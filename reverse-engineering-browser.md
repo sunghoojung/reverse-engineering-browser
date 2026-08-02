@@ -31,6 +31,8 @@ flowchart TB
         UI["Research UI"]
         EventBus["Normalized event bus"]
         Store["Optional local capture store"]
+        Artifacts["Artifact and code-analysis workspace"]
+        Lab["Isolated Experiment Lab"]
     end
 
     subgraph Brave["Custom Brave build"]
@@ -66,6 +68,9 @@ flowchart TB
     EventBus --> UI
     EventBus --> API
     EventBus --> Store
+    EventBus --> Artifacts
+    EventBus --> Lab
+    Policy --> Lab
 
     Session <--> Socket
     Socket <--> Broker
@@ -229,8 +234,13 @@ protocol_version
 session_id
 sequence_number
 monotonic_timestamp
+navigation_id
 process_id
 frame_token
+execution_context_id
+worker_token
+parent_event_id
+artifact_id
 origin
 event_type
 flags
@@ -239,6 +249,8 @@ payload
 ```
 
 Events should preserve their original timestamps and sequence numbers even when the UI displays them later.
+
+The additional correlation fields are required for causality: a navigation identifies one page lifetime, an execution context or worker identifies where code ran, an artifact identifies the source file or WASM module, and a parent event connects a derived event to the event that caused it.
 
 ## Agent API
 
@@ -257,6 +269,60 @@ capture.export(format)
 ```
 
 Every session defines allowed origins, probe categories, data sensitivity, rate limits, and an expiration time.
+
+## Artifact and code-analysis workspace
+
+The harness catalogs every JavaScript artifact, inline script, worker script, source map, and WebAssembly module that loads during a session. Each catalog entry retains immutable original bytes and a content hash, URL, initiator, frame or worker, load time, and execution context.
+
+The workspace presents three linked views:
+
+1. original source or module bytes;
+2. a derived readable representation;
+3. a transformation and evidence log.
+
+Artifacts are classified as readable, minified, or likely obfuscated. Derived JavaScript views may use formatting, source maps, safe static simplification, recovered string tables, and descriptive identifier labels. Virtualized code receives a dedicated bytecode workspace with bytecode traversal, opcode labels, disassembly, and annotations.
+
+The original artifact is never overwritten. Every derived source range must map back to the original bytes and every transformation must state why it was performed. Extracted code must not be automatically executed.
+
+WebAssembly gets a parallel workspace: original module bytes, hash, imports, exports, strings, readable disassembly, compile and instantiation history, traps, and links to JavaScript callers and browser events.
+
+## Value causality and network correlation
+
+Researchers and agents investigate a value from a request field, browser-API event, JavaScript object, or WebAssembly boundary. The browser presents a short causal story:
+
+```text
+created here -> transformed here -> serialized here -> sent here
+```
+
+Every claim has a confidence label:
+
+- **exact**: the value crossed an instrumented browser or WASM boundary;
+- **inferred**: an observed creation or mutation boundary strongly identifies the source;
+- **heuristic**: snapshot, replay, or structural-similarity analysis identifies the most likely origin.
+
+Network correlation links an outgoing request or response to the scripts, WASM modules, browser APIs, and value transformations involved in producing or consuming it. Sensitive values are redacted by default, and request or response bodies remain opt-in and size-limited.
+
+The UI must support source-to-event and event-to-source navigation, exact and structural-similarity search, causal timelines, and comparison of two authorized runs.
+
+### Dynamic-code provenance and async causality
+
+The artifact catalog must include code created after initial page load: dynamic module imports, blob and data URLs, workers, `eval`, `Function` constructors, injected script elements, and WebAssembly compiled from runtime bytes. Each generated artifact records its creator event, parent artifact, original bytes or source string when available, execution context, and first execution time.
+
+The browser also maintains an async causality graph. It links scheduling and continuation boundaries across events, promises, microtasks, timers, message channels, workers, and frame boundaries. A request, browser API call, or derived value can therefore be traced across asynchronous hops to its originating user action, script, or WASM module.
+
+The graph is evidence-based. Missing or ambiguous links remain visible as gaps rather than being silently inferred.
+
+## Experiment Lab
+
+The Experiment Lab lets a researcher create a controlled, disposable experiment from a selected script, function, WASM module, or captured request. It is separate from the active website document and never inherits production cookies, account state, or session credentials.
+
+Three modes are supported:
+
+1. **Static lab**: parse, deobfuscate, inspect strings, imports, exports, and control flow without executing code.
+2. **Detached execution lab**: execute selected code in a throwaway origin and profile using explicit fixtures for DOM state, storage, inputs, permissions, and API responses.
+3. **Full-page replay lab**: replay an authorized page scenario in an isolated profile, with explicit dependency stubs and a recorded comparison against the captured session.
+
+Experiments record inputs, fixture versions, browser build, configuration, observed events, outputs, and differences from the source session. They can be discarded or saved as a reproducible evidence bundle. The lab is never an invisible modification layer inside a live website.
 
 ## Performance rules
 
@@ -347,6 +413,7 @@ Keep the patch set narrow and rebase it for every supported Brave release. Never
 - expose the versioned agent API;
 - add local capture storage;
 - implement audit logging.
+- add artifact cataloging and source-to-event navigation.
 
 ### Phase 4: Coverage
 
@@ -355,6 +422,10 @@ Keep the patch set narrow and rebase it for every supported Brave release. Never
 - add scoped Network Service probes;
 - add OOPIF and worker coverage;
 - add filtered GPU and WebGL observations.
+- add the readable-code workspace and WASM module view;
+- add exact value provenance at instrumented boundaries and request correlation;
+- add dynamic-code provenance and async causality edges;
+- add static Experiment Lab support.
 
 ### Phase 5: Production hardening
 
@@ -363,6 +434,8 @@ Keep the patch set narrow and rebase it for every supported Brave release. Never
 - compare official and custom fingerprints;
 - fuzz IPC decoders and probe payloads;
 - sign and package releases for each platform.
+- add isolated detached-execution and full-page replay lab modes;
+- test evidence-bundle reproducibility and sensitive-data redaction.
 
 ## Initial success criteria
 

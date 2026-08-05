@@ -8,4 +8,4 @@ The project goal is to observe browser behavior through native browser instrumen
 
 - [Technical architecture](./reverse-engineering-browser.md)
 - [System architecture diagram](./system-architecture.md)
-
+- [Version 1 scope](./v1-scope.md)

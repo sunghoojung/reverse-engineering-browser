@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="2048" height="1150" viewBox="0 0 2048 1150" role="img" aria-labelledby="title desc">
   <title id="title">Reverse Engineering Browser architecture</title>
-  <desc id="desc">An AWS reference architecture-inspired diagram showing external web events, an instrumented Brave runtime, a browser harness, product interfaces, and external clients.</desc>
+  <desc id="desc">A clean Version 1 architecture diagram for an authorized research browser. Selected browser API probes and scoped network metadata flow through per-renderer shared-memory rings to a browser-process broker and local harness. V8, GPU, MCP, and UI capabilities are marked as later work.</desc>
 
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto-start-reverse">
@@ -39,16 +39,16 @@
   <rect x="76" y="180" width="90" height="90" fill="#F97316"/>
   <circle cx="121" cy="225" r="26" class="icon-stroke"/>
   <path d="M95 225h52M121 199c9 8 14 17 14 26s-5 18-14 26M121 199c-9 8-14 17-14 26s5 18 14 26M100 211h42M100 239h42" class="icon-stroke"/>
-  <text x="121" y="294" text-anchor="middle" class="label">Application events</text>
-  <text x="121" y="314" text-anchor="middle" class="sub">DOM · JavaScript</text>
+  <text x="121" y="294" text-anchor="middle" class="label">Selected APIs</text>
+  <text x="121" y="314" text-anchor="middle" class="sub">Canvas · WebGL</text>
 
   <rect x="76" y="345" width="90" height="90" fill="#2563EB"/>
   <circle cx="121" cy="371" r="7" class="icon-stroke"/>
   <circle cx="98" cy="409" r="7" class="icon-stroke"/>
   <circle cx="144" cy="409" r="7" class="icon-stroke"/>
   <path d="M117 378l-15 24M125 378l15 24M106 409h30" class="icon-stroke"/>
-  <text x="121" y="459" text-anchor="middle" class="label">Network events</text>
-  <text x="121" y="479" text-anchor="middle" class="sub">Requests · responses</text>
+  <text x="121" y="459" text-anchor="middle" class="label">Network</text>
+  <text x="121" y="479" text-anchor="middle" class="sub">Request metadata</text>
 
   <!-- External clients -->
   <g transform="translate(67 655)">
@@ -64,7 +64,7 @@
   <rect x="320" y="98" width="56" height="56" rx="2" fill="#FB542B"/>
   <path d="M15.68 0l2.096 2.38s1.84-.512 2.709.358c.868.87 1.584 1.638 1.584 1.638l-.562 1.381.715 2.047s-2.104 7.98-2.35 8.955c-.486 1.919-.818 2.66-2.198 3.633-1.38.972-3.884 2.66-4.293 2.916-.409.256-.92.692-1.38.692-.46 0-.97-.436-1.38-.692a185.796 185.796 0 01-4.293-2.916c-1.38-.973-1.712-1.714-2.197-3.633-.247-.975-2.351-8.955-2.351-8.955l.715-2.047-.562-1.381s.716-.768 1.585-1.638c.868-.87 2.708-.358 2.708-.358L8.321 0h7.36zm-3.679 14.936c-.14 0-1.038.317-1.758.69-.72.373-1.242.637-1.409.742-.167.104-.065.301.087.409.152.107 2.194 1.69 2.393 1.866.198.175.489.464.687.464.198 0 .49-.29.688-.464.198-.175 2.24-1.759 2.392-1.866.152-.108.254-.305.087-.41-.167-.104-.689-.368-1.41-.741-.72-.373-1.617-.69-1.757-.69zm0-11.278s-.409.001-1.022.206-1.278.46-1.584.46c-.307 0-2.581-.434-2.581-.434S4.119 7.152 4.119 7.849c0 .697.339.881.68 1.243l2.02 2.149c.192.203.59.511.356 1.066-.235.555-.58 1.26-.196 1.977.384.716 1.042 1.194 1.464 1.115.421-.08 1.412-.598 1.776-.834.364-.237 1.518-1.19 1.518-1.554 0-.365-1.193-1.02-1.413-1.168-.22-.15-1.226-.725-1.247-.95-.02-.227-.012-.293.284-.851.297-.559.831-1.304.742-1.8-.089-.495-.95-.753-1.565-.986-.615-.232-1.799-.671-1.947-.74-.148-.068-.11-.133.339-.175.448-.043 1.719-.212 2.292-.052.573.16 1.552.403 1.632.532.079.13.149.134.067.579-.081.445-.5 2.581-.541 2.96-.04.38-.12.63.288.724.409.094 1.097.256 1.333.256s.924-.162 1.333-.256c.408-.093.329-.344.288-.723-.04-.38-.46-2.516-.541-2.961-.082-.445-.012-.45.067-.579.08-.129 1.059-.372 1.632-.532.573-.16 1.845.009 2.292.052.449.042.487.107.339.175-.148.069-1.332.508-1.947.74-.615.233-1.476.49-1.565.986-.09.496.445 1.241.742 1.8.297.558.304.624.284.85-.02.226-1.026.802-1.247.95-.22.15-1.413.804-1.413 1.169 0 .364 1.154 1.317 1.518 1.554.364.236 1.355.755 1.776.834.422.079 1.08-.4 1.464-1.115.384-.716.039-1.422-.195-1.977-.235-.555.163-.863.355-1.066l2.02-2.149c.341-.362.68-.546.68-1.243 0-.697-2.695-3.96-2.695-3.96s-2.274.436-2.58.436c-.307 0-.972-.256-1.585-.461-.613-.205-1.022-.206-1.022-.206z" transform="translate(328 106) scale(1.67)" fill="#FFFFFF"/>
   <text x="392" y="124" class="title">Reverse Engineering Browser</text>
-  <text x="392" y="145" class="sub">Local browser instrumentation and research harness</text>
+  <text x="392" y="145" class="sub">Version 1: local browser instrumentation and research harness</text>
 
   <!-- Product interfaces outside runtime regions -->
   <rect x="350" y="610" width="350" height="305" class="layer"/>
@@ -76,19 +76,19 @@
   <circle cx="432" cy="730" r="7" class="icon-stroke"/>
   <path d="M411 713l14-8M411 719l14 8" class="icon-stroke"/>
   <text x="418" y="782" text-anchor="middle" class="label">MCP</text>
-  <text x="418" y="802" text-anchor="middle" class="sub">Agent protocol</text>
+  <text x="418" y="802" text-anchor="middle" class="sub">Later</text>
 
   <rect x="489" y="680" width="72" height="72" fill="#14B8A6"/>
   <rect x="503" y="695" width="44" height="32" rx="2" class="icon-stroke"/>
   <path d="M514 739h22M525 727v12" class="icon-stroke"/>
   <text x="525" y="782" text-anchor="middle" class="label">Research UI</text>
-  <text x="525" y="802" text-anchor="middle" class="sub">Human control</text>
+  <text x="525" y="802" text-anchor="middle" class="sub">Later</text>
 
   <rect x="596" y="680" width="72" height="72" fill="#4F46E5"/>
   <rect x="610" y="697" width="44" height="30" rx="2" class="icon-stroke"/>
   <path d="M618 706l8 6-8 6M632 720h14" class="icon-stroke"/>
-  <text x="632" y="782" text-anchor="middle" class="label">SDK / CLI</text>
-  <text x="632" y="802" text-anchor="middle" class="sub">Developer access</text>
+  <text x="632" y="782" text-anchor="middle" class="label">CLI</text>
+  <text x="632" y="802" text-anchor="middle" class="sub">Version 1 access</text>
 
   <!-- Browser runtime region -->
   <rect x="750" y="125" width="1140" height="430" class="region"/>
@@ -102,6 +102,7 @@
   <path d="M813 383h8M813 396h8M813 409h8M861 383h8M861 396h8M861 409h8M828 368v8M841 368v8M854 368v8M828 416v8M841 416v8M854 416v8" class="icon-stroke"/>
   <text x="841" y="465" text-anchor="middle" class="label">Renderer Ring Buffers</text>
   <text x="841" y="485" text-anchor="middle" class="sub">SPSC shared memory per renderer</text>
+  <text x="841" y="505" text-anchor="middle" class="sub">Created only for an enabled session</text>
 
   <!-- Browser process broker -->
   <rect x="1030" y="185" width="82" height="82" fill="#DB2777"/>
@@ -114,17 +115,17 @@
 
   <!-- Native instrumentation layer -->
   <rect x="1210" y="345" width="535" height="165" class="layer"/>
-  <text x="1477" y="370" text-anchor="middle" class="label">Native C++ Probe Surfaces</text>
+  <text x="1477" y="370" text-anchor="middle" class="label">Version 1 Native C++ Probe Surfaces</text>
 
   <rect x="1260" y="392" width="62" height="62" fill="#FB542B"/>
-  <text x="1291" y="431" text-anchor="middle" font-size="18" font-weight="700" fill="#FFFFFF">DOM</text>
+  <text x="1291" y="431" text-anchor="middle" font-size="17" font-weight="700" fill="#FFFFFF">APIs</text>
   <text x="1291" y="480" text-anchor="middle" class="label">Blink</text>
-  <text x="1291" y="499" text-anchor="middle" class="sub">renderer process</text>
+  <text x="1291" y="499" text-anchor="middle" class="sub">selected browser APIs</text>
 
   <rect x="1376" y="392" width="62" height="62" fill="#F59E0B"/>
   <text x="1407" y="431" text-anchor="middle" font-size="20" font-weight="700" fill="#FFFFFF">V8</text>
   <text x="1407" y="480" text-anchor="middle" class="label">V8</text>
-  <text x="1407" y="499" text-anchor="middle" class="sub">renderer process</text>
+  <text x="1407" y="499" text-anchor="middle" class="sub">Later</text>
 
   <rect x="1492" y="392" width="62" height="62" fill="#2563EB"/>
   <circle cx="1523" cy="411" r="5" class="icon-stroke"/>
@@ -132,13 +133,13 @@
   <circle cx="1538" cy="440" r="5" class="icon-stroke"/>
   <path d="M1520 416l-10 18M1526 416l10 18M1514 440h18" class="icon-stroke"/>
   <text x="1523" y="480" text-anchor="middle" class="label">Network</text>
-  <text x="1523" y="499" text-anchor="middle" class="sub">Network Service</text>
+  <text x="1523" y="499" text-anchor="middle" class="sub">scoped request metadata</text>
 
   <rect x="1608" y="392" width="62" height="62" fill="#0F766E"/>
   <rect x="1621" y="405" width="36" height="27" rx="2" class="icon-stroke"/>
   <path d="M1630 444h18M1639 432v12" class="icon-stroke"/>
   <text x="1639" y="480" text-anchor="middle" class="label">GPU</text>
-  <text x="1639" y="499" text-anchor="middle" class="sub">GPU process</text>
+  <text x="1639" y="499" text-anchor="middle" class="sub">Later</text>
   <text x="1768" y="432" transform="rotate(90 1768 432)" text-anchor="middle" class="layer-label">Instrumentation surfaces</text>
 
   <!-- Harness region -->
@@ -184,9 +185,9 @@
 
   <!-- External event paths -->
   <path d="M166 225H680V520H1291V454" class="edge"/>
-  <text x="520" y="216" class="edge-label">Application events</text>
+  <text x="520" y="216" class="edge-label">Selected browser API calls</text>
   <path d="M166 390H700V540H1523V454" class="edge"/>
-  <text x="520" y="381" class="edge-label">Network and resource events</text>
+  <text x="520" y="381" class="edge-label">Scoped network metadata</text>
 
   <!-- Runtime event paths -->
   <path d="M1210 430H905V396H882" class="edge"/>
@@ -194,7 +195,7 @@
   <path d="M882 396H965V226H1030" class="edge"/>
   <text x="970" y="217" class="edge-label">event batches</text>
   <path d="M1745 430H1810V335H1000V250H1030" class="edge"/>
-  <text x="1460" y="326" class="edge-label">service-process events</text>
+  <text x="1460" y="326" class="edge-label">scoped network events</text>
 
   <!-- Runtime to harness -->
   <path d="M1071 267V710" class="duplex"/>
@@ -213,7 +214,7 @@
   <path d="M174 705H350" class="edge"/>
   <text x="220" y="696" class="edge-label">tools and controls</text>
   <path d="M525 915V925H1730V759H1658" class="edge"/>
-  <text x="755" y="915" class="edge-label">MCP · UI · SDK requests</text>
+  <text x="755" y="915" class="edge-label">CLI requests · MCP and UI later</text>
 
   <!-- Results back to clients -->
   <path d="M1242 771H1260V880H720V850H700" class="edge"/>

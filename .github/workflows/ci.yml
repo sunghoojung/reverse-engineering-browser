@@ -1,0 +1,35 @@
+name: C++ checks
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os:
+          - macos-latest
+          - ubuntu-latest
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build and test
+        run: make check
+
+      - name: Run end-to-end event path
+        run: make e2e
+
+      - name: Validate research UI server
+        run: python3 -m py_compile apps/research-ui/server.py
+
+      - name: Run sanitizers
+        run: make sanitize

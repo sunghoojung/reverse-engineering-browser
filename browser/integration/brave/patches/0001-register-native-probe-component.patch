@@ -1,0 +1,31 @@
+diff --git a/chromium_src/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc b/chromium_src/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+index 0c5b67a16..0f51ed315 100644
+--- a/chromium_src/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
++++ b/chromium_src/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+@@ -4,12 +4,14 @@
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "base/auto_reset.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "brave/third_party/blink/renderer/core/farbling/brave_session_cache.h"
+ #include "third_party/blink/public/platform/web_content_settings_client.h"
+ #include "ui/gfx/skia_span_util.h"
+ 
+ #define BRAVE_TO_DATA_URL_INTERNAL                                          \
+   {                                                                         \
++    ::reb::NativeProbeSink::Get().RecordCanvasToDataUrl();                  \
+     ExecutionContext* execution_context = GetExecutionContext();            \
+     if (!execution_context) {                                               \
+       execution_context = scoped_execution_context_.Get();                  \
+diff --git a/renderer/BUILD.gn b/renderer/BUILD.gn
+index 751e5aa18..160deef00 100644
+--- a/renderer/BUILD.gn
++++ b/renderer/BUILD.gn
+@@ -23,6 +23,7 @@ source_set("renderer") {
+     "//brave/components/brave_search/renderer",
+     "//brave/components/brave_shields/core/common",
+     "//brave/components/cosmetic_filters/renderer",
++    "//brave/components/reverse_engineering_browser:renderer",
+     "//v8",
+   ]
+ 

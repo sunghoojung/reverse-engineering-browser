@@ -1,0 +1,15 @@
+.DS_Store
+build/
+compile_commands.json
+*.o
+*.out
+
+# Brave and Chromium are generated upstream worktrees, never repository content.
+/browser/worktree/*
+
+# Future UI package outputs.
+node_modules/
+dist/
+coverage/
+.env
+.env.local

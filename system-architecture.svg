@@ -75,8 +75,8 @@
   <circle cx="432" cy="702" r="7" class="icon-stroke"/>
   <circle cx="432" cy="730" r="7" class="icon-stroke"/>
   <path d="M411 713l14-8M411 719l14 8" class="icon-stroke"/>
-  <text x="418" y="782" text-anchor="middle" class="label">MCP</text>
-  <text x="418" y="802" text-anchor="middle" class="sub">Agent protocol</text>
+  <text x="418" y="782" text-anchor="middle" class="label">Evidence</text>
+  <text x="418" y="802" text-anchor="middle" class="sub">Session records</text>
 
   <rect x="489" y="680" width="72" height="72" fill="#14B8A6"/>
   <rect x="503" y="695" width="44" height="32" rx="2" class="icon-stroke"/>
@@ -213,7 +213,7 @@
   <path d="M174 705H350" class="edge"/>
   <text x="220" y="696" class="edge-label">tools and controls</text>
   <path d="M525 915V925H1730V759H1658" class="edge"/>
-  <text x="755" y="915" class="edge-label">MCP · UI · SDK requests</text>
+  <text x="755" y="915" class="edge-label">UI · SDK requests</text>
 
   <!-- Results back to clients -->
   <path d="M1242 771H1260V880H720V850H700" class="edge"/>

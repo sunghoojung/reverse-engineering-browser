@@ -47,7 +47,7 @@ The repository includes a dependency-free C++ vertical slice for the probe event
 - explicit dropped-event accounting;
 - a bounded broker with validation, sequence-gap detection, and eviction accounting;
 - a native binary event stream and versioned JSONL evidence store;
-- a local research UI that reads the broker evidence store;
+- a native macOS Origin Trace application that reads the broker evidence store;
 - a threaded producer and consumer demo;
 - unit tests and sanitizer support.
 
@@ -67,14 +67,29 @@ make test
 ./build/reb-event-demo
 ```
 
-Run the complete native producer, broker, and research UI slice:
+## Origin Trace application
+
+On macOS, build the demo evidence and open the native Origin Trace application:
+
+```sh
+make app
+```
+
+This builds `build/Origin Trace.app`, writes the demo evidence, and opens the
+application. It is a native WebKit window with no browser address bar and no
+localhost server. The application and broker stay local.
+
+The demo includes linked Navigator, Canvas, WebAssembly, and Network events.
+The research workflow starts from a request field and works backward through
+the available evidence.
+
+For browser-based UI development only, run:
 
 ```sh
 make ui
 ```
 
-Then open `http://127.0.0.1:7319`. The demo produces four linked Navigator,
-Canvas, WebAssembly, and Network events. The UI and broker remain local.
+Then open `http://127.0.0.1:7319`.
 
 Run sanitizer checks. Linux uses AddressSanitizer and UndefinedBehaviorSanitizer;
 macOS uses UndefinedBehaviorSanitizer:

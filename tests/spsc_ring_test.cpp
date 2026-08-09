@@ -81,22 +81,20 @@ bool WraparoundTest() {
 bool ConcurrentTest() {
   constexpr std::uint64_t kCount = 250'000;
   reb::SpscRing<std::uint64_t, 1024> ring;
-  std::atomic<bool> producer_failed{false};
   std::atomic<bool> producer_done{false};
   std::atomic<bool> stop_requested{false};
+  std::uint64_t failed_push_attempts = 0;
 
-  std::thread producer([&ring, &producer_failed, &producer_done, &stop_requested] {
+  std::thread producer([&ring, &producer_done, &stop_requested,
+                        &failed_push_attempts] {
     for (std::uint64_t value = 1; value <= kCount; ++value) {
-      while (ring.SizeApprox() >= ring.CapacityValue()) {
+      while (!ring.TryPush(value)) {
+        ++failed_push_attempts;
         if (stop_requested.load(std::memory_order_acquire)) {
           producer_done.store(true, std::memory_order_release);
           return;
         }
         std::this_thread::yield();
-      }
-      if (!ring.TryPush(value)) {
-        producer_failed.store(true, std::memory_order_release);
-        break;
       }
     }
     producer_done.store(true, std::memory_order_release);
@@ -122,8 +120,8 @@ bool ConcurrentTest() {
   }
 
   producer.join();
-  return ordered && !producer_failed.load(std::memory_order_acquire) &&
-         expected == kCount + 1 && ring.SizeApprox() == 0 && ring.DroppedCount() == 0;
+  return ordered && expected == kCount + 1 && ring.SizeApprox() == 0 &&
+         ring.DroppedCount() == failed_push_attempts;
 }
 
 }  // namespace

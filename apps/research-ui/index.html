@@ -3,116 +3,1428 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Reverse Engineering Browser</title>
+    <meta name="color-scheme" content="dark light" />
+    <title>Origin Trace - Reverse Engineering Browser</title>
     <style>
       :root {
         color-scheme: dark;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-        background: #090b10;
-        color: #e7eaf0;
+        --bg: #090c11;
+        --chrome: #12161d;
+        --panel: #0d1117;
+        --panel-2: #11161e;
+        --panel-3: #171c26;
+        --line: #272e39;
+        --line-soft: #1e242e;
+        --text: #e7eaf0;
+        --muted: #8b94a5;
+        --faint: #626c7d;
+        --accent: #9b7cff;
+        --accent-soft: #29233e;
+        --cyan: #49d6e8;
+        --green: #54e3a3;
+        --amber: #f6c667;
+        --red: #ff7d8b;
+        --blue: #72a7ff;
+        --shadow: rgba(0, 0, 0, 0.34);
+        --mono: "SFMono-Regular", "Cascadia Code", "Roboto Mono", Consolas, monospace;
+        --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
+
+      :root[data-theme="light"] {
+        color-scheme: light;
+        --bg: #e9ecef;
+        --chrome: #f2f4f6;
+        --panel: #fbfcfd;
+        --panel-2: #f4f6f8;
+        --panel-3: #eaedf2;
+        --line: #c9cfd8;
+        --line-soft: #dce1e7;
+        --text: #171b23;
+        --muted: #5e6878;
+        --faint: #7d8795;
+        --accent: #6848dd;
+        --accent-soft: #e7e0fb;
+        --cyan: #078ca2;
+        --green: #138757;
+        --amber: #9b690b;
+        --red: #c23c52;
+        --blue: #2767c9;
+        --shadow: rgba(24, 31, 42, 0.15);
+      }
+
       * { box-sizing: border-box; }
-      body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 15% 0%, #172039 0, transparent 32rem), #090b10; }
-      header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem 1.25rem; border-bottom: 1px solid #252a35; background: rgba(9, 11, 16, .88); position: sticky; top: 0; backdrop-filter: blur(18px); }
-      h1 { margin: 0; font-size: 1rem; letter-spacing: .02em; }
-      .status { display: flex; align-items: center; gap: .5rem; color: #9ba5b6; font-size: .8rem; }
-      .dot { width: .55rem; height: .55rem; border-radius: 50%; background: #43d17d; box-shadow: 0 0 1rem #43d17d88; }
-      main { display: grid; grid-template-columns: minmax(14rem, 18rem) minmax(0, 1fr); min-height: calc(100vh - 3.6rem); }
-      aside { border-right: 1px solid #252a35; padding: 1.25rem; }
-      .label { display: block; color: #788397; font-size: .68rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; margin-bottom: .6rem; }
-      input, select { width: 100%; border: 1px solid #303745; border-radius: .55rem; background: #11151d; color: inherit; padding: .65rem .75rem; margin-bottom: .8rem; }
-      .metric { background: #11151d; border: 1px solid #252a35; border-radius: .7rem; padding: .8rem; margin-top: .7rem; }
-      .metric strong { display: block; font-size: 1.45rem; margin-top: .15rem; }
-      section { padding: 1.25rem; overflow: hidden; }
-      .empty { color: #8792a5; padding: 3rem 1rem; text-align: center; border: 1px dashed #303745; border-radius: .8rem; }
-      .event { display: grid; grid-template-columns: 7rem 8rem minmax(9rem, 1fr) minmax(12rem, 2fr); gap: .75rem; align-items: center; border-bottom: 1px solid #222733; padding: .78rem .55rem; font: .78rem ui-monospace, SFMono-Regular, Menlo, monospace; }
-      .event:hover { background: #121722; }
-      .seq { color: #738097; }
-      .category { color: #8db6ff; }
-      .type { color: #c7a6ff; }
-      .payload { color: #dce3ef; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .title-row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: .85rem; }
-      h2 { font-size: 1rem; margin: 0; }
-      #updated { color: #69758a; font-size: .72rem; }
-      @media (max-width: 760px) { main { grid-template-columns: 1fr; } aside { border-right: 0; border-bottom: 1px solid #252a35; } .event { grid-template-columns: 4rem 6rem 1fr; } .payload { grid-column: 1 / -1; } }
+      html, body { min-width: 320px; height: 100%; min-height: 100%; overflow: hidden; }
+      body {
+        margin: 0;
+        background:
+          radial-gradient(circle at 72% -20%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 36rem),
+          var(--bg);
+        color: var(--text);
+        font-family: var(--sans);
+        font-size: 12px;
+      }
+      button, input { color: inherit; font: inherit; }
+      button { cursor: pointer; }
+      button:focus-visible, input:focus-visible {
+        outline: 2px solid var(--cyan);
+        outline-offset: -2px;
+      }
+      [hidden] { display: none !important; }
+      .native-shell .window-dots { opacity: 0; }
+      .native-shell .titlebar { -webkit-user-select: none; user-select: none; }
+
+      .app {
+        width: 100%;
+        height: 100vh;
+        min-height: 0;
+        margin: 0;
+        display: grid;
+        grid-template-rows: 41px 45px minmax(0, 1fr) 34px;
+        overflow: hidden;
+        background: var(--panel);
+        border: 0;
+        border-radius: 0;
+        box-shadow: none;
+      }
+
+      .titlebar {
+        min-height: 41px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 0 13px;
+        background: var(--chrome);
+        border-bottom: 1px solid var(--line);
+      }
+      .window-dots { display: flex; gap: 6px; }
+      .window-dot { width: 9px; height: 9px; border-radius: 50%; }
+      .window-dot:nth-child(1) { background: #ff5f57; }
+      .window-dot:nth-child(2) { background: #febc2e; }
+      .window-dot:nth-child(3) { background: #28c840; }
+      .brand-mark {
+        display: grid;
+        place-items: center;
+        width: 25px;
+        height: 20px;
+        margin-left: 3px;
+        border: 1px solid var(--accent);
+        color: var(--accent);
+        font: 700 8px var(--mono);
+        letter-spacing: .08em;
+        box-shadow: 7px -5px 0 -6px var(--cyan);
+      }
+      .brand-name { font: 650 10px var(--mono); letter-spacing: .17em; }
+      .title-meta {
+        margin-left: auto;
+        color: var(--muted);
+        font: 10px var(--mono);
+      }
+      .poc-badge {
+        padding: 3px 6px;
+        border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--line));
+        border-radius: 3px;
+        color: var(--accent);
+        background: var(--accent-soft);
+        font: 650 8px var(--mono);
+        letter-spacing: .08em;
+        text-transform: uppercase;
+      }
+
+      .toolbar {
+        min-height: 45px;
+        display: flex;
+        align-items: stretch;
+        gap: 14px;
+        padding: 0 13px;
+        background: var(--chrome);
+        border-bottom: 1px solid var(--line);
+      }
+      .capture-state {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        min-width: 94px;
+        color: var(--green);
+        font: 650 9px var(--mono);
+        text-transform: uppercase;
+      }
+      .pulse {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: currentColor;
+        box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 13%, transparent), 0 0 14px currentColor;
+      }
+      .capture-state.offline { color: var(--red); }
+      .primary-nav { display: flex; align-items: stretch; gap: 3px; }
+      .nav-button {
+        position: relative;
+        padding: 0 11px;
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        font-size: 10px;
+      }
+      .nav-button[aria-current="page"] { color: var(--text); }
+      .nav-button[aria-current="page"]::after {
+        content: "";
+        position: absolute;
+        left: 9px;
+        right: 9px;
+        bottom: 0;
+        height: 2px;
+        background: linear-gradient(90deg, var(--accent), var(--cyan));
+      }
+      .toolbar-actions { margin-left: auto; display: flex; align-items: center; gap: 7px; }
+      .authorization {
+        color: var(--muted);
+        font: 9px var(--mono);
+      }
+      .icon-button {
+        width: 27px;
+        height: 27px;
+        display: grid;
+        place-items: center;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--muted);
+      }
+      .icon-button:hover { border-color: var(--line); background: var(--panel-3); color: var(--text); }
+
+      .workspace {
+        display: grid;
+        grid-template-columns: 218px minmax(0, 1fr);
+        min-height: 0;
+        overflow: hidden;
+      }
+      .sidebar {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        min-height: 0;
+        overflow: hidden;
+        background: var(--chrome);
+        border-right: 1px solid var(--line);
+      }
+      .sidebar-heading {
+        min-height: 49px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 12px;
+        border-bottom: 1px solid var(--line);
+        font-size: 11px;
+        font-weight: 650;
+      }
+      .session-icon {
+        width: 13px;
+        height: 10px;
+        border: 1px solid var(--muted);
+        border-radius: 1px;
+        box-shadow: 3px 3px 0 -2px var(--chrome), 3px 3px 0 -1px var(--muted);
+      }
+      .sidebar-count { margin-left: auto; color: var(--faint); font: 9px var(--mono); }
+      .tree { padding: 12px 7px 58px; }
+      .tree-label {
+        margin: 11px 8px 7px;
+        color: var(--faint);
+        font: 650 8px var(--sans);
+        letter-spacing: .14em;
+        text-transform: uppercase;
+      }
+      .tree-row {
+        width: 100%;
+        min-height: 30px;
+        display: grid;
+        grid-template-columns: 15px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 7px;
+        padding: 0 8px;
+        border: 0;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--muted);
+        text-align: left;
+        font-size: 10px;
+      }
+      .tree-row:hover { background: var(--panel-3); color: var(--text); }
+      .tree-row.selected { background: var(--accent-soft); color: var(--text); }
+      .tree-row.indent { padding-left: 24px; }
+      .tree-glyph { color: var(--muted); font: 12px var(--mono); }
+      .tree-number { color: var(--faint); font: 8px var(--mono); }
+      .view-switch {
+        position: absolute;
+        left: 8px;
+        right: 8px;
+        bottom: 8px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        padding: 2px;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        background: var(--panel);
+      }
+      .view-switch button {
+        min-height: 25px;
+        border: 0;
+        border-radius: 3px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 9px;
+      }
+      .view-switch button[aria-pressed="true"] { background: var(--accent-soft); color: var(--text); }
+
+      .main { min-width: 0; min-height: 0; overflow: hidden; background: var(--panel); }
+      .screen { width: 100%; height: 100%; min-height: 0; overflow: hidden; }
+      .traffic-grid {
+        display: grid;
+        grid-template-columns: clamp(290px, 39%, 440px) minmax(370px, 1fr);
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+      }
+      .request-pane {
+        min-width: 0;
+        min-height: 0;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        overflow: hidden;
+        border-right: 1px solid var(--line);
+      }
+      .detail-pane { min-width: 0; min-height: 0; overflow: auto; }
+      .network-tools {
+        min-height: 41px;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 6px 9px;
+        border-bottom: 1px solid var(--line);
+        background: var(--chrome);
+      }
+      .filter-box {
+        position: relative;
+        min-width: 180px;
+        max-width: 420px;
+        flex: 1;
+      }
+      .filter-box::before {
+        content: "⌕";
+        position: absolute;
+        left: 10px;
+        top: 6px;
+        color: var(--muted);
+        font: 14px var(--mono);
+      }
+      .filter-box input {
+        width: 100%;
+        height: 29px;
+        padding: 0 10px 0 30px;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        background: var(--panel);
+        font: 9px var(--mono);
+      }
+      .type-filter {
+        height: 28px;
+        padding: 0 9px;
+        border: 0;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 8px;
+      }
+      .type-filter[aria-pressed="true"] { color: #fff; background: var(--accent); }
+
+      .request-table {
+        min-height: 0;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        overflow: hidden;
+        border-bottom: 1px solid var(--line);
+      }
+      .request-head, .request-row {
+        display: grid;
+        grid-template-columns: 30px minmax(130px, 1fr) 46px 43px 48px 72px;
+        align-items: center;
+        gap: 0;
+      }
+      .request-head {
+        min-height: 26px;
+        color: var(--faint);
+        background: var(--chrome);
+        border-bottom: 1px solid var(--line);
+        font: 7px var(--mono);
+      }
+      .request-head span, .request-row span { padding: 0 7px; }
+      .request-rows { min-height: 0; overflow: auto; }
+      .request-row {
+        width: 100%;
+        min-height: 34px;
+        border: 0;
+        border-bottom: 1px solid var(--line-soft);
+        background: transparent;
+        color: var(--text);
+        text-align: left;
+        font: 9px var(--mono);
+      }
+      .request-row:hover { background: var(--panel-2); }
+      .request-row[aria-selected="true"] {
+        background: color-mix(in srgb, var(--accent) 18%, var(--panel));
+        box-shadow: inset 3px 0 var(--accent);
+      }
+      .request-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .request-method { color: var(--muted); }
+      .status-ok { color: var(--green); }
+      .waterfall {
+        display: block;
+        width: 50px;
+        height: 4px;
+        margin-left: 7px;
+        background: linear-gradient(90deg, transparent var(--water-start, 8%), var(--accent) var(--water-start, 8%), var(--accent) var(--water-mid, 56%), var(--cyan) var(--water-mid, 56%), var(--cyan) var(--water-end, 76%), transparent var(--water-end, 76%));
+      }
+      .sample-chip, .live-chip {
+        display: inline-flex;
+        width: max-content;
+        margin-left: 5px;
+        padding: 2px 4px !important;
+        border-radius: 2px;
+        font: 650 6px var(--mono);
+        letter-spacing: .06em;
+        text-transform: uppercase;
+      }
+      .sample-chip { color: var(--amber); background: color-mix(in srgb, var(--amber) 13%, transparent); }
+      .live-chip { color: var(--green); background: color-mix(in srgb, var(--green) 13%, transparent); }
+
+      .selection-strip {
+        min-height: 44px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 12px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel-2);
+        font: 9px var(--mono);
+      }
+      .method-pill, .status-pill {
+        padding: 3px 8px;
+        border-radius: 3px;
+        font: 650 8px var(--mono);
+      }
+      .method-pill { color: var(--blue); background: color-mix(in srgb, var(--blue) 13%, transparent); }
+      .status-pill { color: var(--green); background: color-mix(in srgb, var(--green) 13%, transparent); }
+      .selection-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .selection-more { margin-left: auto; color: var(--faint); }
+      .inspector-tabs {
+        min-height: 34px;
+        display: flex;
+        align-items: stretch;
+        gap: 16px;
+        padding: 0 13px;
+        border-bottom: 1px solid var(--line);
+      }
+      .inspector-tab, .field-tab {
+        position: relative;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        font-size: 8px;
+      }
+      .inspector-tab[aria-selected="true"], .field-tab[aria-selected="true"] { color: var(--text); }
+      .inspector-tab[aria-selected="true"]::after, .field-tab[aria-selected="true"]::after {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 2px;
+        background: var(--accent);
+      }
+
+      .request-inspector { min-height: 0; padding: 16px 17px 18px; }
+      .request-inspector h1 { margin: 0 0 13px; font-size: 12px; font-weight: 650; }
+      .field-tabs {
+        min-height: 32px;
+        display: flex;
+        align-items: stretch;
+        gap: 20px;
+        border-bottom: 1px solid var(--line);
+      }
+      .field-tree { min-height: 198px; padding-top: 8px; }
+      .field-row {
+        width: 100%;
+        min-height: 37px;
+        display: grid;
+        grid-template-columns: minmax(180px, 1fr) minmax(130px, 1fr) 48px;
+        align-items: center;
+        padding: 0 9px;
+        border: 0;
+        border-bottom: 1px solid var(--line-soft);
+        background: transparent;
+        text-align: left;
+        font: 9px var(--mono);
+      }
+      .field-row.selectable:hover { background: var(--panel-2); }
+      .field-row[aria-selected="true"] {
+        background: var(--accent-soft);
+        box-shadow: inset 3px 0 var(--accent);
+      }
+      .field-key { padding-left: calc(var(--depth, 0) * 14px); }
+      .field-key.group::before { content: "⌄"; margin-right: 8px; color: var(--muted); }
+      .field-key.traceable::before { content: "⊕"; margin-right: 8px; color: var(--muted); }
+      .field-value { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+      .field-type { justify-self: end; color: var(--faint); font-size: 7px; }
+      .field-empty {
+        min-height: 198px;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        color: var(--muted);
+        border-bottom: 1px solid var(--line-soft);
+        text-align: center;
+      }
+      .trace-dock {
+        min-height: 62px;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 10px 13px;
+        border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
+        border-radius: 5px;
+        background: color-mix(in srgb, var(--accent) 5%, var(--panel));
+      }
+      .trace-label { color: var(--muted); font-size: 8px; }
+      .trace-target { margin-top: 5px; color: color-mix(in srgb, var(--accent) 65%, var(--text)); font: 9px var(--mono); }
+      .trace-button, .secondary-button {
+        min-height: 32px;
+        padding: 0 14px;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        font-size: 9px;
+        font-weight: 650;
+      }
+      .trace-button {
+        margin-left: auto;
+        color: #10131a;
+        background: linear-gradient(100deg, #a78bfa, #57d6ee);
+        box-shadow: 0 7px 22px color-mix(in srgb, var(--accent) 20%, transparent);
+      }
+      .trace-button:hover { filter: brightness(1.08); }
+      .trace-button:disabled { cursor: not-allowed; opacity: .45; filter: grayscale(.5); }
+      .secondary-button { color: var(--text); border-color: var(--line); background: var(--panel-2); }
+      .secondary-button:hover { border-color: var(--accent); }
+
+      .screen-head {
+        min-height: 60px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 17px;
+        border-bottom: 1px solid var(--line);
+        background: var(--chrome);
+      }
+      .screen-head h1 { margin: 0; font-size: 13px; font-weight: 650; }
+      .screen-subtitle { margin-top: 5px; color: var(--muted); font: 8px var(--mono); }
+      .back-button {
+        width: 28px;
+        height: 28px;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        background: var(--panel);
+        color: var(--muted);
+      }
+      .screen-head-actions { margin-left: auto; display: flex; gap: 7px; }
+
+      .trace-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 275px;
+        height: calc(100% - 60px);
+        min-height: 0;
+      }
+      .graph-panel {
+        position: relative;
+        padding: 20px 24px 30px;
+        overflow: auto;
+        background-image:
+          linear-gradient(color-mix(in srgb, var(--line) 45%, transparent) 1px, transparent 1px),
+          linear-gradient(90deg, color-mix(in srgb, var(--line) 45%, transparent) 1px, transparent 1px);
+        background-size: 22px 22px;
+      }
+      .graph-kicker {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 14px;
+        color: var(--muted);
+        font: 8px var(--mono);
+        text-transform: uppercase;
+        letter-spacing: .1em;
+      }
+      .graph-kicker::before { content: ""; width: 18px; height: 1px; background: var(--cyan); }
+      .backtrace {
+        width: min(650px, 100%);
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      .trace-step { position: relative; padding: 0 0 24px 38px; }
+      .trace-step:not(:last-child)::before {
+        content: "";
+        position: absolute;
+        left: 12px;
+        top: 25px;
+        bottom: -1px;
+        width: 1px;
+        background: linear-gradient(var(--accent), var(--cyan));
+      }
+      .trace-step.gap::before, .trace-step.correlated::before {
+        background: repeating-linear-gradient(to bottom, var(--amber) 0 4px, transparent 4px 8px);
+      }
+      .step-index {
+        position: absolute;
+        left: 0;
+        top: 11px;
+        z-index: 1;
+        width: 25px;
+        height: 25px;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--accent);
+        border-radius: 50%;
+        color: var(--accent);
+        background: var(--panel);
+        font: 8px var(--mono);
+      }
+      .gap .step-index { border-style: dashed; border-color: var(--amber); color: var(--amber); }
+      .step-card {
+        width: 100%;
+        min-height: 58px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        background: color-mix(in srgb, var(--panel) 94%, transparent);
+        box-shadow: 0 8px 30px color-mix(in srgb, var(--shadow) 45%, transparent);
+      }
+      .step-card:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+      .step-card.gap-card { border-style: dashed; border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); }
+      .step-kind { color: var(--muted); font-size: 8px; }
+      .step-title { margin-top: 4px; font: 10px var(--mono); }
+      .step-meta { margin-top: 5px; color: var(--faint); font: 8px var(--mono); }
+      .step-kind, .step-title, .step-meta { display: block; }
+      .confidence {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 4px 6px;
+        border: 1px solid currentColor;
+        border-radius: 3px;
+        font: 650 7px var(--mono);
+        text-transform: uppercase;
+      }
+      .confidence::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+      .exact { color: var(--green); }
+      .matched { color: var(--blue); }
+      .differential { color: var(--cyan); }
+      .correlation { color: var(--amber); }
+      .unknown { color: var(--red); }
+
+      .trace-inspector {
+        padding: 16px;
+        overflow: auto;
+        border-left: 1px solid var(--line);
+        background: var(--chrome);
+      }
+      .inspector-label {
+        margin: 0 0 9px;
+        color: var(--faint);
+        font: 650 8px var(--sans);
+        letter-spacing: .12em;
+        text-transform: uppercase;
+      }
+      .target-card { padding: 11px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); }
+      .target-path { color: var(--accent); font: 9px var(--mono); word-break: break-word; }
+      .target-request { margin-top: 6px; color: var(--muted); font: 8px var(--mono); }
+      .coverage {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 7px;
+        margin: 14px 0;
+        color: var(--muted);
+        font: 8px var(--mono);
+      }
+      .coverage-bar { grid-column: 1 / -1; height: 4px; background: var(--panel-3); }
+      .coverage-bar span { display: block; width: 68%; height: 100%; background: linear-gradient(90deg, var(--accent), var(--cyan)); }
+      .legend { display: grid; gap: 8px; margin: 12px 0 18px; }
+      .legend-row { display: grid; grid-template-columns: 65px 1fr; gap: 8px; align-items: baseline; color: var(--muted); font-size: 8px; }
+      .legend-row strong { font: 650 7px var(--mono); text-transform: uppercase; }
+      .inspector-actions { display: grid; gap: 7px; }
+      .inspector-actions button { width: 100%; }
+      .evidence-link {
+        min-height: 31px;
+        border: 0;
+        background: transparent;
+        color: var(--cyan);
+        text-align: left;
+        font: 9px var(--mono);
+      }
+
+      .evidence-tools {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 42px;
+        padding: 6px 12px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel-2);
+      }
+      .scope-pill { padding: 4px 7px; border: 1px solid var(--line); border-radius: 3px; color: var(--muted); font: 8px var(--mono); }
+      .evidence-count { margin-left: auto; color: var(--muted); font: 8px var(--mono); }
+      .evidence-table { overflow: auto; }
+      #screen-evidence:not([hidden]) { display: grid; grid-template-rows: 60px 42px minmax(0, 1fr); }
+      #screen-experiments { overflow: auto; }
+      .evidence-head, .evidence-row {
+        min-width: 790px;
+        display: grid;
+        grid-template-columns: 72px 58px 76px 125px 150px minmax(240px, 1fr);
+        align-items: center;
+      }
+      .evidence-head {
+        min-height: 27px;
+        color: var(--faint);
+        background: var(--chrome);
+        border-bottom: 1px solid var(--line);
+        font: 7px var(--mono);
+      }
+      .evidence-row {
+        min-height: 38px;
+        border-bottom: 1px solid var(--line-soft);
+        font: 8px var(--mono);
+      }
+      .evidence-row:hover { background: var(--panel-2); }
+      .evidence-head span, .evidence-row span { padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .source-sample { color: var(--amber); }
+      .source-live { color: var(--green); }
+      .category-cell { color: var(--blue); }
+      .correlation-cell { color: var(--muted); }
+      .evidence-empty { min-height: 240px; display: grid; place-items: center; color: var(--muted); }
+
+      .experiment-content { padding: 22px; }
+      .experiment-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(240px, .7fr); gap: 14px; }
+      .experiment-card { border: 1px solid var(--line); border-radius: 5px; background: var(--panel-2); }
+      .experiment-card header { padding: 12px; border-bottom: 1px solid var(--line); }
+      .experiment-card h2 { margin: 0; font-size: 11px; }
+      .experiment-card p { margin: 5px 0 0; color: var(--muted); font-size: 9px; }
+      .experiment-body { padding: 13px; }
+      .experiment-step { display: grid; grid-template-columns: 21px 1fr; gap: 8px; padding: 8px 0; color: var(--muted); font-size: 9px; }
+      .experiment-step b { display: grid; place-items: center; width: 20px; height: 20px; border: 1px solid var(--line); border-radius: 50%; color: var(--text); font: 8px var(--mono); }
+      .experiment-input { padding: 10px; border: 1px solid var(--line); background: var(--panel); font: 9px var(--mono); }
+      .experiment-note { margin-top: 10px; color: var(--amber); font: 8px var(--mono); }
+
+      .statusbar {
+        min-height: 34px;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 0 12px;
+        border-top: 1px solid var(--line);
+        background: var(--chrome);
+        color: var(--faint);
+        font: 8px var(--mono);
+      }
+      .broker-status { display: flex; align-items: center; gap: 6px; color: var(--green); }
+      .broker-status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+      .broker-status.offline { color: var(--red); }
+      .local-only { margin-left: auto; }
+
+      @media (max-width: 1300px) and (min-width: 901px) {
+        .request-head, .request-row { grid-template-columns: 30px minmax(130px, 1fr) 46px 43px; }
+        .request-head > :nth-child(5), .request-head > :nth-child(6), .request-row > :nth-child(5), .request-row > :nth-child(6) { display: none; }
+      }
+      @media (max-width: 900px) {
+        .traffic-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+        .request-pane { border-right: 0; border-bottom: 1px solid var(--line); }
+        .request-pane, .request-table { grid-template-rows: auto auto; }
+        .request-rows { max-height: min(230px, 35vh); }
+        .detail-pane { overflow: auto; }
+      }
+      @media (max-width: 880px) {
+        .workspace { grid-template-columns: 178px minmax(0, 1fr); }
+        .trace-layout { grid-template-columns: minmax(0, 1fr); }
+        .trace-inspector { border-top: 1px solid var(--line); border-left: 0; }
+        .legend { grid-template-columns: 1fr 1fr; }
+        .inspector-actions { grid-template-columns: 1fr 1fr; }
+        .title-meta, .authorization { display: none; }
+      }
+      @media (max-width: 650px) {
+        .app { width: 100%; height: 100vh; min-height: 0; margin: 0; border: 0; border-radius: 0; }
+        .toolbar { gap: 5px; padding: 0 7px; overflow-x: auto; }
+        .capture-state { min-width: auto; }
+        .capture-state span:last-child { display: none; }
+        .nav-button { padding: 0 8px; }
+        .toolbar-actions { margin-left: 0; }
+        .workspace { grid-template-columns: 1fr; }
+        .sidebar { display: none; }
+        .network-tools { overflow-x: auto; }
+        .filter-box { min-width: 145px; }
+        .request-head, .request-row { grid-template-columns: 28px minmax(155px, 1fr) 46px 43px; }
+        .request-head > :nth-child(5), .request-head > :nth-child(6), .request-row > :nth-child(5), .request-row > :nth-child(6) { display: none; }
+        .field-row { grid-template-columns: minmax(150px, 1fr) minmax(90px, .7fr); }
+        .field-type { display: none; }
+        .request-inspector { padding: 13px 12px; }
+        .trace-dock { align-items: stretch; flex-direction: column; }
+        .trace-button { width: 100%; margin-left: 0; }
+        .graph-panel { padding: 17px 12px 24px; }
+        .step-card { grid-template-columns: 1fr; }
+        .confidence { justify-self: start; }
+        .screen-head { padding: 9px 10px; }
+        .screen-head-actions .secondary-button { display: none; }
+        .experiment-grid { grid-template-columns: 1fr; }
+        .statusbar span:not(:first-child):not(.local-only) { display: none; }
+      }
+      @media (prefers-reduced-motion: no-preference) {
+        .screen:not([hidden]) { animation: reveal .16s ease-out; }
+        @keyframes reveal { from { opacity: .35; transform: translateY(2px); } }
+      }
     </style>
   </head>
   <body>
-    <header>
-      <h1>Reverse Engineering Browser</h1>
-      <div class="status" role="status"><span class="dot" aria-hidden="true"></span><span>Local evidence broker</span></div>
-    </header>
-    <main>
-      <aside>
-        <label class="label" for="search">Find evidence</label>
-        <input id="search" type="search" placeholder="Request, API, value..." />
-        <label class="label" for="category">Event category</label>
-        <select id="category">
-          <option value="">All categories</option>
-          <option>canvas</option><option>navigator</option><option>wasm</option><option>network</option>
-          <option>webgl</option><option>web_audio</option><option>storage</option>
-        </select>
-        <div class="metric"><span class="label">Visible events</span><strong id="count">0</strong></div>
-        <div class="metric"><span class="label">Sequence gaps</span><strong id="gaps">0</strong></div>
-      </aside>
-      <section>
-        <div class="title-row"><h2>Investigation timeline</h2><span id="updated">Waiting for evidence</span></div>
-        <div id="events" class="empty">No native probe events captured yet.</div>
-      </section>
-    </main>
+    <div class="app">
+      <header class="titlebar">
+        <div class="window-dots" aria-hidden="true"><span class="window-dot"></span><span class="window-dot"></span><span class="window-dot"></span></div>
+        <span class="brand-mark" aria-hidden="true">R:B</span>
+        <span class="brand-name">ORIGIN TRACE</span>
+        <span class="poc-badge">Proof of concept</span>
+        <span class="title-meta">session_007f3 · checkout.acme.test</span>
+      </header>
+
+      <div class="toolbar">
+        <div id="capture-state" class="capture-state" role="status"><span class="pulse" aria-hidden="true"></span><span>Connecting</span></div>
+        <nav class="primary-nav" aria-label="Workspace">
+          <button class="nav-button" data-screen="traffic" aria-current="page">Traffic</button>
+          <button class="nav-button" data-screen="backtrace">Backtraces</button>
+          <button class="nav-button" data-screen="experiments">Experiments</button>
+        </nav>
+        <div class="toolbar-actions">
+          <span class="authorization">◇ authorized baseline</span>
+          <button id="theme-toggle" class="icon-button" type="button" aria-label="Switch color theme" title="Switch color theme">◐</button>
+        </div>
+      </div>
+
+      <div class="workspace">
+        <aside class="sidebar" aria-label="Session structure">
+          <div class="sidebar-heading"><span class="session-icon" aria-hidden="true"></span>Working session <span id="sidebar-count" class="sidebar-count">12</span></div>
+          <div class="tree">
+            <div class="tree-label">Pinned</div>
+            <button class="tree-row selected" type="button"><span class="tree-glyph">⌁</span><span>checkout.acme.test</span><span class="tree-number">4</span></button>
+            <button class="tree-row indent" type="button"><span class="tree-glyph">□</span><span>/cart</span><span class="tree-number">2</span></button>
+            <button class="tree-row indent" type="button"><span class="tree-glyph">□</span><span>/api</span><span class="tree-number">2</span></button>
+            <div class="tree-label">Domains</div>
+            <button class="tree-row" type="button"><span class="tree-glyph">◎</span><span>api.acme.test</span><span class="tree-number">5</span></button>
+            <button class="tree-row" type="button"><span class="tree-glyph">◎</span><span>metrics.acme.test</span><span class="tree-number">3</span></button>
+            <div class="tree-label">Context</div>
+            <button class="tree-row" type="button"><span class="tree-glyph">▣</span><span>Chromium</span><span class="tree-number">tab 7</span></button>
+          </div>
+          <div class="view-switch" aria-label="Request organization">
+            <button type="button" aria-pressed="true">Structure</button>
+            <button type="button" aria-pressed="false">Sequence</button>
+          </div>
+        </aside>
+
+        <main class="main">
+          <section id="screen-traffic" class="screen" aria-label="Traffic">
+            <div class="traffic-grid">
+              <div class="request-pane">
+                <div class="network-tools">
+                  <label class="filter-box"><span hidden>Filter requests</span><input id="request-filter" type="search" placeholder="Filter URL, method, status, body…" /></label>
+                  <button class="type-filter" type="button" data-filter="all" aria-pressed="true">All</button>
+                  <button class="type-filter" type="button" data-filter="xhr" aria-pressed="false">XHR</button>
+                  <button class="type-filter" type="button" data-filter="js" aria-pressed="false">JS</button>
+                  <button class="type-filter" type="button" data-filter="wasm" aria-pressed="false">Wasm</button>
+                </div>
+
+                <div class="request-table" aria-label="Captured requests">
+                  <div class="request-head" aria-hidden="true"><span>#</span><span>Request</span><span>Method</span><span>Status</span><span>Time</span><span>Waterfall</span></div>
+                  <div id="request-rows" class="request-rows"></div>
+                </div>
+              </div>
+
+              <div class="detail-pane">
+                <div class="selection-strip">
+                  <span id="selected-method" class="method-pill">POST</span>
+                  <span id="selected-status" class="status-pill">201</span>
+                  <span id="selected-url" class="selection-url">https://checkout.acme.test/cart</span>
+                  <span class="selection-more" aria-hidden="true">•••</span>
+                </div>
+                <div class="inspector-tabs" role="tablist" aria-label="Request inspector">
+                  <button class="inspector-tab" type="button" role="tab" aria-selected="true">Request</button>
+                  <button class="inspector-tab" type="button" role="tab" aria-selected="false">Response</button>
+                  <button class="inspector-tab" type="button" role="tab" aria-selected="false">Timing</button>
+                  <button class="inspector-tab" type="button" role="tab" aria-selected="false">Notes</button>
+                </div>
+                <div class="request-inspector">
+                  <h1 id="request-prompt">Choose a request value and trace where it came from.</h1>
+                  <div class="field-tabs" role="tablist" aria-label="Request values">
+                    <button class="field-tab" type="button" role="tab" data-field-tab="body" aria-selected="true">Body</button>
+                    <button class="field-tab" type="button" role="tab" data-field-tab="headers" aria-selected="false">Headers</button>
+                    <button class="field-tab" type="button" role="tab" data-field-tab="cookies" aria-selected="false">Cookies</button>
+                    <button class="field-tab" type="button" role="tab" data-field-tab="raw" aria-selected="false">Raw</button>
+                  </div>
+                  <div id="field-tree" class="field-tree"></div>
+                  <div class="trace-dock">
+                    <div><div class="trace-label">Selected request field</div><div id="trace-target" class="trace-target">request-81 · Body · $.device.fingerprint</div></div>
+                    <button id="trace-origin" class="trace-button" type="button">⌘ Trace origin</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="screen-backtrace" class="screen" aria-label="Request field backtrace" hidden>
+            <header class="screen-head">
+              <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
+              <div><h1>Request Field Backtrace</h1><div id="backtrace-subtitle" class="screen-subtitle">request-81 · Body · $.device.fingerprint</div></div>
+              <div class="screen-head-actions"><button class="secondary-button" type="button" data-screen="evidence">Supporting evidence</button></div>
+            </header>
+            <div class="trace-layout">
+              <div class="graph-panel">
+                <div class="graph-kicker">Working backward from what left the browser</div>
+                <ol class="backtrace">
+                  <li class="trace-step">
+                    <span class="step-index">01</span>
+                    <button class="step-card" type="button">
+                      <span><span class="step-kind">Request field</span><span class="step-title">POST /cart · body.device.fingerprint</span><span class="step-meta">request-81 · 24 bytes sent</span></span>
+                      <span class="confidence exact">Exact</span>
+                    </button>
+                  </li>
+                  <li class="trace-step">
+                    <span class="step-index">02</span>
+                    <button class="step-card" type="button">
+                      <span><span class="step-kind">Serialized by</span><span class="step-title">JSON.stringify(object-17)</span><span class="step-meta">script cart.js:418 · boundary observed</span></span>
+                      <span class="confidence exact">Exact</span>
+                    </button>
+                  </li>
+                  <li class="trace-step">
+                    <span class="step-index">03</span>
+                    <button class="step-card" type="button">
+                      <span><span class="step-kind">Derived from</span><span class="step-title">Base64 encoded bytes</span><span class="step-meta">reversible value match · 18 input bytes</span></span>
+                      <span class="confidence matched">Matched</span>
+                    </button>
+                  </li>
+                  <li class="trace-step gap">
+                    <span class="step-index">?</span>
+                    <button class="step-card gap-card" type="button">
+                      <span><span class="step-kind">Evidence gap</span><span class="step-title">Producer relationship not observed</span><span class="step-meta">A targeted replay can instrument only this missing boundary</span></span>
+                      <span class="confidence unknown">Unknown</span>
+                    </button>
+                  </li>
+                  <li class="trace-step correlated">
+                    <span class="step-index">04</span>
+                    <button class="step-card" type="button">
+                      <span><span class="step-kind">Candidate returned by</span><span class="step-title">wasm-4 export generate</span><span class="step-meta">same frame and task · causality not yet proven</span></span>
+                      <span class="confidence correlation">Correlated</span>
+                    </button>
+                  </li>
+                  <li class="trace-step">
+                    <span class="step-index">05</span>
+                    <button class="step-card" type="button">
+                      <span><span class="step-kind">Native probe evidence</span><span class="step-title">Canvas readback · event-194</span><span class="step-meta">CanvasRenderingContext2D.getImageData</span></span>
+                      <span class="confidence correlation">Correlated</span>
+                    </button>
+                  </li>
+                </ol>
+              </div>
+              <aside class="trace-inspector" aria-label="Trace summary">
+                <h2 class="inspector-label">Trace target</h2>
+                <div class="target-card"><div id="summary-target-path" class="target-path">$.device.fingerprint</div><div id="summary-target-request" class="target-request">POST /cart · request-81</div></div>
+                <div class="coverage"><span>Evidence coverage</span><strong id="coverage-value">68%</strong><div class="coverage-bar"><span id="coverage-bar"></span></div></div>
+                <h2 class="inspector-label">Confidence</h2>
+                <div class="legend">
+                  <div class="legend-row"><strong class="exact">Exact</strong><span>Observed boundary</span></div>
+                  <div class="legend-row"><strong class="matched">Matched</strong><span>Reversible bytes</span></div>
+                  <div class="legend-row"><strong class="differential">Differential</strong><span>Changed together</span></div>
+                  <div class="legend-row"><strong class="correlation">Correlated</strong><span>Same context only</span></div>
+                  <div class="legend-row"><strong class="unknown">Unknown</strong><span>Evidence missing</span></div>
+                </div>
+                <div class="inspector-actions">
+                  <button class="trace-button" type="button" data-screen="experiments">Branch experiment</button>
+                  <button class="evidence-link" type="button" data-screen="evidence">Open supporting evidence · <span id="evidence-link-count">5</span> events →</button>
+                </div>
+              </aside>
+            </div>
+          </section>
+
+          <section id="screen-evidence" class="screen" aria-label="Supporting evidence" hidden>
+            <header class="screen-head">
+              <button class="back-button" type="button" data-screen="backtrace" aria-label="Back to trace">←</button>
+              <div><h1>Supporting Evidence</h1><div class="screen-subtitle">Probe events are evidence for the selected backtrace, not the starting point</div></div>
+            </header>
+            <div class="evidence-tools">
+              <span class="scope-pill">session 1</span><span class="scope-pill">navigation 100</span><span class="scope-pill">frame 200</span>
+              <span id="evidence-count" class="evidence-count">0 events</span>
+            </div>
+            <div class="evidence-table" role="table" aria-label="Evidence events">
+              <div class="evidence-head" role="row"><span>Time</span><span>Source</span><span>Category</span><span>Operation</span><span>Correlation IDs</span><span>Value / artifact</span></div>
+              <div id="evidence-rows"></div>
+            </div>
+          </section>
+
+          <section id="screen-experiments" class="screen" aria-label="Experiments" hidden>
+            <header class="screen-head">
+              <button class="back-button" type="button" data-screen="backtrace" aria-label="Back to trace">←</button>
+              <div><h1>Verify the Missing Link</h1><div id="experiment-subtitle" class="screen-subtitle">Draft experiment · nothing has been replayed or changed</div></div>
+            </header>
+            <div class="experiment-content">
+              <div class="experiment-grid">
+                <article class="experiment-card">
+                  <header><h2>Controlled replay plan</h2><p>Change one harmless candidate input, then compare only the selected request field.</p></header>
+                  <div class="experiment-body">
+                    <div class="experiment-step"><b>1</b><span>Pause immediately before <code>JSON.stringify</code> receives object-17.</span></div>
+                    <div class="experiment-step"><b>2</b><span>Replace the candidate Canvas readback hash with a fixed test value.</span></div>
+                    <div class="experiment-step"><b>3</b><span>Replay the authorized request and compare the WASM result and selected field.</span></div>
+                    <div class="experiment-step"><b>4</b><span>Add a Differential edge only if the downstream values change together.</span></div>
+                  </div>
+                </article>
+                <article class="experiment-card">
+                  <header><h2>Candidate input</h2><p id="experiment-candidate">event-194 · Canvas readback</p></header>
+                  <div class="experiment-body">
+                    <div id="experiment-input" class="experiment-input">getImageData() → fixed-test-hash-01</div>
+                    <div id="experiment-note" class="experiment-note">Draft only. Experiment execution is not implemented in this proof of concept.</div>
+                    <button class="secondary-button" type="button" data-screen="backtrace" style="width:100%; margin-top:14px">Return to trace</button>
+                  </div>
+                </article>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+
+      <footer class="statusbar">
+        <span id="broker-status" class="broker-status">connecting to broker</span>
+        <span id="sample-status">sample request values enabled</span>
+        <span id="gap-status">0 sequence gaps</span>
+        <span id="updated-status">waiting for evidence</span>
+        <span class="local-only">local only</span>
+      </footer>
+    </div>
+
     <script>
-      const state = { events: [] };
-      const elements = {
-        search: document.querySelector('#search'), category: document.querySelector('#category'),
-        events: document.querySelector('#events'), count: document.querySelector('#count'),
-        gaps: document.querySelector('#gaps'), updated: document.querySelector('#updated')
+      if (new URLSearchParams(location.search).has('native')) document.documentElement.classList.add('native-shell');
+
+      const sampleRequests = [
+        { id: '78', path: '/api/profile', method: 'GET', status: 200, time: 64, type: 'xhr', origin: 'sample', start: 8, mid: 31, end: 43 },
+        { id: '79', path: '/assets/cart.js', method: 'GET', status: 304, time: 18, type: 'js', origin: 'sample', start: 18, mid: 32, end: 40 },
+        { id: '80', path: '/fingerprint/config', method: 'GET', status: 200, time: 91, type: 'xhr', origin: 'sample', start: 30, mid: 67, end: 79 },
+        { id: '81', path: '/cart', method: 'POST', status: 201, time: 181, type: 'xhr', origin: 'sample', start: 43, mid: 73, end: 88, traceable: true }
+      ];
+
+      const sampleEvidence = [
+        { relative: '0.000 ms', source: 'sample', category: 'network', type: 'request_field', correlation: 'req 81 · nav 100', value: 'body.device.fingerprint' },
+        { relative: '-0.412 ms', source: 'sample', category: 'runtime', type: 'serialized_by', correlation: 'obj 17 · frame 200', value: 'JSON.stringify' },
+        { relative: '-0.831 ms', source: 'sample', category: 'transform', type: 'encoded_by', correlation: 'artifact 300', value: 'Base64 · reversible match' },
+        { relative: '-1.224 ms', source: 'sample', category: 'wasm', type: 'candidate_return', correlation: 'wasm 4 · frame 200', value: 'export generate · correlated only' },
+        { relative: '-1.907 ms', source: 'sample', category: 'canvas', type: 'api_call', correlation: 'event 194 · frame 200', value: 'CanvasRenderingContext2D.getImageData' }
+      ];
+
+      const fieldSets = {
+        body: [
+          { key: 'cart', value: '{ 3 fields }', type: 'obj', depth: 0, group: true },
+          { key: 'items', value: '[ { sku: "A14", qty: 1 } ]', type: 'arr', depth: 1 },
+          { key: 'device', value: '{ 2 fields }', type: 'obj', depth: 1, group: true },
+          { key: 'locale', value: '"en-US"', type: 'str', depth: 2 },
+          { key: 'fingerprint', value: '"N2Y0YTFjZj…"', type: 'str', depth: 2, traceable: true, path: '$.device.fingerprint', label: 'Body' },
+          { key: 'coupon', value: 'null', type: 'null', depth: 1 }
+        ],
+        headers: [
+          { key: 'content-type', value: 'application/json', type: 'str', depth: 0 },
+          { key: 'x-client-token', value: 'tkn_A7f3…', type: 'str', depth: 0, traceable: true, path: 'x-client-token', label: 'Header' },
+          { key: 'accept-language', value: 'en-US', type: 'str', depth: 0 }
+        ],
+        cookies: [
+          { key: 'session_proof', value: 'proof_42bf…', type: 'str', depth: 0, traceable: true, path: 'session_proof', label: 'Cookie' },
+          { key: 'cart_id', value: 'cart_8e11', type: 'str', depth: 0 }
+        ],
+        raw: [
+          { key: 'payload', value: '{"cart":{"items":[…],"device":{…}}}', type: 'bytes', depth: 0 }
+        ]
       };
+
+      const state = {
+        events: [],
+        requests: [...sampleRequests],
+        selectedRequestId: '81',
+        fieldTab: 'body',
+        selectedField: fieldSets.body.find(field => field.traceable),
+        requestType: 'all',
+        broker: 'connecting'
+      };
+
+      const elements = {
+        capture: document.querySelector('#capture-state'),
+        broker: document.querySelector('#broker-status'),
+        updated: document.querySelector('#updated-status'),
+        gaps: document.querySelector('#gap-status'),
+        sidebarCount: document.querySelector('#sidebar-count'),
+        requestFilter: document.querySelector('#request-filter'),
+        requestRows: document.querySelector('#request-rows'),
+        selectedMethod: document.querySelector('#selected-method'),
+        selectedStatus: document.querySelector('#selected-status'),
+        selectedUrl: document.querySelector('#selected-url'),
+        prompt: document.querySelector('#request-prompt'),
+        fieldTree: document.querySelector('#field-tree'),
+        traceTarget: document.querySelector('#trace-target'),
+        traceButton: document.querySelector('#trace-origin'),
+        backtraceSubtitle: document.querySelector('#backtrace-subtitle'),
+        evidenceRows: document.querySelector('#evidence-rows'),
+        evidenceCount: document.querySelector('#evidence-count'),
+        evidenceLinkCount: document.querySelector('#evidence-link-count'),
+        summaryTargetPath: document.querySelector('#summary-target-path'),
+        summaryTargetRequest: document.querySelector('#summary-target-request'),
+        coverageValue: document.querySelector('#coverage-value'),
+        coverageBar: document.querySelector('#coverage-bar'),
+        experimentSubtitle: document.querySelector('#experiment-subtitle'),
+        experimentCandidate: document.querySelector('#experiment-candidate'),
+        experimentInput: document.querySelector('#experiment-input'),
+        experimentNote: document.querySelector('#experiment-note')
+      };
+
+      const bodyTraceSteps = [
+        { index: '01', kind: 'Request field', title: 'POST /cart · body.device.fingerprint', meta: 'request-81 · 24 bytes sent', confidence: 'Exact', style: 'exact' },
+        { index: '02', kind: 'Serialized by', title: 'JSON.stringify(object-17)', meta: 'script cart.js:418 · boundary observed', confidence: 'Exact', style: 'exact' },
+        { index: '03', kind: 'Derived from', title: 'Base64 encoded bytes', meta: 'reversible value match · 18 input bytes', confidence: 'Matched', style: 'matched' },
+        { index: '?', kind: 'Evidence gap', title: 'Producer relationship not observed', meta: 'A targeted replay can instrument only this missing boundary', confidence: 'Unknown', style: 'unknown', gap: true },
+        { index: '04', kind: 'Candidate returned by', title: 'wasm-4 export generate', meta: 'same frame and task · causality not yet proven', confidence: 'Correlated', style: 'correlation', correlated: true },
+        { index: '05', kind: 'Native probe evidence', title: 'Canvas readback · event-194', meta: 'CanvasRenderingContext2D.getImageData', confidence: 'Correlated', style: 'correlation' }
+      ];
+
       function decodePayload(event) {
-        if (event.payload_encoding !== 'hex') return event.payload || '';
-        try { return new TextDecoder().decode(Uint8Array.from(event.payload.match(/.{2}/g) || [], byte => parseInt(byte, 16))); }
-        catch { return event.payload; }
+        if (event.payload_encoding !== 'hex') return String(event.payload || '');
+        try {
+          const pairs = String(event.payload || '').match(/.{2}/g) || [];
+          return new TextDecoder().decode(Uint8Array.from(pairs, byte => Number.parseInt(byte, 16)));
+        } catch {
+          return String(event.payload || '');
+        }
       }
-      function render() {
-        const needle = elements.search.value.toLowerCase();
-        const category = elements.category.value;
-        const events = state.events.filter(event => (!category || event.category === category) &&
-          (!needle || JSON.stringify(event).toLowerCase().includes(needle) || decodePayload(event).toLowerCase().includes(needle)));
-        elements.count.textContent = events.length;
+
+      function countSequenceGaps(events) {
         let gaps = 0;
         const highWaterMarks = new Map();
-        for (const event of state.events) {
+        for (const event of events) {
           const previous = highWaterMarks.get(event.session_id);
-          if (previous !== undefined && event.sequence_number > previous &&
-              event.sequence_number - previous > 1) {
-            gaps += event.sequence_number - previous - 1;
-          }
-          highWaterMarks.set(event.session_id,
-            Math.max(previous ?? event.sequence_number, event.sequence_number));
+          if (previous !== undefined && event.sequence_number > previous + 1) gaps += event.sequence_number - previous - 1;
+          highWaterMarks.set(event.session_id, Math.max(previous ?? event.sequence_number, event.sequence_number));
         }
-        elements.gaps.textContent = gaps;
-        if (!events.length) { elements.events.className = 'empty'; elements.events.textContent = 'No matching native probe events.'; return; }
-        elements.events.className = '';
-        elements.events.replaceChildren(...events.map(event => {
-          const row = document.createElement('div'); row.className = 'event';
-          const values = [
-            ['seq', `#${event.sequence_number}`], ['category', event.category],
-            ['type', event.type], ['payload', decodePayload(event)]
-          ];
-          for (const [className, value] of values) {
-            const cell = document.createElement('span'); cell.className = className;
-            cell.textContent = String(value ?? '');
-            if (className === 'payload') cell.title = cell.textContent;
-            row.append(cell);
-          }
+        return gaps;
+      }
+
+      function requestsFromEvents(events) {
+        return events.filter(event => event.category === 'network').map(event => {
+          const payload = decodePayload(event);
+          const match = payload.match(/^([A-Z]+)\s+(\S+)/);
+          return {
+            id: `E${event.sequence_number}`,
+            path: match?.[2] || payload || 'network request',
+            method: match?.[1] || 'EVENT',
+            status: '…',
+            time: 'live',
+            type: 'xhr',
+            origin: 'live',
+            start: 12,
+            mid: 37,
+            end: 54,
+            event
+          };
+        });
+      }
+
+      function renderRequests() {
+        const needle = elements.requestFilter.value.trim().toLowerCase();
+        const visible = state.requests.filter(request =>
+          (state.requestType === 'all' || request.type === state.requestType) &&
+          (!needle || `${request.method} ${request.path} ${request.status}`.toLowerCase().includes(needle))
+        );
+        elements.requestRows.replaceChildren(...visible.map(request => {
+          const row = document.createElement('button');
+          row.type = 'button';
+          row.className = 'request-row';
+          row.dataset.requestId = request.id;
+          row.setAttribute('aria-selected', String(request.id === state.selectedRequestId));
+
+          const number = document.createElement('span'); number.textContent = request.id;
+          const name = document.createElement('span'); name.className = 'request-name'; name.textContent = request.path;
+          const source = document.createElement('span'); source.className = request.origin === 'live' ? 'live-chip' : 'sample-chip'; source.textContent = request.origin;
+          name.append(source);
+          const method = document.createElement('span'); method.className = 'request-method'; method.textContent = request.method;
+          const status = document.createElement('span'); status.className = 'status-ok'; status.textContent = request.status;
+          const time = document.createElement('span'); time.textContent = typeof request.time === 'number' ? `${request.time} ms` : request.time;
+          const waterfallCell = document.createElement('span');
+          const waterfall = document.createElement('i'); waterfall.className = 'waterfall'; waterfall.style.setProperty('--water-start', `${request.start}%`); waterfall.style.setProperty('--water-mid', `${request.mid}%`); waterfall.style.setProperty('--water-end', `${request.end}%`); waterfallCell.append(waterfall);
+          row.append(number, name, method, status, time, waterfallCell);
+          row.addEventListener('click', () => selectRequest(request.id));
           return row;
         }));
+        elements.sidebarCount.textContent = String(state.requests.length);
       }
+
+      function selectRequest(id) {
+        state.selectedRequestId = id;
+        const request = state.requests.find(candidate => candidate.id === id);
+        elements.selectedMethod.textContent = request.method;
+        elements.selectedStatus.textContent = request.status;
+        elements.selectedUrl.textContent = request.origin === 'sample'
+          ? `https://checkout.acme.test${request.path}`
+          : request.path;
+        if (request.traceable) {
+          elements.prompt.textContent = 'Choose a request value and trace where it came from.';
+          state.fieldTab = 'body';
+          state.selectedField = fieldSets.body.find(field => field.traceable);
+        } else {
+          elements.prompt.textContent = request.origin === 'live'
+            ? 'This live event has no captured field structure yet.'
+            : 'This sample request has no trace target in the proof of concept.';
+          state.selectedField = null;
+        }
+        renderRequests();
+        renderFields();
+        renderEvidence();
+      }
+
+      function renderFields() {
+        document.querySelectorAll('.field-tab').forEach(tab => tab.setAttribute('aria-selected', String(tab.dataset.fieldTab === state.fieldTab)));
+        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        if (!request?.traceable) {
+          const empty = document.createElement('div');
+          empty.className = 'field-empty';
+          empty.textContent = request?.origin === 'live'
+            ? 'Request field capture is not available for this broker event. Select the sample POST /cart request to explore the field backtrace.'
+            : 'Select the sample POST /cart request to explore the field backtrace.';
+          elements.fieldTree.replaceChildren(empty);
+          elements.traceTarget.textContent = 'No traceable request field selected';
+          elements.traceButton.disabled = true;
+          return;
+        }
+
+        const fields = fieldSets[state.fieldTab];
+        elements.fieldTree.replaceChildren(...fields.map(field => {
+          const row = document.createElement(field.traceable ? 'button' : 'div');
+          if (field.traceable) row.type = 'button';
+          row.className = `field-row${field.traceable ? ' selectable' : ''}`;
+          if (field.traceable) row.setAttribute('aria-selected', String(state.selectedField?.path === field.path));
+          const key = document.createElement('span'); key.className = `field-key${field.group ? ' group' : ''}${field.traceable ? ' traceable' : ''}`; key.style.setProperty('--depth', field.depth); key.textContent = field.key;
+          const value = document.createElement('span'); value.className = 'field-value'; value.textContent = field.value;
+          const type = document.createElement('span'); type.className = 'field-type'; type.textContent = field.type;
+          row.append(key, value, type);
+          if (field.traceable) row.addEventListener('click', () => { state.selectedField = field; renderFields(); renderEvidence(); });
+          return row;
+        }));
+        const selected = state.selectedField;
+        elements.traceTarget.textContent = selected
+          ? `request-${state.selectedRequestId} · ${selected.label} · ${selected.path}`
+          : 'Select a traceable field';
+        elements.traceButton.disabled = !selected;
+      }
+
+      function renderEvidence() {
+        const selectedSampleEvidence = state.selectedField?.label === 'Body'
+          ? sampleEvidence
+          : [{
+              relative: '0.000 ms',
+              source: 'sample',
+              category: 'network',
+              type: 'request_field',
+              correlation: `req ${state.selectedRequestId} · nav 100`,
+              value: state.selectedField ? `${state.selectedField.label.toLowerCase()}.${state.selectedField.path}` : 'No selected field'
+            }];
+        const liveEvidence = state.events.map((event, index) => {
+          const firstTime = state.events[0]?.monotonic_time_ns || event.monotonic_time_ns;
+          return {
+            relative: `+${((event.monotonic_time_ns - firstTime) / 1e6).toFixed(3)} ms`,
+            source: 'live',
+            category: event.category || 'unknown',
+            type: event.type || 'unknown',
+            correlation: `seq ${event.sequence_number} · frame ${event.frame_id}`,
+            value: decodePayload(event),
+            index
+          };
+        });
+        const evidence = [...selectedSampleEvidence, ...liveEvidence];
+        elements.evidenceRows.replaceChildren(...evidence.map(event => {
+          const row = document.createElement('div'); row.className = 'evidence-row'; row.setAttribute('role', 'row');
+          const values = [event.relative, event.source, event.category, event.type, event.correlation, event.value];
+          values.forEach((value, index) => {
+            const cell = document.createElement('span'); cell.textContent = String(value ?? ''); cell.title = cell.textContent;
+            if (index === 1) cell.className = event.source === 'live' ? 'source-live' : 'source-sample';
+            if (index === 2) cell.className = 'category-cell';
+            if (index === 4) cell.className = 'correlation-cell';
+            row.append(cell);
+          });
+          return row;
+        }));
+        elements.evidenceCount.textContent = `${evidence.length} events · ${state.events.length} live`;
+        elements.evidenceLinkCount.textContent = String(evidence.length);
+      }
+
+      function renderBacktrace() {
+        if (!state.selectedField) return;
+        const isBodyTrace = state.selectedField.label === 'Body';
+        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        const fieldTarget = `${state.selectedField.label.toLowerCase()}.${state.selectedField.path.replace(/^\$\.?/, '')}`;
+        const steps = isBodyTrace
+          ? bodyTraceSteps
+          : [
+              { index: '01', kind: 'Request field', title: `${request.method} ${request.path} · ${fieldTarget}`, meta: `request-${request.id} · final value observed`, confidence: 'Exact', style: 'exact' },
+              { index: '?', kind: 'Evidence gap', title: 'Origin boundary not captured yet', meta: 'No transformation or producer relationship is available for this field', confidence: 'Unknown', style: 'unknown', gap: true }
+            ];
+
+        document.querySelectorAll('.trace-step').forEach((step, index) => {
+          const model = steps[index];
+          step.hidden = !model;
+          if (!model) return;
+          step.className = `trace-step${model.gap ? ' gap' : ''}${model.correlated ? ' correlated' : ''}`;
+          step.querySelector('.step-index').textContent = model.index;
+          step.querySelector('.step-kind').textContent = model.kind;
+          step.querySelector('.step-title').textContent = model.title;
+          step.querySelector('.step-meta').textContent = model.meta;
+          const confidence = step.querySelector('.confidence');
+          confidence.className = `confidence ${model.style}`;
+          confidence.textContent = model.confidence;
+          step.querySelector('.step-card').classList.toggle('gap-card', Boolean(model.gap));
+        });
+
+        elements.summaryTargetPath.textContent = state.selectedField.path;
+        elements.summaryTargetRequest.textContent = `${request.method} ${request.path} · request-${request.id}`;
+        elements.coverageValue.textContent = isBodyTrace ? '68%' : '18%';
+        elements.coverageBar.style.width = isBodyTrace ? '68%' : '18%';
+      }
+
+      function renderExperiment() {
+        if (!state.selectedField) return;
+        const isBodyTrace = state.selectedField.label === 'Body';
+        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        const steps = document.querySelectorAll('.experiment-step span');
+        elements.experimentSubtitle.textContent = `Draft for request-${request.id} · ${state.selectedField.label} · ${state.selectedField.path}`;
+        if (isBodyTrace) {
+          const bodySteps = [
+            'Pause immediately before JSON.stringify receives object-17.',
+            'Replace the candidate Canvas readback hash with a fixed test value.',
+            'Replay the authorized request and compare the WASM result and selected field.',
+            'Add a Differential edge only if the downstream values change together.'
+          ];
+          steps.forEach((step, index) => { step.textContent = bodySteps[index]; });
+          elements.experimentCandidate.textContent = 'event-194 · Canvas readback';
+          elements.experimentInput.textContent = 'getImageData() → fixed-test-hash-01';
+          elements.experimentNote.textContent = 'Draft only. Experiment execution is not implemented in this proof of concept.';
+          return;
+        }
+
+        const genericSteps = [
+          `Pause immediately before request-${request.id} is assembled.`,
+          `Choose and hook one candidate producer for ${state.selectedField.label} ${state.selectedField.path}.`,
+          'Replay the authorized request and compare only the selected field.',
+          'Add a Differential edge only if the candidate and field change together.'
+        ];
+        steps.forEach((step, index) => { step.textContent = genericSteps[index]; });
+        elements.experimentCandidate.textContent = 'No candidate selected';
+        elements.experimentInput.textContent = 'Choose a candidate from Supporting Evidence';
+        elements.experimentNote.textContent = 'The origin is still Unknown. This draft does not claim a producer until a controlled replay verifies one.';
+      }
+
+      function showScreen(name) {
+        const screenName = name === 'backtraces' ? 'backtrace' : name;
+        document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
+        document.querySelectorAll('.nav-button').forEach(button => {
+          const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence');
+          if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
+        });
+        if (screenName === 'backtrace' && state.selectedField) {
+          const label = `request-${state.selectedRequestId} · ${state.selectedField.label} · ${state.selectedField.path}`;
+          elements.backtraceSubtitle.textContent = label;
+          renderBacktrace();
+        }
+        if (screenName === 'experiments') renderExperiment();
+      }
+
       async function refresh() {
-        try { const response = await fetch('/api/events?limit=500', { cache: 'no-store' }); if (!response.ok) throw new Error(`Broker returned ${response.status}`); const body = await response.json(); state.events = body.events || []; elements.updated.textContent = `Updated ${new Date().toLocaleTimeString()}`; render(); }
-        catch { elements.updated.textContent = 'Broker unavailable'; }
+        try {
+          const response = await fetch('/api/events?limit=500', { cache: 'no-store' });
+          if (!response.ok) throw new Error(`Broker returned ${response.status}`);
+          const body = await response.json();
+          state.events = Array.isArray(body.events) ? body.events : [];
+          state.requests = [...sampleRequests, ...requestsFromEvents(state.events)];
+          state.broker = 'connected';
+          elements.capture.classList.remove('offline');
+          elements.capture.querySelector('span:last-child').textContent = 'Capturing';
+          elements.broker.classList.remove('offline');
+          elements.broker.textContent = 'broker connected';
+          elements.updated.textContent = `updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+          elements.gaps.textContent = `${countSequenceGaps(state.events)} sequence gaps`;
+          renderRequests();
+          renderEvidence();
+        } catch {
+          state.broker = 'unavailable';
+          elements.capture.classList.add('offline');
+          elements.capture.querySelector('span:last-child').textContent = 'Offline';
+          elements.broker.classList.add('offline');
+          elements.broker.textContent = 'broker unavailable';
+          elements.updated.textContent = 'sample data remains available';
+          renderRequests();
+          renderEvidence();
+        }
       }
-      elements.search.addEventListener('input', render); elements.category.addEventListener('change', render);
-      refresh(); setInterval(refresh, 2000);
+
+      function useStandalonePreview() {
+        state.broker = 'preview';
+        elements.capture.classList.remove('offline');
+        elements.capture.querySelector('span:last-child').textContent = 'Sample';
+        elements.broker.classList.remove('offline');
+        elements.broker.textContent = 'standalone preview';
+        elements.updated.textContent = 'open the app for live evidence';
+        elements.gaps.textContent = '0 sequence gaps';
+        renderRequests();
+        renderEvidence();
+      }
+
+      document.querySelectorAll('[data-screen]').forEach(button => button.addEventListener('click', () => showScreen(button.dataset.screen)));
+      document.querySelectorAll('.type-filter').forEach(button => button.addEventListener('click', () => {
+        state.requestType = button.dataset.filter;
+        document.querySelectorAll('.type-filter').forEach(candidate => candidate.setAttribute('aria-pressed', String(candidate === button)));
+        renderRequests();
+      }));
+      document.querySelectorAll('.field-tab').forEach(button => button.addEventListener('click', () => {
+        state.fieldTab = button.dataset.fieldTab;
+        state.selectedField = fieldSets[state.fieldTab].find(field => field.traceable) || null;
+        renderFields();
+        renderEvidence();
+      }));
+      document.querySelectorAll('.view-switch button').forEach(button => button.addEventListener('click', () => {
+        document.querySelectorAll('.view-switch button').forEach(candidate => candidate.setAttribute('aria-pressed', String(candidate === button)));
+      }));
+      elements.requestFilter.addEventListener('input', renderRequests);
+      elements.traceButton.addEventListener('click', () => showScreen('backtrace'));
+      document.querySelector('#theme-toggle').addEventListener('click', () => {
+        const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+        document.documentElement.dataset.theme = next;
+        try { localStorage.setItem('reb-theme', next); } catch { /* Native private mode may not persist preferences. */ }
+      });
+      let savedTheme = null;
+      try { savedTheme = localStorage.getItem('reb-theme'); } catch { /* Keep the system theme. */ }
+      if (savedTheme === 'light' || savedTheme === 'dark') document.documentElement.dataset.theme = savedTheme;
+
+      renderRequests();
+      renderFields();
+      renderEvidence();
+      if (location.protocol === 'file:') {
+        useStandalonePreview();
+      } else {
+        refresh();
+        setInterval(refresh, 2000);
+      }
     </script>
   </body>
 </html>

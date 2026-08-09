@@ -118,15 +118,19 @@ make sanitize
 ## Layout
 
 ```text
-apps/                  research UI and runnable development tools
-browser/               tracked Brave integration and ignored source worktree
-docs/                  documentation index
+.github/workflows/      pull-request checks and tag-triggered releases
+apps/                   runnable demos, producers, and Origin Trace
+  research-ui/macos/    native macOS shell and application icon source
+browser/                tracked Brave integration and ignored source worktree
+docs/                   product and architecture documentation
+  architecture/         technical architecture and system diagram
+  product/              feature roadmap and product catalog
 include/ and src/       dependency-free native event foundation
-protocol/              shared browser, broker, and UI contracts
-services/event-broker/ local browser-process bridge and evidence broker
-scripts/               setup and workspace validation
-tests/                 native unit and concurrency tests
-tools/                 development and analysis utilities
+protocol/               shared browser, broker, and UI contracts
+services/event-broker/  local browser-process bridge and evidence broker
+scripts/                setup, app packaging, and workspace validation
+tests/                  native unit and concurrency tests
+tools/                  development and analysis utilities
 ```
 
 All project-owned Brave changes live in `browser/integration/brave` as tracked
@@ -141,8 +145,9 @@ GiB is recommended for comfortable development and updates.
 
 ## Docs
 
-- [Technical architecture](./reverse-engineering-browser.md)
-- [System architecture diagram](./system-architecture.md)
-- [Feature list](./feature_list.md)
-- [Workspace architecture](./docs/README.md)
+- [Documentation index](./docs/README.md)
+- [Technical architecture](./docs/architecture/technical-architecture.md)
+- [System architecture](./docs/architecture/system-architecture.md)
+- [Feature roadmap](./docs/product/feature-list.md)
+- [Feature catalog](./docs/product/feature-catalog.md)
 - [Brave integration](./browser/README.md)

@@ -39,11 +39,11 @@ TEST_BINARIES := \
 	$(BUILD_DIR)/tests/event_broker_test \
 	$(BUILD_DIR)/tests/spsc_ring_test
 
-.PHONY: all bootstrap-brave brave-doctor brave-probe-check browser-sync broker check clean demo e2e format producer sanitize test ui workspace-check
+.PHONY: all app app-build bootstrap-brave brave-doctor brave-probe-check browser-sync broker check clean demo e2e format producer sanitize test ui ui-test workspace-check
 
 all: demo producer broker
 
-check: workspace-check test
+check: workspace-check test ui-test
 
 bootstrap-brave:
 	./scripts/bootstrap-brave.sh
@@ -74,6 +74,12 @@ e2e: producer broker
 ui: e2e
 	python3 apps/research-ui/server.py --store $(BUILD_DIR)/sessions/demo.jsonl
 
+app-build: e2e
+	./scripts/build-research-app.sh
+
+app: app-build
+	open "$(CURDIR)/$(BUILD_DIR)/Origin Trace.app" --args --store "$(CURDIR)/$(BUILD_DIR)/sessions/demo.jsonl"
+
 $(BUILD_DIR)/src/%.o: src/%.cpp
 	@mkdir -p $(@D)
 	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) -c $< -o $@
@@ -99,6 +105,9 @@ test: $(TEST_BINARIES)
 		echo "Running $$test_binary"; \
 		$$test_binary; \
 	done
+
+ui-test:
+	python3 -m unittest discover -s apps/research-ui -p 'test_*.py'
 
 sanitize:
 	$(MAKE) BUILD_DIR=$(SANITIZE_BUILD_DIR) clean

@@ -4,6 +4,12 @@ The research UI is the human-facing investigation workspace.
 
 ## Responsibilities
 
+- Start from a captured request and let the researcher choose a header, cookie,
+  or body field to investigate.
+- Show a backward evidence graph through serialization, transforms, runtime
+  values, browser inputs, and native probe evidence.
+- Keep confidence visible on every relationship: Exact, Matched, Differential,
+  Correlated, or Unknown.
 - Show correlated requests, scripts, frames, API probes, WASM modules, and artifacts.
 - Start and stop explicitly authorized research sessions.
 - Display dropped-event counts and evidence gaps instead of hiding them.
@@ -15,15 +21,36 @@ The UI does not inject hooks into a page and does not communicate directly with
 a renderer. It reads evidence through the local event broker so capture and
 presentation remain separate.
 
-## Run it
+## Run the application
+
+On macOS, build and open the native application window:
+
+```sh
+make app
+```
+
+The application uses a native WebKit shell and reads its bundled local evidence
+store directly. It has no browser address bar and does not require a localhost
+server. The build output is `build/Origin Trace.app`.
+
+For development, the same interface can still run in a browser:
 
 ```sh
 make ui
 ```
 
 Open `http://127.0.0.1:7319`. The dependency-free local server reads the same
-JSONL evidence store written by the native broker. The timeline supports live
-refresh, category filtering, text search, and visible sequence-gap accounting.
+JSONL evidence store written by the native broker. The proof-of-concept UI
+combines a sample request field backtrace with live broker events. Sample and
+live evidence are always labeled separately. Select `POST /cart`, choose a
+request field, and use **Trace origin** to explore the backward graph. Native
+probe events remain available under **Supporting Evidence**, with live refresh
+and visible sequence-gap accounting.
+
+The current broker does not capture structured request fields or arbitrary
+JavaScript data flow. The sample backtrace demonstrates the intended workflow,
+and its unobserved producer boundary is explicitly marked **Unknown**. The UI
+must not promote timing correlation to exact causality.
 
 Evidence values are inserted with DOM text nodes, never HTML, so captured page
 content cannot become executable UI markup.

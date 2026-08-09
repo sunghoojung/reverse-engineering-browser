@@ -139,7 +139,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     }
 
     configureApplicationMenu()
-    NSApp.applicationIconImage = makeApplicationIcon()
+    configureApplicationIcon(resourcesURL: resourcesURL)
 
     let indexURL = resourcesURL.appendingPathComponent("index.html")
     let eventStoreURL = configuredEventStore(resourcesURL: resourcesURL)
@@ -259,40 +259,12 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     NSApp.mainMenu = mainMenu
   }
 
-  private func makeApplicationIcon() -> NSImage {
-    let size = NSSize(width: 128, height: 128)
-    let image = NSImage(size: size)
-    image.lockFocus()
-
-    let background = NSBezierPath(roundedRect: NSRect(origin: .zero, size: size), xRadius: 27, yRadius: 27)
-    NSColor(calibratedRed: 0.055, green: 0.071, blue: 0.098, alpha: 1).setFill()
-    background.fill()
-
-    let frame = NSBezierPath(roundedRect: NSRect(x: 18, y: 18, width: 92, height: 92), xRadius: 15, yRadius: 15)
-    frame.lineWidth = 5
-    NSColor(calibratedRed: 0.60, green: 0.45, blue: 1.0, alpha: 1).setStroke()
-    frame.stroke()
-
-    let accent = NSBezierPath()
-    accent.move(to: NSPoint(x: 29, y: 28))
-    accent.line(to: NSPoint(x: 99, y: 28))
-    accent.lineWidth = 5
-    NSColor(calibratedRed: 0.29, green: 0.84, blue: 0.91, alpha: 1).setStroke()
-    accent.stroke()
-
-    let text = "R:B" as NSString
-    let attributes: [NSAttributedString.Key: Any] = [
-      .font: NSFont.monospacedSystemFont(ofSize: 29, weight: .bold),
-      .foregroundColor: NSColor(calibratedWhite: 0.94, alpha: 1),
-    ]
-    let textSize = text.size(withAttributes: attributes)
-    text.draw(
-      at: NSPoint(x: (size.width - textSize.width) / 2, y: (size.height - textSize.height) / 2 + 3),
-      withAttributes: attributes
-    )
-
-    image.unlockFocus()
-    return image
+  private func configureApplicationIcon(resourcesURL: URL) {
+    let iconURL = resourcesURL.appendingPathComponent("OriginTrace.icns")
+    guard let icon = NSImage(contentsOf: iconURL) else {
+      return
+    }
+    NSApp.applicationIconImage = icon
   }
 
   private func presentFatalError(_ message: String) {

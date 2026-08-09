@@ -45,6 +45,23 @@ class ResearchUiTests(unittest.TestCase):
         self.assertIn("textContent", html)
         self.assertNotIn(".innerHTML", html)
 
+    def test_native_application_uses_the_packaged_icon(self) -> None:
+        macos_directory = Path(__file__).parent / "macos"
+        application = (macos_directory / "OriginTraceApp.swift").read_text(encoding="utf-8")
+        plist = (macos_directory / "Info.plist").read_text(encoding="utf-8")
+        build_script = (Path(__file__).parents[2] / "scripts" / "build-research-app.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("configureApplicationIcon(resourcesURL: resourcesURL)", application)
+        self.assertIn('appendingPathComponent("OriginTrace.icns")', application)
+        self.assertIn("NSApp.applicationIconImage = icon", application)
+        self.assertNotIn("makeApplicationIcon", application)
+        self.assertIn("<key>CFBundleIconFile</key>", plist)
+        self.assertIn("<string>OriginTrace</string>", plist)
+        self.assertIn("origin-trace-icon.png", build_script)
+        self.assertIn("iconutil -c icns", build_script)
+
 
 if __name__ == "__main__":
     unittest.main()

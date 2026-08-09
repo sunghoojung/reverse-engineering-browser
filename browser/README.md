@@ -26,6 +26,12 @@ Apply the project-owned integration:
 ./scripts/sync-browser-integration.sh
 ```
 
+Verify Xcode, Node.js, and pnpm without changing the system-wide developer path:
+
+```sh
+make brave-doctor
+```
+
 Download Chromium and complete Brave initialization only when needed:
 
 ```sh
@@ -34,6 +40,16 @@ Download Chromium and complete Brave initialization only when needed:
 
 The initialized checkout requires at least 150 GiB free. Keep 200 to 250 GiB
 available for builds and updates.
+
+Compile the exact native probe integration and its Chromium prerequisites:
+
+```sh
+make brave-probe-check
+```
+
+The project helper automatically uses `/Applications/Xcode.app` when present
+and Brave's bundled Python. A complete browser build remains available through
+`./scripts/brave-toolchain.sh build` and may take several hours.
 
 ## Ownership rule
 

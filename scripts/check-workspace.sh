@@ -2,8 +2,10 @@
 
 set -euo pipefail
 
-readonly script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly repository_root="$(cd "${script_dir}/.." && pwd)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly script_dir
+repository_root="$(cd "${script_dir}/.." && pwd)"
+readonly repository_root
 
 readonly required_paths=(
   "AGENTS.md"
@@ -14,6 +16,7 @@ readonly required_paths=(
   "browser/integration/brave/README.md"
   "browser/integration/brave/patches/0001-register-native-probe-component.patch"
   "scripts/sync-browser-integration.sh"
+  "scripts/brave-toolchain.sh"
   "include/reb/event.hpp"
   "protocol/README.md"
   "services/event-broker/README.md"

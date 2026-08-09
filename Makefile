@@ -39,7 +39,7 @@ TEST_BINARIES := \
 	$(BUILD_DIR)/tests/event_broker_test \
 	$(BUILD_DIR)/tests/spsc_ring_test
 
-.PHONY: all bootstrap-brave browser-sync broker check clean demo e2e format producer sanitize test ui workspace-check
+.PHONY: all bootstrap-brave brave-doctor brave-probe-check browser-sync broker check clean demo e2e format producer sanitize test ui workspace-check
 
 all: demo producer broker
 
@@ -47,6 +47,12 @@ check: workspace-check test
 
 bootstrap-brave:
 	./scripts/bootstrap-brave.sh
+
+brave-doctor:
+	./scripts/brave-toolchain.sh doctor
+
+brave-probe-check:
+	./scripts/brave-toolchain.sh probe-check
 
 browser-sync:
 	./scripts/sync-browser-integration.sh

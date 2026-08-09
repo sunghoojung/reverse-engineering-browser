@@ -31,6 +31,13 @@ When you are ready for the large Chromium download and full Brave initialization
 ./scripts/bootstrap-brave.sh --init
 ```
 
+Check the local Apple toolchain and compile the tracked Brave probe:
+
+```sh
+make brave-doctor
+make brave-probe-check
+```
+
 ## Current implementation
 
 The repository includes a dependency-free C++ vertical slice for the probe event path:

@@ -5,10 +5,9 @@
 
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 
-#include <cstring>
+#include <algorithm>
 #include <string_view>
 
-#include "base/no_destructor.h"
 #include "base/process/process_handle.h"
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
@@ -22,8 +21,8 @@ constexpr std::string_view kCanvasToDataUrlPayload = "canvas.toDataURL";
 }  // namespace
 
 NativeProbeSink& NativeProbeSink::Get() {
-  static base::NoDestructor<NativeProbeSink> sink;
-  return *sink;
+  static NativeProbeSink sink;
+  return sink;
 }
 
 void NativeProbeSink::SetEmitter(const NativeProbeEmitter emitter) noexcept {
@@ -39,17 +38,15 @@ void NativeProbeSink::RecordCanvasToDataUrl() noexcept {
   NativeProbeEvent event;
   event.header.category = NativeProbeCategory::kCanvas;
   event.header.type = NativeProbeType::kApiCall;
-  event.header.sequence_number =
-      next_sequence_.fetch_add(1, std::memory_order_relaxed);
-  event.header.monotonic_time_ns = static_cast<std::uint64_t>(
-      base::TimeTicks::Now().since_origin().InNanoseconds());
+  event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  event.header.monotonic_time_ns =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
   event.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
-  event.header.thread_id =
-      static_cast<std::uint32_t>(base::PlatformThread::CurrentId());
-  event.header.payload_size =
-      static_cast<std::uint32_t>(kCanvasToDataUrlPayload.size());
-  std::memcpy(event.inline_payload.data(), kCanvasToDataUrlPayload.data(),
-              kCanvasToDataUrlPayload.size());
+  event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  event.header.payload_size = static_cast<std::uint32_t>(kCanvasToDataUrlPayload.size());
+  std::transform(
+      kCanvasToDataUrlPayload.begin(), kCanvasToDataUrlPayload.end(), event.inline_payload.begin(),
+      [](const char value) { return static_cast<std::byte>(static_cast<unsigned char>(value)); });
   emitter(event);
 }
 

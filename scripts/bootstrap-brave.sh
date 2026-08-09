@@ -2,11 +2,18 @@
 
 set -euo pipefail
 
-readonly script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly repository_root="$(cd "${script_dir}/.." && pwd)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly script_dir
+repository_root="$(cd "${script_dir}/.." && pwd)"
+readonly repository_root
 readonly default_remote="https://github.com/brave/brave-core.git"
 readonly revision_file="${repository_root}/browser/config/brave-core.rev"
 readonly minimum_init_free_gib=150
+
+if [[ -z "${DEVELOPER_DIR:-}" ]] &&
+   [[ -d /Applications/Xcode.app/Contents/Developer ]]; then
+  export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+fi
 
 brave_remote="${REB_BRAVE_CORE_REMOTE:-${default_remote}}"
 brave_revision="${REB_BRAVE_CORE_REVISION:-$(tr -d '[:space:]' < "${revision_file}")}"
@@ -97,8 +104,9 @@ if [[ "${run_init}" == true ]]; then
     echo "Only ${available_gib} GiB is currently available." >&2
     exit 1
   fi
-  if ! command -v pnpm >/dev/null 2>&1; then
-    echo "pnpm is required for Brave initialization but is not installed." >&2
+  if ! command -v corepack >/dev/null 2>&1 &&
+     ! command -v pnpm >/dev/null 2>&1; then
+    echo "Corepack or pnpm is required for Brave initialization." >&2
     exit 1
   fi
   (
@@ -107,7 +115,11 @@ if [[ "${run_init}" == true ]]; then
     # ceiling, Git can mistake the enclosing application repository for the
     # Chromium checkout before gclient has created src/.git.
     export GIT_CEILING_DIRECTORIES="${repository_root}"
-    pnpm run init
+    if command -v corepack >/dev/null 2>&1; then
+      corepack pnpm run init
+    else
+      pnpm run init
+    fi
   )
 else
   echo "Chromium has not been downloaded. Run this script with --init when ready."

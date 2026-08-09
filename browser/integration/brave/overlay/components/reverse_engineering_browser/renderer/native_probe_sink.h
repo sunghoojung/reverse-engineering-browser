@@ -11,11 +11,6 @@
 
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 
-namespace base {
-template <typename T>
-class NoDestructor;
-}  // namespace base
-
 namespace reb {
 
 // The registered emitter must be non-blocking and allocation-free. The renderer
@@ -33,8 +28,6 @@ class NativeProbeSink final {
   void RecordCanvasToDataUrl() noexcept;
 
  private:
-  friend class base::NoDestructor<NativeProbeSink>;
-
   NativeProbeSink() = default;
 
   std::atomic<NativeProbeEmitter> emitter_{nullptr};

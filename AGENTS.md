@@ -153,6 +153,10 @@ For Brave integration changes, also verify:
 4. The affected target compiles when full Xcode and the Chromium toolchain are
    installed.
 
+Use `make brave-doctor` for the local toolchain and `make brave-probe-check`
+for the tracked native probe target. These helpers select the installed Xcode
+and Brave's bundled Python without requiring a global `xcode-select` change.
+
 If a required platform tool is unavailable, report the exact missing tool and
 do not claim that validation passed.
 

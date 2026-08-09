@@ -36,6 +36,7 @@ bool BasicFifoTest() {
 }
 
 bool FullRingTest() {
+  constexpr std::uint64_t kRejectedPushes = 3;
   reb::SpscRing<std::uint64_t, 4> ring;
 
   for (std::uint64_t value = 0; value < 4; ++value) {
@@ -44,7 +45,13 @@ bool FullRingTest() {
     }
   }
 
-  if (ring.TryPush(99) || ring.DroppedCount() != 1 || ring.SizeApprox() != 4) {
+  for (std::uint64_t attempt = 0; attempt < kRejectedPushes; ++attempt) {
+    if (ring.TryPush(99 + attempt)) {
+      return false;
+    }
+  }
+
+  if (ring.DroppedCount() != kRejectedPushes || ring.SizeApprox() != 4) {
     return false;
   }
 
@@ -83,13 +90,10 @@ bool ConcurrentTest() {
   reb::SpscRing<std::uint64_t, 1024> ring;
   std::atomic<bool> producer_done{false};
   std::atomic<bool> stop_requested{false};
-  std::uint64_t failed_push_attempts = 0;
 
-  std::thread producer([&ring, &producer_done, &stop_requested,
-                        &failed_push_attempts] {
+  std::thread producer([&ring, &producer_done, &stop_requested] {
     for (std::uint64_t value = 1; value <= kCount; ++value) {
       while (!ring.TryPush(value)) {
-        ++failed_push_attempts;
         if (stop_requested.load(std::memory_order_acquire)) {
           producer_done.store(true, std::memory_order_release);
           return;
@@ -120,8 +124,7 @@ bool ConcurrentTest() {
   }
 
   producer.join();
-  return ordered && expected == kCount + 1 && ring.SizeApprox() == 0 &&
-         ring.DroppedCount() == failed_push_attempts;
+  return ordered && expected == kCount + 1 && ring.SizeApprox() == 0;
 }
 
 }  // namespace

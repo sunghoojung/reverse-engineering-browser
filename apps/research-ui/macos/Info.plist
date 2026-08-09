@@ -10,6 +10,8 @@
     <string>OriginTrace</string>
     <key>CFBundleIdentifier</key>
     <string>com.reverseengineeringbrowser.origintrace</string>
+    <key>CFBundleIconFile</key>
+    <string>OriginTrace</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

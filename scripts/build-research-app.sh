@@ -13,7 +13,9 @@ contents_path="${app_path}/Contents"
 macos_path="${contents_path}/MacOS"
 resources_path="${contents_path}/Resources"
 swift_source="${repo_root}/apps/research-ui/macos/OriginTraceApp.swift"
+icon_source="${repo_root}/apps/research-ui/macos/assets/origin-trace-icon.png"
 event_store="${repo_root}/build/sessions/demo.jsonl"
+iconset_path="${repo_root}/build/OriginTrace.iconset"
 
 if [[ -e "${app_path}" ]]; then
   rm -rf "${app_path}"
@@ -23,6 +25,28 @@ mkdir -p "${macos_path}" "${resources_path}"
 cp "${repo_root}/apps/research-ui/macos/Info.plist" "${contents_path}/Info.plist"
 cp "${repo_root}/apps/research-ui/index.html" "${resources_path}/index.html"
 cp "${event_store}" "${resources_path}/demo.jsonl"
+
+rm -rf "${iconset_path}"
+mkdir -p "${iconset_path}"
+
+render_icon() {
+  local pixels="$1"
+  local filename="$2"
+  sips -z "${pixels}" "${pixels}" "${icon_source}" \
+    --out "${iconset_path}/${filename}" >/dev/null
+}
+
+render_icon 16 icon_16x16.png
+render_icon 32 icon_16x16@2x.png
+render_icon 32 icon_32x32.png
+render_icon 64 icon_32x32@2x.png
+render_icon 128 icon_128x128.png
+render_icon 256 icon_128x128@2x.png
+render_icon 256 icon_256x256.png
+render_icon 512 icon_256x256@2x.png
+render_icon 512 icon_512x512.png
+render_icon 1024 icon_512x512@2x.png
+xcrun iconutil -c icns "${iconset_path}" -o "${resources_path}/OriginTrace.icns"
 
 xcrun swiftc \
   -parse-as-library \

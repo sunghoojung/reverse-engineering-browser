@@ -10,6 +10,12 @@ readonly repository_root
 readonly required_paths=(
   "AGENTS.md"
   "workspace.json"
+  "docs/README.md"
+  "docs/architecture/technical-architecture.md"
+  "docs/architecture/system-architecture.md"
+  "docs/architecture/system-architecture.svg"
+  "docs/product/feature-list.md"
+  "docs/product/feature-catalog.md"
   "apps/research-ui/README.md"
   "browser/README.md"
   "browser/config/brave-core.rev"

@@ -25,7 +25,7 @@
       "id": "research-ui",
       "path": "apps/research-ui",
       "tracked": true,
-      "role": "Human investigation interface"
+      "role": "Native macOS investigation application and browser development UI"
     },
     {
       "id": "protocol",

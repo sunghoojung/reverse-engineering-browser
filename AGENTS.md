@@ -16,7 +16,7 @@ Work on these areas:
 
 1. The dependency-free C++ event and queue foundation.
 2. The event broker, correlation model, and evidence storage.
-3. The local research UI.
+3. The native Origin Trace application and browser-only development UI.
 4. Versioned contracts between browser probes and the broker.
 5. Tracked Brave integration overlays and patches.
 
@@ -26,15 +26,19 @@ or documentation unless the user explicitly brings it back into scope.
 ## Repository map
 
 ```text
+.github/workflows/      pull-request checks and tag-triggered release builds
 apps/
   reb-event-demo/       Small concurrency and event-path demonstration
   reb-event-producer/   Deterministic browser-event development producer
-  research-ui/          Local human-facing investigation interface
+  research-ui/          Human-facing investigation interface
+    macos/              Native shell, bundle metadata, and app icon source
 browser/
   config/               Pinned upstream browser revisions
   integration/brave/    Tracked Brave overlays, patches, and instructions
   worktree/             Ignored local Brave and Chromium checkout
-docs/                    Architecture and contributor documentation
+docs/
+  architecture/         Technical architecture and system diagram
+  product/              Feature roadmap and product catalog
 include/reb/             Public dependency-free C++ headers
 protocol/                Versioned event and command contracts
 services/event-broker/   Event validation, correlation, storage, and querying
@@ -42,6 +46,16 @@ src/                     C++ implementations
 tests/                   Native unit and integration tests
 tools/                   Developer and offline analysis tools
 ```
+
+## Documentation ownership
+
+- Keep product planning and architecture documents under `docs/`.
+- Keep operating instructions beside their subsystem, for example
+  `apps/research-ui/README.md` and `browser/README.md`.
+- Keep the root `README.md` focused on setup, application launch, CI, releases,
+  and the repository map.
+- Update links when moving documentation. Do not leave duplicate root-level
+  design documents behind.
 
 ## Source ownership
 
@@ -116,6 +130,10 @@ drop counter or emit a gap marker as soon as capacity returns.
 - Insert captured values as text, never executable HTML.
 - Show loading, empty, disconnected, malformed-event, and sequence-gap states.
 - Keep the interface usable with a keyboard and at narrow viewport sizes.
+- `make app` is the normal macOS product path. `make ui` is only for
+  browser-based UI development.
+- Keep native application assets under `apps/research-ui/macos/` and verify
+  that the packaged application loads those assets at runtime.
 
 ## Change workflow
 
@@ -141,8 +159,15 @@ gate before handing work off:
 make check
 make e2e
 make sanitize
-python3 -m py_compile apps/research-ui/server.py
+python3 -m py_compile apps/research-ui/server.py apps/research-ui/test_research_ui.py
 git diff --check
+```
+
+For native macOS application, packaging, or icon changes, also run:
+
+```sh
+make app-build
+codesign --verify --deep --strict "build/Origin Trace.app"
 ```
 
 For Brave integration changes, also verify:

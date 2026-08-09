@@ -11,6 +11,19 @@ The research UI is the human-facing investigation workspace.
 
 ## Boundary
 
-The UI does not inject hooks into a page and does not communicate directly with a renderer. It requests evidence and actions through the local event broker so the UI and MCP server observe the same state.
+The UI does not inject hooks into a page and does not communicate directly with
+a renderer. It reads evidence through the local event broker so capture and
+presentation remain separate.
 
-The application framework will be selected when the first broker API is usable.
+## Run it
+
+```sh
+make ui
+```
+
+Open `http://127.0.0.1:7319`. The dependency-free local server reads the same
+JSONL evidence store written by the native broker. The timeline supports live
+refresh, category filtering, text search, and visible sequence-gap accounting.
+
+Evidence values are inserted with DOM text nodes, never HTML, so captured page
+content cannot become executable UI markup.

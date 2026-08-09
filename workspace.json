@@ -3,11 +3,17 @@
   "name": "reverse-engineering-browser",
   "components": [
     {
-      "id": "browser-core",
-      "path": "browser/worktree/src/brave",
+      "id": "browser-integration",
+      "path": "browser/integration/brave",
       "tracked": true,
-      "separateRepository": true,
-      "role": "Private Brave core submodule for Chromium C++ instrumentation"
+      "role": "Tracked overlays and patches for upstream Brave instrumentation"
+    },
+    {
+      "id": "browser-worktree",
+      "path": "browser/worktree/src/brave",
+      "tracked": false,
+      "generated": true,
+      "role": "Ignored local checkout of pinned upstream Brave and Chromium"
     },
     {
       "id": "event-broker",
@@ -22,12 +28,6 @@
       "role": "Human investigation interface"
     },
     {
-      "id": "mcp-server",
-      "path": "apps/mcp-server",
-      "tracked": true,
-      "role": "Agent-facing evidence and action adapter"
-    },
-    {
       "id": "protocol",
       "path": "protocol",
       "tracked": true,
@@ -35,13 +35,8 @@
     }
   ],
   "eventFlow": [
-    "browser-core",
+    "browser-integration",
     "event-broker",
     "research-ui"
-  ],
-  "agentFlow": [
-    "browser-core",
-    "event-broker",
-    "mcp-server"
   ]
 }

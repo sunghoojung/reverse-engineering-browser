@@ -2,6 +2,7 @@ CXX ?= c++
 OPT_CXXFLAGS ?= -O2 -g
 
 BUILD_DIR := build
+SANITIZE_BUILD_DIR := $(BUILD_DIR)/sanitize
 INCLUDE_DIR := include
 
 UNAME_S := $(shell uname -s)
@@ -27,31 +28,59 @@ COMMON_CXXFLAGS := \
 CPPFLAGS := -I$(INCLUDE_DIR)
 LDFLAGS := -pthread $(EXTRA_LDFLAGS)
 
-LIB_OBJECTS := $(BUILD_DIR)/src/event.o
+LIB_OBJECTS := \
+	$(BUILD_DIR)/src/event.o \
+	$(BUILD_DIR)/src/event_broker.o
 DEMO_BINARY := $(BUILD_DIR)/reb-event-demo
+PRODUCER_BINARY := $(BUILD_DIR)/reb-event-producer
+BROKER_BINARY := $(BUILD_DIR)/reb-event-broker
 TEST_BINARIES := \
 	$(BUILD_DIR)/tests/event_test \
+	$(BUILD_DIR)/tests/event_broker_test \
 	$(BUILD_DIR)/tests/spsc_ring_test
 
-.PHONY: all bootstrap-brave check clean demo format sanitize test workspace-check
+.PHONY: all bootstrap-brave browser-sync broker check clean demo e2e format producer sanitize test ui workspace-check
 
-all: demo
+all: demo producer broker
 
 check: workspace-check test
 
 bootstrap-brave:
 	./scripts/bootstrap-brave.sh
 
+browser-sync:
+	./scripts/sync-browser-integration.sh
+
 workspace-check:
 	./scripts/check-workspace.sh
 
 demo: $(DEMO_BINARY)
+
+producer: $(PRODUCER_BINARY)
+
+broker: $(BROKER_BINARY)
+
+e2e: producer broker
+	@mkdir -p $(BUILD_DIR)/sessions
+	$(PRODUCER_BINARY) | $(BROKER_BINARY) --store $(BUILD_DIR)/sessions/demo.jsonl
+	test "$$(wc -l < $(BUILD_DIR)/sessions/demo.jsonl | tr -d ' ')" = "4"
+
+ui: e2e
+	python3 apps/research-ui/server.py --store $(BUILD_DIR)/sessions/demo.jsonl
 
 $(BUILD_DIR)/src/%.o: src/%.cpp
 	@mkdir -p $(@D)
 	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) -c $< -o $@
 
 $(DEMO_BINARY): apps/reb-event-demo/main.cpp $(LIB_OBJECTS)
+	@mkdir -p $(@D)
+	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $^ $(LDFLAGS) -o $@
+
+$(PRODUCER_BINARY): apps/reb-event-producer/main.cpp $(LIB_OBJECTS)
+	@mkdir -p $(@D)
+	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $^ $(LDFLAGS) -o $@
+
+$(BROKER_BINARY): services/event-broker/main.cpp $(LIB_OBJECTS)
 	@mkdir -p $(@D)
 	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $^ $(LDFLAGS) -o $@
 
@@ -66,8 +95,9 @@ test: $(TEST_BINARIES)
 	done
 
 sanitize:
-	$(MAKE) clean
+	$(MAKE) BUILD_DIR=$(SANITIZE_BUILD_DIR) clean
 	$(MAKE) \
+		BUILD_DIR=$(SANITIZE_BUILD_DIR) \
 		OPT_CXXFLAGS="-O1 -g" \
 		EXTRA_CXXFLAGS="-fsanitize=$(SANITIZERS) -fno-omit-frame-pointer" \
 		EXTRA_LDFLAGS="-fsanitize=$(SANITIZERS)" \

@@ -2,7 +2,6 @@
 
 ## Build now
 
-- [Version 1 scope](../v1-scope.md)
 - [Feature list](../feature_list.md)
 - [Browser integration](../browser/README.md)
 

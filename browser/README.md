@@ -1,33 +1,46 @@
-# Browser Integration Workspace
+# Browser Workspace
 
-`browser/worktree/` is the local Brave and Chromium build workspace. The private `brave-core` submodule is tracked at `src/brave`; downloaded Chromium source and build output are ignored.
-
-The actual browser source project is [`brave/brave-core`](https://github.com/brave/brave-core), not `brave/brave-browser`. Brave expects it at this path:
+Brave is part of this project without being copied into Git history.
 
 ```text
-browser/worktree/src/brave/
+browser/
+├── config/                 pinned upstream revision
+├── integration/brave/      tracked source, overlays, and patches
+└── worktree/src/brave/     ignored local upstream checkout
 ```
 
-## Prepare the checkout
+This keeps all project-owned work in one GitHub repository while avoiding a
+massive duplicate of Brave and Chromium.
 
-Initialize the private shallow submodule:
+## Set up Brave
+
+Prepare the pinned Brave checkout:
 
 ```sh
 ./scripts/bootstrap-brave.sh
 ```
 
-Initialize Chromium only when ready for the large download:
+Apply the project-owned integration:
+
+```sh
+./scripts/sync-browser-integration.sh
+```
+
+Download Chromium and complete Brave initialization only when needed:
 
 ```sh
 ./scripts/bootstrap-brave.sh --init
 ```
 
-The initialization script requires at least 150 GiB free. For repeated builds and Chromium updates, 200 to 250 GiB free is recommended.
+The initialized checkout requires at least 150 GiB free. Keep 200 to 250 GiB
+available for builds and updates.
 
-## Source ownership
+## Ownership rule
 
-- Native Blink, V8, network, browser-process, and renderer instrumentation belongs in the private `brave-core` submodule.
-- Reusable patch experiments belong in `browser/patches/` until their permanent Brave integration point is known.
-- The event broker, UI, MCP server, protocol documentation, and research-session tests belong in the control repository.
+Never commit `browser/worktree/`. New complete files belong in the mirrored
+overlay tree. Small changes to upstream files belong in ordered patch files.
+That makes every project change visible and reproducible from the pinned Brave
+revision.
 
-Do not copy the Chromium source tree into this repository.
+The current integration contains a dormant native Canvas probe boundary. It
+does not yet connect Brave to the event broker, and no MCP layer is included.

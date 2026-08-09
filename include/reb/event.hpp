@@ -4,6 +4,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
+#include <string>
 #include <string_view>
 #include <type_traits>
 
@@ -70,6 +72,17 @@ static_assert(sizeof(EventRecord) == 128);
                                     std::uint64_t sequence_number,
                                     std::uint64_t monotonic_time_ns,
                                     std::uint64_t session_id) noexcept;
+
+[[nodiscard]] bool SetInlinePayload(EventRecord& event,
+                                    std::span<const std::byte> payload) noexcept;
+[[nodiscard]] bool SetInlinePayload(EventRecord& event,
+                                    std::string_view payload) noexcept;
+
+[[nodiscard]] std::span<const std::byte> InlinePayload(
+    const EventRecord& event) noexcept;
+
+[[nodiscard]] bool IsValidEvent(const EventRecord& event) noexcept;
+[[nodiscard]] std::string EventToJson(const EventRecord& event);
 
 [[nodiscard]] std::string_view EventCategoryName(EventCategory category) noexcept;
 [[nodiscard]] std::string_view EventTypeName(EventType type) noexcept;

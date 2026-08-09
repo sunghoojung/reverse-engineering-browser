@@ -1,5 +1,0 @@
-[submodule "browser/worktree/src/brave"]
-	path = browser/worktree/src/brave
-	url = https://github.com/sunghoojung/reverse-engineering-browser-core.git
-	branch = master
-	shallow = true

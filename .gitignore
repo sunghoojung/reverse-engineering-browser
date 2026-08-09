@@ -4,13 +4,10 @@ compile_commands.json
 *.o
 *.out
 
-# Track only the brave-core submodule inside the generated Brave workspace.
+# Brave and Chromium are generated upstream worktrees, never repository content.
 /browser/worktree/*
-!/browser/worktree/src
-/browser/worktree/src/*
-!/browser/worktree/src/brave
 
-# Future UI and MCP package outputs.
+# Future UI package outputs.
 node_modules/
 dist/
 coverage/

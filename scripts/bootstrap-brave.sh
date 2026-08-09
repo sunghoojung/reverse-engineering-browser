@@ -4,8 +4,7 @@ set -euo pipefail
 
 readonly script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly repository_root="$(cd "${script_dir}/.." && pwd)"
-readonly default_remote="https://github.com/sunghoojung/reverse-engineering-browser-core.git"
-readonly upstream_remote="https://github.com/brave/brave-core.git"
+readonly default_remote="https://github.com/brave/brave-core.git"
 readonly revision_file="${repository_root}/browser/config/brave-core.rev"
 readonly minimum_init_free_gib=150
 
@@ -16,7 +15,7 @@ run_init=false
 usage() {
   echo "Usage: $0 [--remote URL] [--revision REF] [--init]"
   echo
-  echo "Initializes brave-core at browser/worktree/src/brave."
+  echo "Prepares the pinned upstream Brave checkout at browser/worktree/src/brave."
   echo "The --init flag also runs pnpm run init and begins the large Chromium download."
 }
 
@@ -63,10 +62,9 @@ if [[ -e "${brave_directory}" ]]; then
     exit 1
   fi
 
-  existing_remote="$(git -C "${brave_directory}" remote get-url origin)"
-  if [[ "${existing_remote}" != "${brave_remote}" ]]; then
-    echo "Existing brave-core origin does not match the requested remote." >&2
-    echo "Existing:  ${existing_remote}" >&2
+  if ! git -C "${brave_directory}" remote -v |
+    awk '{print $2}' | grep -Fxq "${brave_remote}"; then
+    echo "Existing brave-core checkout does not reference the requested remote." >&2
     echo "Requested: ${brave_remote}" >&2
     exit 1
   fi
@@ -74,30 +72,18 @@ if [[ -e "${brave_directory}" ]]; then
   echo "Using existing brave-core checkout: ${brave_directory}"
 else
   mkdir -p "${worktree_root}/src"
-  if [[ "${brave_remote}" == "${default_remote}" ]] &&
-     git -C "${repository_root}" config --file .gitmodules \
-       --get-regexp '^submodule\..*\.path$' 2>/dev/null |
-       grep -q 'browser/worktree/src/brave'; then
-    git -C "${repository_root}" submodule update --init --depth 1 \
-      --recommend-shallow browser/worktree/src/brave
-  else
-    git clone --depth 1 --branch "${brave_revision}" "${brave_remote}" "${brave_directory}"
-  fi
+  git clone --depth 1 --branch "${brave_revision}" \
+    "${brave_remote}" "${brave_directory}"
 fi
 
-if [[ "${brave_revision}" != "master" ]] &&
-   ! git -C "${brave_directory}" merge-base --is-ancestor HEAD "${brave_revision}" 2>/dev/null; then
-  git -C "${brave_directory}" fetch origin "${brave_revision}"
+if [[ -n "$(git -C "${brave_directory}" status --porcelain)" ]]; then
+  echo "Brave checkout has local integration changes; leaving its revision unchanged."
+elif ! git -C "${brave_directory}" rev-parse --verify \
+  "${brave_revision}^{commit}" >/dev/null 2>&1; then
+  git -C "${brave_directory}" fetch --depth 1 origin "${brave_revision}"
   git -C "${brave_directory}" checkout --detach FETCH_HEAD
-fi
-
-if [[ "${brave_remote}" != "${upstream_remote}" ]] &&
-   ! git -C "${brave_directory}" remote get-url upstream >/dev/null 2>&1; then
-  git -C "${brave_directory}" remote add upstream "${upstream_remote}"
-fi
-
-if git -C "${brave_directory}" remote get-url upstream >/dev/null 2>&1; then
-  git -C "${brave_directory}" remote set-url --push upstream DISABLED
+else
+  git -C "${brave_directory}" checkout --detach "${brave_revision}^{commit}"
 fi
 
 echo "brave-core is ready at ${brave_directory}"
@@ -126,3 +112,5 @@ if [[ "${run_init}" == true ]]; then
 else
   echo "Chromium has not been downloaded. Run this script with --init when ready."
 fi
+
+echo "Apply tracked project changes with ./scripts/sync-browser-integration.sh"

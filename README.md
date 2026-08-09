@@ -91,6 +91,23 @@ make ui
 
 Then open `http://127.0.0.1:7319`.
 
+## CI and release builds
+
+Every pull request runs the test suite on macOS and Ubuntu. The macOS job also
+builds and verifies the application bundle, then keeps a downloadable preview
+for three days.
+
+To publish a versioned macOS download, push a version tag:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+GitHub Actions verifies the application, creates a ZIP archive, and attaches it
+to a GitHub Release. Release builds are locally signed for development; Apple
+notarization is intentionally deferred until external distribution is needed.
+
 Run sanitizer checks. Linux uses AddressSanitizer and UndefinedBehaviorSanitizer;
 macOS uses UndefinedBehaviorSanitizer:
 

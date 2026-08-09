@@ -1,0 +1,46 @@
+name: Release macOS application
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run release checks
+        run: make check
+
+      - name: Build macOS application bundle
+        run: make app-build
+
+      - name: Verify macOS application signature
+        run: codesign --verify --deep --strict "build/Origin Trace.app"
+
+      - name: Archive application
+        run: >-
+          ditto -c -k --sequesterRsrc --keepParent
+          "build/Origin Trace.app"
+          "build/Origin-Trace-${GITHUB_REF_NAME}-macos.zip"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          "build/Origin-Trace-${GITHUB_REF_NAME}-macos.zip"
+          --title "Origin Trace $GITHUB_REF_NAME"
+          --generate-notes

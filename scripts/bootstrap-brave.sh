@@ -117,6 +117,10 @@ if [[ "${run_init}" == true ]]; then
   fi
   (
     cd "${brave_directory}"
+    # Chromium must become its own repository at worktree/src. Without this
+    # ceiling, Git can mistake the enclosing application repository for the
+    # Chromium checkout before gclient has created src/.git.
+    export GIT_CEILING_DIRECTORIES="${repository_root}"
     pnpm run init
   )
 else

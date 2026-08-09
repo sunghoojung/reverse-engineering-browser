@@ -1,0 +1,18 @@
+.DS_Store
+build/
+compile_commands.json
+*.o
+*.out
+
+# Track only the brave-core submodule inside the generated Brave workspace.
+/browser/worktree/*
+!/browser/worktree/src
+/browser/worktree/src/*
+!/browser/worktree/src/brave
+
+# Future UI and MCP package outputs.
+node_modules/
+dist/
+coverage/
+.env
+.env.local

@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "name": "reverse-engineering-browser",
+  "components": [
+    {
+      "id": "browser-core",
+      "path": "browser/worktree/src/brave",
+      "tracked": true,
+      "separateRepository": true,
+      "role": "Private Brave core submodule for Chromium C++ instrumentation"
+    },
+    {
+      "id": "event-broker",
+      "path": "services/event-broker",
+      "tracked": true,
+      "role": "Event correlation, storage, redaction, and local control"
+    },
+    {
+      "id": "research-ui",
+      "path": "apps/research-ui",
+      "tracked": true,
+      "role": "Human investigation interface"
+    },
+    {
+      "id": "mcp-server",
+      "path": "apps/mcp-server",
+      "tracked": true,
+      "role": "Agent-facing evidence and action adapter"
+    },
+    {
+      "id": "protocol",
+      "path": "protocol",
+      "tracked": true,
+      "role": "Versioned event and command contracts"
+    }
+  ],
+  "eventFlow": [
+    "browser-core",
+    "event-broker",
+    "research-ui"
+  ],
+  "agentFlow": [
+    "browser-core",
+    "event-broker",
+    "mcp-server"
+  ]
+}

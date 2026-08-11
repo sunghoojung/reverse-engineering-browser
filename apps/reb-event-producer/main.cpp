@@ -1,7 +1,7 @@
 #include <array>
 #include <chrono>
-#include <cstdlib>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <string_view>
 
@@ -15,18 +15,16 @@ constexpr std::uint64_t kFrameId = 200;
 constexpr std::uint64_t kArtifactId = 300;
 
 std::uint64_t MonotonicTimeNs() {
-  return static_cast<std::uint64_t>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now().time_since_epoch())
-          .count());
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count());
 }
 
 reb::EventRecord BuildEvent(const reb::EventCategory category,
                             const reb::EventType type,
                             const std::uint64_t sequence,
                             const std::string_view payload) {
-  reb::EventRecord event =
-      reb::MakeEvent(category, type, sequence, MonotonicTimeNs(), kSessionId);
+  reb::EventRecord event = reb::MakeEvent(category, type, sequence, MonotonicTimeNs(), kSessionId);
   event.header.process_id = 10;
   event.header.thread_id = 20;
   event.header.navigation_id = kNavigationId;
@@ -39,19 +37,39 @@ reb::EventRecord BuildEvent(const reb::EventCategory category,
   return event;
 }
 
+reb::EventRecord BuildNetworkEvent(const reb::EventType type,
+                                   const std::uint64_t sequence,
+                                   const std::string_view payload) {
+  reb::EventRecord event = BuildEvent(reb::EventCategory::kNetwork, type, sequence, payload);
+  event.header.request_id = 81;
+  event.header.resource_type = 13;
+  return event;
+}
+
 }  // namespace
 
 int main() {
-  const std::array events = {
+  std::array events = {
       BuildEvent(reb::EventCategory::kNavigator, reb::EventType::kPropertyRead, 1,
                  "navigator.languages"),
-      BuildEvent(reb::EventCategory::kCanvas, reb::EventType::kApiCall, 2,
-                 "canvas.toDataURL"),
+      BuildEvent(reb::EventCategory::kCanvas, reb::EventType::kApiCall, 2, "canvas.toDataURL"),
       BuildEvent(reb::EventCategory::kWasm, reb::EventType::kModuleInstantiated, 3,
                  "wasm-module-2"),
-      BuildEvent(reb::EventCategory::kNetwork, reb::EventType::kRequestStarted, 4,
-                 "POST /collect"),
+      BuildNetworkEvent(reb::EventType::kRequestInitiated, 4, "POST collector.example.test"),
+      BuildNetworkEvent(reb::EventType::kRequestStarted, 5, "POST collector.example.test"),
+      BuildNetworkEvent(reb::EventType::kResponseStarted, 6, "application/json; protocol=h2"),
+      BuildNetworkEvent(reb::EventType::kRequestCompleted, 7, "completed"),
   };
+
+  events[2].header.parent_event_id = 2;
+  events[3].header.parent_event_id = 3;
+  events[4].header.parent_event_id = 4;
+  events[5].header.parent_event_id = 5;
+  events[5].header.status_code = 200;
+  events[6].header.parent_event_id = 6;
+  events[6].header.status_code = 200;
+  events[6].header.encoded_data_length = 391;
+  events[6].header.decoded_body_length = 447;
 
   for (const reb::EventRecord& event : events) {
     std::cout.write(reinterpret_cast<const char*>(&event), sizeof(event));

@@ -12,9 +12,17 @@ The event broker is the center of the system.
 
 ## Implemented vertical slice
 
-The broker accepts fixed 128-byte native records on standard input, validates
-their protocol envelope, detects sequence gaps, retains a bounded snapshot, and
-writes a versioned JSONL evidence store.
+The broker accepts fixed 320-byte native records on standard input, validates
+their protocol envelope, enum values, flags, payload bounds, and reserved
+fields, detects sequence gaps, retains a bounded snapshot, and writes a
+versioned JSONL evidence store. Sequence tracking is bounded by the broker
+capacity, and tracker evictions are reported explicitly in broker stats.
+When the tracker reaches capacity, it evicts streams in deterministic insertion
+order so repeated evidence replays produce the same gap accounting.
+If combined gap counts exceed 64-bit range, the count saturates at its maximum
+and a separate saturation flag is reported instead of wrapping silently.
+Protocol v2 stores 64-bit values as canonical decimal strings so opaque IDs and
+large counters remain exact in JavaScript clients.
 
 ```sh
 make e2e

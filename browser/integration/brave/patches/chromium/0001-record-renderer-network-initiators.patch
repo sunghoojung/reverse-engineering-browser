@@ -1,0 +1,33 @@
+diff --git a/third_party/blink/renderer/platform/loader/BUILD.gn b/third_party/blink/renderer/platform/loader/BUILD.gn
+index a9d5281da7d26..31bf5a662a607 100644
+--- a/third_party/blink/renderer/platform/loader/BUILD.gn
++++ b/third_party/blink/renderer/platform/loader/BUILD.gn
+@@ -203,6 +203,7 @@ blink_platform_sources("loader") {
+   deps = [
+     ":make_platform_loader_generated_delivery_type_names",
+     ":make_platform_loader_generated_fetch_initiator_type_names",
++    "//brave/components/reverse_engineering_browser:renderer",
+     "//components/link_header_util",
+     "//components/persistent_cache",
+     "//components/variations/net",
+diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
+index a6a815835ad88..77ff86f2078f0 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
++++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
+@@ -27,6 +27,7 @@
+ #include "base/task/thread_pool.h"
+ #include "base/time/time.h"
+ #include "base/trace_event/trace_event.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "build/build_config.h"
+ #include "net/base/load_flags.h"
+ #include "net/base/net_errors.h"
+@@ -277,6 +278,8 @@ int ResourceRequestSender::SendAsync(
+ 
+   // Compute a unique request_id for this renderer process.
+   int request_id = GenerateRequestId();
++  reb::NativeProbeSink::Get().RecordRequestInitiated(
++      request_id, request->method, request->url.host());
+   request_info_ = std::make_unique<PendingRequestInfo>(
+       std::move(client), request->destination, KURL(request->url),
+       std::move(resource_load_info_notifier_wrapper));

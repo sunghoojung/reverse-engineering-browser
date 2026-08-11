@@ -8,14 +8,11 @@
 
 #include <atomic>
 #include <cstdint>
+#include <string_view>
 
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 
 namespace reb {
-
-// The registered emitter must be non-blocking and allocation-free. The renderer
-// transport owns buffering, backpressure, and dropped-event accounting.
-using NativeProbeEmitter = void (*)(const NativeProbeEvent& event);
 
 class NativeProbeSink final {
  public:
@@ -24,14 +21,18 @@ class NativeProbeSink final {
   NativeProbeSink(const NativeProbeSink&) = delete;
   NativeProbeSink& operator=(const NativeProbeSink&) = delete;
 
-  void SetEmitter(NativeProbeEmitter emitter) noexcept;
+  void SetEmitter(NativeProbeEmitter emitter, std::uint64_t session_id) noexcept;
   void RecordCanvasToDataUrl() noexcept;
+  void RecordRequestInitiated(std::int32_t request_id,
+                              std::string_view method,
+                              std::string_view url) noexcept;
 
  private:
   NativeProbeSink() = default;
 
   std::atomic<NativeProbeEmitter> emitter_{nullptr};
   std::atomic<std::uint64_t> next_sequence_{1};
+  std::atomic<std::uint64_t> session_id_{0};
 };
 
 }  // namespace reb

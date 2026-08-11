@@ -16,9 +16,23 @@ Apply the tracked integration to the local checkout with:
 ./scripts/sync-browser-integration.sh
 ```
 
-The command is safe to run again. It copies overlays and applies each patch
-only when it has not already been applied.
+Initialize Chromium with `./scripts/bootstrap-brave.sh --init` first. The sync
+command verifies the tracked Brave and Chromium pins, preflights both checkouts
+and every patch before copying overlays, is safe to run again, and applies each
+patch only when needed. Revision mismatches fail with the current and expected
+commits without changing either checkout.
 
-The current Canvas probe is dormant until a non-blocking emitter is registered.
-Its inactive path performs one atomic load and does not change Canvas output.
-The renderer transport and browser-process bridge are intentionally future work.
+The integration now observes renderer request initiation and the browser-side
+request, redirect, response, completion, and failure lifecycle. It reuses
+Brave's production `BraveProxyingURLLoaderFactory` and client proxy instead of
+installing a second interception layer. The capture boundary records metadata
+and a bounded payload prefix only. Request payload prefixes contain the method
+and destination host, not URL paths, queries, fragments, or credentials.
+Browser lifecycle records also carry Chromium's opaque 128-bit BrowserContext
+token, which disambiguates Brave request IDs generated independently per
+profile without exposing a profile path.
+
+All probes remain dormant until a session-scoped, non-blocking, non-throwing
+emitter is registered. Their inactive paths perform one atomic load and do not
+change network or Canvas behavior. The bounded renderer transport and broker
+IPC bridge remain the next integration layer.

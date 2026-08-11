@@ -1,6 +1,7 @@
 #include "reb/event_broker.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 namespace reb {
@@ -18,16 +19,30 @@ IngestStatus EventBroker::Ingest(const EventRecord& event) {
     return IngestStatus::kInvalid;
   }
 
-  const auto high_water = session_high_water_marks_.find(event.header.session_id);
-  if (high_water != session_high_water_marks_.end()) {
+  const StreamKey stream{event.header.session_id, event.header.process_id};
+  auto high_water = stream_high_water_marks_.find(stream);
+  if (high_water == stream_high_water_marks_.end() &&
+      stream_high_water_marks_.size() == capacity_) {
+    stream_high_water_marks_.erase(stream_insertion_order_.front());
+    stream_insertion_order_.pop_front();
+    ++stats_.sequence_tracking_evictions;
+  }
+
+  if (high_water != stream_high_water_marks_.end()) {
     if (event.header.sequence_number > high_water->second &&
         event.header.sequence_number - high_water->second > 1) {
-      stats_.sequence_gaps += event.header.sequence_number - high_water->second - 1;
+      const std::uint64_t missing = event.header.sequence_number - high_water->second - 1;
+      if (missing > std::numeric_limits<std::uint64_t>::max() - stats_.sequence_gaps) {
+        stats_.sequence_gaps = std::numeric_limits<std::uint64_t>::max();
+        stats_.sequence_gaps_saturated = true;
+      } else {
+        stats_.sequence_gaps += missing;
+      }
     }
     high_water->second = std::max(high_water->second, event.header.sequence_number);
   } else {
-    session_high_water_marks_.emplace(event.header.session_id,
-                                      event.header.sequence_number);
+    stream_high_water_marks_.emplace(stream, event.header.sequence_number);
+    stream_insertion_order_.push_back(stream);
   }
 
   if (events_.size() == capacity_) {

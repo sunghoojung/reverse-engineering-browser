@@ -20,12 +20,6 @@ Prepare the pinned Brave checkout:
 ./scripts/bootstrap-brave.sh
 ```
 
-Apply the project-owned integration:
-
-```sh
-./scripts/sync-browser-integration.sh
-```
-
 Verify Xcode, Node.js, and pnpm without changing the system-wide developer path:
 
 ```sh
@@ -37,6 +31,22 @@ Download Chromium and complete Brave initialization only when needed:
 ```sh
 ./scripts/bootstrap-brave.sh --init
 ```
+
+Apply the project-owned integration after Chromium is initialized:
+
+```sh
+./scripts/sync-browser-integration.sh
+```
+
+This uses Brave's supported `--no-history` initialization mode, keeping the
+Chromium checkout shallow. Use `--init --full-history` only when an
+investigation needs complete Chromium Git history.
+Bootstrap refuses to switch a checkout with local changes when its revision
+does not match the requested pin.
+The sync command verifies both `browser/config/brave-core.rev` and
+`browser/config/chromium.rev` before copying or patching anything. A mismatch
+is reported with the current and pinned commits, and the checkout is left
+untouched.
 
 The initialized checkout requires at least 150 GiB free. Keep 200 to 250 GiB
 available for builds and updates.
@@ -58,5 +68,8 @@ overlay tree. Small changes to upstream files belong in ordered patch files.
 That makes every project change visible and reproducible from the pinned Brave
 revision.
 
-The current integration contains a dormant native Canvas probe boundary. It
-does not yet connect Brave to the event broker, and no MCP layer is included.
+The current integration contains dormant native Canvas and network lifecycle
+probe boundaries. Network observation reuses Brave's production URL loader
+factory proxy and correlates browser lifecycle records with the renderer request
+identifier. It does not yet connect Brave to the event broker, and no MCP layer
+is included.

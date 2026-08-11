@@ -1,0 +1,191 @@
+diff --git a/browser/net/brave_proxying_url_loader_factory.cc b/browser/net/brave_proxying_url_loader_factory.cc
+index 554328f6b..f122a632b 100644
+--- a/browser/net/brave_proxying_url_loader_factory.cc
++++ b/browser/net/brave_proxying_url_loader_factory.cc
+@@ -5,6 +5,7 @@
+ 
+ #include "brave/browser/net/brave_proxying_url_loader_factory.h"
+ 
++#include <bit>
+ #include <memory>
+ #include <optional>
+ #include <string_view>
+@@ -22,10 +23,12 @@
+ #include "brave/browser/net/url_context.h"
+ #include "brave/components/brave_shields/content/browser/adblock_stub_response.h"
+ #include "brave/components/brave_shields/core/common/features.h"
++#include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
+ #include "content/public/browser/browser_context.h"
+ #include "content/public/browser/browser_task_traits.h"
+ #include "content/public/browser/browser_thread.h"
+ #include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_process_host.h"
+ #include "content/public/common/url_utils.h"
+ #include "mojo/public/cpp/system/data_pipe_producer.h"
+ #include "mojo/public/cpp/system/string_data_source.h"
+@@ -44,6 +47,28 @@
+ 
+ namespace {
+ 
++std::uint32_t InitiatorProcessId(
++    const content::GlobalRenderFrameHostToken& render_frame_token) {
++  if (render_frame_token.child_id < 0) {
++    return 0;
++  }
++  content::RenderProcessHost* const render_process =
++      content::RenderProcessHost::FromID(render_frame_token.child_id);
++  return render_process
++             ? static_cast<std::uint32_t>(render_process->GetProcess().Pid())
++             : 0;
++}
++
++std::uint64_t FrameId(
++    const content::GlobalRenderFrameHostToken& render_frame_token) {
++  if (render_frame_token.child_id < 0) {
++    return 0;
++  }
++  const base::UnguessableToken& token = render_frame_token.frame_token.value();
++  return std::rotl(token.GetHighForSerialization(), 17) ^
++         token.GetLowForSerialization();
++}
++
+ // Helper struct for crafting responses.
+ struct WriteData {
+   base::WeakPtr<network::mojom::URLLoaderClient> client;
+@@ -148,6 +173,23 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::~InProgressRequest() {
+   }
+ }
+ 
++template <template <typename> class T>
++void BraveProxyingURLLoaderFactory<
++    T>::InProgressRequest::EnsureNativeCaptureIdentity() {
++  if (native_capture_identity_initialized_) {
++    return;
++  }
++  initiator_process_id_ = InitiatorProcessId(render_frame_token_);
++  frame_id_ = FrameId(render_frame_token_);
++  if (browser_context_) {
++    const base::UnguessableToken& browser_context_token =
++        browser_context_->UniqueToken();
++    browser_context_id_high_ = browser_context_token.GetHighForSerialization();
++    browser_context_id_low_ = browser_context_token.GetLowForSerialization();
++  }
++  native_capture_identity_initialized_ = true;
++}
++
+ template <template <typename> class T>
+ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::Restart() {
+   UpdateRequestInfo();
+@@ -338,6 +380,14 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::OnComplete(
+     OnRequestError(status);
+     return;
+   }
++  auto& network_capture = reb::NativeNetworkCaptureSink::Get();
++  if (network_capture.IsEnabled()) {
++    EnsureNativeCaptureIdentity();
++    network_capture.RecordRequestCompleted(
++        request_id_, network_service_request_id_, initiator_process_id_,
++        frame_id_, browser_context_id_high_, browser_context_id_low_, status);
++  }
++
+   target_client_->OnComplete(status);
+ 
+   // Deletes |this|.
+@@ -508,6 +558,15 @@ void BraveProxyingURLLoaderFactory<
+   if (!target_loader_.is_bound() && factory_->target_factory_.is_bound()) {
+     // Nothing has cancelled us up to this point, so it's now OK to
+     // initiate the real network request.
++    auto& network_capture = reb::NativeNetworkCaptureSink::Get();
++    if (network_capture.IsEnabled()) {
++      EnsureNativeCaptureIdentity();
++      network_capture.RecordRequestStarted(
++          request_id_, network_service_request_id_, initiator_process_id_,
++          frame_id_, browser_context_id_high_, browser_context_id_low_,
++          request_);
++    }
++
+     uint32_t options = options_;
+     factory_->target_factory_->CreateLoaderAndStart(
+         target_loader_.BindNewPipeAndPassReceiver(
+@@ -612,6 +671,15 @@ void BraveProxyingURLLoaderFactory<
+     return;
+   }
+ 
++  auto& network_capture = reb::NativeNetworkCaptureSink::Get();
++  if (network_capture.IsEnabled()) {
++    EnsureNativeCaptureIdentity();
++    network_capture.RecordResponseStarted(
++        request_id_, network_service_request_id_, initiator_process_id_,
++        frame_id_, browser_context_id_high_, browser_context_id_low_,
++        *current_response_head_);
++  }
++
+   proxied_client_receiver_.Resume();
+   target_client_->OnReceiveResponse(std::move(current_response_head_),
+                                     std::move(current_response_body_),
+@@ -636,6 +704,15 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::
+   } else {
+     ctx_->set_redirect_source(request_.url);
+   }
++  auto& network_capture = reb::NativeNetworkCaptureSink::Get();
++  if (network_capture.IsEnabled()) {
++    EnsureNativeCaptureIdentity();
++    network_capture.RecordRequestRedirected(
++        request_id_, network_service_request_id_, initiator_process_id_,
++        frame_id_, browser_context_id_high_, browser_context_id_low_,
++        redirect_info, *current_response_head_);
++  }
++
+   target_client_->OnReceiveRedirect(redirect_info,
+                                     std::move(current_response_head_));
+   request_.UpdateOnRedirect(redirect_info);
+@@ -689,6 +766,13 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::OnRequestError(
+   // Make a non-const copy of status so that |should_collapse_initiator| can be
+   // modified.
+   network::URLLoaderCompletionStatus collapse_status(status);
++  auto& network_capture = reb::NativeNetworkCaptureSink::Get();
++  if (network_capture.IsEnabled()) {
++    EnsureNativeCaptureIdentity();
++    network_capture.RecordRequestCompleted(
++        request_id_, network_service_request_id_, initiator_process_id_,
++        frame_id_, browser_context_id_high_, browser_context_id_low_, status);
++  }
+ 
+   if (base::FeatureList::IsEnabled(
+           ::brave_shields::features::kBraveAdblockCollapseBlockedElements) &&
+diff --git a/browser/net/brave_proxying_url_loader_factory.h b/browser/net/brave_proxying_url_loader_factory.h
+index ef12a0d5f..5648f7373 100644
+--- a/browser/net/brave_proxying_url_loader_factory.h
++++ b/browser/net/brave_proxying_url_loader_factory.h
+@@ -127,6 +127,7 @@ class BraveProxyingURLLoaderFactory : public network::mojom::URLLoaderFactory {
+         net::CompletionOnceCallback continuation);
+     void OnRequestError(const network::URLLoaderCompletionStatus& status);
+     void HandleBeforeRequestRedirect();
++    void EnsureNativeCaptureIdentity();
+ 
+     base::ElapsedTimer elapsed_timer_;
+ 
+@@ -139,6 +140,11 @@ class BraveProxyingURLLoaderFactory : public network::mojom::URLLoaderFactory {
+     const int32_t network_service_request_id_;
+ 
+     const content::GlobalRenderFrameHostToken render_frame_token_;
++    uint32_t initiator_process_id_ = 0;
++    uint64_t frame_id_ = 0;
++    uint64_t browser_context_id_high_ = 0;
++    uint64_t browser_context_id_low_ = 0;
++    bool native_capture_identity_initialized_ = false;
+     const uint32_t options_;
+ 
+     raw_ptr<content::BrowserContext> browser_context_ = nullptr;
+diff --git a/browser/sources.gni b/browser/sources.gni
+index 882d2864a..fbaff6cf6 100644
+--- a/browser/sources.gni
++++ b/browser/sources.gni
+@@ -135,6 +135,7 @@ if (enable_brave_wallet) {
+ 
+ brave_chrome_browser_deps = [
+   "//base",
++  "//brave/components/reverse_engineering_browser:browser",
+   "//brave/app:brave_generated_resources_grit",
+   "//brave/browser:brave_global_features_impl",
+   "//brave/browser:browser_process",

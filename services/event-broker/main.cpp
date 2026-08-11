@@ -77,9 +77,10 @@ int main(const int argc, char* argv[]) {
   }
 
   const reb::BrokerStats stats = broker.Stats();
-  std::cerr << "Broker stopped: accepted=" << stats.accepted
-            << " invalid=" << stats.invalid
+  std::cerr << "Broker stopped: accepted=" << stats.accepted << " invalid=" << stats.invalid
             << " sequence_gaps=" << stats.sequence_gaps
+            << " sequence_gaps_saturated=" << stats.sequence_gaps_saturated
+            << " sequence_tracking_evictions=" << stats.sequence_tracking_evictions
             << " evicted=" << stats.evicted << '\n';
   return stats.invalid == 0 ? 0 : 1;
 }

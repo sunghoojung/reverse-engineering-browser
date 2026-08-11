@@ -45,7 +45,10 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         with self.event_store.open(encoding="utf-8") as stream:
             for line in stream:
                 if line.strip():
-                    events.append(json.loads(line))
+                    event = json.loads(line)
+                    if not isinstance(event, dict):
+                        raise ValueError("The evidence store contains a malformed event")
+                    events.append(event)
         return events
 
     def send_json(self, value: dict, status: HTTPStatus = HTTPStatus.OK) -> None:

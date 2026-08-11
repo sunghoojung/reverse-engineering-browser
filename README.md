@@ -17,19 +17,25 @@ make check
 ./build/reb-event-demo
 ```
 
-Prepare the pinned upstream Brave checkout without downloading Chromium, then
-apply the integration tracked by this repository:
+Prepare the pinned upstream Brave checkout without downloading Chromium:
 
 ```sh
 ./scripts/bootstrap-brave.sh
-./scripts/sync-browser-integration.sh
 ```
 
-When you are ready for the large Chromium download and full Brave initialization:
+When you are ready for the large Chromium download, initialize Brave and then
+apply the integration tracked by this repository:
 
 ```sh
 ./scripts/bootstrap-brave.sh --init
+./scripts/sync-browser-integration.sh
 ```
+
+Initialization uses Brave's shallow Chromium history mode by default. If an
+investigation specifically requires complete Chromium Git history, opt in with
+`./scripts/bootstrap-brave.sh --init --full-history`.
+Bootstrap refuses to switch a checkout with local changes when its revision
+does not match the requested pin, leaving those changes untouched.
 
 Check the local Apple toolchain and compile the tracked Brave probe:
 
@@ -141,7 +147,8 @@ duplicating hundreds of gigabytes of reproducible upstream source.
 
 Brave and Chromium initialization requires substantial storage. Keep at least
 150 GiB free before running `./scripts/bootstrap-brave.sh --init`; 200 to 250
-GiB is recommended for comfortable development and updates.
+GiB is recommended for comfortable development and updates. The default
+shallow history avoids downloading unnecessary historical Git objects.
 
 ## Docs
 

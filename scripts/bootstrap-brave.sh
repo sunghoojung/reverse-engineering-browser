@@ -18,12 +18,27 @@ fi
 brave_remote="${REB_BRAVE_CORE_REMOTE:-${default_remote}}"
 brave_revision="${REB_BRAVE_CORE_REVISION:-$(tr -d '[:space:]' < "${revision_file}")}"
 run_init=false
+use_shallow_history=true
 
 usage() {
-  echo "Usage: $0 [--remote URL] [--revision REF] [--init]"
+  echo "Usage: $0 [--remote URL] [--revision REF] [--init] [--full-history]"
   echo
   echo "Prepares the pinned upstream Brave checkout at browser/worktree/src/brave."
-  echo "The --init flag also runs pnpm run init and begins the large Chromium download."
+  echo "The --init flag runs Brave initialization with shallow Chromium history."
+  echo "Use --full-history with --init only when complete Chromium Git history is required."
+}
+
+is_git_checkout_root() {
+  local candidate_directory="$1"
+  local canonical_directory
+  local discovered_root
+  [[ -d "${candidate_directory}" ]] || return 1
+  canonical_directory="$(cd "${candidate_directory}" && pwd -P)" || return 1
+  discovered_root="$(
+    git -C "${canonical_directory}" rev-parse --show-toplevel 2>/dev/null
+  )" || return 1
+  discovered_root="$(cd "${discovered_root}" && pwd -P)" || return 1
+  [[ "${canonical_directory}" == "${discovered_root}" ]]
 }
 
 while (($# > 0)); do
@@ -48,6 +63,10 @@ while (($# > 0)); do
       run_init=true
       shift
       ;;
+    --full-history)
+      use_shallow_history=false
+      shift
+      ;;
     --help|-h)
       usage
       exit 0
@@ -60,17 +79,27 @@ while (($# > 0)); do
   esac
 done
 
+if [[ "${use_shallow_history}" == false && "${run_init}" == false ]]; then
+  echo "--full-history requires --init" >&2
+  exit 2
+fi
+
 readonly worktree_root="${REB_BRAVE_WORKTREE:-${repository_root}/browser/worktree}"
 readonly brave_directory="${worktree_root}/src/brave"
+brave_fetch_remote="origin"
 
 if [[ -e "${brave_directory}" ]]; then
-  if ! git -C "${brave_directory}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if ! is_git_checkout_root "${brave_directory}"; then
     echo "Existing path is not a Git checkout: ${brave_directory}" >&2
     exit 1
   fi
 
-  if ! git -C "${brave_directory}" remote -v |
-    awk '{print $2}' | grep -Fxq "${brave_remote}"; then
+  brave_fetch_remote="$(
+    git -C "${brave_directory}" remote -v |
+      awk -v requested_url="${brave_remote}" \
+        '$2 == requested_url && $3 == "(fetch)" {print $1; exit}'
+  )"
+  if [[ -z "${brave_fetch_remote}" ]]; then
     echo "Existing brave-core checkout does not reference the requested remote." >&2
     echo "Requested: ${brave_remote}" >&2
     exit 1
@@ -79,18 +108,27 @@ if [[ -e "${brave_directory}" ]]; then
   echo "Using existing brave-core checkout: ${brave_directory}"
 else
   mkdir -p "${worktree_root}/src"
-  git clone --depth 1 --branch "${brave_revision}" \
-    "${brave_remote}" "${brave_directory}"
+  git -C "${worktree_root}/src" init -q brave
+  git -C "${brave_directory}" remote add origin "${brave_remote}"
 fi
 
+git -C "${brave_directory}" fetch --quiet --depth 1 \
+  "${brave_fetch_remote}" "${brave_revision}"
+requested_commit="$(git -C "${brave_directory}" rev-parse 'FETCH_HEAD^{commit}')"
+readonly requested_commit
+
 if [[ -n "$(git -C "${brave_directory}" status --porcelain)" ]]; then
-  echo "Brave checkout has local integration changes; leaving its revision unchanged."
-elif ! git -C "${brave_directory}" rev-parse --verify \
-  "${brave_revision}^{commit}" >/dev/null 2>&1; then
-  git -C "${brave_directory}" fetch --depth 1 origin "${brave_revision}"
-  git -C "${brave_directory}" checkout --detach FETCH_HEAD
+  current_commit="$(git -C "${brave_directory}" rev-parse HEAD)"
+  if [[ "${current_commit}" != "${requested_commit}" ]]; then
+    echo "Brave checkout has local changes at a different revision." >&2
+    echo "Current: ${current_commit}" >&2
+    echo "Requested: ${requested_commit}" >&2
+    echo "Preserve or remove the local changes before switching revisions." >&2
+    exit 1
+  fi
+  echo "Brave checkout has local integration changes at the requested revision."
 else
-  git -C "${brave_directory}" checkout --detach "${brave_revision}^{commit}"
+  git -C "${brave_directory}" checkout --quiet --detach "${requested_commit}"
 fi
 
 echo "brave-core is ready at ${brave_directory}"
@@ -115,10 +153,14 @@ if [[ "${run_init}" == true ]]; then
     # ceiling, Git can mistake the enclosing application repository for the
     # Chromium checkout before gclient has created src/.git.
     export GIT_CEILING_DIRECTORIES="${repository_root}"
+    declare -a init_arguments=(run init)
+    if [[ "${use_shallow_history}" == true ]]; then
+      init_arguments+=(-- --no-history)
+    fi
     if command -v corepack >/dev/null 2>&1; then
-      corepack pnpm run init
+      corepack pnpm "${init_arguments[@]}"
     else
-      pnpm run init
+      pnpm "${init_arguments[@]}"
     fi
   )
 else

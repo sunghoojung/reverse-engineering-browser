@@ -8,23 +8,23 @@
     <style>
       :root {
         color-scheme: dark;
-        --bg: #090c11;
-        --chrome: #12161d;
-        --panel: #0d1117;
-        --panel-2: #11161e;
-        --panel-3: #171c26;
-        --line: #272e39;
-        --line-soft: #1e242e;
-        --text: #e7eaf0;
-        --muted: #8b94a5;
-        --faint: #626c7d;
-        --accent: #9b7cff;
-        --accent-soft: #29233e;
-        --cyan: #49d6e8;
-        --green: #54e3a3;
-        --amber: #f6c667;
-        --red: #ff7d8b;
-        --blue: #72a7ff;
+        --bg: #202124;
+        --chrome: #292a2d;
+        --panel: #202124;
+        --panel-2: #292a2d;
+        --panel-3: #303134;
+        --line: #494c50;
+        --line-soft: #35363a;
+        --text: #e8eaed;
+        --muted: #bdc1c6;
+        --faint: #9aa0a6;
+        --accent: #8ab4f8;
+        --accent-soft: #394457;
+        --cyan: #8ab4f8;
+        --green: #81c995;
+        --amber: #fdd663;
+        --red: #f28b82;
+        --blue: #8ab4f8;
         --shadow: rgba(0, 0, 0, 0.34);
         --mono: "SFMono-Regular", "Cascadia Code", "Roboto Mono", Consolas, monospace;
         --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -32,23 +32,23 @@
 
       :root[data-theme="light"] {
         color-scheme: light;
-        --bg: #e9ecef;
-        --chrome: #f2f4f6;
-        --panel: #fbfcfd;
-        --panel-2: #f4f6f8;
-        --panel-3: #eaedf2;
-        --line: #c9cfd8;
-        --line-soft: #dce1e7;
-        --text: #171b23;
-        --muted: #5e6878;
-        --faint: #7d8795;
-        --accent: #6848dd;
-        --accent-soft: #e7e0fb;
-        --cyan: #078ca2;
-        --green: #138757;
-        --amber: #9b690b;
-        --red: #c23c52;
-        --blue: #2767c9;
+        --bg: #ffffff;
+        --chrome: #f1f3f4;
+        --panel: #ffffff;
+        --panel-2: #f8f9fa;
+        --panel-3: #e8eaed;
+        --line: #c4c7c5;
+        --line-soft: #e0e0e0;
+        --text: #202124;
+        --muted: #5f6368;
+        --faint: #80868b;
+        --accent: #1a73e8;
+        --accent-soft: #d2e3fc;
+        --cyan: #1a73e8;
+        --green: #188038;
+        --amber: #b06000;
+        --red: #d93025;
+        --blue: #1a73e8;
         --shadow: rgba(24, 31, 42, 0.15);
       }
 
@@ -56,9 +56,7 @@
       html, body { min-width: 320px; height: 100%; min-height: 100%; overflow: hidden; }
       body {
         margin: 0;
-        background:
-          radial-gradient(circle at 72% -20%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 36rem),
-          var(--bg);
+        background: var(--bg);
         color: var(--text);
         font-family: var(--sans);
         font-size: 12px;
@@ -111,7 +109,7 @@
         color: var(--accent);
         font: 700 8px var(--mono);
         letter-spacing: .08em;
-        box-shadow: 7px -5px 0 -6px var(--cyan);
+        box-shadow: none;
       }
       .brand-name { font: 650 10px var(--mono); letter-spacing: .17em; }
       .title-meta {
@@ -153,7 +151,7 @@
         height: 7px;
         border-radius: 50%;
         background: currentColor;
-        box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 13%, transparent), 0 0 14px currentColor;
+        box-shadow: none;
       }
       .capture-state.offline { color: var(--red); }
       .primary-nav { display: flex; align-items: stretch; gap: 3px; }
@@ -166,6 +164,7 @@
         font-size: 10px;
       }
       .nav-button[aria-current="page"] { color: var(--text); }
+      .nav-button:disabled { cursor: not-allowed; opacity: .45; }
       .nav-button[aria-current="page"]::after {
         content: "";
         position: absolute;
@@ -173,7 +172,7 @@
         right: 9px;
         bottom: 0;
         height: 2px;
-        background: linear-gradient(90deg, var(--accent), var(--cyan));
+        background: var(--accent);
       }
       .toolbar-actions { margin-left: auto; display: flex; align-items: center; gap: 7px; }
       .authorization {
@@ -280,7 +279,7 @@
       .screen { width: 100%; height: 100%; min-height: 0; overflow: hidden; }
       .traffic-grid {
         display: grid;
-        grid-template-columns: clamp(290px, 39%, 440px) minmax(370px, 1fr);
+        grid-template-columns: minmax(430px, 48%) minmax(420px, 1fr);
         width: 100%;
         height: 100%;
         min-height: 0;
@@ -289,25 +288,24 @@
         min-width: 0;
         min-height: 0;
         display: grid;
-        grid-template-rows: auto minmax(0, 1fr);
+        grid-template-rows: auto auto minmax(0, 1fr);
         overflow: hidden;
         border-right: 1px solid var(--line);
       }
       .detail-pane { min-width: 0; min-height: 0; overflow: auto; }
       .network-tools {
-        min-height: 41px;
-        display: flex;
+        min-height: 67px;
+        display: grid;
+        grid-template-columns: auto auto auto minmax(140px, 1fr);
         align-items: center;
         gap: 7px;
-        padding: 6px 9px;
+        padding: 5px 8px 6px;
         border-bottom: 1px solid var(--line);
         background: var(--chrome);
       }
       .filter-box {
         position: relative;
-        min-width: 180px;
-        max-width: 420px;
-        flex: 1;
+        min-width: 0;
       }
       .filter-box::before {
         content: "⌕";
@@ -322,20 +320,63 @@
         height: 29px;
         padding: 0 10px 0 30px;
         border: 1px solid var(--line);
-        border-radius: 4px;
+        border-radius: 2px;
         background: var(--panel);
-        font: 9px var(--mono);
+        font: 11px var(--sans);
       }
-      .type-filter {
+      .network-action {
+        width: 28px;
         height: 28px;
-        padding: 0 9px;
-        border: 0;
-        border-radius: 4px;
+        display: grid;
+        place-items: center;
+        flex: 0 0 auto;
+        border: 1px solid transparent;
+        border-radius: 2px;
         background: transparent;
         color: var(--muted);
-        font-size: 8px;
       }
-      .type-filter[aria-pressed="true"] { color: #fff; background: var(--accent); }
+      .network-action:hover { border-color: var(--line); background: var(--panel-3); color: var(--text); }
+      .filter-divider { width: 1px; height: 18px; flex: 0 0 auto; background: var(--line); }
+      .type-filters {
+        grid-column: 1 / -1;
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        min-width: 0;
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+      .type-filters::-webkit-scrollbar { display: none; }
+      .type-filter {
+        height: 22px;
+        padding: 0 7px;
+        flex: 0 0 auto;
+        border: 1px solid transparent;
+        border-radius: 11px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 10px;
+      }
+      .type-filter:hover { background: var(--panel-3); color: var(--text); }
+      .type-filter[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: transparent; }
+
+      .network-notice {
+        min-height: 31px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 5px 10px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel-2);
+        color: var(--muted);
+        font-size: 10px;
+      }
+      .network-notice::before { content: ""; width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--faint); }
+      .network-notice[data-kind="loading"]::before { background: var(--accent); }
+      .network-notice[data-kind="empty"]::before { background: var(--faint); }
+      .network-notice[data-kind="disconnected"]::before,
+      .network-notice[data-kind="malformed"]::before { background: var(--red); }
+      .network-notice[data-kind="gap"]::before { background: var(--amber); }
 
       .request-table {
         min-height: 0;
@@ -346,43 +387,60 @@
       }
       .request-head, .request-row {
         display: grid;
-        grid-template-columns: 30px minmax(130px, 1fr) 46px 43px 48px 72px;
+        grid-template-columns: minmax(180px, 1fr) 56px 52px 58px minmax(84px, .65fr);
         align-items: center;
         gap: 0;
       }
       .request-head {
-        min-height: 26px;
+        min-height: 28px;
         color: var(--faint);
         background: var(--chrome);
         border-bottom: 1px solid var(--line);
-        font: 7px var(--mono);
+        font: 10px var(--sans);
       }
-      .request-head span, .request-row span { padding: 0 7px; }
+      .request-head > span, .request-row > span {
+        min-width: 0;
+        padding: 0 6px;
+        overflow: hidden;
+        border-right: 1px solid var(--line-soft);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
       .request-rows { min-height: 0; overflow: auto; }
+      .request-empty {
+        min-height: 96px;
+        display: grid;
+        place-items: center;
+        padding: 18px;
+        color: var(--muted);
+        text-align: center;
+      }
       .request-row {
         width: 100%;
-        min-height: 34px;
+        min-height: 25px;
         border: 0;
         border-bottom: 1px solid var(--line-soft);
         background: transparent;
         color: var(--text);
         text-align: left;
-        font: 9px var(--mono);
+        font: 10px var(--sans);
       }
       .request-row:hover { background: var(--panel-2); }
       .request-row[aria-selected="true"] {
-        background: color-mix(in srgb, var(--accent) 18%, var(--panel));
-        box-shadow: inset 3px 0 var(--accent);
+        background: var(--accent-soft);
+        box-shadow: none;
       }
       .request-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .request-method { color: var(--muted); }
       .status-ok { color: var(--green); }
+      .status-error { color: var(--red); }
+      .status-neutral { color: var(--muted); }
       .waterfall {
         display: block;
         width: 50px;
         height: 4px;
         margin-left: 7px;
-        background: linear-gradient(90deg, transparent var(--water-start, 8%), var(--accent) var(--water-start, 8%), var(--accent) var(--water-mid, 56%), var(--cyan) var(--water-mid, 56%), var(--cyan) var(--water-end, 76%), transparent var(--water-end, 76%));
+        background: linear-gradient(90deg, transparent var(--water-start, 8%), #a78bfa var(--water-start, 8%), #a78bfa var(--water-mid, 56%), var(--accent) var(--water-mid, 56%), var(--accent) var(--water-end, 76%), transparent var(--water-end, 76%));
       }
       .sample-chip, .live-chip {
         display: inline-flex;
@@ -390,7 +448,7 @@
         margin-left: 5px;
         padding: 2px 4px !important;
         border-radius: 2px;
-        font: 650 6px var(--mono);
+        font: 650 7px var(--sans);
         letter-spacing: .06em;
         text-transform: uppercase;
       }
@@ -398,29 +456,31 @@
       .live-chip { color: var(--green); background: color-mix(in srgb, var(--green) 13%, transparent); }
 
       .selection-strip {
-        min-height: 44px;
+        min-height: 34px;
         display: flex;
         align-items: center;
         gap: 10px;
         padding: 0 12px;
         border-bottom: 1px solid var(--line);
-        background: var(--panel-2);
-        font: 9px var(--mono);
+        background: var(--chrome);
+        font: 10px var(--sans);
       }
       .method-pill, .status-pill {
-        padding: 3px 8px;
-        border-radius: 3px;
-        font: 650 8px var(--mono);
+        padding: 2px 6px;
+        border-radius: 2px;
+        font: 650 9px var(--mono);
       }
       .method-pill { color: var(--blue); background: color-mix(in srgb, var(--blue) 13%, transparent); }
       .status-pill { color: var(--green); background: color-mix(in srgb, var(--green) 13%, transparent); }
+      .status-pill.status-error { color: var(--red); }
+      .status-pill.status-neutral { color: var(--muted); }
       .selection-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .selection-more { margin-left: auto; color: var(--faint); }
       .inspector-tabs {
-        min-height: 34px;
+        min-height: 36px;
         display: flex;
         align-items: stretch;
-        gap: 16px;
+        gap: 18px;
         padding: 0 13px;
         border-bottom: 1px solid var(--line);
       }
@@ -430,7 +490,7 @@
         border: 0;
         background: transparent;
         color: var(--muted);
-        font-size: 8px;
+        font-size: 11px;
       }
       .inspector-tab[aria-selected="true"], .field-tab[aria-selected="true"] { color: var(--text); }
       .inspector-tab[aria-selected="true"]::after, .field-tab[aria-selected="true"]::after {
@@ -444,7 +504,7 @@
       }
 
       .request-inspector { min-height: 0; padding: 16px 17px 18px; }
-      .request-inspector h1 { margin: 0 0 13px; font-size: 12px; font-weight: 650; }
+      .request-inspector h1 { margin: 0 0 13px; font-size: 12px; font-weight: 500; }
       .field-tabs {
         min-height: 32px;
         display: flex;
@@ -455,7 +515,7 @@
       .field-tree { min-height: 198px; padding-top: 8px; }
       .field-row {
         width: 100%;
-        min-height: 37px;
+        min-height: 30px;
         display: grid;
         grid-template-columns: minmax(180px, 1fr) minmax(130px, 1fr) 48px;
         align-items: center;
@@ -464,10 +524,10 @@
         border-bottom: 1px solid var(--line-soft);
         background: transparent;
         text-align: left;
-        font: 9px var(--mono);
+        font: 10px var(--mono);
       }
       .field-row.selectable:hover { background: var(--panel-2); }
-      .field-row[aria-selected="true"] {
+      .field-row[aria-pressed="true"] {
         background: var(--accent-soft);
         box-shadow: inset 3px 0 var(--accent);
       }
@@ -491,9 +551,9 @@
         align-items: center;
         gap: 14px;
         padding: 10px 13px;
-        border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
-        border-radius: 5px;
-        background: color-mix(in srgb, var(--accent) 5%, var(--panel));
+        border: 1px solid var(--line);
+        border-radius: 2px;
+        background: var(--panel-2);
       }
       .trace-label { color: var(--muted); font-size: 8px; }
       .trace-target { margin-top: 5px; color: color-mix(in srgb, var(--accent) 65%, var(--text)); font: 9px var(--mono); }
@@ -507,9 +567,9 @@
       }
       .trace-button {
         margin-left: auto;
-        color: #10131a;
-        background: linear-gradient(100deg, #a78bfa, #57d6ee);
-        box-shadow: 0 7px 22px color-mix(in srgb, var(--accent) 20%, transparent);
+        color: var(--panel);
+        background: var(--accent);
+        box-shadow: none;
       }
       .trace-button:hover { filter: brightness(1.08); }
       .trace-button:disabled { cursor: not-allowed; opacity: .45; filter: grayscale(.5); }
@@ -742,16 +802,19 @@
       .broker-status.offline { color: var(--red); }
       .local-only { margin-left: auto; }
 
-      @media (max-width: 1300px) and (min-width: 901px) {
-        .request-head, .request-row { grid-template-columns: 30px minmax(130px, 1fr) 46px 43px; }
-        .request-head > :nth-child(5), .request-head > :nth-child(6), .request-row > :nth-child(5), .request-row > :nth-child(6) { display: none; }
+      @media (max-width: 1100px) and (min-width: 901px) {
+        .request-head, .request-row { grid-template-columns: minmax(150px, 1fr) 56px 52px 58px; }
+        .request-head > :nth-child(5), .request-row > :nth-child(5) { display: none; }
       }
       @media (max-width: 900px) {
         .traffic-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
         .request-pane { border-right: 0; border-bottom: 1px solid var(--line); }
-        .request-pane, .request-table { grid-template-rows: auto auto; }
+        .request-pane { grid-template-rows: auto auto auto; }
+        .request-table { grid-template-rows: auto auto; }
         .request-rows { max-height: min(230px, 35vh); }
         .detail-pane { overflow: auto; }
+        .inspector-tabs { overflow-x: auto; }
+        .inspector-tab { flex: 0 0 auto; }
       }
       @media (max-width: 880px) {
         .workspace { grid-template-columns: 178px minmax(0, 1fr); }
@@ -770,10 +833,10 @@
         .toolbar-actions { margin-left: 0; }
         .workspace { grid-template-columns: 1fr; }
         .sidebar { display: none; }
-        .network-tools { overflow-x: auto; }
+        .network-tools { grid-template-columns: auto auto auto minmax(145px, 1fr); }
         .filter-box { min-width: 145px; }
-        .request-head, .request-row { grid-template-columns: 28px minmax(155px, 1fr) 46px 43px; }
-        .request-head > :nth-child(5), .request-head > :nth-child(6), .request-row > :nth-child(5), .request-row > :nth-child(6) { display: none; }
+        .request-head, .request-row { grid-template-columns: minmax(154px, 1fr) 56px 52px 58px; }
+        .request-head > :nth-child(5), .request-row > :nth-child(5) { display: none; }
         .field-row { grid-template-columns: minmax(150px, 1fr) minmax(90px, .7fr); }
         .field-type { display: none; }
         .request-inspector { padding: 13px 12px; }
@@ -841,16 +904,30 @@
             <div class="traffic-grid">
               <div class="request-pane">
                 <div class="network-tools">
-                  <label class="filter-box"><span hidden>Filter requests</span><input id="request-filter" type="search" placeholder="Filter URL, method, status, body…" /></label>
-                  <button class="type-filter" type="button" data-filter="all" aria-pressed="true">All</button>
-                  <button class="type-filter" type="button" data-filter="xhr" aria-pressed="false">XHR</button>
-                  <button class="type-filter" type="button" data-filter="js" aria-pressed="false">JS</button>
-                  <button class="type-filter" type="button" data-filter="wasm" aria-pressed="false">Wasm</button>
+                  <button class="network-action" type="button" aria-label="Capture is active" title="Capture is active">●</button>
+                  <button class="network-action" type="button" aria-label="Clear visible requests" title="Clear visible requests" disabled>⊘</button>
+                  <span class="filter-divider" aria-hidden="true"></span>
+                  <label class="filter-box"><input id="request-filter" type="search" placeholder="Filter" aria-label="Filter requests" /></label>
+                  <div class="type-filters" aria-label="Resource type filters">
+                    <button class="type-filter" type="button" data-filter="all" aria-pressed="true">All</button>
+                    <button class="type-filter" type="button" data-filter="xhr" aria-pressed="false">Fetch/XHR</button>
+                    <button class="type-filter" type="button" data-filter="doc" aria-pressed="false">Doc</button>
+                    <button class="type-filter" type="button" data-filter="css" aria-pressed="false">CSS</button>
+                    <button class="type-filter" type="button" data-filter="js" aria-pressed="false">JS</button>
+                    <button class="type-filter" type="button" data-filter="font" aria-pressed="false">Font</button>
+                    <button class="type-filter" type="button" data-filter="img" aria-pressed="false">Img</button>
+                    <button class="type-filter" type="button" data-filter="media" aria-pressed="false">Media</button>
+                    <button class="type-filter" type="button" data-filter="socket" aria-pressed="false">Socket</button>
+                    <button class="type-filter" type="button" data-filter="wasm" aria-pressed="false">Wasm</button>
+                    <button class="type-filter" type="button" data-filter="other" aria-pressed="false">Other</button>
+                  </div>
                 </div>
 
-                <div class="request-table" aria-label="Captured requests">
-                  <div class="request-head" aria-hidden="true"><span>#</span><span>Request</span><span>Method</span><span>Status</span><span>Time</span><span>Waterfall</span></div>
-                  <div id="request-rows" class="request-rows"></div>
+                <div id="network-notice" class="network-notice" data-kind="loading" role="status" aria-live="polite">Connecting to the local evidence broker…</div>
+
+                <div class="request-table">
+                  <div class="request-head" aria-hidden="true"><span>Name</span><span>Method</span><span>Status</span><span>Time</span><span>Waterfall</span></div>
+                  <div id="request-rows" class="request-rows" role="listbox" aria-label="Captured requests"></div>
                 </div>
               </div>
 
@@ -862,21 +939,23 @@
                   <span class="selection-more" aria-hidden="true">•••</span>
                 </div>
                 <div class="inspector-tabs" role="tablist" aria-label="Request inspector">
-                  <button class="inspector-tab" type="button" role="tab" aria-selected="true">Request</button>
-                  <button class="inspector-tab" type="button" role="tab" aria-selected="false">Response</button>
-                  <button class="inspector-tab" type="button" role="tab" aria-selected="false">Timing</button>
-                  <button class="inspector-tab" type="button" role="tab" aria-selected="false">Notes</button>
+                  <button id="inspector-tab-headers" class="inspector-tab" type="button" role="tab" data-inspector-tab="headers" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Headers</button>
+                  <button id="inspector-tab-payload" class="inspector-tab" type="button" role="tab" data-inspector-tab="payload" aria-controls="request-inspector" aria-selected="true">Payload</button>
+                  <button id="inspector-tab-preview" class="inspector-tab" type="button" role="tab" data-inspector-tab="preview" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Preview</button>
+                  <button id="inspector-tab-response" class="inspector-tab" type="button" role="tab" data-inspector-tab="response" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Response</button>
+                  <button id="inspector-tab-initiator" class="inspector-tab" type="button" role="tab" data-inspector-tab="initiator" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Initiator</button>
+                  <button id="inspector-tab-timing" class="inspector-tab" type="button" role="tab" data-inspector-tab="timing" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Timing</button>
                 </div>
-                <div class="request-inspector">
+                <div id="request-inspector" class="request-inspector" role="tabpanel" aria-labelledby="inspector-tab-payload" tabindex="0">
                   <h1 id="request-prompt">Choose a request value and trace where it came from.</h1>
-                  <div class="field-tabs" role="tablist" aria-label="Request values">
-                    <button class="field-tab" type="button" role="tab" data-field-tab="body" aria-selected="true">Body</button>
-                    <button class="field-tab" type="button" role="tab" data-field-tab="headers" aria-selected="false">Headers</button>
-                    <button class="field-tab" type="button" role="tab" data-field-tab="cookies" aria-selected="false">Cookies</button>
-                    <button class="field-tab" type="button" role="tab" data-field-tab="raw" aria-selected="false">Raw</button>
+                  <div id="field-tabs" class="field-tabs" role="tablist" aria-label="Request values">
+                    <button id="field-tab-body" class="field-tab" type="button" role="tab" data-field-tab="body" aria-controls="field-tree" aria-selected="true">Body</button>
+                    <button id="field-tab-headers" class="field-tab" type="button" role="tab" data-field-tab="headers" aria-controls="field-tree" aria-selected="false" tabindex="-1">Headers</button>
+                    <button id="field-tab-cookies" class="field-tab" type="button" role="tab" data-field-tab="cookies" aria-controls="field-tree" aria-selected="false" tabindex="-1">Cookies</button>
+                    <button id="field-tab-raw" class="field-tab" type="button" role="tab" data-field-tab="raw" aria-controls="field-tree" aria-selected="false" tabindex="-1">Raw</button>
                   </div>
-                  <div id="field-tree" class="field-tree"></div>
-                  <div class="trace-dock">
+                  <div id="field-tree" class="field-tree" role="tabpanel" aria-labelledby="field-tab-body" tabindex="0"></div>
+                  <div id="trace-dock" class="trace-dock">
                     <div><div class="trace-label">Selected request field</div><div id="trace-target" class="trace-target">request-81 · Body · $.device.fingerprint</div></div>
                     <button id="trace-origin" class="trace-button" type="button">⌘ Trace origin</button>
                   </div>
@@ -969,7 +1048,7 @@
               <span id="evidence-count" class="evidence-count">0 events</span>
             </div>
             <div class="evidence-table" role="table" aria-label="Evidence events">
-              <div class="evidence-head" role="row"><span>Time</span><span>Source</span><span>Category</span><span>Operation</span><span>Correlation IDs</span><span>Value / artifact</span></div>
+              <div class="evidence-head" role="row"><span role="columnheader">Time</span><span role="columnheader">Source</span><span role="columnheader">Category</span><span role="columnheader">Operation</span><span role="columnheader">Correlation IDs</span><span role="columnheader">Value / artifact</span></div>
               <div id="evidence-rows"></div>
             </div>
           </section>
@@ -1058,10 +1137,12 @@
         events: [],
         requests: [...sampleRequests],
         selectedRequestId: '81',
+        inspectorTab: 'payload',
         fieldTab: 'body',
         selectedField: fieldSets.body.find(field => field.traceable),
         requestType: 'all',
-        broker: 'connecting'
+        broker: 'connecting',
+        refreshing: false
       };
 
       const elements = {
@@ -1072,11 +1153,15 @@
         sidebarCount: document.querySelector('#sidebar-count'),
         requestFilter: document.querySelector('#request-filter'),
         requestRows: document.querySelector('#request-rows'),
+        networkNotice: document.querySelector('#network-notice'),
         selectedMethod: document.querySelector('#selected-method'),
         selectedStatus: document.querySelector('#selected-status'),
         selectedUrl: document.querySelector('#selected-url'),
+        requestInspector: document.querySelector('#request-inspector'),
         prompt: document.querySelector('#request-prompt'),
+        fieldTabs: document.querySelector('#field-tabs'),
         fieldTree: document.querySelector('#field-tree'),
+        traceDock: document.querySelector('#trace-dock'),
         traceTarget: document.querySelector('#trace-target'),
         traceButton: document.querySelector('#trace-origin'),
         backtraceSubtitle: document.querySelector('#backtrace-subtitle'),
@@ -1102,45 +1187,298 @@
         { index: '05', kind: 'Native probe evidence', title: 'Canvas readback · event-194', meta: 'CanvasRenderingContext2D.getImageData', confidence: 'Correlated', style: 'correlation' }
       ];
 
-      function decodePayload(event) {
-        if (event.payload_encoding !== 'hex') return String(event.payload || '');
-        try {
-          const pairs = String(event.payload || '').match(/.{2}/g) || [];
-          return new TextDecoder().decode(Uint8Array.from(pairs, byte => Number.parseInt(byte, 16)));
-        } catch {
-          return String(event.payload || '');
+      const eventCategories = new Set([
+        'unknown', 'canvas', 'webgl', 'web_audio', 'navigator', 'permissions',
+        'storage', 'webrtc', 'wasm', 'network'
+      ]);
+      const eventTypes = {
+        1: new Set([
+          'unknown', 'api_call', 'property_read', 'module_compiled',
+          'module_instantiated', 'request_started', 'response_completed', 'gap'
+        ]),
+        2: new Set([
+          'unknown', 'api_call', 'property_read', 'module_compiled',
+          'module_instantiated', 'request_started', 'response_completed', 'gap',
+          'request_initiated', 'request_redirected', 'response_started',
+          'request_completed', 'request_failed'
+        ])
+      };
+      const uint64Fields = [
+        'session_id', 'sequence_number', 'monotonic_time_ns', 'navigation_id',
+        'frame_id', 'artifact_id', 'parent_event_id', 'request_id'
+      ];
+      const browserContextFields = ['browser_context_id_high', 'browser_context_id_low'];
+      const int64Fields = ['encoded_data_length', 'decoded_body_length'];
+      const uint32Fields = ['process_id', 'thread_id', 'initiator_request_id', 'initiator_process_id'];
+      const uint16Fields = ['resource_type', 'flags'];
+      const uint64Max = 18446744073709551615n;
+      const int64Min = -9223372036854775808n;
+      const int64Max = 9223372036854775807n;
+      const resourceTypeFilters = new Map([
+        [0, 'doc'], [1, 'doc'], [2, 'css'], [3, 'js'], [4, 'img'], [5, 'font'],
+        [8, 'media'], [11, 'xhr'], [13, 'xhr'], [19, 'doc'], [20, 'doc']
+      ]);
+      const lifecycleRanks = new Map([
+        ['request_initiated', 1], ['request_started', 2], ['request_redirected', 3],
+        ['response_started', 4], ['response_completed', 5], ['request_completed', 5],
+        ['request_failed', 5]
+      ]);
+      const networkLifecycleTypes = new Set(lifecycleRanks.keys());
+
+      function isPlainObject(value) {
+        return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+      }
+
+      function isSafeIntegerInRange(value, minimum, maximum) {
+        return Number.isSafeInteger(value) && value >= minimum && value <= maximum;
+      }
+
+      function isCanonicalInteger(value, minimum, maximum, signed = false) {
+        if (typeof value !== 'string') return false;
+        const pattern = signed ? /^(?:0|-[1-9][0-9]*|[1-9][0-9]*)$/ : /^(?:0|[1-9][0-9]*)$/;
+        if (!pattern.test(value)) return false;
+        const integer = BigInt(value);
+        return integer >= minimum && integer <= maximum;
+      }
+
+      function integerValue(event, field) {
+        return BigInt(event[field]);
+      }
+
+      function integerText(event, field) {
+        return String(event[field]);
+      }
+
+      function browserContextToken(event) {
+        if (event.protocol_version !== 2 ||
+            !browserContextFields.every(field => Object.hasOwn(event, field)) ||
+            browserContextFields.every(field => event[field] === '0')) {
+          return null;
         }
+        return `${event.browser_context_id_high}:${event.browser_context_id_low}`;
+      }
+
+      function decodePayload(event) {
+        const pairs = event.payload.match(/.{2}/g) || [];
+        return new TextDecoder().decode(Uint8Array.from(pairs, byte => Number.parseInt(byte, 16)));
+      }
+
+      function summarizeEventValue(event) {
+        const values = [];
+        const payload = decodePayload(event);
+        if (payload) values.push(payload);
+        if (event.protocol_version === 2) {
+          if (event.status_code !== 0) values.push(`status ${event.status_code}`);
+          if (event.error_code !== 0) values.push(`error ${event.error_code}`);
+          if (event.encoded_data_length !== '0') values.push(`${event.encoded_data_length} encoded bytes`);
+          if (event.decoded_body_length !== '0') values.push(`${event.decoded_body_length} decoded bytes`);
+          if (event.flags & 1) values.push('payload truncated');
+          if (event.flags & 2) values.push('from cache');
+          if (event.flags & 4) values.push('from service worker');
+        }
+        return values.join(' · ') || 'no inline payload';
+      }
+
+      function formatMilliseconds(nanoseconds, prefix = '') {
+        const negative = nanoseconds < 0n;
+        const absolute = negative ? -nanoseconds : nanoseconds;
+        const whole = absolute / 1000000n;
+        const fractional = ((absolute % 1000000n) / 1000n).toString().padStart(3, '0');
+        return `${negative ? '-' : prefix}${whole}.${fractional} ms`;
       }
 
       function countSequenceGaps(events) {
-        let gaps = 0;
+        let gaps = 0n;
         const highWaterMarks = new Map();
         for (const event of events) {
-          const previous = highWaterMarks.get(event.session_id);
-          if (previous !== undefined && event.sequence_number > previous + 1) gaps += event.sequence_number - previous - 1;
-          highWaterMarks.set(event.session_id, Math.max(previous ?? event.sequence_number, event.sequence_number));
+          const streamId = `${integerText(event, 'session_id')}:${event.process_id}`;
+          const sequence = integerValue(event, 'sequence_number');
+          const previous = highWaterMarks.get(streamId);
+          const missing = previous !== undefined && sequence > previous + 1n
+            ? sequence - previous - 1n
+            : 0n;
+          gaps += missing > 0n ? missing : event.type === 'gap' ? 1n : 0n;
+          highWaterMarks.set(streamId, previous === undefined || sequence > previous ? sequence : previous);
         }
         return gaps;
       }
 
+      function isBrokerEvent(event) {
+        if (!isPlainObject(event) || !Number.isInteger(event.protocol_version)) return false;
+        const payloadLimit = event.protocol_version === 1 ? 48 : event.protocol_version === 2 ? 128 : null;
+        if (payloadLimit === null || !eventTypes[event.protocol_version]?.has(event.type)) return false;
+        if (!eventCategories.has(event.category)) return false;
+        if (event.protocol_version === 2 && (event.category === 'unknown' || event.type === 'unknown')) return false;
+        if (!isSafeIntegerInRange(event.payload_size, 0, payloadLimit)) return false;
+        if (event.payload_encoding !== 'hex' || typeof event.payload !== 'string') return false;
+        if (event.payload.length !== event.payload_size * 2 || !/^[0-9a-f]*$/i.test(event.payload)) return false;
+
+        if (event.protocol_version === 1) {
+          const legacyUint64Fields = [
+            'session_id', 'sequence_number', 'monotonic_time_ns', 'navigation_id',
+            'frame_id', 'artifact_id', 'parent_event_id'
+          ];
+          return legacyUint64Fields.every(field => isSafeIntegerInRange(event[field], 0, Number.MAX_SAFE_INTEGER)) &&
+            ['process_id', 'thread_id'].every(field => isSafeIntegerInRange(event[field], 0, 0xffffffff));
+        }
+
+        if (!uint64Fields.every(field => isCanonicalInteger(event[field], 0n, uint64Max))) return false;
+        const contextFieldPresence = browserContextFields.map(field => Object.hasOwn(event, field));
+        if (contextFieldPresence[0] !== contextFieldPresence[1]) return false;
+        if (contextFieldPresence[0] &&
+            !browserContextFields.every(field => isCanonicalInteger(event[field], 0n, uint64Max))) return false;
+        if (!int64Fields.every(field => isCanonicalInteger(event[field], int64Min, int64Max, true))) return false;
+        if (!uint32Fields.every(field => isSafeIntegerInRange(event[field], 0, 0xffffffff))) return false;
+        if (!uint16Fields.every(field => isSafeIntegerInRange(event[field], 0, 0xffff))) return false;
+        if ((event.flags & ~0x7) !== 0) return false;
+        if (!isSafeIntegerInRange(event.status_code, -0x80000000, 0x7fffffff)) return false;
+        if (!isSafeIntegerInRange(event.error_code, -0x80000000, 0x7fffffff)) return false;
+        if (typeof event.payload_truncated !== 'boolean') return false;
+        return event.payload_truncated === Boolean(event.flags & 1);
+      }
+
+      function isBrokerResponse(body) {
+        return isPlainObject(body) &&
+          Array.isArray(body.events) &&
+          isSafeIntegerInRange(body.count, 0, 5000) &&
+          body.count === body.events.length &&
+          body.events.every(isBrokerEvent);
+      }
+
+      function legacyBrowserRequestKey(event) {
+        const session = integerText(event, 'session_id');
+        const requestId = integerText(event, 'request_id');
+        if (requestId === '0') return null;
+        return event.initiator_process_id > 0
+          ? `S${session}:R${event.initiator_process_id}:B${requestId}`
+          : `S${session}:P${event.process_id}:F${integerText(event, 'frame_id')}:B${requestId}`;
+      }
+
+      function browserRequestKey(event) {
+        const session = integerText(event, 'session_id');
+        const requestId = integerText(event, 'request_id');
+        if (requestId === '0') return null;
+        const context = browserContextToken(event);
+        return context
+          ? `S${session}:P${event.process_id}:C${context}:B${requestId}`
+          : legacyBrowserRequestKey(event);
+      }
+
+      function rendererRequestIdentity(event) {
+        return `S${integerText(event, 'session_id')}:R${event.process_id}:${integerText(event, 'request_id')}`;
+      }
+
+      function correlatedRendererIdentity(event) {
+        return `S${integerText(event, 'session_id')}:R${event.initiator_process_id}:${event.initiator_request_id}`;
+      }
+
+      function buildBrowserRequestKeys(events) {
+        const keys = new Map();
+        for (const event of events) {
+          if (event.protocol_version !== 2 || integerText(event, 'request_id') === '0') continue;
+          if (event.type === 'request_initiated') {
+            const fallbackKey = legacyBrowserRequestKey(event);
+            if (fallbackKey) keys.set(fallbackKey, rendererRequestIdentity(event));
+            continue;
+          }
+          if (event.initiator_process_id === 0) continue;
+          const identity = correlatedRendererIdentity(event);
+          const primaryKey = browserRequestKey(event);
+          const fallbackKey = legacyBrowserRequestKey(event);
+          if (primaryKey && !keys.has(primaryKey)) keys.set(primaryKey, identity);
+          if (fallbackKey && !keys.has(fallbackKey)) keys.set(fallbackKey, identity);
+        }
+        return keys;
+      }
+
+      function requestIdentity(event, browserRequestKeys) {
+        const session = integerText(event, 'session_id');
+        if (event.protocol_version === 1) {
+          return `S${session}:P${event.process_id}:E${integerText(event, 'sequence_number')}`;
+        }
+
+        const requestId = integerText(event, 'request_id');
+        if (event.type === 'request_initiated') {
+          return rendererRequestIdentity(event);
+        }
+        const hasInitiator = event.initiator_process_id > 0;
+        const correlatedId = hasInitiator
+          ? correlatedRendererIdentity(event)
+          : requestId !== '0' && browserContextToken(event)
+            ? browserRequestKey(event)
+            : requestId !== '0'
+              ? legacyBrowserRequestKey(event)
+            : `S${session}:P${event.process_id}:E${integerText(event, 'sequence_number')}`;
+        const requestKey = browserRequestKey(event);
+        return requestKey ? browserRequestKeys.get(requestKey) ?? correlatedId : correlatedId;
+      }
+
+      function resourceTypeFilter(event, previous, payload) {
+        if (/^application\/wasm(?:;|$)/i.test(payload)) return 'wasm';
+        if (event.protocol_version === 2 && event.type === 'request_started') {
+          return resourceTypeFilters.get(event.resource_type) ?? 'other';
+        }
+        return previous?.type ?? 'other';
+      }
+
       function requestsFromEvents(events) {
-        return events.filter(event => event.category === 'network').map(event => {
+        const requests = new Map();
+        const lifecycleEvents = events.filter(event => event.category === 'network' && networkLifecycleTypes.has(event.type));
+        const browserRequestKeys = buildBrowserRequestKeys(lifecycleEvents);
+        lifecycleEvents.forEach(event => {
           const payload = decodePayload(event);
-          const match = payload.match(/^([A-Z]+)\s+(\S+)/);
-          return {
-            id: `E${event.sequence_number}`,
-            path: match?.[2] || payload || 'network request',
-            method: match?.[1] || 'EVENT',
-            status: '…',
-            time: 'live',
-            type: 'xhr',
+          const carriesRequestTarget = ['request_initiated', 'request_started', 'request_redirected'].includes(event.type);
+          const match = carriesRequestTarget ? payload.match(/^([A-Z]+)\s+(\S+)/) : null;
+          const id = requestIdentity(event, browserRequestKeys);
+          const previous = requests.get(id);
+          const timestamp = integerValue(event, 'monotonic_time_ns');
+          const firstTimestamp = previous && previous.firstTimestamp < timestamp ? previous.firstTimestamp : timestamp;
+          const lastTimestamp = previous && previous.lastTimestamp > timestamp ? previous.lastTimestamp : timestamp;
+          const incomingRank = lifecycleRanks.get(event.type) ?? 0;
+          const rank = Math.max(previous?.rank ?? 0, incomingRank);
+          const failed = previous?.failed || event.type === 'request_failed' || (event.protocol_version === 2 && event.error_code !== 0);
+          const numericStatus = event.protocol_version === 2 ? event.status_code : 0;
+          const previousStatusRank = previous?.statusRank ?? 0;
+          const hasNewerStatus = numericStatus > 0 && incomingRank >= previousStatusRank;
+          const status = failed
+            ? 'failed'
+            : hasNewerStatus
+              ? numericStatus
+              : previous?.status ?? 'pending';
+          const targetRank = match && incomingRank >= (previous?.targetRank ?? 0)
+            ? incomingRank
+            : previous?.targetRank ?? 0;
+          const updatesTarget = Boolean(match) && targetRank === incomingRank;
+          const terminal = rank >= 5;
+          requests.set(id, {
+            id,
+            path: updatesTarget ? match[2] : previous?.path ?? 'network request',
+            method: updatesTarget ? match[1] : previous?.method ?? 'EVENT',
+            status,
+            time: terminal ? formatMilliseconds(lastTimestamp - firstTimestamp) : 'pending',
+            type: resourceTypeFilter(event, previous, payload),
             origin: 'live',
-            start: 12,
-            mid: 37,
-            end: 54,
-            event
-          };
+            start: 8,
+            mid: Math.min(80, 18 + rank * 11),
+            end: Math.min(94, 30 + rank * 12),
+            event: incomingRank >= (previous?.rank ?? 0) ? event : previous.event,
+            events: [...(previous?.events ?? []), event],
+            failed,
+            rank,
+            statusRank: hasNewerStatus ? incomingRank : previousStatusRank,
+            targetRank,
+            operation: incomingRank >= (previous?.rank ?? 0) ? event.type : previous.operation,
+            firstTimestamp,
+            lastTimestamp
+          });
         });
+        return [...requests.values()];
+      }
+
+      function setNetworkNotice(kind, message) {
+        elements.networkNotice.dataset.kind = kind;
+        elements.networkNotice.textContent = message;
+        elements.networkNotice.hidden = false;
       }
 
       function renderRequests() {
@@ -1149,37 +1487,72 @@
           (state.requestType === 'all' || request.type === state.requestType) &&
           (!needle || `${request.method} ${request.path} ${request.status}`.toLowerCase().includes(needle))
         );
-        elements.requestRows.replaceChildren(...visible.map(request => {
+        if (visible.length === 0) {
+          const empty = document.createElement('div');
+          empty.className = 'request-empty';
+          empty.setAttribute('role', 'status');
+          empty.textContent = 'No requests match the current filters.';
+          elements.requestRows.removeAttribute('role');
+          elements.requestRows.replaceChildren(empty);
+          elements.sidebarCount.textContent = String(state.requests.length);
+          return;
+        }
+        elements.requestRows.setAttribute('role', 'listbox');
+        const selectedIsVisible = visible.some(request => request.id === state.selectedRequestId);
+        elements.requestRows.replaceChildren(...visible.map((request, index) => {
           const row = document.createElement('button');
           row.type = 'button';
           row.className = 'request-row';
+          row.setAttribute('role', 'option');
           row.dataset.requestId = request.id;
           row.setAttribute('aria-selected', String(request.id === state.selectedRequestId));
+          row.setAttribute('aria-label', `${request.method} ${request.path}, ${request.status}, ${request.time}, ${request.origin}, ${request.id}`);
+          row.tabIndex = request.id === state.selectedRequestId || !selectedIsVisible && index === 0 ? 0 : -1;
 
-          const number = document.createElement('span'); number.textContent = request.id;
           const name = document.createElement('span'); name.className = 'request-name'; name.textContent = request.path;
+          name.title = `${request.method} ${request.path} · network · ${request.operation ?? 'sample'} · ${request.id}`;
           const source = document.createElement('span'); source.className = request.origin === 'live' ? 'live-chip' : 'sample-chip'; source.textContent = request.origin;
           name.append(source);
           const method = document.createElement('span'); method.className = 'request-method'; method.textContent = request.method;
-          const status = document.createElement('span'); status.className = 'status-ok'; status.textContent = request.status;
+          const status = document.createElement('span');
+          const numericStatus = Number(request.status);
+          status.className = request.failed || (Number.isFinite(numericStatus) && numericStatus >= 400)
+            ? 'status-error'
+            : Number.isFinite(numericStatus) && numericStatus >= 200
+              ? 'status-ok'
+              : 'status-neutral';
+          status.textContent = request.status;
           const time = document.createElement('span'); time.textContent = typeof request.time === 'number' ? `${request.time} ms` : request.time;
           const waterfallCell = document.createElement('span');
-          const waterfall = document.createElement('i'); waterfall.className = 'waterfall'; waterfall.style.setProperty('--water-start', `${request.start}%`); waterfall.style.setProperty('--water-mid', `${request.mid}%`); waterfall.style.setProperty('--water-end', `${request.end}%`); waterfallCell.append(waterfall);
-          row.append(number, name, method, status, time, waterfallCell);
-          row.addEventListener('click', () => selectRequest(request.id));
+          const waterfall = document.createElement('i'); waterfall.className = 'waterfall'; waterfall.setAttribute('aria-hidden', 'true'); waterfall.style.setProperty('--water-start', `${request.start}%`); waterfall.style.setProperty('--water-mid', `${request.mid}%`); waterfall.style.setProperty('--water-end', `${request.end}%`); waterfallCell.append(waterfall);
+          row.append(name, method, status, time, waterfallCell);
+          row.addEventListener('click', () => {
+            selectRequest(request.id);
+            focusRequestRow(request.id);
+          });
+          row.addEventListener('keydown', moveRequestSelection);
           return row;
         }));
         elements.sidebarCount.textContent = String(state.requests.length);
       }
 
-      function selectRequest(id) {
-        state.selectedRequestId = id;
-        const request = state.requests.find(candidate => candidate.id === id);
+      function updateSelectionSummary(request) {
         elements.selectedMethod.textContent = request.method;
         elements.selectedStatus.textContent = request.status;
+        const numericStatus = Number(request.status);
+        const failed = Boolean(request.failed) || Number.isFinite(numericStatus) && numericStatus >= 400;
+        elements.selectedStatus.classList.toggle('status-error', failed);
+        elements.selectedStatus.classList.toggle('status-neutral', !failed && !Number.isFinite(numericStatus));
         elements.selectedUrl.textContent = request.origin === 'sample'
           ? `https://checkout.acme.test${request.path}`
           : request.path;
+      }
+
+      function selectRequest(id) {
+        const request = state.requests.find(candidate => candidate.id === id);
+        if (!request) return;
+        state.selectedRequestId = id;
+        updateSelectionSummary(request);
         if (request.traceable) {
           elements.prompt.textContent = 'Choose a request value and trace where it came from.';
           state.fieldTab = 'body';
@@ -1191,13 +1564,47 @@
           state.selectedField = null;
         }
         renderRequests();
-        renderFields();
+        renderInspector();
         renderEvidence();
       }
 
+      function moveRequestSelection(event) {
+        if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+        const rows = [...elements.requestRows.querySelectorAll('.request-row')];
+        const current = rows.indexOf(event.currentTarget);
+        if (current < 0) return;
+        event.preventDefault();
+        const next = event.key === 'Home'
+          ? 0
+          : event.key === 'End'
+            ? rows.length - 1
+            : Math.max(0, Math.min(rows.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1)));
+        const id = rows[next].dataset.requestId;
+        selectRequest(id);
+        focusRequestRow(id);
+      }
+
+      function focusRequestRow(id) {
+        [...elements.requestRows.querySelectorAll('.request-row')]
+          .find(row => row.dataset.requestId === id)?.focus({ preventScroll: true });
+      }
+
       function renderFields() {
-        document.querySelectorAll('.field-tab').forEach(tab => tab.setAttribute('aria-selected', String(tab.dataset.fieldTab === state.fieldTab)));
+        document.querySelectorAll('.field-tab').forEach(tab => {
+          const selected = tab.dataset.fieldTab === state.fieldTab;
+          tab.setAttribute('aria-selected', String(selected));
+          tab.tabIndex = selected ? 0 : -1;
+        });
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        if (state.inspectorTab === 'payload' && request?.traceable) {
+          elements.fieldTree.setAttribute('role', 'tabpanel');
+          elements.fieldTree.setAttribute('aria-labelledby', `field-tab-${state.fieldTab}`);
+          elements.fieldTree.tabIndex = 0;
+        } else {
+          elements.fieldTree.removeAttribute('role');
+          elements.fieldTree.removeAttribute('aria-labelledby');
+          elements.fieldTree.tabIndex = -1;
+        }
         if (!request?.traceable) {
           const empty = document.createElement('div');
           empty.className = 'field-empty';
@@ -1215,7 +1622,7 @@
           const row = document.createElement(field.traceable ? 'button' : 'div');
           if (field.traceable) row.type = 'button';
           row.className = `field-row${field.traceable ? ' selectable' : ''}`;
-          if (field.traceable) row.setAttribute('aria-selected', String(state.selectedField?.path === field.path));
+          if (field.traceable) row.setAttribute('aria-pressed', String(state.selectedField?.path === field.path));
           const key = document.createElement('span'); key.className = `field-key${field.group ? ' group' : ''}${field.traceable ? ' traceable' : ''}`; key.style.setProperty('--depth', field.depth); key.textContent = field.key;
           const value = document.createElement('span'); value.className = 'field-value'; value.textContent = field.value;
           const type = document.createElement('span'); type.className = 'field-type'; type.textContent = field.type;
@@ -1230,7 +1637,133 @@
         elements.traceButton.disabled = !selected;
       }
 
+      function renderInspectorMessage(message) {
+        const empty = document.createElement('div');
+        empty.className = 'field-empty';
+        empty.textContent = message;
+        elements.fieldTree.replaceChildren(empty);
+      }
+
+      function renderInspectorDetails(rows) {
+        elements.fieldTree.replaceChildren(...rows.map(detail => {
+          const row = document.createElement('div');
+          row.className = 'field-row';
+          const key = document.createElement('span'); key.className = 'field-key'; key.textContent = detail.key;
+          const value = document.createElement('span'); value.className = 'field-value'; value.textContent = String(detail.value);
+          const type = document.createElement('span'); type.className = 'field-type'; type.textContent = detail.type;
+          row.append(key, value, type);
+          return row;
+        }));
+      }
+
+      function renderInspector() {
+        document.querySelectorAll('.inspector-tab').forEach(tab => {
+          const selected = tab.dataset.inspectorTab === state.inspectorTab;
+          tab.setAttribute('aria-selected', String(selected));
+          tab.tabIndex = selected ? 0 : -1;
+        });
+        elements.requestInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
+        if (state.inspectorTab !== 'payload') {
+          elements.fieldTree.removeAttribute('role');
+          elements.fieldTree.removeAttribute('aria-labelledby');
+          elements.fieldTree.tabIndex = -1;
+        }
+        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        if (state.inspectorTab === 'payload') {
+          const traceable = Boolean(request?.traceable);
+          elements.prompt.textContent = traceable
+            ? 'Choose a request value and trace where it came from.'
+            : 'No structured request payload was captured.';
+          elements.fieldTabs.hidden = !traceable;
+          elements.traceDock.hidden = !traceable;
+          renderFields();
+          return;
+        }
+        if (state.inspectorTab === 'headers') {
+          const traceable = Boolean(request?.traceable);
+          state.fieldTab = 'headers';
+          state.selectedField = traceable ? fieldSets.headers.find(field => field.traceable) : null;
+          elements.prompt.textContent = 'Request headers';
+          elements.fieldTabs.hidden = true;
+          elements.traceDock.hidden = !traceable;
+          if (traceable) {
+            renderFields();
+          } else {
+            renderInspectorMessage('Request header capture is disabled for this session.');
+          }
+          return;
+        }
+        if (state.inspectorTab === 'initiator') {
+          elements.prompt.textContent = 'Initiator';
+          elements.fieldTabs.hidden = true;
+          elements.traceDock.hidden = true;
+          const lifecycleEvents = request?.events ?? [];
+          const correlated = lifecycleEvents.find(event => event.protocol_version === 2 && event.initiator_process_id > 0);
+          const initiated = lifecycleEvents.find(event => event.type === 'request_initiated');
+          const contextEvent = lifecycleEvents.find(event => browserContextToken(event));
+          if (correlated || initiated || contextEvent) {
+            const source = correlated ?? initiated ?? contextEvent;
+            const details = [{ key: 'correlation', value: request.id, type: 'id' }];
+            if (contextEvent) {
+              details.push({ key: 'browser context', value: browserContextToken(contextEvent), type: 'token' });
+            }
+            if (correlated || initiated) {
+              details.push(
+                { key: 'renderer process', value: correlated?.initiator_process_id ?? initiated.process_id, type: 'pid' },
+                { key: 'renderer request', value: correlated?.initiator_request_id ?? integerText(initiated, 'request_id'), type: 'id' }
+              );
+            } else {
+              details.push(
+                { key: 'browser process', value: contextEvent.process_id, type: 'pid' },
+                { key: 'browser request', value: integerText(contextEvent, 'request_id'), type: 'id' }
+              );
+            }
+            details.push({ key: 'frame', value: integerText(source, 'frame_id'), type: 'id' });
+            renderInspectorDetails(details);
+          } else {
+            renderInspectorMessage(request?.origin === 'sample'
+              ? 'Sample initiator evidence is available in the request field backtrace.'
+              : 'No renderer initiator was captured for this browser request.');
+          }
+          return;
+        }
+        if (state.inspectorTab === 'timing') {
+          elements.prompt.textContent = 'Timing';
+          elements.fieldTabs.hidden = true;
+          elements.traceDock.hidden = true;
+          if (request?.origin === 'live') {
+            renderInspectorDetails([
+              { key: 'first event', value: request.firstTimestamp, type: 'ns' },
+              { key: 'last event', value: request.lastTimestamp, type: 'ns' },
+              { key: 'duration', value: request.time, type: 'time' },
+              { key: 'lifecycle', value: request.operation, type: 'state' },
+              { key: 'events', value: request.events.length, type: 'count' }
+            ]);
+          } else if (request) {
+            renderInspectorDetails([
+              { key: 'duration', value: `${request.time} ms`, type: 'time' },
+              { key: 'source', value: 'sample workspace data', type: 'source' }
+            ]);
+          } else {
+            renderInspectorMessage('No request timing is available.');
+          }
+          return;
+        }
+
+        const messages = {
+          preview: 'No safe preview is available for this response.',
+          response: 'Response body capture is disabled for this session.'
+        };
+        elements.prompt.textContent = state.inspectorTab[0].toUpperCase() + state.inspectorTab.slice(1);
+        elements.fieldTabs.hidden = true;
+        elements.traceDock.hidden = true;
+        renderInspectorMessage(messages[state.inspectorTab] || 'No captured data is available.');
+      }
+
       function renderEvidence() {
+        const traceUnavailable = !state.selectedField;
+        document.querySelectorAll('.nav-button[data-screen="backtrace"], .nav-button[data-screen="experiments"]')
+          .forEach(button => { button.disabled = traceUnavailable; });
         const selectedSampleEvidence = state.selectedField?.label === 'Body'
           ? sampleEvidence
           : [{
@@ -1241,15 +1774,31 @@
               correlation: `req ${state.selectedRequestId} · nav 100`,
               value: state.selectedField ? `${state.selectedField.label.toLowerCase()}.${state.selectedField.path}` : 'No selected field'
             }];
+        const firstTime = state.events.length > 0
+          ? integerValue(state.events[0], 'monotonic_time_ns')
+          : 0n;
         const liveEvidence = state.events.map((event, index) => {
-          const firstTime = state.events[0]?.monotonic_time_ns || event.monotonic_time_ns;
+          const correlation = [
+            `session ${integerText(event, 'session_id')}`,
+            `process ${event.process_id}`,
+            `seq ${integerText(event, 'sequence_number')}`,
+            `nav ${integerText(event, 'navigation_id')}`,
+            `frame ${integerText(event, 'frame_id')}`,
+            `artifact ${integerText(event, 'artifact_id')}`,
+            `parent ${integerText(event, 'parent_event_id')}`
+          ];
+          if (event.protocol_version === 2) {
+            correlation.push(`request ${integerText(event, 'request_id')}`);
+            const context = browserContextToken(event);
+            if (context) correlation.push(`browser context ${context}`);
+          }
           return {
-            relative: `+${((event.monotonic_time_ns - firstTime) / 1e6).toFixed(3)} ms`,
+            relative: formatMilliseconds(integerValue(event, 'monotonic_time_ns') - firstTime, '+'),
             source: 'live',
-            category: event.category || 'unknown',
-            type: event.type || 'unknown',
-            correlation: `seq ${event.sequence_number} · frame ${event.frame_id}`,
-            value: decodePayload(event),
+            category: event.category,
+            type: event.type,
+            correlation: correlation.join(' · '),
+            value: summarizeEventValue(event),
             index
           };
         });
@@ -1259,6 +1808,7 @@
           const values = [event.relative, event.source, event.category, event.type, event.correlation, event.value];
           values.forEach((value, index) => {
             const cell = document.createElement('span'); cell.textContent = String(value ?? ''); cell.title = cell.textContent;
+            cell.setAttribute('role', 'cell');
             if (index === 1) cell.className = event.source === 'live' ? 'source-live' : 'source-sample';
             if (index === 2) cell.className = 'category-cell';
             if (index === 4) cell.className = 'correlation-cell';
@@ -1335,8 +1885,9 @@
         elements.experimentNote.textContent = 'The origin is still Unknown. This draft does not claim a producer until a controlled replay verifies one.';
       }
 
-      function showScreen(name) {
+      function showScreen(name, trigger = null) {
         const screenName = name === 'backtraces' ? 'backtrace' : name;
+        if ((screenName === 'backtrace' || screenName === 'experiments') && !state.selectedField) return;
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
         document.querySelectorAll('.nav-button').forEach(button => {
           const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence');
@@ -1348,33 +1899,76 @@
           renderBacktrace();
         }
         if (screenName === 'experiments') renderExperiment();
+        if (!trigger?.classList.contains('nav-button')) {
+          requestAnimationFrame(() => {
+            if (screenName === 'traffic') {
+              const selectedRow = [...elements.requestRows.querySelectorAll('.request-row')]
+                .find(row => row.dataset.requestId === state.selectedRequestId);
+              (selectedRow ?? elements.requestFilter).focus({ preventScroll: true });
+              return;
+            }
+            document.querySelector(`#screen-${screenName} .back-button`)?.focus({ preventScroll: true });
+          });
+        }
       }
 
       async function refresh() {
+        if (state.refreshing) return;
+        state.refreshing = true;
         try {
           const response = await fetch('/api/events?limit=500', { cache: 'no-store' });
           if (!response.ok) throw new Error(`Broker returned ${response.status}`);
-          const body = await response.json();
-          state.events = Array.isArray(body.events) ? body.events : [];
+          const rawBody = await response.text();
+          let body;
+          try { body = JSON.parse(rawBody); } catch { throw new TypeError('Malformed broker response'); }
+          if (!isBrokerResponse(body)) throw new TypeError('Malformed broker response');
+          state.events = body.events;
           state.requests = [...sampleRequests, ...requestsFromEvents(state.events)];
+          let selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
+          if (!selectedRequest) {
+            state.selectedRequestId = '81';
+            state.fieldTab = 'body';
+            state.selectedField = fieldSets.body.find(field => field.traceable);
+            selectedRequest = sampleRequests.find(request => request.id === state.selectedRequestId);
+          }
+          updateSelectionSummary(selectedRequest);
           state.broker = 'connected';
           elements.capture.classList.remove('offline');
           elements.capture.querySelector('span:last-child').textContent = 'Capturing';
           elements.broker.classList.remove('offline');
           elements.broker.textContent = 'broker connected';
           elements.updated.textContent = `updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
-          elements.gaps.textContent = `${countSequenceGaps(state.events)} sequence gaps`;
+          const gapCount = countSequenceGaps(state.events);
+          elements.gaps.textContent = `${gapCount} sequence ${gapCount === 1n ? 'gap' : 'gaps'}`;
+          if (gapCount > 0n) {
+            setNetworkNotice('gap', `${gapCount} captured ${gapCount === 1n ? 'event is' : 'events are'} missing. Request rows may be incomplete.`);
+          } else if (state.events.length === 0) {
+            setNetworkNotice('empty', 'No live requests yet. Sample requests remain available for exploring the workspace.');
+          } else {
+            elements.networkNotice.hidden = true;
+          }
           renderRequests();
+          renderInspector();
           renderEvidence();
-        } catch {
+        } catch (error) {
           state.broker = 'unavailable';
           elements.capture.classList.add('offline');
           elements.capture.querySelector('span:last-child').textContent = 'Offline';
           elements.broker.classList.add('offline');
           elements.broker.textContent = 'broker unavailable';
-          elements.updated.textContent = 'sample data remains available';
+          const malformed = error instanceof TypeError && error.message === 'Malformed broker response';
+          const retainedEvidence = state.events.length > 0;
+          elements.updated.textContent = retainedEvidence ? 'last valid evidence retained' : 'sample data remains available';
+          setNetworkNotice(
+            malformed ? 'malformed' : 'disconnected',
+            malformed
+              ? `The broker returned malformed event data. ${retainedEvidence ? 'The last valid evidence remains visible.' : 'Sample requests remain available.'}`
+              : `The local evidence broker is disconnected. ${retainedEvidence ? 'The last valid evidence remains visible.' : 'Sample requests remain available.'}`
+          );
           renderRequests();
           renderEvidence();
+        } finally {
+          state.refreshing = false;
         }
       }
 
@@ -1386,11 +1980,29 @@
         elements.broker.textContent = 'standalone preview';
         elements.updated.textContent = 'open the app for live evidence';
         elements.gaps.textContent = '0 sequence gaps';
+        setNetworkNotice('empty', 'Standalone preview. Open the local app to capture live requests.');
         renderRequests();
         renderEvidence();
       }
 
-      document.querySelectorAll('[data-screen]').forEach(button => button.addEventListener('click', () => showScreen(button.dataset.screen)));
+      function enableTabKeyboardNavigation(selector) {
+        document.querySelectorAll(selector).forEach(tab => tab.addEventListener('keydown', event => {
+          if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+          const tabs = [...tab.closest('[role="tablist"]').querySelectorAll(selector)];
+          const current = tabs.indexOf(tab);
+          if (current < 0) return;
+          event.preventDefault();
+          const next = event.key === 'Home'
+            ? 0
+            : event.key === 'End'
+              ? tabs.length - 1
+              : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+          tabs[next].click();
+          tabs[next].focus();
+        }));
+      }
+
+      document.querySelectorAll('[data-screen]').forEach(button => button.addEventListener('click', () => showScreen(button.dataset.screen, button)));
       document.querySelectorAll('.type-filter').forEach(button => button.addEventListener('click', () => {
         state.requestType = button.dataset.filter;
         document.querySelectorAll('.type-filter').forEach(candidate => candidate.setAttribute('aria-pressed', String(candidate === button)));
@@ -1399,14 +2011,26 @@
       document.querySelectorAll('.field-tab').forEach(button => button.addEventListener('click', () => {
         state.fieldTab = button.dataset.fieldTab;
         state.selectedField = fieldSets[state.fieldTab].find(field => field.traceable) || null;
-        renderFields();
+        renderInspector();
         renderEvidence();
       }));
+      document.querySelectorAll('.inspector-tab').forEach(button => button.addEventListener('click', () => {
+        state.inspectorTab = button.dataset.inspectorTab;
+        if (state.inspectorTab === 'payload' && state.fieldTab === 'headers') {
+          state.fieldTab = 'body';
+          const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+          state.selectedField = request?.traceable ? fieldSets.body.find(field => field.traceable) : null;
+        }
+        renderInspector();
+        renderEvidence();
+      }));
+      enableTabKeyboardNavigation('.inspector-tab');
+      enableTabKeyboardNavigation('.field-tab');
       document.querySelectorAll('.view-switch button').forEach(button => button.addEventListener('click', () => {
         document.querySelectorAll('.view-switch button').forEach(candidate => candidate.setAttribute('aria-pressed', String(candidate === button)));
       }));
       elements.requestFilter.addEventListener('input', renderRequests);
-      elements.traceButton.addEventListener('click', () => showScreen('backtrace'));
+      elements.traceButton.addEventListener('click', () => showScreen('backtrace', elements.traceButton));
       document.querySelector('#theme-toggle').addEventListener('click', () => {
         const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
         document.documentElement.dataset.theme = next;
@@ -1417,7 +2041,7 @@
       if (savedTheme === 'light' || savedTheme === 'dark') document.documentElement.dataset.theme = savedTheme;
 
       renderRequests();
-      renderFields();
+      renderInspector();
       renderEvidence();
       if (location.protocol === 'file:') {
         useStandalonePreview();

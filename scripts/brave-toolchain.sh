@@ -10,7 +10,12 @@ readonly brave_directory="${REB_BRAVE_DIRECTORY:-${repository_root}/browser/work
 chromium_directory="$(cd "${brave_directory}/.." 2>/dev/null && pwd || true)"
 readonly chromium_directory
 readonly output_directory="${REB_BRAVE_OUTPUT_DIRECTORY:-out/Component_arm64}"
-readonly probe_object="obj/brave/components/reverse_engineering_browser/renderer/native_probe_sink.o"
+readonly probe_objects=(
+  "obj/brave/components/reverse_engineering_browser/renderer/native_probe_sink.o"
+  "obj/brave/components/reverse_engineering_browser/browser/native_network_capture_sink.o"
+  "obj/brave/browser/core/brave_proxying_url_loader_factory.o"
+  "obj/third_party/blink/renderer/platform/loader/loader/resource_request_sender.o"
+)
 
 usage() {
   echo "Usage: $0 <doctor|gen|probe-check|build|start> [arguments...]"
@@ -44,6 +49,7 @@ configure_brave_python() {
   for candidate in "${candidates[@]}"; do
     if [[ -x "${candidate}/python3" ]]; then
       export PATH="${candidate}:${brave_directory}/vendor/depot_tools:${PATH}"
+      export PYTHONPATH="${brave_directory}/script${PYTHONPATH:+:${PYTHONPATH}}"
       return
     fi
   done
@@ -102,7 +108,7 @@ case "${command_name}" in
     (
       cd "${chromium_directory}"
       buildtools/mac/gn gen "${output_directory}"
-      autoninja -C "${output_directory}" "${probe_object}"
+      autoninja -C "${output_directory}" "${probe_objects[@]}"
     )
     ;;
   build|start)

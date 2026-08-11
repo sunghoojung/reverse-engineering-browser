@@ -12,3 +12,18 @@ source_set("renderer") {
 
   deps = [ "//base" ]
 }
+
+source_set("browser") {
+  sources = [
+    "browser/native_network_capture_sink.cc",
+    "browser/native_network_capture_sink.h",
+    "common/native_probe_event.h",
+  ]
+
+  deps = [
+    "//base",
+    "//net",
+    "//services/network/public/cpp",
+    "//services/network/public/mojom",
+  ]
+}

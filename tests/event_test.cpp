@@ -135,10 +135,12 @@ int main() {
   CHECK((truncated.header.flags & static_cast<std::uint16_t>(reb::EventFlag::kPayloadTruncated)) ==
         0);
 
-  truncated.header.flags |= static_cast<std::uint16_t>(reb::EventFlag::kPayloadTruncated);
+  truncated.header.flags |= static_cast<std::uint16_t>(reb::EventFlag::kPayloadTruncated) |
+                            static_cast<std::uint16_t>(reb::EventFlag::kFromCache);
   CHECK(reb::SetInlinePayload(truncated, "exact"));
   CHECK((truncated.header.flags & static_cast<std::uint16_t>(reb::EventFlag::kPayloadTruncated)) ==
         0);
+  CHECK((truncated.header.flags & static_cast<std::uint16_t>(reb::EventFlag::kFromCache)) != 0);
 
   reb::EventRecord malformed = event;
   malformed.header.category = reb::EventCategory::kUnknown;

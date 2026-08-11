@@ -15,6 +15,11 @@ constexpr std::uint16_t kKnownEventFlags =
     static_cast<std::uint16_t>(EventFlag::kFromCache) |
     static_cast<std::uint16_t>(EventFlag::kFromServiceWorker);
 
+constexpr std::uint16_t ClearEventFlag(const std::uint16_t flags, const EventFlag flag) noexcept {
+  const auto flag_mask = static_cast<std::uint16_t>(flag);
+  return static_cast<std::uint16_t>(flags & static_cast<std::uint16_t>(~flag_mask));
+}
+
 bool IsKnownCategory(const EventCategory category) noexcept {
   switch (category) {
     case EventCategory::kCanvas:
@@ -78,7 +83,7 @@ bool SetInlinePayload(EventRecord& event, const std::span<const std::byte> paylo
   std::fill(event.inline_payload.begin(), event.inline_payload.end(), std::byte{0});
   std::copy(payload.begin(), payload.end(), event.inline_payload.begin());
   event.header.payload_size = static_cast<std::uint32_t>(payload.size());
-  event.header.flags &= ~static_cast<std::uint16_t>(EventFlag::kPayloadTruncated);
+  event.header.flags = ClearEventFlag(event.header.flags, EventFlag::kPayloadTruncated);
   return true;
 }
 
@@ -88,7 +93,7 @@ bool SetInlinePayload(EventRecord& event, const std::string_view payload) noexce
 }
 
 void SetInlinePayloadPrefix(EventRecord& event, const std::string_view payload) noexcept {
-  event.header.flags &= ~static_cast<std::uint16_t>(EventFlag::kPayloadTruncated);
+  event.header.flags = ClearEventFlag(event.header.flags, EventFlag::kPayloadTruncated);
   const std::size_t size = std::min(payload.size(), event.inline_payload.size());
   const auto* data = reinterpret_cast<const std::byte*>(payload.data());
   static_cast<void>(SetInlinePayload(event, std::span<const std::byte>(data, size)));

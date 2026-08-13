@@ -49,16 +49,18 @@ make brave-probe-check
 The repository includes a dependency-free C++ vertical slice for the probe event path:
 
 - a fixed-size, versioned event record;
-- a bounded single-producer, single-consumer ring buffer;
+- bounded multi-producer, single-consumer shared-memory queues;
 - explicit dropped-event accounting;
 - a bounded broker with validation, sequence-gap detection, and eviction accounting;
+- an authenticated, user-only Unix socket from Brave to the broker;
 - a native binary event stream and versioned JSONL evidence store;
 - a native macOS Origin Trace application that reads the broker evidence store;
 - a threaded producer and consumer demo;
 - unit tests and sanitizer support.
 
-The current producer is a deterministic development stand-in for the Brave adapter. It
-validates the complete local path before Chromium shared memory and Mojo IPC are added.
+The deterministic producer validates the same broker boundary without launching
+Brave. The tracked Brave integration carries renderer records through shared
+memory and Mojo into the browser process, then sends them to the broker socket.
 
 ## Native development
 
@@ -96,6 +98,18 @@ make ui
 ```
 
 Then open `http://127.0.0.1:7319`.
+
+After building the complete custom Brave application, launch one live capture
+session with:
+
+```sh
+make live
+```
+
+The launcher creates a session-scoped broker socket and token, opens Origin
+Trace, and starts the custom Brave executable with the matching session flags.
+Set `REB_BRAVE_BINARY` when the executable is outside the default component
+output directory.
 
 ## CI and release builds
 

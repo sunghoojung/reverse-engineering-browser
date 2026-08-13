@@ -42,12 +42,12 @@ flowchart TB
         subgraph RendererA["Sandboxed renderer process"]
             BlinkA["Blink C++ probes"]
             V8A["Optional V8 probes"]
-            RingA["Shared-memory SPSC ring buffer"]
+            RingA["Shared-memory MPSC queue"]
         end
 
         subgraph RendererB["Additional renderer or OOPIF"]
             BlinkB["Blink C++ probes"]
-            RingB["Shared-memory SPSC ring buffer"]
+            RingB["Shared-memory MPSC queue"]
         end
 
         subgraph Services["Chromium services"]
@@ -190,13 +190,15 @@ GPU and WebGL operations may execute outside the renderer. Use dedicated probes 
 
 ## Shared-memory event transport
 
-Each renderer receives a bounded single-producer, single-consumer ring buffer from the browser process.
+Each renderer receives a bounded multi-producer, single-consumer queue from the
+browser process. The render thread and worker threads can produce records, while
+the browser process remains the only consumer.
 
 ```mermaid
 flowchart LR
-    Producer["Renderer producer"] -->|"writes event"| Slots["Fixed shared-memory slots"]
+    Producer["Render thread and workers"] -->|"reserve and write"| Slots["Fixed shared-memory slots"]
     Slots -->|"reads batch"| Consumer["Browser-process consumer"]
-    Producer --> Head["Producer-owned head index"]
+    Producer --> Head["Atomic reservation index"]
     Consumer --> Tail["Consumer-owned tail index"]
     Head -. "separate cache line" .-> Tail
     Full["Queue full"] --> Drop["Increment dropped counter"]
@@ -215,13 +217,14 @@ Large payloads should use a separate bounded shared-memory slab or Mojo data pip
 
 ## Local transport
 
-The browser process owns one long-lived connection to the harness:
+The browser process owns one session-scoped connection to the harness:
 
 - Unix domain socket on macOS and Linux;
 - named pipe on Windows;
-- binary, length-prefixed, versioned messages;
-- authenticated peer with user-only operating-system permissions;
-- bounded outgoing batches with explicit drop behavior.
+- a fixed, versioned authentication hello followed by fixed-size binary records;
+- a 256-bit session token stored in a user-owned mode-0600 file;
+- a mode-0600 socket and exact session-ID validation;
+- a bounded outgoing queue with explicit gap records after drops.
 
 The local transport carries no website traffic and must never listen on a public network interface.
 

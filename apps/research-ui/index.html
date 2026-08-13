@@ -1342,6 +1342,7 @@
           Array.isArray(body.events) &&
           isSafeIntegerInRange(body.count, 0, 5000) &&
           body.count === body.events.length &&
+          (body.broker_connected === undefined || typeof body.broker_connected === 'boolean') &&
           body.events.every(isBrokerEvent);
       }
 
@@ -1932,15 +1933,20 @@
             selectedRequest = sampleRequests.find(request => request.id === state.selectedRequestId);
           }
           updateSelectionSummary(selectedRequest);
-          state.broker = 'connected';
-          elements.capture.classList.remove('offline');
-          elements.capture.querySelector('span:last-child').textContent = 'Capturing';
-          elements.broker.classList.remove('offline');
-          elements.broker.textContent = 'broker connected';
-          elements.updated.textContent = `updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+          const brokerConnected = body.broker_connected !== false;
+          state.broker = brokerConnected ? 'connected' : 'unavailable';
+          elements.capture.classList.toggle('offline', !brokerConnected);
+          elements.capture.querySelector('span:last-child').textContent = brokerConnected ? 'Capturing' : 'Offline';
+          elements.broker.classList.toggle('offline', !brokerConnected);
+          elements.broker.textContent = brokerConnected ? 'broker connected' : 'broker unavailable';
+          elements.updated.textContent = brokerConnected
+            ? `updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
+            : (state.events.length > 0 ? 'last valid evidence retained' : 'sample data remains available');
           const gapCount = countSequenceGaps(state.events);
           elements.gaps.textContent = `${gapCount} sequence ${gapCount === 1n ? 'gap' : 'gaps'}`;
-          if (gapCount > 0n) {
+          if (!brokerConnected) {
+            setNetworkNotice('disconnected', `The local evidence broker is disconnected. ${state.events.length > 0 ? 'The last valid evidence remains visible.' : 'Sample requests remain available.'}`);
+          } else if (gapCount > 0n) {
             setNetworkNotice('gap', `${gapCount} captured ${gapCount === 1n ? 'event is' : 'events are'} missing. Request rows may be incomplete.`);
           } else if (state.events.length === 0) {
             setNetworkNotice('empty', 'No live requests yet. Sample requests remain available for exploring the workspace.');

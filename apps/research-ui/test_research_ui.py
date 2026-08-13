@@ -1,5 +1,6 @@
 import json
 import shutil
+import socket
 import subprocess
 import tempfile
 import unittest
@@ -43,6 +44,20 @@ class ResearchUiTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "malformed event"):
                 handler.load_events()
+
+    def test_broker_connection_tracks_unix_socket_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = Path(directory) / "broker.sock"
+            handler = object.__new__(ResearchHandler)
+            handler.broker_socket = socket_path
+            self.assertFalse(handler.broker_connected())
+
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                listener.bind(str(socket_path))
+                self.assertTrue(handler.broker_connected())
+            finally:
+                listener.close()
 
     def test_ui_keeps_captured_values_out_of_html_injection_paths(self) -> None:
         html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")

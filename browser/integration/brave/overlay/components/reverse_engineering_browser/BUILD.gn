@@ -3,25 +3,53 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this file,
 # You can obtain one at https://mozilla.org/MPL/2.0/.
 
+import("//mojo/public/tools/bindings/mojom.gni")
+
+mojom("mojom") {
+  sources = [ "common/native_probe_transport.mojom" ]
+
+  public_deps = [ "//mojo/public/mojom/base" ]
+}
+
 source_set("renderer") {
   sources = [
     "common/native_probe_event.h",
+    "common/native_probe_queue.h",
     "renderer/native_probe_sink.cc",
     "renderer/native_probe_sink.h",
+    "renderer/native_probe_transport.cc",
+    "renderer/native_probe_transport.h",
   ]
 
-  deps = [ "//base" ]
+  deps = [
+    ":mojom",
+    "//base",
+    "//content/public/renderer",
+    "//mojo/public/cpp/base",
+    "//mojo/public/cpp/bindings",
+  ]
 }
 
 source_set("browser") {
   sources = [
     "browser/native_network_capture_sink.cc",
     "browser/native_network_capture_sink.h",
+    "browser/native_probe_host.cc",
+    "browser/native_probe_host.h",
+    "browser/native_probe_session.cc",
+    "browser/native_probe_session.h",
+    "browser/native_probe_socket_client.cc",
+    "browser/native_probe_socket_client.h",
     "common/native_probe_event.h",
+    "common/native_probe_ipc.h",
+    "common/native_probe_queue.h",
   ]
 
   deps = [
+    ":mojom",
     "//base",
+    "//mojo/public/cpp/base",
+    "//mojo/public/cpp/bindings",
     "//net",
     "//services/network/public/cpp",
     "//services/network/public/mojom",

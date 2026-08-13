@@ -12,7 +12,8 @@ The event broker is the center of the system.
 
 ## Implemented vertical slice
 
-The broker accepts fixed 320-byte native records on standard input, validates
+The broker accepts fixed 320-byte native records on standard input or an
+authenticated Unix socket, validates
 their protocol envelope, enum values, flags, payload bounds, and reserved
 fields, detects sequence gaps, retains a bounded snapshot, and writes a
 versioned JSONL evidence store. Sequence tracking is bounded by the broker
@@ -32,5 +33,19 @@ The command connects a deterministic native producer to the broker and creates
 `build/sessions/demo.jsonl`. Invalid or truncated records fail closed. The
 broker reports accepted records, invalid records, gaps, and retention evictions.
 
-This is the development transport. The browser-process implementation will
-feed the same broker model over authenticated local IPC.
+The socket mode requires one session identifier and a user-owned mode-0600
+token file. The broker creates the token when needed, creates a mode-0600 Unix
+socket, authenticates one Brave connection, rejects records from any other
+session, and removes the socket after disconnect.
+
+```sh
+build/reb-event-broker \
+  --store build/sessions/live/events.jsonl \
+  --socket /tmp/origin-trace.sock \
+  --token-file build/sessions/live/broker.token \
+  --session-id 123
+```
+
+Run `make socket-e2e` to validate authentication, permissions, ingestion, and
+socket cleanup without launching Brave. Run `make live` after a complete custom
+Brave app build to start the broker, Origin Trace, and Brave as one session.

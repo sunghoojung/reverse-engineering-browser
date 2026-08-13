@@ -13,8 +13,7 @@
 
 namespace reb {
 
-NativeProbeHost::NativeProbeHost(NativeProbeSession& session)
-    : session_(session) {
+NativeProbeHost::NativeProbeHost(NativeProbeSession& session) : session_(session) {
   session_->AddHost(*this);
 }
 
@@ -23,8 +22,7 @@ NativeProbeHost::~NativeProbeHost() {
   session_->RemoveHost(*this);
 }
 
-void NativeProbeHost::BindClient(
-    mojo::PendingRemote<mojom::NativeProbeClient> client) {
+void NativeProbeHost::BindClient(mojo::PendingRemote<mojom::NativeProbeClient> client) {
   client_.Bind(std::move(client));
   if (session_->IsActive()) {
     Configure(session_->session_id());
@@ -41,8 +39,7 @@ void NativeProbeHost::Configure(const std::uint64_t session_id) {
     return;
   }
 
-  queue_region_ = base::UnsafeSharedMemoryRegion::Create(
-      sizeof(NativeProbeQueue));
+  queue_region_ = base::UnsafeSharedMemoryRegion::Create(sizeof(NativeProbeQueue));
   if (!queue_region_.IsValid()) {
     return;
   }
@@ -52,8 +49,7 @@ void NativeProbeHost::Configure(const std::uint64_t session_id) {
     return;
   }
 
-  queue_ = std::construct_at(
-      static_cast<NativeProbeQueue*>(queue_mapping_.memory()));
+  queue_ = std::construct_at(static_cast<NativeProbeQueue*>(queue_mapping_.memory()));
   reported_dropped_events_ = 0;
   base::UnsafeSharedMemoryRegion renderer_region = queue_region_.Duplicate();
   if (!renderer_region.IsValid()) {
@@ -90,9 +86,7 @@ void NativeProbeHost::Drain() {
 
     const std::uint64_t dropped = queue_->DroppedCount();
     if (drained_event && dropped > reported_dropped_events_) {
-      session_->Emit(
-          MakeNativeProbeGapEvent(last_event,
-                                  dropped - reported_dropped_events_));
+      session_->Emit(MakeNativeProbeGapEvent(last_event, dropped - reported_dropped_events_));
       reported_dropped_events_ = dropped;
     }
 

@@ -34,8 +34,7 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
   void Connect();
 
   // mojom::NativeProbeClient:
-  void Configure(std::uint64_t session_id,
-                 base::UnsafeSharedMemoryRegion queue_region) override;
+  void Configure(std::uint64_t session_id, base::UnsafeSharedMemoryRegion queue_region) override;
   void Disable() override;
 
  private:
@@ -48,8 +47,7 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
   void EmitEvent(const NativeProbeEvent& event) noexcept;
 
   mojo::SharedRemote<mojom::NativeProbeHost> host_;
-  base::ThreadLocalOwnedPointer<mojo::SharedRemote<mojom::NativeProbeHost>>
-      thread_hosts_;
+  base::ThreadLocalOwnedPointer<mojo::SharedRemote<mojom::NativeProbeHost>> thread_hosts_;
   mojo::Receiver<mojom::NativeProbeClient> receiver_{this};
   // Mappings are retained for process lifetime so Disable cannot unmap a queue
   // after a worker has loaded its pointer but before that worker finishes its

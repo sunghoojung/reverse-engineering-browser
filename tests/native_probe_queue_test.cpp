@@ -13,8 +13,7 @@ namespace {
 constexpr std::uint64_t kProducerCount = 4;
 constexpr std::uint64_t kEventsPerProducer = 20000;
 
-reb::NativeProbeEvent Event(const std::uint64_t producer,
-                            const std::uint64_t sequence) {
+reb::NativeProbeEvent Event(const std::uint64_t producer, const std::uint64_t sequence) {
   reb::NativeProbeEvent event;
   event.header.process_id = static_cast<std::uint32_t>(producer + 1);
   event.header.sequence_number = sequence + 1;
@@ -27,21 +26,18 @@ bool TestLayoutAndBoundedDrop() {
     return false;
   }
 
-  for (std::uint64_t index = 0; index < reb::kNativeProbeQueueCapacity;
-       ++index) {
+  for (std::uint64_t index = 0; index < reb::kNativeProbeQueueCapacity; ++index) {
     if (!queue.TryPush(Event(0, index))) {
       return false;
     }
   }
 
-  if (queue.TryPush(Event(0, reb::kNativeProbeQueueCapacity)) ||
-      queue.DroppedCount() != 1) {
+  if (queue.TryPush(Event(0, reb::kNativeProbeQueueCapacity)) || queue.DroppedCount() != 1) {
     return false;
   }
 
   reb::NativeProbeEvent event;
-  for (std::uint64_t index = 0; index < reb::kNativeProbeQueueCapacity;
-       ++index) {
+  for (std::uint64_t index = 0; index < reb::kNativeProbeQueueCapacity; ++index) {
     if (!queue.TryPop(event) || event.header.sequence_number != index + 1) {
       return false;
     }
@@ -65,15 +61,13 @@ bool TestGapMarker() {
   reference.header.session_id = 55;
   const reb::NativeProbeEvent gap =
       reb::MakeNativeProbeGapEvent(reference, 18446744073709551615ULL);
-  const std::string_view payload(
-      reinterpret_cast<const char*>(gap.inline_payload.data()),
-      gap.header.payload_size);
+  const std::string_view payload(reinterpret_cast<const char*>(gap.inline_payload.data()),
+                                 gap.header.payload_size);
   return gap.header.category == reb::NativeProbeCategory::kNetwork &&
          gap.header.type == reb::NativeProbeType::kGap &&
          gap.header.sequence_number == reference.header.sequence_number &&
          gap.header.monotonic_time_ns == 1234 && gap.header.session_id == 55 &&
-         gap.header.process_id == reference.header.process_id &&
-         payload == "18446744073709551615";
+         gap.header.process_id == reference.header.process_id && payload == "18446744073709551615";
 }
 
 bool TestConcurrentProducers() {
@@ -88,8 +82,7 @@ bool TestConcurrentProducers() {
       while (!start.load(std::memory_order_acquire)) {
         std::this_thread::yield();
       }
-      for (std::uint64_t sequence = 0; sequence < kEventsPerProducer;
-           ++sequence) {
+      for (std::uint64_t sequence = 0; sequence < kEventsPerProducer; ++sequence) {
         while (!queue.TryPush(Event(producer, sequence))) {
           std::this_thread::yield();
         }
@@ -103,8 +96,7 @@ bool TestConcurrentProducers() {
   bool ordered = true;
   start.store(true, std::memory_order_release);
 
-  while (producers_done.load(std::memory_order_acquire) != kProducerCount ||
-         !queue.Empty()) {
+  while (producers_done.load(std::memory_order_acquire) != kProducerCount || !queue.Empty()) {
     reb::NativeProbeEvent event;
     if (!queue.TryPop(event)) {
       std::this_thread::yield();
@@ -138,8 +130,8 @@ bool TestConcurrentProducers() {
 }  // namespace
 
 int main() {
-  if (!TestLayoutAndBoundedDrop() || !TestNotificationCoalescing() ||
-      !TestGapMarker() || !TestConcurrentProducers()) {
+  if (!TestLayoutAndBoundedDrop() || !TestNotificationCoalescing() || !TestGapMarker() ||
+      !TestConcurrentProducers()) {
     std::cerr << "native_probe_queue_test failed\n";
     return 1;
   }

@@ -7,7 +7,7 @@ readonly script_dir
 repository_root="$(cd "${script_dir}/.." && pwd)"
 readonly repository_root
 readonly brave_directory="${REB_BRAVE_DIRECTORY:-${repository_root}/browser/worktree/src/brave}"
-chromium_directory="$(cd "${brave_directory}/.." 2>/dev/null && pwd || true)"
+chromium_directory="$(cd "${brave_directory}/.." 2>/dev/null && pwd)" || chromium_directory=""
 readonly chromium_directory
 readonly output_directory="${REB_BRAVE_OUTPUT_DIRECTORY:-out/Component_arm64}"
 readonly probe_objects=(

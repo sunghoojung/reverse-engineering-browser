@@ -1,13 +1,13 @@
+#include <unistd.h>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
-#include <charconv>
 #include <iostream>
 #include <span>
 #include <string>
 #include <string_view>
-#include <unistd.h>
 
 #include "reb/event.hpp"
 #include "reb/local_ipc.hpp"
@@ -35,8 +35,7 @@ reb::EventRecord BuildEvent(const reb::EventCategory category,
                             const std::uint64_t sequence,
                             const std::string_view payload,
                             const std::uint64_t session_id) {
-  reb::EventRecord event =
-      reb::MakeEvent(category, type, sequence, MonotonicTimeNs(), session_id);
+  reb::EventRecord event = reb::MakeEvent(category, type, sequence, MonotonicTimeNs(), session_id);
   event.header.process_id = 10;
   event.header.thread_id = 20;
   event.header.navigation_id = kNavigationId;
@@ -61,10 +60,8 @@ reb::EventRecord BuildNetworkEvent(const reb::EventType type,
 }
 
 bool ParseSessionId(const std::string_view value, std::uint64_t& session_id) {
-  const auto parsed = std::from_chars(value.data(), value.data() + value.size(),
-                                      session_id);
-  return parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size() &&
-         session_id != 0;
+  const auto parsed = std::from_chars(value.data(), value.data() + value.size(), session_id);
+  return parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size() && session_id != 0;
 }
 
 bool ParseOptions(const int argc, char* argv[], Options& options) {
@@ -90,26 +87,24 @@ bool ParseOptions(const int argc, char* argv[], Options& options) {
 int main(const int argc, char* argv[]) {
   Options options;
   if (!ParseOptions(argc, argv, options)) {
-    std::cerr << "Usage: " << argv[0]
-              << " [--socket PATH --token-file PATH --session-id ID]\n";
+    std::cerr << "Usage: " << argv[0] << " [--socket PATH --token-file PATH --session-id ID]\n";
     return 2;
   }
 
   std::array events = {
       BuildEvent(reb::EventCategory::kNavigator, reb::EventType::kPropertyRead, 1,
                  "navigator.languages", options.session_id),
-      BuildEvent(reb::EventCategory::kCanvas, reb::EventType::kApiCall, 2,
-                 "canvas.toDataURL", options.session_id),
-      BuildEvent(reb::EventCategory::kWasm, reb::EventType::kModuleInstantiated, 3,
-                 "wasm-module-2", options.session_id),
-      BuildNetworkEvent(reb::EventType::kRequestInitiated, 4,
-                        "POST collector.example.test", options.session_id),
-      BuildNetworkEvent(reb::EventType::kRequestStarted, 5,
-                        "POST collector.example.test", options.session_id),
-      BuildNetworkEvent(reb::EventType::kResponseStarted, 6,
-                        "application/json; protocol=h2", options.session_id),
-      BuildNetworkEvent(reb::EventType::kRequestCompleted, 7, "completed",
+      BuildEvent(reb::EventCategory::kCanvas, reb::EventType::kApiCall, 2, "canvas.toDataURL",
+                 options.session_id),
+      BuildEvent(reb::EventCategory::kWasm, reb::EventType::kModuleInstantiated, 3, "wasm-module-2",
+                 options.session_id),
+      BuildNetworkEvent(reb::EventType::kRequestInitiated, 4, "POST collector.example.test",
                         options.session_id),
+      BuildNetworkEvent(reb::EventType::kRequestStarted, 5, "POST collector.example.test",
+                        options.session_id),
+      BuildNetworkEvent(reb::EventType::kResponseStarted, 6, "application/json; protocol=h2",
+                        options.session_id),
+      BuildNetworkEvent(reb::EventType::kRequestCompleted, 7, "completed", options.session_id),
   };
 
   events[2].header.parent_event_id = 2;
@@ -139,8 +134,7 @@ int main(const int argc, char* argv[]) {
       return 1;
     }
     for (const reb::EventRecord& event : events) {
-      if (!reb::WriteExact(descriptor, std::as_bytes(std::span(&event, 1)),
-                           error)) {
+      if (!reb::WriteExact(descriptor, std::as_bytes(std::span(&event, 1)), error)) {
         std::cerr << error << '\n';
         close(descriptor);
         return 1;

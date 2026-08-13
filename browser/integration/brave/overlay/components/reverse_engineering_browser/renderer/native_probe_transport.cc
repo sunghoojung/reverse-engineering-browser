@@ -31,19 +31,16 @@ void NativeProbeTransport::Connect() {
   }
 
   mojo::PendingRemote<mojom::NativeProbeHost> pending_host;
-  content::RenderThread::Get()->BindHostReceiver(
-      pending_host.InitWithNewPipeAndPassReceiver());
-  host_.Bind(std::move(pending_host),
-             base::SequencedTaskRunner::GetCurrentDefault());
+  content::RenderThread::Get()->BindHostReceiver(pending_host.InitWithNewPipeAndPassReceiver());
+  host_.Bind(std::move(pending_host), base::SequencedTaskRunner::GetCurrentDefault());
   host_.set_disconnect_handler(
       base::BindOnce(&NativeProbeTransport::Disable, base::Unretained(this)),
       base::SequencedTaskRunner::GetCurrentDefault());
   host_->BindClient(receiver_.BindNewPipeAndPassRemote());
 }
 
-void NativeProbeTransport::Configure(
-    const std::uint64_t session_id,
-    base::UnsafeSharedMemoryRegion queue_region) {
+void NativeProbeTransport::Configure(const std::uint64_t session_id,
+                                     base::UnsafeSharedMemoryRegion queue_region) {
   Disable();
   if (session_id == 0 || !queue_region.IsValid() ||
       queue_region.GetSize() != sizeof(NativeProbeQueue)) {
@@ -86,8 +83,7 @@ void NativeProbeTransport::EmitEvent(const NativeProbeEvent& event) noexcept {
 
   auto* thread_host = thread_hosts_.Get();
   if (!thread_host) {
-    thread_hosts_.Set(
-        std::make_unique<mojo::SharedRemote<mojom::NativeProbeHost>>(host_));
+    thread_hosts_.Set(std::make_unique<mojo::SharedRemote<mojom::NativeProbeHost>>(host_));
     thread_host = thread_hosts_.Get();
   }
   if (*thread_host) {

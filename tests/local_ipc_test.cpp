@@ -2,8 +2,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <array>
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -46,8 +46,7 @@ bool TestSecureTokenFile() {
            reb::ConstantTimeTokenEquals(created, loaded);
 
   struct stat status {};
-  passed = passed && stat(path.c_str(), &status) == 0 &&
-           (status.st_mode & 0777) == 0600;
+  passed = passed && stat(path.c_str(), &status) == 0 && (status.st_mode & 0777) == 0600;
 
   if (chmod(path.c_str(), 0644) != 0) {
     passed = false;

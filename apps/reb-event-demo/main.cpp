@@ -13,10 +13,9 @@ constexpr std::uint64_t kSessionId = 1;
 constexpr std::uint64_t kEventCount = 100'000;
 
 std::uint64_t MonotonicTimeNs() {
-  return static_cast<std::uint64_t>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now().time_since_epoch())
-          .count());
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count());
 }
 
 }  // namespace
@@ -28,11 +27,9 @@ int main() {
 
   std::thread producer([&ring, &producer_done] {
     for (std::uint64_t sequence = 1; sequence <= kEventCount; ++sequence) {
-      const reb::EventRecord event = reb::MakeEvent(reb::EventCategory::kCanvas,
-                                                    reb::EventType::kApiCall,
-                                                    sequence,
-                                                    MonotonicTimeNs(),
-                                                    kSessionId);
+      const reb::EventRecord event =
+          reb::MakeEvent(reb::EventCategory::kCanvas, reb::EventType::kApiCall, sequence,
+                         MonotonicTimeNs(), kSessionId);
       static_cast<void>(ring.TryPush(event));
     }
     producer_done.store(true, std::memory_order_release);

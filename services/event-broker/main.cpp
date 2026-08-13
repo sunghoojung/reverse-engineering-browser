@@ -104,17 +104,14 @@ bool ParseOptions(const int argc, char* argv[], Options& options) {
   if (options.store_path.empty()) {
     return false;
   }
-  const bool any_socket_option = !options.socket_path.empty() ||
-                                 !options.token_path.empty() ||
-                                 options.session_id != 0;
-  const bool all_socket_options = !options.socket_path.empty() &&
-                                 !options.token_path.empty() &&
-                                 options.session_id != 0;
+  const bool any_socket_option =
+      !options.socket_path.empty() || !options.token_path.empty() || options.session_id != 0;
+  const bool all_socket_options =
+      !options.socket_path.empty() && !options.token_path.empty() && options.session_id != 0;
   return !any_socket_option || all_socket_options;
 }
 
-bool StoreEvent(reb::EventBroker& broker, std::ofstream& store,
-                const reb::EventRecord& event) {
+bool StoreEvent(reb::EventBroker& broker, std::ofstream& store, const reb::EventRecord& event) {
   if (broker.Ingest(event) != reb::IngestStatus::kAccepted) {
     return true;
   }
@@ -141,23 +138,22 @@ bool IngestStandardInput(reb::EventBroker& broker, std::ofstream& store) {
   return true;
 }
 
-bool IngestSocket(const int descriptor, const Options& options,
+bool IngestSocket(const int descriptor,
+                  const Options& options,
                   const reb::LocalIpcToken& expected_token,
-                  reb::EventBroker& broker, std::ofstream& store) {
+                  reb::EventBroker& broker,
+                  std::ofstream& store) {
   reb::LocalIpcHello hello;
   std::string error;
-  if (!reb::ReadExact(descriptor,
-                      std::as_writable_bytes(std::span(&hello, 1)), error)) {
+  if (!reb::ReadExact(descriptor, std::as_writable_bytes(std::span(&hello, 1)), error)) {
     std::cerr << "Unable to read broker authentication: " << error << '\n';
     return false;
   }
   const bool reserved_clear = std::ranges::all_of(
       hello.reserved, [](const std::byte value) { return value == std::byte{0}; });
-  if (hello.magic != reb::kLocalIpcMagic ||
-      hello.version != reb::kLocalIpcVersion ||
-      hello.size != sizeof(reb::LocalIpcHello) ||
-      hello.session_id != options.session_id || !reserved_clear ||
-      !reb::ConstantTimeTokenEquals(hello.token, expected_token)) {
+  if (hello.magic != reb::kLocalIpcMagic || hello.version != reb::kLocalIpcVersion ||
+      hello.size != sizeof(reb::LocalIpcHello) || hello.session_id != options.session_id ||
+      !reserved_clear || !reb::ConstantTimeTokenEquals(hello.token, expected_token)) {
     std::cerr << "Broker authentication rejected\n";
     return false;
   }
@@ -167,8 +163,7 @@ bool IngestSocket(const int descriptor, const Options& options,
     auto bytes = std::as_writable_bytes(std::span(&event, 1));
     std::size_t offset = 0;
     while (offset < bytes.size()) {
-      const ssize_t count =
-          read(descriptor, bytes.data() + offset, bytes.size() - offset);
+      const ssize_t count = read(descriptor, bytes.data() + offset, bytes.size() - offset);
       if (count > 0) {
         offset += static_cast<std::size_t>(count);
         continue;
@@ -230,8 +225,7 @@ int ListenOnUnixSocket(const std::string& path) {
 }
 
 void PrintStats(const reb::BrokerStats& stats) {
-  std::cerr << "Broker stopped: accepted=" << stats.accepted
-            << " invalid=" << stats.invalid
+  std::cerr << "Broker stopped: accepted=" << stats.accepted << " invalid=" << stats.invalid
             << " sequence_gaps=" << stats.sequence_gaps
             << " sequence_gaps_saturated=" << stats.sequence_gaps_saturated
             << " sequence_tracking_evictions=" << stats.sequence_tracking_evictions
@@ -273,8 +267,7 @@ int main(const int argc, char* argv[]) {
     std::cerr << "Broker listening on " << options.socket_path << '\n';
     const ScopedDescriptor connection(accept(listener.get(), nullptr, nullptr));
     if (!connection.is_valid()) {
-      std::cerr << "Unable to accept browser connection: " << std::strerror(errno)
-                << '\n';
+      std::cerr << "Unable to accept browser connection: " << std::strerror(errno) << '\n';
       return 1;
     }
     ingested = IngestSocket(connection.get(), options, token, broker, store);

@@ -3,6 +3,7 @@ build/
 compile_commands.json
 *.o
 *.out
+__pycache__/
 
 # Brave and Chromium are generated upstream worktrees, never repository content.
 /browser/worktree/*

@@ -113,9 +113,18 @@ output directory.
 
 ## CI and release builds
 
-Every pull request runs the test suite on macOS and Ubuntu. The macOS job also
-builds and verifies the application bundle, then keeps a downloadable preview
-for three days.
+Every pull request runs formatting, shell, Python, workflow, repository hygiene,
+and evidence-contract checks. The native test suite runs on macOS and Ubuntu.
+Linux also runs the full end-to-end and sanitizer paths. The macOS job builds
+and verifies the application bundle, then keeps a downloadable preview for
+three days.
+
+After installing the pinned tool versions listed in the CI workflow, run the
+fast source and repository checks with:
+
+```sh
+make lint
+```
 
 To publish a versioned macOS download, push a version tag:
 

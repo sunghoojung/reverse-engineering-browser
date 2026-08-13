@@ -54,16 +54,14 @@ int HexValue(const char value) noexcept {
   return -1;
 }
 
-bool LoadToken(const base::FilePath& path,
-               NativeProbeLocalIpcToken& token) {
-  const int descriptor =
-      open(path.value().c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+bool LoadToken(const base::FilePath& path, NativeProbeLocalIpcToken& token) {
+  const int descriptor = open(path.value().c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
   if (descriptor < 0) {
     return false;
   }
   struct stat status {};
-  if (fstat(descriptor, &status) != 0 || !S_ISREG(status.st_mode) ||
-      status.st_uid != geteuid() || (status.st_mode & 0777) != 0600) {
+  if (fstat(descriptor, &status) != 0 || !S_ISREG(status.st_mode) || status.st_uid != geteuid() ||
+      (status.st_mode & 0777) != 0600) {
     close(descriptor);
     return false;
   }
@@ -71,8 +69,7 @@ bool LoadToken(const base::FilePath& path,
   std::array<char, kNativeProbeLocalIpcTokenSize * 2 + 2> buffer{};
   std::size_t size = 0;
   while (size < buffer.size()) {
-    const ssize_t count =
-        read(descriptor, buffer.data() + size, buffer.size() - size);
+    const ssize_t count = read(descriptor, buffer.data() + size, buffer.size() - size);
     if (count > 0) {
       size += static_cast<std::size_t>(count);
       continue;
@@ -107,8 +104,10 @@ bool LoadToken(const base::FilePath& path,
   return true;
 }
 
-bool SendAll(const int descriptor, const void* const data,
-             const std::size_t size, const bool non_blocking) {
+bool SendAll(const int descriptor,
+             const void* const data,
+             const std::size_t size,
+             const bool non_blocking) {
   const auto* bytes = static_cast<const std::byte*>(data);
   std::size_t offset = 0;
   while (offset < size) {
@@ -143,8 +142,7 @@ bool SendAll(const int descriptor, const void* const data,
   return true;
 }
 
-int Connect(const std::string& socket_path,
-            const NativeProbeLocalIpcHello& hello) {
+int Connect(const std::string& socket_path, const NativeProbeLocalIpcHello& hello) {
   sockaddr_un address{};
   if (socket_path.empty() || socket_path.size() >= sizeof(address.sun_path)) {
     return -1;
@@ -195,8 +193,7 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
     return true;
   }
 
-  const base::CommandLine& command_line =
-      *base::CommandLine::ForCurrentProcess();
+  const base::CommandLine& command_line = *base::CommandLine::ForCurrentProcess();
   const bool has_socket = command_line.HasSwitch(kBrokerSocketSwitch);
   const bool has_token = command_line.HasSwitch(kBrokerTokenFileSwitch);
   const bool has_session = command_line.HasSwitch(kSessionIdSwitch);
@@ -209,8 +206,7 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
   }
 
   std::uint64_t session_id = 0;
-  if (!base::StringToUint64(command_line.GetSwitchValueASCII(kSessionIdSwitch),
-                            &session_id) ||
+  if (!base::StringToUint64(command_line.GetSwitchValueASCII(kSessionIdSwitch), &session_id) ||
       session_id == 0) {
     LOG(ERROR) << "Invalid native probe session ID";
     return false;
@@ -218,15 +214,13 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
 
   NativeProbeLocalIpcHello hello;
   hello.session_id = session_id;
-  const base::FilePath token_path =
-      command_line.GetSwitchValuePath(kBrokerTokenFileSwitch);
+  const base::FilePath token_path = command_line.GetSwitchValuePath(kBrokerTokenFileSwitch);
   if (!LoadToken(token_path, hello.token)) {
     LOG(ERROR) << "Native probe broker token is unavailable or insecure";
     return false;
   }
 
-  socket_descriptor_ =
-      Connect(command_line.GetSwitchValueASCII(kBrokerSocketSwitch), hello);
+  socket_descriptor_ = Connect(command_line.GetSwitchValueASCII(kBrokerSocketSwitch), hello);
   if (socket_descriptor_ < 0) {
     LOG(ERROR) << "Unable to connect to native probe broker";
     return false;
@@ -240,10 +234,8 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
   }
   connected_.store(true, std::memory_order_release);
   writer_thread_.task_runner()->PostTask(
-      FROM_HERE,
-      base::BindOnce(&NativeProbeSocketClient::Run, base::Unretained(this)));
-  if (!NativeProbeSession::Get().StartSession(
-          session_id, &NativeProbeSocketClient::Emit)) {
+      FROM_HERE, base::BindOnce(&NativeProbeSocketClient::Run, base::Unretained(this)));
+  if (!NativeProbeSession::Get().StartSession(session_id, &NativeProbeSocketClient::Emit)) {
     connected_.store(false, std::memory_order_release);
     wakeup_.Signal();
     close(socket_descriptor_);
@@ -283,23 +275,21 @@ void NativeProbeSocketClient::Run() {
         break;
       }
       drained_event = true;
-      if (!SendAll(socket_descriptor_, batch.data(),
-                   batch_size * sizeof(NativeProbeEvent), true)) {
+      if (!SendAll(socket_descriptor_, batch.data(), batch_size * sizeof(NativeProbeEvent), true)) {
         browser_task_runner_->PostTask(
-            FROM_HERE, base::BindOnce(&NativeProbeSocketClient::HandleDisconnect,
-                                      base::Unretained(this)));
+            FROM_HERE,
+            base::BindOnce(&NativeProbeSocketClient::HandleDisconnect, base::Unretained(this)));
         return;
       }
     }
 
     const std::uint64_t dropped = queue_.DroppedCount();
     if (drained_event && dropped > reported_dropped) {
-      const NativeProbeEvent gap =
-          MakeNativeProbeGapEvent(last_event, dropped - reported_dropped);
+      const NativeProbeEvent gap = MakeNativeProbeGapEvent(last_event, dropped - reported_dropped);
       if (!SendAll(socket_descriptor_, &gap, sizeof(gap), true)) {
         browser_task_runner_->PostTask(
-            FROM_HERE, base::BindOnce(&NativeProbeSocketClient::HandleDisconnect,
-                                      base::Unretained(this)));
+            FROM_HERE,
+            base::BindOnce(&NativeProbeSocketClient::HandleDisconnect, base::Unretained(this)));
         return;
       }
       reported_dropped = dropped;

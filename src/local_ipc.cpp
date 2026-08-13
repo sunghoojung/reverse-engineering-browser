@@ -1,12 +1,12 @@
 #include "reb/local_ipc.hpp"
 
-#include <cerrno>
-#include <cstring>
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <cerrno>
+#include <cstring>
 
 #include <algorithm>
 #include <array>
@@ -32,15 +32,13 @@ int HexValue(const char value) noexcept {
   return -1;
 }
 
-bool ValidateTokenFile(const int descriptor, const std::string& path,
-                       std::string& error) {
+bool ValidateTokenFile(const int descriptor, const std::string& path, std::string& error) {
   struct stat status {};
   if (fstat(descriptor, &status) != 0) {
     error = "Unable to inspect token file " + path + ": " + std::strerror(errno);
     return false;
   }
-  if (!S_ISREG(status.st_mode) || status.st_uid != geteuid() ||
-      (status.st_mode & 0777) != 0600) {
+  if (!S_ISREG(status.st_mode) || status.st_uid != geteuid() || (status.st_mode & 0777) != 0600) {
     error = "Token file must be a user-owned regular file with mode 0600: " + path;
     return false;
   }
@@ -64,8 +62,7 @@ bool FillRandomToken(LocalIpcToken& token, std::string& error) {
 
 }  // namespace
 
-bool DecodeLocalIpcToken(const std::string_view encoded,
-                         LocalIpcToken& token) noexcept {
+bool DecodeLocalIpcToken(const std::string_view encoded, LocalIpcToken& token) noexcept {
   if (encoded.size() != token.size() * 2) {
     return false;
   }
@@ -91,8 +88,7 @@ std::string EncodeLocalIpcToken(const LocalIpcToken& token) {
   return encoded;
 }
 
-bool LoadLocalIpcToken(const std::string& path, LocalIpcToken& token,
-                       std::string& error) {
+bool LoadLocalIpcToken(const std::string& path, LocalIpcToken& token, std::string& error) {
   const int descriptor = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
   if (descriptor < 0) {
     error = "Unable to open token file " + path + ": " + std::strerror(errno);
@@ -106,8 +102,7 @@ bool LoadLocalIpcToken(const std::string& path, LocalIpcToken& token,
   std::array<char, kLocalIpcTokenSize * 2 + 2> buffer{};
   std::size_t size = 0;
   while (size < buffer.size()) {
-    const ssize_t count =
-        read(descriptor, buffer.data() + size, buffer.size() - size);
+    const ssize_t count = read(descriptor, buffer.data() + size, buffer.size() - size);
     if (count > 0) {
       size += static_cast<std::size_t>(count);
       continue;
@@ -137,8 +132,7 @@ bool LoadLocalIpcToken(const std::string& path, LocalIpcToken& token,
   return true;
 }
 
-bool LoadOrCreateLocalIpcToken(const std::string& path, LocalIpcToken& token,
-                               std::string& error) {
+bool LoadOrCreateLocalIpcToken(const std::string& path, LocalIpcToken& token, std::string& error) {
   struct stat status {};
   if (lstat(path.c_str(), &status) == 0) {
     return LoadLocalIpcToken(path, token, error);
@@ -171,8 +165,7 @@ bool LoadOrCreateLocalIpcToken(const std::string& path, LocalIpcToken& token,
   return written && closed && error.empty();
 }
 
-bool ConstantTimeTokenEquals(const LocalIpcToken& left,
-                             const LocalIpcToken& right) noexcept {
+bool ConstantTimeTokenEquals(const LocalIpcToken& left, const LocalIpcToken& right) noexcept {
   unsigned difference = 0;
   for (std::size_t index = 0; index < left.size(); ++index) {
     difference |= std::to_integer<unsigned>(left[index] ^ right[index]);
@@ -185,8 +178,7 @@ int ConnectAuthenticatedLocalIpc(const std::string& socket_path,
                                  const std::uint64_t session_id,
                                  std::string& error) {
   sockaddr_un address{};
-  if (session_id == 0 || socket_path.empty() ||
-      socket_path.size() >= sizeof(address.sun_path)) {
+  if (session_id == 0 || socket_path.empty() || socket_path.size() >= sizeof(address.sun_path)) {
     error = "Invalid local IPC connection configuration";
     return -1;
   }
@@ -198,16 +190,13 @@ int ConnectAuthenticatedLocalIpc(const std::string& socket_path,
 
   const int descriptor = socket(AF_UNIX, SOCK_STREAM, 0);
   if (descriptor < 0) {
-    error = "Unable to create local IPC socket: " +
-            std::string(std::strerror(errno));
+    error = "Unable to create local IPC socket: " + std::string(std::strerror(errno));
     return -1;
   }
 #if defined(SO_NOSIGPIPE)
   const int enabled = 1;
-  if (setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &enabled,
-                 sizeof(enabled)) != 0) {
-    error = "Unable to protect local IPC socket: " +
-            std::string(std::strerror(errno));
+  if (setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)) != 0) {
+    error = "Unable to protect local IPC socket: " + std::string(std::strerror(errno));
     close(descriptor);
     return -1;
   }
@@ -217,8 +206,7 @@ int ConnectAuthenticatedLocalIpc(const std::string& socket_path,
   std::copy(socket_path.begin(), socket_path.end(), address.sun_path);
   if (connect(descriptor, reinterpret_cast<const sockaddr*>(&address),
               static_cast<socklen_t>(sizeof(address))) != 0) {
-    error = "Unable to connect to broker socket: " +
-            std::string(std::strerror(errno));
+    error = "Unable to connect to broker socket: " + std::string(std::strerror(errno));
     close(descriptor);
     return -1;
   }
@@ -233,12 +221,10 @@ int ConnectAuthenticatedLocalIpc(const std::string& socket_path,
   return descriptor;
 }
 
-bool ReadExact(const int descriptor, const std::span<std::byte> output,
-               std::string& error) {
+bool ReadExact(const int descriptor, const std::span<std::byte> output, std::string& error) {
   std::size_t offset = 0;
   while (offset < output.size()) {
-    const ssize_t count =
-        read(descriptor, output.data() + offset, output.size() - offset);
+    const ssize_t count = read(descriptor, output.data() + offset, output.size() - offset);
     if (count > 0) {
       offset += static_cast<std::size_t>(count);
       continue;
@@ -257,14 +243,12 @@ bool ReadExact(const int descriptor, const std::span<std::byte> output,
   return true;
 }
 
-bool WriteExact(const int descriptor, const std::span<const std::byte> input,
-                std::string& error) {
+bool WriteExact(const int descriptor, const std::span<const std::byte> input, std::string& error) {
   std::size_t offset = 0;
   while (offset < input.size()) {
     ssize_t count = -1;
 #if defined(MSG_NOSIGNAL)
-    count = send(descriptor, input.data() + offset, input.size() - offset,
-                 MSG_NOSIGNAL);
+    count = send(descriptor, input.data() + offset, input.size() - offset, MSG_NOSIGNAL);
     if (count < 0 && errno == ENOTSOCK) {
       count = write(descriptor, input.data() + offset, input.size() - offset);
     }

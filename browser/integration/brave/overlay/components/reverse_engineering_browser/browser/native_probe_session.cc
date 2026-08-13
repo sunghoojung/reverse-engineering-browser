@@ -25,23 +25,19 @@ NativeProbeSession::NativeProbeSession() = default;
 
 NativeProbeSession::~NativeProbeSession() = default;
 
-void NativeProbeSession::BindHost(
-    mojo::PendingReceiver<mojom::NativeProbeHost> receiver) {
-  mojo::MakeSelfOwnedReceiver(std::make_unique<NativeProbeHost>(*this),
-                              std::move(receiver));
+void NativeProbeSession::BindHost(mojo::PendingReceiver<mojom::NativeProbeHost> receiver) {
+  mojo::MakeSelfOwnedReceiver(std::make_unique<NativeProbeHost>(*this), std::move(receiver));
 }
 
-bool NativeProbeSession::StartSession(
-    const std::uint64_t session_id,
-    const NativeProbeEmitter downstream) noexcept {
+bool NativeProbeSession::StartSession(const std::uint64_t session_id,
+                                      const NativeProbeEmitter downstream) noexcept {
   if (session_id == 0 || !downstream || IsActive()) {
     return false;
   }
 
   downstream_.store(downstream, std::memory_order_release);
   session_id_.store(session_id, std::memory_order_release);
-  NativeNetworkCaptureSink::Get().SetEmitter(
-      &NativeProbeSession::EmitBrowserEvent, session_id);
+  NativeNetworkCaptureSink::Get().SetEmitter(&NativeProbeSession::EmitBrowserEvent, session_id);
   for (NativeProbeHost* const host : hosts_) {
     host->Configure(session_id);
   }
@@ -58,8 +54,7 @@ void NativeProbeSession::StopSession() noexcept {
 }
 
 bool NativeProbeSession::IsActive() const noexcept {
-  return downstream_.load(std::memory_order_acquire) != nullptr &&
-         session_id() != 0;
+  return downstream_.load(std::memory_order_acquire) != nullptr && session_id() != 0;
 }
 
 std::uint64_t NativeProbeSession::session_id() const noexcept {
@@ -67,8 +62,7 @@ std::uint64_t NativeProbeSession::session_id() const noexcept {
 }
 
 void NativeProbeSession::Emit(const NativeProbeEvent& event) const noexcept {
-  const NativeProbeEmitter downstream =
-      downstream_.load(std::memory_order_acquire);
+  const NativeProbeEmitter downstream = downstream_.load(std::memory_order_acquire);
   if (downstream) {
     downstream(event);
   }
@@ -82,8 +76,7 @@ void NativeProbeSession::RemoveHost(NativeProbeHost& host) {
   std::erase(hosts_, &host);
 }
 
-void NativeProbeSession::EmitBrowserEvent(
-    const NativeProbeEvent& event) noexcept {
+void NativeProbeSession::EmitBrowserEvent(const NativeProbeEvent& event) noexcept {
   Get().Emit(event);
 }
 

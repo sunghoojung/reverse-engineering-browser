@@ -7,7 +7,7 @@ readonly script_dir
 repository_root="$(cd "${script_dir}/.." && pwd)"
 readonly repository_root
 readonly brave_directory="${REB_BRAVE_DIRECTORY:-${repository_root}/browser/worktree/src/brave}"
-chromium_directory="$(cd "${brave_directory}/.." 2>/dev/null && pwd || true)"
+chromium_directory="$(cd "${brave_directory}/.." 2>/dev/null && pwd)" || chromium_directory=""
 readonly chromium_directory
 readonly integration_directory="${repository_root}/browser/integration/brave"
 readonly overlay_directory="${integration_directory}/overlay"

@@ -16,14 +16,12 @@ inline constexpr std::uint32_t kNativeProbeLocalIpcMagic = 0x52454249;
 inline constexpr std::uint16_t kNativeProbeLocalIpcVersion = 1;
 inline constexpr std::size_t kNativeProbeLocalIpcTokenSize = 32;
 
-using NativeProbeLocalIpcToken =
-    std::array<std::byte, kNativeProbeLocalIpcTokenSize>;
+using NativeProbeLocalIpcToken = std::array<std::byte, kNativeProbeLocalIpcTokenSize>;
 
 struct NativeProbeLocalIpcHello final {
   std::uint32_t magic = kNativeProbeLocalIpcMagic;
   std::uint16_t version = kNativeProbeLocalIpcVersion;
-  std::uint16_t size =
-      static_cast<std::uint16_t>(sizeof(NativeProbeLocalIpcHello));
+  std::uint16_t size = static_cast<std::uint16_t>(sizeof(NativeProbeLocalIpcHello));
   std::uint64_t session_id = 0;
   NativeProbeLocalIpcToken token{};
   std::array<std::byte, 16> reserved{};

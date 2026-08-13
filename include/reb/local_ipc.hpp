@@ -28,8 +28,7 @@ struct LocalIpcHello final {
 static_assert(sizeof(LocalIpcHello) == 64);
 static_assert(alignof(LocalIpcHello) == 8);
 
-[[nodiscard]] bool DecodeLocalIpcToken(std::string_view encoded,
-                                       LocalIpcToken& token) noexcept;
+[[nodiscard]] bool DecodeLocalIpcToken(std::string_view encoded, LocalIpcToken& token) noexcept;
 [[nodiscard]] std::string EncodeLocalIpcToken(const LocalIpcToken& token);
 
 [[nodiscard]] bool LoadLocalIpcToken(const std::string& path,
@@ -45,11 +44,8 @@ static_assert(alignof(LocalIpcHello) == 8);
                                                const std::string& token_path,
                                                std::uint64_t session_id,
                                                std::string& error);
-[[nodiscard]] bool ReadExact(int descriptor, std::span<std::byte> output,
-                             std::string& error);
-[[nodiscard]] bool WriteExact(int descriptor,
-                              std::span<const std::byte> input,
-                              std::string& error);
+[[nodiscard]] bool ReadExact(int descriptor, std::span<std::byte> output, std::string& error);
+[[nodiscard]] bool WriteExact(int descriptor, std::span<const std::byte> input, std::string& error);
 
 }  // namespace reb
 

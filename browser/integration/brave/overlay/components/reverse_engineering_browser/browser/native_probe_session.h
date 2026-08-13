@@ -31,8 +31,7 @@ class NativeProbeSession final {
 
   void BindHost(mojo::PendingReceiver<mojom::NativeProbeHost> receiver);
 
-  [[nodiscard]] bool StartSession(std::uint64_t session_id,
-                                  NativeProbeEmitter downstream) noexcept;
+  [[nodiscard]] bool StartSession(std::uint64_t session_id, NativeProbeEmitter downstream) noexcept;
   void StopSession() noexcept;
 
   [[nodiscard]] bool IsActive() const noexcept;

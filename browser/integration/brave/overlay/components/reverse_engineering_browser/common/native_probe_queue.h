@@ -25,9 +25,8 @@ inline constexpr std::uint32_t kNativeProbeQueueMagic = 0x52454251;
 inline constexpr std::uint16_t kNativeProbeQueueVersion = 1;
 inline constexpr std::size_t kNativeProbeQueueCapacity = 256;
 
-inline NativeProbeEvent MakeNativeProbeGapEvent(
-    const NativeProbeEvent& reference,
-    const std::uint64_t dropped) noexcept {
+inline NativeProbeEvent MakeNativeProbeGapEvent(const NativeProbeEvent& reference,
+                                                const std::uint64_t dropped) noexcept {
   NativeProbeEvent gap;
   gap.header.category = reference.header.category;
   gap.header.type = NativeProbeType::kGap;
@@ -41,8 +40,7 @@ inline NativeProbeEvent MakeNativeProbeGapEvent(
   char* const end = begin + gap.inline_payload.size();
   const auto result = std::to_chars(begin, end, dropped);
   if (result.ec == std::errc()) {
-    gap.header.payload_size =
-        static_cast<std::uint32_t>(result.ptr - begin);
+    gap.header.payload_size = static_cast<std::uint32_t>(result.ptr - begin);
   }
   return gap;
 }
@@ -58,8 +56,7 @@ class alignas(64) NativeProbeQueue final {
  public:
   NativeProbeQueue() noexcept {
     for (std::uint64_t index = 0; index < kNativeProbeQueueCapacity; ++index) {
-      slots_[static_cast<std::size_t>(index)].sequence.store(
-          index, std::memory_order_relaxed);
+      slots_[static_cast<std::size_t>(index)].sequence.store(index, std::memory_order_relaxed);
     }
   }
 
@@ -67,10 +64,8 @@ class alignas(64) NativeProbeQueue final {
   NativeProbeQueue& operator=(const NativeProbeQueue&) = delete;
 
   [[nodiscard]] bool IsValid() const noexcept {
-    return magic_ == kNativeProbeQueueMagic &&
-           version_ == kNativeProbeQueueVersion &&
-           record_size_ == sizeof(NativeProbeEvent) &&
-           capacity_ == kNativeProbeQueueCapacity;
+    return magic_ == kNativeProbeQueueMagic && version_ == kNativeProbeQueueVersion &&
+           record_size_ == sizeof(NativeProbeEvent) && capacity_ == kNativeProbeQueueCapacity;
   }
 
   [[nodiscard]] bool TryPush(const NativeProbeEvent& event) noexcept {
@@ -78,15 +73,12 @@ class alignas(64) NativeProbeQueue final {
 
     for (;;) {
       Slot& slot = slots_[static_cast<std::size_t>(position) & kIndexMask];
-      const std::uint64_t sequence =
-          slot.sequence.load(std::memory_order_acquire);
-      const std::int64_t difference =
-          static_cast<std::int64_t>(sequence - position);
+      const std::uint64_t sequence = slot.sequence.load(std::memory_order_acquire);
+      const std::int64_t difference = static_cast<std::int64_t>(sequence - position);
 
       if (difference == 0) {
         if (enqueue_position_.compare_exchange_weak(
-                position, position + 1, std::memory_order_relaxed,
-                std::memory_order_relaxed)) {
+                position, position + 1, std::memory_order_relaxed, std::memory_order_relaxed)) {
           slot.event = event;
           slot.sequence.store(position + 1, std::memory_order_release);
           return true;
@@ -104,21 +96,17 @@ class alignas(64) NativeProbeQueue final {
   }
 
   [[nodiscard]] bool TryPop(NativeProbeEvent& event) noexcept {
-    const std::uint64_t position =
-        dequeue_position_.load(std::memory_order_relaxed);
+    const std::uint64_t position = dequeue_position_.load(std::memory_order_relaxed);
     Slot& slot = slots_[static_cast<std::size_t>(position) & kIndexMask];
-    const std::uint64_t sequence =
-        slot.sequence.load(std::memory_order_acquire);
-    const std::int64_t difference =
-        static_cast<std::int64_t>(sequence - (position + 1));
+    const std::uint64_t sequence = slot.sequence.load(std::memory_order_acquire);
+    const std::int64_t difference = static_cast<std::int64_t>(sequence - (position + 1));
 
     if (difference != 0) {
       return false;
     }
 
     event = slot.event;
-    slot.sequence.store(position + kNativeProbeQueueCapacity,
-                        std::memory_order_release);
+    slot.sequence.store(position + kNativeProbeQueueCapacity, std::memory_order_release);
     dequeue_position_.store(position + 1, std::memory_order_relaxed);
     return true;
   }
@@ -131,8 +119,8 @@ class alignas(64) NativeProbeQueue final {
       return false;
     }
     bool expected = false;
-    return notification_pending_.compare_exchange_strong(
-        expected, true, std::memory_order_acq_rel, std::memory_order_acquire);
+    return notification_pending_.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
+                                                         std::memory_order_acquire);
   }
 
   void ClearNotificationPending() noexcept {
@@ -140,8 +128,7 @@ class alignas(64) NativeProbeQueue final {
   }
 
   [[nodiscard]] bool Empty() const noexcept {
-    const std::uint64_t position =
-        dequeue_position_.load(std::memory_order_relaxed);
+    const std::uint64_t position = dequeue_position_.load(std::memory_order_relaxed);
     const Slot& slot = slots_[static_cast<std::size_t>(position) & kIndexMask];
     return slot.sequence.load(std::memory_order_acquire) != position + 1;
   }
@@ -160,8 +147,7 @@ class alignas(64) NativeProbeQueue final {
   void IncrementDroppedCount() noexcept {
     std::uint64_t dropped = dropped_.load(std::memory_order_relaxed);
     while (dropped != std::numeric_limits<std::uint64_t>::max() &&
-           !dropped_.compare_exchange_weak(dropped, dropped + 1,
-                                           std::memory_order_relaxed,
+           !dropped_.compare_exchange_weak(dropped, dropped + 1, std::memory_order_relaxed,
                                            std::memory_order_relaxed)) {
     }
   }
@@ -174,8 +160,7 @@ class alignas(64) NativeProbeQueue final {
 
   const std::uint32_t magic_ = kNativeProbeQueueMagic;
   const std::uint16_t version_ = kNativeProbeQueueVersion;
-  const std::uint16_t record_size_ =
-      static_cast<std::uint16_t>(sizeof(NativeProbeEvent));
+  const std::uint16_t record_size_ = static_cast<std::uint16_t>(sizeof(NativeProbeEvent));
   const std::uint32_t capacity_ = kNativeProbeQueueCapacity;
   [[maybe_unused]] std::array<std::byte, 52> metadata_padding_{};
 

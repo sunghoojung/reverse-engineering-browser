@@ -127,7 +127,12 @@ class alignas(64) NativeProbeQueue final {
   // unannounced to an announced state. That producer should send one Mojo
   // wake-up. Other producers only copy their record into shared memory.
   [[nodiscard]] bool MarkNotificationPending() noexcept {
-    return !notification_pending_.exchange(true, std::memory_order_acq_rel);
+    if (notification_pending_.load(std::memory_order_acquire)) {
+      return false;
+    }
+    bool expected = false;
+    return notification_pending_.compare_exchange_strong(
+        expected, true, std::memory_order_acq_rel, std::memory_order_acquire);
   }
 
   void ClearNotificationPending() noexcept {

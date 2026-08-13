@@ -39,6 +39,7 @@ namespace {
 constexpr char kBrokerSocketSwitch[] = "reb-broker-socket";
 constexpr char kBrokerTokenFileSwitch[] = "reb-broker-token-file";
 constexpr char kSessionIdSwitch[] = "reb-session-id";
+constexpr std::size_t kSocketBatchCapacity = 32;
 
 int HexValue(const char value) noexcept {
   if (value >= '0' && value <= '9') {
@@ -269,18 +270,26 @@ void NativeProbeSocketClient::Run() {
   std::uint64_t reported_dropped = 0;
   while (connected_.load(std::memory_order_acquire)) {
     wakeup_.Wait();
-    NativeProbeEvent event;
+    std::array<NativeProbeEvent, kSocketBatchCapacity> batch;
     NativeProbeEvent last_event;
     bool drained_event = false;
-    while (queue_.TryPop(event)) {
-      if (!SendAll(socket_descriptor_, &event, sizeof(event), true)) {
+    for (;;) {
+      std::size_t batch_size = 0;
+      while (batch_size < batch.size() && queue_.TryPop(batch[batch_size])) {
+        last_event = batch[batch_size];
+        ++batch_size;
+      }
+      if (batch_size == 0) {
+        break;
+      }
+      drained_event = true;
+      if (!SendAll(socket_descriptor_, batch.data(),
+                   batch_size * sizeof(NativeProbeEvent), true)) {
         browser_task_runner_->PostTask(
             FROM_HERE, base::BindOnce(&NativeProbeSocketClient::HandleDisconnect,
                                       base::Unretained(this)));
         return;
       }
-      last_event = event;
-      drained_event = true;
     }
 
     const std::uint64_t dropped = queue_.DroppedCount();

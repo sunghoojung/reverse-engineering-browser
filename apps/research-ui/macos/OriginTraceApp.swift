@@ -5,10 +5,12 @@ import WebKit
 private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let indexURL: URL
   private let eventStoreURL: URL
+  private let brokerSocketURL: URL?
 
-  init(indexURL: URL, eventStoreURL: URL) {
+  init(indexURL: URL, eventStoreURL: URL, brokerSocketURL: URL?) {
     self.indexURL = indexURL
     self.eventStoreURL = eventStoreURL
+    self.brokerSocketURL = brokerSocketURL
   }
 
   func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
@@ -47,6 +49,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "status": "ok",
         "store": eventStoreURL.path,
         "store_exists": FileManager.default.fileExists(atPath: eventStoreURL.path),
+        "broker_connected": brokerConnected(),
       ],
       options: []
     )
@@ -61,7 +64,10 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     let limit = min(max(requestedLimit, 1), 5000)
 
     guard FileManager.default.fileExists(atPath: eventStoreURL.path) else {
-      return try JSONSerialization.data(withJSONObject: ["count": 0, "events": []], options: [])
+      return try JSONSerialization.data(
+        withJSONObject: ["count": 0, "events": [], "broker_connected": brokerConnected()],
+        options: []
+      )
     }
 
     let contents = try String(contentsOf: eventStoreURL, encoding: .utf8)
@@ -80,9 +86,22 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       events.append(event)
     }
     return try JSONSerialization.data(
-      withJSONObject: ["count": events.count, "events": events],
+      withJSONObject: [
+        "count": events.count,
+        "events": events,
+        "broker_connected": brokerConnected(),
+      ],
       options: []
     )
+  }
+
+  private func brokerConnected() -> Bool {
+    guard let brokerSocketURL else { return true }
+    guard
+      let attributes = try? FileManager.default.attributesOfItem(atPath: brokerSocketURL.path),
+      let type = attributes[.type] as? FileAttributeType
+    else { return false }
+    return type == .typeSocket
   }
 
   private func sendError(_ message: String, status: Int, to task: WKURLSchemeTask) {
@@ -143,7 +162,11 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
 
     let indexURL = resourcesURL.appendingPathComponent("index.html")
     let eventStoreURL = configuredEventStore(resourcesURL: resourcesURL)
-    let handler = LocalContentHandler(indexURL: indexURL, eventStoreURL: eventStoreURL)
+    let handler = LocalContentHandler(
+      indexURL: indexURL,
+      eventStoreURL: eventStoreURL,
+      brokerSocketURL: configuredBrokerSocket()
+    )
     contentHandler = handler
 
     let configuration = WKWebViewConfiguration()
@@ -200,6 +223,21 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       return URL(fileURLWithPath: configuredPath).standardizedFileURL
     }
     return resourcesURL.appendingPathComponent("demo.jsonl")
+  }
+
+  private func configuredBrokerSocket() -> URL? {
+    let arguments = CommandLine.arguments
+    if let socketFlag = arguments.firstIndex(of: "--broker-socket"),
+      socketFlag + 1 < arguments.count
+    {
+      return URL(fileURLWithPath: arguments[socketFlag + 1]).standardizedFileURL
+    }
+    if let configuredPath = ProcessInfo.processInfo.environment["REB_BROKER_SOCKET"],
+      !configuredPath.isEmpty
+    {
+      return URL(fileURLWithPath: configuredPath).standardizedFileURL
+    }
+    return nil
   }
 
   private func configureApplicationMenu() {

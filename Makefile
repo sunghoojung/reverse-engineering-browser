@@ -35,16 +35,19 @@ LDFLAGS := -pthread $(EXTRA_LDFLAGS)
 
 LIB_OBJECTS := \
 	$(BUILD_DIR)/src/event.o \
-	$(BUILD_DIR)/src/event_broker.o
+	$(BUILD_DIR)/src/event_broker.o \
+	$(BUILD_DIR)/src/local_ipc.o
 DEMO_BINARY := $(BUILD_DIR)/reb-event-demo
 PRODUCER_BINARY := $(BUILD_DIR)/reb-event-producer
 BROKER_BINARY := $(BUILD_DIR)/reb-event-broker
 TEST_BINARIES := \
 	$(BUILD_DIR)/tests/event_test \
 	$(BUILD_DIR)/tests/event_broker_test \
+	$(BUILD_DIR)/tests/local_ipc_test \
+	$(BUILD_DIR)/tests/native_probe_queue_test \
 	$(BUILD_DIR)/tests/spsc_ring_test
 
-.PHONY: all app app-build bootstrap-brave bootstrap-test brave-doctor brave-probe-check browser-sync browser-sync-test broker check clean demo e2e format producer sanitize test ui ui-test workspace-check
+.PHONY: all app app-build bootstrap-brave bootstrap-test brave-doctor brave-probe-check browser-sync browser-sync-test broker check clean demo e2e format live producer sanitize socket-e2e test ui ui-test workspace-check
 
 all: demo producer broker
 
@@ -82,6 +85,10 @@ e2e: producer broker
 	$(PRODUCER_BINARY) | $(BROKER_BINARY) --store $(BUILD_DIR)/sessions/demo.jsonl
 	test "$$(wc -l < $(BUILD_DIR)/sessions/demo.jsonl | tr -d ' ')" = "7"
 	test "$$(grep -c '\"payload\":\"$(DEMO_NETWORK_PAYLOAD_HEX)\"' $(BUILD_DIR)/sessions/demo.jsonl)" = "2"
+	./tests/event_broker_socket_test.sh $(BROKER_BINARY) $(PRODUCER_BINARY) $(DEMO_NETWORK_PAYLOAD_HEX)
+
+socket-e2e: producer broker
+	./tests/event_broker_socket_test.sh $(BROKER_BINARY) $(PRODUCER_BINARY) $(DEMO_NETWORK_PAYLOAD_HEX)
 
 ui: e2e
 	python3 apps/research-ui/server.py --store $(BUILD_DIR)/sessions/demo.jsonl
@@ -91,6 +98,9 @@ app-build: e2e
 
 app: app-build
 	open "$(CURDIR)/$(BUILD_DIR)/Origin Trace.app" --args --store "$(CURDIR)/$(BUILD_DIR)/sessions/demo.jsonl"
+
+live: app-build broker
+	./scripts/run-live-session.sh
 
 $(BUILD_DIR)/src/%.o: src/%.cpp $(NATIVE_HEADERS)
 	@mkdir -p $(@D)

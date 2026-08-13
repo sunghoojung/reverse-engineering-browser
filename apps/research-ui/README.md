@@ -33,6 +33,17 @@ The application uses a native WebKit shell and reads its bundled local evidence
 store directly. It has no browser address bar and does not require a localhost
 server. The build output is `build/Origin Trace.app`.
 
+For a live custom-Brave capture, run:
+
+```sh
+make live
+```
+
+The launcher passes the broker evidence store and Unix-socket path to Origin
+Trace. The application continues to show the last valid evidence if the broker
+disconnects and marks the capture as offline. Raw browser records stay on the
+Brave-to-broker socket; the UI reads the broker's normalized store.
+
 For development, the same interface can still run in a browser:
 
 ```sh
@@ -46,6 +57,9 @@ Preview, Response, Initiator, and Timing inspectors. Loading, empty,
 disconnected, malformed-event, and sequence-gap states remain visible. The
 trace workspace still combines a sample request field backtrace with live broker
 events, with sample and live evidence always labeled separately.
+
+Pass `--socket /path/to/broker.sock` to the development server when it should
+also report live broker connectivity.
 
 The UI validates the broker envelope and every event before replacing the last
 known-good view. Protocol v2 transports 64-bit identifiers, timestamps, and

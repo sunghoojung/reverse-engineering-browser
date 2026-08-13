@@ -2,15 +2,18 @@
 
 import argparse
 import json
+import stat
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 
 class ResearchHandler(SimpleHTTPRequestHandler):
     ui_directory: Path
     event_store: Path
+    broker_socket: Optional[Path] = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(self.ui_directory), **kwargs)
@@ -23,6 +26,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     "status": "ok",
                     "store": str(self.event_store),
                     "store_exists": self.event_store.exists(),
+                    "broker_connected": self.broker_connected(),
                 }
             )
             return
@@ -34,7 +38,13 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             except (OSError, ValueError, json.JSONDecodeError) as exception:
                 self.send_json({"error": str(exception)}, HTTPStatus.INTERNAL_SERVER_ERROR)
                 return
-            self.send_json({"count": len(events), "events": events})
+            self.send_json(
+                {
+                    "count": len(events),
+                    "events": events,
+                    "broker_connected": self.broker_connected(),
+                }
+            )
             return
         super().do_GET()
 
@@ -50,6 +60,14 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                         raise ValueError("The evidence store contains a malformed event")
                     events.append(event)
         return events
+
+    def broker_connected(self) -> bool:
+        if self.broker_socket is None:
+            return True
+        try:
+            return stat.S_ISSOCK(self.broker_socket.stat().st_mode)
+        except OSError:
+            return False
 
     def send_json(self, value: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(value, separators=(",", ":")).encode()
@@ -69,6 +87,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7319)
     parser.add_argument("--store", type=Path, default=Path("build/sessions/demo.jsonl"))
+    parser.add_argument("--socket", type=Path)
     return parser.parse_args()
 
 
@@ -76,6 +95,7 @@ def main() -> int:
     args = parse_args()
     ResearchHandler.ui_directory = Path(__file__).resolve().parent
     ResearchHandler.event_store = args.store.resolve()
+    ResearchHandler.broker_socket = args.socket.resolve() if args.socket else None
     server = ThreadingHTTPServer((args.host, args.port), ResearchHandler)
     print(f"Research UI: http://{args.host}:{args.port}")
     print(f"Event store: {ResearchHandler.event_store}")

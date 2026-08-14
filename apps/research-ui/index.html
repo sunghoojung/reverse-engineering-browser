@@ -1085,7 +1085,14 @@
       .vm-row:hover { background: var(--panel-3); }
       .vm-row[aria-selected="true"] { background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
       .vm-row-title { overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
-      .vm-row-meta { grid-column: 1 / -1; color: var(--faint); font: 8px var(--mono); }
+      .vm-row-meta, .vm-row-correlation {
+        grid-column: 1 / -1;
+        overflow: hidden;
+        color: var(--faint);
+        font: 8px var(--mono);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
       .vm-kind, .vm-confidence {
         width: max-content;
         padding: 3px 5px;
@@ -1990,7 +1997,8 @@ export async function checkout(cart, fingerprint) {
 
       function decodeVmFinding(event) {
         if (event.protocol_version !== 2 || event.category !== 'vm' ||
-            event.type !== 'vm_finding' || event.payload_size !== 128) return null;
+            event.type !== 'vm_finding' || event.payload_size !== 128 ||
+            event.payload_truncated) return null;
         const bytes = bytesFromHex(event.payload);
         if (bytes.length !== 128) return null;
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -2014,6 +2022,7 @@ export async function checkout(cart, fingerprint) {
         if (isCoverage ? totalCount === 0 || observedCount > totalCount : observedCount !== 0 || totalCount !== 0) return null;
         const hasSourceRange = Boolean(flags & 1);
         if (hasSourceRange ? sourceSize === 0n : sourceOffset !== 0n || sourceSize !== 0n) return null;
+        if (hasSourceRange && sourceOffset + sourceSize > uint64Max) return null;
         if (hasSourceRange && integerText(event, 'artifact_id') === '0') return null;
         const labelBytes = bytes.slice(72, 72 + labelSize);
         if ([...labelBytes].some(byte => byte < 0x20 || byte > 0x7e) ||
@@ -2038,7 +2047,10 @@ export async function checkout(cart, fingerprint) {
           sourceSize: String(sourceSize),
           sourceArtifactId: integerText(event, 'artifact_id'),
           sequenceNumber: integerText(event, 'sequence_number'),
-          parentEventId: integerText(event, 'parent_event_id')
+          parentEventId: integerText(event, 'parent_event_id'),
+          monotonicTimeNs: integerText(event, 'monotonic_time_ns'),
+          processId: event.process_id,
+          threadId: event.thread_id
         };
       }
 
@@ -2139,12 +2151,17 @@ export async function checkout(cart, fingerprint) {
       }
 
       function renderVmLab() {
+        const focusedFindingId = document.activeElement?.classList.contains('vm-row')
+          ? document.activeElement.dataset.findingId
+          : null;
         elements.vmCount.textContent = String(state.vmFindings.length);
         if (!state.vmFindings.some(finding => finding.findingId === state.selectedVmFindingId)) {
           state.selectedVmFindingId = state.vmFindings[0]?.findingId ?? null;
         }
         const gapCount = countSequenceGaps(state.events);
-        if (state.broker === 'unavailable') {
+        if (state.broker === 'connecting') {
+          setVmNotice('loading', 'Waiting for VM findings from the local evidence broker.');
+        } else if (state.broker === 'unavailable') {
           setVmNotice('disconnected', state.vmFindings.length ? 'Broker disconnected. Last valid VM findings remain visible.' : 'Broker disconnected. No VM findings are available.');
         } else if (state.malformedVmFindings > 0) {
           setVmNotice('malformed', `${state.malformedVmFindings} malformed VM ${state.malformedVmFindings === 1 ? 'finding was' : 'findings were'} rejected.`);
@@ -2165,9 +2182,15 @@ export async function checkout(cart, fingerprint) {
           row.append(
             textElement('span', 'vm-row-title', finding.label),
             textElement('span', 'vm-kind', finding.kind),
-            textElement('span', 'vm-row-meta', `${finding.hostRuntime} · ${finding.confidence} · investigation ${finding.investigationId}`)
+            textElement('span', 'vm-row-meta', `t ${finding.monotonicTimeNs} ns · source p${finding.processId}:t${finding.threadId} · category vm`),
+            textElement('span', 'vm-row-correlation', `operation ${finding.kind} · finding ${finding.findingId} · investigation ${finding.investigationId} · ${finding.hostRuntime} · ${finding.confidence}`)
           );
-          row.addEventListener('click', () => { state.selectedVmFindingId = finding.findingId; renderVmLab(); });
+          row.addEventListener('click', () => {
+            state.selectedVmFindingId = finding.findingId;
+            renderVmLab();
+            [...elements.vmList.querySelectorAll('.vm-row')]
+              .find(candidate => candidate.dataset.findingId === finding.findingId)?.focus();
+          });
           row.addEventListener('keydown', event => {
             if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
             event.preventDefault();
@@ -2175,10 +2198,14 @@ export async function checkout(cart, fingerprint) {
             const current = rows.indexOf(row);
             const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
               : (current + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
-            rows[next].click(); rows[next].focus();
+            rows[next].click();
           });
           return row;
         }));
+        if (focusedFindingId) {
+          [...elements.vmList.querySelectorAll('.vm-row')]
+            .find(row => row.dataset.findingId === focusedFindingId)?.focus({ preventScroll: true });
+        }
         renderVmDetail();
       }
 

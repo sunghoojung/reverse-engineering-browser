@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstring>
+#include <limits>
 #include <span>
 
 namespace reb {
@@ -75,9 +76,11 @@ bool IsValidVmFinding(const VmFindingPayload& finding) noexcept {
       finding.kind == VmFindingKind::kCoverage
           ? finding.total_count > 0 && finding.observed_count <= finding.total_count
           : finding.observed_count == 0 && finding.total_count == 0;
-  const bool valid_range = has_source_range
-                               ? finding.source_size > 0
-                               : finding.source_offset == 0 && finding.source_size == 0;
+  const bool valid_range =
+      has_source_range ? finding.source_size > 0 &&
+                             finding.source_offset <=
+                                 std::numeric_limits<std::uint64_t>::max() - finding.source_size
+                       : finding.source_offset == 0 && finding.source_size == 0;
   const std::size_t label_size = finding.label_size;
   const bool clean_label_tail = label_size <= finding.label.size() &&
                                 std::ranges::all_of(std::span(finding.label).subspan(label_size),
@@ -109,7 +112,10 @@ bool SetVmFindingPayload(EventRecord& event, const VmFindingPayload& finding) no
 }
 
 bool DecodeVmFinding(const EventRecord& event, VmFindingPayload& finding) noexcept {
-  if (event.header.category != EventCategory::kVm || event.header.type != EventType::kVmFinding ||
+  const bool payload_truncated =
+      (event.header.flags & static_cast<std::uint16_t>(EventFlag::kPayloadTruncated)) != 0;
+  if (!IsValidEvent(event) || payload_truncated || event.header.category != EventCategory::kVm ||
+      event.header.type != EventType::kVmFinding ||
       event.header.payload_size != sizeof(VmFindingPayload)) {
     return false;
   }

@@ -446,6 +446,11 @@ process.stdout.write(JSON.stringify({
         self.assertIn("gaps may", html)
         self.assertIn("Last valid VM findings remain visible", html)
         self.assertIn("['ArrowUp', 'ArrowDown', 'Home', 'End']", html)
+        self.assertIn("state.broker === 'connecting'", html)
+        self.assertIn("source p${finding.processId}:t${finding.threadId}", html)
+        self.assertIn("operation ${finding.kind}", html)
+        self.assertIn("focusedFindingId", html)
+        self.assertIn("focus({ preventScroll: true })", html)
         self.assertIn("Open in Sources", html)
         self.assertIn("selectArtifact(sourceArtifact.artifact_id)", html)
 
@@ -724,7 +729,16 @@ const valid = findingEvent();
 const decoded = decodeVmFinding(valid);
 const badCounts = findingEvent((bytes, view) => { view.setUint32(12, 61, true); });
 const badTail = findingEvent(bytes => { bytes[100] = 1; });
-const modelResult = vmFindingsFromEvents([valid, badCounts, badTail]);
+const truncated = {...valid, flags: 1, payload_truncated: true};
+const overflowRange = findingEvent((bytes, view) => {
+  bytes[4] = 2;
+  bytes[7] = 1;
+  view.setUint32(12, 0, true);
+  view.setUint32(16, 0, true);
+  view.setBigUint64(56, 18446744073709551615n, true);
+  view.setBigUint64(64, 2n, true);
+});
+const modelResult = vmFindingsFromEvents([valid, badCounts, badTail, truncated, overflowRange]);
 process.stdout.write(JSON.stringify({
   brokerAccepted: isBrokerEvent(valid),
   findingId: decoded.findingId,
@@ -736,8 +750,13 @@ process.stdout.write(JSON.stringify({
   observedCount: decoded.observedCount,
   totalCount: decoded.totalCount,
   flags: decoded.flags,
+  monotonicTimeNs: decoded.monotonicTimeNs,
+  processId: decoded.processId,
+  threadId: decoded.threadId,
   badCountsRejected: decodeVmFinding(badCounts) === null,
   badTailRejected: decodeVmFinding(badTail) === null,
+  truncatedRejected: decodeVmFinding(truncated) === null,
+  overflowRangeRejected: decodeVmFinding(overflowRange) === null,
   validCount: modelResult.findings.length,
   malformedCount: modelResult.malformedCount
 }));
@@ -762,10 +781,15 @@ process.stdout.write(JSON.stringify({
                 "observedCount": 42,
                 "totalCount": 60,
                 "flags": ["partial"],
+                "monotonicTimeNs": "1000",
+                "processId": 10,
+                "threadId": 20,
                 "badCountsRejected": True,
                 "badTailRejected": True,
+                "truncatedRejected": True,
+                "overflowRangeRejected": True,
                 "validCount": 1,
-                "malformedCount": 2,
+                "malformedCount": 4,
             },
         )
 

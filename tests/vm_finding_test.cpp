@@ -1,6 +1,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <type_traits>
 
@@ -33,8 +34,10 @@ int main() {
   CHECK_VM_OFFSET(confidence);
   CHECK_VM_OFFSET(flags);
   CHECK_VM_OFFSET(label_size);
+  CHECK_VM_OFFSET(reserved0);
   CHECK_VM_OFFSET(observed_count);
   CHECK_VM_OFFSET(total_count);
+  CHECK_VM_OFFSET(reserved1);
   CHECK_VM_OFFSET(finding_id);
   CHECK_VM_OFFSET(investigation_id);
   CHECK_VM_OFFSET(subject_id);
@@ -136,6 +139,9 @@ int main() {
   malformed = finding;
   malformed.source_offset = 1;
   CHECK(!reb::IsValidVmFinding(malformed));
+  malformed = range;
+  malformed.source_offset = std::numeric_limits<std::uint64_t>::max();
+  CHECK(!reb::IsValidVmFinding(malformed));
   malformed = finding;
   malformed.label[finding.label_size] = 'x';
   CHECK(!reb::IsValidVmFinding(malformed));
@@ -156,6 +162,14 @@ int main() {
   CHECK(retained.finding_id == range.finding_id);
   malformed_event = event;
   malformed_event.inline_payload[4] = std::byte{0};
+  CHECK(!reb::DecodeVmFinding(malformed_event, retained));
+  CHECK(retained.finding_id == range.finding_id);
+  malformed_event = event;
+  malformed_event.header.protocol_version += 1;
+  CHECK(!reb::DecodeVmFinding(malformed_event, retained));
+  CHECK(retained.finding_id == range.finding_id);
+  malformed_event = event;
+  malformed_event.header.flags = static_cast<std::uint16_t>(reb::EventFlag::kPayloadTruncated);
   CHECK(!reb::DecodeVmFinding(malformed_event, retained));
   CHECK(retained.finding_id == range.finding_id);
 

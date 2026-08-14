@@ -109,11 +109,15 @@ bool ConcurrentTest() {
   while (expected <= kCount) {
     std::uint64_t value = 0;
     if (!ring.TryPop(value)) {
-      if (producer_done.load(std::memory_order_acquire)) {
+      if (!producer_done.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+        continue;
+      }
+      // The first empty read can precede the producer's final release. Retry
+      // after acquiring producer_done so the final head update is visible.
+      if (!ring.TryPop(value)) {
         break;
       }
-      std::this_thread::yield();
-      continue;
     }
     if (value != expected) {
       ordered = false;

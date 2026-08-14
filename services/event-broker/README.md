@@ -15,7 +15,8 @@ The event broker is the center of the system.
 The broker accepts fixed 320-byte native records on standard input or an
 authenticated Unix socket, validates
 their protocol envelope, enum values, flags, payload bounds, and reserved
-fields, detects sequence gaps, retains a bounded snapshot, and writes a
+fields, enforces an immutable category allowlist and monotonic expiration,
+detects sequence gaps, retains a bounded snapshot, and writes a
 versioned JSONL evidence store. Sequence tracking is bounded by the broker
 capacity, and tracker evictions are reported explicitly in broker stats.
 When the tracker reaches capacity, it evicts streams in deterministic insertion
@@ -43,8 +44,18 @@ build/reb-event-broker \
   --store build/sessions/live/events.jsonl \
   --socket /tmp/origin-trace.sock \
   --token-file build/sessions/live/broker.token \
-  --session-id 123
+  --session-id 123 \
+  --category-mask 257 \
+  --duration-seconds 3600
 ```
+
+Socket sessions require both policy options. Category bits follow the native
+category enum: Canvas is `1`, WebGL `2`, Web Audio `4`, Navigator `8`,
+Permissions `16`, Storage `32`, WebRTC `64`, WASM `128`, and Network `256`.
+Mask `257` enables the currently implemented Canvas and Network probes. The
+broker rejects categories outside the mask before sequence accounting or
+storage, and closes its listener or browser connection when the monotonic
+deadline expires.
 
 Run `make socket-e2e` to validate authentication, permissions, ingestion, and
 socket cleanup without launching Brave. Run `make live` after a complete custom

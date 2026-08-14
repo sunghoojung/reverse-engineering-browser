@@ -109,7 +109,9 @@ make live
 The launcher creates a session-scoped broker socket and token, opens Origin
 Trace, and starts the custom Brave executable with the matching session flags.
 Set `REB_BRAVE_BINARY` when the executable is outside the default component
-output directory.
+output directory. Live sessions enable Canvas and Network by default and expire
+after one hour. Override those startup limits with `REB_CAPTURE_CATEGORY_MASK`
+and `REB_CAPTURE_DURATION_SECONDS`.
 
 ## CI and release builds
 

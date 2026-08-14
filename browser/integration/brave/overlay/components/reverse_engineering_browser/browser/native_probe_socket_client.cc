@@ -19,6 +19,7 @@
 #include <array>
 #include <cerrno>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -29,6 +30,7 @@
 #include "base/logging.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_ipc.h"
 
@@ -39,6 +41,8 @@ namespace {
 constexpr char kBrokerSocketSwitch[] = "reb-broker-socket";
 constexpr char kBrokerTokenFileSwitch[] = "reb-broker-token-file";
 constexpr char kSessionIdSwitch[] = "reb-session-id";
+constexpr char kCategoryMaskSwitch[] = "reb-category-mask";
+constexpr char kDurationSecondsSwitch[] = "reb-duration-seconds";
 constexpr std::size_t kSocketBatchCapacity = 32;
 
 int HexValue(const char value) noexcept {
@@ -197,11 +201,13 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
   const bool has_socket = command_line.HasSwitch(kBrokerSocketSwitch);
   const bool has_token = command_line.HasSwitch(kBrokerTokenFileSwitch);
   const bool has_session = command_line.HasSwitch(kSessionIdSwitch);
-  if (!has_socket && !has_token && !has_session) {
+  const bool has_category_mask = command_line.HasSwitch(kCategoryMaskSwitch);
+  const bool has_duration = command_line.HasSwitch(kDurationSecondsSwitch);
+  if (!has_socket && !has_token && !has_session && !has_category_mask && !has_duration) {
     return false;
   }
-  if (!has_socket || !has_token || !has_session) {
-    LOG(ERROR) << "All native probe broker switches are required";
+  if (!has_socket || !has_token || !has_session || !has_category_mask || !has_duration) {
+    LOG(ERROR) << "All native probe session switches are required";
     return false;
   }
 
@@ -211,6 +217,31 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
     LOG(ERROR) << "Invalid native probe session ID";
     return false;
   }
+
+  std::uint64_t category_mask = 0;
+  if (!base::StringToUint64(command_line.GetSwitchValueASCII(kCategoryMaskSwitch),
+                            &category_mask) ||
+      !IsValidNativeProbeCategoryMask(category_mask)) {
+    LOG(ERROR) << "Invalid native probe category mask";
+    return false;
+  }
+
+  std::uint64_t duration_seconds = 0;
+  if (!base::StringToUint64(command_line.GetSwitchValueASCII(kDurationSecondsSwitch),
+                            &duration_seconds) ||
+      duration_seconds == 0 ||
+      duration_seconds > std::numeric_limits<std::uint64_t>::max() / 1'000'000'000ULL) {
+    LOG(ERROR) << "Invalid native probe session duration";
+    return false;
+  }
+  const std::uint64_t duration_ns = duration_seconds * 1'000'000'000ULL;
+  const std::uint64_t now =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  if (duration_ns > std::numeric_limits<std::uint64_t>::max() - now) {
+    LOG(ERROR) << "Native probe session duration overflows the monotonic clock";
+    return false;
+  }
+  const std::uint64_t expires_at_monotonic_ns = now + duration_ns;
 
   NativeProbeLocalIpcHello hello;
   hello.session_id = session_id;
@@ -235,7 +266,8 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
   connected_.store(true, std::memory_order_release);
   writer_thread_.task_runner()->PostTask(
       FROM_HERE, base::BindOnce(&NativeProbeSocketClient::Run, base::Unretained(this)));
-  if (!NativeProbeSession::Get().StartSession(session_id, &NativeProbeSocketClient::Emit)) {
+  if (!NativeProbeSession::Get().StartSession(session_id, category_mask, expires_at_monotonic_ns,
+                                              &NativeProbeSocketClient::Emit)) {
     connected_.store(false, std::memory_order_release);
     wakeup_.Signal();
     close(socket_descriptor_);

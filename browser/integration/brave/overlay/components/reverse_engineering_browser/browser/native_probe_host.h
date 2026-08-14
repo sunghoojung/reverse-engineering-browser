@@ -31,7 +31,9 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   void BindClient(mojo::PendingRemote<mojom::NativeProbeClient> client) override;
   void EventsAvailable() override;
 
-  void Configure(std::uint64_t session_id);
+  void Configure(std::uint64_t session_id,
+                 std::uint64_t category_mask,
+                 std::uint64_t expires_at_monotonic_ns);
   void Disable();
 
  private:

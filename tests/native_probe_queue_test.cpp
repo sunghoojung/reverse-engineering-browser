@@ -6,6 +6,8 @@
 #include <thread>
 #include <vector>
 
+#include "reb/event_broker.hpp"
+
 #include "../browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_probe_queue.h"
 
 namespace {
@@ -70,6 +72,18 @@ bool TestGapMarker() {
          gap.header.process_id == reference.header.process_id && payload == "18446744073709551615";
 }
 
+bool TestCategoryMasks() {
+  const std::uint64_t canvas = reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kCanvas);
+  const std::uint64_t network = reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kNetwork);
+  return canvas == 1 && network == (std::uint64_t{1} << 8U) &&
+         canvas == reb::EventCategoryMask(reb::EventCategory::kCanvas) &&
+         network == reb::EventCategoryMask(reb::EventCategory::kNetwork) &&
+         reb::kAllNativeProbeCategoryMask == reb::kAllEventCategoryMask &&
+         reb::IsValidNativeProbeCategoryMask(canvas | network) &&
+         !reb::IsValidNativeProbeCategoryMask(0) &&
+         !reb::IsValidNativeProbeCategoryMask(std::uint64_t{1} << 63U);
+}
+
 bool TestConcurrentProducers() {
   reb::NativeProbeQueue queue;
   std::atomic<bool> start{false};
@@ -131,7 +145,7 @@ bool TestConcurrentProducers() {
 
 int main() {
   if (!TestLayoutAndBoundedDrop() || !TestNotificationCoalescing() || !TestGapMarker() ||
-      !TestConcurrentProducers()) {
+      !TestCategoryMasks() || !TestConcurrentProducers()) {
     std::cerr << "native_probe_queue_test failed\n";
     return 1;
   }

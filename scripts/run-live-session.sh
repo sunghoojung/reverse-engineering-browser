@@ -12,6 +12,8 @@ readonly session_directory="${repository_root}/build/sessions/live"
 readonly store_path="${session_directory}/events.jsonl"
 readonly token_path="${session_directory}/broker.token"
 readonly profile_path="${repository_root}/build/brave-profile"
+readonly category_mask="${REB_CAPTURE_CATEGORY_MASK:-257}"
+readonly duration_seconds="${REB_CAPTURE_DURATION_SECONDS:-3600}"
 
 mkdir -p "${session_directory}" "${profile_path}"
 
@@ -67,6 +69,7 @@ trap cleanup EXIT INT TERM
 
 "${broker_binary}" --store "${store_path}" --socket "${socket_path}" \
   --token-file "${token_path}" --session-id "${session_id}" \
+  --category-mask "${category_mask}" --duration-seconds "${duration_seconds}" \
   >"${broker_log}" 2>&1 &
 broker_pid=$!
 
@@ -90,13 +93,16 @@ open -n "${origin_trace_app}" --args --store "${store_path}" \
 
 echo "Origin Trace live session ${session_id}"
 echo "Evidence store: ${store_path}"
+echo "Category mask: ${category_mask}; expires after ${duration_seconds} seconds"
 echo "Close Brave to stop this capture session."
 
 "${brave_binary}" \
   --user-data-dir="${profile_path}" \
   --reb-broker-socket="${socket_path}" \
   --reb-broker-token-file="${token_path}" \
-  --reb-session-id="${session_id}"
+  --reb-session-id="${session_id}" \
+  --reb-category-mask="${category_mask}" \
+  --reb-duration-seconds="${duration_seconds}"
 
 wait "${broker_pid}"
 broker_pid=""

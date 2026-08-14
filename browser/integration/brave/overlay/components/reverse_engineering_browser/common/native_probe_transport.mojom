@@ -9,6 +9,8 @@ import "mojo/public/mojom/base/shared_memory.mojom";
 
 interface NativeProbeClient {
   Configure(uint64 session_id,
+            uint64 category_mask,
+            uint64 expires_at_monotonic_ns,
             mojo_base.mojom.UnsafeSharedMemoryRegion queue_region);
   Disable();
 };

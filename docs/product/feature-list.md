@@ -36,6 +36,7 @@
 - Format source and apply available source maps.
 - Safely simplify static expressions and recover string tables.
 - Detect control-flow flattening, proxy functions, packers, and anti-debugging checks.
+- Detect JavaScript-hosted virtual machines and route them to the shared Virtual Machine Laboratory without classifying ordinary obfuscation as virtualization.
 - Highlight fingerprinting, environment detection, encoding, cryptography, and payload construction.
 - Infer descriptive identifier labels with visible confidence.
 - Map every derived range back to the original bytes.
@@ -50,6 +51,19 @@
 - Record compilation, instantiation, exported calls, imported calls, traps, and memory growth.
 - Connect JavaScript-to-WASM and WASM-to-JavaScript crossings.
 - Search for values moving between WASM, JavaScript, browser APIs, and network requests.
+- Analyze captured modules through a bounded offline semantic provider that preserves byte offsets for every derived function, instruction, control-flow edge, call, and data reference.
+- Detect WASM-hosted virtual machine candidates and route them to the shared Virtual Machine Laboratory without classifying ordinary compiled WASM as a nested VM.
+
+## Virtual Machine Laboratory
+
+- Analyze custom virtual machines regardless of whether their interpreter is implemented in JavaScript or WebAssembly.
+- Normalize JavaScript AST and control-flow evidence and WASM instruction evidence into a shared model of dispatchers, exits, instruction pointers, stacks, registers, memory, bytecode sources, and handlers.
+- Locate bytecode embedded in artifacts, fetched separately, generated at runtime, or exposed only after decoding or decryption while preserving its creator and transformation provenance.
+- Detect JavaScript VM structures such as switch dispatch, function arrays, object maps, indexed bytecode reads, stack arrays, and dynamically generated handlers.
+- Detect WASM VM structures such as dispatch loops, `br_table`, indirect calls, tables, advancing address locals, repeated linear-memory access, and bytecode-like regions.
+- Build an evidence-linked opcode workspace that maps candidate opcodes to handlers, operands, state effects, atomic operations, fused superoperators, confidence, and unresolved ambiguity.
+- Confirm VM hypotheses only in an isolated Experiment session by tracing bounded opcode dispatch, handler selection, instruction-pointer movement, and selected state changes against explicit inputs.
+- Support content-addressed evidence, residual unknowns, agent-guided investigation, and cross-version comparison of randomized instruction sets and handler semantics.
 
 ## Value Trace
 

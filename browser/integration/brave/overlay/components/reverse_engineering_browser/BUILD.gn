@@ -15,6 +15,7 @@ source_set("renderer") {
   sources = [
     "common/native_probe_event.h",
     "common/native_probe_queue.h",
+    "common/native_vm_finding.h",
     "renderer/native_probe_sink.cc",
     "renderer/native_probe_sink.h",
     "renderer/native_probe_transport.cc",
@@ -44,6 +45,7 @@ source_set("browser") {
     "common/native_probe_event.h",
     "common/native_probe_ipc.h",
     "common/native_probe_queue.h",
+    "common/native_vm_finding.h",
   ]
 
   deps = [

@@ -74,6 +74,7 @@ EVENT_CATEGORIES = {
     "network",
     "permissions",
     "storage",
+    "vm",
     "wasm",
     "web_audio",
     "webgl",
@@ -92,6 +93,7 @@ EVENT_TYPES = {
     "request_started",
     "response_completed",
     "response_started",
+    "vm_finding",
 }
 UINT64_MAX = (1 << 64) - 1
 INT64_MIN = -(1 << 63)

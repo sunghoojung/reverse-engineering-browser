@@ -424,6 +424,36 @@ process.stdout.write(JSON.stringify({
         self.assertIn("requestAnimationFrame", html)
         self.assertIn("selectedRow ?? elements.requestFilter", html)
 
+    def test_vm_lab_exposes_typed_evidence_and_failure_states(self) -> None:
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('data-screen="vm">VM Lab</button>', html)
+        self.assertIn('id="screen-vm"', html)
+        self.assertIn('role="listbox" aria-label="Captured VM findings"', html)
+        for evidence_kind in (
+            "interpreter",
+            "guest program",
+            "invocation",
+            "host binding",
+            "hypothesis",
+            "coverage",
+        ):
+            self.assertIn(evidence_kind, html)
+        self.assertIn("function decodeVmFinding(event)", html)
+        self.assertIn("function vmFindingsFromEvents(events)", html)
+        self.assertIn("malformed VM", html)
+        self.assertIn("No VM findings yet", html)
+        self.assertIn("gaps may", html)
+        self.assertIn("Last valid VM findings remain visible", html)
+        self.assertIn("['ArrowUp', 'ArrowDown', 'Home', 'End']", html)
+        self.assertIn("state.broker === 'connecting'", html)
+        self.assertIn("source p${finding.processId}:t${finding.threadId}", html)
+        self.assertIn("operation ${finding.kind}", html)
+        self.assertIn("focusedFindingId", html)
+        self.assertIn("focus({ preventScroll: true })", html)
+        self.assertIn("Open in Sources", html)
+        self.assertIn("selectArtifact(sourceArtifact.artifact_id)", html)
+
     def test_network_model_validates_and_aggregates_without_losing_integer_precision(self) -> None:
         node = shutil.which("node")
         if node is None:
@@ -633,6 +663,133 @@ process.stdout.write(JSON.stringify({
                 "browserContextToken": "9007199254740993:18446744073709551615",
                 "gap": "1",
                 "explicitGap": "1",
+            },
+        )
+
+    def test_vm_model_decodes_versioned_findings_and_rejects_bad_contracts(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        start = html.index("      const eventCategories")
+        end = html.index("      function setNetworkNotice")
+        model = html[start:end]
+        exercise = r"""
+const findingEvent = (mutate = () => {}) => {
+  const bytes = new Uint8Array(128);
+  const view = new DataView(bytes.buffer);
+  view.setUint16(0, 1, true);
+  view.setUint16(2, 128, true);
+  bytes[4] = 6;
+  bytes[5] = 3;
+  bytes[6] = 1;
+  bytes[7] = 2;
+  view.setUint16(8, 22, true);
+  view.setUint32(12, 42, true);
+  view.setUint32(16, 60, true);
+  view.setBigUint64(24, 106n, true);
+  view.setBigUint64(32, 7001n, true);
+  view.setBigUint64(40, 1001n, true);
+  const label = 'handlers characterized';
+  [...label].forEach((character, index) => { bytes[72 + index] = character.charCodeAt(0); });
+  mutate(bytes, view);
+  const payload = [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  return {
+    protocol_version: 2,
+    session_id: '1',
+    sequence_number: '13',
+    monotonic_time_ns: '1000',
+    process_id: 10,
+    thread_id: 20,
+    navigation_id: '100',
+    frame_id: '200',
+    artifact_id: '300',
+    parent_event_id: '12',
+    request_id: '0',
+    browser_context_id_high: '0',
+    browser_context_id_low: '0',
+    encoded_data_length: '0',
+    decoded_body_length: '0',
+    status_code: 0,
+    error_code: 0,
+    resource_type: 0,
+    flags: 0,
+    initiator_request_id: 0,
+    initiator_process_id: 0,
+    payload_truncated: false,
+    category: 'vm',
+    type: 'vm_finding',
+    payload_size: 128,
+    payload_encoding: 'hex',
+    payload
+  };
+};
+const valid = findingEvent();
+const decoded = decodeVmFinding(valid);
+const badCounts = findingEvent((bytes, view) => { view.setUint32(12, 61, true); });
+const badTail = findingEvent(bytes => { bytes[100] = 1; });
+const truncated = {...valid, flags: 1, payload_truncated: true};
+const overflowRange = findingEvent((bytes, view) => {
+  bytes[4] = 2;
+  bytes[7] = 1;
+  view.setUint32(12, 0, true);
+  view.setUint32(16, 0, true);
+  view.setBigUint64(56, 18446744073709551615n, true);
+  view.setBigUint64(64, 2n, true);
+});
+const modelResult = vmFindingsFromEvents([valid, badCounts, badTail, truncated, overflowRange]);
+process.stdout.write(JSON.stringify({
+  brokerAccepted: isBrokerEvent(valid),
+  findingId: decoded.findingId,
+  investigationId: decoded.investigationId,
+  kind: decoded.kind,
+  runtime: decoded.hostRuntime,
+  confidence: decoded.confidence,
+  label: decoded.label,
+  observedCount: decoded.observedCount,
+  totalCount: decoded.totalCount,
+  flags: decoded.flags,
+  monotonicTimeNs: decoded.monotonicTimeNs,
+  processId: decoded.processId,
+  threadId: decoded.threadId,
+  badCountsRejected: decodeVmFinding(badCounts) === null,
+  badTailRejected: decodeVmFinding(badTail) === null,
+  truncatedRejected: decodeVmFinding(truncated) === null,
+  overflowRangeRejected: decodeVmFinding(overflowRange) === null,
+  validCount: modelResult.findings.length,
+  malformedCount: modelResult.malformedCount
+}));
+"""
+        completed = subprocess.run(
+            [node, "-e", model + exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "brokerAccepted": True,
+                "findingId": "106",
+                "investigationId": "7001",
+                "kind": "coverage",
+                "runtime": "mixed",
+                "confidence": "observed",
+                "label": "handlers characterized",
+                "observedCount": 42,
+                "totalCount": 60,
+                "flags": ["partial"],
+                "monotonicTimeNs": "1000",
+                "processId": 10,
+                "threadId": 20,
+                "badCountsRejected": True,
+                "badTailRejected": True,
+                "truncatedRejected": True,
+                "overflowRangeRejected": True,
+                "validCount": 1,
+                "malformedCount": 4,
             },
         )
 

@@ -86,7 +86,7 @@ broker_pid=""
 test "$(wc -l < "${store_path}" | tr -d ' ')" = 4
 test "$(grep -c "\"payload\":\"${expected_payload_hex}\"" "${store_path}")" = 2
 test "$(grep -c '\"category\":\"network\"' "${store_path}")" = 4
-grep -Fq 'accepted=4 invalid=0 category_rejected=3 expired=0 sequence_gaps=0' \
+grep -Fq 'accepted=4 invalid=0 category_rejected=9 expired=0 sequence_gaps=0' \
   "${test_root}/broker.err"
 test ! -e "${socket_path}"
 

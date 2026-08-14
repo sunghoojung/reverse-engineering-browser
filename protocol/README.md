@@ -73,4 +73,27 @@ bodies fail closed unless the session receiver is explicitly started with
 sensitive capture enabled. See
 `docs/architecture/artifact-transfer-channel.md` for the low-level design.
 
+## VM finding payload
+
+VM investigation evidence uses the `vm` category and `vm_finding` event type.
+Its version-1 `VmFindingPayload` occupies the existing 128-byte inline payload,
+so it adds no allocation, variable-length framing, or side channel to the
+native event path. The fixed little-endian record is defined in
+`include/reb/vm_finding.hpp`. The tracked Brave overlay mirrors that ABI in
+`native_vm_finding.h`, with compile-time size, offset, and enum synchronization
+checks in the native test suite.
+
+Each finding has stable finding, investigation, subject, and related-subject
+identifiers. Its kind is one of interpreter, guest program, invocation, host
+binding, hypothesis, or coverage. Host runtime and confidence are independent
+fields because an observed WebAssembly boundary does not prove guest bytecode
+semantics. Optional flags identify artifact ranges, partial evidence, dynamic
+observations, and nested guest containers. Coverage findings carry bounded
+observed and total counts; other finding kinds must leave those counters zero.
+
+Labels are bounded printable ASCII metadata. The decoder rejects unknown enum
+values, flags, nonzero reserved bytes, dirty label tails, invalid ranges, and
+inconsistent coverage. Artifact bytes remain outside this record and are
+referenced by the event header's `artifact_id` plus the optional range.
+
 Protocol changes must remain backward-readable for stored research sessions.

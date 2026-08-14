@@ -77,6 +77,14 @@ visible even when the viewer shows a bounded preview.
 Pass `--socket /path/to/broker.sock` to the development server when it should
 also report live broker connectivity.
 
+The VM Lab tab reads versioned `vm_finding` records from that same broker
+stream. It separates interpreter, guest program, invocation, host binding,
+hypothesis, and coverage evidence, and shows runtime, confidence, relations,
+artifact ranges, and partial coverage without inventing missing semantics.
+Empty, disconnected, malformed-finding, and sequence-gap states remain
+visible. Unlike the request backtrace demonstration, VM Lab does not populate
+sample findings in standalone preview mode.
+
 The UI validates the broker envelope and every event before replacing the last
 known-good view. Protocol v2 transports 64-bit identifiers, timestamps, and
 transfer sizes as canonical decimal strings so browser-side correlation and

@@ -61,8 +61,11 @@
 - Locate bytecode embedded in artifacts, fetched separately, generated at runtime, or exposed only after decoding or decryption while preserving its creator and transformation provenance.
 - Detect JavaScript VM structures such as switch dispatch, function arrays, object maps, indexed bytecode reads, stack arrays, and dynamically generated handlers.
 - Detect WASM VM structures such as dispatch loops, `br_table`, indirect calls, tables, advancing address locals, repeated linear-memory access, and bytecode-like regions.
+- Keep interpreter, guest program, invocation, host-binding, hypothesis, and coverage evidence separate with explicit confidence.
 - Build an evidence-linked opcode workspace that maps candidate opcodes to handlers, operands, state effects, atomic operations, fused superoperators, confidence, and unresolved ambiguity.
+- Traverse reachable guest code recursively while reporting characterized and uncharacterized coverage.
 - Confirm VM hypotheses only in an isolated Experiment session by tracing bounded opcode dispatch, handler selection, instruction-pointer movement, and selected state changes against explicit inputs.
+- Support target-specific analysis packs above a stable evidence contract instead of assuming one universal VM design.
 - Support content-addressed evidence, residual unknowns, agent-guided investigation, and cross-version comparison of randomized instruction sets and handler semantics.
 
 ## Value Trace

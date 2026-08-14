@@ -66,13 +66,35 @@ export async function checkout(cart, fingerprint) {
       std::byte{0x00}, std::byte{0x61}, std::byte{0x73}, std::byte{0x6d},
       std::byte{0x01}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
   };
+  constexpr std::string_view kJavaScriptVm = R"js(const guestProgram = Uint8Array.of(1, 7, 2, 3, 0);
+
+export function runGuest(host, program = guestProgram) {
+  let accumulator = 0;
+  let pc = 0;
+  while (pc < program.length) {
+    switch (program[pc++]) {
+      case 0: return accumulator;
+      case 1: accumulator += program[pc++]; break;
+      case 2: accumulator ^= program[pc++]; break;
+      case 3: return host.canvasReadback(accumulator);
+      default: throw new Error('unknown guest opcode');
+    }
+  }
+  return accumulator;
+}
+)js";
   const auto javascript_bytes = std::as_bytes(std::span(kJavaScript.data(), kJavaScript.size()));
+  const auto javascript_vm_bytes =
+      std::as_bytes(std::span(kJavaScriptVm.data(), kJavaScriptVm.size()));
   if (!WriteArtifact(300, 0, 4, reb::ArtifactKind::kJavaScript,
                      "https://checkout.acme.test/assets/cart.js", "text/javascript",
                      javascript_bytes) ||
       !WriteArtifact(301, 300, 3, reb::ArtifactKind::kWasm,
                      "https://checkout.acme.test/assets/fingerprint.wasm", "application/wasm",
-                     kWasmHeader)) {
+                     kWasmHeader) ||
+      !WriteArtifact(302, 0, 0, reb::ArtifactKind::kJavaScript,
+                     "https://checkout.acme.test/assets/vm-sample.js", "text/javascript",
+                     javascript_vm_bytes)) {
     std::cerr << "Failed to write artifact transfer stream\n";
     return 1;
   }

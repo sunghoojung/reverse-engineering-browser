@@ -1,22 +1,63 @@
 #include "reb/event_broker.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <stdexcept>
 
 namespace reb {
 
-EventBroker::EventBroker(const std::size_t capacity) : capacity_(capacity) {
+namespace {
+
+std::uint64_t MonotonicTimeNs() noexcept {
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count());
+}
+
+}  // namespace
+
+bool SessionPolicy::IsValid() const noexcept {
+  return category_mask != 0 && (category_mask & ~kAllEventCategoryMask) == 0 &&
+         expires_at_monotonic_ns != 0;
+}
+
+bool SessionPolicy::Allows(const EventCategory category) const noexcept {
+  const std::uint64_t category_bit = EventCategoryMask(category);
+  return category_bit != 0 && (category_mask & category_bit) != 0;
+}
+
+bool SessionPolicy::IsExpired(const std::uint64_t monotonic_now_ns) const noexcept {
+  return monotonic_now_ns >= expires_at_monotonic_ns;
+}
+
+EventBroker::EventBroker(const std::size_t capacity, const SessionPolicy policy)
+    : capacity_(capacity), policy_(policy) {
   if (capacity == 0) {
     throw std::invalid_argument("EventBroker capacity must be greater than zero");
+  }
+  if (!policy.IsValid()) {
+    throw std::invalid_argument("EventBroker session policy is invalid");
   }
 }
 
 IngestStatus EventBroker::Ingest(const EventRecord& event) {
+  return IngestAt(event, MonotonicTimeNs());
+}
+
+IngestStatus EventBroker::IngestAt(const EventRecord& event, const std::uint64_t monotonic_now_ns) {
   std::scoped_lock lock(mutex_);
   if (!IsValidEvent(event)) {
     ++stats_.invalid;
     return IngestStatus::kInvalid;
+  }
+  if (policy_.IsExpired(monotonic_now_ns)) {
+    ++stats_.expired;
+    return IngestStatus::kSessionExpired;
+  }
+  if (!policy_.Allows(event.header.category)) {
+    ++stats_.category_rejected;
+    return IngestStatus::kCategoryRejected;
   }
 
   const StreamKey stream{event.header.session_id, event.header.process_id};

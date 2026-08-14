@@ -10,6 +10,7 @@
 
 #include "base/functional/bind.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 #include "content/public/renderer/render_thread.h"
@@ -40,9 +41,14 @@ void NativeProbeTransport::Connect() {
 }
 
 void NativeProbeTransport::Configure(const std::uint64_t session_id,
+                                     const std::uint64_t category_mask,
+                                     const std::uint64_t expires_at_monotonic_ns,
                                      base::UnsafeSharedMemoryRegion queue_region) {
   Disable();
-  if (session_id == 0 || !queue_region.IsValid() ||
+  const std::uint64_t now =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  if (session_id == 0 || !IsValidNativeProbeCategoryMask(category_mask) ||
+      expires_at_monotonic_ns <= now || !queue_region.IsValid() ||
       queue_region.GetSize() != sizeof(NativeProbeQueue)) {
     return;
   }
@@ -59,11 +65,12 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
 
   queue_mappings_.push_back(std::move(mapping));
   queue_.store(queue, std::memory_order_release);
-  NativeProbeSink::Get().SetEmitter(&NativeProbeTransport::Emit, session_id);
+  NativeProbeSink::Get().SetEmitter(&NativeProbeTransport::Emit, session_id, category_mask,
+                                    expires_at_monotonic_ns);
 }
 
 void NativeProbeTransport::Disable() {
-  NativeProbeSink::Get().SetEmitter(nullptr, 0);
+  NativeProbeSink::Get().SetEmitter(nullptr, 0, 0, 0);
   queue_.store(nullptr, std::memory_order_release);
 }
 

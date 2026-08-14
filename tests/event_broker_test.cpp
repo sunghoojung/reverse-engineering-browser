@@ -40,6 +40,23 @@ int main() {
   }
   CHECK(rejected_zero_capacity);
 
+  bool rejected_empty_policy = false;
+  try {
+    reb::EventBroker invalid_policy_broker(1, {.category_mask = 0});
+  } catch (const std::invalid_argument&) {
+    rejected_empty_policy = true;
+  }
+  CHECK(rejected_empty_policy);
+
+  bool rejected_unknown_category_bit = false;
+  try {
+    reb::EventBroker invalid_policy_broker(
+        1, {.category_mask = reb::kAllEventCategoryMask | (std::uint64_t{1} << 63U)});
+  } catch (const std::invalid_argument&) {
+    rejected_unknown_category_bit = true;
+  }
+  CHECK(rejected_unknown_category_bit);
+
   reb::EventBroker broker(2);
   CHECK(broker.Ingest(Event(1)) == reb::IngestStatus::kAccepted);
   CHECK(broker.Ingest(Event(3)) == reb::IngestStatus::kAccepted);
@@ -61,6 +78,21 @@ int main() {
   invalid.header.protocol_version = 99;
   CHECK(broker.Ingest(invalid) == reb::IngestStatus::kInvalid);
   CHECK(broker.Stats().invalid == 1);
+
+  reb::EventBroker scoped_broker(
+      4, {.category_mask = reb::EventCategoryMask(reb::EventCategory::kNetwork),
+          .expires_at_monotonic_ns = 100});
+  CHECK(scoped_broker.IngestAt(Event(1), 1) == reb::IngestStatus::kCategoryRejected);
+  reb::EventRecord network_event = Event(2);
+  network_event.header.category = reb::EventCategory::kNetwork;
+  network_event.header.type = reb::EventType::kRequestStarted;
+  CHECK(scoped_broker.IngestAt(network_event, 99) == reb::IngestStatus::kAccepted);
+  CHECK(scoped_broker.IngestAt(network_event, 100) == reb::IngestStatus::kSessionExpired);
+  CHECK(scoped_broker.Size() == 1);
+  CHECK(scoped_broker.Stats().accepted == 1);
+  CHECK(scoped_broker.Stats().category_rejected == 1);
+  CHECK(scoped_broker.Stats().expired == 1);
+  CHECK(scoped_broker.Stats().sequence_gaps == 0);
 
   reb::EventBroker interleaved_broker(8);
   CHECK(interleaved_broker.Ingest(Event(1, 10)) == reb::IngestStatus::kAccepted);

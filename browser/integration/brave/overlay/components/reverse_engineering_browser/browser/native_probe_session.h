@@ -19,9 +19,9 @@ namespace reb {
 
 class NativeProbeHost;
 
-// Owns browser-process probe activation and fans one session configuration out
-// to every connected renderer. A future authenticated broker connection calls
-// StartSession and StopSession. Until then every probe remains dormant.
+// Owns browser-process probe activation and fans one immutable session policy
+// out to every connected renderer. The authenticated socket client starts the
+// session. Without a complete valid policy every probe remains dormant.
 class NativeProbeSession final {
  public:
   static NativeProbeSession& Get();
@@ -31,11 +31,16 @@ class NativeProbeSession final {
 
   void BindHost(mojo::PendingReceiver<mojom::NativeProbeHost> receiver);
 
-  [[nodiscard]] bool StartSession(std::uint64_t session_id, NativeProbeEmitter downstream) noexcept;
+  [[nodiscard]] bool StartSession(std::uint64_t session_id,
+                                  std::uint64_t category_mask,
+                                  std::uint64_t expires_at_monotonic_ns,
+                                  NativeProbeEmitter downstream) noexcept;
   void StopSession() noexcept;
 
   [[nodiscard]] bool IsActive() const noexcept;
   [[nodiscard]] std::uint64_t session_id() const noexcept;
+  [[nodiscard]] std::uint64_t category_mask() const noexcept;
+  [[nodiscard]] std::uint64_t expires_at_monotonic_ns() const noexcept;
   void Emit(const NativeProbeEvent& event) const noexcept;
 
   void AddHost(NativeProbeHost& host);
@@ -52,6 +57,8 @@ class NativeProbeSession final {
   std::vector<raw_ptr<NativeProbeHost>> hosts_;
   std::atomic<NativeProbeEmitter> downstream_{nullptr};
   std::atomic<std::uint64_t> session_id_{0};
+  std::atomic<std::uint64_t> category_mask_{0};
+  std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};
 };
 
 }  // namespace reb

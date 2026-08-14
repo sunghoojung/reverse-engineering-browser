@@ -47,6 +47,7 @@ void SetPayload(NativeProbeEvent& event,
 
 NativeProbeEvent MakeNetworkEvent(const NativeProbeType type,
                                   const std::uint64_t sequence_number,
+                                  const std::uint64_t monotonic_time_ns,
                                   const std::uint64_t session_id,
                                   const std::uint64_t request_id,
                                   const std::int32_t initiator_request_id,
@@ -58,8 +59,7 @@ NativeProbeEvent MakeNetworkEvent(const NativeProbeType type,
   event.header.category = NativeProbeCategory::kNetwork;
   event.header.type = type;
   event.header.sequence_number = sequence_number;
-  event.header.monotonic_time_ns =
-      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  event.header.monotonic_time_ns = monotonic_time_ns;
   event.header.session_id = session_id;
   event.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
   event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
@@ -80,13 +80,24 @@ NativeNetworkCaptureSink& NativeNetworkCaptureSink::Get() {
 }
 
 bool NativeNetworkCaptureSink::IsEnabled() const noexcept {
-  return emitter_.load(std::memory_order_acquire) != nullptr;
+  if (emitter_.load(std::memory_order_acquire) == nullptr ||
+      (category_mask_.load(std::memory_order_relaxed) &
+       NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) == 0) {
+    return false;
+  }
+  const std::uint64_t now =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  return now < expires_at_monotonic_ns_.load(std::memory_order_relaxed);
 }
 
 void NativeNetworkCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
-                                          const std::uint64_t session_id) noexcept {
+                                          const std::uint64_t session_id,
+                                          const std::uint64_t category_mask,
+                                          const std::uint64_t expires_at_monotonic_ns) noexcept {
   emitter_.store(nullptr, std::memory_order_release);
   session_id_.store(emitter ? session_id : 0, std::memory_order_relaxed);
+  category_mask_.store(emitter ? category_mask : 0, std::memory_order_relaxed);
+  expires_at_monotonic_ns_.store(emitter ? expires_at_monotonic_ns : 0, std::memory_order_relaxed);
   emitter_.store(emitter, std::memory_order_release);
 }
 
@@ -102,11 +113,19 @@ void NativeNetworkCaptureSink::RecordRequestStarted(
   if (!emitter) [[likely]] {
     return;
   }
+  const std::uint64_t monotonic_time_ns =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  if ((category_mask_.load(std::memory_order_relaxed) &
+       NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) == 0 ||
+      monotonic_time_ns >= expires_at_monotonic_ns_.load(std::memory_order_relaxed)) {
+    return;
+  }
 
   NativeProbeEvent event = MakeNetworkEvent(
       NativeProbeType::kRequestStarted, next_sequence_.fetch_add(1, std::memory_order_relaxed),
-      session_id_.load(std::memory_order_relaxed), request_id, initiator_request_id,
-      initiator_process_id, frame_id, browser_context_id_high, browser_context_id_low);
+      monotonic_time_ns, session_id_.load(std::memory_order_relaxed), request_id,
+      initiator_request_id, initiator_process_id, frame_id, browser_context_id_high,
+      browser_context_id_low);
   event.header.resource_type =
       static_cast<std::uint16_t>(std::clamp(request.resource_type, 0, 65535));
   if (request.originated_from_service_worker) {
@@ -129,11 +148,19 @@ void NativeNetworkCaptureSink::RecordRequestRedirected(
   if (!emitter) [[likely]] {
     return;
   }
+  const std::uint64_t monotonic_time_ns =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  if ((category_mask_.load(std::memory_order_relaxed) &
+       NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) == 0 ||
+      monotonic_time_ns >= expires_at_monotonic_ns_.load(std::memory_order_relaxed)) {
+    return;
+  }
 
   NativeProbeEvent event = MakeNetworkEvent(
       NativeProbeType::kRequestRedirected, next_sequence_.fetch_add(1, std::memory_order_relaxed),
-      session_id_.load(std::memory_order_relaxed), request_id, initiator_request_id,
-      initiator_process_id, frame_id, browser_context_id_high, browser_context_id_low);
+      monotonic_time_ns, session_id_.load(std::memory_order_relaxed), request_id,
+      initiator_request_id, initiator_process_id, frame_id, browser_context_id_high,
+      browser_context_id_low);
   event.header.status_code = response_head.headers ? response_head.headers->response_code() : 0;
   event.header.encoded_data_length = response_head.encoded_data_length;
   SetPayload(event, redirect_info.new_method, " ", redirect_info.new_url.host());
@@ -152,11 +179,19 @@ void NativeNetworkCaptureSink::RecordResponseStarted(
   if (!emitter) [[likely]] {
     return;
   }
+  const std::uint64_t monotonic_time_ns =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  if ((category_mask_.load(std::memory_order_relaxed) &
+       NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) == 0 ||
+      monotonic_time_ns >= expires_at_monotonic_ns_.load(std::memory_order_relaxed)) {
+    return;
+  }
 
   NativeProbeEvent event = MakeNetworkEvent(
       NativeProbeType::kResponseStarted, next_sequence_.fetch_add(1, std::memory_order_relaxed),
-      session_id_.load(std::memory_order_relaxed), request_id, initiator_request_id,
-      initiator_process_id, frame_id, browser_context_id_high, browser_context_id_low);
+      monotonic_time_ns, session_id_.load(std::memory_order_relaxed), request_id,
+      initiator_request_id, initiator_process_id, frame_id, browser_context_id_high,
+      browser_context_id_low);
   event.header.status_code = response_head.headers ? response_head.headers->response_code() : 0;
   event.header.encoded_data_length = response_head.encoded_data_length;
   if (response_head.was_fetched_via_cache) {
@@ -181,10 +216,17 @@ void NativeNetworkCaptureSink::RecordRequestCompleted(
   if (!emitter) [[likely]] {
     return;
   }
+  const std::uint64_t monotonic_time_ns =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  if ((category_mask_.load(std::memory_order_relaxed) &
+       NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) == 0 ||
+      monotonic_time_ns >= expires_at_monotonic_ns_.load(std::memory_order_relaxed)) {
+    return;
+  }
 
   NativeProbeEvent event = MakeNetworkEvent(
       status.error_code == 0 ? NativeProbeType::kRequestCompleted : NativeProbeType::kRequestFailed,
-      next_sequence_.fetch_add(1, std::memory_order_relaxed),
+      next_sequence_.fetch_add(1, std::memory_order_relaxed), monotonic_time_ns,
       session_id_.load(std::memory_order_relaxed), request_id, initiator_request_id,
       initiator_process_id, frame_id, browser_context_id_high, browser_context_id_low);
   event.header.error_code = status.error_code;

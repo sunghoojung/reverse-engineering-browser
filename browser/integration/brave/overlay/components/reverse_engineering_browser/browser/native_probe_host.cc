@@ -25,7 +25,8 @@ NativeProbeHost::~NativeProbeHost() {
 void NativeProbeHost::BindClient(mojo::PendingRemote<mojom::NativeProbeClient> client) {
   client_.Bind(std::move(client));
   if (session_->IsActive()) {
-    Configure(session_->session_id());
+    Configure(session_->session_id(), session_->category_mask(),
+              session_->expires_at_monotonic_ns());
   }
 }
 
@@ -33,7 +34,9 @@ void NativeProbeHost::EventsAvailable() {
   Drain();
 }
 
-void NativeProbeHost::Configure(const std::uint64_t session_id) {
+void NativeProbeHost::Configure(const std::uint64_t session_id,
+                                const std::uint64_t category_mask,
+                                const std::uint64_t expires_at_monotonic_ns) {
   Disable();
   if (!client_.is_bound() || session_id == 0) {
     return;
@@ -56,7 +59,8 @@ void NativeProbeHost::Configure(const std::uint64_t session_id) {
     Disable();
     return;
   }
-  client_->Configure(session_id, std::move(renderer_region));
+  client_->Configure(session_id, category_mask, expires_at_monotonic_ns,
+                     std::move(renderer_region));
 }
 
 void NativeProbeHost::Disable() {

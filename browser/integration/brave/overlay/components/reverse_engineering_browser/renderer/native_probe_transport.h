@@ -34,7 +34,10 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
   void Connect();
 
   // mojom::NativeProbeClient:
-  void Configure(std::uint64_t session_id, base::UnsafeSharedMemoryRegion queue_region) override;
+  void Configure(std::uint64_t session_id,
+                 std::uint64_t category_mask,
+                 std::uint64_t expires_at_monotonic_ns,
+                 base::UnsafeSharedMemoryRegion queue_region) override;
   void Disable() override;
 
  private:

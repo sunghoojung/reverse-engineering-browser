@@ -41,8 +41,11 @@ make live
 
 The launcher passes the broker evidence store and Unix-socket path to Origin
 Trace. The application continues to show the last valid evidence if the broker
-disconnects and marks the capture as offline. Raw browser records stay on the
-Brave-to-broker socket; the UI reads the broker's normalized store.
+disconnects or the session expires and marks the capture as offline. Raw
+browser records stay on the Brave-to-broker socket; the UI reads the broker's
+normalized store. Live sessions enable Canvas and Network for one hour by
+default; `REB_CAPTURE_CATEGORY_MASK` and `REB_CAPTURE_DURATION_SECONDS` change
+those low-level startup limits.
 
 For development, the same interface can still run in a browser:
 

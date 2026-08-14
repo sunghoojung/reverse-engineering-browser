@@ -61,6 +61,12 @@ The project helper automatically uses `/Applications/Xcode.app` when present
 and Brave's bundled Python. A complete browser build remains available through
 `./scripts/brave-toolchain.sh build` and may take several hours.
 
+## Manual test target
+
+Use the [Fingerprint Playground](https://demo.fingerprint.com/playground) as a
+repeatable website target when manually testing browser observations and
+fingerprint-related evidence capture.
+
 ## Ownership rule
 
 Never commit `browser/worktree/`. New complete files belong in the mirrored

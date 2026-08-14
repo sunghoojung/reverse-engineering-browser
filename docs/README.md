@@ -8,6 +8,7 @@
 ## Architecture
 
 - [Technical architecture](./architecture/technical-architecture.md)
+- [Artifact transfer channel low-level design](./architecture/artifact-transfer-channel.md)
 - [System architecture](./architecture/system-architecture.md)
 - [System architecture diagram](./architecture/system-architecture.svg)
 
@@ -15,6 +16,7 @@
 
 - [Research UI and macOS application](../apps/research-ui/README.md)
 - [Event broker](../services/event-broker/README.md)
+- [Artifact receiver](../services/artifact-receiver/README.md)
 - [Shared protocol](../protocol/README.md)
 - [Brave workspace](../browser/README.md)
 - [Brave integration overlay](../browser/integration/brave/README.md)

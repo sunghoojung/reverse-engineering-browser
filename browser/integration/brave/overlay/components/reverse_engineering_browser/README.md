@@ -34,6 +34,11 @@ prefixes contain only the method and destination host. URL paths, queries,
 fragments, bodies, credentials, authorization headers, and cookies are not
 captured.
 
+Large artifact bytes use the separate 128-byte framed contract in
+`common/native_artifact_header.h`. Only the browser-process bridge may own that
+channel. It is not part of the renderer event ring, and response bodies require
+explicit sensitive-capture authorization.
+
 Renderer code never writes files or sockets directly.
 
 The current event envelope does not yet carry a trustworthy origin identity,

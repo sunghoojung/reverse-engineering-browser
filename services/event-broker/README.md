@@ -34,6 +34,11 @@ The command connects a deterministic native producer to the broker and creates
 `build/sessions/demo.jsonl`. Invalid or truncated records fail closed. The
 broker reports accepted records, invalid records, gaps, and retention evictions.
 
+Large artifact bytes are intentionally outside this service and its event
+queue. `reb-artifact-receiver` owns the independently bounded artifact stream,
+immutable blob store, hashing, and manifest. Events reference artifacts by ID;
+the event broker never copies their content.
+
 The socket mode requires one session identifier and a user-owned mode-0600
 token file. The broker creates the token when needed, creates a mode-0600 Unix
 socket, authenticates one Brave connection, rejects records from any other

@@ -40,6 +40,7 @@ source_set("browser") {
     "browser/native_probe_session.h",
     "browser/native_probe_socket_client.cc",
     "browser/native_probe_socket_client.h",
+    "common/native_artifact_header.h",
     "common/native_probe_event.h",
     "common/native_probe_ipc.h",
     "common/native_probe_queue.h",

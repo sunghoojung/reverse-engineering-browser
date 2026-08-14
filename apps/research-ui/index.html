@@ -197,6 +197,8 @@
         min-height: 0;
         overflow: hidden;
       }
+      .workspace.sources-active { grid-template-columns: minmax(0, 1fr); }
+      .workspace.sources-active > .sidebar { display: none; }
       .sidebar {
         position: relative;
         display: flex;
@@ -774,6 +776,265 @@
       .correlation-cell { color: var(--muted); }
       .evidence-empty { min-height: 240px; display: grid; place-items: center; color: var(--muted); }
 
+      #screen-sources:not([hidden]) {
+        display: grid;
+        grid-template-columns: 252px minmax(360px, 1fr) 244px;
+        min-height: 0;
+      }
+      .sources-navigator, .sources-debugger {
+        min-width: 0;
+        min-height: 0;
+        display: grid;
+        background: var(--chrome);
+      }
+      .sources-navigator {
+        grid-template-rows: 35px minmax(0, 1fr);
+        border-right: 1px solid var(--line);
+      }
+      .source-side-tabs, .source-editor-tabs {
+        min-width: 0;
+        display: flex;
+        align-items: stretch;
+        overflow-x: auto;
+        scrollbar-width: none;
+        background: var(--chrome);
+        border-bottom: 1px solid var(--line);
+      }
+      .source-side-tabs::-webkit-scrollbar, .source-editor-tabs::-webkit-scrollbar { display: none; }
+      .source-side-tab, .source-editor-tab {
+        position: relative;
+        flex: 0 0 auto;
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        font-size: 10px;
+      }
+      .source-side-tab { padding: 0 12px; }
+      .source-side-tab[aria-selected="true"] { color: var(--text); }
+      .source-side-tab[aria-selected="true"]::after {
+        content: "";
+        position: absolute;
+        left: 9px;
+        right: 9px;
+        bottom: 0;
+        height: 2px;
+        background: var(--accent);
+      }
+      .source-tree { min-height: 0; padding: 5px 0 24px; overflow: auto; }
+      .source-tree-row {
+        width: 100%;
+        min-height: 24px;
+        display: grid;
+        grid-template-columns: 14px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 5px;
+        padding: 0 9px 0 calc(9px + var(--source-depth, 0) * 13px);
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        text-align: left;
+        font-size: 10px;
+      }
+      .source-tree-row:hover { background: var(--panel-3); color: var(--text); }
+      .source-tree-row[aria-selected="true"] { background: var(--accent-soft); color: var(--text); }
+      .source-tree-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .source-tree-meta { color: var(--faint); font: 8px var(--mono); }
+      .source-file-icon { color: #fdd663; font: 9px var(--mono); }
+      .source-file-icon.wasm { color: #c58af9; }
+      .source-file-icon.response_body { color: var(--green); }
+      .source-tree-empty { padding: 22px 14px; color: var(--muted); line-height: 1.6; }
+      .sources-editor {
+        min-width: 0;
+        min-height: 0;
+        display: grid;
+        grid-template-rows: 35px 32px minmax(0, 1fr) 27px;
+        background: var(--panel);
+      }
+      .source-editor-tab {
+        min-width: 120px;
+        max-width: 210px;
+        gap: 7px;
+        align-items: center;
+        padding: 0 9px;
+        border-right: 1px solid var(--line);
+        text-align: left;
+      }
+      .source-editor-tab[aria-selected="true"] { color: var(--text); background: var(--panel); }
+      .source-editor-tab[aria-selected="true"]::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 0;
+        height: 2px;
+        background: var(--accent);
+      }
+      .source-editor-tab span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .source-tab-close { margin-left: auto; color: var(--faint); }
+      .source-tab-placeholder { display: flex; align-items: center; padding: 0 11px; color: var(--faint); }
+      .source-editor-toolbar {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 0 7px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel-2);
+      }
+      .source-location {
+        min-width: 0;
+        margin-right: auto;
+        overflow: hidden;
+        color: var(--muted);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font: 9px var(--mono);
+      }
+      .source-tool {
+        min-width: 25px;
+        height: 24px;
+        padding: 0 6px;
+        border: 1px solid transparent;
+        border-radius: 2px;
+        background: transparent;
+        color: var(--muted);
+        font: 10px var(--mono);
+      }
+      .source-tool:hover:not(:disabled) { border-color: var(--line); background: var(--panel-3); color: var(--text); }
+      .source-tool:disabled { cursor: not-allowed; opacity: .35; }
+      .source-search {
+        width: 150px;
+        height: 23px;
+        padding: 0 7px;
+        border: 1px solid var(--line);
+        border-radius: 2px;
+        background: var(--panel);
+        font: 9px var(--mono);
+      }
+      .source-code-wrap { min-height: 0; overflow: auto; position: relative; }
+      .source-code {
+        min-width: 100%;
+        width: max-content;
+        margin: 0;
+        padding: 5px 0 40px;
+        counter-reset: source-line;
+        color: var(--text);
+        tab-size: 2;
+        font: 11px/20px var(--mono);
+      }
+      .source-line {
+        min-height: 20px;
+        display: block;
+        padding: 0 16px 0 64px;
+        position: relative;
+        white-space: pre;
+      }
+      .source-line::before {
+        counter-increment: source-line;
+        content: counter(source-line);
+        position: absolute;
+        left: 0;
+        width: 49px;
+        padding-right: 8px;
+        color: var(--faint);
+        border-right: 1px solid var(--line-soft);
+        text-align: right;
+        user-select: none;
+      }
+      .source-line.search-match { background: color-mix(in srgb, var(--amber) 13%, transparent); }
+      .source-empty {
+        min-height: 100%;
+        display: grid;
+        place-items: center;
+        padding: 26px;
+        color: var(--muted);
+        text-align: center;
+      }
+      .source-editor-status {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 0 8px;
+        border-top: 1px solid var(--line);
+        background: var(--chrome);
+        color: var(--faint);
+        font: 8px var(--mono);
+      }
+      .source-editor-status .source-hash { margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .sources-debugger {
+        grid-template-rows: 35px auto minmax(0, 1fr);
+        border-left: 1px solid var(--line);
+      }
+      .debug-controls {
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        padding: 0 6px;
+        border-bottom: 1px solid var(--line);
+      }
+      .debug-control {
+        width: 25px;
+        height: 24px;
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+      }
+      .debug-control:disabled { opacity: .42; cursor: not-allowed; }
+      .debug-state { padding: 8px 10px; color: var(--muted); border-bottom: 1px solid var(--line); font-size: 9px; }
+      .debug-panes { min-height: 0; overflow: auto; }
+      .debug-pane { border-bottom: 1px solid var(--line); }
+      .debug-pane summary {
+        min-height: 29px;
+        display: flex;
+        align-items: center;
+        padding: 0 9px;
+        cursor: pointer;
+        font-weight: 650;
+        list-style: none;
+      }
+      .debug-pane summary::before { content: "›"; width: 14px; color: var(--muted); }
+      .debug-pane[open] summary::before { content: "⌄"; }
+      .debug-pane-body { padding: 4px 11px 10px 23px; color: var(--muted); font-size: 9px; line-height: 1.55; }
+      .artifact-facts { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 5px 8px; font: 8px/1.5 var(--mono); }
+      .artifact-facts dt { color: var(--faint); }
+      .artifact-facts dd { margin: 0; overflow-wrap: anywhere; color: var(--muted); }
+      .quick-open {
+        position: absolute;
+        z-index: 10;
+        left: 50%;
+        top: 64px;
+        width: min(520px, calc(100% - 32px));
+        transform: translateX(-50%);
+        border: 1px solid var(--line);
+        background: var(--chrome);
+        box-shadow: 0 12px 40px var(--shadow);
+      }
+      .quick-open input {
+        width: 100%;
+        height: 38px;
+        padding: 0 11px;
+        border: 0;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+        font: 11px var(--mono);
+      }
+      .quick-open-results { max-height: 260px; overflow: auto; }
+      .quick-open-row {
+        width: 100%;
+        min-height: 34px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 8px;
+        padding: 0 10px;
+        border: 0;
+        background: transparent;
+        text-align: left;
+      }
+      .quick-open-row:hover, .quick-open-row:focus { background: var(--accent-soft); }
+      .quick-open-row small { color: var(--faint); font: 8px var(--mono); }
+
       .experiment-content { padding: 22px; }
       .experiment-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(240px, .7fr); gap: 14px; }
       .experiment-card { border: 1px solid var(--line); border-radius: 5px; background: var(--panel-2); }
@@ -815,6 +1076,8 @@
         .detail-pane { overflow: auto; }
         .inspector-tabs { overflow-x: auto; }
         .inspector-tab { flex: 0 0 auto; }
+        #screen-sources:not([hidden]) { grid-template-columns: 210px minmax(330px, 1fr); }
+        .sources-debugger { display: none; }
       }
       @media (max-width: 880px) {
         .workspace { grid-template-columns: 178px minmax(0, 1fr); }
@@ -849,6 +1112,9 @@
         .screen-head-actions .secondary-button { display: none; }
         .experiment-grid { grid-template-columns: 1fr; }
         .statusbar span:not(:first-child):not(.local-only) { display: none; }
+        #screen-sources:not([hidden]) { grid-template-columns: 148px minmax(260px, 1fr); }
+        .source-search { display: none; }
+        .source-tree-row { padding-left: calc(6px + var(--source-depth, 0) * 9px); }
       }
       @media (prefers-reduced-motion: no-preference) {
         .screen:not([hidden]) { animation: reveal .16s ease-out; }
@@ -870,6 +1136,7 @@
         <div id="capture-state" class="capture-state" role="status"><span class="pulse" aria-hidden="true"></span><span>Connecting</span></div>
         <nav class="primary-nav" aria-label="Workspace">
           <button class="nav-button" data-screen="traffic" aria-current="page">Traffic</button>
+          <button class="nav-button" data-screen="sources">Sources</button>
           <button class="nav-button" data-screen="backtrace">Backtraces</button>
           <button class="nav-button" data-screen="experiments">Experiments</button>
         </nav>
@@ -879,7 +1146,7 @@
         </div>
       </div>
 
-      <div class="workspace">
+      <div id="workspace" class="workspace">
         <aside class="sidebar" aria-label="Session structure">
           <div class="sidebar-heading"><span class="session-icon" aria-hidden="true"></span>Working session <span id="sidebar-count" class="sidebar-count">12</span></div>
           <div class="tree">
@@ -962,6 +1229,61 @@
                 </div>
               </div>
             </div>
+          </section>
+
+          <section id="screen-sources" class="screen" aria-label="Sources" hidden>
+            <aside class="sources-navigator" aria-label="Sources navigator">
+              <div class="source-side-tabs" role="tablist" aria-label="Source collections">
+                <button id="source-tab-page" class="source-side-tab" type="button" role="tab" aria-selected="true" aria-controls="source-tree">Page</button>
+                <button class="source-side-tab" type="button" role="tab" aria-selected="false" tabindex="-1" disabled>Filesystem</button>
+                <button class="source-side-tab" type="button" role="tab" aria-selected="false" tabindex="-1" disabled>Overrides</button>
+              </div>
+              <div id="source-tree" class="source-tree" role="tree" aria-labelledby="source-tab-page"></div>
+            </aside>
+
+            <section class="sources-editor" aria-label="Source editor">
+              <div id="source-editor-tabs" class="source-editor-tabs" role="tablist" aria-label="Open source files"></div>
+              <div class="source-editor-toolbar">
+                <span id="source-location" class="source-location">Select a captured artifact</span>
+                <button id="source-quick-open" class="source-tool" type="button" aria-label="Open file" title="Open file (⌘P)">⌘P</button>
+                <label><span class="sr-only" hidden>Find in source</span><input id="source-search" class="source-search" type="search" placeholder="Find" aria-label="Find in source" /></label>
+                <button id="source-pretty" class="source-tool" type="button" aria-label="Show readable representation" title="Show readable representation" disabled>{ }</button>
+              </div>
+              <div id="source-code-wrap" class="source-code-wrap" tabindex="0">
+                <div id="source-code-empty" class="source-empty">Select a JavaScript file, WASM module, source map, or approved response body.</div>
+                <code id="source-code" class="source-code" aria-label="Source content" hidden></code>
+              </div>
+              <div class="source-editor-status">
+                <span id="source-position">Line 1, Column 1</span>
+                <span id="source-size">0 bytes</span>
+                <span id="source-view-kind">Original evidence</span>
+                <span id="source-hash" class="source-hash"></span>
+              </div>
+              <div id="quick-open" class="quick-open" role="dialog" aria-label="Open a source file" hidden>
+                <input id="quick-open-input" type="search" placeholder="Open file" aria-label="File name" />
+                <div id="quick-open-results" class="quick-open-results"></div>
+              </div>
+            </section>
+
+            <aside class="sources-debugger" aria-label="Debugger sidebar">
+              <div class="debug-controls" aria-label="Debugger controls">
+                <button class="debug-control" type="button" aria-label="Resume script execution" title="Resume script execution" disabled>▶</button>
+                <button class="debug-control" type="button" aria-label="Step over" title="Step over" disabled>↷</button>
+                <button class="debug-control" type="button" aria-label="Step into" title="Step into" disabled>↓</button>
+                <button class="debug-control" type="button" aria-label="Step out" title="Step out" disabled>↑</button>
+                <button class="debug-control" type="button" aria-label="Deactivate breakpoints" title="Deactivate breakpoints" disabled>◇</button>
+              </div>
+              <div class="debug-state">Not paused</div>
+              <div class="debug-panes">
+                <details id="artifact-details" class="debug-pane" open><summary>Artifact details</summary><div id="artifact-facts" class="debug-pane-body">Select an artifact to inspect immutable capture metadata.</div></details>
+                <details class="debug-pane"><summary>Watch</summary><div class="debug-pane-body">No watch expressions</div></details>
+                <details class="debug-pane"><summary>Breakpoints</summary><div class="debug-pane-body">Runtime debugging is not enabled for this evidence session.</div></details>
+                <details class="debug-pane"><summary>Scope</summary><div class="debug-pane-body">Not paused</div></details>
+                <details class="debug-pane"><summary>Call Stack</summary><div class="debug-pane-body">Not paused</div></details>
+                <details class="debug-pane"><summary>XHR/fetch Breakpoints</summary><div class="debug-pane-body">No breakpoints</div></details>
+                <details class="debug-pane"><summary>Event Listener Breakpoints</summary><div class="debug-pane-body">No breakpoints</div></details>
+              </div>
+            </aside>
           </section>
 
           <section id="screen-backtrace" class="screen" aria-label="Request field backtrace" hidden>
@@ -1110,6 +1432,37 @@
         { relative: '-1.907 ms', source: 'sample', category: 'canvas', type: 'api_call', correlation: 'event 194 · frame 200', value: 'CanvasRenderingContext2D.getImageData' }
       ];
 
+      const sampleArtifacts = [
+        {
+          protocol_version: 1, artifact_id: 'sample-300', session_id: '1', navigation_id: '100', frame_id: '200',
+          parent_artifact_id: '0', creator_event_id: '79', kind: 'javascript', origin: 'sample',
+          url: 'https://checkout.acme.test/assets/cart.js', mime_type: 'text/javascript', byte_size: 368,
+          sha256: 'sample-preview-not-stored', sensitive: false,
+          content: `export function buildPayload(cart, fingerprint) {
+  const payload = {
+    cart,
+    device: {locale: navigator.language, fingerprint},
+  };
+  return JSON.stringify(payload);
+}
+
+export async function checkout(cart, fingerprint) {
+  return fetch('/cart', {
+    method: 'POST',
+    headers: {'content-type': 'application/json'},
+    body: buildPayload(cart, fingerprint),
+  });
+}`
+        },
+        {
+          protocol_version: 1, artifact_id: 'sample-301', session_id: '1', navigation_id: '100', frame_id: '200',
+          parent_artifact_id: 'sample-300', creator_event_id: '194', kind: 'wasm', origin: 'sample',
+          url: 'https://checkout.acme.test/assets/fingerprint.wasm', mime_type: 'application/wasm', byte_size: 8,
+          sha256: 'sample-preview-not-stored', sensitive: false,
+          content: '00000000  00 61 73 6d 01 00 00 00                          |.asm....|'
+        }
+      ];
+
       const fieldSets = {
         body: [
           { key: 'cart', value: '{ 3 fields }', type: 'obj', depth: 0, group: true },
@@ -1136,6 +1489,12 @@
       const state = {
         events: [],
         requests: [...sampleRequests],
+        artifacts: [...sampleArtifacts],
+        openArtifactIds: ['sample-300'],
+        selectedArtifactId: 'sample-300',
+        artifactRefreshing: false,
+        sourcePretty: false,
+        sourceTruncated: false,
         selectedRequestId: '81',
         inspectorTab: 'payload',
         fieldTab: 'body',
@@ -1175,7 +1534,24 @@
         experimentSubtitle: document.querySelector('#experiment-subtitle'),
         experimentCandidate: document.querySelector('#experiment-candidate'),
         experimentInput: document.querySelector('#experiment-input'),
-        experimentNote: document.querySelector('#experiment-note')
+        experimentNote: document.querySelector('#experiment-note'),
+        workspace: document.querySelector('#workspace'),
+        sourceTree: document.querySelector('#source-tree'),
+        sourceEditorTabs: document.querySelector('#source-editor-tabs'),
+        sourceLocation: document.querySelector('#source-location'),
+        sourceSearch: document.querySelector('#source-search'),
+        sourcePretty: document.querySelector('#source-pretty'),
+        sourceCodeWrap: document.querySelector('#source-code-wrap'),
+        sourceCode: document.querySelector('#source-code'),
+        sourceCodeEmpty: document.querySelector('#source-code-empty'),
+        sourcePosition: document.querySelector('#source-position'),
+        sourceSize: document.querySelector('#source-size'),
+        sourceViewKind: document.querySelector('#source-view-kind'),
+        sourceHash: document.querySelector('#source-hash'),
+        artifactFacts: document.querySelector('#artifact-facts'),
+        quickOpen: document.querySelector('#quick-open'),
+        quickOpenInput: document.querySelector('#quick-open-input'),
+        quickOpenResults: document.querySelector('#quick-open-results')
       };
 
       const bodyTraceSteps = [
@@ -1224,6 +1600,10 @@
         ['request_failed', 5]
       ]);
       const networkLifecycleTypes = new Set(lifecycleRanks.keys());
+      const artifactKinds = new Set(['javascript', 'wasm', 'source_map', 'response_body']);
+      const artifactIdentifierFields = [
+        'artifact_id', 'session_id', 'navigation_id', 'frame_id', 'parent_artifact_id', 'creator_event_id'
+      ];
 
       function isPlainObject(value) {
         return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -1344,6 +1724,27 @@
           body.count === body.events.length &&
           (body.broker_connected === undefined || typeof body.broker_connected === 'boolean') &&
           body.events.every(isBrokerEvent);
+      }
+
+      function isArtifact(artifact) {
+        return isPlainObject(artifact) &&
+          artifact.protocol_version === 1 &&
+          artifactIdentifierFields.every(field => isCanonicalInteger(artifact[field], 0n, uint64Max)) &&
+          artifactKinds.has(artifact.kind) &&
+          typeof artifact.url === 'string' && artifact.url.length > 0 &&
+          typeof artifact.mime_type === 'string' && artifact.mime_type.length > 0 &&
+          isSafeIntegerInRange(artifact.byte_size, 0, Number.MAX_SAFE_INTEGER) &&
+          typeof artifact.sha256 === 'string' && /^[0-9a-f]{64}$/.test(artifact.sha256) &&
+          typeof artifact.sensitive === 'boolean' &&
+          (!artifact.sensitive || artifact.kind === 'response_body');
+      }
+
+      function isArtifactResponse(body) {
+        return isPlainObject(body) &&
+          Array.isArray(body.artifacts) &&
+          isSafeIntegerInRange(body.count, 0, 5000) &&
+          body.count === body.artifacts.length &&
+          body.artifacts.every(isArtifact);
       }
 
       function legacyBrowserRequestKey(event) {
@@ -1886,10 +2287,405 @@
         elements.experimentNote.textContent = 'The origin is still Unknown. This draft does not claim a producer until a controlled replay verifies one.';
       }
 
+      function sourceName(artifact) {
+        try {
+          const path = new URL(artifact.url).pathname;
+          return path.split('/').filter(Boolean).at(-1) || artifact.url;
+        } catch {
+          return artifact.url.split('/').filter(Boolean).at(-1) || `artifact-${artifact.artifact_id}`;
+        }
+      }
+
+      function sourceOrigin(artifact) {
+        try { return new URL(artifact.url).origin; } catch { return '(generated)'; }
+      }
+
+      function sourcePathParts(artifact) {
+        try { return new URL(artifact.url).pathname.split('/').filter(Boolean); } catch { return [sourceName(artifact)]; }
+      }
+
+      function sourceIcon(artifact) {
+        if (artifact.kind === 'wasm') return 'W';
+        if (artifact.kind === 'source_map') return '{}';
+        if (artifact.kind === 'response_body') return 'R';
+        return 'JS';
+      }
+
+      function sourceTreeRow(label, glyph, depth, artifact = null, meta = '') {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'source-tree-row';
+        row.style.setProperty('--source-depth', String(depth));
+        row.setAttribute('role', 'treeitem');
+        row.setAttribute('aria-level', String(depth + 1));
+        const icon = document.createElement('span');
+        icon.className = artifact ? `source-file-icon ${artifact.kind}` : 'tree-glyph';
+        icon.textContent = glyph;
+        const name = document.createElement('span');
+        name.className = 'source-tree-name';
+        name.textContent = label;
+        name.title = artifact?.url ?? label;
+        const detail = document.createElement('span');
+        detail.className = 'source-tree-meta';
+        detail.textContent = meta;
+        row.append(icon, name, detail);
+        if (artifact) {
+          row.dataset.artifactId = artifact.artifact_id;
+          row.setAttribute('aria-selected', String(artifact.artifact_id === state.selectedArtifactId));
+          row.addEventListener('click', () => selectArtifact(artifact.artifact_id));
+        } else {
+          row.setAttribute('aria-expanded', 'true');
+        }
+        return row;
+      }
+
+      function renderSourceTree() {
+        if (state.artifacts.length === 0) {
+          const empty = document.createElement('div');
+          empty.className = 'source-tree-empty';
+          empty.textContent = 'No artifacts captured. JavaScript, WASM, source maps, and approved response bodies will appear here.';
+          elements.sourceTree.replaceChildren(empty);
+          return;
+        }
+        const rows = [sourceTreeRow('top', '⌄', 0, null, `${state.artifacts.length}`)];
+        const byOrigin = new Map();
+        state.artifacts.forEach(artifact => {
+          const origin = sourceOrigin(artifact);
+          if (!byOrigin.has(origin)) byOrigin.set(origin, []);
+          byOrigin.get(origin).push(artifact);
+        });
+        [...byOrigin.entries()].sort(([left], [right]) => left.localeCompare(right)).forEach(([origin, artifacts]) => {
+          rows.push(sourceTreeRow(origin.replace(/^https?:\/\//, ''), '⌄', 1, null, `${artifacts.length}`));
+          const renderedDirectories = new Set();
+          artifacts.sort((left, right) => left.url.localeCompare(right.url)).forEach(artifact => {
+            const parts = sourcePathParts(artifact);
+            parts.slice(0, -1).forEach((directory, index) => {
+              const key = parts.slice(0, index + 1).join('/');
+              if (renderedDirectories.has(key)) return;
+              renderedDirectories.add(key);
+              rows.push(sourceTreeRow(directory, '⌄', index + 2));
+            });
+            rows.push(sourceTreeRow(
+              sourceName(artifact),
+              sourceIcon(artifact),
+              Math.max(2, parts.length + 1),
+              artifact,
+              artifact.origin === 'sample' ? 'sample' : ''
+            ));
+          });
+        });
+        elements.sourceTree.replaceChildren(...rows);
+      }
+
+      function renderSourceTabs() {
+        const artifacts = state.openArtifactIds
+          .map(id => state.artifacts.find(artifact => artifact.artifact_id === id))
+          .filter(Boolean);
+        if (artifacts.length === 0) {
+          const placeholder = document.createElement('span');
+          placeholder.className = 'source-tab-placeholder';
+          placeholder.textContent = 'No file open';
+          elements.sourceEditorTabs.replaceChildren(placeholder);
+          return;
+        }
+        const tabs = artifacts.map(artifact => {
+          const tab = document.createElement('button');
+          tab.type = 'button';
+          tab.className = 'source-editor-tab';
+          tab.setAttribute('role', 'tab');
+          tab.setAttribute('aria-selected', String(artifact.artifact_id === state.selectedArtifactId));
+          tab.tabIndex = artifact.artifact_id === state.selectedArtifactId ? 0 : -1;
+          const icon = document.createElement('span');
+          icon.className = `source-file-icon ${artifact.kind}`;
+          icon.textContent = sourceIcon(artifact);
+          const name = document.createElement('span');
+          name.textContent = sourceName(artifact);
+          const close = document.createElement('span');
+          close.className = 'source-tab-close';
+          close.textContent = '×';
+          close.setAttribute('aria-hidden', 'true');
+          tab.append(icon, name, close);
+          tab.addEventListener('click', event => {
+            if (event.target === close) {
+              closeArtifact(artifact.artifact_id);
+              return;
+            }
+            selectArtifact(artifact.artifact_id);
+          });
+          return tab;
+        });
+        elements.sourceEditorTabs.replaceChildren(...tabs);
+      }
+
+      function renderArtifactFacts(artifact) {
+        if (!artifact) {
+          elements.artifactFacts.textContent = 'Select an artifact to inspect immutable capture metadata.';
+          return;
+        }
+        const list = document.createElement('dl');
+        list.className = 'artifact-facts';
+        const facts = [
+          ['Artifact', artifact.artifact_id],
+          ['Kind', artifact.kind],
+          ['Session', artifact.session_id],
+          ['Navigation', artifact.navigation_id],
+          ['Frame', artifact.frame_id],
+          ['Creator', artifact.creator_event_id],
+          ['Parent', artifact.parent_artifact_id],
+          ['MIME', artifact.mime_type],
+          ['SHA-256', artifact.sha256],
+          ['Sensitive', artifact.sensitive ? 'approved' : 'no']
+        ];
+        facts.forEach(([label, value]) => {
+          const term = document.createElement('dt'); term.textContent = label;
+          const detail = document.createElement('dd'); detail.textContent = String(value);
+          list.append(term, detail);
+        });
+        elements.artifactFacts.replaceChildren(list);
+      }
+
+      function formatByteSize(bytes) {
+        if (bytes < 1024) return `${bytes} bytes`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+      }
+
+      function formatWasmHex(buffer) {
+        const bytes = new Uint8Array(buffer);
+        const rows = [];
+        for (let offset = 0; offset < bytes.length; offset += 16) {
+          const chunk = bytes.slice(offset, offset + 16);
+          const address = offset.toString(16).padStart(8, '0');
+          const hex = [...chunk].map(byte => byte.toString(16).padStart(2, '0')).join(' ').padEnd(47, ' ');
+          const printable = [...chunk].map(byte => byte >= 32 && byte < 127 ? String.fromCharCode(byte) : '.').join('');
+          rows.push(`${address}  ${hex}  |${printable}|`);
+        }
+        return rows.join('\n');
+      }
+
+      function formatJavaScript(source) {
+        if (source.split('\n').length > 5) return source;
+        let output = '';
+        let indent = 0;
+        let quote = '';
+        let escaped = false;
+        let lineComment = false;
+        let blockComment = false;
+        const newline = () => { output = `${output.trimEnd()}\n${'  '.repeat(indent)}`; };
+        for (let index = 0; index < source.length; index += 1) {
+          const character = source[index];
+          const next = source[index + 1] ?? '';
+          if (lineComment) {
+            output += character;
+            if (character === '\n') { lineComment = false; output += '  '.repeat(indent); }
+            continue;
+          }
+          if (blockComment) {
+            output += character;
+            if (character === '*' && next === '/') { output += next; index += 1; blockComment = false; }
+            continue;
+          }
+          if (quote) {
+            output += character;
+            if (escaped) escaped = false;
+            else if (character === '\\') escaped = true;
+            else if (character === quote) quote = '';
+            continue;
+          }
+          if (character === '/' && next === '/') { output += '//'; index += 1; lineComment = true; continue; }
+          if (character === '/' && next === '*') { output += '/*'; index += 1; blockComment = true; continue; }
+          if (character === '"' || character === "'" || character === '`') { quote = character; output += character; continue; }
+          if (character === '{') { output += ' {'; indent += 1; newline(); continue; }
+          if (character === '}') { indent = Math.max(0, indent - 1); newline(); output += '}'; if (next && next !== ';' && next !== ',' && next !== ')') newline(); continue; }
+          if (character === ';') { output += ';'; newline(); continue; }
+          if (character === ',') { output += ', '; continue; }
+          if (/\s/.test(character)) {
+            if (output && !/\s$/.test(output)) output += ' ';
+            continue;
+          }
+          output += character;
+        }
+        return output.trim();
+      }
+
+      function applySourceSearch() {
+        const needle = elements.sourceSearch.value.toLowerCase();
+        let matches = 0;
+        let first = null;
+        elements.sourceCode.querySelectorAll('.source-line').forEach(line => {
+          const matched = Boolean(needle) && line.textContent.toLowerCase().includes(needle);
+          line.classList.toggle('search-match', matched);
+          if (matched) { matches += 1; first ??= line; }
+        });
+        if (needle) {
+          elements.sourcePosition.textContent = `${matches} ${matches === 1 ? 'match' : 'matches'}`;
+          first?.scrollIntoView({ block: 'center' });
+        } else {
+          elements.sourcePosition.textContent = 'Line 1, Column 1';
+        }
+      }
+
+      function renderSourceContent(artifact) {
+        if (!artifact) {
+          elements.sourceCode.hidden = true;
+          elements.sourceCodeEmpty.hidden = false;
+          elements.sourceCodeEmpty.textContent = 'Select a JavaScript file, WASM module, source map, or approved response body.';
+          return;
+        }
+        if (artifact.loading) {
+          elements.sourceCode.hidden = true;
+          elements.sourceCodeEmpty.hidden = false;
+          elements.sourceCodeEmpty.textContent = 'Loading immutable artifact bytes…';
+          return;
+        }
+        if (artifact.loadError) {
+          elements.sourceCode.hidden = true;
+          elements.sourceCodeEmpty.hidden = false;
+          elements.sourceCodeEmpty.textContent = artifact.loadError;
+          return;
+        }
+        const original = artifact.content ?? '';
+        const content = state.sourcePretty && artifact.kind === 'javascript'
+          ? formatJavaScript(original)
+          : original;
+        const lines = content.split('\n');
+        const renderedLines = lines.slice(0, 20000);
+        const nodes = renderedLines.map(line => {
+          const row = document.createElement('span');
+          row.className = 'source-line';
+          row.textContent = line || ' ';
+          return row;
+        });
+        if (lines.length > renderedLines.length) {
+          const notice = document.createElement('span');
+          notice.className = 'source-line';
+          notice.textContent = `Viewer limit reached. ${lines.length - renderedLines.length} more lines remain in the immutable artifact.`;
+          nodes.push(notice);
+        }
+        elements.sourceCode.replaceChildren(...nodes);
+        elements.sourceCode.hidden = false;
+        elements.sourceCodeEmpty.hidden = true;
+        elements.sourceCodeWrap.scrollTop = 0;
+        applySourceSearch();
+      }
+
+      function renderSources() {
+        const artifact = state.artifacts.find(candidate => candidate.artifact_id === state.selectedArtifactId) ?? null;
+        renderSourceTree();
+        renderSourceTabs();
+        renderArtifactFacts(artifact);
+        elements.sourceLocation.textContent = artifact?.url ?? 'Select a captured artifact';
+        elements.sourceSize.textContent = artifact ? formatByteSize(artifact.byte_size) : '0 bytes';
+        elements.sourceHash.textContent = artifact ? `sha256 ${artifact.sha256}` : '';
+        elements.sourceViewKind.textContent = state.sourcePretty ? 'Readable derived view' : 'Original evidence';
+        elements.sourcePretty.disabled = artifact?.kind !== 'javascript' || !artifact.content;
+        elements.sourcePretty.setAttribute('aria-pressed', String(state.sourcePretty));
+        elements.sourcePretty.title = state.sourcePretty ? 'Show original evidence' : 'Show readable representation';
+        renderSourceContent(artifact);
+      }
+
+      async function loadArtifactContent(artifact) {
+        if (artifact.content !== undefined || artifact.loading) return;
+        artifact.loading = true;
+        artifact.loadError = null;
+        renderSources();
+        try {
+          const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?limit=2097152`, { cache: 'no-store' });
+          if (!response.ok) throw new Error(`Artifact store returned ${response.status}`);
+          const buffer = await response.arrayBuffer();
+          artifact.content = artifact.kind === 'wasm'
+            ? formatWasmHex(buffer)
+            : new TextDecoder('utf-8', { fatal: false }).decode(buffer);
+          artifact.contentTruncated = response.headers.get('X-Artifact-Truncated') === '1';
+          if (artifact.contentTruncated) artifact.content += '\n\n[Viewer preview limited to the first 2 MB]';
+        } catch (error) {
+          artifact.loadError = `Artifact bytes are unavailable: ${error.message}`;
+        } finally {
+          artifact.loading = false;
+          renderSources();
+        }
+      }
+
+      function selectArtifact(artifactId) {
+        const artifact = state.artifacts.find(candidate => candidate.artifact_id === artifactId);
+        if (!artifact) return;
+        state.selectedArtifactId = artifactId;
+        state.sourcePretty = false;
+        if (!state.openArtifactIds.includes(artifactId)) state.openArtifactIds.push(artifactId);
+        renderSources();
+        loadArtifactContent(artifact);
+      }
+
+      function closeArtifact(artifactId) {
+        const closedIndex = state.openArtifactIds.indexOf(artifactId);
+        state.openArtifactIds = state.openArtifactIds.filter(id => id !== artifactId);
+        if (state.selectedArtifactId === artifactId) {
+          state.selectedArtifactId = state.openArtifactIds[Math.max(0, closedIndex - 1)] ?? null;
+        }
+        state.sourcePretty = false;
+        renderSources();
+      }
+
+      function renderQuickOpen() {
+        const needle = elements.quickOpenInput.value.trim().toLowerCase();
+        const matches = state.artifacts.filter(artifact =>
+          !needle || `${sourceName(artifact)} ${artifact.url}`.toLowerCase().includes(needle)
+        );
+        const rows = matches.map(artifact => {
+          const row = document.createElement('button');
+          row.type = 'button';
+          row.className = 'quick-open-row';
+          const name = document.createElement('span'); name.textContent = sourceName(artifact);
+          const path = document.createElement('small'); path.textContent = artifact.url;
+          row.append(name, path);
+          row.addEventListener('click', () => {
+            elements.quickOpen.hidden = true;
+            selectArtifact(artifact.artifact_id);
+          });
+          return row;
+        });
+        elements.quickOpenResults.replaceChildren(...rows);
+      }
+
+      function openQuickOpen() {
+        elements.quickOpen.hidden = false;
+        elements.quickOpenInput.value = '';
+        renderQuickOpen();
+        requestAnimationFrame(() => elements.quickOpenInput.focus());
+      }
+
+      async function refreshArtifacts() {
+        if (state.artifactRefreshing || location.protocol === 'file:') return;
+        state.artifactRefreshing = true;
+        try {
+          const response = await fetch('/api/artifacts?limit=500', { cache: 'no-store' });
+          if (!response.ok) throw new Error(`Artifact store returned ${response.status}`);
+          const body = await response.json();
+          if (!isArtifactResponse(body)) throw new TypeError('Malformed artifact response');
+          if (body.artifacts.length === 0) return;
+          const existing = new Map(state.artifacts.map(artifact => [artifact.artifact_id, artifact]));
+          state.artifacts = body.artifacts.map(artifact => ({ ...artifact, origin: 'live', content: existing.get(artifact.artifact_id)?.content }));
+          state.openArtifactIds = state.openArtifactIds.filter(id => state.artifacts.some(artifact => artifact.artifact_id === id));
+          if (!state.artifacts.some(artifact => artifact.artifact_id === state.selectedArtifactId)) {
+            state.selectedArtifactId = state.artifacts[0].artifact_id;
+            state.openArtifactIds = [state.selectedArtifactId];
+          }
+          renderSources();
+          const selected = state.artifacts.find(artifact => artifact.artifact_id === state.selectedArtifactId);
+          if (selected) loadArtifactContent(selected);
+        } catch (error) {
+          if (state.artifacts.every(artifact => artifact.origin === 'sample')) return;
+          elements.sourceCodeEmpty.textContent = `Artifact catalog unavailable: ${error.message}`;
+        } finally {
+          state.artifactRefreshing = false;
+        }
+      }
+
       function showScreen(name, trigger = null) {
         const screenName = name === 'backtraces' ? 'backtrace' : name;
         if ((screenName === 'backtrace' || screenName === 'experiments') && !state.selectedField) return;
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
+        elements.workspace.classList.toggle('sources-active', screenName === 'sources');
         document.querySelectorAll('.nav-button').forEach(button => {
           const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence');
           if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
@@ -1900,6 +2696,11 @@
           renderBacktrace();
         }
         if (screenName === 'experiments') renderExperiment();
+        if (screenName === 'sources') {
+          renderSources();
+          const artifact = state.artifacts.find(candidate => candidate.artifact_id === state.selectedArtifactId);
+          if (artifact) loadArtifactContent(artifact);
+        }
         if (!trigger?.classList.contains('nav-button')) {
           requestAnimationFrame(() => {
             if (screenName === 'traffic') {
@@ -1956,6 +2757,7 @@
           renderRequests();
           renderInspector();
           renderEvidence();
+          await refreshArtifacts();
         } catch (error) {
           state.broker = 'unavailable';
           elements.capture.classList.add('offline');
@@ -1989,6 +2791,7 @@
         setNetworkNotice('empty', 'Standalone preview. Open the local app to capture live requests.');
         renderRequests();
         renderEvidence();
+        renderSources();
       }
 
       function enableTabKeyboardNavigation(selector) {
@@ -2037,6 +2840,40 @@
       }));
       elements.requestFilter.addEventListener('input', renderRequests);
       elements.traceButton.addEventListener('click', () => showScreen('backtrace', elements.traceButton));
+      elements.sourceSearch.addEventListener('input', applySourceSearch);
+      elements.sourcePretty.addEventListener('click', () => {
+        state.sourcePretty = !state.sourcePretty;
+        renderSources();
+      });
+      document.querySelector('#source-quick-open').addEventListener('click', openQuickOpen);
+      elements.quickOpenInput.addEventListener('input', renderQuickOpen);
+      elements.quickOpenInput.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+          elements.quickOpen.hidden = true;
+          document.querySelector('#source-quick-open').focus();
+        }
+        if (event.key === 'Enter') elements.quickOpenResults.querySelector('button')?.click();
+      });
+      elements.sourceCode.addEventListener('click', event => {
+        const line = event.target.closest('.source-line');
+        if (!line) return;
+        const lines = [...elements.sourceCode.querySelectorAll('.source-line')];
+        elements.sourcePosition.textContent = `Line ${lines.indexOf(line) + 1}, Column 1`;
+      });
+      document.addEventListener('keydown', event => {
+        const commandKey = navigator.platform.includes('Mac') ? event.metaKey : event.ctrlKey;
+        if (!commandKey || event.altKey) return;
+        if (event.key.toLowerCase() === 'p') {
+          event.preventDefault();
+          showScreen('sources');
+          openQuickOpen();
+        }
+        if (event.key.toLowerCase() === 'f' && !document.querySelector('#screen-sources').hidden) {
+          event.preventDefault();
+          elements.sourceSearch.focus();
+          elements.sourceSearch.select();
+        }
+      });
       document.querySelector('#theme-toggle').addEventListener('click', () => {
         const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
         document.documentElement.dataset.theme = next;
@@ -2049,6 +2886,7 @@
       renderRequests();
       renderInspector();
       renderEvidence();
+      renderSources();
       if (location.protocol === 'file:') {
         useStandalonePreview();
       } else {

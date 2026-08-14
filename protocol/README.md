@@ -58,4 +58,19 @@ drains the retained batch. Its UTF-8 decimal payload is the number of newly
 dropped records. The gap record repeats the last retained sequence number so it
 does not hide the missing sequence range from broker accounting.
 
+## Large artifact transfer
+
+Large JavaScript files, WASM modules, source maps, and explicitly approved
+response bodies never use `EventRecord`, the renderer ring, or the broker event
+queue. They use the separate version 1 artifact stream defined by
+`include/reb/artifact.hpp`. Its fixed 128-byte header carries kind, byte count,
+correlation identifiers, metadata lengths, and an optional expected SHA-256,
+followed by bounded URL, MIME, and original-content byte ranges.
+
+The receiver defaults to 16 MiB per artifact and 256 MiB per session store. It
+streams and hashes content into immutable content-addressed storage. Response
+bodies fail closed unless the session receiver is explicitly started with
+sensitive capture enabled. See
+`docs/architecture/artifact-transfer-channel.md` for the low-level design.
+
 Protocol changes must remain backward-readable for stored research sessions.

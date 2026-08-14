@@ -61,6 +61,19 @@ disconnected, malformed-event, and sequence-gap states remain visible. The
 trace workspace still combines a sample request field backtrace with live broker
 events, with sample and live evidence always labeled separately.
 
+The Sources workspace reads the separate artifact manifest and immutable blobs
+created by `reb-artifact-receiver`. Its Page navigator follows the DevTools
+frame, origin, directory, and file organization. The center editor provides
+tabs, line numbers, `Command+P` or `Control+P` open-file navigation,
+`Command+F` or `Control+F` search, original and readable-derived views, and WASM
+hex display. The right side keeps the familiar debugger pane structure while
+runtime controls remain disabled until native debugging is implemented.
+
+Artifact content responses are capped at 2 MiB and use attachment, `nosniff`,
+and sandbox headers. The editor renders at most 20,000 lines and inserts all
+captured content as text. The catalog keeps original byte size and SHA-256
+visible even when the viewer shows a bounded preview.
+
 Pass `--socket /path/to/broker.sock` to the development server when it should
 also report live broker connectivity.
 

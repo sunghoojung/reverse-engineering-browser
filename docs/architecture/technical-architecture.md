@@ -211,7 +211,10 @@ Recommended properties:
 - monotonic sequence numbers and timestamps;
 - drop counters for every event category.
 
-Large payloads should use a separate bounded shared-memory slab or Mojo data pipe. The hot ring should contain only descriptors and references.
+Large artifacts use the separate bounded transfer contract described in
+[Artifact Transfer Channel - Low-Level Design](./artifact-transfer-channel.md).
+The hot ring contains only small evidence events and artifact correlation IDs.
+The browser process, never the renderer probe, owns the artifact stream.
 
 ## Local transport
 

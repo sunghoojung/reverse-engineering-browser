@@ -34,19 +34,23 @@ CPPFLAGS := -I$(INCLUDE_DIR)
 LDFLAGS := -pthread $(EXTRA_LDFLAGS)
 
 LIB_OBJECTS := \
+	$(BUILD_DIR)/src/artifact.o \
 	$(BUILD_DIR)/src/event.o \
 	$(BUILD_DIR)/src/event_broker.o
 DEMO_BINARY := $(BUILD_DIR)/reb-event-demo
 PRODUCER_BINARY := $(BUILD_DIR)/reb-event-producer
 BROKER_BINARY := $(BUILD_DIR)/reb-event-broker
+ARTIFACT_PRODUCER_BINARY := $(BUILD_DIR)/reb-artifact-producer
+ARTIFACT_RECEIVER_BINARY := $(BUILD_DIR)/reb-artifact-receiver
 TEST_BINARIES := \
+	$(BUILD_DIR)/tests/artifact_test \
 	$(BUILD_DIR)/tests/event_test \
 	$(BUILD_DIR)/tests/event_broker_test \
 	$(BUILD_DIR)/tests/spsc_ring_test
 
-.PHONY: all app app-build bootstrap-brave bootstrap-test brave-doctor brave-probe-check browser-sync browser-sync-test broker check clean demo e2e format producer sanitize test ui ui-test workspace-check
+.PHONY: all app app-build artifact-producer artifact-receiver bootstrap-brave bootstrap-test brave-doctor brave-probe-check browser-sync browser-sync-test broker check clean demo e2e format producer sanitize test ui ui-test workspace-check
 
-all: demo producer broker
+all: demo producer broker artifact-producer artifact-receiver
 
 check: workspace-check bootstrap-test browser-sync-test test ui-test
 
@@ -77,11 +81,18 @@ producer: $(PRODUCER_BINARY)
 
 broker: $(BROKER_BINARY)
 
-e2e: producer broker
+artifact-producer: $(ARTIFACT_PRODUCER_BINARY)
+
+artifact-receiver: $(ARTIFACT_RECEIVER_BINARY)
+
+e2e: producer broker artifact-producer artifact-receiver
 	@mkdir -p $(BUILD_DIR)/sessions
 	$(PRODUCER_BINARY) | $(BROKER_BINARY) --store $(BUILD_DIR)/sessions/demo.jsonl
+	$(RM) -r "$(BUILD_DIR)/sessions/artifacts"
+	$(ARTIFACT_PRODUCER_BINARY) | $(ARTIFACT_RECEIVER_BINARY) --store $(BUILD_DIR)/sessions/artifacts
 	test "$$(wc -l < $(BUILD_DIR)/sessions/demo.jsonl | tr -d ' ')" = "7"
 	test "$$(grep -c '\"payload\":\"$(DEMO_NETWORK_PAYLOAD_HEX)\"' $(BUILD_DIR)/sessions/demo.jsonl)" = "2"
+	test "$$(wc -l < $(BUILD_DIR)/sessions/artifacts/manifest.jsonl | tr -d ' ')" = "2"
 
 ui: e2e
 	python3 apps/research-ui/server.py --store $(BUILD_DIR)/sessions/demo.jsonl
@@ -90,7 +101,9 @@ app-build: e2e
 	./scripts/build-research-app.sh
 
 app: app-build
-	open "$(CURDIR)/$(BUILD_DIR)/Origin Trace.app" --args --store "$(CURDIR)/$(BUILD_DIR)/sessions/demo.jsonl"
+	open "$(CURDIR)/$(BUILD_DIR)/Origin Trace.app" --args \
+		--store "$(CURDIR)/$(BUILD_DIR)/sessions/demo.jsonl" \
+		--artifacts "$(CURDIR)/$(BUILD_DIR)/sessions/artifacts"
 
 $(BUILD_DIR)/src/%.o: src/%.cpp $(NATIVE_HEADERS)
 	@mkdir -p $(@D)
@@ -101,6 +114,14 @@ $(DEMO_BINARY): apps/reb-event-demo/main.cpp $(LIB_OBJECTS) $(NATIVE_HEADERS)
 	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cpp %.o,$^) $(LDFLAGS) -o $@
 
 $(PRODUCER_BINARY): apps/reb-event-producer/main.cpp $(LIB_OBJECTS) $(NATIVE_HEADERS)
+	@mkdir -p $(@D)
+	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cpp %.o,$^) $(LDFLAGS) -o $@
+
+$(ARTIFACT_PRODUCER_BINARY): apps/reb-artifact-producer/main.cpp $(LIB_OBJECTS) $(NATIVE_HEADERS)
+	@mkdir -p $(@D)
+	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cpp %.o,$^) $(LDFLAGS) -o $@
+
+$(ARTIFACT_RECEIVER_BINARY): services/artifact-receiver/main.cpp $(LIB_OBJECTS) $(NATIVE_HEADERS)
 	@mkdir -p $(@D)
 	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cpp %.o,$^) $(LDFLAGS) -o $@
 

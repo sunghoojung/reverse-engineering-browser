@@ -15,6 +15,7 @@ resources_path="${contents_path}/Resources"
 swift_source="${repo_root}/apps/research-ui/macos/OriginTraceApp.swift"
 icon_source="${repo_root}/apps/research-ui/macos/assets/origin-trace-icon.png"
 event_store="${repo_root}/build/sessions/demo.jsonl"
+artifact_store="${repo_root}/build/sessions/artifacts"
 iconset_path="${repo_root}/build/OriginTrace.iconset"
 
 if [[ -e "${app_path}" ]]; then
@@ -25,6 +26,7 @@ mkdir -p "${macos_path}" "${resources_path}"
 cp "${repo_root}/apps/research-ui/macos/Info.plist" "${contents_path}/Info.plist"
 cp "${repo_root}/apps/research-ui/index.html" "${resources_path}/index.html"
 cp "${event_store}" "${resources_path}/demo.jsonl"
+cp -R "${artifact_store}" "${resources_path}/artifacts"
 
 rm -rf "${iconset_path}"
 mkdir -p "${iconset_path}"

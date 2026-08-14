@@ -29,3 +29,8 @@ captured.
 The browser-process transport and session-scoped emitter registration are the
 next integration layer. Renderer code must never write files or sockets
 directly.
+
+Large artifact bytes use the separate 128-byte framed contract in
+`common/native_artifact_header.h`. Only the browser-process bridge may own that
+channel. It is not part of the renderer event ring, and response bodies require
+explicit sensitive-capture authorization.

@@ -1,8 +1,12 @@
+import hashlib
 import json
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
+import urllib.request
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from server import ResearchHandler
@@ -44,6 +48,158 @@ class ResearchUiTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "malformed event"):
                 handler.load_events()
 
+    def test_artifact_manifest_and_content_are_validated(self) -> None:
+        content = b"export function checkout() { return true; }\n"
+        digest = hashlib.sha256(content).hexdigest()
+        artifact = {
+            "protocol_version": 1,
+            "artifact_id": "300",
+            "session_id": "7",
+            "navigation_id": "100",
+            "frame_id": "200",
+            "parent_artifact_id": "0",
+            "creator_event_id": "79",
+            "kind": "javascript",
+            "url": "https://checkout.acme.test/assets/cart.js",
+            "mime_type": "text/javascript",
+            "byte_size": len(content),
+            "sha256": digest,
+            "sensitive": False,
+            "content_path": f"blobs/{digest}.bin",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "blobs").mkdir()
+            (root / artifact["content_path"]).write_bytes(content)
+            (root / "manifest.jsonl").write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+            handler = object.__new__(ResearchHandler)
+            handler.artifact_store = root
+
+            self.assertEqual(handler.load_artifacts(), [artifact])
+            loaded, path = handler.find_artifact("300")
+            self.assertEqual(loaded, artifact)
+            self.assertEqual(path.read_bytes(), content)
+
+    def test_artifact_api_lists_metadata_and_bounds_content_windows(self) -> None:
+        content = b"export const artifact = true;\n"
+        digest = hashlib.sha256(content).hexdigest()
+        artifact = {
+            "protocol_version": 1,
+            "artifact_id": "300",
+            "session_id": "7",
+            "navigation_id": "100",
+            "frame_id": "200",
+            "parent_artifact_id": "0",
+            "creator_event_id": "79",
+            "kind": "javascript",
+            "url": "https://checkout.acme.test/assets/cart.js",
+            "mime_type": "text/javascript",
+            "byte_size": len(content),
+            "sha256": digest,
+            "sensitive": False,
+            "content_path": f"blobs/{digest}.bin",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "blobs").mkdir()
+            (root / artifact["content_path"]).write_bytes(content)
+            (root / "manifest.jsonl").write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+            ResearchHandler.ui_directory = Path(__file__).parent
+            ResearchHandler.event_store = root / "events.jsonl"
+            ResearchHandler.artifact_store = root
+            server = ThreadingHTTPServer(("127.0.0.1", 0), ResearchHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base_url = f"http://127.0.0.1:{server.server_port}"
+                with urllib.request.urlopen(f"{base_url}/api/artifacts?limit=10") as response:
+                    catalog = json.load(response)
+                self.assertEqual(catalog["count"], 1)
+                self.assertEqual(catalog["artifacts"][0]["artifact_id"], "300")
+                self.assertNotIn("content_path", catalog["artifacts"][0])
+
+                with urllib.request.urlopen(
+                    f"{base_url}/api/artifacts/300/content?offset=2&limit=4"
+                ) as response:
+                    self.assertEqual(response.read(), content[2:6])
+                    self.assertEqual(response.headers["Content-Type"], "application/octet-stream")
+                    self.assertEqual(response.headers["Content-Security-Policy"], "sandbox")
+                    self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+                    self.assertEqual(response.headers["X-Artifact-Truncated"], "1")
+                    self.assertEqual(response.headers["X-Artifact-Total-Bytes"], str(len(content)))
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+
+    def test_artifact_manifest_rejects_sensitive_code_and_path_escape(self) -> None:
+        artifact = {
+            "protocol_version": 1,
+            "artifact_id": "300",
+            "session_id": "7",
+            "navigation_id": "100",
+            "frame_id": "200",
+            "parent_artifact_id": "0",
+            "creator_event_id": "79",
+            "kind": "javascript",
+            "url": "https://checkout.acme.test/assets/cart.js",
+            "mime_type": "text/javascript",
+            "byte_size": 1,
+            "sha256": "0" * 64,
+            "sensitive": True,
+            "content_path": "../outside.bin",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            root.mkdir()
+            (root / "manifest.jsonl").write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+            handler = object.__new__(ResearchHandler)
+            handler.artifact_store = root
+
+            with self.assertRaisesRegex(ValueError, "malformed record"):
+                handler.load_artifacts()
+
+            artifact["sensitive"] = False
+            artifact["content_path"] = f"blobs/{artifact['sha256']}.bin"
+            (root / "manifest.jsonl").write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+            (root / "blobs").mkdir()
+            (Path(directory) / "outside.bin").write_bytes(b"x")
+            (root / artifact["content_path"]).symlink_to(Path(directory) / "outside.bin")
+            with self.assertRaisesRegex(ValueError, "escapes"):
+                handler.find_artifact("300")
+
+    def test_artifact_manifest_rejects_noncanonical_blob_path_and_boolean_size(self) -> None:
+        artifact = {
+            "protocol_version": 1,
+            "artifact_id": "300",
+            "session_id": "7",
+            "navigation_id": "100",
+            "frame_id": "200",
+            "parent_artifact_id": "0",
+            "creator_event_id": "79",
+            "kind": "javascript",
+            "url": "https://checkout.acme.test/assets/cart.js",
+            "mime_type": "text/javascript",
+            "byte_size": 1,
+            "sha256": "0" * 64,
+            "sensitive": False,
+            "content_path": "blobs/other.bin",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "manifest.jsonl").write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+            handler = object.__new__(ResearchHandler)
+            handler.artifact_store = root
+
+            with self.assertRaisesRegex(ValueError, "malformed record"):
+                handler.load_artifacts()
+
+            artifact["content_path"] = f"blobs/{artifact['sha256']}.bin"
+            artifact["byte_size"] = True
+            (root / "manifest.jsonl").write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "malformed record"):
+                handler.load_artifacts()
+
     def test_ui_keeps_captured_values_out_of_html_injection_paths(self) -> None:
         html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
 
@@ -78,6 +234,96 @@ class ResearchUiTests(unittest.TestCase):
         self.assertIn("browser context ${context}", html)
         self.assertIn("[13, 'xhr']", html)
         self.assertIn("No requests match the current filters", html)
+
+    def test_sources_workspace_matches_the_devtools_navigation_model(self) -> None:
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('data-screen="sources">Sources</button>', html)
+        self.assertIn('aria-label="Sources navigator"', html)
+        self.assertIn(">Page</button>", html)
+        self.assertIn(">Filesystem</button>", html)
+        self.assertIn(">Overrides</button>", html)
+        self.assertIn('aria-label="Source editor"', html)
+        self.assertIn('aria-label="Debugger sidebar"', html)
+        for pane in (
+            "Artifact details",
+            "Watch",
+            "Breakpoints",
+            "Scope",
+            "Call Stack",
+            "XHR/fetch Breakpoints",
+            "Event Listener Breakpoints",
+        ):
+            self.assertIn(f">{pane}</summary>", html)
+        self.assertIn("function renderSourceTree()", html)
+        self.assertIn("function formatWasmHex(buffer)", html)
+        self.assertIn("function openQuickOpen()", html)
+        self.assertIn("Viewer preview limited to the first 2 MB", html)
+        self.assertIn("Readable derived view", html)
+        self.assertIn("Original evidence", html)
+        self.assertIn("elements.sourceCode.replaceChildren", html)
+
+    def test_sources_model_rejects_malformed_artifact_catalogs(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        start = html.index("      function isPlainObject")
+        end = html.index("      function legacyBrowserRequestKey")
+        model = """
+const uint64Max = 18446744073709551615n;
+const artifactKinds = new Set(['javascript', 'wasm', 'source_map', 'response_body']);
+const artifactIdentifierFields = [
+  'artifact_id', 'session_id', 'navigation_id', 'frame_id', 'parent_artifact_id', 'creator_event_id'
+];
+""" + html[start:end]
+        exercise = r"""
+const artifact = {
+  protocol_version: 1,
+  artifact_id: '300',
+  session_id: '7',
+  navigation_id: '100',
+  frame_id: '200',
+  parent_artifact_id: '0',
+  creator_event_id: '79',
+  kind: 'javascript',
+  url: 'https://checkout.acme.test/assets/cart.js',
+  mime_type: 'text/javascript',
+  byte_size: 123,
+  sha256: 'a'.repeat(64),
+  sensitive: false
+};
+process.stdout.write(JSON.stringify({
+  accepted: isArtifact(artifact),
+  canonicalIdRequired: !isArtifact({...artifact, artifact_id: '0300'}),
+  kindRequired: !isArtifact({...artifact, kind: 'archive'}),
+  digestRequired: !isArtifact({...artifact, sha256: 'a'}),
+  sensitiveCodeRejected: !isArtifact({...artifact, sensitive: true}),
+  approvedBodyAccepted: isArtifact({...artifact, kind: 'response_body', sensitive: true}),
+  envelopeCountRequired: !isArtifactResponse({count: 2, artifacts: [artifact]}),
+  validEnvelope: isArtifactResponse({count: 1, artifacts: [artifact]})
+}));
+"""
+        completed = subprocess.run(
+            [node, "-e", model + exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "accepted": True,
+                "canonicalIdRequired": True,
+                "kindRequired": True,
+                "digestRequired": True,
+                "sensitiveCodeRejected": True,
+                "approvedBodyAccepted": True,
+                "envelopeCountRequired": True,
+                "validEnvelope": True,
+            },
+        )
 
     def test_tab_controls_have_keyboard_and_panel_relationships(self) -> None:
         html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
@@ -321,9 +567,18 @@ process.stdout.write(JSON.stringify({
         self.assertIn('appendingPathComponent("OriginTrace.icns")', application)
         self.assertIn("NSApp.applicationIconImage = icon", application)
         self.assertNotIn("makeApplicationIcon", application)
+        self.assertIn('case "/api/artifacts":', application)
+        self.assertIn("artifactContentResponse(for: requestURL)", application)
+        self.assertIn('"Content-Security-Policy": "sandbox"', application)
+        self.assertIn('"X-Artifact-Truncated"', application)
+        self.assertIn('firstIndex(of: "--artifacts")', application)
+        self.assertIn("source-tree-row[data-artifact-id]", application)
+        self.assertIn("sourceLines", application)
         self.assertIn("<key>CFBundleIconFile</key>", plist)
         self.assertIn("<string>OriginTrace</string>", plist)
         self.assertIn("origin-trace-icon.png", build_script)
+        self.assertIn('build/sessions/artifacts', build_script)
+        self.assertIn('"${resources_path}/artifacts"', build_script)
         self.assertIn("iconutil -c icns", build_script)
 
 

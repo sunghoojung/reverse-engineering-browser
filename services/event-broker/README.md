@@ -34,3 +34,8 @@ broker reports accepted records, invalid records, gaps, and retention evictions.
 
 This is the development transport. The browser-process implementation will
 feed the same broker model over authenticated local IPC.
+
+Large artifact bytes are intentionally outside this service and its event
+queue. `reb-artifact-receiver` owns the independently bounded artifact stream,
+immutable blob store, hashing, and manifest. Events reference artifacts by ID;
+the event broker never copies their content.

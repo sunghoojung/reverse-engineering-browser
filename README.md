@@ -53,6 +53,7 @@ The repository includes a dependency-free C++ vertical slice for the probe event
 - explicit dropped-event accounting;
 - a bounded broker with validation, sequence-gap detection, and eviction accounting;
 - a native binary event stream and versioned JSONL evidence store;
+- a separate size-limited native artifact stream with immutable SHA-256 blobs;
 - a native macOS Origin Trace application that reads the broker evidence store;
 - a threaded producer and consumer demo;
 - unit tests and sanitizer support.
@@ -85,7 +86,8 @@ This builds `build/Origin Trace.app`, writes the demo evidence, and opens the
 application. It is a native WebKit window with no browser address bar and no
 localhost server. The application and broker stay local.
 
-The demo includes linked Navigator, Canvas, WebAssembly, and Network events.
+The demo includes linked Navigator, Canvas, WebAssembly, and Network events,
+plus separately transferred JavaScript and WASM artifacts in the Sources tab.
 The research workflow starts from a request field and works backward through
 the available evidence.
 
@@ -134,6 +136,7 @@ docs/                   product and architecture documentation
 include/ and src/       dependency-free native event foundation
 protocol/               shared browser, broker, and UI contracts
 services/event-broker/  local browser-process bridge and evidence broker
+services/artifact-receiver/ bounded cold-path artifact receiver and store
 scripts/                setup, app packaging, and workspace validation
 tests/                  native unit and concurrency tests
 tools/                  development and analysis utilities

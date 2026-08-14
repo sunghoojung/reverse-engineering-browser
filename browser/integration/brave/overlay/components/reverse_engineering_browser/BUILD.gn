@@ -17,6 +17,7 @@ source_set("browser") {
   sources = [
     "browser/native_network_capture_sink.cc",
     "browser/native_network_capture_sink.h",
+    "common/native_artifact_header.h",
     "common/native_probe_event.h",
   ]
 

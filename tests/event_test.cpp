@@ -7,7 +7,9 @@
 #include <type_traits>
 
 #include "../browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_probe_event.h"
+#include "../browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_probe_ipc.h"
 #include "reb/event.hpp"
+#include "reb/local_ipc.hpp"
 
 #define CHECK(condition)                                                                   \
   do {                                                                                     \
@@ -57,6 +59,17 @@ static_assert(reb::kEventRecordReservedSize == reb::kNativeProbeRecordReservedSi
 static_assert(sizeof(reb::EventHeader) == sizeof(reb::NativeProbeHeader));
 static_assert(sizeof(reb::EventRecord) == sizeof(reb::NativeProbeEvent));
 static_assert(alignof(reb::EventRecord) == alignof(reb::NativeProbeEvent));
+static_assert(reb::kLocalIpcMagic == reb::kNativeProbeLocalIpcMagic);
+static_assert(reb::kLocalIpcVersion == reb::kNativeProbeLocalIpcVersion);
+static_assert(reb::kLocalIpcTokenSize == reb::kNativeProbeLocalIpcTokenSize);
+static_assert(sizeof(reb::LocalIpcHello) == sizeof(reb::NativeProbeLocalIpcHello));
+static_assert(alignof(reb::LocalIpcHello) == alignof(reb::NativeProbeLocalIpcHello));
+static_assert(offsetof(reb::LocalIpcHello, magic) ==
+              offsetof(reb::NativeProbeLocalIpcHello, magic));
+static_assert(offsetof(reb::LocalIpcHello, session_id) ==
+              offsetof(reb::NativeProbeLocalIpcHello, session_id));
+static_assert(offsetof(reb::LocalIpcHello, token) ==
+              offsetof(reb::NativeProbeLocalIpcHello, token));
 #define CHECK_WIRE_ENUM_VALUE(core_enum, native_enum, value)    \
   static_assert(static_cast<std::uint16_t>(core_enum::value) == \
                 static_cast<std::uint16_t>(native_enum::value))

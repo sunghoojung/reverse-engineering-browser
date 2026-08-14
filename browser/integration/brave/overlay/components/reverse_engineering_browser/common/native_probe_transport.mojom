@@ -1,0 +1,23 @@
+// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this file,
+// You can obtain one at https://mozilla.org/MPL/2.0/.
+
+module reb.mojom;
+
+import "mojo/public/mojom/base/shared_memory.mojom";
+
+interface NativeProbeClient {
+  Configure(uint64 session_id,
+            uint64 category_mask,
+            uint64 expires_at_monotonic_ns,
+            mojo_base.mojom.UnsafeSharedMemoryRegion queue_region);
+  Disable();
+};
+
+// Process-wide renderer connection. Event records travel through the shared
+// queue. Mojo carries lifecycle changes and one coalesced wake-up per batch.
+interface NativeProbeHost {
+  BindClient(pending_remote<NativeProbeClient> client);
+  EventsAvailable();
+};

@@ -77,5 +77,7 @@ revision.
 The current integration contains dormant native Canvas and network lifecycle
 probe boundaries. Network observation reuses Brave's production URL loader
 factory proxy and correlates browser lifecycle records with the renderer request
-identifier. It does not yet connect Brave to the event broker, and no MCP layer
-is included.
+identifier. A bounded shared-memory queue and Mojo lifecycle bridge carry
+renderer records into the browser process. The browser process connects to the
+event broker through an authenticated, session-scoped Unix socket and a second
+bounded queue keeps socket writes off probe paths. No MCP layer is included.

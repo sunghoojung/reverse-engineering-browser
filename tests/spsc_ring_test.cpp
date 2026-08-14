@@ -5,13 +5,13 @@
 
 #include "reb/spsc_ring.hpp"
 
-#define CHECK(condition)                                                               \
-  do {                                                                                 \
-    if (!(condition)) {                                                                \
-      std::cerr << "CHECK failed at " << __FILE__ << ':' << __LINE__ << ": "          \
-                << #condition << '\n';                                                  \
-      return 1;                                                                        \
-    }                                                                                  \
+#define CHECK(condition)                                                                   \
+  do {                                                                                     \
+    if (!(condition)) {                                                                    \
+      std::cerr << "CHECK failed at " << __FILE__ << ':' << __LINE__ << ": " << #condition \
+                << '\n';                                                                   \
+      return 1;                                                                            \
+    }                                                                                      \
   } while (false)
 
 namespace {
@@ -109,11 +109,15 @@ bool ConcurrentTest() {
   while (expected <= kCount) {
     std::uint64_t value = 0;
     if (!ring.TryPop(value)) {
-      if (producer_done.load(std::memory_order_acquire)) {
+      if (!producer_done.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+        continue;
+      }
+      // The first empty read can precede the producer's final release. Retry
+      // after acquiring producer_done so the final head update is visible.
+      if (!ring.TryPop(value)) {
         break;
       }
-      std::this_thread::yield();
-      continue;
     }
     if (value != expected) {
       ordered = false;

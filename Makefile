@@ -1,4 +1,5 @@
 CXX ?= c++
+CLANG_FORMAT ?= clang-format
 OPT_CXXFLAGS ?= -O2 -g
 
 BUILD_DIR := build
@@ -8,6 +9,8 @@ NATIVE_HEADERS := $(shell find $(INCLUDE_DIR) -type f -name '*.hpp')
 TRACKED_BROWSER_PROTOCOL_HEADERS := $(shell find \
 	browser/integration/brave/overlay/components/reverse_engineering_browser/common \
 	-type f -name '*.h')
+FORMATTED_SOURCES := $(shell git ls-files '*.cc' '*.cpp' '*.h' '*.hpp')
+SHELL_SOURCES := $(shell git ls-files '*.sh')
 DEMO_NETWORK_PAYLOAD_HEX := 504f535420636f6c6c6563746f722e6578616d706c652e74657374
 
 UNAME_S := $(shell uname -s)
@@ -36,7 +39,8 @@ LDFLAGS := -pthread $(EXTRA_LDFLAGS)
 LIB_OBJECTS := \
 	$(BUILD_DIR)/src/artifact.o \
 	$(BUILD_DIR)/src/event.o \
-	$(BUILD_DIR)/src/event_broker.o
+	$(BUILD_DIR)/src/event_broker.o \
+	$(BUILD_DIR)/src/local_ipc.o
 DEMO_BINARY := $(BUILD_DIR)/reb-event-demo
 PRODUCER_BINARY := $(BUILD_DIR)/reb-event-producer
 BROKER_BINARY := $(BUILD_DIR)/reb-event-broker
@@ -46,13 +50,17 @@ TEST_BINARIES := \
 	$(BUILD_DIR)/tests/artifact_test \
 	$(BUILD_DIR)/tests/event_test \
 	$(BUILD_DIR)/tests/event_broker_test \
+	$(BUILD_DIR)/tests/local_ipc_test \
+	$(BUILD_DIR)/tests/native_probe_queue_test \
 	$(BUILD_DIR)/tests/spsc_ring_test
 
-.PHONY: all app app-build artifact-producer artifact-receiver bootstrap-brave bootstrap-test brave-doctor brave-probe-check browser-sync browser-sync-test broker check clean demo e2e format producer sanitize test ui ui-test workspace-check
+.PHONY: all app app-build artifact-producer artifact-receiver bootstrap-brave bootstrap-test brave-doctor brave-probe-check browser-sync browser-sync-test broker check clean demo e2e format format-check lint live producer python-check repository-check sanitize shellcheck socket-e2e test ui ui-test workflow-check workspace-check
 
 all: demo producer broker artifact-producer artifact-receiver
 
 check: workspace-check bootstrap-test browser-sync-test test ui-test
+
+lint: format-check shellcheck python-check repository-check workflow-check
 
 bootstrap-brave:
 	./scripts/bootstrap-brave.sh
@@ -93,6 +101,11 @@ e2e: producer broker artifact-producer artifact-receiver
 	test "$$(wc -l < $(BUILD_DIR)/sessions/demo.jsonl | tr -d ' ')" = "7"
 	test "$$(grep -c '\"payload\":\"$(DEMO_NETWORK_PAYLOAD_HEX)\"' $(BUILD_DIR)/sessions/demo.jsonl)" = "2"
 	test "$$(wc -l < $(BUILD_DIR)/sessions/artifacts/manifest.jsonl | tr -d ' ')" = "2"
+	python3 tools/validate-evidence-store.py $(BUILD_DIR)/sessions/demo.jsonl
+	./tests/event_broker_socket_test.sh $(BROKER_BINARY) $(PRODUCER_BINARY) $(DEMO_NETWORK_PAYLOAD_HEX)
+
+socket-e2e: producer broker
+	./tests/event_broker_socket_test.sh $(BROKER_BINARY) $(PRODUCER_BINARY) $(DEMO_NETWORK_PAYLOAD_HEX)
 
 ui: e2e
 	python3 apps/research-ui/server.py --store $(BUILD_DIR)/sessions/demo.jsonl
@@ -104,6 +117,9 @@ app: app-build
 	open "$(CURDIR)/$(BUILD_DIR)/Origin Trace.app" --args \
 		--store "$(CURDIR)/$(BUILD_DIR)/sessions/demo.jsonl" \
 		--artifacts "$(CURDIR)/$(BUILD_DIR)/sessions/artifacts"
+
+live: app-build broker
+	./scripts/run-live-session.sh
 
 $(BUILD_DIR)/src/%.o: src/%.cpp $(NATIVE_HEADERS)
 	@mkdir -p $(@D)
@@ -152,12 +168,37 @@ sanitize:
 		test
 
 format:
-	@if command -v clang-format >/dev/null 2>&1; then \
-		clang-format -i $$(find include src apps tests -type f \( -name '*.cpp' -o -name '*.hpp' \)); \
+	@if command -v $(CLANG_FORMAT) >/dev/null 2>&1; then \
+		$(CLANG_FORMAT) -i $(FORMATTED_SOURCES); \
 	else \
-		echo "clang-format is not installed"; \
+		echo "$(CLANG_FORMAT) is not installed"; \
 		exit 1; \
 	fi
+
+format-check:
+	@command -v $(CLANG_FORMAT) >/dev/null 2>&1 || { \
+		echo "$(CLANG_FORMAT) is not installed" >&2; exit 1; \
+	}
+	$(CLANG_FORMAT) --dry-run --Werror $(FORMATTED_SOURCES)
+
+shellcheck:
+	@command -v shellcheck >/dev/null 2>&1 || { \
+		echo "shellcheck is not installed" >&2; exit 1; \
+	}
+	shellcheck $(SHELL_SOURCES)
+
+python-check:
+	python3 -m compileall -q apps/research-ui tools
+	python3 -m ruff check apps/research-ui tools
+
+repository-check:
+	./scripts/check-repository-hygiene.sh
+
+workflow-check:
+	@command -v actionlint >/dev/null 2>&1 || { \
+		echo "actionlint is not installed" >&2; exit 1; \
+	}
+	actionlint
 
 clean:
 	rm -rf $(BUILD_DIR)

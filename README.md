@@ -49,17 +49,19 @@ make brave-probe-check
 The repository includes a dependency-free C++ vertical slice for the probe event path:
 
 - a fixed-size, versioned event record;
-- a bounded single-producer, single-consumer ring buffer;
+- bounded multi-producer, single-consumer shared-memory queues;
 - explicit dropped-event accounting;
 - a bounded broker with validation, sequence-gap detection, and eviction accounting;
+- an authenticated, user-only Unix socket from Brave to the broker;
 - a native binary event stream and versioned JSONL evidence store;
 - a separate size-limited native artifact stream with immutable SHA-256 blobs;
 - a native macOS Origin Trace application that reads the broker evidence store;
 - a threaded producer and consumer demo;
 - unit tests and sanitizer support.
 
-The current producer is a deterministic development stand-in for the Brave adapter. It
-validates the complete local path before Chromium shared memory and Mojo IPC are added.
+The deterministic producer validates the same broker boundary without launching
+Brave. The tracked Brave integration carries renderer records through shared
+memory and Mojo into the browser process, then sends them to the broker socket.
 
 ## Native development
 
@@ -99,11 +101,34 @@ make ui
 
 Then open `http://127.0.0.1:7319`.
 
+After building the complete custom Brave application, launch one live capture
+session with:
+
+```sh
+make live
+```
+
+The launcher creates a session-scoped broker socket and token, opens Origin
+Trace, and starts the custom Brave executable with the matching session flags.
+Set `REB_BRAVE_BINARY` when the executable is outside the default component
+output directory. Live sessions enable Canvas and Network by default and expire
+after one hour. Override those startup limits with `REB_CAPTURE_CATEGORY_MASK`
+and `REB_CAPTURE_DURATION_SECONDS`.
+
 ## CI and release builds
 
-Every pull request runs the test suite on macOS and Ubuntu. The macOS job also
-builds and verifies the application bundle, then keeps a downloadable preview
-for three days.
+Every pull request runs formatting, shell, Python, workflow, repository hygiene,
+and evidence-contract checks. The native test suite runs on macOS and Ubuntu.
+Linux also runs the full end-to-end and sanitizer paths. The macOS job builds
+and verifies the application bundle, then keeps a downloadable preview for
+three days.
+
+After installing the pinned tool versions listed in the CI workflow, run the
+fast source and repository checks with:
+
+```sh
+make lint
+```
 
 To publish a versioned macOS download, push a version tag:
 

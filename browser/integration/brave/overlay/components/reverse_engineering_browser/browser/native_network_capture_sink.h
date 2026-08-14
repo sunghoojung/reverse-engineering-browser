@@ -36,7 +36,10 @@ class NativeNetworkCaptureSink final {
   NativeNetworkCaptureSink& operator=(const NativeNetworkCaptureSink&) = delete;
 
   [[nodiscard]] bool IsEnabled() const noexcept;
-  void SetEmitter(NativeProbeEmitter emitter, std::uint64_t session_id) noexcept;
+  void SetEmitter(NativeProbeEmitter emitter,
+                  std::uint64_t session_id,
+                  std::uint64_t category_mask,
+                  std::uint64_t expires_at_monotonic_ns) noexcept;
 
   void RecordRequestStarted(std::uint64_t request_id,
                             std::int32_t initiator_request_id,
@@ -74,6 +77,8 @@ class NativeNetworkCaptureSink final {
   std::atomic<NativeProbeEmitter> emitter_{nullptr};
   std::atomic<std::uint64_t> next_sequence_{1};
   std::atomic<std::uint64_t> session_id_{0};
+  std::atomic<std::uint64_t> category_mask_{0};
+  std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};
 };
 
 }  // namespace reb

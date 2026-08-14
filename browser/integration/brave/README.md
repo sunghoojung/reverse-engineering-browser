@@ -34,5 +34,8 @@ profile without exposing a profile path.
 
 All probes remain dormant until a session-scoped, non-blocking, non-throwing
 emitter is registered. Their inactive paths perform one atomic load and do not
-change network or Canvas behavior. The bounded renderer transport and broker
-IPC bridge remain the next integration layer.
+change network or Canvas behavior. Renderer events use a bounded shared-memory
+queue with Mojo lifecycle control and coalesced wake-ups. The browser process
+authenticates to the event broker with a session identifier and a mode-0600
+token file, then sends exact fixed-size records over a Unix socket. A bounded
+browser-process queue keeps those socket writes off the capture paths.

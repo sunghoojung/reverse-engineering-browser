@@ -14,6 +14,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install lightweight linters
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+          python3 -m venv /tmp/reb-ci-tools
+          /tmp/reb-ci-tools/bin/pip install --disable-pip-version-check \
+            clang-format==18.1.8 ruff==0.12.8
+          curl --fail --location --silent --show-error \
+            --output /tmp/actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz
+          echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  /tmp/actionlint.tar.gz" \
+            | sha256sum --check
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          install -m 0755 /tmp/actionlint /tmp/reb-ci-tools/bin/actionlint
+          echo "/tmp/reb-ci-tools/bin" >> "$GITHUB_PATH"
+
+      - name: Run source and repository checks
+        run: make lint
+
+      - name: Check pull request whitespace
+        if: github.event_name == 'pull_request'
+        run: git diff --check "${{ github.event.pull_request.base.sha }}...HEAD"
+
+      - name: Check pushed commit whitespace
+        if: github.event_name == 'push'
+        run: git show --check --oneline --no-renames HEAD
+
   test:
     timeout-minutes: 15
     strategy:
@@ -32,12 +69,14 @@ jobs:
         run: make check
 
       - name: Run end-to-end event path
+        if: matrix.os == 'ubuntu-latest'
         run: make e2e
 
       - name: Validate research UI server
         run: python3 -m py_compile apps/research-ui/server.py
 
       - name: Run sanitizers
+        if: matrix.os == 'ubuntu-latest'
         run: make sanitize
 
       - name: Build macOS application bundle

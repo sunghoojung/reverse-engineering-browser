@@ -30,6 +30,22 @@ enum class NativeProbeCategory : std::uint16_t {
   kNetwork = 9,
 };
 
+inline constexpr std::uint64_t kAllNativeProbeCategoryMask =
+    (std::uint64_t{1} << static_cast<std::uint16_t>(NativeProbeCategory::kNetwork)) - 1;
+
+[[nodiscard]] constexpr std::uint64_t NativeProbeCategoryMask(
+    const NativeProbeCategory category) noexcept {
+  const auto value = static_cast<std::uint16_t>(category);
+  return value == 0 || value > static_cast<std::uint16_t>(NativeProbeCategory::kNetwork)
+             ? 0
+             : std::uint64_t{1} << (value - 1U);
+}
+
+[[nodiscard]] constexpr bool IsValidNativeProbeCategoryMask(
+    const std::uint64_t category_mask) noexcept {
+  return category_mask != 0 && (category_mask & ~kAllNativeProbeCategoryMask) == 0;
+}
+
 enum class NativeProbeType : std::uint16_t {
   kUnknown = 0,
   kApiCall = 1,

@@ -12,9 +12,11 @@ The event broker is the center of the system.
 
 ## Implemented vertical slice
 
-The broker accepts fixed 320-byte native records on standard input, validates
+The broker accepts fixed 320-byte native records on standard input or an
+authenticated Unix socket, validates
 their protocol envelope, enum values, flags, payload bounds, and reserved
-fields, detects sequence gaps, retains a bounded snapshot, and writes a
+fields, enforces an immutable category allowlist and monotonic expiration,
+detects sequence gaps, retains a bounded snapshot, and writes a
 versioned JSONL evidence store. Sequence tracking is bounded by the broker
 capacity, and tracker evictions are reported explicitly in broker stats.
 When the tracker reaches capacity, it evicts streams in deterministic insertion
@@ -32,10 +34,34 @@ The command connects a deterministic native producer to the broker and creates
 `build/sessions/demo.jsonl`. Invalid or truncated records fail closed. The
 broker reports accepted records, invalid records, gaps, and retention evictions.
 
-This is the development transport. The browser-process implementation will
-feed the same broker model over authenticated local IPC.
-
 Large artifact bytes are intentionally outside this service and its event
 queue. `reb-artifact-receiver` owns the independently bounded artifact stream,
 immutable blob store, hashing, and manifest. Events reference artifacts by ID;
 the event broker never copies their content.
+
+The socket mode requires one session identifier and a user-owned mode-0600
+token file. The broker creates the token when needed, creates a mode-0600 Unix
+socket, authenticates one Brave connection, rejects records from any other
+session, and removes the socket after disconnect.
+
+```sh
+build/reb-event-broker \
+  --store build/sessions/live/events.jsonl \
+  --socket /tmp/origin-trace.sock \
+  --token-file build/sessions/live/broker.token \
+  --session-id 123 \
+  --category-mask 257 \
+  --duration-seconds 3600
+```
+
+Socket sessions require both policy options. Category bits follow the native
+category enum: Canvas is `1`, WebGL `2`, Web Audio `4`, Navigator `8`,
+Permissions `16`, Storage `32`, WebRTC `64`, WASM `128`, and Network `256`.
+Mask `257` enables the currently implemented Canvas and Network probes. The
+broker rejects categories outside the mask before sequence accounting or
+storage, and closes its listener or browser connection when the monotonic
+deadline expires.
+
+Run `make socket-e2e` to validate authentication, permissions, ingestion, and
+socket cleanup without launching Brave. Run `make live` after a complete custom
+Brave app build to start the broker, Origin Trace, and Brave as one session.

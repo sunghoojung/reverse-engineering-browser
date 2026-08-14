@@ -40,10 +40,23 @@ Default network payload prefixes contain only the request method and
 destination host. URL paths, queries, fragments, credentials, headers,
 cookies, and bodies require a separate visibly enabled sensitive-capture mode.
 
-The native producer-to-broker boundary currently uses exact 320-byte
-`EventRecord` frames over a pipe. The Chromium adapter will replace that
-development pipe with shared memory and Mojo without changing the evidence
-model consumed by the broker and UI.
+Renderer-to-browser delivery uses exact 320-byte `EventRecord` objects in a
+bounded shared-memory queue. Mojo carries session lifecycle and coalesced
+wake-ups, not individual events. The initial configuration carries a nonzero
+category bitmask and a monotonic expiration deadline. Both renderer and browser
+capture boundaries reject disabled or expired events before enqueueing them.
+Browser-to-broker delivery uses the same exact records over a user-only Unix
+socket. Before records are accepted, Brave sends
+a fixed 64-byte hello containing the IPC magic, version, size, session ID, and
+a 256-bit token loaded from a user-owned mode-0600 file. The broker compares the
+token in constant time and rejects records whose session differs from the
+authenticated connection. The broker independently applies the same category
+mask before sequence accounting or storage, and closes the session at its own
+monotonic deadline.
+When a renderer queue drops records, the browser emits a `gap` record after it
+drains the retained batch. Its UTF-8 decimal payload is the number of newly
+dropped records. The gap record repeats the last retained sequence number so it
+does not hide the missing sequence range from broker accounting.
 
 ## Large artifact transfer
 

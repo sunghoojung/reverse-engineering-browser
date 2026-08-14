@@ -18,19 +18,28 @@ and caches them for the request. This keeps completion correlated after
 renderer exit, disambiguates profile-local Brave request IDs, and adds no work
 to the inactive path.
 
-An authorized session will register a non-blocking, non-throwing emitter that
-copies the fixed 320-byte record into its bounded transport. Until that
-transport is registered, probes remain dormant and no events are produced.
+An authorized session registers a non-blocking, non-throwing emitter that
+copies the fixed 320-byte record into a bounded shared-memory queue. Each
+renderer has one multi-producer queue because probes can run on its render
+thread and worker threads. Mojo carries session configuration and coalesced
+wake-ups while event records remain in shared memory. Session configuration
+includes an immutable category bitmask and a monotonic expiration deadline.
+Renderer and browser-process sinks check both values before queue insertion,
+and the browser session checks them again before socket delivery. The
+browser-side session starts only after its Unix-socket client authenticates to
+the local event broker. It uses another bounded queue and a dedicated writer
+thread, so network and renderer capture paths never wait for the socket.
 Payload capture is limited to a bounded metadata prefix. Network request
 prefixes contain only the method and destination host. URL paths, queries,
 fragments, bodies, credentials, authorization headers, and cookies are not
 captured.
 
-The browser-process transport and session-scoped emitter registration are the
-next integration layer. Renderer code must never write files or sockets
-directly.
-
 Large artifact bytes use the separate 128-byte framed contract in
 `common/native_artifact_header.h`. Only the browser-process bridge may own that
 channel. It is not part of the renderer event ring, and response bodies require
 explicit sensitive-capture authorization.
+
+Renderer code never writes files or sockets directly.
+
+The current event envelope does not yet carry a trustworthy origin identity,
+so origin allowlisting is intentionally not inferred from bounded payload text.

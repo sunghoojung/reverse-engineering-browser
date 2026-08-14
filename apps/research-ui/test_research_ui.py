@@ -1,6 +1,7 @@
 import hashlib
 import json
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -13,6 +14,72 @@ from server import ResearchHandler
 
 
 class ResearchUiTests(unittest.TestCase):
+    def test_evidence_contract_rejects_unexpected_and_sensitive_fields(self) -> None:
+        validator = Path(__file__).parents[2] / "tools" / "validate-evidence-store.py"
+        valid_event = {
+            "artifact_id": "300",
+            "browser_context_id_high": "0",
+            "browser_context_id_low": "0",
+            "category": "network",
+            "decoded_body_length": "0",
+            "encoded_data_length": "0",
+            "error_code": 0,
+            "flags": 0,
+            "frame_id": "200",
+            "initiator_process_id": 0,
+            "initiator_request_id": 0,
+            "monotonic_time_ns": "1000",
+            "navigation_id": "100",
+            "parent_event_id": "0",
+            "payload": "474554202f",
+            "payload_encoding": "hex",
+            "payload_size": 5,
+            "payload_truncated": False,
+            "process_id": 10,
+            "protocol_version": 2,
+            "request_id": "81",
+            "resource_type": 13,
+            "sequence_number": "1",
+            "session_id": "1",
+            "status_code": 0,
+            "thread_id": 20,
+            "type": "request_started",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            store = Path(directory) / "events.jsonl"
+            store.write_text(json.dumps(valid_event) + "\n", encoding="utf-8")
+            subprocess.run(
+                ["python3", str(validator), str(store)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            valid_event["authorization"] = "secret"
+            store.write_text(json.dumps(valid_event) + "\n", encoding="utf-8")
+            result = subprocess.run(
+                ["python3", str(validator), str(store)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("unexpected=['authorization']", result.stderr)
+
+            valid_event.pop("authorization")
+            payload = b"Authorization: Bearer example"
+            valid_event["payload"] = payload.hex()
+            valid_event["payload_size"] = len(payload)
+            store.write_text(json.dumps(valid_event) + "\n", encoding="utf-8")
+            result = subprocess.run(
+                ["python3", str(validator), str(store)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("sensitive HTTP metadata", result.stderr)
+
     def test_event_store_preserves_normalized_records(self) -> None:
         event = {
             "protocol_version": 1,
@@ -199,6 +266,20 @@ class ResearchUiTests(unittest.TestCase):
             (root / "manifest.jsonl").write_text(json.dumps(artifact) + "\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "malformed record"):
                 handler.load_artifacts()
+
+    def test_broker_connection_tracks_unix_socket_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = Path(directory) / "broker.sock"
+            handler = object.__new__(ResearchHandler)
+            handler.broker_socket = socket_path
+            self.assertFalse(handler.broker_connected())
+
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                listener.bind(str(socket_path))
+                self.assertTrue(handler.broker_connected())
+            finally:
+                listener.close()
 
     def test_ui_keeps_captured_values_out_of_html_injection_paths(self) -> None:
         html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")

@@ -63,7 +63,7 @@ bool LoadToken(const base::FilePath& path, NativeProbeLocalIpcToken& token) {
   if (descriptor < 0) {
     return false;
   }
-  struct stat status{};
+  struct stat status {};
   if (fstat(descriptor, &status) != 0 || !S_ISREG(status.st_mode) || status.st_uid != geteuid() ||
       (status.st_mode & 0777) != 0600) {
     close(descriptor);

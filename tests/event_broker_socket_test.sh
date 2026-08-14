@@ -39,6 +39,16 @@ readonly socket_path="${test_root}/broker.sock"
 readonly token_path="${test_root}/token"
 readonly store_path="${test_root}/events.jsonl"
 
+if "${broker}" --store "${test_root}/overflow.jsonl" \
+  --socket "${test_root}/overflow.sock" --token-file "${test_root}/overflow-token" \
+  --session-id 3 --category-mask 256 --duration-seconds 18446744073 \
+  >"${test_root}/overflow.out" 2>"${test_root}/overflow.err"; then
+  echo "Broker unexpectedly accepted an overflowing duration" >&2
+  exit 1
+fi
+grep -Fq 'Session duration overflows the monotonic clock' "${test_root}/overflow.err"
+test ! -e "${test_root}/overflow.jsonl"
+
 "${broker}" --store "${store_path}" --socket "${socket_path}" \
   --token-file "${token_path}" --session-id 1 --category-mask 256 \
   --duration-seconds 60 \

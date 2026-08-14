@@ -147,16 +147,17 @@ int MillisecondsUntil(const std::uint64_t deadline_ns) noexcept {
       remaining_ms, static_cast<std::uint64_t>(std::numeric_limits<int>::max())));
 }
 
-reb::SessionPolicy MakeSessionPolicy(const Options& options) noexcept {
+bool MakeSessionPolicy(const Options& options, reb::SessionPolicy& policy) noexcept {
   if (options.socket_path.empty()) {
-    return {};
+    return true;
   }
   const std::uint64_t duration_ns = options.duration_seconds * 1'000'000'000ULL;
   const std::uint64_t now = MonotonicTimeNs();
-  const std::uint64_t deadline = duration_ns > std::numeric_limits<std::uint64_t>::max() - now
-                                     ? std::numeric_limits<std::uint64_t>::max()
-                                     : now + duration_ns;
-  return {.category_mask = options.category_mask, .expires_at_monotonic_ns = deadline};
+  if (duration_ns > std::numeric_limits<std::uint64_t>::max() - now) {
+    return false;
+  }
+  policy = {.category_mask = options.category_mask, .expires_at_monotonic_ns = now + duration_ns};
+  return true;
 }
 
 bool StoreEvent(reb::EventBroker& broker, std::ofstream& store, const reb::EventRecord& event) {
@@ -296,7 +297,7 @@ int ListenOnUnixSocket(const std::string& path) {
     return -1;
   }
 
-  struct stat existing{};
+  struct stat existing {};
   if (lstat(path.c_str(), &existing) == 0 || errno != ENOENT) {
     std::cerr << "Broker socket path already exists: " << path << '\n';
     return -1;
@@ -357,13 +358,18 @@ int main(const int argc, char* argv[]) {
     return 2;
   }
 
+  reb::SessionPolicy policy;
+  if (!MakeSessionPolicy(options, policy)) {
+    std::cerr << "Session duration overflows the monotonic clock\n";
+    return 2;
+  }
+
   std::ofstream store(options.store_path, std::ios::out | std::ios::trunc);
   if (!store) {
     std::cerr << "Unable to open event store: " << options.store_path << '\n';
     return 1;
   }
 
-  const reb::SessionPolicy policy = MakeSessionPolicy(options);
   reb::EventBroker broker(options.capacity, policy);
   bool ingested = false;
   if (options.socket_path.empty()) {

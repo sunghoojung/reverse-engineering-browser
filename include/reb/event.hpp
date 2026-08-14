@@ -26,6 +26,7 @@ enum class EventCategory : std::uint16_t {
   kWebRtc = 7,
   kWasm = 8,
   kNetwork = 9,
+  kVm = 10,
 };
 
 enum class EventType : std::uint16_t {
@@ -42,6 +43,7 @@ enum class EventType : std::uint16_t {
   kResponseStarted = 10,
   kRequestCompleted = 11,
   kRequestFailed = 12,
+  kVmFinding = 13,
 };
 
 enum class EventFlag : std::uint16_t {

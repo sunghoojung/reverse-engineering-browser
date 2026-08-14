@@ -40,7 +40,8 @@ LIB_OBJECTS := \
 	$(BUILD_DIR)/src/artifact.o \
 	$(BUILD_DIR)/src/event.o \
 	$(BUILD_DIR)/src/event_broker.o \
-	$(BUILD_DIR)/src/local_ipc.o
+	$(BUILD_DIR)/src/local_ipc.o \
+	$(BUILD_DIR)/src/vm_finding.o
 DEMO_BINARY := $(BUILD_DIR)/reb-event-demo
 PRODUCER_BINARY := $(BUILD_DIR)/reb-event-producer
 BROKER_BINARY := $(BUILD_DIR)/reb-event-broker
@@ -52,7 +53,8 @@ TEST_BINARIES := \
 	$(BUILD_DIR)/tests/event_broker_test \
 	$(BUILD_DIR)/tests/local_ipc_test \
 	$(BUILD_DIR)/tests/native_probe_queue_test \
-	$(BUILD_DIR)/tests/spsc_ring_test
+	$(BUILD_DIR)/tests/spsc_ring_test \
+	$(BUILD_DIR)/tests/vm_finding_test
 
 .PHONY: all app app-build artifact-producer artifact-receiver bootstrap-brave bootstrap-test brave-doctor brave-probe-check browser-sync browser-sync-test broker check clean demo e2e format format-check lint live producer python-check repository-check sanitize shellcheck socket-e2e test ui ui-test workflow-check workspace-check
 
@@ -98,9 +100,11 @@ e2e: producer broker artifact-producer artifact-receiver
 	$(PRODUCER_BINARY) | $(BROKER_BINARY) --store $(BUILD_DIR)/sessions/demo.jsonl
 	$(RM) -r "$(BUILD_DIR)/sessions/artifacts"
 	$(ARTIFACT_PRODUCER_BINARY) | $(ARTIFACT_RECEIVER_BINARY) --store $(BUILD_DIR)/sessions/artifacts
-	test "$$(wc -l < $(BUILD_DIR)/sessions/demo.jsonl | tr -d ' ')" = "7"
+	test "$$(wc -l < $(BUILD_DIR)/sessions/demo.jsonl | tr -d ' ')" = "13"
 	test "$$(grep -c '\"payload\":\"$(DEMO_NETWORK_PAYLOAD_HEX)\"' $(BUILD_DIR)/sessions/demo.jsonl)" = "2"
-	test "$$(wc -l < $(BUILD_DIR)/sessions/artifacts/manifest.jsonl | tr -d ' ')" = "2"
+	test "$$(grep -c '\"category\":\"vm\"' $(BUILD_DIR)/sessions/demo.jsonl)" = "6"
+	test "$$(wc -l < $(BUILD_DIR)/sessions/artifacts/manifest.jsonl | tr -d ' ')" = "3"
+	test "$$(grep -c 'vm-sample.js' $(BUILD_DIR)/sessions/artifacts/manifest.jsonl)" = "1"
 	python3 tools/validate-evidence-store.py $(BUILD_DIR)/sessions/demo.jsonl
 	./tests/event_broker_socket_test.sh $(BROKER_BINARY) $(PRODUCER_BINARY) $(DEMO_NETWORK_PAYLOAD_HEX)
 

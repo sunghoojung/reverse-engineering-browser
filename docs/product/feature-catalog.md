@@ -34,6 +34,8 @@ Reverse Engineering Browser is a Brave-based research browser for authorized web
 - Keep a transformation log and map every readable result back to original source bytes.
 - Inspect WASM imports, exports, strings, disassembly, lifecycle, traps, and JavaScript crossings.
 - Analyze virtualized or bytecode-based code through bytecode traversal, opcode labeling, disassembly, and annotations.
+- Treat JavaScript-hosted, WebAssembly-hosted, and mixed virtual machines as separate frontends over common evidence types.
+- Distinguish interpreter, guest program, invocation, host binding, hypothesis, and coverage findings so target-specific semantics remain replaceable.
 - Never overwrite source evidence or automatically execute extracted code.
 
 ## Behavior and browser signals

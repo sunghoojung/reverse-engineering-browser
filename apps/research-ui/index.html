@@ -1047,6 +1047,76 @@
       .experiment-input { padding: 10px; border: 1px solid var(--line); background: var(--panel); font: 9px var(--mono); }
       .experiment-note { margin-top: 10px; color: var(--amber); font: 8px var(--mono); }
 
+      #screen-vm:not([hidden]) { display: grid; grid-template-rows: 60px auto minmax(0, 1fr); }
+      #screen-vm > .screen-head { grid-row: 1; }
+      #screen-vm > .vm-notice { grid-row: 2; }
+      #screen-vm > .vm-grid { grid-row: 3; }
+      .vm-notice {
+        min-height: 34px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 13px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel-2);
+        color: var(--muted);
+        font-size: 10px;
+      }
+      .vm-notice::before { content: ""; width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--accent); }
+      .vm-notice[data-kind="empty"]::before { background: var(--faint); }
+      .vm-notice[data-kind="malformed"]::before, .vm-notice[data-kind="disconnected"]::before { background: var(--red); }
+      .vm-notice[data-kind="gap"]::before { background: var(--amber); }
+      .vm-grid { min-height: 0; display: grid; grid-template-columns: minmax(230px, 30%) minmax(0, 1fr); }
+      .vm-list-pane { min-width: 0; overflow: auto; border-right: 1px solid var(--line); background: var(--chrome); }
+      .vm-list-head { padding: 12px; border-bottom: 1px solid var(--line); color: var(--faint); font: 650 8px var(--mono); letter-spacing: .1em; text-transform: uppercase; }
+      .vm-list { display: grid; }
+      .vm-row {
+        min-width: 0;
+        min-height: 58px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 5px 8px;
+        padding: 10px 12px;
+        border: 0;
+        border-bottom: 1px solid var(--line-soft);
+        background: transparent;
+        text-align: left;
+      }
+      .vm-row:hover { background: var(--panel-3); }
+      .vm-row[aria-selected="true"] { background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
+      .vm-row-title { overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
+      .vm-row-meta { grid-column: 1 / -1; color: var(--faint); font: 8px var(--mono); }
+      .vm-kind, .vm-confidence {
+        width: max-content;
+        padding: 3px 5px;
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        color: var(--accent);
+        font: 650 7px var(--mono);
+        text-transform: uppercase;
+      }
+      .vm-detail { min-width: 0; overflow: auto; padding: 18px; }
+      .vm-empty { min-height: 220px; display: grid; place-items: center; padding: 24px; color: var(--muted); text-align: center; }
+      .vm-summary { display: grid; grid-template-columns: repeat(4, minmax(110px, 1fr)); gap: 8px; margin-bottom: 16px; }
+      .vm-metric { padding: 10px; border: 1px solid var(--line); background: var(--panel-2); }
+      .vm-metric span { display: block; color: var(--faint); font: 7px var(--mono); text-transform: uppercase; }
+      .vm-metric strong { display: block; margin-top: 6px; font: 500 18px var(--mono); }
+      .vm-detail-card { border: 1px solid var(--line); background: var(--panel-2); }
+      .vm-detail-head { display: flex; align-items: flex-start; gap: 10px; padding: 13px; border-bottom: 1px solid var(--line); }
+      .vm-detail-head > :first-child { min-width: 0; flex: 1; }
+      .vm-detail-head h2 { margin: 0; font-size: 13px; }
+      .vm-detail-head p { margin: 5px 0 0; color: var(--muted); font: 8px var(--mono); }
+      .vm-detail-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; margin-left: auto; }
+      .vm-detail-head .vm-confidence { color: var(--green); }
+      .vm-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .vm-field { min-width: 0; padding: 10px 13px; border-right: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
+      .vm-field span { display: block; color: var(--faint); font: 7px var(--mono); text-transform: uppercase; }
+      .vm-field strong { display: block; margin-top: 5px; overflow-wrap: anywhere; font: 500 9px var(--mono); }
+      .vm-coverage { padding: 12px 13px; }
+      .vm-coverage-line { display: flex; justify-content: space-between; color: var(--muted); font: 9px var(--mono); }
+      .vm-coverage-bar { height: 5px; margin-top: 8px; background: var(--panel-3); }
+      .vm-coverage-bar span { display: block; height: 100%; background: var(--accent); }
+
       .statusbar {
         min-height: 34px;
         display: flex;
@@ -1078,6 +1148,7 @@
         .inspector-tab { flex: 0 0 auto; }
         #screen-sources:not([hidden]) { grid-template-columns: 210px minmax(330px, 1fr); }
         .sources-debugger { display: none; }
+        .vm-summary { grid-template-columns: repeat(2, minmax(100px, 1fr)); }
       }
       @media (max-width: 880px) {
         .workspace { grid-template-columns: 178px minmax(0, 1fr); }
@@ -1111,6 +1182,12 @@
         .screen-head { padding: 9px 10px; }
         .screen-head-actions .secondary-button { display: none; }
         .experiment-grid { grid-template-columns: 1fr; }
+        .vm-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+        .vm-list-pane { max-height: 210px; border-right: 0; border-bottom: 1px solid var(--line); }
+        .vm-fields { grid-template-columns: 1fr; }
+        .vm-detail { padding: 12px; }
+        .vm-detail-head { flex-wrap: wrap; }
+        .vm-detail-actions { width: 100%; justify-content: flex-start; margin-left: 0; }
         .statusbar span:not(:first-child):not(.local-only) { display: none; }
         #screen-sources:not([hidden]) { grid-template-columns: 148px minmax(260px, 1fr); }
         .source-search { display: none; }
@@ -1137,6 +1214,7 @@
         <nav class="primary-nav" aria-label="Workspace">
           <button class="nav-button" data-screen="traffic" aria-current="page">Traffic</button>
           <button class="nav-button" data-screen="sources">Sources</button>
+          <button id="nav-vm" class="nav-button" data-screen="vm">VM Lab</button>
           <button class="nav-button" data-screen="backtrace">Backtraces</button>
           <button class="nav-button" data-screen="experiments">Experiments</button>
         </nav>
@@ -1284,6 +1362,20 @@
                 <details class="debug-pane"><summary>Event Listener Breakpoints</summary><div class="debug-pane-body">No breakpoints</div></details>
               </div>
             </aside>
+          </section>
+
+          <section id="screen-vm" class="screen" aria-label="Virtual machine investigation" hidden>
+            <header class="screen-head">
+              <div><h1>VM Lab</h1><div class="screen-subtitle">Interpreter, guest program, invocation, binding, hypothesis, and coverage evidence</div></div>
+            </header>
+            <div id="vm-notice" class="vm-notice" data-kind="loading" role="status" aria-live="polite">Waiting for VM findings from the local evidence broker.</div>
+            <div class="vm-grid">
+              <aside class="vm-list-pane" aria-label="VM findings">
+                <div class="vm-list-head">Findings <span id="vm-count">0</span></div>
+                <div id="vm-list" class="vm-list" role="listbox" aria-label="Captured VM findings"></div>
+              </aside>
+              <div id="vm-detail" class="vm-detail" tabindex="0"></div>
+            </div>
           </section>
 
           <section id="screen-backtrace" class="screen" aria-label="Request field backtrace" hidden>
@@ -1501,7 +1593,10 @@ export async function checkout(cart, fingerprint) {
         selectedField: fieldSets.body.find(field => field.traceable),
         requestType: 'all',
         broker: 'connecting',
-        refreshing: false
+        refreshing: false,
+        vmFindings: [],
+        malformedVmFindings: 0,
+        selectedVmFindingId: null
       };
 
       const elements = {
@@ -1551,7 +1646,11 @@ export async function checkout(cart, fingerprint) {
         artifactFacts: document.querySelector('#artifact-facts'),
         quickOpen: document.querySelector('#quick-open'),
         quickOpenInput: document.querySelector('#quick-open-input'),
-        quickOpenResults: document.querySelector('#quick-open-results')
+        quickOpenResults: document.querySelector('#quick-open-results'),
+        vmNotice: document.querySelector('#vm-notice'),
+        vmCount: document.querySelector('#vm-count'),
+        vmList: document.querySelector('#vm-list'),
+        vmDetail: document.querySelector('#vm-detail')
       };
 
       const bodyTraceSteps = [
@@ -1565,7 +1664,7 @@ export async function checkout(cart, fingerprint) {
 
       const eventCategories = new Set([
         'unknown', 'canvas', 'webgl', 'web_audio', 'navigator', 'permissions',
-        'storage', 'webrtc', 'wasm', 'network'
+        'storage', 'webrtc', 'wasm', 'network', 'vm'
       ]);
       const eventTypes = {
         1: new Set([
@@ -1576,7 +1675,7 @@ export async function checkout(cart, fingerprint) {
           'unknown', 'api_call', 'property_read', 'module_compiled',
           'module_instantiated', 'request_started', 'response_completed', 'gap',
           'request_initiated', 'request_redirected', 'response_started',
-          'request_completed', 'request_failed'
+          'request_completed', 'request_failed', 'vm_finding'
         ])
       };
       const uint64Fields = [
@@ -1604,6 +1703,12 @@ export async function checkout(cart, fingerprint) {
       const artifactIdentifierFields = [
         'artifact_id', 'session_id', 'navigation_id', 'frame_id', 'parent_artifact_id', 'creator_event_id'
       ];
+      const vmKinds = new Map([
+        [1, 'interpreter'], [2, 'guest program'], [3, 'invocation'],
+        [4, 'host binding'], [5, 'hypothesis'], [6, 'coverage']
+      ]);
+      const vmHostRuntimes = new Map([[0, 'unknown'], [1, 'JavaScript'], [2, 'WebAssembly'], [3, 'mixed']]);
+      const vmConfidences = new Map([[0, 'unknown'], [1, 'observed'], [2, 'inferred'], [3, 'heuristic']]);
 
       function isPlainObject(value) {
         return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -1639,11 +1744,17 @@ export async function checkout(cart, fingerprint) {
       }
 
       function decodePayload(event) {
-        const pairs = event.payload.match(/.{2}/g) || [];
-        return new TextDecoder().decode(Uint8Array.from(pairs, byte => Number.parseInt(byte, 16)));
+        return new TextDecoder().decode(bytesFromHex(event.payload));
+      }
+
+      function bytesFromHex(hex) {
+        const pairs = hex.match(/.{2}/g) || [];
+        return Uint8Array.from(pairs, byte => Number.parseInt(byte, 16));
       }
 
       function summarizeEventValue(event) {
+        const vmFinding = decodeVmFinding(event);
+        if (vmFinding) return `${vmFinding.kind} · ${vmFinding.label} · ${vmFinding.confidence}`;
         const values = [];
         const payload = decodePayload(event);
         if (payload) values.push(payload);
@@ -1877,10 +1988,198 @@ export async function checkout(cart, fingerprint) {
         return [...requests.values()];
       }
 
+      function decodeVmFinding(event) {
+        if (event.protocol_version !== 2 || event.category !== 'vm' ||
+            event.type !== 'vm_finding' || event.payload_size !== 128) return null;
+        const bytes = bytesFromHex(event.payload);
+        if (bytes.length !== 128) return null;
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const kindCode = bytes[4];
+        const runtimeCode = bytes[5];
+        const confidenceCode = bytes[6];
+        const flags = bytes[7];
+        const labelSize = view.getUint16(8, true);
+        const observedCount = view.getUint32(12, true);
+        const totalCount = view.getUint32(16, true);
+        const sourceOffset = view.getBigUint64(56, true);
+        const sourceSize = view.getBigUint64(64, true);
+        const findingId = view.getBigUint64(24, true);
+        const investigationId = view.getBigUint64(32, true);
+        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 ||
+            !vmKinds.has(kindCode) || !vmHostRuntimes.has(runtimeCode) ||
+            !vmConfidences.has(confidenceCode) || (flags & ~0x0f) !== 0 ||
+            labelSize === 0 || labelSize > 40 || view.getUint16(10, true) !== 0 ||
+            view.getUint32(20, true) !== 0 || findingId === 0n || investigationId === 0n) return null;
+        const isCoverage = kindCode === 6;
+        if (isCoverage ? totalCount === 0 || observedCount > totalCount : observedCount !== 0 || totalCount !== 0) return null;
+        const hasSourceRange = Boolean(flags & 1);
+        if (hasSourceRange ? sourceSize === 0n : sourceOffset !== 0n || sourceSize !== 0n) return null;
+        if (hasSourceRange && integerText(event, 'artifact_id') === '0') return null;
+        const labelBytes = bytes.slice(72, 72 + labelSize);
+        if ([...labelBytes].some(byte => byte < 0x20 || byte > 0x7e) ||
+            bytes.slice(72 + labelSize, 112).some(byte => byte !== 0) ||
+            bytes.slice(112).some(byte => byte !== 0)) return null;
+        const flagNames = [
+          [1, 'source range'], [2, 'partial'], [4, 'dynamic'], [8, 'nested']
+        ].filter(([mask]) => flags & mask).map(([, name]) => name);
+        return {
+          findingId: String(findingId),
+          investigationId: String(investigationId),
+          subjectId: String(view.getBigUint64(40, true)),
+          relatedSubjectId: String(view.getBigUint64(48, true)),
+          kind: vmKinds.get(kindCode),
+          hostRuntime: vmHostRuntimes.get(runtimeCode),
+          confidence: vmConfidences.get(confidenceCode),
+          flags: flagNames,
+          label: String.fromCharCode(...labelBytes),
+          observedCount,
+          totalCount,
+          sourceOffset: String(sourceOffset),
+          sourceSize: String(sourceSize),
+          sourceArtifactId: integerText(event, 'artifact_id'),
+          sequenceNumber: integerText(event, 'sequence_number'),
+          parentEventId: integerText(event, 'parent_event_id')
+        };
+      }
+
+      function vmFindingsFromEvents(events) {
+        const findings = [];
+        let malformedCount = 0;
+        events.filter(event => event.category === 'vm' && event.type === 'vm_finding').forEach(event => {
+          const finding = decodeVmFinding(event);
+          if (finding) findings.push(finding); else malformedCount += 1;
+        });
+        return { findings, malformedCount };
+      }
+
       function setNetworkNotice(kind, message) {
         elements.networkNotice.dataset.kind = kind;
         elements.networkNotice.textContent = message;
         elements.networkNotice.hidden = false;
+      }
+
+      function textElement(tag, className, value) {
+        const element = document.createElement(tag);
+        if (className) element.className = className;
+        element.textContent = String(value);
+        return element;
+      }
+
+      function setVmNotice(kind, message) {
+        elements.vmNotice.dataset.kind = kind;
+        elements.vmNotice.textContent = message;
+        elements.vmNotice.hidden = false;
+      }
+
+      function vmField(label, value) {
+        const field = document.createElement('div'); field.className = 'vm-field';
+        field.append(textElement('span', '', label), textElement('strong', '', value));
+        return field;
+      }
+
+      function renderVmDetail() {
+        const selected = state.vmFindings.find(finding => finding.findingId === state.selectedVmFindingId);
+        if (!selected) {
+          elements.vmDetail.replaceChildren(textElement('div', 'vm-empty', 'No valid VM findings have been captured. Capture stays separate from interpretation, so the lab does not synthesize sample conclusions.'));
+          return;
+        }
+        const investigation = state.vmFindings.filter(finding => finding.investigationId === selected.investigationId);
+        const coverage = investigation.find(finding => finding.kind === 'coverage');
+        const coveragePercent = coverage ? Math.round(coverage.observedCount * 100 / coverage.totalCount) : null;
+        const summary = document.createElement('div'); summary.className = 'vm-summary';
+        [
+          ['findings', investigation.length],
+          ['interpreters', investigation.filter(finding => finding.kind === 'interpreter').length],
+          ['guest programs', investigation.filter(finding => finding.kind === 'guest program').length],
+          ['coverage', coveragePercent === null ? 'unknown' : `${coveragePercent}%`]
+        ].forEach(([label, value]) => {
+          const metric = document.createElement('div'); metric.className = 'vm-metric';
+          metric.append(textElement('span', '', label), textElement('strong', '', value));
+          summary.append(metric);
+        });
+
+        const card = document.createElement('article'); card.className = 'vm-detail-card';
+        const head = document.createElement('header'); head.className = 'vm-detail-head';
+        const title = document.createElement('div');
+        title.append(textElement('h2', '', selected.label), textElement('p', '', `finding ${selected.findingId} · investigation ${selected.investigationId}`));
+        const actions = document.createElement('div'); actions.className = 'vm-detail-actions';
+        actions.append(textElement('span', 'vm-confidence', selected.confidence));
+        const fields = document.createElement('div'); fields.className = 'vm-fields';
+        fields.append(
+          vmField('evidence kind', selected.kind),
+          vmField('host runtime', selected.hostRuntime),
+          vmField('subject', selected.subjectId === '0' ? 'not assigned' : selected.subjectId),
+          vmField('related subject', selected.relatedSubjectId === '0' ? 'none' : selected.relatedSubjectId),
+          vmField('flags', selected.flags.join(', ') || 'none'),
+          vmField('event link', `sequence ${selected.sequenceNumber} · parent ${selected.parentEventId}`),
+          vmField('source artifact', selected.sourceArtifactId === '0' ? 'not captured' : selected.sourceArtifactId),
+          vmField('source range', selected.flags.includes('source range') ? `${selected.sourceOffset} + ${selected.sourceSize} bytes` : 'not captured')
+        );
+        const sourceArtifact = state.artifacts.find(artifact => artifact.artifact_id === selected.sourceArtifactId);
+        if (sourceArtifact) {
+          const openSource = textElement('button', 'secondary-button', 'Open in Sources');
+          openSource.type = 'button';
+          openSource.addEventListener('click', () => {
+            showScreen('sources', openSource);
+            selectArtifact(sourceArtifact.artifact_id);
+          });
+          actions.append(openSource);
+        }
+        head.append(title, actions);
+        card.append(head, fields);
+        if (coverage) {
+          const coveragePanel = document.createElement('div'); coveragePanel.className = 'vm-coverage';
+          const line = document.createElement('div'); line.className = 'vm-coverage-line';
+          line.append(textElement('span', '', coverage.label), textElement('strong', '', `${coverage.observedCount} / ${coverage.totalCount}`));
+          const bar = document.createElement('div'); bar.className = 'vm-coverage-bar';
+          const fill = document.createElement('span'); fill.style.width = `${coveragePercent}%`; bar.append(fill);
+          coveragePanel.append(line, bar); card.append(coveragePanel);
+        }
+        elements.vmDetail.replaceChildren(summary, card);
+      }
+
+      function renderVmLab() {
+        elements.vmCount.textContent = String(state.vmFindings.length);
+        if (!state.vmFindings.some(finding => finding.findingId === state.selectedVmFindingId)) {
+          state.selectedVmFindingId = state.vmFindings[0]?.findingId ?? null;
+        }
+        const gapCount = countSequenceGaps(state.events);
+        if (state.broker === 'unavailable') {
+          setVmNotice('disconnected', state.vmFindings.length ? 'Broker disconnected. Last valid VM findings remain visible.' : 'Broker disconnected. No VM findings are available.');
+        } else if (state.malformedVmFindings > 0) {
+          setVmNotice('malformed', `${state.malformedVmFindings} malformed VM ${state.malformedVmFindings === 1 ? 'finding was' : 'findings were'} rejected.`);
+        } else if (state.vmFindings.length === 0) {
+          setVmNotice('empty', 'No VM findings yet. The lab waits for observed or explicitly inferred evidence.');
+        } else if (gapCount > 0n) {
+          setVmNotice('gap', `${gapCount} event ${gapCount === 1n ? 'gap may' : 'gaps may'} make VM coverage incomplete.`);
+        } else {
+          elements.vmNotice.hidden = true;
+        }
+        const selectedExists = state.vmFindings.some(finding => finding.findingId === state.selectedVmFindingId);
+        elements.vmList.replaceChildren(...state.vmFindings.map((finding, index) => {
+          const row = document.createElement('button'); row.className = 'vm-row'; row.type = 'button';
+          row.dataset.findingId = finding.findingId;
+          row.setAttribute('role', 'option');
+          row.setAttribute('aria-selected', String(finding.findingId === state.selectedVmFindingId));
+          row.tabIndex = finding.findingId === state.selectedVmFindingId || !selectedExists && index === 0 ? 0 : -1;
+          row.append(
+            textElement('span', 'vm-row-title', finding.label),
+            textElement('span', 'vm-kind', finding.kind),
+            textElement('span', 'vm-row-meta', `${finding.hostRuntime} · ${finding.confidence} · investigation ${finding.investigationId}`)
+          );
+          row.addEventListener('click', () => { state.selectedVmFindingId = finding.findingId; renderVmLab(); });
+          row.addEventListener('keydown', event => {
+            if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const rows = [...elements.vmList.querySelectorAll('.vm-row')];
+            const current = rows.indexOf(row);
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
+              : (current + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
+            rows[next].click(); rows[next].focus();
+          });
+          return row;
+        }));
+        renderVmDetail();
       }
 
       function renderRequests() {
@@ -2701,6 +3000,7 @@ export async function checkout(cart, fingerprint) {
           const artifact = state.artifacts.find(candidate => candidate.artifact_id === state.selectedArtifactId);
           if (artifact) loadArtifactContent(artifact);
         }
+        if (screenName === 'vm') renderVmLab();
         if (!trigger?.classList.contains('nav-button')) {
           requestAnimationFrame(() => {
             if (screenName === 'traffic') {
@@ -2725,6 +3025,9 @@ export async function checkout(cart, fingerprint) {
           try { body = JSON.parse(rawBody); } catch { throw new TypeError('Malformed broker response'); }
           if (!isBrokerResponse(body)) throw new TypeError('Malformed broker response');
           state.events = body.events;
+          const vmModel = vmFindingsFromEvents(state.events);
+          state.vmFindings = vmModel.findings;
+          state.malformedVmFindings = vmModel.malformedCount;
           state.requests = [...sampleRequests, ...requestsFromEvents(state.events)];
           let selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
           if (!selectedRequest) {
@@ -2758,6 +3061,7 @@ export async function checkout(cart, fingerprint) {
           renderInspector();
           renderEvidence();
           await refreshArtifacts();
+          renderVmLab();
         } catch (error) {
           state.broker = 'unavailable';
           elements.capture.classList.add('offline');
@@ -2775,6 +3079,7 @@ export async function checkout(cart, fingerprint) {
           );
           renderRequests();
           renderEvidence();
+          renderVmLab();
         } finally {
           state.refreshing = false;
         }
@@ -2792,6 +3097,7 @@ export async function checkout(cart, fingerprint) {
         renderRequests();
         renderEvidence();
         renderSources();
+        renderVmLab();
       }
 
       function enableTabKeyboardNavigation(selector) {
@@ -2887,6 +3193,7 @@ export async function checkout(cart, fingerprint) {
       renderInspector();
       renderEvidence();
       renderSources();
+      renderVmLab();
       if (location.protocol === 'file:') {
         useStandalonePreview();
       } else {

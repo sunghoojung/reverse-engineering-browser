@@ -39,6 +39,12 @@ Large artifact bytes use the separate 128-byte framed contract in
 channel. It is not part of the renderer event ring, and response bodies require
 explicit sensitive-capture authorization.
 
+Bounded VM investigation metadata uses `NativeVmFindingPayload` from
+`common/native_vm_finding.h` inside the existing event record. The record keeps
+interpreter, guest program, invocation, host binding, hypothesis, and coverage
+findings distinct. Guest bytes remain in the artifact channel and are linked by
+artifact ID instead of being copied through the renderer queue.
+
 Renderer code never writes files or sockets directly.
 
 The current event envelope does not yet carry a trustworthy origin identity,

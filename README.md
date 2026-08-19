@@ -44,6 +44,10 @@ make brave-doctor
 make brave-probe-check
 ```
 
+On memory-constrained machines, set `REB_BRAVE_JOBS` to a positive integer to
+bound concurrent Brave compiler jobs, for example `REB_BRAVE_JOBS=4 make
+brave-probe-check`.
+
 ## Current implementation
 
 The repository includes a dependency-free C++ vertical slice for the probe event path:
@@ -54,7 +58,7 @@ The repository includes a dependency-free C++ vertical slice for the probe event
 - a bounded broker with validation, sequence-gap detection, and eviction accounting;
 - an authenticated, user-only Unix socket from Brave to the broker;
 - a native binary event stream and versioned JSONL evidence store;
-- a separate size-limited native artifact stream with immutable SHA-256 blobs;
+- an authenticated, acknowledged artifact socket with immutable SHA-256 blobs;
 - a native macOS Origin Trace application that reads the broker evidence store;
 - a threaded producer and consumer demo;
 - unit tests and sanitizer support.
@@ -62,6 +66,9 @@ The repository includes a dependency-free C++ vertical slice for the probe event
 The deterministic producer validates the same broker boundary without launching
 Brave. The tracked Brave integration carries renderer records through shared
 memory and Mojo into the browser process, then sends them to the broker socket.
+The browser process also tees JavaScript and WASM response bodies into a
+separate bounded artifact queue without delaying or changing the response
+delivered to the page.
 
 ## Native development
 
@@ -108,11 +115,14 @@ session with:
 make live
 ```
 
-The launcher creates a session-scoped broker socket and token, opens Origin
-Trace, and starts the custom Brave executable with the matching session flags.
+The launcher creates session-scoped event and artifact sockets with one
+user-only token, opens Origin Trace, and starts the custom Brave executable
+with the matching session flags. Artifact success events are emitted only
+after the receiver has committed the manifest record; capture or transfer
+failures remain visible as normal evidence events.
 Set `REB_BRAVE_BINARY` when the executable is outside the default component
-output directory. Live sessions enable Canvas and Network by default and expire
-after one hour. Override those startup limits with `REB_CAPTURE_CATEGORY_MASK`
+output directory. Live sessions enable Canvas, Network, and Artifact by default
+and expire after one hour. Override those startup limits with `REB_CAPTURE_CATEGORY_MASK`
 and `REB_CAPTURE_DURATION_SECONDS`.
 
 ## CI and release builds

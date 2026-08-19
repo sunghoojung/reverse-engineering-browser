@@ -1,18 +1,43 @@
 #include "reb/artifact.hpp"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cerrno>
 #include <charconv>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 
 namespace reb {
 namespace {
+
+bool SyncFile(const std::filesystem::path& path, std::string& error) {
+  const int descriptor = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (descriptor < 0) {
+    error = "Unable to open file for durable commit: " + std::string(std::strerror(errno));
+    return false;
+  }
+  if (fsync(descriptor) != 0) {
+    const int sync_error = errno;
+    close(descriptor);
+    error = "Unable to durably commit file: " + std::string(std::strerror(sync_error));
+    return false;
+  }
+  if (close(descriptor) != 0) {
+    error = "Unable to close durably committed file: " + std::string(std::strerror(errno));
+    return false;
+  }
+  return true;
+}
 
 constexpr std::array<std::uint32_t, 64> kSha256RoundConstants = {
     0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U, 0x3956c25bU, 0x59f111f1U, 0x923f82a4U,
@@ -329,6 +354,7 @@ ArtifactReceiver::ArtifactReceiver(std::filesystem::path store_directory,
 
 ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
   last_error_.clear();
+  last_artifact_id_ = 0;
   ArtifactHeader header{};
   stream.read(reinterpret_cast<char*>(&header), static_cast<std::streamsize>(sizeof(header)));
   if (stream.gcount() == 0 && stream.eof()) {
@@ -337,6 +363,7 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
   if (stream.gcount() != static_cast<std::streamsize>(sizeof(header))) {
     return Reject(ArtifactReceiveStatus::kInvalid, "Truncated artifact header");
   }
+  last_artifact_id_ = header.artifact_id;
   if (!IsValidArtifactHeader(header)) {
     return Reject(ArtifactReceiveStatus::kInvalid, "Invalid artifact header");
   }
@@ -403,6 +430,11 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
     RemoveFileBestEffort(temporary_path);
     return Reject(ArtifactReceiveStatus::kIoError, "Unable to flush artifact content");
   }
+  std::string sync_error;
+  if (!SyncFile(temporary_path, sync_error)) {
+    RemoveFileBestEffort(temporary_path);
+    return Reject(ArtifactReceiveStatus::kIoError, std::move(sync_error));
+  }
 
   const std::array<std::uint8_t, 32> digest = sha256.Final();
   if (!IsZeroDigest(header.expected_sha256) && digest != header.expected_sha256) {
@@ -444,8 +476,12 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
            << "\",\"sensitive\":" << (header.kind == ArtifactKind::kResponseBody ? "true" : "false")
            << ",\"content_path\":\"blobs/" << digest_hex << ".bin\"}\n";
   manifest.flush();
+  manifest.close();
   if (!manifest) {
     return Reject(ArtifactReceiveStatus::kIoError, "Unable to write artifact manifest");
+  }
+  if (!SyncFile(manifest_path_, sync_error)) {
+    return Reject(ArtifactReceiveStatus::kIoError, std::move(sync_error));
   }
 
   if (!blob_exists) {
@@ -462,6 +498,10 @@ ArtifactReceiverStats ArtifactReceiver::Stats() const noexcept {
 
 std::uint64_t ArtifactReceiver::StoredBytes() const noexcept {
   return stored_bytes_;
+}
+
+std::uint64_t ArtifactReceiver::LastArtifactId() const noexcept {
+  return last_artifact_id_;
 }
 
 const std::string& ArtifactReceiver::LastError() const noexcept {

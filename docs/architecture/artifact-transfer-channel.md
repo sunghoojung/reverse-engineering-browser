@@ -10,19 +10,20 @@ broker queue, or inline event payload.
 The implemented development path is:
 
 ```text
-browser-process artifact owner
-  -> bounded artifact frame stream
+browser-process response-body tee
+  -> bounded artifact queue
+  -> authenticated artifact socket
   -> reb-artifact-receiver
+  -> durable acknowledgment
   -> immutable content-addressed blob
   -> versioned manifest record
   -> research UI artifact API
   -> Sources workspace
 ```
 
-`reb-artifact-producer` stands in for the browser-process owner in the current
-end-to-end fixture. The tracked Brave header fixes the browser-side ABI. A
-future browser bridge can replace the development pipe with authenticated local
-IPC without changing the frame, store, or UI contracts.
+The tracked Brave integration implements this path for JavaScript and
+WebAssembly responses. `reb-artifact-producer` exercises the same socket and
+acknowledgment contract in deterministic end-to-end fixtures.
 
 ## Ownership boundaries
 
@@ -85,11 +86,18 @@ first frame. Unsupported versions, flags, enum values, nonzero reserved bytes,
 invalid printable UTF-8 metadata, truncated ranges, and digest mismatches fail
 closed.
 
+The receiver replies with a fixed 32-byte version-1 acknowledgment containing
+the artifact identifier and receive status. Accepted means the immutable blob
+and manifest entry were committed. Brave emits success only after matching that
+acknowledgment to the queued artifact.
+
 ## Limits and backpressure
 
 Defaults are:
 
 - 16 MiB per artifact;
+- 32 MiB of active browser capture memory;
+- 16 queued artifacts and 32 MiB of queued browser content;
 - 256 MiB of immutable blobs per session store;
 - 8 KiB source URL;
 - 255-byte MIME type;
@@ -107,10 +115,10 @@ visible status counter. It does not truncate original evidence. The
 browser-process bridge must treat rejection as artifact-unavailable evidence
 and emit a small gap or failure event through the normal event path.
 
-The current command-line receiver stops after a rejected frame because a pipe
-cannot safely resynchronize after an untrusted declared length. A framed socket
-implementation should close only that authenticated connection and preserve
-the session receiver.
+The standard-input receiver stops after a rejected frame because a pipe cannot
+safely resynchronize after an untrusted declared length. Socket mode closes
+the authenticated connection and ends the receiver process, making the failed
+artifact channel visible to the live-session supervisor.
 
 ## Storage layout
 
@@ -173,6 +181,8 @@ runtime debugging remain disabled because stored evidence is immutable.
 
 `tests/artifact_test.cpp` covers ABI parity, valid streaming, SHA-256, immutable
 manifest publication, duplicate identifiers, per-artifact and total limits,
-truncation, digest mismatch, and sensitive-capture policy. `make e2e` runs the
-event and artifact channels independently and then serves both stores to the
-UI.
+truncation, digest mismatch, and sensitive-capture policy. The socket E2E test
+covers authenticated acceptance, acknowledgment, permissions, session
+mismatch, and oversized rejection. The live-session E2E test launches both
+receivers, produces correlated event and artifact evidence, and verifies that
+Origin Trace receives both stores.

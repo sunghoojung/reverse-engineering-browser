@@ -44,6 +44,26 @@ CHECK_ARTIFACT_WIRE_OFFSET(reserved1);
 
 #undef CHECK_ARTIFACT_WIRE_OFFSET
 
+static_assert(reb::kArtifactAckMagic == reb::kNativeArtifactAckMagic);
+static_assert(reb::kArtifactAckSize == reb::kNativeArtifactAckSize);
+static_assert(reb::kMaxArtifactUrlBytes == reb::kNativeArtifactMaxUrlBytes);
+static_assert(reb::kMaxArtifactMimeTypeBytes == reb::kNativeArtifactMaxMimeTypeBytes);
+static_assert(sizeof(reb::ArtifactAck) == sizeof(reb::NativeArtifactAck));
+static_assert(offsetof(reb::ArtifactAck, status) == offsetof(reb::NativeArtifactAck, status));
+static_assert(offsetof(reb::ArtifactAck, artifact_id) ==
+              offsetof(reb::NativeArtifactAck, artifact_id));
+#define CHECK_ARTIFACT_STATUS_VALUE(value)                                       \
+  static_assert(static_cast<std::uint32_t>(reb::ArtifactReceiveStatus::value) == \
+                static_cast<std::uint32_t>(reb::NativeArtifactReceiveStatus::value))
+CHECK_ARTIFACT_STATUS_VALUE(kAccepted);
+CHECK_ARTIFACT_STATUS_VALUE(kEndOfStream);
+CHECK_ARTIFACT_STATUS_VALUE(kInvalid);
+CHECK_ARTIFACT_STATUS_VALUE(kTooLarge);
+CHECK_ARTIFACT_STATUS_VALUE(kSensitiveCaptureDisabled);
+CHECK_ARTIFACT_STATUS_VALUE(kConflict);
+CHECK_ARTIFACT_STATUS_VALUE(kIoError);
+#undef CHECK_ARTIFACT_STATUS_VALUE
+
 static_assert(reb::kArtifactMagic == reb::kNativeArtifactMagic);
 static_assert(reb::kArtifactProtocolVersion == reb::kNativeArtifactProtocolVersion);
 static_assert(reb::kArtifactHeaderSize == reb::kNativeArtifactHeaderSize);

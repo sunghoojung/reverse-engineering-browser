@@ -22,11 +22,11 @@ enum class IngestStatus {
 };
 
 inline constexpr std::uint64_t kAllEventCategoryMask =
-    (std::uint64_t{1} << static_cast<std::uint16_t>(EventCategory::kVm)) - 1;
+    (std::uint64_t{1} << static_cast<std::uint16_t>(EventCategory::kArtifact)) - 1;
 
 [[nodiscard]] constexpr std::uint64_t EventCategoryMask(const EventCategory category) noexcept {
   const auto value = static_cast<std::uint16_t>(category);
-  return value == 0 || value > static_cast<std::uint16_t>(EventCategory::kVm)
+  return value == 0 || value > static_cast<std::uint16_t>(EventCategory::kArtifact)
              ? 0
              : std::uint64_t{1} << (value - 1U);
 }

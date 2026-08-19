@@ -13,7 +13,6 @@
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
-#include "content/public/renderer/render_thread.h"
 
 namespace reb {
 
@@ -26,13 +25,11 @@ NativeProbeTransport::NativeProbeTransport() = default;
 
 NativeProbeTransport::~NativeProbeTransport() = default;
 
-void NativeProbeTransport::Connect() {
-  if (host_.is_bound()) {
+void NativeProbeTransport::Connect(mojo::PendingRemote<mojom::NativeProbeHost> pending_host) {
+  if (host_.is_bound() || !pending_host.is_valid()) {
     return;
   }
 
-  mojo::PendingRemote<mojom::NativeProbeHost> pending_host;
-  content::RenderThread::Get()->BindHostReceiver(pending_host.InitWithNewPipeAndPassReceiver());
   host_.Bind(std::move(pending_host), base::SequencedTaskRunner::GetCurrentDefault());
   host_.set_disconnect_handler(
       base::BindOnce(&NativeProbeTransport::Disable, base::Unretained(this)),

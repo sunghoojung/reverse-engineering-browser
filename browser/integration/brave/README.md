@@ -39,3 +39,13 @@ queue with Mojo lifecycle control and coalesced wake-ups. The browser process
 authenticates to the event broker with a session identifier and a mode-0600
 token file, then sends exact fixed-size records over a Unix socket. A bounded
 browser-process queue keeps those socket writes off the capture paths.
+
+When the Artifact category is authorized, the browser process recognizes
+JavaScript and WebAssembly responses, removes URL credentials, queries, and
+fragments from stored metadata, and asynchronously tees at most 16 MiB per
+response. The original response pipe remains the page's source of bytes. A
+separate queue permits at most 16 pending artifacts and 32 MiB of queued
+content, then transfers frames over an authenticated user-only socket. Brave
+emits `artifact_captured` only after a durable receiver acknowledgment and
+emits `artifact_capture_failed` for limits, incomplete bodies, queue pressure,
+disconnects, and receiver rejection.

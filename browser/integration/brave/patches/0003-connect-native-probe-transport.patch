@@ -58,11 +58,14 @@ index 6c6b8d934..1b22d623a 100644
  #include "brave/components/safe_builtins/renderer/safe_builtins.h"
  #include "brave/components/script_injector/renderer/script_injector_render_frame_observer.h"
  #include "brave/components/skus/common/features.h"
-@@ -141,6 +142,7 @@ BraveContentRendererClient::~BraveContentRendererClient() = default;
+@@ -141,6 +142,10 @@ BraveContentRendererClient::~BraveContentRendererClient() = default;
  
  void BraveContentRendererClient::RenderThreadStarted() {
    ChromeContentRendererClient::RenderThreadStarted();
-+  reb::NativeProbeTransport::Get().Connect();
++  mojo::PendingRemote<reb::mojom::NativeProbeHost> pending_probe_host;
++  content::RenderThread::Get()->BindHostReceiver(
++      pending_probe_host.InitWithNewPipeAndPassReceiver());
++  reb::NativeProbeTransport::Get().Connect(std::move(pending_probe_host));
  
    brave_observer_ = std::make_unique<BraveRenderThreadObserver>();
    content::RenderThread::Get()->AddObserver(brave_observer_.get());

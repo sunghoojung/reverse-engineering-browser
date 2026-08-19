@@ -10,9 +10,15 @@ readonly brave_directory="${REB_BRAVE_DIRECTORY:-${repository_root}/browser/work
 chromium_directory="$(cd "${brave_directory}/.." 2>/dev/null && pwd)" || chromium_directory=""
 readonly chromium_directory
 readonly output_directory="${REB_BRAVE_OUTPUT_DIRECTORY:-out/Component_arm64}"
+readonly brave_jobs="${REB_BRAVE_JOBS:-}"
 readonly probe_objects=(
+  "obj/brave/components/reverse_engineering_browser/queue/native_probe_queue.o"
   "obj/brave/components/reverse_engineering_browser/renderer/native_probe_sink.o"
   "obj/brave/components/reverse_engineering_browser/renderer/native_probe_transport.o"
+  "obj/brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.o"
+  "obj/brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.o"
+  "obj/brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.o"
+  "obj/brave/components/reverse_engineering_browser/browser/native_local_ipc_client.o"
   "obj/brave/components/reverse_engineering_browser/browser/native_network_capture_sink.o"
   "obj/brave/components/reverse_engineering_browser/browser/native_probe_host.o"
   "obj/brave/components/reverse_engineering_browser/browser/native_probe_session.o"
@@ -114,7 +120,17 @@ case "${command_name}" in
     (
       cd "${chromium_directory}"
       buildtools/mac/gn gen "${output_directory}"
-      autoninja -C "${output_directory}" "${probe_objects[@]}"
+      autoninja_arguments=(-C "${output_directory}")
+      if [[ -n "${brave_jobs}" ]]; then
+        if [[ ! "${brave_jobs}" =~ ^[1-9][0-9]*$ ]]; then
+          echo "REB_BRAVE_JOBS must be a positive integer." >&2
+          exit 2
+        fi
+        autoninja_arguments+=("-j${brave_jobs}")
+      fi
+      autoninja "${autoninja_arguments[@]}" "${probe_objects[@]}" \
+        brave/components/reverse_engineering_browser:native_artifact_body_tee_unittests
+      "${output_directory}/native_artifact_body_tee_unittests"
     )
     ;;
   build|start)

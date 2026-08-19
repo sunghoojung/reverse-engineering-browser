@@ -16,6 +16,10 @@ namespace reb {
 inline constexpr std::uint32_t kNativeArtifactMagic = 0x41424552U;
 inline constexpr std::uint16_t kNativeArtifactProtocolVersion = 1;
 inline constexpr std::size_t kNativeArtifactHeaderSize = 128;
+inline constexpr std::uint32_t kNativeArtifactAckMagic = 0x4b414252U;
+inline constexpr std::size_t kNativeArtifactAckSize = 32;
+inline constexpr std::uint32_t kNativeArtifactMaxUrlBytes = 8'192;
+inline constexpr std::uint32_t kNativeArtifactMaxMimeTypeBytes = 255;
 inline constexpr std::uint16_t kNativeArtifactFlagSensitive = 1U << 0U;
 
 enum class NativeArtifactKind : std::uint16_t {
@@ -25,6 +29,32 @@ enum class NativeArtifactKind : std::uint16_t {
   kSourceMap = 3,
   kResponseBody = 4,
 };
+
+enum class NativeArtifactReceiveStatus : std::uint32_t {
+  kAccepted = 0,
+  kEndOfStream = 1,
+  kInvalid = 2,
+  kTooLarge = 3,
+  kSensitiveCaptureDisabled = 4,
+  kConflict = 5,
+  kIoError = 6,
+};
+
+struct NativeArtifactAck final {
+  std::uint32_t magic = kNativeArtifactAckMagic;
+  std::uint16_t protocol_version = kNativeArtifactProtocolVersion;
+  std::uint16_t ack_size = static_cast<std::uint16_t>(kNativeArtifactAckSize);
+  NativeArtifactReceiveStatus status = NativeArtifactReceiveStatus::kInvalid;
+  std::uint32_t reserved0 = 0;
+  std::uint64_t artifact_id = 0;
+  std::array<std::byte, 8> reserved1{};
+};
+
+static_assert(sizeof(NativeArtifactAck) == kNativeArtifactAckSize);
+static_assert(std::is_standard_layout_v<NativeArtifactAck>);
+static_assert(std::is_trivially_copyable_v<NativeArtifactAck>);
+static_assert(offsetof(NativeArtifactAck, status) == 8);
+static_assert(offsetof(NativeArtifactAck, artifact_id) == 16);
 
 struct NativeArtifactHeader final {
   std::uint32_t magic = kNativeArtifactMagic;

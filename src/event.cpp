@@ -32,6 +32,7 @@ bool IsKnownCategory(const EventCategory category) noexcept {
     case EventCategory::kWasm:
     case EventCategory::kNetwork:
     case EventCategory::kVm:
+    case EventCategory::kArtifact:
       return true;
     case EventCategory::kUnknown:
       return false;
@@ -54,6 +55,8 @@ bool IsKnownType(const EventType type) noexcept {
     case EventType::kRequestCompleted:
     case EventType::kRequestFailed:
     case EventType::kVmFinding:
+    case EventType::kArtifactCaptured:
+    case EventType::kArtifactCaptureFailed:
       return true;
     case EventType::kUnknown:
       return false;
@@ -189,6 +192,8 @@ std::string_view EventCategoryName(const EventCategory category) noexcept {
       return "network";
     case EventCategory::kVm:
       return "vm";
+    case EventCategory::kArtifact:
+      return "artifact";
     case EventCategory::kUnknown:
       return "unknown";
   }
@@ -223,6 +228,10 @@ std::string_view EventTypeName(const EventType type) noexcept {
       return "request_failed";
     case EventType::kVmFinding:
       return "vm_finding";
+    case EventType::kArtifactCaptured:
+      return "artifact_captured";
+    case EventType::kArtifactCaptureFailed:
+      return "artifact_capture_failed";
     case EventType::kUnknown:
       return "unknown";
   }

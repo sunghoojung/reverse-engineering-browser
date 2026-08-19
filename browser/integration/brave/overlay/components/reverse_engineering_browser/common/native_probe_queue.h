@@ -8,7 +8,6 @@
 
 #include <array>
 #include <atomic>
-#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -36,12 +35,18 @@ inline NativeProbeEvent MakeNativeProbeGapEvent(const NativeProbeEvent& referenc
   gap.header.process_id = reference.header.process_id;
   gap.header.thread_id = reference.header.thread_id;
 
-  char* const begin = reinterpret_cast<char*>(gap.inline_payload.data());
-  char* const end = begin + gap.inline_payload.size();
-  const auto result = std::to_chars(begin, end, dropped);
-  if (result.ec == std::errc()) {
-    gap.header.payload_size = static_cast<std::uint32_t>(result.ptr - begin);
+  std::array<char, 20> reversed{};
+  std::uint64_t remaining = dropped;
+  std::size_t size = 0;
+  do {
+    reversed[size] = static_cast<char>('0' + remaining % 10);
+    remaining /= 10;
+    ++size;
+  } while (remaining != 0);
+  for (std::size_t index = 0; index < size; ++index) {
+    gap.inline_payload[index] = static_cast<std::byte>(reversed[size - index - 1]);
   }
+  gap.header.payload_size = static_cast<std::uint32_t>(size);
   return gap;
 }
 
@@ -54,11 +59,7 @@ inline NativeProbeEvent MakeNativeProbeGapEvent(const NativeProbeEvent& referenc
 // region. Both processes must map exactly sizeof(NativeProbeQueue) bytes.
 class alignas(64) NativeProbeQueue final {
  public:
-  NativeProbeQueue() noexcept {
-    for (std::uint64_t index = 0; index < kNativeProbeQueueCapacity; ++index) {
-      slots_[static_cast<std::size_t>(index)].sequence.store(index, std::memory_order_relaxed);
-    }
-  }
+  NativeProbeQueue() noexcept;
 
   NativeProbeQueue(const NativeProbeQueue&) = delete;
   NativeProbeQueue& operator=(const NativeProbeQueue&) = delete;

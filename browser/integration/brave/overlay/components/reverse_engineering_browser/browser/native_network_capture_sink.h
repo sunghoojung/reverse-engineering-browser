@@ -56,13 +56,14 @@ class NativeNetworkCaptureSink final {
                                std::uint64_t browser_context_id_low,
                                const net::RedirectInfo& redirect_info,
                                const network::mojom::URLResponseHead& response_head) noexcept;
-  void RecordResponseStarted(std::uint64_t request_id,
-                             std::int32_t initiator_request_id,
-                             std::uint32_t initiator_process_id,
-                             std::uint64_t frame_id,
-                             std::uint64_t browser_context_id_high,
-                             std::uint64_t browser_context_id_low,
-                             const network::mojom::URLResponseHead& response_head) noexcept;
+  [[nodiscard]] std::uint64_t RecordResponseStarted(
+      std::uint64_t request_id,
+      std::int32_t initiator_request_id,
+      std::uint32_t initiator_process_id,
+      std::uint64_t frame_id,
+      std::uint64_t browser_context_id_high,
+      std::uint64_t browser_context_id_low,
+      const network::mojom::URLResponseHead& response_head) noexcept;
   void RecordRequestCompleted(std::uint64_t request_id,
                               std::int32_t initiator_request_id,
                               std::uint32_t initiator_process_id,
@@ -75,7 +76,6 @@ class NativeNetworkCaptureSink final {
   NativeNetworkCaptureSink() = default;
 
   std::atomic<NativeProbeEmitter> emitter_{nullptr};
-  std::atomic<std::uint64_t> next_sequence_{1};
   std::atomic<std::uint64_t> session_id_{0};
   std::atomic<std::uint64_t> category_mask_{0};
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};

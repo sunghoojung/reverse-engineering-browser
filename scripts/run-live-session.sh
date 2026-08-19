@@ -7,23 +7,29 @@ readonly script_dir
 repository_root="$(cd "${script_dir}/.." && pwd)"
 readonly repository_root
 readonly broker_binary="${repository_root}/build/reb-event-broker"
-readonly origin_trace_app="${repository_root}/build/Origin Trace.app"
-readonly session_directory="${repository_root}/build/sessions/live"
-readonly store_path="${session_directory}/events.jsonl"
-readonly token_path="${session_directory}/broker.token"
-readonly profile_path="${repository_root}/build/brave-profile"
-readonly category_mask="${REB_CAPTURE_CATEGORY_MASK:-257}"
-readonly duration_seconds="${REB_CAPTURE_DURATION_SECONDS:-3600}"
-
-mkdir -p "${session_directory}" "${profile_path}"
-
+readonly artifact_receiver_binary="${repository_root}/build/reb-artifact-receiver"
+readonly origin_trace_app="${REB_ORIGIN_TRACE_APP:-${repository_root}/build/Origin Trace.app}"
 session_id="$(od -An -N8 -tu8 /dev/urandom | tr -d '[:space:]')"
 if [[ -z "${session_id}" || "${session_id}" == 0 ]]; then
   session_id=1
 fi
 readonly session_id
+readonly live_session_root="${REB_LIVE_SESSION_ROOT:-${repository_root}/build/sessions/live}"
+readonly session_directory="${live_session_root}/${session_id}"
+readonly store_path="${session_directory}/events.jsonl"
+readonly artifact_store_path="${session_directory}/artifacts"
+readonly token_path="${session_directory}/broker.token"
+readonly profile_path="${repository_root}/build/brave-profile"
+readonly category_mask="${REB_CAPTURE_CATEGORY_MASK:-1281}"
+readonly duration_seconds="${REB_CAPTURE_DURATION_SECONDS:-3600}"
+readonly open_command="${REB_OPEN_COMMAND:-open}"
+
+mkdir -p "${session_directory}" "${profile_path}"
+
 readonly socket_path="/tmp/origin-trace-${UID}-${session_id}.sock"
+readonly artifact_socket_path="/tmp/origin-trace-${UID}-${session_id}-artifacts.sock"
 readonly broker_log="${session_directory}/broker.log"
+readonly artifact_receiver_log="${session_directory}/artifact-receiver.log"
 
 brave_binary="${REB_BRAVE_BINARY:-}"
 if [[ -z "${brave_binary}" ]]; then
@@ -45,6 +51,10 @@ if [[ ! -x "${broker_binary}" ]]; then
   echo "Event broker is missing. Run: make broker" >&2
   exit 1
 fi
+if [[ ! -x "${artifact_receiver_binary}" ]]; then
+  echo "Artifact receiver is missing. Run: make artifact-receiver" >&2
+  exit 1
+fi
 if [[ ! -d "${origin_trace_app}" ]]; then
   echo "Origin Trace is missing. Run: make app-build" >&2
   exit 1
@@ -56,13 +66,21 @@ if [[ -z "${brave_binary}" || ! -x "${brave_binary}" ]]; then
 fi
 
 broker_pid=""
+artifact_receiver_pid=""
 cleanup() {
   if [[ -n "${broker_pid}" ]] && kill -0 "${broker_pid}" 2>/dev/null; then
     kill "${broker_pid}" 2>/dev/null || true
     wait "${broker_pid}" 2>/dev/null || true
   fi
+  if [[ -n "${artifact_receiver_pid}" ]] && kill -0 "${artifact_receiver_pid}" 2>/dev/null; then
+    kill "${artifact_receiver_pid}" 2>/dev/null || true
+    wait "${artifact_receiver_pid}" 2>/dev/null || true
+  fi
   if [[ -S "${socket_path}" ]]; then
     rm -f "${socket_path}"
+  fi
+  if [[ -S "${artifact_socket_path}" ]]; then
+    rm -f "${artifact_socket_path}"
   fi
 }
 trap cleanup EXIT INT TERM
@@ -88,17 +106,38 @@ if [[ ! -S "${socket_path}" ]]; then
   exit 1
 fi
 
-open -n "${origin_trace_app}" --args --store "${store_path}" \
-  --broker-socket "${socket_path}"
+"${artifact_receiver_binary}" --store "${artifact_store_path}" \
+  --socket "${artifact_socket_path}" --token-file "${token_path}" \
+  --session-id "${session_id}" >"${artifact_receiver_log}" 2>&1 &
+artifact_receiver_pid=$!
+for _ in {1..100}; do
+  if [[ -S "${artifact_socket_path}" ]]; then
+    break
+  fi
+  if ! kill -0 "${artifact_receiver_pid}" 2>/dev/null; then
+    echo "Artifact receiver stopped during startup. See: ${artifact_receiver_log}" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+if [[ ! -S "${artifact_socket_path}" ]]; then
+  echo "Artifact receiver socket did not become ready. See: ${artifact_receiver_log}" >&2
+  exit 1
+fi
+
+"${open_command}" -n "${origin_trace_app}" --args --store "${store_path}" \
+  --artifacts "${artifact_store_path}" --broker-socket "${socket_path}"
 
 echo "Origin Trace live session ${session_id}"
 echo "Evidence store: ${store_path}"
+echo "Artifact store: ${artifact_store_path}"
 echo "Category mask: ${category_mask}; expires after ${duration_seconds} seconds"
 echo "Close Brave to stop this capture session."
 
 "${brave_binary}" \
   --user-data-dir="${profile_path}" \
   --reb-broker-socket="${socket_path}" \
+  --reb-artifact-socket="${artifact_socket_path}" \
   --reb-broker-token-file="${token_path}" \
   --reb-session-id="${session_id}" \
   --reb-category-mask="${category_mask}" \
@@ -106,3 +145,5 @@ echo "Close Brave to stop this capture session."
 
 wait "${broker_pid}"
 broker_pid=""
+wait "${artifact_receiver_pid}"
+artifact_receiver_pid=""

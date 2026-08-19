@@ -11,6 +11,7 @@
 
 #include "base/no_destructor.h"
 #include "base/time/time.h"
+#include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_host.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
@@ -43,10 +44,13 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
 
   category_mask_.store(category_mask, std::memory_order_relaxed);
   expires_at_monotonic_ns_.store(expires_at_monotonic_ns, std::memory_order_relaxed);
+  next_browser_sequence_.store(1, std::memory_order_relaxed);
   downstream_.store(downstream, std::memory_order_release);
   session_id_.store(session_id, std::memory_order_release);
   NativeNetworkCaptureSink::Get().SetEmitter(&NativeProbeSession::EmitBrowserEvent, session_id,
                                              category_mask, expires_at_monotonic_ns);
+  NativeArtifactCaptureSink::Get().SetEmitter(&NativeProbeSession::EmitBrowserEvent, session_id,
+                                              category_mask, expires_at_monotonic_ns);
   for (NativeProbeHost* const host : hosts_) {
     host->Configure(session_id, category_mask, expires_at_monotonic_ns);
   }
@@ -54,6 +58,7 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
 }
 
 void NativeProbeSession::StopSession() noexcept {
+  NativeArtifactCaptureSink::Get().SetEmitter(nullptr, 0, 0, 0);
   NativeNetworkCaptureSink::Get().SetEmitter(nullptr, 0, 0, 0);
   session_id_.store(0, std::memory_order_release);
   category_mask_.store(0, std::memory_order_release);
@@ -78,6 +83,10 @@ std::uint64_t NativeProbeSession::category_mask() const noexcept {
 
 std::uint64_t NativeProbeSession::expires_at_monotonic_ns() const noexcept {
   return expires_at_monotonic_ns_.load(std::memory_order_acquire);
+}
+
+std::uint64_t NativeProbeSession::NextBrowserSequence() noexcept {
+  return next_browser_sequence_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void NativeProbeSession::Emit(const NativeProbeEvent& event) const noexcept {

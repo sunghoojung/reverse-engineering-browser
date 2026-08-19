@@ -69,6 +69,12 @@ tabs, line numbers, `Command+P` or `Control+P` open-file navigation,
 hex display. The right side keeps the familiar debugger pane structure while
 runtime controls remain disabled until native debugging is implemented.
 
+During `make live`, Brave captures authorized JavaScript and WASM response
+bodies through the separate authenticated artifact socket. The catalog refreshes
+while the session runs, so acknowledged artifacts appear without restarting
+Origin Trace. Capture and transfer failures remain inspectable in the evidence
+timeline as `artifact_capture_failed` events.
+
 Artifact content responses are capped at 2 MiB and use attachment, `nosniff`,
 and sandbox headers. The editor renders at most 20,000 lines and inserts all
 captured content as text. The catalog keeps original byte size and SHA-256

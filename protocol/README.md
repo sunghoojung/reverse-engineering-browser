@@ -67,6 +67,14 @@ queue. They use the separate version 1 artifact stream defined by
 correlation identifiers, metadata lengths, and an optional expected SHA-256,
 followed by bounded URL, MIME, and original-content byte ranges.
 
+Authenticated socket mode adds a fixed 32-byte acknowledgment after each
+frame. The receiver identifies the artifact and reports an accepted, invalid,
+too-large, policy, conflict, or I/O status only after storage processing is
+complete. Browser capture reports `artifact_captured` after an accepted
+acknowledgment and `artifact_capture_failed` for every other local or receiver
+outcome. These event types use the `artifact` category in the normal event
+stream, so a missing artifact is explicit evidence rather than silent loss.
+
 The receiver defaults to 16 MiB per artifact and 256 MiB per session store. It
 streams and hashes content into immutable content-addressed storage. Response
 bodies fail closed unless the session receiver is explicitly started with

@@ -1671,7 +1671,7 @@ export async function checkout(cart, fingerprint) {
 
       const eventCategories = new Set([
         'unknown', 'canvas', 'webgl', 'web_audio', 'navigator', 'permissions',
-        'storage', 'webrtc', 'wasm', 'network', 'vm'
+        'storage', 'webrtc', 'wasm', 'network', 'vm', 'artifact'
       ]);
       const eventTypes = {
         1: new Set([
@@ -1682,7 +1682,8 @@ export async function checkout(cart, fingerprint) {
           'unknown', 'api_call', 'property_read', 'module_compiled',
           'module_instantiated', 'request_started', 'response_completed', 'gap',
           'request_initiated', 'request_redirected', 'response_started',
-          'request_completed', 'request_failed', 'vm_finding'
+          'request_completed', 'request_failed', 'vm_finding',
+          'artifact_captured', 'artifact_capture_failed'
         ])
       };
       const uint64Fields = [

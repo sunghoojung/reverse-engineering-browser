@@ -10,10 +10,11 @@ index 554328f6b..f122a632b 100644
  #include <memory>
  #include <optional>
  #include <string_view>
-@@ -22,10 +23,12 @@
+@@ -22,10 +23,13 @@
  #include "brave/browser/net/url_context.h"
  #include "brave/components/brave_shields/content/browser/adblock_stub_response.h"
  #include "brave/components/brave_shields/core/common/features.h"
++#include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 +#include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
  #include "content/public/browser/browser_context.h"
  #include "content/public/browser/browser_task_traits.h"
@@ -107,17 +108,25 @@ index 554328f6b..f122a632b 100644
      uint32_t options = options_;
      factory_->target_factory_->CreateLoaderAndStart(
          target_loader_.BindNewPipeAndPassReceiver(
-@@ -612,6 +671,15 @@ void BraveProxyingURLLoaderFactory<
+@@ -612,6 +672,23 @@ void BraveProxyingURLLoaderFactory<
      return;
    }
  
++  std::uint64_t creator_event_id = 0;
 +  auto& network_capture = reb::NativeNetworkCaptureSink::Get();
 +  if (network_capture.IsEnabled()) {
 +    EnsureNativeCaptureIdentity();
-+    network_capture.RecordResponseStarted(
++    creator_event_id = network_capture.RecordResponseStarted(
 +        request_id_, network_service_request_id_, initiator_process_id_,
 +        frame_id_, browser_context_id_high_, browser_context_id_low_,
 +        *current_response_head_);
++  }
++  auto& artifact_capture = reb::NativeArtifactCaptureSink::Get();
++  if (artifact_capture.IsEnabled()) {
++    EnsureNativeCaptureIdentity();
++    current_response_body_ = artifact_capture.MaybeCaptureResponse(
++        request_id_, frame_id_, creator_event_id, request_,
++        *current_response_head_, std::move(current_response_body_));
 +  }
 +
    proxied_client_receiver_.Resume();

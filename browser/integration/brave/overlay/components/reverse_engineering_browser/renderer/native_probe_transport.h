@@ -31,7 +31,7 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
   NativeProbeTransport& operator=(const NativeProbeTransport&) = delete;
 
   // Called once on the renderer main thread after Mojo is available.
-  void Connect();
+  void Connect(mojo::PendingRemote<mojom::NativeProbeHost> pending_host);
 
   // mojom::NativeProbeClient:
   void Configure(std::uint64_t session_id,

@@ -11,10 +11,16 @@ mojom("mojom") {
   public_deps = [ "//mojo/public/mojom/base" ]
 }
 
+source_set("queue") {
+  sources = [
+    "common/native_probe_queue.cc",
+    "common/native_probe_queue.h",
+  ]
+}
+
 source_set("renderer") {
   sources = [
     "common/native_probe_event.h",
-    "common/native_probe_queue.h",
     "common/native_vm_finding.h",
     "renderer/native_probe_sink.cc",
     "renderer/native_probe_sink.h",
@@ -24,8 +30,8 @@ source_set("renderer") {
 
   deps = [
     ":mojom",
+    ":queue",
     "//base",
-    "//content/public/renderer",
     "//mojo/public/cpp/base",
     "//mojo/public/cpp/bindings",
   ]
@@ -33,6 +39,14 @@ source_set("renderer") {
 
 source_set("browser") {
   sources = [
+    "browser/native_artifact_body_tee.cc",
+    "browser/native_artifact_body_tee.h",
+    "browser/native_artifact_capture_sink.cc",
+    "browser/native_artifact_capture_sink.h",
+    "browser/native_artifact_socket_client.cc",
+    "browser/native_artifact_socket_client.h",
+    "browser/native_local_ipc_client.cc",
+    "browser/native_local_ipc_client.h",
     "browser/native_network_capture_sink.cc",
     "browser/native_network_capture_sink.h",
     "browser/native_probe_host.cc",
@@ -44,17 +58,34 @@ source_set("browser") {
     "common/native_artifact_header.h",
     "common/native_probe_event.h",
     "common/native_probe_ipc.h",
-    "common/native_probe_queue.h",
     "common/native_vm_finding.h",
   ]
 
   deps = [
     ":mojom",
+    ":queue",
     "//base",
     "//mojo/public/cpp/base",
     "//mojo/public/cpp/bindings",
     "//net",
     "//services/network/public/cpp",
     "//services/network/public/mojom",
+    "//url",
+  ]
+}
+
+executable("native_artifact_body_tee_unittests") {
+  testonly = true
+  sources = [
+    "browser/native_artifact_body_tee.cc",
+    "browser/native_artifact_body_tee_unittest.cc",
+  ]
+
+  deps = [
+    "//base",
+    "//base/test:test_support",
+    "//mojo/core/embedder",
+    "//mojo/public/cpp/system",
+    "//testing/gtest",
   ]
 }

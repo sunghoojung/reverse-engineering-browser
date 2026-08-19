@@ -9,6 +9,8 @@ NATIVE_HEADERS := $(shell find $(INCLUDE_DIR) -type f -name '*.hpp')
 TRACKED_BROWSER_PROTOCOL_HEADERS := $(shell find \
 	browser/integration/brave/overlay/components/reverse_engineering_browser/common \
 	-type f -name '*.h')
+NATIVE_PROBE_QUEUE_SOURCE := \
+	browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_probe_queue.cc
 FORMATTED_SOURCES := $(shell git ls-files '*.cc' '*.cpp' '*.h' '*.hpp')
 SHELL_SOURCES := $(shell git ls-files '*.sh')
 DEMO_NETWORK_PAYLOAD_HEX := 504f535420636f6c6c6563746f722e6578616d706c652e74657374
@@ -56,7 +58,7 @@ TEST_BINARIES := \
 	$(BUILD_DIR)/tests/spsc_ring_test \
 	$(BUILD_DIR)/tests/vm_finding_test
 
-.PHONY: all app app-build artifact-producer artifact-receiver bootstrap-brave bootstrap-test brave-doctor brave-probe-check browser-sync browser-sync-test broker check clean demo e2e format format-check lint live producer python-check repository-check sanitize shellcheck socket-e2e test ui ui-test workflow-check workspace-check
+.PHONY: all app app-build artifact-producer artifact-receiver artifact-socket-e2e bootstrap-brave bootstrap-test brave-doctor brave-probe-check browser-sync browser-sync-test broker check clean demo e2e format format-check lint live producer python-check repository-check sanitize shellcheck socket-e2e test ui ui-test workflow-check workspace-check
 
 all: demo producer broker artifact-producer artifact-receiver
 
@@ -107,9 +109,14 @@ e2e: producer broker artifact-producer artifact-receiver
 	test "$$(grep -c 'vm-sample.js' $(BUILD_DIR)/sessions/artifacts/manifest.jsonl)" = "1"
 	python3 tools/validate-evidence-store.py $(BUILD_DIR)/sessions/demo.jsonl
 	./tests/event_broker_socket_test.sh $(BROKER_BINARY) $(PRODUCER_BINARY) $(DEMO_NETWORK_PAYLOAD_HEX)
+	./tests/artifact_receiver_socket_test.sh $(ARTIFACT_RECEIVER_BINARY) $(ARTIFACT_PRODUCER_BINARY)
+	./tests/live_session_test.sh ./scripts/run-live-session.sh $(PRODUCER_BINARY) $(ARTIFACT_PRODUCER_BINARY)
 
 socket-e2e: producer broker
 	./tests/event_broker_socket_test.sh $(BROKER_BINARY) $(PRODUCER_BINARY) $(DEMO_NETWORK_PAYLOAD_HEX)
+
+artifact-socket-e2e: artifact-producer artifact-receiver
+	./tests/artifact_receiver_socket_test.sh $(ARTIFACT_RECEIVER_BINARY) $(ARTIFACT_PRODUCER_BINARY)
 
 ui: e2e
 	python3 apps/research-ui/server.py --store $(BUILD_DIR)/sessions/demo.jsonl
@@ -122,7 +129,7 @@ app: app-build
 		--store "$(CURDIR)/$(BUILD_DIR)/sessions/demo.jsonl" \
 		--artifacts "$(CURDIR)/$(BUILD_DIR)/sessions/artifacts"
 
-live: app-build broker
+live: app-build broker artifact-receiver
 	./scripts/run-live-session.sh
 
 $(BUILD_DIR)/src/%.o: src/%.cpp $(NATIVE_HEADERS)
@@ -149,9 +156,9 @@ $(BROKER_BINARY): services/event-broker/main.cpp $(LIB_OBJECTS) $(NATIVE_HEADERS
 	@mkdir -p $(@D)
 	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cpp %.o,$^) $(LDFLAGS) -o $@
 
-$(BUILD_DIR)/tests/%: tests/%.cpp $(LIB_OBJECTS) $(NATIVE_HEADERS) $(TRACKED_BROWSER_PROTOCOL_HEADERS)
+$(BUILD_DIR)/tests/%: tests/%.cpp $(LIB_OBJECTS) $(NATIVE_HEADERS) $(TRACKED_BROWSER_PROTOCOL_HEADERS) $(NATIVE_PROBE_QUEUE_SOURCE)
 	@mkdir -p $(@D)
-	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cpp %.o,$^) $(LDFLAGS) -o $@
+	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cc %.cpp %.o,$^) $(LDFLAGS) -o $@
 
 test: $(TEST_BINARIES)
 	@set -e; for test_binary in $(TEST_BINARIES); do \

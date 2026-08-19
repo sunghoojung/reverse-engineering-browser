@@ -10,19 +10,20 @@ broker queue, or inline event payload.
 The implemented development path is:
 
 ```text
-browser-process artifact owner
-  -> bounded artifact frame stream
+browser-process response-body tee
+  -> bounded artifact queue
+  -> authenticated artifact socket
   -> reb-artifact-receiver
+  -> durable acknowledgment
   -> immutable content-addressed blob
   -> versioned manifest record
   -> research UI artifact API
   -> Sources workspace
 ```
 
-`reb-artifact-producer` stands in for the browser-process owner in the current
-end-to-end fixture. The tracked Brave header fixes the browser-side ABI. A
-future browser bridge can replace the development pipe with authenticated local
-IPC without changing the frame, store, or UI contracts.
+The tracked Brave integration implements this path for JavaScript and
+WebAssembly responses. `reb-artifact-producer` exercises the same socket and
+acknowledgment contract in deterministic end-to-end fixtures.
 
 ## Ownership boundaries
 
@@ -85,11 +86,18 @@ first frame. Unsupported versions, flags, enum values, nonzero reserved bytes,
 invalid printable UTF-8 metadata, truncated ranges, and digest mismatches fail
 closed.
 
+The receiver replies with a fixed 32-byte version-1 acknowledgment containing
+the artifact identifier and receive status. Accepted means the immutable blob
+and manifest entry were committed. Brave emits success only after matching that
+acknowledgment to the queued artifact.
+
 ## Limits and backpressure
 
 Defaults are:
 
 - 16 MiB per artifact;
+- 32 MiB of active browser capture memory;
+- 16 queued artifacts and 32 MiB of queued browser content;
 - 256 MiB of immutable blobs per session store;
 - 8 KiB source URL;
 - 255-byte MIME type;
@@ -107,10 +115,10 @@ visible status counter. It does not truncate original evidence. The
 browser-process bridge must treat rejection as artifact-unavailable evidence
 and emit a small gap or failure event through the normal event path.
 
-The current command-line receiver stops after a rejected frame because a pipe
-cannot safely resynchronize after an untrusted declared length. A framed socket
-implementation should close only that authenticated connection and preserve
-the session receiver.
+The standard-input receiver stops after a rejected frame because a pipe cannot
+safely resynchronize after an untrusted declared length. Socket mode closes
+the authenticated connection and ends the receiver process, making the failed
+artifact channel visible to the live-session supervisor.
 
 ## Storage layout
 
@@ -129,7 +137,10 @@ responses and resolves it beneath the configured store before reading.
 
 Identical bytes may share one content-addressed blob. Artifact identifiers are
 still unique and immutable. The session limit is checked conservatively before
-the digest is known.
+the digest is known. Artifact count and manifest bytes are independently
+bounded, and loaded identifiers are kept in a bounded in-memory index for
+constant-time duplicate checks. Live stores use mode-0700 directories and
+mode-0600 evidence files.
 
 ## Sensitive response bodies
 
@@ -162,10 +173,14 @@ runtime debugging remain disabled because stored evidence is immutable.
 - Partial content: remove the temporary file and publish nothing.
 - SHA-256 mismatch: remove the temporary file and publish nothing.
 - Duplicate artifact ID: reject without changing the original manifest entry.
+- Authenticated session mismatch: reject the frame and close the connection.
+- Artifact count or manifest limit: reject before publishing a manifest entry.
 - Blob commit failure: report I/O failure and publish nothing.
 - Manifest failure after blob commit: leave an unreferenced immutable blob. A
   later maintenance pass may remove unreferenced blobs, but capture never
   guesses or rewrites provenance.
+- Restart recovery: reject incomplete, malformed, duplicate, or mixed-session
+  manifest records before accepting new evidence.
 - Malformed manifest: the UI retains its last valid catalog and reports the
   artifact catalog as unavailable.
 
@@ -173,6 +188,9 @@ runtime debugging remain disabled because stored evidence is immutable.
 
 `tests/artifact_test.cpp` covers ABI parity, valid streaming, SHA-256, immutable
 manifest publication, duplicate identifiers, per-artifact and total limits,
-truncation, digest mismatch, and sensitive-capture policy. `make e2e` runs the
-event and artifact channels independently and then serves both stores to the
-UI.
+artifact-count and manifest limits, truncation, digest mismatch, authenticated
+session binding, and sensitive-capture policy. The socket E2E test covers
+authenticated acceptance, acknowledgment, permissions, hello and frame session
+mismatches, and oversized rejection. The live-session E2E test launches both
+receivers, produces correlated event and artifact evidence, verifies private
+store permissions, and covers capture with the Artifact category disabled.

@@ -12,6 +12,7 @@
 #include "base/process/process_handle.h"
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
+#include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
 #include "net/http/http_response_headers.h"
 #include "net/url_request/redirect_info.h"
 #include "services/network/public/cpp/resource_request.h"
@@ -122,7 +123,7 @@ void NativeNetworkCaptureSink::RecordRequestStarted(
   }
 
   NativeProbeEvent event = MakeNetworkEvent(
-      NativeProbeType::kRequestStarted, next_sequence_.fetch_add(1, std::memory_order_relaxed),
+      NativeProbeType::kRequestStarted, NativeProbeSession::Get().NextBrowserSequence(),
       monotonic_time_ns, session_id_.load(std::memory_order_relaxed), request_id,
       initiator_request_id, initiator_process_id, frame_id, browser_context_id_high,
       browser_context_id_low);
@@ -157,7 +158,7 @@ void NativeNetworkCaptureSink::RecordRequestRedirected(
   }
 
   NativeProbeEvent event = MakeNetworkEvent(
-      NativeProbeType::kRequestRedirected, next_sequence_.fetch_add(1, std::memory_order_relaxed),
+      NativeProbeType::kRequestRedirected, NativeProbeSession::Get().NextBrowserSequence(),
       monotonic_time_ns, session_id_.load(std::memory_order_relaxed), request_id,
       initiator_request_id, initiator_process_id, frame_id, browser_context_id_high,
       browser_context_id_low);
@@ -167,7 +168,7 @@ void NativeNetworkCaptureSink::RecordRequestRedirected(
   emitter(event);
 }
 
-void NativeNetworkCaptureSink::RecordResponseStarted(
+std::uint64_t NativeNetworkCaptureSink::RecordResponseStarted(
     const std::uint64_t request_id,
     const std::int32_t initiator_request_id,
     const std::uint32_t initiator_process_id,
@@ -177,21 +178,21 @@ void NativeNetworkCaptureSink::RecordResponseStarted(
     const network::mojom::URLResponseHead& response_head) noexcept {
   const NativeProbeEmitter emitter = emitter_.load(std::memory_order_acquire);
   if (!emitter) [[likely]] {
-    return;
+    return 0;
   }
   const std::uint64_t monotonic_time_ns =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
   if ((category_mask_.load(std::memory_order_relaxed) &
        NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) == 0 ||
       monotonic_time_ns >= expires_at_monotonic_ns_.load(std::memory_order_relaxed)) {
-    return;
+    return 0;
   }
 
+  const std::uint64_t sequence_number = NativeProbeSession::Get().NextBrowserSequence();
   NativeProbeEvent event = MakeNetworkEvent(
-      NativeProbeType::kResponseStarted, next_sequence_.fetch_add(1, std::memory_order_relaxed),
-      monotonic_time_ns, session_id_.load(std::memory_order_relaxed), request_id,
-      initiator_request_id, initiator_process_id, frame_id, browser_context_id_high,
-      browser_context_id_low);
+      NativeProbeType::kResponseStarted, sequence_number, monotonic_time_ns,
+      session_id_.load(std::memory_order_relaxed), request_id, initiator_request_id,
+      initiator_process_id, frame_id, browser_context_id_high, browser_context_id_low);
   event.header.status_code = response_head.headers ? response_head.headers->response_code() : 0;
   event.header.encoded_data_length = response_head.encoded_data_length;
   if (response_head.was_fetched_via_cache) {
@@ -202,6 +203,7 @@ void NativeNetworkCaptureSink::RecordResponseStarted(
   }
   SetPayload(event, response_head.mime_type, "; protocol=", response_head.alpn_negotiated_protocol);
   emitter(event);
+  return sequence_number;
 }
 
 void NativeNetworkCaptureSink::RecordRequestCompleted(
@@ -226,7 +228,7 @@ void NativeNetworkCaptureSink::RecordRequestCompleted(
 
   NativeProbeEvent event = MakeNetworkEvent(
       status.error_code == 0 ? NativeProbeType::kRequestCompleted : NativeProbeType::kRequestFailed,
-      next_sequence_.fetch_add(1, std::memory_order_relaxed), monotonic_time_ns,
+      NativeProbeSession::Get().NextBrowserSequence(), monotonic_time_ns,
       session_id_.load(std::memory_order_relaxed), request_id, initiator_request_id,
       initiator_process_id, frame_id, browser_context_id_high, browser_context_id_low);
   event.header.error_code = status.error_code;

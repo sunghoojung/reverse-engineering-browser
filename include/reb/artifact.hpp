@@ -8,15 +8,20 @@
 #include <istream>
 #include <string>
 #include <type_traits>
+#include <unordered_set>
 
 namespace reb {
 
 inline constexpr std::uint32_t kArtifactMagic = 0x41424552U;
 inline constexpr std::uint16_t kArtifactProtocolVersion = 1;
 inline constexpr std::size_t kArtifactHeaderSize = 128;
+inline constexpr std::uint32_t kArtifactAckMagic = 0x4b414252U;
+inline constexpr std::size_t kArtifactAckSize = 32;
 inline constexpr std::uint32_t kMaxArtifactUrlBytes = 8'192;
 inline constexpr std::uint32_t kMaxArtifactMimeTypeBytes = 255;
 inline constexpr std::uint16_t kArtifactFlagSensitive = 1U << 0U;
+inline constexpr std::uint64_t kDefaultMaxStoredArtifacts = 4'096;
+inline constexpr std::uint64_t kDefaultMaxManifestBytes = 64ULL * 1024ULL * 1024ULL;
 
 enum class ArtifactKind : std::uint16_t {
   kUnknown = 0,
@@ -53,7 +58,7 @@ static_assert(offsetof(ArtifactHeader, session_id) == 16);
 static_assert(offsetof(ArtifactHeader, content_size) == 64);
 static_assert(offsetof(ArtifactHeader, expected_sha256) == 80);
 
-enum class ArtifactReceiveStatus {
+enum class ArtifactReceiveStatus : std::uint32_t {
   kAccepted,
   kEndOfStream,
   kInvalid,
@@ -62,6 +67,22 @@ enum class ArtifactReceiveStatus {
   kConflict,
   kIoError,
 };
+
+struct ArtifactAck final {
+  std::uint32_t magic = kArtifactAckMagic;
+  std::uint16_t protocol_version = kArtifactProtocolVersion;
+  std::uint16_t ack_size = static_cast<std::uint16_t>(kArtifactAckSize);
+  ArtifactReceiveStatus status = ArtifactReceiveStatus::kInvalid;
+  std::uint32_t reserved0 = 0;
+  std::uint64_t artifact_id = 0;
+  std::array<std::byte, 8> reserved1{};
+};
+
+static_assert(sizeof(ArtifactAck) == kArtifactAckSize);
+static_assert(std::is_standard_layout_v<ArtifactAck>);
+static_assert(std::is_trivially_copyable_v<ArtifactAck>);
+static_assert(offsetof(ArtifactAck, status) == 8);
+static_assert(offsetof(ArtifactAck, artifact_id) == 16);
 
 struct ArtifactReceiverStats final {
   std::uint64_t accepted = 0;
@@ -73,12 +94,18 @@ struct ArtifactReceiverStats final {
   std::uint64_t io_errors = 0;
 };
 
+struct ArtifactReceiverLimits final {
+  std::uint64_t max_artifact_bytes = 0;
+  std::uint64_t max_store_bytes = 0;
+  std::uint64_t max_artifacts = kDefaultMaxStoredArtifacts;
+  std::uint64_t max_manifest_bytes = kDefaultMaxManifestBytes;
+  std::uint64_t expected_session_id = 0;
+  bool allow_sensitive = false;
+};
+
 class ArtifactReceiver final {
  public:
-  ArtifactReceiver(std::filesystem::path store_directory,
-                   std::uint64_t max_artifact_bytes,
-                   std::uint64_t max_store_bytes,
-                   bool allow_sensitive);
+  ArtifactReceiver(std::filesystem::path store_directory, ArtifactReceiverLimits limits);
 
   ArtifactReceiver(const ArtifactReceiver&) = delete;
   ArtifactReceiver& operator=(const ArtifactReceiver&) = delete;
@@ -86,6 +113,7 @@ class ArtifactReceiver final {
   [[nodiscard]] ArtifactReceiveStatus ReceiveOne(std::istream& stream);
   [[nodiscard]] ArtifactReceiverStats Stats() const noexcept;
   [[nodiscard]] std::uint64_t StoredBytes() const noexcept;
+  [[nodiscard]] std::uint64_t LastArtifactId() const noexcept;
   [[nodiscard]] const std::string& LastError() const noexcept;
 
  private:
@@ -94,10 +122,11 @@ class ArtifactReceiver final {
   std::filesystem::path store_directory_;
   std::filesystem::path blob_directory_;
   std::filesystem::path manifest_path_;
-  std::uint64_t max_artifact_bytes_ = 0;
-  std::uint64_t max_store_bytes_ = 0;
-  bool allow_sensitive_ = false;
+  ArtifactReceiverLimits limits_;
   std::uint64_t stored_bytes_ = 0;
+  std::uint64_t manifest_bytes_ = 0;
+  std::uint64_t last_artifact_id_ = 0;
+  std::unordered_set<std::uint64_t> artifact_ids_;
   ArtifactReceiverStats stats_;
   std::string last_error_;
 };

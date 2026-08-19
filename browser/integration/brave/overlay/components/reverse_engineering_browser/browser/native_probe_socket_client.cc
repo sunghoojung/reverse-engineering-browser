@@ -8,31 +8,28 @@
 #include "build/build_config.h"
 
 #if BUILDFLAG(IS_POSIX)
-#include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/un.h>
 #include <unistd.h>
 
-#include <algorithm>
 #include <array>
 #include <cerrno>
-#include <cstring>
 #include <limits>
 #include <string>
-#include <string_view>
 #include <utility>
 
 #include "base/command_line.h"
+#include "base/containers/span.h"
 #include "base/files/file_path.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
+#include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
+#include "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h"
+#include "brave/components/reverse_engineering_browser/browser/native_local_ipc_client.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
-#include "brave/components/reverse_engineering_browser/common/native_probe_ipc.h"
 
 namespace reb {
 
@@ -43,86 +40,19 @@ constexpr char kBrokerTokenFileSwitch[] = "reb-broker-token-file";
 constexpr char kSessionIdSwitch[] = "reb-session-id";
 constexpr char kCategoryMaskSwitch[] = "reb-category-mask";
 constexpr char kDurationSecondsSwitch[] = "reb-duration-seconds";
+constexpr char kArtifactSocketSwitch[] = "reb-artifact-socket";
 constexpr std::size_t kSocketBatchCapacity = 32;
 
-int HexValue(const char value) noexcept {
-  if (value >= '0' && value <= '9') {
-    return value - '0';
-  }
-  if (value >= 'a' && value <= 'f') {
-    return value - 'a' + 10;
-  }
-  if (value >= 'A' && value <= 'F') {
-    return value - 'A' + 10;
-  }
-  return -1;
-}
-
-bool LoadToken(const base::FilePath& path, NativeProbeLocalIpcToken& token) {
-  const int descriptor = open(path.value().c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-  if (descriptor < 0) {
-    return false;
-  }
-  struct stat status {};
-  if (fstat(descriptor, &status) != 0 || !S_ISREG(status.st_mode) || status.st_uid != geteuid() ||
-      (status.st_mode & 0777) != 0600) {
-    close(descriptor);
-    return false;
-  }
-
-  std::array<char, kNativeProbeLocalIpcTokenSize * 2 + 2> buffer{};
-  std::size_t size = 0;
-  while (size < buffer.size()) {
-    const ssize_t count = read(descriptor, buffer.data() + size, buffer.size() - size);
-    if (count > 0) {
-      size += static_cast<std::size_t>(count);
-      continue;
-    }
-    if (count < 0 && errno == EINTR) {
-      continue;
-    }
-    if (count < 0) {
-      close(descriptor);
-      return false;
-    }
-    break;
-  }
-  if (close(descriptor) != 0) {
-    return false;
-  }
-  std::string encoded(buffer.data(), size);
-  if (!encoded.empty() && encoded.back() == '\n') {
-    encoded.pop_back();
-  }
-  if (encoded.size() != token.size() * 2) {
-    return false;
-  }
-  for (std::size_t index = 0; index < token.size(); ++index) {
-    const int high = HexValue(encoded[index * 2]);
-    const int low = HexValue(encoded[index * 2 + 1]);
-    if (high < 0 || low < 0) {
-      return false;
-    }
-    token[index] = static_cast<std::byte>((high << 4) | low);
-  }
-  return true;
-}
-
-bool SendAll(const int descriptor,
-             const void* const data,
-             const std::size_t size,
-             const bool non_blocking) {
-  const auto* bytes = static_cast<const std::byte*>(data);
-  std::size_t offset = 0;
-  while (offset < size) {
+bool SendAll(const int descriptor, base::span<const std::uint8_t> bytes, const bool non_blocking) {
+  while (!bytes.empty()) {
     ssize_t count = -1;
 #if defined(MSG_NOSIGNAL)
-    count = send(descriptor, bytes + offset, size - offset, MSG_NOSIGNAL);
+    count = send(descriptor, bytes.data(), bytes.size(), MSG_NOSIGNAL);
 #else
-    count = send(descriptor, bytes + offset, size - offset, 0);
+    count = send(descriptor, bytes.data(), bytes.size(), 0);
 #endif
     if (count > 0) {
-      offset += static_cast<std::size_t>(count);
+      bytes = bytes.subspan(static_cast<std::size_t>(count));
       continue;
     }
     if (count < 0 && errno == EINTR) {
@@ -144,41 +74,6 @@ bool SendAll(const int descriptor,
     return false;
   }
   return true;
-}
-
-int Connect(const std::string& socket_path, const NativeProbeLocalIpcHello& hello) {
-  sockaddr_un address{};
-  if (socket_path.empty() || socket_path.size() >= sizeof(address.sun_path)) {
-    return -1;
-  }
-
-  const int descriptor = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (descriptor < 0) {
-    return -1;
-  }
-#if defined(SO_NOSIGPIPE)
-  const int enabled = 1;
-  if (setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &enabled,
-                 static_cast<socklen_t>(sizeof(enabled))) != 0) {
-    close(descriptor);
-    return -1;
-  }
-#endif
-  address.sun_family = AF_UNIX;
-  std::copy(socket_path.begin(), socket_path.end(), address.sun_path);
-  if (connect(descriptor, reinterpret_cast<const sockaddr*>(&address),
-              static_cast<socklen_t>(sizeof(address))) != 0 ||
-      !SendAll(descriptor, &hello, sizeof(hello), false)) {
-    close(descriptor);
-    return -1;
-  }
-
-  const int flags = fcntl(descriptor, F_GETFL, 0);
-  if (flags < 0 || fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) != 0) {
-    close(descriptor);
-    return -1;
-  }
-  return descriptor;
 }
 
 }  // namespace
@@ -243,22 +138,28 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
   }
   const std::uint64_t expires_at_monotonic_ns = now + duration_ns;
 
-  NativeProbeLocalIpcHello hello;
-  hello.session_id = session_id;
   const base::FilePath token_path = command_line.GetSwitchValuePath(kBrokerTokenFileSwitch);
-  if (!LoadToken(token_path, hello.token)) {
-    LOG(ERROR) << "Native probe broker token is unavailable or insecure";
-    return false;
-  }
-
-  socket_descriptor_ = Connect(command_line.GetSwitchValueASCII(kBrokerSocketSwitch), hello);
+  socket_descriptor_ = ConnectNativeLocalIpc(command_line.GetSwitchValueASCII(kBrokerSocketSwitch),
+                                             token_path, session_id, true);
   if (socket_descriptor_ < 0) {
     LOG(ERROR) << "Unable to connect to native probe broker";
     return false;
   }
 
+  const bool artifact_capture_enabled =
+      (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kArtifact)) != 0;
+  const bool has_artifact_socket = command_line.HasSwitch(kArtifactSocketSwitch);
+  if (artifact_capture_enabled &&
+      (!has_artifact_socket || !NativeArtifactSocketClient::Get().StartFromCommandLine(
+                                   session_id, &NativeArtifactCaptureSink::TransferCompleted))) {
+    close(socket_descriptor_);
+    socket_descriptor_ = -1;
+    return false;
+  }
+
   browser_task_runner_ = base::SequencedTaskRunner::GetCurrentDefault();
   if (!writer_thread_.Start()) {
+    NativeArtifactSocketClient::Get().Stop();
     close(socket_descriptor_);
     socket_descriptor_ = -1;
     return false;
@@ -272,6 +173,7 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
     wakeup_.Signal();
     close(socket_descriptor_);
     socket_descriptor_ = -1;
+    NativeArtifactSocketClient::Get().Stop();
     return false;
   }
   return true;
@@ -307,7 +209,7 @@ void NativeProbeSocketClient::Run() {
         break;
       }
       drained_event = true;
-      if (!SendAll(socket_descriptor_, batch.data(), batch_size * sizeof(NativeProbeEvent), true)) {
+      if (!SendAll(socket_descriptor_, base::as_bytes(base::span(batch).first(batch_size)), true)) {
         browser_task_runner_->PostTask(
             FROM_HERE,
             base::BindOnce(&NativeProbeSocketClient::HandleDisconnect, base::Unretained(this)));
@@ -318,7 +220,7 @@ void NativeProbeSocketClient::Run() {
     const std::uint64_t dropped = queue_.DroppedCount();
     if (drained_event && dropped > reported_dropped) {
       const NativeProbeEvent gap = MakeNativeProbeGapEvent(last_event, dropped - reported_dropped);
-      if (!SendAll(socket_descriptor_, &gap, sizeof(gap), true)) {
+      if (!SendAll(socket_descriptor_, base::byte_span_from_ref(gap), true)) {
         browser_task_runner_->PostTask(
             FROM_HERE,
             base::BindOnce(&NativeProbeSocketClient::HandleDisconnect, base::Unretained(this)));
@@ -339,6 +241,7 @@ void NativeProbeSocketClient::HandleDisconnect() {
     return;
   }
   NativeProbeSession::Get().StopSession();
+  NativeArtifactSocketClient::Get().Stop();
   if (socket_descriptor_ >= 0) {
     close(socket_descriptor_);
     socket_descriptor_ = -1;

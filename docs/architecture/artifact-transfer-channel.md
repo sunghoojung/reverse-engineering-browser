@@ -137,7 +137,10 @@ responses and resolves it beneath the configured store before reading.
 
 Identical bytes may share one content-addressed blob. Artifact identifiers are
 still unique and immutable. The session limit is checked conservatively before
-the digest is known.
+the digest is known. Artifact count and manifest bytes are independently
+bounded, and loaded identifiers are kept in a bounded in-memory index for
+constant-time duplicate checks. Live stores use mode-0700 directories and
+mode-0600 evidence files.
 
 ## Sensitive response bodies
 
@@ -170,10 +173,14 @@ runtime debugging remain disabled because stored evidence is immutable.
 - Partial content: remove the temporary file and publish nothing.
 - SHA-256 mismatch: remove the temporary file and publish nothing.
 - Duplicate artifact ID: reject without changing the original manifest entry.
+- Authenticated session mismatch: reject the frame and close the connection.
+- Artifact count or manifest limit: reject before publishing a manifest entry.
 - Blob commit failure: report I/O failure and publish nothing.
 - Manifest failure after blob commit: leave an unreferenced immutable blob. A
   later maintenance pass may remove unreferenced blobs, but capture never
   guesses or rewrites provenance.
+- Restart recovery: reject incomplete, malformed, duplicate, or mixed-session
+  manifest records before accepting new evidence.
 - Malformed manifest: the UI retains its last valid catalog and reports the
   artifact catalog as unavailable.
 
@@ -181,8 +188,9 @@ runtime debugging remain disabled because stored evidence is immutable.
 
 `tests/artifact_test.cpp` covers ABI parity, valid streaming, SHA-256, immutable
 manifest publication, duplicate identifiers, per-artifact and total limits,
-truncation, digest mismatch, and sensitive-capture policy. The socket E2E test
-covers authenticated acceptance, acknowledgment, permissions, session
-mismatch, and oversized rejection. The live-session E2E test launches both
-receivers, produces correlated event and artifact evidence, and verifies that
-Origin Trace receives both stores.
+artifact-count and manifest limits, truncation, digest mismatch, authenticated
+session binding, and sensitive-capture policy. The socket E2E test covers
+authenticated acceptance, acknowledgment, permissions, hello and frame session
+mismatches, and oversized rejection. The live-session E2E test launches both
+receivers, produces correlated event and artifact evidence, verifies private
+store permissions, and covers capture with the Artifact category disabled.

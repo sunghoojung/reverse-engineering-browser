@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+umask 077
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly script_dir
@@ -24,7 +25,8 @@ readonly category_mask="${REB_CAPTURE_CATEGORY_MASK:-1281}"
 readonly duration_seconds="${REB_CAPTURE_DURATION_SECONDS:-3600}"
 readonly open_command="${REB_OPEN_COMMAND:-open}"
 
-mkdir -p "${session_directory}" "${profile_path}"
+mkdir -p "${session_directory}" "${artifact_store_path}" "${profile_path}"
+chmod 700 "${session_directory}" "${artifact_store_path}" "${profile_path}"
 
 readonly socket_path="/tmp/origin-trace-${UID}-${session_id}.sock"
 readonly artifact_socket_path="/tmp/origin-trace-${UID}-${session_id}-artifacts.sock"
@@ -106,23 +108,25 @@ if [[ ! -S "${socket_path}" ]]; then
   exit 1
 fi
 
-"${artifact_receiver_binary}" --store "${artifact_store_path}" \
-  --socket "${artifact_socket_path}" --token-file "${token_path}" \
-  --session-id "${session_id}" >"${artifact_receiver_log}" 2>&1 &
-artifact_receiver_pid=$!
-for _ in {1..100}; do
-  if [[ -S "${artifact_socket_path}" ]]; then
-    break
-  fi
-  if ! kill -0 "${artifact_receiver_pid}" 2>/dev/null; then
-    echo "Artifact receiver stopped during startup. See: ${artifact_receiver_log}" >&2
+if ((category_mask & 1024)); then
+  "${artifact_receiver_binary}" --store "${artifact_store_path}" \
+    --socket "${artifact_socket_path}" --token-file "${token_path}" \
+    --session-id "${session_id}" >"${artifact_receiver_log}" 2>&1 &
+  artifact_receiver_pid=$!
+  for _ in {1..100}; do
+    if [[ -S "${artifact_socket_path}" ]]; then
+      break
+    fi
+    if ! kill -0 "${artifact_receiver_pid}" 2>/dev/null; then
+      echo "Artifact receiver stopped during startup. See: ${artifact_receiver_log}" >&2
+      exit 1
+    fi
+    sleep 0.05
+  done
+  if [[ ! -S "${artifact_socket_path}" ]]; then
+    echo "Artifact receiver socket did not become ready. See: ${artifact_receiver_log}" >&2
     exit 1
   fi
-  sleep 0.05
-done
-if [[ ! -S "${artifact_socket_path}" ]]; then
-  echo "Artifact receiver socket did not become ready. See: ${artifact_receiver_log}" >&2
-  exit 1
 fi
 
 "${open_command}" -n "${origin_trace_app}" --args --store "${store_path}" \
@@ -145,5 +149,7 @@ echo "Close Brave to stop this capture session."
 
 wait "${broker_pid}"
 broker_pid=""
-wait "${artifact_receiver_pid}"
-artifact_receiver_pid=""
+if [[ -n "${artifact_receiver_pid}" ]]; then
+  wait "${artifact_receiver_pid}"
+  artifact_receiver_pid=""
+fi

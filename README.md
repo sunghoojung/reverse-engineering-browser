@@ -119,7 +119,9 @@ The launcher creates session-scoped event and artifact sockets with one
 user-only token, opens Origin Trace, and starts the custom Brave executable
 with the matching session flags. Artifact success events are emitted only
 after the receiver has committed the manifest record; capture or transfer
-failures remain visible as normal evidence events.
+failures remain visible as normal evidence events. Session directories and
+evidence files are user-only. When the Artifact category is disabled, the
+launcher omits the artifact receiver and exits normally with Brave.
 Set `REB_BRAVE_BINARY` when the executable is outside the default component
 output directory. Live sessions enable Canvas, Network, and Artifact by default
 and expire after one hour. Override those startup limits with `REB_CAPTURE_CATEGORY_MASK`

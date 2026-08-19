@@ -35,6 +35,8 @@ struct Options final {
   std::uint64_t session_id = 0;
   std::uint64_t max_artifact_bytes = kDefaultMaxArtifactBytes;
   std::uint64_t max_store_bytes = kDefaultMaxStoreBytes;
+  std::uint64_t max_artifacts = reb::kDefaultMaxStoredArtifacts;
+  std::uint64_t max_manifest_bytes = reb::kDefaultMaxManifestBytes;
   bool allow_sensitive = false;
 };
 
@@ -100,10 +102,12 @@ class DescriptorStreamBuffer final : public std::streambuf {
 void PrintUsage(const char* program) {
   std::cerr << "Usage: " << program
             << " --store PATH [--max-artifact-bytes COUNT] [--max-store-bytes COUNT]"
+               " [--max-artifacts COUNT] [--max-manifest-bytes COUNT]"
                " [--allow-sensitive]\n"
             << "       " << program
             << " --store PATH --socket PATH --token-file PATH --session-id ID"
                " [--max-artifact-bytes COUNT] [--max-store-bytes COUNT]"
+               " [--max-artifacts COUNT] [--max-manifest-bytes COUNT]"
                " [--allow-sensitive]\n";
 }
 
@@ -133,6 +137,14 @@ bool ParseOptions(const int argc, char* argv[], Options& options) {
       }
     } else if (argument == "--max-store-bytes" && index + 1 < argc) {
       if (!ParseSize(argv[++index], options.max_store_bytes)) {
+        return false;
+      }
+    } else if (argument == "--max-artifacts" && index + 1 < argc) {
+      if (!ParseSize(argv[++index], options.max_artifacts)) {
+        return false;
+      }
+    } else if (argument == "--max-manifest-bytes" && index + 1 < argc) {
+      if (!ParseSize(argv[++index], options.max_manifest_bytes)) {
         return false;
       }
     } else if (argument == "--allow-sensitive") {
@@ -265,6 +277,7 @@ void PrintStats(const reb::ArtifactReceiver& receiver) {
 }  // namespace
 
 int main(const int argc, char* argv[]) {
+  umask(S_IRWXG | S_IRWXO);
   Options options;
   if (!ParseOptions(argc, argv, options)) {
     PrintUsage(argv[0]);
@@ -272,8 +285,14 @@ int main(const int argc, char* argv[]) {
   }
 
   try {
-    reb::ArtifactReceiver receiver(options.store_path, options.max_artifact_bytes,
-                                   options.max_store_bytes, options.allow_sensitive);
+    reb::ArtifactReceiverLimits limits;
+    limits.max_artifact_bytes = options.max_artifact_bytes;
+    limits.max_store_bytes = options.max_store_bytes;
+    limits.max_artifacts = options.max_artifacts;
+    limits.max_manifest_bytes = options.max_manifest_bytes;
+    limits.expected_session_id = options.session_id;
+    limits.allow_sensitive = options.allow_sensitive;
+    reb::ArtifactReceiver receiver(options.store_path, limits);
     bool received = false;
     if (options.socket_path.empty()) {
       received = ReceiveStream(std::cin, receiver, -1);

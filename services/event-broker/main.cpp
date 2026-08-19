@@ -352,6 +352,7 @@ void PrintStats(const reb::BrokerStats& stats) {
 }  // namespace
 
 int main(const int argc, char* argv[]) {
+  umask(S_IRWXG | S_IRWXO);
   Options options;
   if (!ParseOptions(argc, argv, options)) {
     PrintUsage(argv[0]);

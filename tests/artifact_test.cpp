@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -142,6 +143,16 @@ std::array<std::uint8_t, 32> DigestFromHex(const std::string_view hex) {
   return digest;
 }
 
+reb::ArtifactReceiverLimits Limits(const std::uint64_t max_artifact_bytes,
+                                   const std::uint64_t max_store_bytes,
+                                   const bool allow_sensitive = false) {
+  reb::ArtifactReceiverLimits limits;
+  limits.max_artifact_bytes = max_artifact_bytes;
+  limits.max_store_bytes = max_store_bytes;
+  limits.allow_sensitive = allow_sensitive;
+  return limits;
+}
+
 }  // namespace
 
 int main() {
@@ -155,7 +166,7 @@ int main() {
   CHECK(!reb::IsValidArtifactHeader(valid));
 
   TemporaryDirectory accepted_directory("accepted");
-  reb::ArtifactReceiver receiver(accepted_directory.Path(), 1024, 4096, false);
+  reb::ArtifactReceiver receiver(accepted_directory.Path(), Limits(1024, 4096));
   std::istringstream accepted_stream(Frame(Header(300, 3), "abc"));
   CHECK(receiver.ReceiveOne(accepted_stream) == reb::ArtifactReceiveStatus::kAccepted);
   CHECK(receiver.ReceiveOne(accepted_stream) == reb::ArtifactReceiveStatus::kEndOfStream);
@@ -176,9 +187,39 @@ int main() {
   std::istringstream conflict_stream(Frame(Header(300, 3), "abc"));
   CHECK(receiver.ReceiveOne(conflict_stream) == reb::ArtifactReceiveStatus::kConflict);
   CHECK(receiver.Stats().conflicts == 1);
+  reb::ArtifactReceiver reopened_receiver(accepted_directory.Path(), Limits(1024, 4096));
+  std::istringstream reopened_conflict_stream(Frame(Header(300, 3), "abc"));
+  CHECK(reopened_receiver.ReceiveOne(reopened_conflict_stream) ==
+        reb::ArtifactReceiveStatus::kConflict);
+  reb::ArtifactReceiverLimits mismatched_reopen_limits = Limits(1024, 4096);
+  mismatched_reopen_limits.expected_session_id = 8;
+  bool mismatched_reopen_rejected = false;
+  try {
+    reb::ArtifactReceiver mismatched_reopen(accepted_directory.Path(), mismatched_reopen_limits);
+    (void)mismatched_reopen;
+  } catch (const std::runtime_error&) {
+    mismatched_reopen_rejected = true;
+  }
+  CHECK(mismatched_reopen_rejected);
+
+  TemporaryDirectory truncated_manifest_directory("truncated-manifest");
+  std::filesystem::create_directories(truncated_manifest_directory.Path() / "blobs");
+  {
+    std::ofstream truncated_manifest(truncated_manifest_directory.Path() / "manifest.jsonl");
+    truncated_manifest << "{\"protocol_version\":1,\"artifact_id\":\"123\",";
+  }
+  bool truncated_manifest_rejected = false;
+  try {
+    reb::ArtifactReceiver truncated_manifest_receiver(truncated_manifest_directory.Path(),
+                                                      Limits(1024, 4096));
+    (void)truncated_manifest_receiver;
+  } catch (const std::runtime_error&) {
+    truncated_manifest_rejected = true;
+  }
+  CHECK(truncated_manifest_rejected);
 
   TemporaryDirectory limit_directory("limit");
-  reb::ArtifactReceiver limited(limit_directory.Path(), 3, 4, false);
+  reb::ArtifactReceiver limited(limit_directory.Path(), Limits(3, 4));
   std::istringstream oversized_stream(Frame(Header(400, 4), "four"));
   CHECK(limited.ReceiveOne(oversized_stream) == reb::ArtifactReceiveStatus::kTooLarge);
   std::istringstream small_stream(Frame(Header(400, 3), "one"));
@@ -188,7 +229,7 @@ int main() {
   CHECK(limited.Stats().too_large == 2);
 
   TemporaryDirectory sensitive_directory("sensitive");
-  reb::ArtifactReceiver default_receiver(sensitive_directory.Path(), 1024, 4096, false);
+  reb::ArtifactReceiver default_receiver(sensitive_directory.Path(), Limits(1024, 4096));
   const std::string response_frame = Frame(Header(500, 2, reb::ArtifactKind::kResponseBody), "{}",
                                            "https://checkout.acme.test/cart", "application/json");
   std::istringstream rejected_response(response_frame);
@@ -196,12 +237,12 @@ int main() {
         reb::ArtifactReceiveStatus::kSensitiveCaptureDisabled);
 
   TemporaryDirectory approved_directory("approved");
-  reb::ArtifactReceiver approved_receiver(approved_directory.Path(), 1024, 4096, true);
+  reb::ArtifactReceiver approved_receiver(approved_directory.Path(), Limits(1024, 4096, true));
   std::istringstream approved_response(response_frame);
   CHECK(approved_receiver.ReceiveOne(approved_response) == reb::ArtifactReceiveStatus::kAccepted);
 
   TemporaryDirectory invalid_directory("invalid");
-  reb::ArtifactReceiver invalid_receiver(invalid_directory.Path(), 1024, 4096, false);
+  reb::ArtifactReceiver invalid_receiver(invalid_directory.Path(), Limits(1024, 4096));
   std::string truncated = Frame(Header(600, 4), "two");
   std::istringstream truncated_stream(truncated);
   CHECK(invalid_receiver.ReceiveOne(truncated_stream) == reb::ArtifactReceiveStatus::kInvalid);
@@ -212,6 +253,33 @@ int main() {
   std::istringstream bad_hash_stream(Frame(bad_hash_header, "abc"));
   CHECK(invalid_receiver.ReceiveOne(bad_hash_stream) == reb::ArtifactReceiveStatus::kInvalid);
   CHECK(invalid_receiver.LastError().find("SHA-256") != std::string::npos);
+
+  TemporaryDirectory session_directory("session");
+  reb::ArtifactReceiverLimits session_limits = Limits(1024, 4096);
+  session_limits.expected_session_id = 8;
+  reb::ArtifactReceiver session_receiver(session_directory.Path(), session_limits);
+  std::istringstream wrong_session_stream(Frame(Header(700, 0), ""));
+  CHECK(session_receiver.ReceiveOne(wrong_session_stream) == reb::ArtifactReceiveStatus::kInvalid);
+  CHECK(session_receiver.LastError().find("authenticated") != std::string::npos);
+
+  TemporaryDirectory count_directory("count");
+  reb::ArtifactReceiverLimits count_limits = Limits(1024, 4096);
+  count_limits.max_artifacts = 32;
+  reb::ArtifactReceiver count_receiver(count_directory.Path(), count_limits);
+  for (std::uint64_t artifact_id = 800; artifact_id < 832; ++artifact_id) {
+    std::istringstream empty_frame(Frame(Header(artifact_id, 0), ""));
+    CHECK(count_receiver.ReceiveOne(empty_frame) == reb::ArtifactReceiveStatus::kAccepted);
+  }
+  std::istringstream excess_empty(Frame(Header(832, 0), ""));
+  CHECK(count_receiver.ReceiveOne(excess_empty) == reb::ArtifactReceiveStatus::kTooLarge);
+
+  TemporaryDirectory manifest_limit_directory("manifest-limit");
+  reb::ArtifactReceiverLimits manifest_limits = Limits(1024, 4096);
+  manifest_limits.max_manifest_bytes = 64;
+  reb::ArtifactReceiver manifest_limited(manifest_limit_directory.Path(), manifest_limits);
+  std::istringstream metadata_frame(Frame(Header(900, 0), ""));
+  CHECK(manifest_limited.ReceiveOne(metadata_frame) == reb::ArtifactReceiveStatus::kTooLarge);
+  CHECK(std::filesystem::is_empty(manifest_limit_directory.Path() / "blobs"));
 
   std::cout << "artifact_test passed\n";
   return 0;

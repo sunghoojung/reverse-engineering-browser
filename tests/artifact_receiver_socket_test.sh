@@ -86,6 +86,29 @@ receiver_pid=""
 grep -Fq 'Artifact authentication rejected' "${test_root}/mismatch.err"
 test ! -e "${mismatch_socket}"
 
+readonly frame_mismatch_socket="${test_root}/frame-mismatch.sock"
+"${receiver}" --store "${test_root}/frame-mismatch" --socket "${frame_mismatch_socket}" \
+  --token-file "${token_path}" --session-id 45 \
+  >"${test_root}/frame-mismatch.out" 2>"${test_root}/frame-mismatch.err" &
+receiver_pid=$!
+wait_for_socket "${frame_mismatch_socket}"
+if "${producer}" --socket "${frame_mismatch_socket}" --token-file "${token_path}" \
+  --session-id 45 --frame-session-id 46 \
+  >"${test_root}/frame-mismatch-producer.out" \
+  2>"${test_root}/frame-mismatch-producer.err"; then
+  echo "Artifact producer unexpectedly passed mismatched frame session validation" >&2
+  exit 1
+fi
+if wait "${receiver_pid}"; then
+  echo "Artifact receiver unexpectedly accepted a mismatched frame session" >&2
+  exit 1
+fi
+receiver_pid=""
+grep -Fq 'authenticated connection' "${test_root}/frame-mismatch.err"
+grep -Fq 'invalid=1' "${test_root}/frame-mismatch.err"
+test ! -e "${frame_mismatch_socket}"
+test ! -e "${test_root}/frame-mismatch/manifest.jsonl"
+
 readonly limited_socket="${test_root}/limited.sock"
 "${receiver}" --store "${test_root}/limited" --socket "${limited_socket}" \
   --token-file "${token_path}" --session-id 44 --max-artifact-bytes 16 --max-store-bytes 64 \

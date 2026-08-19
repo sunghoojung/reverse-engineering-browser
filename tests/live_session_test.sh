@@ -13,11 +13,16 @@ readonly artifact_producer="$3"
 test_root="$(mktemp -d)"
 readonly test_root
 test_succeeded=false
+live_pid=""
 
 cleanup() {
   if [[ "${test_succeeded}" != true ]]; then
     echo "live_session_test failed" >&2
     find "${test_root}" -type f -maxdepth 4 -print -exec sed 's/^/  /' {} \; >&2 || true
+  fi
+  if [[ -n "${live_pid}" ]] && kill -0 "${live_pid}" 2>/dev/null; then
+    kill "${live_pid}" 2>/dev/null || true
+    wait "${live_pid}" 2>/dev/null || true
   fi
   rm -rf "${test_root}"
 }
@@ -38,20 +43,25 @@ printf '%s\n' \
   'artifact_socket=""' \
   'token_file=""' \
   'session_id=""' \
+  'category_mask=""' \
   'for argument in "$@"; do' \
   '  case "${argument}" in' \
   '    --reb-broker-socket=*) event_socket="${argument#*=}" ;;' \
   '    --reb-artifact-socket=*) artifact_socket="${argument#*=}" ;;' \
   '    --reb-broker-token-file=*) token_file="${argument#*=}" ;;' \
   '    --reb-session-id=*) session_id="${argument#*=}" ;;' \
+  '    --reb-category-mask=*) category_mask="${argument#*=}" ;;' \
   '  esac' \
   'done' \
   'test -n "${event_socket}"' \
   'test -n "${artifact_socket}"' \
   'test -n "${token_file}"' \
   'test -n "${session_id}"' \
+  'test -n "${category_mask}"' \
   '"${REB_EVENT_PRODUCER}" --socket "${event_socket}" --token-file "${token_file}" --session-id "${session_id}"' \
-  '"${REB_ARTIFACT_PRODUCER}" --socket "${artifact_socket}" --token-file "${token_file}" --session-id "${session_id}"' \
+  'if ((category_mask & 1024)); then' \
+  '  "${REB_ARTIFACT_PRODUCER}" --socket "${artifact_socket}" --token-file "${token_file}" --session-id "${session_id}"' \
+  'fi' \
   >"${fake_brave}"
 
 # shellcheck disable=SC2016
@@ -84,6 +94,55 @@ grep -Fxq -- "${session_directory}/artifacts" "${open_arguments}"
 grep -Fq 'accepted=3' "${session_directory}/artifact-receiver.log"
 test ! -e "/tmp/origin-trace-${UID}-$(basename "${session_directory}").sock"
 test ! -e "/tmp/origin-trace-${UID}-$(basename "${session_directory}")-artifacts.sock"
+
+mode_of() {
+  case "$(uname -s)" in
+    Darwin) stat -f '%Lp' "$1" ;;
+    Linux) stat -c '%a' "$1" ;;
+    *) echo "Unsupported operating system: $(uname -s)" >&2; return 1 ;;
+  esac
+}
+
+test "$(mode_of "${session_directory}")" = 700
+test "$(mode_of "${session_directory}/artifacts")" = 700
+test "$(mode_of "${session_directory}/events.jsonl")" = 600
+test "$(mode_of "${session_directory}/broker.log")" = 600
+test "$(mode_of "${session_directory}/artifact-receiver.log")" = 600
+test "$(mode_of "${session_directory}/broker.token")" = 600
+test "$(mode_of "${session_directory}/artifacts/manifest.jsonl")" = 600
+artifact_blob="$(find "${session_directory}/artifacts/blobs" -type f -name '*.bin' -print -quit)"
+test -n "${artifact_blob}"
+test "$(mode_of "${artifact_blob}")" = 600
+
+readonly disabled_sessions="${test_root}/disabled-sessions"
+REB_BRAVE_BINARY="${fake_brave}" \
+REB_ORIGIN_TRACE_APP="${fake_app}" \
+REB_LIVE_SESSION_ROOT="${disabled_sessions}" \
+REB_OPEN_COMMAND="${fake_open}" \
+REB_OPEN_ARGUMENTS="${open_arguments}" \
+REB_EVENT_PRODUCER="${event_producer}" \
+REB_ARTIFACT_PRODUCER="${artifact_producer}" \
+REB_CAPTURE_CATEGORY_MASK=257 \
+REB_CAPTURE_DURATION_SECONDS=60 \
+  "${live_script}" >"${test_root}/disabled-live.out" 2>"${test_root}/disabled-live.err" &
+live_pid=$!
+for _ in {1..200}; do
+  if ! kill -0 "${live_pid}" 2>/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+if kill -0 "${live_pid}" 2>/dev/null; then
+  echo "Live session did not stop when artifact capture was disabled" >&2
+  exit 1
+fi
+wait "${live_pid}"
+live_pid=""
+disabled_session_directory="$(find "${disabled_sessions}" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+test -n "${disabled_session_directory}"
+test "$(wc -l <"${disabled_session_directory}/events.jsonl" | tr -d ' ')" = 5
+test ! -e "${disabled_session_directory}/artifact-receiver.log"
+test ! -e "${disabled_session_directory}/artifacts/manifest.jsonl"
 
 test_succeeded=true
 echo "live_session_test passed"

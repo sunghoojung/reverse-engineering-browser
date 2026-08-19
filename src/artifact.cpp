@@ -39,6 +39,25 @@ bool SyncFile(const std::filesystem::path& path, std::string& error) {
   return true;
 }
 
+bool SyncDirectory(const std::filesystem::path& path, std::string& error) {
+  const int descriptor = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (descriptor < 0) {
+    error = "Unable to open directory for durable commit: " + std::string(std::strerror(errno));
+    return false;
+  }
+  if (fsync(descriptor) != 0) {
+    const int sync_error = errno;
+    close(descriptor);
+    error = "Unable to durably commit directory: " + std::string(std::strerror(sync_error));
+    return false;
+  }
+  if (close(descriptor) != 0) {
+    error = "Unable to close durably committed directory: " + std::string(std::strerror(errno));
+    return false;
+  }
+  return true;
+}
+
 constexpr std::array<std::uint32_t, 64> kSha256RoundConstants = {
     0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U, 0x3956c25bU, 0x59f111f1U, 0x923f82a4U,
     0xab1c5ed5U, 0xd807aa98U, 0x12835b01U, 0x243185beU, 0x550c7dc3U, 0x72be5d74U, 0x80deb1feU,
@@ -255,21 +274,125 @@ std::string JsonEscape(const std::string_view text) {
   return output.str();
 }
 
-bool ManifestContainsArtifact(const std::filesystem::path& manifest_path,
-                              const std::uint64_t artifact_id) {
-  std::ifstream manifest(manifest_path);
-  if (!manifest) {
+bool ConsumePrefix(const std::string_view text,
+                   std::size_t& position,
+                   const std::string_view prefix) noexcept {
+  if (!text.substr(position).starts_with(prefix)) {
     return false;
   }
-  const std::string prefix =
-      "{\"protocol_version\":1,\"artifact_id\":\"" + std::to_string(artifact_id) + "\",";
-  std::string line;
-  while (std::getline(manifest, line)) {
-    if (line.starts_with(prefix)) {
+  position += prefix.size();
+  return true;
+}
+
+bool ParseUnsignedField(const std::string_view line,
+                        std::size_t& position,
+                        const std::string_view suffix,
+                        std::uint64_t& value) noexcept {
+  const std::size_t end = line.find(suffix, position);
+  if (end == std::string_view::npos) {
+    return false;
+  }
+  const std::string_view encoded = line.substr(position, end - position);
+  const auto parsed = std::from_chars(encoded.data(), encoded.data() + encoded.size(), value);
+  position = end + suffix.size();
+  return parsed.ec == std::errc{} && parsed.ptr == encoded.data() + encoded.size() &&
+         !encoded.empty();
+}
+
+bool IsLowercaseHex(const char value) noexcept {
+  return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
+}
+
+bool SkipJsonString(const std::string_view line, std::size_t& position) noexcept {
+  while (position < line.size()) {
+    const unsigned char character = static_cast<unsigned char>(line[position++]);
+    if (character == '"') {
       return true;
+    }
+    if (character < 0x20U) {
+      return false;
+    }
+    if (character != '\\') {
+      continue;
+    }
+    if (position >= line.size()) {
+      return false;
+    }
+    const char escape = line[position++];
+    if (escape == 'u') {
+      if (position + 4 > line.size() ||
+          !std::all_of(line.begin() + static_cast<std::ptrdiff_t>(position),
+                       line.begin() + static_cast<std::ptrdiff_t>(position + 4), IsLowercaseHex)) {
+        return false;
+      }
+      position += 4;
+    } else if (std::string_view("\"\\/bfnrt").find(escape) == std::string_view::npos) {
+      return false;
     }
   }
   return false;
+}
+
+bool ParseManifestRecord(const std::string_view line,
+                         std::uint64_t& artifact_id,
+                         std::uint64_t& session_id) {
+  std::size_t position = 0;
+  std::uint64_t ignored = 0;
+  if (!ConsumePrefix(line, position, "{\"protocol_version\":1,\"artifact_id\":\"") ||
+      !ParseUnsignedField(line, position, "\",\"session_id\":\"", artifact_id) ||
+      artifact_id == 0 ||
+      !ParseUnsignedField(line, position, "\",\"navigation_id\":\"", session_id) ||
+      session_id == 0 || !ParseUnsignedField(line, position, "\",\"frame_id\":\"", ignored) ||
+      !ParseUnsignedField(line, position, "\",\"parent_artifact_id\":\"", ignored) ||
+      !ParseUnsignedField(line, position, "\",\"creator_event_id\":\"", ignored) ||
+      !ParseUnsignedField(line, position, "\",\"kind\":\"", ignored)) {
+    return false;
+  }
+
+  const std::size_t kind_end = line.find("\",\"url\":\"", position);
+  if (kind_end == std::string_view::npos) {
+    return false;
+  }
+  const std::string_view kind = line.substr(position, kind_end - position);
+  if (kind != "javascript" && kind != "wasm" && kind != "source_map" && kind != "response_body") {
+    return false;
+  }
+  position = kind_end + std::string_view("\",\"url\":\"").size();
+  if (!SkipJsonString(line, position) || !ConsumePrefix(line, position, ",\"mime_type\":\"") ||
+      !SkipJsonString(line, position) || !ConsumePrefix(line, position, ",\"byte_size\":")) {
+    return false;
+  }
+  std::uint64_t byte_size = 0;
+  if (!ParseUnsignedField(line, position, ",\"sha256\":\"", byte_size)) {
+    return false;
+  }
+  const std::size_t digest_end = line.find('"', position);
+  if (digest_end == std::string_view::npos || digest_end - position != 64) {
+    return false;
+  }
+  const std::string_view digest = line.substr(position, 64);
+  if (!std::all_of(digest.begin(), digest.end(), IsLowercaseHex)) {
+    return false;
+  }
+  position = digest_end + 1;
+  if (!ConsumePrefix(line, position, ",\"sensitive\":")) {
+    return false;
+  }
+  const bool sensitive = line.substr(position).starts_with("true");
+  if (sensitive) {
+    position += 4;
+  } else if (line.substr(position).starts_with("false")) {
+    position += 5;
+  } else {
+    return false;
+  }
+  if (sensitive != (kind == "response_body") ||
+      !ConsumePrefix(line, position, ",\"content_path\":\"blobs/") ||
+      line.substr(position, digest.size()) != digest) {
+    return false;
+  }
+  position += digest.size();
+  return line.substr(position) == ".bin\"}";
 }
 
 void SaturatingAdd(std::uint64_t& value, const std::uint64_t increment) noexcept {
@@ -320,22 +443,30 @@ const char* ArtifactKindName(const ArtifactKind kind) noexcept {
 }
 
 ArtifactReceiver::ArtifactReceiver(std::filesystem::path store_directory,
-                                   const std::uint64_t max_artifact_bytes,
-                                   const std::uint64_t max_store_bytes,
-                                   const bool allow_sensitive)
+                                   ArtifactReceiverLimits limits)
     : store_directory_(std::move(store_directory)),
       blob_directory_(store_directory_ / "blobs"),
       manifest_path_(store_directory_ / "manifest.jsonl"),
-      max_artifact_bytes_(max_artifact_bytes),
-      max_store_bytes_(max_store_bytes),
-      allow_sensitive_(allow_sensitive) {
-  if (max_artifact_bytes == 0 || max_store_bytes == 0 || max_artifact_bytes > max_store_bytes) {
+      limits_(limits) {
+  if (limits_.max_artifact_bytes == 0 || limits_.max_store_bytes == 0 ||
+      limits_.max_artifact_bytes > limits_.max_store_bytes || limits_.max_artifacts == 0 ||
+      limits_.max_manifest_bytes == 0) {
     throw std::invalid_argument("Artifact receiver limits are invalid");
   }
   std::error_code error;
   std::filesystem::create_directories(blob_directory_, error);
   if (error) {
     throw std::runtime_error("Unable to create artifact store: " + error.message());
+  }
+  std::filesystem::permissions(store_directory_, std::filesystem::perms::owner_all,
+                               std::filesystem::perm_options::replace, error);
+  if (error) {
+    throw std::runtime_error("Unable to secure artifact store: " + error.message());
+  }
+  std::filesystem::permissions(blob_directory_, std::filesystem::perms::owner_all,
+                               std::filesystem::perm_options::replace, error);
+  if (error) {
+    throw std::runtime_error("Unable to secure artifact blob store: " + error.message());
   }
   for (const auto& entry : std::filesystem::directory_iterator(blob_directory_)) {
     if (!entry.is_regular_file() || entry.path().extension() != ".bin") {
@@ -347,8 +478,54 @@ ArtifactReceiver::ArtifactReceiver(std::filesystem::path store_directory,
     }
     stored_bytes_ += size;
   }
-  if (stored_bytes_ > max_store_bytes_) {
+  if (stored_bytes_ > limits_.max_store_bytes) {
     throw std::runtime_error("Existing artifact store exceeds its configured byte limit");
+  }
+
+  const bool manifest_exists = std::filesystem::exists(manifest_path_, error);
+  if (error) {
+    throw std::runtime_error("Unable to inspect artifact manifest: " + error.message());
+  }
+  if (manifest_exists) {
+    manifest_bytes_ = std::filesystem::file_size(manifest_path_, error);
+    if (error || manifest_bytes_ > limits_.max_manifest_bytes) {
+      throw std::runtime_error(error ? "Unable to size artifact manifest: " + error.message()
+                                     : "Existing artifact manifest exceeds its byte limit");
+    }
+    std::filesystem::permissions(
+        manifest_path_, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace, error);
+    if (error) {
+      throw std::runtime_error("Unable to secure artifact manifest: " + error.message());
+    }
+    std::ifstream manifest(manifest_path_, std::ios::binary);
+    if (!manifest) {
+      throw std::runtime_error("Unable to read artifact manifest");
+    }
+    if (manifest_bytes_ > 0) {
+      manifest.seekg(-1, std::ios::end);
+      if (manifest.get() != '\n') {
+        throw std::runtime_error("Artifact manifest ends with an incomplete record");
+      }
+      manifest.seekg(0, std::ios::beg);
+    }
+    std::string line;
+    while (std::getline(manifest, line)) {
+      std::uint64_t artifact_id = 0;
+      std::uint64_t session_id = 0;
+      if (!ParseManifestRecord(line, artifact_id, session_id) ||
+          (limits_.expected_session_id != 0 && session_id != limits_.expected_session_id) ||
+          !artifact_ids_.insert(artifact_id).second) {
+        throw std::runtime_error(
+            "Artifact manifest contains an invalid, duplicate, or mismatched record");
+      }
+      if (artifact_ids_.size() > limits_.max_artifacts) {
+        throw std::runtime_error("Existing artifact manifest exceeds its artifact count limit");
+      }
+    }
+    if (!manifest.eof()) {
+      throw std::runtime_error("Unable to read artifact manifest");
+    }
   }
 }
 
@@ -367,15 +544,22 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
   if (!IsValidArtifactHeader(header)) {
     return Reject(ArtifactReceiveStatus::kInvalid, "Invalid artifact header");
   }
-  if (header.content_size > max_artifact_bytes_ ||
-      header.content_size > max_store_bytes_ - stored_bytes_) {
+  if (limits_.expected_session_id != 0 && header.session_id != limits_.expected_session_id) {
+    return Reject(ArtifactReceiveStatus::kInvalid,
+                  "Artifact session does not match the authenticated connection");
+  }
+  if (artifact_ids_.size() >= limits_.max_artifacts) {
+    return Reject(ArtifactReceiveStatus::kTooLarge, "Artifact count exceeds its configured limit");
+  }
+  if (header.content_size > limits_.max_artifact_bytes ||
+      header.content_size > limits_.max_store_bytes - stored_bytes_) {
     return Reject(ArtifactReceiveStatus::kTooLarge, "Artifact exceeds a configured byte limit");
   }
-  if (header.kind == ArtifactKind::kResponseBody && !allow_sensitive_) {
+  if (header.kind == ArtifactKind::kResponseBody && !limits_.allow_sensitive) {
     return Reject(ArtifactReceiveStatus::kSensitiveCaptureDisabled,
                   "Sensitive response body capture is disabled");
   }
-  if (ManifestContainsArtifact(manifest_path_, header.artifact_id)) {
+  if (artifact_ids_.contains(header.artifact_id)) {
     return Reject(ArtifactReceiveStatus::kConflict, "Artifact identifier already exists");
   }
 
@@ -399,6 +583,16 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
   std::ofstream temporary(temporary_path, std::ios::binary | std::ios::trunc);
   if (!temporary) {
     return Reject(ArtifactReceiveStatus::kIoError, "Unable to open temporary artifact file");
+  }
+  std::error_code permission_error;
+  std::filesystem::permissions(
+      temporary_path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+      std::filesystem::perm_options::replace, permission_error);
+  if (permission_error) {
+    temporary.close();
+    RemoveFileBestEffort(temporary_path);
+    return Reject(ArtifactReceiveStatus::kIoError,
+                  "Unable to secure temporary artifact file: " + permission_error.message());
   }
 
   Sha256 sha256;
@@ -460,21 +654,48 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
     return Reject(ArtifactReceiveStatus::kIoError,
                   "Unable to commit artifact blob: " + error.message());
   }
+  if (!blob_exists && !SyncDirectory(blob_directory_, sync_error)) {
+    return Reject(ArtifactReceiveStatus::kIoError, std::move(sync_error));
+  }
 
+  std::ostringstream manifest_entry;
+  manifest_entry << "{\"protocol_version\":1,\"artifact_id\":\"" << header.artifact_id
+                 << "\",\"session_id\":\"" << header.session_id << "\",\"navigation_id\":\""
+                 << header.navigation_id << "\",\"frame_id\":\"" << header.frame_id
+                 << "\",\"parent_artifact_id\":\"" << header.parent_artifact_id
+                 << "\",\"creator_event_id\":\"" << header.creator_event_id << "\",\"kind\":\""
+                 << ArtifactKindName(header.kind) << "\",\"url\":\"" << JsonEscape(url)
+                 << "\",\"mime_type\":\"" << JsonEscape(mime_type)
+                 << "\",\"byte_size\":" << header.content_size << ",\"sha256\":\"" << digest_hex
+                 << "\",\"sensitive\":"
+                 << (header.kind == ArtifactKind::kResponseBody ? "true" : "false")
+                 << ",\"content_path\":\"blobs/" << digest_hex << ".bin\"}\n";
+  const std::string manifest_line = manifest_entry.str();
+  if (manifest_line.size() > limits_.max_manifest_bytes - manifest_bytes_) {
+    if (!blob_exists) {
+      RemoveFileBestEffort(blob_path);
+    }
+    return Reject(ArtifactReceiveStatus::kTooLarge,
+                  "Artifact manifest exceeds its configured byte limit");
+  }
+
+  const bool manifest_existed = std::filesystem::exists(manifest_path_, error);
+  if (error) {
+    return Reject(ArtifactReceiveStatus::kIoError,
+                  "Unable to inspect artifact manifest: " + error.message());
+  }
   std::ofstream manifest(manifest_path_, std::ios::app);
   if (!manifest) {
     return Reject(ArtifactReceiveStatus::kIoError, "Unable to open artifact manifest");
   }
-  manifest << "{\"protocol_version\":1,\"artifact_id\":\"" << header.artifact_id
-           << "\",\"session_id\":\"" << header.session_id << "\",\"navigation_id\":\""
-           << header.navigation_id << "\",\"frame_id\":\"" << header.frame_id
-           << "\",\"parent_artifact_id\":\"" << header.parent_artifact_id
-           << "\",\"creator_event_id\":\"" << header.creator_event_id << "\",\"kind\":\""
-           << ArtifactKindName(header.kind) << "\",\"url\":\"" << JsonEscape(url)
-           << "\",\"mime_type\":\"" << JsonEscape(mime_type)
-           << "\",\"byte_size\":" << header.content_size << ",\"sha256\":\"" << digest_hex
-           << "\",\"sensitive\":" << (header.kind == ArtifactKind::kResponseBody ? "true" : "false")
-           << ",\"content_path\":\"blobs/" << digest_hex << ".bin\"}\n";
+  std::filesystem::permissions(
+      manifest_path_, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+      std::filesystem::perm_options::replace, permission_error);
+  if (permission_error) {
+    return Reject(ArtifactReceiveStatus::kIoError,
+                  "Unable to secure artifact manifest: " + permission_error.message());
+  }
+  manifest << manifest_line;
   manifest.flush();
   manifest.close();
   if (!manifest) {
@@ -483,10 +704,15 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
   if (!SyncFile(manifest_path_, sync_error)) {
     return Reject(ArtifactReceiveStatus::kIoError, std::move(sync_error));
   }
+  if (!manifest_existed && !SyncDirectory(store_directory_, sync_error)) {
+    return Reject(ArtifactReceiveStatus::kIoError, std::move(sync_error));
+  }
 
   if (!blob_exists) {
     stored_bytes_ += header.content_size;
   }
+  manifest_bytes_ += manifest_line.size();
+  artifact_ids_.insert(header.artifact_id);
   SaturatingAdd(stats_.accepted, 1);
   SaturatingAdd(stats_.bytes_accepted, header.content_size);
   return ArtifactReceiveStatus::kAccepted;

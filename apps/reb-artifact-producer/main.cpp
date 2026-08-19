@@ -22,6 +22,7 @@ struct Options final {
   std::string socket_path;
   std::string token_path;
   std::uint64_t session_id = kSessionId;
+  std::uint64_t frame_session_id = 0;
 };
 
 bool ParseSessionId(const std::string_view value, std::uint64_t& session_id) {
@@ -38,6 +39,10 @@ bool ParseOptions(const int argc, char* argv[], Options& options) {
       options.token_path = argv[++index];
     } else if (argument == "--session-id" && index + 1 < argc) {
       if (!ParseSessionId(argv[++index], options.session_id)) {
+        return false;
+      }
+    } else if (argument == "--frame-session-id" && index + 1 < argc) {
+      if (!ParseSessionId(argv[++index], options.frame_session_id)) {
         return false;
       }
     } else {
@@ -110,9 +115,13 @@ bool WriteArtifact(const int descriptor,
 int main(const int argc, char* argv[]) {
   Options options;
   if (!ParseOptions(argc, argv, options)) {
-    std::cerr << "Usage: " << argv[0] << " [--socket PATH --token-file PATH --session-id ID]\n";
+    std::cerr << "Usage: " << argv[0]
+              << " [--socket PATH --token-file PATH --session-id ID"
+                 " [--frame-session-id ID]]\n";
     return 2;
   }
+  const std::uint64_t frame_session_id =
+      options.frame_session_id == 0 ? options.session_id : options.frame_session_id;
   constexpr std::string_view kJavaScript = R"js(export function buildPayload(cart, fingerprint) {
   const payload = {
     cart,
@@ -167,14 +176,14 @@ export function runGuest(host, program = guestProgram) {
   }
   const bool expect_ack = !options.socket_path.empty();
   const bool written =
-      WriteArtifact(descriptor, expect_ack, options.session_id, 300, 0, 4,
+      WriteArtifact(descriptor, expect_ack, frame_session_id, 300, 0, 4,
                     reb::ArtifactKind::kJavaScript, "https://checkout.acme.test/assets/cart.js",
                     "text/javascript", javascript_bytes) &&
-      WriteArtifact(descriptor, expect_ack, options.session_id, 301, 300, 3,
-                    reb::ArtifactKind::kWasm, "https://checkout.acme.test/assets/fingerprint.wasm",
-                    "application/wasm", kWasmHeader) &&
+      WriteArtifact(descriptor, expect_ack, frame_session_id, 301, 300, 3, reb::ArtifactKind::kWasm,
+                    "https://checkout.acme.test/assets/fingerprint.wasm", "application/wasm",
+                    kWasmHeader) &&
       WriteArtifact(
-          descriptor, expect_ack, options.session_id, 302, 0, 0, reb::ArtifactKind::kJavaScript,
+          descriptor, expect_ack, frame_session_id, 302, 0, 0, reb::ArtifactKind::kJavaScript,
           "https://checkout.acme.test/assets/vm-sample.js", "text/javascript", javascript_vm_bytes);
   if (expect_ack && close(descriptor) != 0) {
     std::cerr << "Failed to close artifact socket\n";

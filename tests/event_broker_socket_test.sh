@@ -113,6 +113,7 @@ python3 - "${batch_socket_path}" "${batch_token_path}" "${batch_input_path}" <<'
 import socket
 import struct
 import sys
+import time
 from pathlib import Path
 
 socket_path, token_path, event_path = sys.argv[1:]
@@ -121,7 +122,14 @@ hello = struct.pack("=IHHQ32s16s", 0x52454249, 1, 64, 1, token, bytes(16))
 events = Path(event_path).read_bytes() * 40
 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
     connection.connect(socket_path)
-    connection.sendall(hello + events)
+    connection.sendall(hello)
+    offset = 0
+    for chunk_size in (1, 319, 321, 81919, 321, 319, 81921):
+        end = min(offset + chunk_size, len(events))
+        connection.sendall(events[offset:end])
+        offset = end
+        time.sleep(0.005)
+    connection.sendall(events[offset:])
 PY
 wait "${broker_pid}"
 broker_pid=""
@@ -130,6 +138,50 @@ test "$(wc -l < "${batch_store_path}" | tr -d ' ')" = 520
 grep -Fq 'accepted=520 invalid=0 category_rejected=0 expired=0 sequence_gaps=0' \
   "${test_root}/batch-broker.err"
 test ! -e "${batch_socket_path}"
+
+readonly truncated_socket_path="${test_root}/truncated.sock"
+readonly truncated_token_path="${test_root}/truncated-token"
+readonly truncated_store_path="${test_root}/truncated-events.jsonl"
+
+"${broker}" --store "${truncated_store_path}" --socket "${truncated_socket_path}" \
+  --token-file "${truncated_token_path}" --session-id 1 --category-mask 2047 \
+  --duration-seconds 60 --capacity 20 \
+  >"${test_root}/truncated-broker.out" 2>"${test_root}/truncated-broker.err" &
+broker_pid=$!
+
+for _ in {1..100}; do
+  if [[ -S "${truncated_socket_path}" && -f "${truncated_token_path}" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+test -S "${truncated_socket_path}"
+python3 - "${truncated_socket_path}" "${truncated_token_path}" "${batch_input_path}" <<'PY'
+import socket
+import struct
+import sys
+from pathlib import Path
+
+socket_path, token_path, event_path = sys.argv[1:]
+token = bytes.fromhex(Path(token_path).read_text(encoding="ascii").strip())
+hello = struct.pack("=IHHQ32s16s", 0x52454249, 1, 64, 1, token, bytes(16))
+events = Path(event_path).read_bytes()
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+    connection.connect(socket_path)
+    connection.sendall(hello + events + events[:17])
+PY
+if wait "${broker_pid}"; then
+  echo "Broker unexpectedly accepted a truncated final event" >&2
+  exit 1
+fi
+broker_pid=""
+
+test "$(wc -l < "${truncated_store_path}" | tr -d ' ')" = 13
+grep -Fq 'Unable to read native event: unexpected end of stream' \
+  "${test_root}/truncated-broker.err"
+grep -Fq 'accepted=13 invalid=0 category_rejected=0 expired=0 sequence_gaps=0' \
+  "${test_root}/truncated-broker.err"
+test ! -e "${truncated_socket_path}"
 
 readonly expired_socket_path="${test_root}/expired.sock"
 readonly expired_token_path="${test_root}/expired-token"

@@ -65,6 +65,8 @@ The event endpoint reads backward from the append-only JSONL store and parses
 only its requested, bounded tail window. UI refresh cost therefore follows the
 visible event count instead of the total capture size. Offline evidence-store
 validation still scans the complete file through `tools/validate-evidence-store.py`.
+The reader rejects JSONL records larger than 4 KiB, which is safely above the
+current fixed event contract and keeps malformed-record work bounded.
 Event and artifact polling also sends explicit entity tags. When neither store
 nor broker connectivity changed, the server returns an empty `304` response and
 the UI skips JSON parsing and DOM reconstruction.

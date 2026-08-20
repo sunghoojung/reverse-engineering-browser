@@ -16,6 +16,7 @@ SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 ARTIFACT_KINDS = {"javascript", "wasm", "source_map", "response_body"}
 MAX_ARTIFACT_RESPONSE_BYTES = 2 * 1024 * 1024
 JSONL_TAIL_CHUNK_BYTES = 64 * 1024
+MAX_EVENT_JSON_BYTES = 4 * 1024
 PUBLIC_ARTIFACT_FIELDS = (
     "protocol_version",
     "artifact_id",
@@ -136,10 +137,12 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         if limit is not None:
             return [self.parse_event(line) for line in self.read_recent_lines(limit)]
         events = []
-        with self.event_store.open(encoding="utf-8") as stream:
-            for line in stream:
-                if line.strip():
-                    events.append(self.parse_event(line))
+        with self.event_store.open("rb") as stream:
+            for encoded_line in stream:
+                if encoded_line.strip():
+                    if encoded_line.endswith(b"\n"):
+                        encoded_line = encoded_line[:-1]
+                    events.append(self.parse_event(self.decode_event_line(encoded_line)))
         return events
 
     def read_recent_lines(self, limit: int) -> list[str]:
@@ -147,26 +150,26 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             return []
 
         lines = []
-        buffered = b""
+        suffix = b""
         with self.event_store.open("rb") as stream:
             position = stream.seek(0, 2)
             while position > 0 and len(lines) < limit:
                 chunk_size = min(position, JSONL_TAIL_CHUNK_BYTES)
                 position -= chunk_size
                 stream.seek(position)
-                buffered = stream.read(chunk_size) + buffered
+                parts = stream.read(chunk_size).split(b"\n")
+                parts[-1] += suffix
+                for encoded_line in reversed(parts[1:]):
+                    if encoded_line.strip():
+                        lines.append(self.decode_event_line(encoded_line))
+                        if len(lines) == limit:
+                            break
+                suffix = parts[0]
+                if len(suffix) > MAX_EVENT_JSON_BYTES:
+                    raise ValueError("The evidence store contains an oversized event")
 
-                while len(lines) < limit:
-                    separator = buffered.rfind(b"\n")
-                    if separator < 0:
-                        break
-                    line = buffered[separator + 1 :]
-                    buffered = buffered[:separator]
-                    if line.strip():
-                        lines.append(line.decode("utf-8"))
-
-            if position == 0 and len(lines) < limit and buffered.strip():
-                lines.append(buffered.decode("utf-8"))
+            if position == 0 and len(lines) < limit and suffix.strip():
+                lines.append(self.decode_event_line(suffix))
 
         lines.reverse()
         return lines
@@ -177,6 +180,12 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         if not isinstance(event, dict):
             raise ValueError("The evidence store contains a malformed event")
         return event
+
+    @staticmethod
+    def decode_event_line(encoded_line: bytes) -> str:
+        if len(encoded_line) > MAX_EVENT_JSON_BYTES:
+            raise ValueError("The evidence store contains an oversized event")
+        return encoded_line.decode("utf-8")
 
     def load_artifacts(self) -> list[dict]:
         manifest = self.artifact_store / "manifest.jsonl"

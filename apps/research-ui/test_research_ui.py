@@ -12,7 +12,7 @@ from http import HTTPStatus
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from server import JSONL_TAIL_CHUNK_BYTES, ResearchHandler
+from server import JSONL_TAIL_CHUNK_BYTES, MAX_EVENT_JSON_BYTES, ResearchHandler
 
 
 class ResearchUiTests(unittest.TestCase):
@@ -102,13 +102,10 @@ class ResearchUiTests(unittest.TestCase):
 
     def test_event_store_reads_only_the_requested_tail_window(self) -> None:
         events = [
-            {"sequence_number": "1", "payload": "old"},
-            {
-                "sequence_number": "2",
-                "payload": "x" * (JSONL_TAIL_CHUNK_BYTES + 1),
-            },
-            {"sequence_number": "3", "payload": "newest ☃"},
+            {"sequence_number": str(index), "payload": "x" * 2048}
+            for index in range(1, 41)
         ]
+        events[-1]["payload"] = "newest ☃"
         with tempfile.TemporaryDirectory() as directory:
             store = Path(directory) / "events.jsonl"
             store.write_text(
@@ -118,9 +115,23 @@ class ResearchUiTests(unittest.TestCase):
             handler = object.__new__(ResearchHandler)
             handler.event_store = store
 
+            self.assertGreater(store.stat().st_size, JSONL_TAIL_CHUNK_BYTES)
             self.assertEqual(handler.load_events(2), events[-2:])
-            self.assertEqual(handler.load_events(10), events)
+            self.assertEqual(handler.load_events(40), events)
             self.assertEqual(handler.load_events(0), [])
+
+    def test_event_store_rejects_oversized_records(self) -> None:
+        oversized = b'{' + (b"x" * MAX_EVENT_JSON_BYTES)
+        with tempfile.TemporaryDirectory() as directory:
+            store = Path(directory) / "events.jsonl"
+            store.write_bytes(b'{"sequence_number":"1"}\n' + oversized)
+            handler = object.__new__(ResearchHandler)
+            handler.event_store = store
+
+            with self.assertRaisesRegex(ValueError, "oversized event"):
+                handler.load_events(1)
+            with self.assertRaisesRegex(ValueError, "oversized event"):
+                handler.load_events()
 
     def test_event_store_tail_rejects_a_malformed_selected_record(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

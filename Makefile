@@ -49,6 +49,7 @@ PRODUCER_BINARY := $(BUILD_DIR)/reb-event-producer
 BROKER_BINARY := $(BUILD_DIR)/reb-event-broker
 ARTIFACT_PRODUCER_BINARY := $(BUILD_DIR)/reb-artifact-producer
 ARTIFACT_RECEIVER_BINARY := $(BUILD_DIR)/reb-artifact-receiver
+VM_ANALYZER := apps/research-ui/vm_analyzer.py
 TEST_BINARIES := \
 	$(BUILD_DIR)/tests/artifact_test \
 	$(BUILD_DIR)/tests/event_test \
@@ -102,11 +103,13 @@ e2e: producer broker artifact-producer artifact-receiver
 	$(PRODUCER_BINARY) | $(BROKER_BINARY) --store $(BUILD_DIR)/sessions/demo.jsonl
 	$(RM) -r "$(BUILD_DIR)/sessions/artifacts"
 	$(ARTIFACT_PRODUCER_BINARY) | $(ARTIFACT_RECEIVER_BINARY) --store $(BUILD_DIR)/sessions/artifacts
+	python3 $(VM_ANALYZER) --artifacts $(BUILD_DIR)/sessions/artifacts --events $(BUILD_DIR)/sessions/demo.jsonl
 	test "$$(wc -l < $(BUILD_DIR)/sessions/demo.jsonl | tr -d ' ')" = "13"
 	test "$$(grep -c '\"payload\":\"$(DEMO_NETWORK_PAYLOAD_HEX)\"' $(BUILD_DIR)/sessions/demo.jsonl)" = "2"
 	test "$$(grep -c '\"category\":\"vm\"' $(BUILD_DIR)/sessions/demo.jsonl)" = "6"
 	test "$$(wc -l < $(BUILD_DIR)/sessions/artifacts/manifest.jsonl | tr -d ' ')" = "3"
 	test "$$(grep -c 'vm-sample.js' $(BUILD_DIR)/sessions/artifacts/manifest.jsonl)" = "1"
+	test "$$(python3 -c 'import json; print(json.load(open("$(BUILD_DIR)/sessions/artifacts/analysis/vm-analysis-v1.json"))["summary"]["likely_vm_count"])')" = "1"
 	python3 tools/validate-evidence-store.py $(BUILD_DIR)/sessions/demo.jsonl
 	./tests/event_broker_socket_test.sh $(BROKER_BINARY) $(PRODUCER_BINARY) $(DEMO_NETWORK_PAYLOAD_HEX)
 	./tests/artifact_receiver_socket_test.sh $(ARTIFACT_RECEIVER_BINARY) $(ARTIFACT_PRODUCER_BINARY)

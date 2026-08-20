@@ -1,0 +1,296 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://origin-trace.local/protocol/vm-analysis-v1.schema.json",
+  "title": "Origin Trace VM Analysis Document v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "document_kind", "producer", "profile", "profile_digest", "inputs", "input_coverage", "results", "mixed_findings", "summary", "document_digest"],
+  "properties": {
+    "contract_version": {"const": 1},
+    "document_kind": {"const": "vm-analysis"},
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": {"const": "origin-trace-vm-detector"},
+        "version": {"type": "string", "minLength": 1, "maxLength": 32}
+      }
+    },
+    "profile": {"$ref": "#/$defs/profile"},
+    "profile_digest": {"$ref": "#/$defs/digest"},
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_manifest_digest", "event_store_digest"],
+      "properties": {
+        "artifact_manifest_digest": {"$ref": "#/$defs/digest"},
+        "event_store_digest": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]}
+      }
+    },
+    "input_coverage": {"$ref": "#/$defs/coverage"},
+    "results": {"type": "array", "maxItems": 10000, "items": {"$ref": "#/$defs/result"}},
+    "mixed_findings": {"type": "array", "maxItems": 10000, "items": {"$ref": "#/$defs/mixedFinding"}},
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["analyzed_artifacts", "candidate_count", "likely_vm_count", "failed_count", "mixed_count"],
+      "properties": {
+        "analyzed_artifacts": {"type": "integer", "minimum": 0},
+        "candidate_count": {"type": "integer", "minimum": 0},
+        "likely_vm_count": {"type": "integer", "minimum": 0},
+        "failed_count": {"type": "integer", "minimum": 0},
+        "mixed_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "document_digest": {"$ref": "#/$defs/digest"},
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "request_id", "edge_semantics"],
+      "properties": {
+        "kind": {"const": "request"},
+        "request_id": {"$ref": "#/$defs/uint64"},
+        "edge_semantics": {"const": "correlated-not-causal"}
+      },
+      "description": "Optional API projection metadata outside the stored document digest."
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "findingId": {"type": "string", "pattern": "^[0-9a-f]{24}$"},
+    "uint64": {"type": "string", "minLength": 1, "maxLength": 20, "pattern": "^(?:0|[1-9][0-9]*)$"},
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_id", "candidate_threshold", "likely_vm_threshold", "likely_vm_required_families", "rule_weights", "limits"],
+      "properties": {
+        "profile_id": {"const": "anti-bot-vm-detection-v1"},
+        "candidate_threshold": {"type": "integer", "minimum": 0},
+        "likely_vm_threshold": {"type": "integer", "minimum": 0},
+        "likely_vm_required_families": {"type": "integer", "minimum": 1},
+        "rule_weights": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["js.dispatch-loop", "js.instruction-pointer", "js.indexed-bytecode-read", "js.state-effects", "js.handler-selection", "js.bounded-exit", "wasm.dispatch-loop", "wasm.instruction-pointer", "wasm.linear-memory", "wasm.handler-table", "wasm.bytecode-region", "wasm.bounded-exit"],
+          "properties": {
+            "js.dispatch-loop": {"type": "integer", "minimum": 0},
+            "js.instruction-pointer": {"type": "integer", "minimum": 0},
+            "js.indexed-bytecode-read": {"type": "integer", "minimum": 0},
+            "js.state-effects": {"type": "integer", "minimum": 0},
+            "js.handler-selection": {"type": "integer", "minimum": 0},
+            "js.bounded-exit": {"type": "integer", "minimum": 0},
+            "wasm.dispatch-loop": {"type": "integer", "minimum": 0},
+            "wasm.instruction-pointer": {"type": "integer", "minimum": 0},
+            "wasm.linear-memory": {"type": "integer", "minimum": 0},
+            "wasm.handler-table": {"type": "integer", "minimum": 0},
+            "wasm.bytecode-region": {"type": "integer", "minimum": 0},
+            "wasm.bounded-exit": {"type": "integer", "minimum": 0}
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_artifact_bytes", "max_js_matches_per_rule", "max_js_function_regions", "max_js_region_work_bytes", "max_wasm_sections", "max_wasm_section_bytes", "max_graph_edges", "max_bytecode_snapshot_bytes", "max_manifest_line_bytes", "max_event_line_bytes", "max_artifact_records", "max_event_records", "max_wasm_functions", "max_wasm_instructions"],
+          "properties": {
+            "max_artifact_bytes": {"type": "integer", "minimum": 1},
+            "max_js_matches_per_rule": {"type": "integer", "minimum": 1},
+            "max_js_function_regions": {"type": "integer", "minimum": 1},
+            "max_js_region_work_bytes": {"type": "integer", "minimum": 1},
+            "max_wasm_sections": {"type": "integer", "minimum": 1},
+            "max_wasm_section_bytes": {"type": "integer", "minimum": 1},
+            "max_graph_edges": {"type": "integer", "minimum": 1},
+            "max_bytecode_snapshot_bytes": {"type": "integer", "minimum": 1},
+            "max_manifest_line_bytes": {"type": "integer", "minimum": 1},
+            "max_event_line_bytes": {"type": "integer", "minimum": 1},
+            "max_artifact_records": {"type": "integer", "minimum": 1},
+            "max_event_records": {"type": "integer", "minimum": 1},
+            "max_wasm_functions": {"type": "integer", "minimum": 1},
+            "max_wasm_instructions": {"type": "integer", "minimum": 1}
+          }
+        }
+      }
+    },
+    "coordinate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["byte_offset", "byte_size"],
+      "properties": {
+        "byte_offset": {"type": "integer", "minimum": 0},
+        "byte_size": {"type": "integer", "minimum": 1},
+        "function_index": {"type": "integer", "minimum": 0},
+        "function_body_offset": {"type": "integer", "minimum": 0},
+        "function_body_size": {"type": "integer", "minimum": 1}
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule_id", "weight", "coordinate", "detail"],
+      "properties": {
+        "rule_id": {"type": "string", "minLength": 1},
+        "family": {"type": "string", "minLength": 1},
+        "weight": {"type": "integer", "minimum": 0},
+        "coordinate": {"$ref": "#/$defs/coordinate"},
+        "detail": {"type": "string", "minLength": 1},
+        "match_count": {"type": "integer", "minimum": 1},
+        "matches_truncated": {"type": "boolean"},
+        "function_region": {"$ref": "#/$defs/coordinate"},
+        "event_sequence": {"$ref": "#/$defs/uint64"},
+        "state": {"enum": ["observed", "correlated"]}
+      }
+    },
+    "omission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": {
+        "reason": {"type": "string", "minLength": 1},
+        "line": {"type": "integer", "minimum": 0},
+        "observed_bytes": {"type": "integer", "minimum": 0},
+        "total_bytes": {"type": "integer", "minimum": 0},
+        "observed_records": {"type": "integer", "minimum": 0}
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["complete", "omissions"],
+      "properties": {
+        "complete": {"type": "boolean"},
+        "observed_bytes": {"type": "integer", "minimum": 0},
+        "total_bytes": {"type": "integer", "minimum": 0},
+        "omissions": {"type": "array", "items": {"$ref": "#/$defs/omission"}},
+        "residual_unknowns": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "reason"],
+      "properties": {
+        "state": {"enum": ["observed", "inferred", "correlated", "unknown"]},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "graphEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to", "state", "reason"],
+      "properties": {
+        "from": {"type": "string", "minLength": 1},
+        "to": {"type": "string", "minLength": 1},
+        "state": {"enum": ["observed", "inferred", "correlated", "unknown"]},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "graphNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "label"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["artifact", "vm-candidate", "browser-signal", "request"]},
+        "label": {"type": "string"},
+        "event_sequence": {"$ref": "#/$defs/uint64"},
+        "request_id": {"$ref": "#/$defs/uint64"}
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "artifact_sha256", "runtime", "status", "coverage"],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/uint64"},
+        "artifact_sha256": {"$ref": "#/$defs/digest"},
+        "runtime": {"enum": ["javascript", "webassembly", "unknown"]},
+        "status": {"enum": ["complete", "partial", "failed"]},
+        "finding_id": {"$ref": "#/$defs/findingId"},
+        "tier": {"enum": ["none", "candidate", "likely-vm"]},
+        "vm_score": {"type": "integer", "minimum": 0},
+        "vm_threshold": {"type": "integer", "minimum": 0},
+        "required_family_count": {"type": "integer", "minimum": 1},
+        "evidence_families": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "observations": {"type": "array", "items": {"$ref": "#/$defs/observation"}},
+        "anti_bot_score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "anti_bot_observations": {"type": "array", "items": {"$ref": "#/$defs/observation"}},
+        "related_request_ids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/uint64"}},
+        "graph": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["nodes", "edges"],
+          "properties": {
+            "nodes": {"type": "array", "items": {"$ref": "#/$defs/graphNode"}},
+            "edges": {"type": "array", "items": {"$ref": "#/$defs/graphEdge"}}
+          }
+        },
+        "coverage": {"$ref": "#/$defs/coverage"},
+        "frontend": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "replacement_character_count": {"type": "integer", "minimum": 0},
+            "section_count": {"type": "integer", "minimum": 0},
+            "code_section_count": {"type": "integer", "minimum": 0},
+            "data_section_count": {"type": "integer", "minimum": 0},
+            "decoded_function_count": {"type": "integer", "minimum": 0},
+            "imported_function_count": {"type": "integer", "minimum": 0},
+            "decoded_instruction_count": {"type": "integer", "minimum": 0}
+          }
+        },
+        "bytecode_snapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["artifact_id", "snapshot_hex", "unavailable_reason"],
+          "properties": {
+            "artifact_id": {"$ref": "#/$defs/uint64"},
+            "producer": {
+              "type": "object", "additionalProperties": false,
+              "required": ["kind", "byte_offset"],
+              "properties": {"kind": {"const": "static-initializer"}, "byte_offset": {"type": "integer", "minimum": 0}}
+            },
+            "consumer": {
+              "type": "object", "additionalProperties": false,
+              "required": ["kind", "status"],
+              "properties": {"kind": {"const": "indexed-read"}, "status": {"const": "inferred"}}
+            },
+            "sha256": {"$ref": "#/$defs/digest"},
+            "original_byte_count": {"type": "integer", "minimum": 0},
+            "snapshot_byte_count": {"type": "integer", "minimum": 0},
+            "snapshot_hex": {"anyOf": [{"type": "string", "pattern": "^(?:[0-9a-f]{2})*$"}, {"type": "null"}]},
+            "truncated": {"type": "boolean"},
+            "unavailable_reason": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]}
+          }
+        },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {"code": {"type": "string", "minLength": 1}, "message": {"type": "string", "minLength": 1}}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "failed"}}, "required": ["status"]},
+          "then": {"required": ["error"]},
+          "else": {"required": ["finding_id", "tier", "vm_score", "vm_threshold", "required_family_count", "evidence_families", "observations", "anti_bot_score", "anti_bot_observations", "related_request_ids", "graph", "frontend"]}
+        }
+      ]
+    },
+    "mixedFinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["finding_id", "runtime", "tier", "artifact_ids", "vm_score", "anti_bot_score", "evidence_families", "boundary"],
+      "properties": {
+        "finding_id": {"$ref": "#/$defs/findingId"},
+        "runtime": {"const": "mixed"},
+        "tier": {"enum": ["candidate", "likely-vm"]},
+        "artifact_ids": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/uint64"}},
+        "vm_score": {"type": "integer", "minimum": 0},
+        "anti_bot_score": {"type": "integer", "minimum": 0},
+        "evidence_families": {"type": "array", "items": {"type": "string"}},
+        "boundary": {"$ref": "#/$defs/edge"}
+      }
+    }
+  }
+}

@@ -4,12 +4,19 @@ import argparse
 import json
 import re
 import stat
+import threading
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
+from vm_analyzer import (
+    AnalysisError,
+    analyze_store,
+    verify_analysis_document,
+    write_analysis,
+)
 
 CANONICAL_UINT64 = re.compile(r"(?:0|[1-9][0-9]*)\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -39,6 +46,8 @@ class ResearchHandler(SimpleHTTPRequestHandler):
     event_store: Path
     artifact_store: Path
     broker_socket: Optional[Path] = None
+    analysis_lock = threading.Lock()
+    analysis_signature: Optional[str] = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(self.ui_directory), **kwargs)
@@ -69,7 +78,9 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     return
                 events = self.load_events(limit)
             except (OSError, ValueError, json.JSONDecodeError) as exception:
-                self.send_json({"error": str(exception)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+                self.send_json(
+                    {"error": str(exception)}, HTTPStatus.INTERNAL_SERVER_ERROR
+                )
                 return
             self.send_json(
                 {
@@ -91,15 +102,62 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     return
                 artifacts = self.load_artifacts()[-limit:]
             except (OSError, ValueError, json.JSONDecodeError) as exception:
-                self.send_json({"error": str(exception)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+                self.send_json(
+                    {"error": str(exception)}, HTTPStatus.INTERNAL_SERVER_ERROR
+                )
                 return
             public_artifacts = [
                 {field: artifact[field] for field in PUBLIC_ARTIFACT_FIELDS}
                 for artifact in artifacts
             ]
             self.send_json(
-                {"count": len(public_artifacts), "artifacts": public_artifacts}, etag=etag
+                {"count": len(public_artifacts), "artifacts": public_artifacts},
+                etag=etag,
             )
+            return
+        if parsed.path == "/api/analysis/vm":
+            query = parse_qs(parsed.query)
+            request_id = query.get("request_id", [None])[0]
+            try:
+                if request_id is not None and (
+                    not CANONICAL_UINT64.fullmatch(request_id)
+                    or int(request_id) >= 2**64
+                ):
+                    raise ValueError(
+                        "Request ID must be a canonical unsigned 64-bit integer"
+                    )
+                document = self.load_vm_analysis()
+                if request_id is not None:
+                    document = dict(document)
+                    document["selection"] = {
+                        "kind": "request",
+                        "request_id": request_id,
+                        "edge_semantics": "correlated-not-causal",
+                    }
+                    document["results"] = [
+                        result
+                        for result in document["results"]
+                        if request_id in result.get("related_request_ids", [])
+                    ]
+                    document["mixed_findings"] = [
+                        finding
+                        for finding in document["mixed_findings"]
+                        if any(
+                            request_id in result.get("related_request_ids", [])
+                            for result in document["results"]
+                            if result.get("artifact_id")
+                            in finding.get("artifact_ids", [])
+                        )
+                    ]
+                etag = f'"{document["document_digest"]}-{request_id or "all"}"'
+                if self.send_not_modified(etag):
+                    return
+            except (OSError, ValueError, json.JSONDecodeError) as exception:
+                self.send_json(
+                    {"error": str(exception)}, HTTPStatus.INTERNAL_SERVER_ERROR
+                )
+                return
+            self.send_json(document, etag=etag)
             return
         artifact_match = re.fullmatch(r"/api/artifacts/([^/]+)/content", parsed.path)
         if artifact_match is not None:
@@ -125,7 +183,9 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                 self.send_json({"error": "Artifact not found"}, HTTPStatus.NOT_FOUND)
                 return
             except (OSError, ValueError, json.JSONDecodeError) as exception:
-                self.send_json({"error": str(exception)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+                self.send_json(
+                    {"error": str(exception)}, HTTPStatus.INTERNAL_SERVER_ERROR
+                )
                 return
             self.send_artifact_bytes(body, total_size, offset)
             return
@@ -142,7 +202,9 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                 if encoded_line.strip():
                     if encoded_line.endswith(b"\n"):
                         encoded_line = encoded_line[:-1]
-                    events.append(self.parse_event(self.decode_event_line(encoded_line)))
+                    events.append(
+                        self.parse_event(self.decode_event_line(encoded_line))
+                    )
         return events
 
     def read_recent_lines(self, limit: int) -> list[str]:
@@ -199,9 +261,13 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     continue
                 artifact = json.loads(line)
                 if not self.is_artifact(artifact):
-                    raise ValueError("The artifact manifest contains a malformed record")
+                    raise ValueError(
+                        "The artifact manifest contains a malformed record"
+                    )
                 if artifact["artifact_id"] in seen_ids:
-                    raise ValueError("The artifact manifest contains a duplicate artifact ID")
+                    raise ValueError(
+                        "The artifact manifest contains a duplicate artifact ID"
+                    )
                 seen_ids.add(artifact["artifact_id"])
                 artifacts.append(artifact)
         return artifacts
@@ -240,7 +306,9 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             or artifact["byte_size"] >= 2**64
         ):
             return False
-        if not isinstance(artifact.get("sha256"), str) or not SHA256.fullmatch(artifact["sha256"]):
+        if not isinstance(artifact.get("sha256"), str) or not SHA256.fullmatch(
+            artifact["sha256"]
+        ):
             return False
         if not isinstance(artifact.get("sensitive"), bool):
             return False
@@ -252,7 +320,11 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         if not CANONICAL_UINT64.fullmatch(artifact_id) or int(artifact_id) >= 2**64:
             raise FileNotFoundError(artifact_id)
         artifact = next(
-            (item for item in self.load_artifacts() if item["artifact_id"] == artifact_id),
+            (
+                item
+                for item in self.load_artifacts()
+                if item["artifact_id"] == artifact_id
+            ),
             None,
         )
         if artifact is None:
@@ -261,9 +333,32 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         content_path = (store_root / artifact["content_path"]).resolve()
         if not content_path.is_relative_to(store_root):
             raise ValueError("Artifact content path escapes the artifact store")
-        if not content_path.is_file() or content_path.stat().st_size != artifact["byte_size"]:
+        if (
+            not content_path.is_file()
+            or content_path.stat().st_size != artifact["byte_size"]
+        ):
             raise ValueError("Artifact content does not match its manifest")
         return artifact, content_path
+
+    def load_vm_analysis(self) -> dict:
+        manifest = self.artifact_store / "manifest.jsonl"
+        event_state = self.resource_etag(self.event_store)
+        manifest_state = self.resource_etag(manifest)
+        signature = f"{self.artifact_store.resolve()}:{manifest_state}:{event_state}"
+        with self.analysis_lock:
+            if type(self).analysis_signature != signature:
+                document = analyze_store(self.artifact_store, self.event_store)
+                write_analysis(document, self.artifact_store)
+                type(self).analysis_signature = signature
+                return document
+            path = self.artifact_store / "analysis" / "vm-analysis-v1.json"
+            try:
+                document = json.loads(path.read_text(encoding="utf-8"))
+                verify_analysis_document(document)
+            except (OSError, UnicodeDecodeError, AnalysisError, json.JSONDecodeError):
+                document = analyze_store(self.artifact_store, self.event_store)
+                write_analysis(document, self.artifact_store)
+            return document
 
     def broker_connected(self) -> bool:
         if self.broker_socket is None:
@@ -295,7 +390,10 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         return True
 
     def send_json(
-        self, value: dict, status: HTTPStatus = HTTPStatus.OK, etag: Optional[str] = None
+        self,
+        value: dict,
+        status: HTTPStatus = HTTPStatus.OK,
+        etag: Optional[str] = None,
     ) -> None:
         body = json.dumps(value, separators=(",", ":")).encode()
         self.send_response(status)
@@ -317,7 +415,9 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Artifact-Total-Bytes", str(total_size))
         self.send_header("X-Artifact-Offset", str(offset))
-        self.send_header("X-Artifact-Truncated", "1" if offset + len(body) < total_size else "0")
+        self.send_header(
+            "X-Artifact-Truncated", "1" if offset + len(body) < total_size else "0"
+        )
         self.end_headers()
         self.wfile.write(body)
 
@@ -330,7 +430,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7319)
     parser.add_argument("--store", type=Path, default=Path("build/sessions/demo.jsonl"))
-    parser.add_argument("--artifacts", type=Path, default=Path("build/sessions/artifacts"))
+    parser.add_argument(
+        "--artifacts", type=Path, default=Path("build/sessions/artifacts")
+    )
     parser.add_argument("--socket", type=Path)
     return parser.parse_args()
 

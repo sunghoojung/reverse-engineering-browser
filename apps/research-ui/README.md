@@ -93,13 +93,36 @@ visible even when the viewer shows a bounded preview.
 Pass `--socket /path/to/broker.sock` to the development server when it should
 also report live broker connectivity.
 
-The VM Lab tab reads versioned `vm_finding` records from that same broker
-stream. It separates interpreter, guest program, invocation, host binding,
-hypothesis, and coverage evidence, and shows runtime, confidence, relations,
-artifact ranges, and partial coverage without inventing missing semantics.
-Empty, disconnected, malformed-finding, and sequence-gap states remain
-visible. Unlike the request backtrace demonstration, VM Lab does not populate
-sample findings in standalone preview mode.
+Captured JavaScript and WebAssembly artifacts are analyzed automatically on
+the cold path. The UI reads `/api/analysis/vm` for the automatic scan and
+`/api/analysis/vm?request_id=ID` for request-first correlation. Analysis is
+bounded, deterministic, and stored at
+`ARTIFACT_STORE/analysis/vm-analysis-v1.json`. A failed or malformed analysis
+does not hide the last valid timeline evidence. The native live-session
+launcher runs the same analyzer when its event or artifact inputs change.
+Manifest and event JSONL reads have explicit line and record limits. Invalid
+canonical identifiers, digests, or artifact paths become named failure or
+partial-coverage records before content is read. Cached analysis is served only
+after its profile and document digests are verified.
+
+The WebAssembly frontend decodes bounded function bodies and instruction
+immediates. It scores dispatch only when a decoded branch table or indirect
+call occurs inside a decoded loop, and reports the function and body range for
+each observation. Raw immediate bytes and the data-count section are not
+treated as opcodes or guest byte data. JavaScript signals must occur within one
+function region before they can combine into a likely-VM result.
+
+The analyzer never runs in the renderer probe, artifact receiver, event broker,
+or browser-process capture path.
+
+The VM Lab combines versioned `vm_finding` timeline records with the cold-path
+analysis document. It separates interpreter, guest program, invocation, host
+binding, hypothesis, and coverage evidence, and shows runtime, two-tier
+confidence, decomposed scores, rule evidence, related requests, artifact
+ranges, residual unknowns, and partial coverage without inventing missing
+semantics. Empty, disconnected, malformed-analysis, malformed-finding, and
+sequence-gap states remain visible. Unlike the request backtrace demonstration,
+VM Lab does not populate sample findings in standalone preview mode.
 
 The UI validates the broker envelope and every returned event before replacing
 the last known-good view. Protocol v2 transports 64-bit identifiers,

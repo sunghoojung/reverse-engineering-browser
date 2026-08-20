@@ -9,6 +9,7 @@ repository_root="$(cd "${script_dir}/.." && pwd)"
 readonly repository_root
 readonly broker_binary="${repository_root}/build/reb-event-broker"
 readonly artifact_receiver_binary="${repository_root}/build/reb-artifact-receiver"
+readonly vm_analyzer="${repository_root}/apps/research-ui/vm_analyzer.py"
 readonly origin_trace_app="${REB_ORIGIN_TRACE_APP:-${repository_root}/build/Origin Trace.app}"
 session_id="$(od -An -N8 -tu8 /dev/urandom | tr -d '[:space:]')"
 if [[ -z "${session_id}" || "${session_id}" == 0 ]]; then
@@ -69,7 +70,12 @@ fi
 
 broker_pid=""
 artifact_receiver_pid=""
+analyzer_pid=""
 cleanup() {
+  if [[ -n "${analyzer_pid}" ]] && kill -0 "${analyzer_pid}" 2>/dev/null; then
+    kill "${analyzer_pid}" 2>/dev/null || true
+    wait "${analyzer_pid}" 2>/dev/null || true
+  fi
   if [[ -n "${broker_pid}" ]] && kill -0 "${broker_pid}" 2>/dev/null; then
     kill "${broker_pid}" 2>/dev/null || true
     wait "${broker_pid}" 2>/dev/null || true
@@ -128,6 +134,24 @@ if ((category_mask & 1024)); then
     exit 1
   fi
 fi
+
+analyzer_log="${session_directory}/vm-analyzer.log"
+analyze_captured_artifacts() {
+  local previous_signature=""
+  local current_signature=""
+  while true; do
+    current_signature="$({ stat -f '%m:%z' "${artifact_store_path}/manifest.jsonl" 2>/dev/null || true; stat -f '%m:%z' "${store_path}" 2>/dev/null || true; } | tr '\n' ':')"
+    if [[ -n "${current_signature}" && "${current_signature}" != "${previous_signature}" ]]; then
+      if ! python3 "${vm_analyzer}" --artifacts "${artifact_store_path}" --events "${store_path}" >>"${analyzer_log}" 2>&1; then
+        echo "VM analysis failed for input state ${current_signature}" >>"${analyzer_log}"
+      fi
+      previous_signature="${current_signature}"
+    fi
+    sleep 1
+  done
+}
+analyze_captured_artifacts &
+analyzer_pid=$!
 
 "${open_command}" -n "${origin_trace_app}" --args --store "${store_path}" \
   --artifacts "${artifact_store_path}" --broker-socket "${socket_path}"

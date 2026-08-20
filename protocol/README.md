@@ -104,4 +104,21 @@ values, flags, nonzero reserved bytes, dirty label tails, invalid ranges, and
 inconsistent coverage. Artifact bytes remain outside this record and are
 referenced by the event header's `artifact_id` plus the optional range.
 
+## Cold-path VM analysis document
+
+Detailed deterministic VM analysis uses the version 1 JSON contract in
+`vm-analysis-v1.schema.json`. The stored document is derived, content-addressed
+evidence under `artifacts/analysis/vm-analysis-v1.json`; it never replaces the
+immutable artifact bytes or the fixed-size timeline summary.
+
+The document names its producer, analyzer version, profile and profile digest,
+input digests, limits, rule weights, per-rule observations, separate VM and
+anti-bot scores, coverage omissions, residual unknowns, bytecode snapshots,
+and evidence graph. Graph edges use only `observed`, `inferred`, `correlated`,
+or `unknown`. Request projections add selection metadata but do not change the
+stored document or claim exact value provenance.
+The schema closes consumer-owned objects to additional properties, requires
+canonical decimal identifiers and digest formats, and includes top-level input
+coverage for bounded or malformed manifest and event records.
+
 Protocol changes must remain backward-readable for stored research sessions.

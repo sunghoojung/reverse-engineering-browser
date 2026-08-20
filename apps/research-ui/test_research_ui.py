@@ -121,7 +121,7 @@ class ResearchUiTests(unittest.TestCase):
             self.assertEqual(handler.load_events(0), [])
 
     def test_event_store_rejects_oversized_records(self) -> None:
-        oversized = b'{' + (b"x" * MAX_EVENT_JSON_BYTES)
+        oversized = b"{" + (b"x" * MAX_EVENT_JSON_BYTES)
         with tempfile.TemporaryDirectory() as directory:
             store = Path(directory) / "events.jsonl"
             store.write_bytes(b'{"sequence_number":"1"}\n' + oversized)
@@ -240,7 +240,9 @@ class ResearchUiTests(unittest.TestCase):
             root = Path(directory)
             (root / "blobs").mkdir()
             (root / artifact["content_path"]).write_bytes(content)
-            (root / "manifest.jsonl").write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+            (root / "manifest.jsonl").write_text(
+                json.dumps(artifact) + "\n", encoding="utf-8"
+            )
             handler = object.__new__(ResearchHandler)
             handler.artifact_store = root
 
@@ -272,7 +274,9 @@ class ResearchUiTests(unittest.TestCase):
             root = Path(directory)
             (root / "blobs").mkdir()
             (root / artifact["content_path"]).write_bytes(content)
-            (root / "manifest.jsonl").write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+            (root / "manifest.jsonl").write_text(
+                json.dumps(artifact) + "\n", encoding="utf-8"
+            )
             ResearchHandler.ui_directory = Path(__file__).parent
             ResearchHandler.event_store = root / "events.jsonl"
             ResearchHandler.artifact_store = root
@@ -281,7 +285,9 @@ class ResearchUiTests(unittest.TestCase):
             thread.start()
             try:
                 base_url = f"http://127.0.0.1:{server.server_port}"
-                with urllib.request.urlopen(f"{base_url}/api/artifacts?limit=10") as response:
+                with urllib.request.urlopen(
+                    f"{base_url}/api/artifacts?limit=10"
+                ) as response:
                     catalog = json.load(response)
                     catalog_etag = response.headers["ETag"]
                 self.assertEqual(catalog["count"], 1)
@@ -300,11 +306,125 @@ class ResearchUiTests(unittest.TestCase):
                     f"{base_url}/api/artifacts/300/content?offset=2&limit=4"
                 ) as response:
                     self.assertEqual(response.read(), content[2:6])
-                    self.assertEqual(response.headers["Content-Type"], "application/octet-stream")
-                    self.assertEqual(response.headers["Content-Security-Policy"], "sandbox")
-                    self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+                    self.assertEqual(
+                        response.headers["Content-Type"], "application/octet-stream"
+                    )
+                    self.assertEqual(
+                        response.headers["Content-Security-Policy"], "sandbox"
+                    )
+                    self.assertEqual(
+                        response.headers["X-Content-Type-Options"], "nosniff"
+                    )
                     self.assertEqual(response.headers["X-Artifact-Truncated"], "1")
-                    self.assertEqual(response.headers["X-Artifact-Total-Bytes"], str(len(content)))
+                    self.assertEqual(
+                        response.headers["X-Artifact-Total-Bytes"], str(len(content))
+                    )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+
+    def test_vm_analysis_api_runs_automatically_and_filters_from_a_request(
+        self,
+    ) -> None:
+        content = (
+            Path(__file__).parents[2]
+            / "tests"
+            / "fixtures"
+            / "vm-analysis"
+            / "pure-js-vm.js"
+        ).read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        artifact = {
+            "protocol_version": 1,
+            "artifact_id": "300",
+            "session_id": "7",
+            "navigation_id": "100",
+            "frame_id": "200",
+            "parent_artifact_id": "0",
+            "creator_event_id": "79",
+            "kind": "javascript",
+            "url": "https://authorized.test/pure-js-vm.js",
+            "mime_type": "text/javascript",
+            "byte_size": len(content),
+            "sha256": digest,
+            "sensitive": False,
+            "content_path": f"blobs/{digest}.bin",
+        }
+        events = [
+            {
+                "session_id": "7",
+                "sequence_number": "1",
+                "frame_id": "200",
+                "artifact_id": "300",
+                "request_id": "81",
+                "category": "network",
+                "type": "request_started",
+            }
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_store = root / "artifacts"
+            (artifact_store / "blobs").mkdir(parents=True)
+            (artifact_store / artifact["content_path"]).write_bytes(content)
+            (artifact_store / "manifest.jsonl").write_text(
+                json.dumps(artifact) + "\n", encoding="utf-8"
+            )
+            event_store = root / "events.jsonl"
+            event_store.write_text(
+                "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
+            )
+            ResearchHandler.ui_directory = Path(__file__).parent
+            ResearchHandler.event_store = event_store
+            ResearchHandler.artifact_store = artifact_store
+            ResearchHandler.broker_socket = None
+            ResearchHandler.analysis_signature = None
+            server = ThreadingHTTPServer(("127.0.0.1", 0), ResearchHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base_url = f"http://127.0.0.1:{server.server_port}/api/analysis/vm"
+                with urllib.request.urlopen(base_url) as response:
+                    automatic = json.load(response)
+                    etag = response.headers["ETag"]
+                self.assertEqual(automatic["summary"]["likely_vm_count"], 1)
+                analysis_path = artifact_store / "analysis" / "vm-analysis-v1.json"
+                self.assertTrue(analysis_path.is_file())
+
+                tampered = json.loads(analysis_path.read_text(encoding="utf-8"))
+                tampered["profile"]["candidate_threshold"] = 999
+                analysis_path.write_text(json.dumps(tampered) + "\n", encoding="utf-8")
+                with urllib.request.urlopen(base_url) as response:
+                    repaired = json.load(response)
+                self.assertEqual(repaired["profile"]["candidate_threshold"], 20)
+                self.assertEqual(
+                    json.loads(analysis_path.read_text(encoding="utf-8"))["profile"][
+                        "candidate_threshold"
+                    ],
+                    20,
+                )
+
+                unchanged = urllib.request.Request(
+                    base_url, headers={"If-None-Match": etag}
+                )
+                with self.assertRaises(urllib.error.HTTPError) as not_modified:
+                    urllib.request.urlopen(unchanged)
+                self.assertEqual(not_modified.exception.code, HTTPStatus.NOT_MODIFIED)
+
+                with urllib.request.urlopen(f"{base_url}?request_id=81") as response:
+                    request_first = json.load(response)
+                self.assertEqual(
+                    request_first["selection"]["edge_semantics"],
+                    "correlated-not-causal",
+                )
+                self.assertEqual(
+                    [result["artifact_id"] for result in request_first["results"]],
+                    ["300"],
+                )
+
+                with urllib.request.urlopen(f"{base_url}?request_id=82") as response:
+                    unrelated = json.load(response)
+                self.assertEqual(unrelated["results"], [])
             finally:
                 server.shutdown()
                 server.server_close()
@@ -330,7 +450,9 @@ class ResearchUiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "store"
             root.mkdir()
-            (root / "manifest.jsonl").write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+            (root / "manifest.jsonl").write_text(
+                json.dumps(artifact) + "\n", encoding="utf-8"
+            )
             handler = object.__new__(ResearchHandler)
             handler.artifact_store = root
 
@@ -339,14 +461,20 @@ class ResearchUiTests(unittest.TestCase):
 
             artifact["sensitive"] = False
             artifact["content_path"] = f"blobs/{artifact['sha256']}.bin"
-            (root / "manifest.jsonl").write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+            (root / "manifest.jsonl").write_text(
+                json.dumps(artifact) + "\n", encoding="utf-8"
+            )
             (root / "blobs").mkdir()
             (Path(directory) / "outside.bin").write_bytes(b"x")
-            (root / artifact["content_path"]).symlink_to(Path(directory) / "outside.bin")
+            (root / artifact["content_path"]).symlink_to(
+                Path(directory) / "outside.bin"
+            )
             with self.assertRaisesRegex(ValueError, "escapes"):
                 handler.find_artifact("300")
 
-    def test_artifact_manifest_rejects_noncanonical_blob_path_and_boolean_size(self) -> None:
+    def test_artifact_manifest_rejects_noncanonical_blob_path_and_boolean_size(
+        self,
+    ) -> None:
         artifact = {
             "protocol_version": 1,
             "artifact_id": "300",
@@ -365,7 +493,9 @@ class ResearchUiTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "manifest.jsonl").write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+            (root / "manifest.jsonl").write_text(
+                json.dumps(artifact) + "\n", encoding="utf-8"
+            )
             handler = object.__new__(ResearchHandler)
             handler.artifact_store = root
 
@@ -374,7 +504,9 @@ class ResearchUiTests(unittest.TestCase):
 
             artifact["content_path"] = f"blobs/{artifact['sha256']}.bin"
             artifact["byte_size"] = True
-            (root / "manifest.jsonl").write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+            (root / "manifest.jsonl").write_text(
+                json.dumps(artifact) + "\n", encoding="utf-8"
+            )
             with self.assertRaisesRegex(ValueError, "malformed record"):
                 handler.load_artifacts()
 
@@ -403,13 +535,27 @@ class ResearchUiTests(unittest.TestCase):
         self.assertIn("height: 100vh", html)
         self.assertIn("standalone preview", html)
         self.assertIn("textContent", html)
-        for unsafe_sink in (".innerHTML", ".outerHTML", "insertAdjacentHTML", "document.write"):
+        for unsafe_sink in (
+            ".innerHTML",
+            ".outerHTML",
+            "insertAdjacentHTML",
+            "document.write",
+        ):
             self.assertNotIn(unsafe_sink, html)
 
-    def test_network_workspace_exposes_baseline_inspection_and_health_states(self) -> None:
+    def test_network_workspace_exposes_baseline_inspection_and_health_states(
+        self,
+    ) -> None:
         html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
 
-        for label in ("Headers", "Payload", "Preview", "Response", "Initiator", "Timing"):
+        for label in (
+            "Headers",
+            "Payload",
+            "Preview",
+            "Response",
+            "Initiator",
+            "Timing",
+        ):
             self.assertIn(f">{label}</button>", html)
         self.assertIn('data-kind="loading"', html)
         for state in ("empty", "disconnected", "malformed", "gap"):
@@ -424,7 +570,9 @@ class ResearchUiTests(unittest.TestCase):
         self.assertIn("body.count === body.events.length", html)
         self.assertIn("isCanonicalInteger(event[field], 0n, uint64Max)", html)
         self.assertIn("function correlatedRendererIdentity(event)", html)
-        self.assertIn("`S${session}:P${event.process_id}:C${context}:B${requestId}`", html)
+        self.assertIn(
+            "`S${session}:P${event.process_id}:C${context}:B${requestId}`", html
+        )
         self.assertIn("browser context ${context}", html)
         self.assertIn("[13, 'xhr']", html)
         self.assertIn("No requests match the current filters", html)
@@ -566,8 +714,61 @@ process.stdout.write(JSON.stringify({
         self.assertIn("focus({ preventScroll: true })", html)
         self.assertIn("Open in Sources", html)
         self.assertIn("selectArtifact(sourceArtifact.artifact_id)", html)
+        self.assertIn("function isVmAnalysisDocument(document)", html)
+        self.assertIn("function vmFindingsFromAnalysis(document)", html)
+        self.assertIn("/api/analysis/vm", html)
+        self.assertIn("Malformed VM analysis was rejected", html)
+        self.assertIn("anti-bot relevance", html)
+        self.assertIn("Related VM candidates", html)
+        self.assertIn("correlated · unknown", html)
 
-    def test_network_model_validates_and_aggregates_without_losing_integer_precision(self) -> None:
+    def test_vm_analysis_refresh_failure_retains_last_valid_findings(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        start = html.index("      function retainVmAnalysisOnFailure")
+        end = html.index("      async function refreshVmAnalysis", start)
+        helper = html[start:end]
+        exercise = r"""
+const derived = { findingId: "analysis:derived" };
+const event = { findingId: "event:captured" };
+const targetState = {
+  lastValidAnalysisFindings: [derived],
+  eventVmFindings: [event],
+  vmFindings: []
+};
+retainVmAnalysisOnFailure(targetState, "unavailable", "connection failed");
+console.log(JSON.stringify({
+  status: targetState.vmAnalysisStatus,
+  error: targetState.vmAnalysisError,
+  findings: targetState.vmFindings.map(finding => finding.findingId),
+  derivedIdentityRetained: targetState.vmFindings[0] === derived,
+  eventIdentityRetained: targetState.vmFindings[1] === event
+}));
+"""
+        completed = subprocess.run(
+            [node, "-e", helper + exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "status": "unavailable",
+                "error": "connection failed",
+                "findings": ["analysis:derived", "event:captured"],
+                "derivedIdentityRetained": True,
+                "eventIdentityRetained": True,
+            },
+        )
+
+    def test_network_model_validates_and_aggregates_without_losing_integer_precision(
+        self,
+    ) -> None:
         node = shutil.which("node")
         if node is None:
             self.skipTest("Node.js is not installed")
@@ -783,7 +984,9 @@ process.stdout.write(JSON.stringify({
             },
         )
 
-    def test_vm_model_decodes_versioned_findings_and_rejects_bad_contracts(self) -> None:
+    def test_vm_model_decodes_versioned_findings_and_rejects_bad_contracts(
+        self,
+    ) -> None:
         node = shutil.which("node")
         if node is None:
             self.skipTest("Node.js is not installed")
@@ -912,17 +1115,23 @@ process.stdout.write(JSON.stringify({
 
     def test_native_application_uses_the_packaged_icon(self) -> None:
         macos_directory = Path(__file__).parent / "macos"
-        application = (macos_directory / "OriginTraceApp.swift").read_text(encoding="utf-8")
-        plist = (macos_directory / "Info.plist").read_text(encoding="utf-8")
-        build_script = (Path(__file__).parents[2] / "scripts" / "build-research-app.sh").read_text(
+        application = (macos_directory / "OriginTraceApp.swift").read_text(
             encoding="utf-8"
         )
+        plist = (macos_directory / "Info.plist").read_text(encoding="utf-8")
+        build_script = (
+            Path(__file__).parents[2] / "scripts" / "build-research-app.sh"
+        ).read_text(encoding="utf-8")
 
-        self.assertIn("configureApplicationIcon(resourcesURL: resourcesURL)", application)
+        self.assertIn(
+            "configureApplicationIcon(resourcesURL: resourcesURL)", application
+        )
         self.assertIn('appendingPathComponent("OriginTrace.icns")', application)
         self.assertIn("NSApp.applicationIconImage = icon", application)
         self.assertNotIn("makeApplicationIcon", application)
         self.assertIn('case "/api/artifacts":', application)
+        self.assertIn('case "/api/analysis/vm":', application)
+        self.assertIn("vmAnalysisResponse(for: requestURL)", application)
         self.assertIn("artifactContentResponse(for: requestURL)", application)
         self.assertIn('"Content-Security-Policy": "sandbox"', application)
         self.assertIn('"X-Artifact-Truncated"', application)
@@ -932,7 +1141,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn("<key>CFBundleIconFile</key>", plist)
         self.assertIn("<string>OriginTrace</string>", plist)
         self.assertIn("origin-trace-icon.png", build_script)
-        self.assertIn('build/sessions/artifacts', build_script)
+        self.assertIn("build/sessions/artifacts", build_script)
         self.assertIn('"${resources_path}/artifacts"', build_script)
         self.assertIn("iconutil -c icns", build_script)
 

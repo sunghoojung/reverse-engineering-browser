@@ -1123,6 +1123,11 @@
       .vm-coverage-line { display: flex; justify-content: space-between; color: var(--muted); font: 9px var(--mono); }
       .vm-coverage-bar { height: 5px; margin-top: 8px; background: var(--panel-3); }
       .vm-coverage-bar span { display: block; height: 100%; background: var(--accent); }
+      .vm-analysis-evidence { display: grid; gap: 7px; padding: 12px 13px; border-top: 1px solid var(--line-soft); }
+      .vm-analysis-rule { display: grid; grid-template-columns: minmax(145px, auto) 1fr auto; gap: 9px; align-items: baseline; font: 8px var(--mono); }
+      .vm-analysis-rule strong { color: var(--text); }
+      .vm-analysis-rule span { color: var(--muted); }
+      .vm-analysis-rule b { color: var(--accent); font-weight: 600; }
 
       .statusbar {
         min-height: 34px;
@@ -1309,6 +1314,7 @@
                   <div id="field-tree" class="field-tree" role="tabpanel" aria-labelledby="field-tab-body" tabindex="0"></div>
                   <div id="trace-dock" class="trace-dock">
                     <div><div class="trace-label">Selected request field</div><div id="trace-target" class="trace-target">request-81 · Body · $.device.fingerprint</div></div>
+                    <button id="request-vm-candidates" class="secondary-button" type="button">Related VM candidates</button>
                     <button id="trace-origin" class="trace-button" type="button">⌘ Trace origin</button>
                   </div>
                 </div>
@@ -1604,8 +1610,14 @@ export async function checkout(cart, fingerprint) {
         refreshing: false,
         eventEtag: null,
         vmFindings: [],
+        lastValidAnalysisFindings: [],
+        eventVmFindings: [],
         malformedVmFindings: 0,
-        selectedVmFindingId: null
+        selectedVmFindingId: null,
+        vmAnalysisStatus: 'loading',
+        vmAnalysisError: null,
+        vmAnalysisRequestId: null,
+        vmAnalysisEtag: null
       };
 
       const elements = {
@@ -1627,6 +1639,7 @@ export async function checkout(cart, fingerprint) {
         traceDock: document.querySelector('#trace-dock'),
         traceTarget: document.querySelector('#trace-target'),
         traceButton: document.querySelector('#trace-origin'),
+        requestVmCandidates: document.querySelector('#request-vm-candidates'),
         backtraceSubtitle: document.querySelector('#backtrace-subtitle'),
         evidenceRows: document.querySelector('#evidence-rows'),
         evidenceCount: document.querySelector('#evidence-count'),
@@ -2067,6 +2080,119 @@ export async function checkout(cart, fingerprint) {
         return { findings, malformedCount };
       }
 
+      function isVmAnalysisObservation(observation) {
+        return isPlainObject(observation) &&
+          typeof observation.rule_id === 'string' && observation.rule_id.length > 0 &&
+          typeof observation.family === 'string' && observation.family.length > 0 &&
+          isSafeIntegerInRange(observation.weight, 0, 100) &&
+          isPlainObject(observation.coordinate) &&
+          isSafeIntegerInRange(observation.coordinate.byte_offset, 0, Number.MAX_SAFE_INTEGER) &&
+          isSafeIntegerInRange(observation.coordinate.byte_size, 1, Number.MAX_SAFE_INTEGER) &&
+          typeof observation.detail === 'string';
+      }
+
+      function isVmAnalysisResult(result) {
+        if (!isPlainObject(result) || typeof result.artifact_id !== 'string' ||
+            !['javascript', 'webassembly', 'unknown'].includes(result.runtime) ||
+            !['complete', 'partial', 'failed'].includes(result.status)) return false;
+        if (result.status === 'failed') {
+          return isPlainObject(result.error) && typeof result.error.code === 'string' &&
+            isPlainObject(result.coverage) && result.coverage.complete === false;
+        }
+        if (!['javascript', 'webassembly'].includes(result.runtime)) return false;
+        return typeof result.finding_id === 'string' && /^[0-9a-f]{24}$/.test(result.finding_id) &&
+          ['none', 'candidate', 'likely-vm'].includes(result.tier) &&
+          isSafeIntegerInRange(result.vm_score, 0, 500) &&
+          isSafeIntegerInRange(result.anti_bot_score, 0, 100) &&
+          Array.isArray(result.evidence_families) && result.evidence_families.every(value => typeof value === 'string') &&
+          Array.isArray(result.observations) && result.observations.every(isVmAnalysisObservation) &&
+          Array.isArray(result.related_request_ids) && result.related_request_ids.every(value => isCanonicalInteger(value, 0n, uint64Max)) &&
+          isPlainObject(result.coverage) && typeof result.coverage.complete === 'boolean';
+      }
+
+      function isVmAnalysisDocument(document) {
+        return isPlainObject(document) && document.contract_version === 1 &&
+          document.document_kind === 'vm-analysis' &&
+          typeof document.document_digest === 'string' && /^[0-9a-f]{64}$/.test(document.document_digest) &&
+          typeof document.profile_digest === 'string' && /^[0-9a-f]{64}$/.test(document.profile_digest) &&
+          isPlainObject(document.profile) && document.profile.profile_id === 'anti-bot-vm-detection-v1' &&
+          isPlainObject(document.input_coverage) && typeof document.input_coverage.complete === 'boolean' &&
+          Array.isArray(document.input_coverage.omissions) &&
+          Array.isArray(document.results) && document.results.every(isVmAnalysisResult) &&
+          Array.isArray(document.mixed_findings) &&
+          document.mixed_findings.every(finding => isPlainObject(finding) &&
+            typeof finding.finding_id === 'string' && /^[0-9a-f]{24}$/.test(finding.finding_id) &&
+            finding.runtime === 'mixed' && ['candidate', 'likely-vm'].includes(finding.tier));
+      }
+
+      function vmFindingsFromAnalysis(document) {
+        const investigationId = `analysis:${document.document_digest.slice(0, 12)}`;
+        const findings = document.results
+          .filter(result => result.status !== 'failed' && result.tier !== 'none')
+          .map(result => ({
+            findingId: `analysis:${result.finding_id}`,
+            investigationId,
+            kind: 'hypothesis',
+            hostRuntime: result.runtime === 'javascript' ? 'JavaScript' : 'WebAssembly',
+            confidence: result.tier,
+            label: result.tier === 'likely-vm' ? 'Likely VM from deterministic analysis' : 'VM candidate from deterministic analysis',
+            sourceArtifactId: result.artifact_id,
+            sourceOffset: '0', sourceSize: '0', flags: result.status === 'partial' ? ['partial'] : [],
+            subjectId: '0', relatedSubjectId: '0', sequenceNumber: 'derived', parentEventId: '0',
+            monotonicTimeNs: 'cold path', processId: 0, threadId: 0,
+            analysis: result
+          }));
+        document.mixed_findings.forEach(result => findings.push({
+          findingId: `analysis:${result.finding_id}`,
+          investigationId,
+          kind: 'hypothesis', hostRuntime: 'mixed', confidence: result.tier,
+          label: result.tier === 'likely-vm' ? 'Likely mixed JavaScript/WASM VM' : 'Mixed runtime VM candidate',
+          sourceArtifactId: result.artifact_ids[0], sourceOffset: '0', sourceSize: '0', flags: [],
+          subjectId: '0', relatedSubjectId: '0', sequenceNumber: 'derived', parentEventId: '0',
+          monotonicTimeNs: 'cold path', processId: 0, threadId: 0,
+          analysis: result
+        }));
+        return findings.sort((left, right) => (right.analysis?.vm_score ?? 0) - (left.analysis?.vm_score ?? 0));
+      }
+
+      function retainVmAnalysisOnFailure(targetState, status, errorMessage) {
+        targetState.vmAnalysisStatus = status;
+        targetState.vmAnalysisError = errorMessage;
+        targetState.vmFindings = [
+          ...targetState.lastValidAnalysisFindings,
+          ...targetState.eventVmFindings
+        ];
+      }
+
+      async function refreshVmAnalysis(requestId = state.vmAnalysisRequestId) {
+        if (location.protocol === 'file:') return;
+        const normalizedRequestId = requestId || null;
+        const query = normalizedRequestId ? `?request_id=${encodeURIComponent(normalizedRequestId)}` : '';
+        const sameSelection = normalizedRequestId === state.vmAnalysisRequestId;
+        const headers = sameSelection && state.vmAnalysisEtag ? { 'If-None-Match': state.vmAnalysisEtag } : {};
+        state.vmAnalysisStatus = 'loading';
+        try {
+          const response = await fetch(`/api/analysis/vm${query}`, { cache: 'no-store', headers });
+          if (response.status === 304) { state.vmAnalysisStatus = 'ready'; return; }
+          if (!response.ok) throw new Error(`Analyzer returned ${response.status}`);
+          const document = await response.json();
+          if (!isVmAnalysisDocument(document)) throw new TypeError('Malformed VM analysis response');
+          state.vmAnalysisEtag = response.headers.get('ETag');
+          state.vmAnalysisRequestId = normalizedRequestId;
+          state.vmAnalysisStatus = 'ready';
+          state.vmAnalysisError = null;
+          state.lastValidAnalysisFindings = vmFindingsFromAnalysis(document);
+          state.vmFindings = [...state.lastValidAnalysisFindings, ...state.eventVmFindings];
+        } catch (error) {
+          retainVmAnalysisOnFailure(
+            state,
+            error instanceof TypeError ? 'malformed' : 'unavailable',
+            error.message
+          );
+        }
+        renderVmLab();
+      }
+
       function setNetworkNotice(kind, message) {
         elements.networkNotice.dataset.kind = kind;
         elements.networkNotice.textContent = message;
@@ -2096,6 +2222,65 @@ export async function checkout(cart, fingerprint) {
         const selected = state.vmFindings.find(finding => finding.findingId === state.selectedVmFindingId);
         if (!selected) {
           elements.vmDetail.replaceChildren(textElement('div', 'vm-empty', 'No valid VM findings have been captured. Capture stays separate from interpretation, so the lab does not synthesize sample conclusions.'));
+          return;
+        }
+        if (selected.analysis) {
+          const result = selected.analysis;
+          const summary = document.createElement('div'); summary.className = 'vm-summary';
+          [
+            ['VM score', result.vm_score],
+            ['anti-bot relevance', result.anti_bot_score],
+            ['signal families', result.evidence_families?.length ?? 0],
+            ['coverage', result.status ?? 'complete']
+          ].forEach(([label, value]) => {
+            const metric = document.createElement('div'); metric.className = 'vm-metric';
+            metric.append(textElement('span', '', label), textElement('strong', '', value));
+            summary.append(metric);
+          });
+          const card = document.createElement('article'); card.className = 'vm-detail-card';
+          const head = document.createElement('header'); head.className = 'vm-detail-head';
+          const title = document.createElement('div');
+          title.append(textElement('h2', '', selected.label), textElement('p', '', `${selected.hostRuntime} · profile anti-bot-vm-detection-v1`));
+          const actions = document.createElement('div'); actions.className = 'vm-detail-actions';
+          actions.append(textElement('span', 'vm-confidence', selected.confidence));
+          const sourceArtifact = state.artifacts.find(artifact => artifact.artifact_id === selected.sourceArtifactId);
+          if (sourceArtifact) {
+            const openSource = textElement('button', 'secondary-button', 'Open in Sources'); openSource.type = 'button';
+            openSource.addEventListener('click', () => { showScreen('sources', openSource); selectArtifact(sourceArtifact.artifact_id); });
+            actions.append(openSource);
+          }
+          head.append(title, actions);
+          const fields = document.createElement('div'); fields.className = 'vm-fields';
+          fields.append(
+            vmField('tier', selected.confidence),
+            vmField('source artifact', selected.sourceArtifactId),
+            vmField('related requests', result.related_request_ids?.join(', ') || 'none observed'),
+            vmField('evidence families', result.evidence_families?.join(', ') || 'none'),
+            vmField('bytecode snapshot', result.bytecode_snapshot?.snapshot_hex || result.bytecode_snapshot?.unavailable_reason || 'not applicable'),
+            vmField('edge semantics', 'observed · inferred · correlated · unknown')
+          );
+          const evidence = document.createElement('div'); evidence.className = 'vm-analysis-evidence';
+          const observations = [...(result.observations ?? []), ...(result.anti_bot_observations ?? [])];
+          if (observations.length === 0) {
+            evidence.append(textElement('div', 'vm-analysis-rule', 'Mixed finding uses the evidence from both linked artifacts.'));
+          } else {
+            observations.forEach(observation => {
+              const row = document.createElement('div'); row.className = 'vm-analysis-rule';
+              row.append(
+                textElement('strong', '', observation.rule_id),
+                textElement('span', '', observation.detail),
+                textElement('b', '', `+${observation.weight}`)
+              );
+              evidence.append(row);
+            });
+          }
+          (result.coverage?.residual_unknowns ?? []).forEach(unknown => {
+            const row = document.createElement('div'); row.className = 'vm-analysis-rule';
+            row.append(textElement('strong', '', 'unknown'), textElement('span', '', unknown), textElement('b', '', '?'));
+            evidence.append(row);
+          });
+          card.append(head, fields, evidence);
+          elements.vmDetail.replaceChildren(summary, card);
           return;
         }
         const investigation = state.vmFindings.filter(finding => finding.investigationId === selected.investigationId);
@@ -2164,6 +2349,10 @@ export async function checkout(cart, fingerprint) {
         const gapCount = countSequenceGaps(state.events);
         if (state.broker === 'connecting') {
           setVmNotice('loading', 'Waiting for VM findings from the local evidence broker.');
+        } else if (state.vmAnalysisStatus === 'malformed') {
+          setVmNotice('malformed', 'Malformed VM analysis was rejected. Valid timeline summaries remain visible.');
+        } else if (state.vmAnalysisStatus === 'unavailable') {
+          setVmNotice('disconnected', `The cold analyzer is unavailable. ${state.vmFindings.length ? 'Last valid VM evidence remains visible.' : 'No VM evidence is available.'}`);
         } else if (state.broker === 'unavailable') {
           setVmNotice('disconnected', state.vmFindings.length ? 'Broker disconnected. Last valid VM findings remain visible.' : 'Broker disconnected. No VM findings are available.');
         } else if (state.malformedVmFindings > 0) {
@@ -2185,7 +2374,7 @@ export async function checkout(cart, fingerprint) {
           row.append(
             textElement('span', 'vm-row-title', finding.label),
             textElement('span', 'vm-kind', finding.kind),
-            textElement('span', 'vm-row-meta', `t ${finding.monotonicTimeNs} ns · source p${finding.processId}:t${finding.threadId} · category vm`),
+            textElement('span', 'vm-row-meta', finding.analysis ? `cold-path derived analysis · artifact ${finding.sourceArtifactId}` : `t ${finding.monotonicTimeNs} ns · source p${finding.processId}:t${finding.threadId} · category vm`),
             textElement('span', 'vm-row-correlation', `operation ${finding.kind} · finding ${finding.findingId} · investigation ${finding.investigationId} · ${finding.hostRuntime} · ${finding.confidence}`)
           );
           row.addEventListener('click', () => {
@@ -3033,7 +3222,10 @@ export async function checkout(cart, fingerprint) {
           const artifact = state.artifacts.find(candidate => candidate.artifact_id === state.selectedArtifactId);
           if (artifact) loadArtifactContent(artifact);
         }
-        if (screenName === 'vm') renderVmLab();
+        if (screenName === 'vm') {
+          if (trigger?.id === 'nav-vm' && state.vmAnalysisRequestId !== null) refreshVmAnalysis(null);
+          renderVmLab();
+        }
         if (!trigger?.classList.contains('nav-button')) {
           requestAnimationFrame(() => {
             if (screenName === 'traffic') {
@@ -3055,6 +3247,7 @@ export async function checkout(cart, fingerprint) {
           const response = await fetch('/api/events?limit=500', { cache: 'no-store', headers });
           if (response.status === 304) {
             await refreshArtifacts();
+            await refreshVmAnalysis();
             return;
           }
           if (!response.ok) throw new Error(`Broker returned ${response.status}`);
@@ -3065,7 +3258,8 @@ export async function checkout(cart, fingerprint) {
           state.eventEtag = response.headers.get('ETag');
           state.events = body.events;
           const vmModel = vmFindingsFromEvents(state.events);
-          state.vmFindings = vmModel.findings;
+          state.eventVmFindings = vmModel.findings;
+          state.vmFindings = [...state.lastValidAnalysisFindings, ...state.eventVmFindings];
           state.malformedVmFindings = vmModel.malformedCount;
           state.requests = [...sampleRequests, ...requestsFromEvents(state.events)];
           let selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
@@ -3100,6 +3294,7 @@ export async function checkout(cart, fingerprint) {
           renderInspector();
           renderEvidence();
           await refreshArtifacts();
+          await refreshVmAnalysis();
           renderVmLab();
         } catch (error) {
           state.broker = 'unavailable';
@@ -3185,6 +3380,12 @@ export async function checkout(cart, fingerprint) {
       }));
       elements.requestFilter.addEventListener('input', renderRequests);
       elements.traceButton.addEventListener('click', () => showScreen('backtrace', elements.traceButton));
+      elements.requestVmCandidates.addEventListener('click', async () => {
+        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        const requestId = request?.event ? String(request.event.request_id) : /^\d+$/.test(request?.id ?? '') ? request.id : null;
+        if (requestId) await refreshVmAnalysis(requestId);
+        showScreen('vm', elements.requestVmCandidates);
+      });
       elements.sourceSearch.addEventListener('input', applySourceSearch);
       elements.sourcePretty.addEventListener('click', () => {
         state.sourcePretty = !state.sourcePretty;

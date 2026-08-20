@@ -35,6 +35,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         response = (try eventsResponse(for: requestURL), "application/json; charset=utf-8", [:])
       case "/api/artifacts":
         response = (try artifactsResponse(for: requestURL), "application/json; charset=utf-8", [:])
+      case "/api/analysis/vm":
+        response = (try vmAnalysisResponse(for: requestURL), "application/json; charset=utf-8", [:])
       default:
         if requestURL.path.hasPrefix("/api/artifacts/") && requestURL.path.hasSuffix("/content") {
           let content = try artifactContentResponse(for: requestURL)
@@ -261,6 +263,48 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "X-Artifact-Truncated": offset + data.count < byteSize ? "1" : "0",
       ]
     )
+  }
+
+  private func vmAnalysisResponse(for requestURL: URL) throws -> Data {
+    let analysisURL = artifactStoreURL
+      .appendingPathComponent("analysis")
+      .appendingPathComponent("vm-analysis-v1.json")
+    let data = try Data(contentsOf: analysisURL)
+    guard var document = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+      (document["contract_version"] as? NSNumber)?.intValue == 1,
+      document["document_kind"] as? String == "vm-analysis",
+      var results = document["results"] as? [[String: Any]],
+      var mixedFindings = document["mixed_findings"] as? [[String: Any]]
+    else {
+      throw artifactError("The VM analysis store contains a malformed document")
+    }
+    let requestID = URLComponents(url: requestURL, resolvingAgainstBaseURL: false)?
+      .queryItems?
+      .first(where: { $0.name == "request_id" })?
+      .value
+    if let requestID {
+      guard requestID.range(of: #"^(?:0|[1-9][0-9]*)$"#, options: .regularExpression) != nil,
+        UInt64(requestID) != nil
+      else {
+        throw artifactError("Request ID must be a canonical unsigned 64-bit integer")
+      }
+      results = results.filter { result in
+        (result["related_request_ids"] as? [String])?.contains(requestID) == true
+      }
+      let visibleArtifactIDs = Set(results.compactMap { $0["artifact_id"] as? String })
+      mixedFindings = mixedFindings.filter { finding in
+        guard let artifactIDs = finding["artifact_ids"] as? [String] else { return false }
+        return !visibleArtifactIDs.isDisjoint(with: artifactIDs)
+      }
+      document["selection"] = [
+        "kind": "request",
+        "request_id": requestID,
+        "edge_semantics": "correlated-not-causal",
+      ]
+    }
+    document["results"] = results
+    document["mixed_findings"] = mixedFindings
+    return try JSONSerialization.data(withJSONObject: document, options: [])
   }
 
   private func brokerConnected() -> Bool {

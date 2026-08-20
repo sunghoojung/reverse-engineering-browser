@@ -140,7 +140,7 @@ analyze_captured_artifacts() {
   local previous_signature=""
   local current_signature=""
   local worker_pid=""
-  # shellcheck disable=SC2329  # Invoked by the signal trap below.
+  # shellcheck disable=SC2317,SC2329  # Invoked by the signal trap below.
   stop_analyzer_worker() {
     trap - INT TERM
     if [[ -n "${worker_pid}" ]] && kill -0 "${worker_pid}" 2>/dev/null; then

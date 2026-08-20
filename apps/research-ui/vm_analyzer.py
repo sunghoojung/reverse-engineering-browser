@@ -21,6 +21,8 @@ CANONICAL_UINT64 = re.compile(r"(?:0|[1-9][0-9]*)\Z")
 SHA256_HEX = re.compile(r"[0-9a-f]{64}\Z")
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 MAX_JS_MATCHES_PER_RULE = 32
+MAX_JS_FUNCTION_REGIONS = 4096
+MAX_JS_REGION_WORK_BYTES = 64 * 1024 * 1024
 MAX_WASM_SECTIONS = 128
 MAX_WASM_SECTION_BYTES = 2 * 1024 * 1024
 MAX_GRAPH_EDGES = 1024
@@ -112,6 +114,8 @@ class AnalysisError(ValueError):
 class Limits:
     max_artifact_bytes: int = MAX_ARTIFACT_BYTES
     max_js_matches_per_rule: int = MAX_JS_MATCHES_PER_RULE
+    max_js_function_regions: int = MAX_JS_FUNCTION_REGIONS
+    max_js_region_work_bytes: int = MAX_JS_REGION_WORK_BYTES
     max_wasm_sections: int = MAX_WASM_SECTIONS
     max_wasm_section_bytes: int = MAX_WASM_SECTION_BYTES
     max_graph_edges: int = MAX_GRAPH_EDGES
@@ -127,6 +131,8 @@ class Limits:
         return {
             "max_artifact_bytes": self.max_artifact_bytes,
             "max_js_matches_per_rule": self.max_js_matches_per_rule,
+            "max_js_function_regions": self.max_js_function_regions,
+            "max_js_region_work_bytes": self.max_js_region_work_bytes,
             "max_wasm_sections": self.max_wasm_sections,
             "max_wasm_section_bytes": self.max_wasm_section_bytes,
             "max_graph_edges": self.max_graph_edges,
@@ -170,17 +176,24 @@ def _find_js_rule(
     detail: str,
     limits: Limits,
 ) -> dict[str, Any] | None:
-    matches = []
+    first_match = None
+    match_count = 0
+    matches_truncated = False
     for pattern in patterns:
-        matches.extend(pattern.finditer(source))
-        if len(matches) >= limits.max_js_matches_per_rule:
+        for match in pattern.finditer(source):
+            if match_count >= limits.max_js_matches_per_rule:
+                matches_truncated = True
+                break
+            match_count += 1
+            if first_match is None or match.start() < first_match.start():
+                first_match = match
+        if matches_truncated:
             break
-    if not matches:
+    if first_match is None:
         return None
-    match = min(matches, key=lambda item: item.start())
-    observation = _observation(rule_id, match.start(), match.end(), detail)
-    observation["match_count"] = min(len(matches), limits.max_js_matches_per_rule)
-    observation["matches_truncated"] = len(matches) >= limits.max_js_matches_per_rule
+    observation = _observation(rule_id, first_match.start(), first_match.end(), detail)
+    observation["match_count"] = match_count
+    observation["matches_truncated"] = matches_truncated
     return observation
 
 
@@ -304,43 +317,84 @@ def _mask_js_literals(source: str) -> str:
     return "".join(masked)
 
 
-def _js_function_regions(source: str) -> list[tuple[int, int]]:
+def _js_function_regions(
+    source: str, limits: Limits
+) -> tuple[list[tuple[int, int]], list[dict[str, Any]]]:
     masked = _mask_js_literals(source)
-    starts = [
-        match.end() - 1
-        for match in re.finditer(
-            r"(?:\bfunction\b[^{}]*|\([^{}]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)\s*\{",
-            masked,
-        )
-    ]
-    regions = []
-    for opening in starts:
-        depth = 0
-        for index in range(opening, len(masked)):
-            if masked[index] == "{":
-                depth += 1
-            elif masked[index] == "}":
-                depth -= 1
-                if depth == 0:
-                    regions.append((opening + 1, index))
-                    break
-        else:
-            raise AnalysisError("unterminated JavaScript function body")
+    starts = []
+    omissions = []
+    for match in re.finditer(
+        r"(?:\bfunction\b[^{}]*|\([^{}]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)\s*\{",
+        masked,
+    ):
+        if len(starts) >= limits.max_js_function_regions:
+            omissions.append(
+                {
+                    "reason": "javascript-function-region-limit",
+                    "observed_records": len(starts),
+                }
+            )
+            break
+        starts.append(match.end() - 1)
+
+    openings = set(starts)
+    brace_stack: list[int] = []
+    regions_by_opening: dict[int, tuple[int, int]] = {}
+    for index, character in enumerate(masked):
+        if character == "{":
+            brace_stack.append(index)
+        elif character == "}" and brace_stack:
+            opening = brace_stack.pop()
+            if opening in openings:
+                regions_by_opening[opening] = (opening + 1, index)
+    if any(opening not in regions_by_opening for opening in openings):
+        raise AnalysisError("unterminated JavaScript function body")
+    regions = [regions_by_opening[opening] for opening in starts]
     if not regions:
-        return [(0, len(source))]
-    return [(0, len(source)), *regions]
+        return [(0, len(source))], omissions
+    return [(0, len(source)), *regions], omissions
 
 
-def _js_observations(source: str, limits: Limits) -> list[dict[str, Any]]:
-    regions = _js_function_regions(source)
+def _js_observations(
+    source: str, limits: Limits
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    regions, omissions = _js_function_regions(source, limits)
+    ordered_regions = sorted(regions, key=lambda item: (item[0], -item[1]))
+    children: dict[tuple[int, int], list[tuple[int, int]]] = {
+        region: [] for region in regions
+    }
+    region_stack: list[tuple[int, int]] = []
+    for region in ordered_regions:
+        start, end = region
+        while region_stack and start >= region_stack[-1][1]:
+            region_stack.pop()
+        if region_stack and end <= region_stack[-1][1]:
+            children[region_stack[-1]].append(region)
+        region_stack.append(region)
+
     ranked = []
-    for start, end in regions:
+    work_bytes = 0
+    evaluation_order = [
+        regions[0],
+        *sorted(regions[1:], key=lambda item: item[1] - item[0]),
+    ]
+    for start, end in evaluation_order:
+        region_bytes = len(source[start:end].encode("utf-8"))
+        if work_bytes + region_bytes > limits.max_js_region_work_bytes:
+            omissions.append(
+                {
+                    "reason": "javascript-region-work-limit",
+                    "observed_bytes": work_bytes,
+                    "total_bytes": work_bytes + region_bytes,
+                }
+            )
+            break
+        work_bytes += region_bytes
         region_source = list(source[start:end])
-        for nested_start, nested_end in regions:
-            if start < nested_start and nested_end <= end:
-                region_source[nested_start - start : nested_end - start] = " " * (
-                    nested_end - nested_start
-                )
+        for nested_start, nested_end in children[(start, end)]:
+            region_source[nested_start - start : nested_end - start] = " " * (
+                nested_end - nested_start
+            )
         observations = _js_region_observations("".join(region_source), limits)
         for observation in observations:
             observation["coordinate"]["byte_offset"] += start
@@ -367,7 +421,7 @@ def _js_observations(source: str, limits: Limits) -> list[dict[str, Any]]:
         function_region["byte_size"] = len(
             source[function_start:function_end].encode("utf-8")
         )
-    return observations
+    return observations, omissions
 
 
 def _read_leb(data: bytes, offset: int, end: int) -> tuple[int, int]:
@@ -886,6 +940,7 @@ def _runtime_anti_bot_observations(
             continue
         if (
             str(event.get("session_id")) != artifact["session_id"]
+            or str(event.get("navigation_id")) != artifact["navigation_id"]
             or str(event.get("frame_id")) != artifact["frame_id"]
         ):
             continue
@@ -964,6 +1019,7 @@ def _event_graph(
         event
         for event in events
         if str(event.get("session_id")) == artifact["session_id"]
+        and str(event.get("navigation_id")) == artifact["navigation_id"]
         and str(event.get("frame_id")) == artifact["frame_id"]
     ]
     for event in relevant:
@@ -1046,7 +1102,8 @@ def analyze_artifact(
     try:
         if runtime == "javascript":
             source = content.decode("utf-8", errors="strict")
-            observations = _js_observations(source, limits)
+            observations, javascript_omissions = _js_observations(source, limits)
+            omissions.extend(javascript_omissions)
             frontend = {"replacement_character_count": 0}
         else:
             observations, frontend = _wasm_observations(content, limits)
@@ -1173,7 +1230,12 @@ def _load_events(
     for line_number, event in records:
         if not isinstance(event, dict) or not all(
             _canonical_uint64(event.get(field))
-            for field in ("session_id", "sequence_number", "frame_id")
+            for field in (
+                "session_id",
+                "sequence_number",
+                "navigation_id",
+                "frame_id",
+            )
         ):
             omissions.append({"reason": "invalid-event-contract", "line": line_number})
             continue
@@ -1441,11 +1503,12 @@ def analyze_store(
     for wasm_id, wasm_result in wasm.items():
         parent_id = str(by_id.get(wasm_id, {}).get("parent_artifact_id", "0"))
         js_result = java_script.get(parent_id)
-        if (
-            not js_result
-            or js_result.get("tier") == "none"
-            or wasm_result.get("tier") == "none"
-        ):
+        js_tier = js_result.get("tier") if js_result else None
+        wasm_tier = wasm_result.get("tier")
+        if js_tier not in {"candidate", "likely-vm"} or wasm_tier not in {
+            "candidate",
+            "likely-vm",
+        }:
             continue
         rules = [item["rule_id"] for item in js_result.get("observations", [])]
         rules.extend(item["rule_id"] for item in wasm_result.get("observations", []))
@@ -1457,7 +1520,7 @@ def analyze_store(
                 ),
                 "runtime": "mixed",
                 "tier": "likely-vm"
-                if "likely-vm" in {js_result["tier"], wasm_result["tier"]}
+                if "likely-vm" in {js_tier, wasm_tier}
                 else "candidate",
                 "artifact_ids": [parent_id, wasm_id],
                 "vm_score": js_result.get("vm_score", 0)

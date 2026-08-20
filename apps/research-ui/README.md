@@ -103,7 +103,9 @@ launcher runs the same analyzer when its event or artifact inputs change.
 Manifest and event JSONL reads have explicit line and record limits. Invalid
 canonical identifiers, digests, or artifact paths become named failure or
 partial-coverage records before content is read. Cached analysis is served only
-after its profile and document digests are verified.
+after its profile and document digests are verified. JavaScript function-region
+count and cumulative region work are also bounded; exhausting either limit
+produces a named partial-coverage omission.
 
 The WebAssembly frontend decodes bounded function bodies and instruction
 immediates. It scores dispatch only when a decoded branch table or indirect

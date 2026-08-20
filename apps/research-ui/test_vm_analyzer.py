@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 from vm_analyzer import (
     AnalysisError,
     Limits,
+    _find_js_rule,
     analyze_store,
     canonical_json,
     verify_analysis_document,
@@ -254,6 +256,52 @@ while (ip < program.length) {
                 result["observations"][0]["function_region"]["byte_offset"], 0
             )
 
+    def test_javascript_match_and_region_work_are_strictly_bounded(self) -> None:
+        class CountingPattern:
+            def __init__(self) -> None:
+                self.match_count = 0
+
+            def finditer(self, source: str):
+                for match in re.finditer(r"pc\+\+", source):
+                    self.match_count += 1
+                    yield match
+
+        pattern = CountingPattern()
+        observation = _find_js_rule(
+            "pc++;" * 1000,
+            "js.instruction-pointer",
+            (pattern,),
+            "bounded test",
+            Limits(max_js_matches_per_rule=3),
+        )
+        self.assertIsNotNone(observation)
+        self.assertEqual(pattern.match_count, 4)
+        self.assertEqual(observation["match_count"], 3)
+        self.assertTrue(observation["matches_truncated"])
+
+        nested_source = (
+            "".join(f"function f{index}(){{" for index in range(128))
+            + "return 1;"
+            + "}" * 128
+        ).encode()
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(
+                Path(directory),
+                [("javascript", "nested-functions.js", nested_source, "0")],
+            )
+            result = analyze_store(
+                store,
+                limits=Limits(
+                    max_js_function_regions=32,
+                    max_js_region_work_bytes=512,
+                ),
+            )["results"][0]
+
+        self.assertEqual(result["status"], "partial")
+        reasons = {item["reason"] for item in result["coverage"]["omissions"]}
+        self.assertIn("javascript-function-region-limit", reasons)
+        self.assertIn("javascript-region-work-limit", reasons)
+
     def test_javascript_coordinates_are_utf8_byte_offsets(self) -> None:
         source = "const marker = 'π';\n" + (FIXTURES / "pure-js-vm.js").read_text(
             encoding="utf-8"
@@ -346,6 +394,7 @@ while (ip < program.length) {
                 {
                     "session_id": "7",
                     "sequence_number": "1",
+                    "navigation_id": "100",
                     "frame_id": "200",
                     "artifact_id": "1",
                     "category": "canvas",
@@ -354,9 +403,20 @@ while (ip < program.length) {
                 {
                     "session_id": "7",
                     "sequence_number": "2",
+                    "navigation_id": "100",
                     "frame_id": "200",
                     "artifact_id": "1",
                     "request_id": "81",
+                    "category": "network",
+                    "type": "request_started",
+                },
+                {
+                    "session_id": "7",
+                    "sequence_number": "3",
+                    "navigation_id": "101",
+                    "frame_id": "200",
+                    "artifact_id": "1",
+                    "request_id": "82",
                     "category": "network",
                     "type": "request_started",
                 },
@@ -377,6 +437,28 @@ while (ip < program.length) {
             self.assertIn(
                 "Exact value provenance is not claimed", request_edge["reason"]
             )
+
+    def test_failed_child_does_not_abort_mixed_runtime_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(
+                Path(directory),
+                [
+                    (
+                        "javascript",
+                        "pure-js-vm.js",
+                        (FIXTURES / "pure-js-vm.js").read_bytes(),
+                        "0",
+                    ),
+                    ("wasm", "malformed.wasm", b"not-wasm", "1"),
+                ],
+            )
+
+            document = analyze_store(store)
+
+        self.assertEqual(len(document["results"]), 2)
+        self.assertEqual(document["results"][1]["status"], "failed")
+        self.assertEqual(document["mixed_findings"], [])
+        self.assertEqual(document["summary"]["failed_count"], 1)
 
     def test_named_limits_and_malformed_wasm_remain_visible(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -501,6 +583,7 @@ while (ip < program.length) {
             event = {
                 "session_id": "7",
                 "sequence_number": "1",
+                "navigation_id": "100",
                 "frame_id": "200",
                 "category": "network",
                 "type": "request_started",

@@ -355,6 +355,7 @@ class ResearchUiTests(unittest.TestCase):
             {
                 "session_id": "7",
                 "sequence_number": "1",
+                "navigation_id": "100",
                 "frame_id": "200",
                 "artifact_id": "300",
                 "request_id": "81",

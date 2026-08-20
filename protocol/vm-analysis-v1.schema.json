@@ -91,10 +91,12 @@
         "limits": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["max_artifact_bytes", "max_js_matches_per_rule", "max_wasm_sections", "max_wasm_section_bytes", "max_graph_edges", "max_bytecode_snapshot_bytes", "max_manifest_line_bytes", "max_event_line_bytes", "max_artifact_records", "max_event_records", "max_wasm_functions", "max_wasm_instructions"],
+          "required": ["max_artifact_bytes", "max_js_matches_per_rule", "max_js_function_regions", "max_js_region_work_bytes", "max_wasm_sections", "max_wasm_section_bytes", "max_graph_edges", "max_bytecode_snapshot_bytes", "max_manifest_line_bytes", "max_event_line_bytes", "max_artifact_records", "max_event_records", "max_wasm_functions", "max_wasm_instructions"],
           "properties": {
             "max_artifact_bytes": {"type": "integer", "minimum": 1},
             "max_js_matches_per_rule": {"type": "integer", "minimum": 1},
+            "max_js_function_regions": {"type": "integer", "minimum": 1},
+            "max_js_region_work_bytes": {"type": "integer", "minimum": 1},
             "max_wasm_sections": {"type": "integer", "minimum": 1},
             "max_wasm_section_bytes": {"type": "integer", "minimum": 1},
             "max_graph_edges": {"type": "integer", "minimum": 1},

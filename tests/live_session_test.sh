@@ -31,6 +31,9 @@ trap cleanup EXIT
 readonly fake_app="${test_root}/Origin Trace.app"
 readonly fake_brave="${test_root}/fake-brave"
 readonly fake_open="${test_root}/fake-open"
+readonly fake_analyzer="${test_root}/fake-analyzer.py"
+readonly analyzer_started="${test_root}/analyzer-started"
+readonly analyzer_stopped="${test_root}/analyzer-stopped"
 readonly open_arguments="${test_root}/open-arguments"
 mkdir -p "${fake_app}"
 
@@ -58,6 +61,13 @@ printf '%s\n' \
   'test -n "${token_file}"' \
   'test -n "${session_id}"' \
   'test -n "${category_mask}"' \
+  'if [[ -n "${REB_ANALYZER_STARTED:-}" ]]; then' \
+  '  for _ in {1..200}; do' \
+  '    [[ -f "${REB_ANALYZER_STARTED}" ]] && break' \
+  '    sleep 0.01' \
+  '  done' \
+  '  test -f "${REB_ANALYZER_STARTED}"' \
+  'fi' \
   '"${REB_EVENT_PRODUCER}" --socket "${event_socket}" --token-file "${token_file}" --session-id "${session_id}"' \
   'if ((category_mask & 1024)); then' \
   '  "${REB_ARTIFACT_PRODUCER}" --socket "${artifact_socket}" --token-file "${token_file}" --session-id "${session_id}"' \
@@ -72,8 +82,28 @@ printf '%s\n' \
   >"${fake_open}"
 chmod +x "${fake_brave}" "${fake_open}"
 
+printf '%s\n' \
+  'import os' \
+  'import signal' \
+  'import time' \
+  'from pathlib import Path' \
+  'started = Path(os.environ["REB_ANALYZER_STARTED"])' \
+  'stopped = Path(os.environ["REB_ANALYZER_STOPPED"])' \
+  'def stop(_signal, _frame):' \
+  '    stopped.write_text("stopped\n", encoding="utf-8")' \
+  '    raise SystemExit(0)' \
+  'signal.signal(signal.SIGINT, stop)' \
+  'signal.signal(signal.SIGTERM, stop)' \
+  'started.write_text(str(os.getpid()) + "\n", encoding="utf-8")' \
+  'while True:' \
+  '    time.sleep(1)' \
+  >"${fake_analyzer}"
+
 REB_BRAVE_BINARY="${fake_brave}" \
 REB_ORIGIN_TRACE_APP="${fake_app}" \
+REB_VM_ANALYZER="${fake_analyzer}" \
+REB_ANALYZER_STARTED="${analyzer_started}" \
+REB_ANALYZER_STOPPED="${analyzer_stopped}" \
 REB_LIVE_SESSION_ROOT="${test_root}/sessions" \
 REB_OPEN_COMMAND="${fake_open}" \
 REB_OPEN_ARGUMENTS="${open_arguments}" \
@@ -81,6 +111,15 @@ REB_EVENT_PRODUCER="${event_producer}" \
 REB_ARTIFACT_PRODUCER="${artifact_producer}" \
 REB_CAPTURE_DURATION_SECONDS=60 \
   "${live_script}" >"${test_root}/live.out" 2>"${test_root}/live.err"
+
+test -f "${analyzer_started}"
+test -f "${analyzer_stopped}"
+analyzer_process_id="$(cat "${analyzer_started}")"
+readonly analyzer_process_id
+if kill -0 "${analyzer_process_id}" 2>/dev/null; then
+  echo "VM analyzer remained alive after the live session stopped" >&2
+  exit 1
+fi
 
 session_directory="$(find "${test_root}/sessions" -mindepth 1 -maxdepth 1 -type d -print -quit)"
 readonly session_directory

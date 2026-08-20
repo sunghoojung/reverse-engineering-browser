@@ -372,7 +372,7 @@ int ListenOnUnixSocket(const std::string& path) {
     return -1;
   }
 
-  struct stat existing{};
+  struct stat existing {};
   if (lstat(path.c_str(), &existing) == 0 || errno != ENOENT) {
     std::cerr << "Broker socket path already exists: " << path << '\n';
     return -1;

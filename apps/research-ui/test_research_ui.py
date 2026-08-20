@@ -6,11 +6,13 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.request
+from http import HTTPStatus
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from server import ResearchHandler
+from server import JSONL_TAIL_CHUNK_BYTES, MAX_EVENT_JSON_BYTES, ResearchHandler
 
 
 class ResearchUiTests(unittest.TestCase):
@@ -98,6 +100,62 @@ class ResearchUiTests(unittest.TestCase):
 
             self.assertEqual(handler.load_events(), [event])
 
+    def test_event_store_reads_only_the_requested_tail_window(self) -> None:
+        events = [
+            {"sequence_number": str(index), "payload": "x" * 2048}
+            for index in range(1, 41)
+        ]
+        events[-1]["payload"] = "newest ☃"
+        with tempfile.TemporaryDirectory() as directory:
+            store = Path(directory) / "events.jsonl"
+            store.write_text(
+                "\n\n".join(json.dumps(event, ensure_ascii=False) for event in events),
+                encoding="utf-8",
+            )
+            handler = object.__new__(ResearchHandler)
+            handler.event_store = store
+
+            self.assertGreater(store.stat().st_size, JSONL_TAIL_CHUNK_BYTES)
+            self.assertEqual(handler.load_events(2), events[-2:])
+            self.assertEqual(handler.load_events(40), events)
+            self.assertEqual(handler.load_events(0), [])
+
+    def test_event_store_rejects_oversized_records(self) -> None:
+        oversized = b'{' + (b"x" * MAX_EVENT_JSON_BYTES)
+        with tempfile.TemporaryDirectory() as directory:
+            store = Path(directory) / "events.jsonl"
+            store.write_bytes(b'{"sequence_number":"1"}\n' + oversized)
+            handler = object.__new__(ResearchHandler)
+            handler.event_store = store
+
+            with self.assertRaisesRegex(ValueError, "oversized event"):
+                handler.load_events(1)
+            with self.assertRaisesRegex(ValueError, "oversized event"):
+                handler.load_events()
+
+    def test_event_store_tail_rejects_a_malformed_selected_record(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = Path(directory) / "events.jsonl"
+            store.write_text('{"sequence_number":"1"}\n[]\n', encoding="utf-8")
+            handler = object.__new__(ResearchHandler)
+            handler.event_store = store
+
+            with self.assertRaisesRegex(ValueError, "malformed event"):
+                handler.load_events(1)
+
+    def test_event_store_tail_does_not_parse_records_outside_the_window(self) -> None:
+        newest = {"sequence_number": "2", "payload": "visible"}
+        with tempfile.TemporaryDirectory() as directory:
+            store = Path(directory) / "events.jsonl"
+            store.write_text(
+                "malformed historical record\n" + json.dumps(newest) + "\n",
+                encoding="utf-8",
+            )
+            handler = object.__new__(ResearchHandler)
+            handler.event_store = store
+
+            self.assertEqual(handler.load_events(1), [newest])
+
     def test_missing_event_store_is_an_empty_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             handler = object.__new__(ResearchHandler)
@@ -114,6 +172,50 @@ class ResearchUiTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "malformed event"):
                 handler.load_events()
+
+    def test_event_api_uses_conditional_responses_for_unchanged_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = root / "events.jsonl"
+            store.write_text('{"sequence_number":"1"}\n', encoding="utf-8")
+            artifact_store = root / "artifacts"
+            artifact_store.mkdir()
+            ResearchHandler.ui_directory = Path(__file__).parent
+            ResearchHandler.event_store = store
+            ResearchHandler.artifact_store = artifact_store
+            ResearchHandler.broker_socket = None
+            server = ThreadingHTTPServer(("127.0.0.1", 0), ResearchHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                url = f"http://127.0.0.1:{server.server_port}/api/events?limit=10"
+                with urllib.request.urlopen(url) as response:
+                    self.assertEqual(json.load(response)["count"], 1)
+                    etag = response.headers["ETag"]
+
+                request = urllib.request.Request(url, headers={"If-None-Match": etag})
+                with self.assertRaises(urllib.error.HTTPError) as unchanged:
+                    urllib.request.urlopen(request)
+                self.assertEqual(unchanged.exception.code, HTTPStatus.NOT_MODIFIED)
+                self.assertEqual(unchanged.exception.headers["ETag"], etag)
+
+                different_window = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_port}/api/events?limit=1",
+                    headers={"If-None-Match": etag},
+                )
+                with urllib.request.urlopen(different_window) as response:
+                    self.assertEqual(json.load(response)["count"], 1)
+                    self.assertNotEqual(response.headers["ETag"], etag)
+
+                with store.open("a", encoding="utf-8") as stream:
+                    stream.write('{"sequence_number":"2"}\n')
+                with urllib.request.urlopen(request) as response:
+                    self.assertEqual(json.load(response)["count"], 2)
+                    self.assertNotEqual(response.headers["ETag"], etag)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
 
     def test_artifact_manifest_and_content_are_validated(self) -> None:
         content = b"export function checkout() { return true; }\n"
@@ -181,9 +283,18 @@ class ResearchUiTests(unittest.TestCase):
                 base_url = f"http://127.0.0.1:{server.server_port}"
                 with urllib.request.urlopen(f"{base_url}/api/artifacts?limit=10") as response:
                     catalog = json.load(response)
+                    catalog_etag = response.headers["ETag"]
                 self.assertEqual(catalog["count"], 1)
                 self.assertEqual(catalog["artifacts"][0]["artifact_id"], "300")
                 self.assertNotIn("content_path", catalog["artifacts"][0])
+
+                conditional_catalog = urllib.request.Request(
+                    f"{base_url}/api/artifacts?limit=10",
+                    headers={"If-None-Match": catalog_etag},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as unchanged:
+                    urllib.request.urlopen(conditional_catalog)
+                self.assertEqual(unchanged.exception.code, HTTPStatus.NOT_MODIFIED)
 
                 with urllib.request.urlopen(
                     f"{base_url}/api/artifacts/300/content?offset=2&limit=4"
@@ -306,6 +417,8 @@ class ResearchUiTests(unittest.TestCase):
         self.assertIn("Fetch/XHR", html)
         self.assertIn("No live requests yet", html)
         self.assertIn("Response body capture is disabled", html)
+        self.assertGreaterEqual(html.count("'If-None-Match'"), 2)
+        self.assertGreaterEqual(html.count("response.status === 304"), 2)
         self.assertIn("`${integerText(event, 'session_id')}:${event.process_id}`", html)
         self.assertIn("body.events.every(isBrokerEvent)", html)
         self.assertIn("body.count === body.events.length", html)

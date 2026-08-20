@@ -15,6 +15,8 @@ CANONICAL_UINT64 = re.compile(r"(?:0|[1-9][0-9]*)\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 ARTIFACT_KINDS = {"javascript", "wasm", "source_map", "response_body"}
 MAX_ARTIFACT_RESPONSE_BYTES = 2 * 1024 * 1024
+JSONL_TAIL_CHUNK_BYTES = 64 * 1024
+MAX_EVENT_JSON_BYTES = 4 * 1024
 PUBLIC_ARTIFACT_FIELDS = (
     "protocol_version",
     "artifact_id",
@@ -59,7 +61,13 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             query = parse_qs(parsed.query)
             try:
                 limit = max(1, min(int(query.get("limit", ["500"])[0]), 5000))
-                events = self.load_events()[-limit:]
+                broker_connected = self.broker_connected()
+                etag = self.resource_etag(
+                    self.event_store, f"{int(broker_connected)}-{limit}"
+                )
+                if self.send_not_modified(etag):
+                    return
+                events = self.load_events(limit)
             except (OSError, ValueError, json.JSONDecodeError) as exception:
                 self.send_json({"error": str(exception)}, HTTPStatus.INTERNAL_SERVER_ERROR)
                 return
@@ -67,14 +75,20 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                 {
                     "count": len(events),
                     "events": events,
-                    "broker_connected": self.broker_connected(),
-                }
+                    "broker_connected": broker_connected,
+                },
+                etag=etag,
             )
             return
         if parsed.path == "/api/artifacts":
             query = parse_qs(parsed.query)
             try:
                 limit = max(1, min(int(query.get("limit", ["500"])[0]), 5000))
+                etag = self.resource_etag(
+                    self.artifact_store / "manifest.jsonl", str(limit)
+                )
+                if self.send_not_modified(etag):
+                    return
                 artifacts = self.load_artifacts()[-limit:]
             except (OSError, ValueError, json.JSONDecodeError) as exception:
                 self.send_json({"error": str(exception)}, HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -83,7 +97,9 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                 {field: artifact[field] for field in PUBLIC_ARTIFACT_FIELDS}
                 for artifact in artifacts
             ]
-            self.send_json({"count": len(public_artifacts), "artifacts": public_artifacts})
+            self.send_json(
+                {"count": len(public_artifacts), "artifacts": public_artifacts}, etag=etag
+            )
             return
         artifact_match = re.fullmatch(r"/api/artifacts/([^/]+)/content", parsed.path)
         if artifact_match is not None:
@@ -115,18 +131,61 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             return
         super().do_GET()
 
-    def load_events(self) -> list[dict]:
+    def load_events(self, limit: Optional[int] = None) -> list[dict]:
         if not self.event_store.exists():
             return []
+        if limit is not None:
+            return [self.parse_event(line) for line in self.read_recent_lines(limit)]
         events = []
-        with self.event_store.open(encoding="utf-8") as stream:
-            for line in stream:
-                if line.strip():
-                    event = json.loads(line)
-                    if not isinstance(event, dict):
-                        raise ValueError("The evidence store contains a malformed event")
-                    events.append(event)
+        with self.event_store.open("rb") as stream:
+            for encoded_line in stream:
+                if encoded_line.strip():
+                    if encoded_line.endswith(b"\n"):
+                        encoded_line = encoded_line[:-1]
+                    events.append(self.parse_event(self.decode_event_line(encoded_line)))
         return events
+
+    def read_recent_lines(self, limit: int) -> list[str]:
+        if limit <= 0:
+            return []
+
+        lines = []
+        suffix = b""
+        with self.event_store.open("rb") as stream:
+            position = stream.seek(0, 2)
+            while position > 0 and len(lines) < limit:
+                chunk_size = min(position, JSONL_TAIL_CHUNK_BYTES)
+                position -= chunk_size
+                stream.seek(position)
+                parts = stream.read(chunk_size).split(b"\n")
+                parts[-1] += suffix
+                for encoded_line in reversed(parts[1:]):
+                    if encoded_line.strip():
+                        lines.append(self.decode_event_line(encoded_line))
+                        if len(lines) == limit:
+                            break
+                suffix = parts[0]
+                if len(suffix) > MAX_EVENT_JSON_BYTES:
+                    raise ValueError("The evidence store contains an oversized event")
+
+            if position == 0 and len(lines) < limit and suffix.strip():
+                lines.append(self.decode_event_line(suffix))
+
+        lines.reverse()
+        return lines
+
+    @staticmethod
+    def parse_event(line: str) -> dict:
+        event = json.loads(line)
+        if not isinstance(event, dict):
+            raise ValueError("The evidence store contains a malformed event")
+        return event
+
+    @staticmethod
+    def decode_event_line(encoded_line: bytes) -> str:
+        if len(encoded_line) > MAX_EVENT_JSON_BYTES:
+            raise ValueError("The evidence store contains an oversized event")
+        return encoded_line.decode("utf-8")
 
     def load_artifacts(self) -> list[dict]:
         manifest = self.artifact_store / "manifest.jsonl"
@@ -214,12 +273,37 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         except OSError:
             return False
 
-    def send_json(self, value: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
+    @staticmethod
+    def resource_etag(path: Path, state: str = "") -> str:
+        try:
+            metadata = path.stat()
+            identity = (
+                f"{metadata.st_dev:x}-{metadata.st_ino:x}-{metadata.st_size:x}-"
+                f"{metadata.st_mtime_ns:x}"
+            )
+        except FileNotFoundError:
+            identity = "missing"
+        return f'"{identity}-{state}"'
+
+    def send_not_modified(self, etag: str) -> bool:
+        if self.headers.get("If-None-Match") != etag:
+            return False
+        self.send_response(HTTPStatus.NOT_MODIFIED)
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        return True
+
+    def send_json(
+        self, value: dict, status: HTTPStatus = HTTPStatus.OK, etag: Optional[str] = None
+    ) -> None:
         body = json.dumps(value, separators=(",", ":")).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if etag is not None:
+            self.send_header("ETag", etag)
         self.end_headers()
         self.wfile.write(body)
 

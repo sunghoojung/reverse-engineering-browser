@@ -61,6 +61,16 @@ disconnected, malformed-event, and sequence-gap states remain visible. The
 trace workspace still combines a sample request field backtrace with live broker
 events, with sample and live evidence always labeled separately.
 
+The event endpoint reads backward from the append-only JSONL store and parses
+only its requested, bounded tail window. UI refresh cost therefore follows the
+visible event count instead of the total capture size. Offline evidence-store
+validation still scans the complete file through `tools/validate-evidence-store.py`.
+The reader rejects JSONL records larger than 4 KiB, which is safely above the
+current fixed event contract and keeps malformed-record work bounded.
+Event and artifact polling also sends explicit entity tags. When neither store
+nor broker connectivity changed, the server returns an empty `304` response and
+the UI skips JSON parsing and DOM reconstruction.
+
 The Sources workspace reads the separate artifact manifest and immutable blobs
 created by `reb-artifact-receiver`. Its Page navigator follows the DevTools
 frame, origin, directory, and file organization. The center editor provides
@@ -91,15 +101,15 @@ Empty, disconnected, malformed-finding, and sequence-gap states remain
 visible. Unlike the request backtrace demonstration, VM Lab does not populate
 sample findings in standalone preview mode.
 
-The UI validates the broker envelope and every event before replacing the last
-known-good view. Protocol v2 transports 64-bit identifiers, timestamps, and
-transfer sizes as canonical decimal strings so browser-side correlation and
-timing calculations remain exact. Browser network events also carry both
-64-bit halves of the BrowserContext token, which keeps BrowserContext-local
-request identifiers distinct. Development stores written before those token
-fields were added remain readable when both fields are absent. Legacy v1
-numeric records remain readable when their integer values are within
-JavaScript's exact range.
+The UI validates the broker envelope and every returned event before replacing
+the last known-good view. Protocol v2 transports 64-bit identifiers,
+timestamps, and transfer sizes as canonical decimal strings so browser-side
+correlation and timing calculations remain exact. Browser network events also
+carry both 64-bit halves of the BrowserContext token, which keeps
+BrowserContext-local request identifiers distinct. Development stores written
+before those token fields were added remain readable when both fields are
+absent. Legacy v1 numeric records remain readable when their integer values are
+within JavaScript's exact range.
 
 The current broker does not capture structured request fields or arbitrary
 JavaScript data flow. The sample backtrace demonstrates the intended workflow,

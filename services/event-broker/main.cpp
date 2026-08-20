@@ -27,6 +27,8 @@
 
 namespace {
 
+constexpr std::size_t kSocketEventBatchCapacity = 256;
+
 struct Options final {
   std::string store_path;
   std::string socket_path;
@@ -165,6 +167,14 @@ bool StoreEvent(reb::EventBroker& broker, std::ofstream& store, const reb::Event
     return true;
   }
   store << reb::EventToJson(event) << '\n';
+  if (!store) {
+    std::cerr << "Unable to write event store\n";
+    return false;
+  }
+  return true;
+}
+
+bool FlushStore(std::ofstream& store) {
   store.flush();
   if (!store) {
     std::cerr << "Unable to write event store\n";
@@ -182,9 +192,10 @@ bool IngestStandardInput(reb::EventBroker& broker, std::ofstream& store) {
   }
   if (std::cin.gcount() != 0) {
     std::cerr << "Truncated native event record received\n";
+    static_cast<void>(FlushStore(store));
     return false;
   }
-  return true;
+  return FlushStore(store);
 }
 
 enum class TimedReadStatus {
@@ -231,6 +242,60 @@ TimedReadStatus ReadExactUntil(const int descriptor,
   return TimedReadStatus::kComplete;
 }
 
+class SocketEventReader final {
+ public:
+  TimedReadStatus ReadBatch(const int descriptor,
+                            const std::span<reb::EventRecord> output,
+                            const std::uint64_t deadline_ns,
+                            std::size_t& event_count,
+                            std::string& error) {
+    event_count = 0;
+    while (buffered_bytes_ < sizeof(reb::EventRecord)) {
+      pollfd readable{descriptor, static_cast<short>(POLLIN), 0};
+      const int poll_result = poll(&readable, 1, MillisecondsUntil(deadline_ns));
+      if (poll_result == 0) {
+        return TimedReadStatus::kExpired;
+      }
+      if (poll_result < 0) {
+        if (errno == EINTR) {
+          continue;
+        }
+        error = std::string("socket poll failed: ") + std::strerror(errno);
+        return TimedReadStatus::kError;
+      }
+
+      const ssize_t count =
+          read(descriptor, bytes_.data() + buffered_bytes_, bytes_.size() - buffered_bytes_);
+      if (count > 0) {
+        buffered_bytes_ += static_cast<std::size_t>(count);
+        continue;
+      }
+      if (count < 0 && errno == EINTR) {
+        continue;
+      }
+      if (count == 0 && buffered_bytes_ == 0) {
+        return TimedReadStatus::kEndOfFile;
+      }
+      error = count == 0 ? "unexpected end of stream"
+                         : std::string("socket read failed: ") + std::strerror(errno);
+      return TimedReadStatus::kError;
+    }
+
+    event_count = std::min(output.size(), buffered_bytes_ / sizeof(reb::EventRecord));
+    const std::size_t consumed_bytes = event_count * sizeof(reb::EventRecord);
+    std::memcpy(output.data(), bytes_.data(), consumed_bytes);
+    buffered_bytes_ -= consumed_bytes;
+    if (buffered_bytes_ != 0) {
+      std::memmove(bytes_.data(), bytes_.data() + consumed_bytes, buffered_bytes_);
+    }
+    return TimedReadStatus::kComplete;
+  }
+
+ private:
+  std::array<std::byte, sizeof(reb::EventRecord) * kSocketEventBatchCapacity> bytes_{};
+  std::size_t buffered_bytes_ = 0;
+};
+
 bool IngestSocket(const int descriptor,
                   const Options& options,
                   const reb::SessionPolicy& policy,
@@ -263,11 +328,12 @@ bool IngestSocket(const int descriptor,
     return false;
   }
 
+  SocketEventReader reader;
+  std::array<reb::EventRecord, kSocketEventBatchCapacity> events{};
   for (;;) {
-    reb::EventRecord event{};
+    std::size_t event_count = 0;
     const TimedReadStatus event_status =
-        ReadExactUntil(descriptor, std::as_writable_bytes(std::span(&event, 1)),
-                       policy.expires_at_monotonic_ns, error);
+        reader.ReadBatch(descriptor, events, policy.expires_at_monotonic_ns, event_count, error);
     if (event_status == TimedReadStatus::kEndOfFile) {
       return true;
     }
@@ -280,11 +346,20 @@ bool IngestSocket(const int descriptor,
       return false;
     }
 
-    if (event.header.session_id != options.session_id) {
-      std::cerr << "Event session does not match authenticated broker session\n";
-      return false;
+    for (std::size_t index = 0; index < event_count; ++index) {
+      const reb::EventRecord& event = events[index];
+      if (event.header.session_id != options.session_id) {
+        std::cerr << "Event session does not match authenticated broker session\n";
+        if (index != 0) {
+          static_cast<void>(FlushStore(store));
+        }
+        return false;
+      }
+      if (!StoreEvent(broker, store, event)) {
+        return false;
+      }
     }
-    if (!StoreEvent(broker, store, event)) {
+    if (!FlushStore(store)) {
       return false;
     }
   }
@@ -297,7 +372,7 @@ int ListenOnUnixSocket(const std::string& path) {
     return -1;
   }
 
-  struct stat existing {};
+  struct stat existing{};
   if (lstat(path.c_str(), &existing) == 0 || errno != ENOENT) {
     std::cerr << "Broker socket path already exists: " << path << '\n';
     return -1;

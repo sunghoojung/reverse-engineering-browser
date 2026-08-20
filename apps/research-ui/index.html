@@ -1592,6 +1592,7 @@ export async function checkout(cart, fingerprint) {
         openArtifactIds: ['sample-300'],
         selectedArtifactId: 'sample-300',
         artifactRefreshing: false,
+        artifactEtag: null,
         sourcePretty: false,
         sourceTruncated: false,
         selectedRequestId: '81',
@@ -1601,6 +1602,7 @@ export async function checkout(cart, fingerprint) {
         requestType: 'all',
         broker: 'connecting',
         refreshing: false,
+        eventEtag: null,
         vmFindings: [],
         malformedVmFindings: 0,
         selectedVmFindingId: null
@@ -2985,10 +2987,13 @@ export async function checkout(cart, fingerprint) {
         if (state.artifactRefreshing || location.protocol === 'file:') return;
         state.artifactRefreshing = true;
         try {
-          const response = await fetch('/api/artifacts?limit=500', { cache: 'no-store' });
+          const headers = state.artifactEtag ? { 'If-None-Match': state.artifactEtag } : {};
+          const response = await fetch('/api/artifacts?limit=500', { cache: 'no-store', headers });
+          if (response.status === 304) return;
           if (!response.ok) throw new Error(`Artifact store returned ${response.status}`);
           const body = await response.json();
           if (!isArtifactResponse(body)) throw new TypeError('Malformed artifact response');
+          state.artifactEtag = response.headers.get('ETag');
           if (body.artifacts.length === 0) return;
           const existing = new Map(state.artifacts.map(artifact => [artifact.artifact_id, artifact]));
           state.artifacts = body.artifacts.map(artifact => ({ ...artifact, origin: 'live', content: existing.get(artifact.artifact_id)?.content }));
@@ -3046,12 +3051,18 @@ export async function checkout(cart, fingerprint) {
         if (state.refreshing) return;
         state.refreshing = true;
         try {
-          const response = await fetch('/api/events?limit=500', { cache: 'no-store' });
+          const headers = state.eventEtag ? { 'If-None-Match': state.eventEtag } : {};
+          const response = await fetch('/api/events?limit=500', { cache: 'no-store', headers });
+          if (response.status === 304) {
+            await refreshArtifacts();
+            return;
+          }
           if (!response.ok) throw new Error(`Broker returned ${response.status}`);
           const rawBody = await response.text();
           let body;
           try { body = JSON.parse(rawBody); } catch { throw new TypeError('Malformed broker response'); }
           if (!isBrokerResponse(body)) throw new TypeError('Malformed broker response');
+          state.eventEtag = response.headers.get('ETag');
           state.events = body.events;
           const vmModel = vmFindingsFromEvents(state.events);
           state.vmFindings = vmModel.findings;

@@ -13,12 +13,18 @@ The event broker is the center of the system.
 ## Implemented vertical slice
 
 The broker accepts fixed 320-byte native records on standard input or an
-authenticated Unix socket, validates
-their protocol envelope, enum values, flags, payload bounds, and reserved
+authenticated Unix socket, validates their protocol envelope, enum values,
+flags, payload bounds, and reserved
 fields, enforces an immutable category allowlist and monotonic expiration,
 detects sequence gaps, retains a bounded snapshot, and writes a
 versioned JSONL evidence store. Sequence tracking is bounded by the broker
 capacity, and tracker evictions are reported explicitly in broker stats.
+Standard-input replays buffer store writes until the replay ends. Live socket
+captures use bounded reads of up to 256 records and flush after every received
+batch. This keeps low-volume evidence visible promptly while reducing socket
+and storage calls on high-volume captures. JSON encoding appends integers and
+payload hex directly into one reserved output string instead of constructing a
+locale-aware stream and an intermediate payload string for every event.
 When the tracker reaches capacity, it evicts streams in deterministic insertion
 order so repeated evidence replays produce the same gap accounting.
 If combined gap counts exceed 64-bit range, the count saturates at its maximum

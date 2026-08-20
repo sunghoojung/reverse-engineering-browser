@@ -2,9 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cstring>
-#include <locale>
-#include <sstream>
+#include <limits>
 
 namespace reb {
 
@@ -62,6 +62,13 @@ bool IsKnownType(const EventType type) noexcept {
       return false;
   }
   return false;
+}
+
+template <typename Integer>
+void AppendInteger(std::string& output, const Integer value) {
+  std::array<char, std::numeric_limits<Integer>::digits10 + 3> buffer{};
+  const auto result = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+  output.append(buffer.data(), static_cast<std::size_t>(result.ptr - buffer.data()));
 }
 
 }  // namespace
@@ -127,47 +134,69 @@ bool IsValidEvent(const EventRecord& event) noexcept {
 std::string EventToJson(const EventRecord& event) {
   constexpr std::array<char, 16> kHex = {'0', '1', '2', '3', '4', '5', '6', '7',
                                          '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
-  std::string payload_hex;
-  payload_hex.reserve(InlinePayload(event).size() * 2);
-  for (const std::byte value : InlinePayload(event)) {
+  const std::span<const std::byte> payload = InlinePayload(event);
+  std::string output;
+  output.reserve(768 + payload.size() * 2);
+  output.append("{\"protocol_version\":");
+  AppendInteger(output, event.header.protocol_version);
+  output.append(",\"session_id\":\"");
+  AppendInteger(output, event.header.session_id);
+  output.append("\",\"sequence_number\":\"");
+  AppendInteger(output, event.header.sequence_number);
+  output.append("\",\"monotonic_time_ns\":\"");
+  AppendInteger(output, event.header.monotonic_time_ns);
+  output.append("\",\"process_id\":");
+  AppendInteger(output, event.header.process_id);
+  output.append(",\"thread_id\":");
+  AppendInteger(output, event.header.thread_id);
+  output.append(",\"navigation_id\":\"");
+  AppendInteger(output, event.header.navigation_id);
+  output.append("\",\"frame_id\":\"");
+  AppendInteger(output, event.header.frame_id);
+  output.append("\",\"artifact_id\":\"");
+  AppendInteger(output, event.header.artifact_id);
+  output.append("\",\"parent_event_id\":\"");
+  AppendInteger(output, event.header.parent_event_id);
+  output.append("\",\"request_id\":\"");
+  AppendInteger(output, event.header.request_id);
+  output.append("\",\"browser_context_id_high\":\"");
+  AppendInteger(output, event.header.browser_context_id_high);
+  output.append("\",\"browser_context_id_low\":\"");
+  AppendInteger(output, event.header.browser_context_id_low);
+  output.append("\",\"encoded_data_length\":\"");
+  AppendInteger(output, event.header.encoded_data_length);
+  output.append("\",\"decoded_body_length\":\"");
+  AppendInteger(output, event.header.decoded_body_length);
+  output.append("\",\"status_code\":");
+  AppendInteger(output, event.header.status_code);
+  output.append(",\"error_code\":");
+  AppendInteger(output, event.header.error_code);
+  output.append(",\"resource_type\":");
+  AppendInteger(output, event.header.resource_type);
+  output.append(",\"flags\":");
+  AppendInteger(output, event.header.flags);
+  output.append(",\"initiator_request_id\":");
+  AppendInteger(output, event.header.initiator_request_id);
+  output.append(",\"initiator_process_id\":");
+  AppendInteger(output, event.header.initiator_process_id);
+  output.append(",\"payload_truncated\":");
+  output.append((event.header.flags & static_cast<std::uint16_t>(EventFlag::kPayloadTruncated)) != 0
+                    ? "true"
+                    : "false");
+  output.append(",\"category\":\"");
+  output.append(EventCategoryName(event.header.category));
+  output.append("\",\"type\":\"");
+  output.append(EventTypeName(event.header.type));
+  output.append("\",\"payload_size\":");
+  AppendInteger(output, event.header.payload_size);
+  output.append(",\"payload_encoding\":\"hex\",\"payload\":\"");
+  for (const std::byte value : payload) {
     const auto byte_value = static_cast<unsigned int>(std::to_integer<unsigned char>(value));
-    payload_hex.push_back(kHex[(byte_value >> 4U) & 0x0fU]);
-    payload_hex.push_back(kHex[byte_value & 0x0fU]);
+    output.push_back(kHex[(byte_value >> 4U) & 0x0fU]);
+    output.push_back(kHex[byte_value & 0x0fU]);
   }
-
-  std::ostringstream output;
-  output.imbue(std::locale::classic());
-  output << '{' << "\"protocol_version\":" << event.header.protocol_version << ','
-         << "\"session_id\":\"" << event.header.session_id << "\","
-         << "\"sequence_number\":\"" << event.header.sequence_number << "\","
-         << "\"monotonic_time_ns\":\"" << event.header.monotonic_time_ns << "\","
-         << "\"process_id\":" << event.header.process_id << ','
-         << "\"thread_id\":" << event.header.thread_id << ',' << "\"navigation_id\":\""
-         << event.header.navigation_id << "\","
-         << "\"frame_id\":\"" << event.header.frame_id << "\","
-         << "\"artifact_id\":\"" << event.header.artifact_id << "\","
-         << "\"parent_event_id\":\"" << event.header.parent_event_id << "\","
-         << "\"request_id\":\"" << event.header.request_id << "\","
-         << "\"browser_context_id_high\":\"" << event.header.browser_context_id_high << "\","
-         << "\"browser_context_id_low\":\"" << event.header.browser_context_id_low << "\","
-         << "\"encoded_data_length\":\"" << event.header.encoded_data_length << "\","
-         << "\"decoded_body_length\":\"" << event.header.decoded_body_length << "\","
-         << "\"status_code\":" << event.header.status_code << ','
-         << "\"error_code\":" << event.header.error_code << ','
-         << "\"resource_type\":" << event.header.resource_type << ','
-         << "\"flags\":" << event.header.flags << ','
-         << "\"initiator_request_id\":" << event.header.initiator_request_id << ','
-         << "\"initiator_process_id\":" << event.header.initiator_process_id << ','
-         << "\"payload_truncated\":"
-         << ((event.header.flags & static_cast<std::uint16_t>(EventFlag::kPayloadTruncated)) != 0
-                 ? "true"
-                 : "false")
-         << ',' << "\"category\":\"" << EventCategoryName(event.header.category) << "\","
-         << "\"type\":\"" << EventTypeName(event.header.type) << "\","
-         << "\"payload_size\":" << event.header.payload_size << ','
-         << "\"payload_encoding\":\"hex\","
-         << "\"payload\":\"" << payload_hex << "\"}";
-  return output.str();
+  output.append("\"}");
+  return output;
 }
 
 std::string_view EventCategoryName(const EventCategory category) noexcept {

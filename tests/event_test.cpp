@@ -206,6 +206,41 @@ int main() {
   CHECK(json.find("\"encoded_data_length\":\"-1\"") != std::string::npos);
   CHECK(json.find("\"decoded_body_length\":\"9223372036854775807\"") != std::string::npos);
 
+  reb::EventRecord serialized =
+      reb::MakeEvent(reb::EventCategory::kNetwork, reb::EventType::kRequestCompleted, 2, 3, 4);
+  serialized.header.process_id = 5;
+  serialized.header.thread_id = 6;
+  serialized.header.navigation_id = 7;
+  serialized.header.frame_id = 8;
+  serialized.header.artifact_id = 9;
+  serialized.header.parent_event_id = 10;
+  serialized.header.request_id = 11;
+  serialized.header.browser_context_id_high = 12;
+  serialized.header.browser_context_id_low = 13;
+  serialized.header.encoded_data_length = -14;
+  serialized.header.decoded_body_length = 15;
+  serialized.header.status_code = -16;
+  serialized.header.error_code = -17;
+  serialized.header.resource_type = 18;
+  serialized.header.initiator_request_id = 19;
+  serialized.header.initiator_process_id = 20;
+  const std::array payload = {std::byte{0x00}, std::byte{0xab}, std::byte{0xff}};
+  CHECK(reb::SetInlinePayload(serialized, payload));
+  serialized.header.flags = static_cast<std::uint16_t>(reb::EventFlag::kPayloadTruncated) |
+                            static_cast<std::uint16_t>(reb::EventFlag::kFromCache);
+  CHECK(reb::EventToJson(serialized) ==
+        "{\"protocol_version\":2,\"session_id\":\"4\",\"sequence_number\":\"2\","
+        "\"monotonic_time_ns\":\"3\",\"process_id\":5,\"thread_id\":6,"
+        "\"navigation_id\":\"7\",\"frame_id\":\"8\",\"artifact_id\":\"9\","
+        "\"parent_event_id\":\"10\",\"request_id\":\"11\","
+        "\"browser_context_id_high\":\"12\",\"browser_context_id_low\":\"13\","
+        "\"encoded_data_length\":\"-14\",\"decoded_body_length\":\"15\","
+        "\"status_code\":-16,\"error_code\":-17,\"resource_type\":18,\"flags\":3,"
+        "\"initiator_request_id\":19,\"initiator_process_id\":20,"
+        "\"payload_truncated\":true,\"category\":\"network\","
+        "\"type\":\"request_completed\",\"payload_size\":3,"
+        "\"payload_encoding\":\"hex\",\"payload\":\"00abff\"}");
+
   const std::locale original_locale = std::locale();
   std::locale::global(std::locale(std::locale::classic(), new GroupedNumbers));
   const std::string locale_independent_json = reb::EventToJson(large_identifiers);

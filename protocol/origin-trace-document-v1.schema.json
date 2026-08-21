@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://origin-trace.local/protocol/origin-trace-document-v1.schema.json",
+  "title": "Origin Trace Request Document v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "document_kind", "request_id", "status", "steps", "gaps", "coverage", "artifacts"],
+  "properties": {
+    "contract_version": {"const": 1},
+    "document_kind": {"const": "origin-trace"},
+    "request_id": {"$ref": "#/$defs/uint64"},
+    "status": {"enum": ["complete", "partial", "empty", "ambiguous"]},
+    "steps": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/step"}},
+    "gaps": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/gap"}},
+    "coverage": {"$ref": "#/$defs/coverage"},
+    "artifacts": {"type": "array", "items": {"$ref": "#/$defs/artifact"}}
+  },
+  "$defs": {
+    "uint32": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+    "nonzeroUint64": {"type": "string", "minLength": 1, "maxLength": 20, "pattern": "^[1-9][0-9]*$"},
+    "uint64": {"type": "string", "minLength": 1, "maxLength": 20, "pattern": "^(?:0|[1-9][0-9]*)$"},
+    "eventReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "process_id", "sequence_number"],
+      "properties": {
+        "session_id": {"$ref": "#/$defs/nonzeroUint64"},
+        "process_id": {"$ref": "#/$defs/uint32"},
+        "sequence_number": {"$ref": "#/$defs/nonzeroUint64"}
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event", "monotonic_time_ns", "category", "operation", "frame_id", "artifact_id", "request_id", "relation", "confidence", "value"],
+      "properties": {
+        "event": {"$ref": "#/$defs/eventReference"},
+        "monotonic_time_ns": {"$ref": "#/$defs/uint64"},
+        "category": {"type": "string", "minLength": 1},
+        "operation": {"type": "string", "minLength": 1},
+        "frame_id": {"$ref": "#/$defs/uint64"},
+        "artifact_id": {"$ref": "#/$defs/uint64"},
+        "request_id": {"$ref": "#/$defs/uint64"},
+        "relation": {"enum": ["trace_target", "parent_event", "request_initiator", "request_lifecycle", "artifact_request"]},
+        "confidence": {"enum": ["observed", "correlated"]},
+        "value": {"type": "string", "maxLength": 256}
+      }
+    },
+    "gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason", "after_step", "detail"],
+      "properties": {
+        "reason": {"enum": ["ambiguous_request", "missing_event", "no_predecessor", "cycle", "step_limit"]},
+        "after_step": {"type": "integer", "minimum": 0, "maximum": 31},
+        "detail": {"type": "string", "minLength": 1}
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["linked_steps", "observed_links", "correlated_links", "gap_count", "percent"],
+      "properties": {
+        "linked_steps": {"type": "integer", "minimum": 0, "maximum": 31},
+        "observed_links": {"type": "integer", "minimum": 0, "maximum": 31},
+        "correlated_links": {"type": "integer", "minimum": 0, "maximum": 31},
+        "gap_count": {"type": "integer", "minimum": 0, "maximum": 32},
+        "percent": {"type": "integer", "minimum": 0, "maximum": 100}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id"],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/uint64"},
+        "kind": {"type": "string"},
+        "url": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "byte_size": {"type": "integer", "minimum": 0},
+        "creator_event_id": {"$ref": "#/$defs/uint64"},
+        "parent_artifact_id": {"$ref": "#/$defs/uint64"}
+      }
+    }
+  }
+}

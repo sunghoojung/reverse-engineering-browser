@@ -128,6 +128,9 @@
 
 ## Research Workspace
 
+- Request-first Origin Trace over the versioned broker edge sidecar, with exact
+  request-root selection, bounded traversal, explicit gaps, and supporting
+  evidence rows.
 - Unified investigation timeline and causal graph.
 - Source-to-event and event-to-source navigation.
 - Bookmarks, annotations, hypotheses, and evidence-backed conclusions.

@@ -5,6 +5,7 @@
 - [Feature roadmap](./product/feature-list.md)
 - [Feature catalog](./product/feature-catalog.md)
 - [Anti-bot VM detection v1](./product/anti-bot-vm-detection-v1.md)
+- [Request Origin Trace v1](./product/request-origin-trace-v1.md)
 
 ## Architecture
 

@@ -32,6 +32,13 @@ and a separate saturation flag is reported instead of wrapping silently.
 Protocol v2 stores 64-bit values as canonical decimal strings so opaque IDs and
 large counters remain exact in JavaScript clients.
 
+When `--trace-store` is present, the broker also maintains a bounded cold-path
+correlation index and writes a versioned Origin Trace edge sidecar. The index
+uses identifiers already in accepted events, emits at most three edges per
+event, and never infers value flow. The renderer queue, browser transport, and
+disabled capture path are unchanged. Parent and initiator identifiers are
+observed relationships; artifact/request joins are visibly correlated.
+
 ```sh
 make e2e
 ```
@@ -53,6 +60,7 @@ session, and removes the socket after disconnect.
 ```sh
 build/reb-event-broker \
   --store build/sessions/live/events.jsonl \
+  --trace-store build/sessions/live/origin-trace.jsonl \
   --socket /tmp/origin-trace.sock \
   --token-file build/sessions/live/broker.token \
   --session-id 123 \

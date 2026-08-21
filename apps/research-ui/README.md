@@ -8,8 +8,7 @@ The research UI is the human-facing investigation workspace.
   or body field to investigate.
 - Show a backward evidence graph through serialization, transforms, runtime
   values, browser inputs, and native probe evidence.
-- Keep confidence visible on every relationship: Exact, Matched, Differential,
-  Correlated, or Unknown.
+- Keep observed, correlated, and unknown relationships visually distinct.
 - Show correlated requests, scripts, frames, API probes, WASM modules, and artifacts.
 - Start and stop explicitly authorized research sessions.
 - Display dropped-event counts and evidence gaps instead of hiding them.
@@ -58,8 +57,10 @@ JSONL evidence store written by the native broker. The network workspace groups
 lifecycle events by request and provides request filters plus Headers, Payload,
 Preview, Response, Initiator, and Timing inspectors. Loading, empty,
 disconnected, malformed-event, and sequence-gap states remain visible. The
-trace workspace still combines a sample request field backtrace with live broker
-events, with sample and live evidence always labeled separately.
+trace workspace builds a live request-level origin chain from the broker's
+versioned edge sidecar. Structured request fields are not required. It selects
+one exact request-start event, shows observed and correlated links separately,
+and makes missing retained evidence visible as named gaps.
 
 The event endpoint reads backward from the append-only JSONL store and parses
 only its requested, bounded tail window. UI refresh cost therefore follows the
@@ -92,6 +93,13 @@ visible even when the viewer shows a bounded preview.
 
 Pass `--socket /path/to/broker.sock` to the development server when it should
 also report live broker connectivity.
+
+Pass `--trace-store /path/to/origin-trace.jsonl` when the edge sidecar is not
+next to the default demo store. The origin-trace endpoint reads at most 10,000
+events, 30,000 edges, and 10,000 artifact records, rejects oversized or
+malformed records, traverses at most 32 steps, and supports entity-tag
+revalidation. The native application
+uses the same limits and contract without a localhost server.
 
 Captured JavaScript and WebAssembly artifacts are analyzed automatically on
 the cold path. The UI reads `/api/analysis/vm` for the automatic scan and
@@ -137,9 +145,9 @@ absent. Legacy v1 numeric records remain readable when their integer values are
 within JavaScript's exact range.
 
 The current broker does not capture structured request fields or arbitrary
-JavaScript data flow. The sample backtrace demonstrates the intended workflow,
-and its unobserved producer boundary is explicitly marked **Unknown**. The UI
-must not promote timing correlation to exact causality.
+JavaScript data flow. Request Origin Trace follows event relationships, not
+field-level value provenance. The UI must not promote identifier or timing
+correlation to exact causality.
 
 Evidence values are inserted with DOM text nodes, never HTML, so captured page
 content cannot become executable UI markup.

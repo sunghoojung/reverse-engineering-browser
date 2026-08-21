@@ -528,7 +528,7 @@ class ResearchUiTests(unittest.TestCase):
     def test_ui_keeps_captured_values_out_of_html_injection_paths(self) -> None:
         html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
 
-        self.assertIn("Request Field Backtrace", html)
+        self.assertIn("Request Origin Trace", html)
         self.assertIn("Trace origin", html)
         self.assertIn("Evidence gap", html)
         self.assertIn("Unknown", html)
@@ -574,7 +574,7 @@ class ResearchUiTests(unittest.TestCase):
         self.assertIn(
             "`S${session}:P${event.process_id}:C${context}:B${requestId}`", html
         )
-        self.assertIn("browser context ${context}", html)
+        self.assertIn("function browserContextToken(event)", html)
         self.assertIn("[13, 'xhr']", html)
         self.assertIn("No requests match the current filters", html)
 
@@ -681,7 +681,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn("row.setAttribute('role', 'option')", html)
         self.assertIn("row.setAttribute('aria-pressed'", html)
         self.assertIn('aria-label="Filter requests"', html)
-        self.assertIn("button.disabled = traceUnavailable", html)
+        self.assertIn("button.disabled = !traceIsAvailable()", html)
         self.assertIn("&& !state.selectedField) return", html)
         self.assertIn("requestAnimationFrame", html)
         self.assertIn("selectedRow ?? elements.requestFilter", html)
@@ -1132,11 +1132,14 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("makeApplicationIcon", application)
         self.assertIn('case "/api/artifacts":', application)
         self.assertIn('case "/api/analysis/vm":', application)
+        self.assertIn('case "/api/origin-trace":', application)
+        self.assertIn("originTraceResponse(for: requestURL)", application)
         self.assertIn("vmAnalysisResponse(for: requestURL)", application)
         self.assertIn("artifactContentResponse(for: requestURL)", application)
         self.assertIn('"Content-Security-Policy": "sandbox"', application)
         self.assertIn('"X-Artifact-Truncated"', application)
         self.assertIn('firstIndex(of: "--artifacts")', application)
+        self.assertIn('firstIndex(of: "--trace-store")', application)
         self.assertIn("source-tree-row[data-artifact-id]", application)
         self.assertIn("sourceLines", application)
         self.assertIn("<key>CFBundleIconFile</key>", plist)
@@ -1144,6 +1147,8 @@ process.stdout.write(JSON.stringify({
         self.assertIn("origin-trace-icon.png", build_script)
         self.assertIn("build/sessions/artifacts", build_script)
         self.assertIn('"${resources_path}/artifacts"', build_script)
+        self.assertIn('"${resources_path}/origin-trace.jsonl"', build_script)
+        self.assertIn('"${trace_document_source}"', build_script)
         self.assertIn("iconutil -c icns", build_script)
 
 

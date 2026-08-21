@@ -105,6 +105,27 @@ class OriginTraceTests(unittest.TestCase):
         self.assertEqual(document["gaps"][0]["reason"], "missing_event")
         self.assertEqual(document["coverage"]["percent"], 0)
 
+    def test_missing_parent_does_not_fall_through_to_a_lower_priority_edge(self) -> None:
+        source = event(1, "canvas", "api_call")
+        request = event(4, "network", "request_started", request_id=81)
+        parent = edge(4, 3)
+        lifecycle = edge(4, 1, "request_lifecycle")
+
+        document = build_origin_trace([source, request], [lifecycle, parent], [], "81")
+
+        self.assertEqual(len(document["steps"]), 1)
+        self.assertEqual(document["gaps"][0]["reason"], "missing_event")
+
+    def test_missing_edge_from_a_source_boundary_remains_visible(self) -> None:
+        source = event(1, "canvas", "api_call")
+        request = event(4, "network", "request_started", request_id=81)
+        document = build_origin_trace(
+            [source, request], [edge(4, 1), edge(1, 9)], [], "81"
+        )
+
+        self.assertEqual([step["category"] for step in document["steps"]], ["network", "canvas"])
+        self.assertEqual(document["gaps"][0]["reason"], "missing_event")
+
     def test_exact_root_disambiguates_reused_request_ids(self) -> None:
         first = event(4, "network", "request_started", request_id=81)
         second = event(
@@ -135,6 +156,14 @@ class OriginTraceTests(unittest.TestCase):
             build_origin_trace([request], [malformed], [], "81")
         with self.assertRaisesRegex(OriginTraceError, "duplicate event"):
             build_origin_trace([request, request], [], [], "81")
+        request["payload"] = "xyz"
+        request["payload_size"] = 1
+        with self.assertRaisesRegex(OriginTraceError, "malformed event payload"):
+            build_origin_trace([request], [], [], "81")
+        request = event(4, "network", "request_started", request_id=81)
+        request["protocol_version"] = 2.0
+        with self.assertRaisesRegex(OriginTraceError, "malformed event"):
+            build_origin_trace([request], [], [], "81")
 
     def test_trace_api_is_bounded_conditional_and_root_specific(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -184,6 +213,12 @@ class OriginTraceTests(unittest.TestCase):
                 with self.assertRaises(urllib.error.HTTPError) as response:
                     urllib.request.urlopen(
                         f"http://127.0.0.1:{server.server_port}/api/origin-trace"
+                    )
+                self.assertEqual(response.exception.code, HTTPStatus.BAD_REQUEST)
+
+                with self.assertRaises(urllib.error.HTTPError) as response:
+                    urllib.request.urlopen(
+                        url.replace("root_process_id=10", "root_process_id=-1")
                     )
                 self.assertEqual(response.exception.code, HTTPStatus.BAD_REQUEST)
             finally:

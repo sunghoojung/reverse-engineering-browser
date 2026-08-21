@@ -10,6 +10,9 @@ enum OriginTraceDocumentBuilder {
   private static let sourceBoundaries = Set([
     "canvas", "webgl", "web_audio", "navigator", "permissions", "storage", "webrtc",
   ])
+  private static let eventCategories = sourceBoundaries.union([
+    "artifact", "network", "vm", "wasm",
+  ])
   private static let publicArtifactFields = Set([
     "artifact_id", "kind", "url", "sha256", "byte_size", "creator_event_id",
     "parent_artifact_id",
@@ -102,30 +105,24 @@ enum OriginTraceDocumentBuilder {
         let rightSequence = UInt64(right["to_sequence_number"] as? String ?? "") ?? 0
         return leftSequence > rightSequence
       }
-      var selectedEdge: [String: Any]?
-      var selectedEvent: [String: Any]?
-      var missingTarget = false
-      for edge in candidates {
-        guard let target = edgeReference(edge, prefix: "to") else { continue }
-        guard let event = eventsByReference[target] else {
-          missingTarget = true
-          continue
-        }
-        selectedEdge = edge
-        selectedEvent = event
-        break
-      }
-
-      guard let selectedEdge, let selectedEvent else {
+      guard let selectedEdge = candidates.first else {
         if !sourceBoundaries.contains(current["category"] as? String ?? "") {
           gaps.append([
-            "reason": missingTarget ? "missing_event" : "no_predecessor",
+            "reason": "no_predecessor",
             "after_step": steps.count - 1,
-            "detail": missingTarget
-              ? "A referenced predecessor is outside the retained evidence window."
-              : "No earlier observed relationship reaches this event.",
+            "detail": "No earlier observed relationship reaches this event.",
           ])
         }
+        break
+      }
+      guard let target = edgeReference(selectedEdge, prefix: "to"),
+        let selectedEvent = eventsByReference[target]
+      else {
+        gaps.append([
+          "reason": "missing_event",
+          "after_step": steps.count - 1,
+          "detail": "The highest-priority predecessor is outside the retained evidence window.",
+        ])
         break
       }
       let targetReference = try eventReference(selectedEvent)
@@ -211,7 +208,13 @@ enum OriginTraceDocumentBuilder {
   private static func eventStep(
     _ event: [String: Any], relation: String, confidence: String
   ) throws -> [String: Any] {
-    guard let sessionID = canonicalUInt64(event["session_id"]),
+    guard exactInteger(event["protocol_version"], equals: 2),
+      let category = event["category"] as? String,
+      eventCategories.contains(category),
+      let operation = event["type"] as? String,
+      !operation.isEmpty,
+      let payload = decodedPayload(event),
+      let sessionID = canonicalUInt64(event["session_id"]),
       let processID = processID(event["process_id"]),
       let sequenceNumber = canonicalUInt64(event["sequence_number"]),
       let monotonicTime = canonicalUInt64(event["monotonic_time_ns"]),
@@ -228,14 +231,14 @@ enum OriginTraceDocumentBuilder {
         "sequence_number": sequenceNumber,
       ],
       "monotonic_time_ns": monotonicTime,
-      "category": event["category"] as? String ?? "unknown",
-      "operation": event["type"] as? String ?? "unknown",
+      "category": category,
+      "operation": operation,
       "frame_id": frameID,
       "artifact_id": artifactID,
       "request_id": requestID,
       "relation": relation,
       "confidence": confidence,
-      "value": decodedPayload(event["payload"] as? String),
+      "value": payload,
     ]
   }
 
@@ -264,9 +267,7 @@ enum OriginTraceDocumentBuilder {
       "artifact_id",
     ])
     guard Set(edge.keys) == expectedKeys,
-      let version = edge["protocol_version"] as? NSNumber,
-      CFGetTypeID(version) != CFBooleanGetTypeID(),
-      version.intValue == 1,
+      exactInteger(edge["protocol_version"], equals: 1),
       relationPriority[edge["relation"] as? String ?? ""] != nil,
       Set(["observed", "correlated"]).contains(edge["confidence"] as? String ?? ""),
       canonicalUInt64(edge["request_id"]) != nil,
@@ -299,14 +300,26 @@ enum OriginTraceDocumentBuilder {
     return parsed
   }
 
-  private static func decodedPayload(_ payload: String?) -> String {
-    guard let payload, payload.count.isMultiple(of: 2) else { return "" }
+  private static func exactInteger(_ value: Any?, equals expected: Int) -> Bool {
+    guard let number = value as? NSNumber,
+      CFGetTypeID(number) != CFBooleanGetTypeID()
+    else { return false }
+    return number.stringValue == String(expected)
+  }
+
+  private static func decodedPayload(_ event: [String: Any]) -> String? {
+    guard let payload = event["payload"] as? String,
+      payload.count.isMultiple(of: 2),
+      payload.count <= 256,
+      event["payload_encoding"] as? String == "hex",
+      exactInteger(event["payload_size"], equals: payload.count / 2)
+    else { return nil }
     var bytes: [UInt8] = []
     bytes.reserveCapacity(min(payload.count / 2, 256))
     var index = payload.startIndex
     while index < payload.endIndex && bytes.count < 256 {
       let next = payload.index(index, offsetBy: 2)
-      guard let byte = UInt8(payload[index..<next], radix: 16) else { return "" }
+      guard let byte = UInt8(payload[index..<next], radix: 16) else { return nil }
       bytes.append(byte)
       index = next
     }

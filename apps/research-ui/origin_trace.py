@@ -27,6 +27,12 @@ SOURCE_BOUNDARY_CATEGORIES = {
     "storage",
     "webrtc",
 }
+EVENT_CATEGORIES = SOURCE_BOUNDARY_CATEGORIES | {
+    "artifact",
+    "network",
+    "vm",
+    "wasm",
+}
 
 
 def _canonical_unsigned(value: object, maximum: int, field: str) -> str:
@@ -115,17 +121,37 @@ def _edge_references(edge: dict) -> tuple[tuple[str, int, str], tuple[str, int, 
 
 def _decode_payload(event: dict) -> str:
     payload = event.get("payload")
-    if not isinstance(payload, str) or len(payload) % 2 != 0:
-        return ""
+    payload_size = event.get("payload_size")
+    if (
+        not isinstance(payload, str)
+        or len(payload) % 2 != 0
+        or len(payload) > 256
+        or type(payload_size) is not int
+        or payload_size != len(payload) // 2
+        or event.get("payload_encoding") != "hex"
+    ):
+        raise OriginTraceError("Origin trace input contains a malformed event payload")
     try:
         decoded = bytes.fromhex(payload).decode("utf-8", errors="replace")
     except ValueError:
-        return ""
+        raise OriginTraceError(
+            "Origin trace input contains a malformed event payload"
+        ) from None
     return decoded[:256]
 
 
 def _event_step(event: dict, relation: str, confidence: str) -> dict:
     session_id, process_id, sequence_number = event_reference(event)
+    category = event.get("category")
+    operation = event.get("type")
+    if (
+        type(event.get("protocol_version")) is not int
+        or event["protocol_version"] != 2
+        or category not in EVENT_CATEGORIES
+        or not isinstance(operation, str)
+        or not operation
+    ):
+        raise OriginTraceError("Origin trace input contains a malformed event")
     return {
         "event": {
             "session_id": session_id,
@@ -135,8 +161,8 @@ def _event_step(event: dict, relation: str, confidence: str) -> dict:
         "monotonic_time_ns": _canonical_unsigned(
             event.get("monotonic_time_ns"), UINT64_MAX, "monotonic_time_ns"
         ),
-        "category": str(event.get("category", "unknown")),
-        "operation": str(event.get("type", "unknown")),
+        "category": category,
+        "operation": operation,
         "frame_id": _canonical_unsigned(
             event.get("frame_id"), UINT64_MAX, "frame_id"
         ),
@@ -292,28 +318,27 @@ def build_origin_trace(
                 -int(edge["to_sequence_number"]),
             ),
         )
-        selected_edge = None
-        selected_event = None
-        missing_target = False
-        for edge in candidates:
-            _, target = _edge_references(edge)
-            target_event = events_by_reference.get(target)
-            if target_event is None:
-                missing_target = True
-                continue
-            selected_edge = edge
-            selected_event = target_event
-            break
-
-        if selected_edge is None or selected_event is None:
+        if not candidates:
             if current.get("category") not in SOURCE_BOUNDARY_CATEGORIES:
-                reason = "missing_event" if missing_target else "no_predecessor"
-                detail = (
-                    "A referenced predecessor is outside the retained evidence window."
-                    if missing_target
-                    else "No earlier observed relationship reaches this event."
+                gaps.append(
+                    _gap(
+                        "no_predecessor",
+                        len(steps) - 1,
+                        "No earlier observed relationship reaches this event.",
+                    )
                 )
-                gaps.append(_gap(reason, len(steps) - 1, detail))
+            break
+        selected_edge = candidates[0]
+        _, target = _edge_references(selected_edge)
+        selected_event = events_by_reference.get(target)
+        if selected_event is None:
+            gaps.append(
+                _gap(
+                    "missing_event",
+                    len(steps) - 1,
+                    "The highest-priority predecessor is outside the retained evidence window.",
+                )
+            )
             break
 
         target_reference = event_reference(selected_event)

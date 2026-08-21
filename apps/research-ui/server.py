@@ -99,6 +99,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     parsed_process_id = int(root_process_id)
                     if (
                         str(parsed_process_id) != root_process_id
+                        or parsed_process_id < 0
                         or parsed_process_id >= 2**32
                     ):
                         raise ValueError(

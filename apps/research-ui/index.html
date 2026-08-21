@@ -1577,7 +1577,8 @@ export async function checkout(cart, fingerprint) {
         originTraceStatus: 'idle',
         originTraceError: null,
         originTraceKey: null,
-        originTraceEtag: null
+        originTraceEtag: null,
+        originTraceGeneration: 0
       };
 
       const elements = {
@@ -1840,12 +1841,14 @@ export async function checkout(cart, fingerprint) {
             !isCanonicalInteger(body.request_id, 0n, uint64Max) ||
             !['complete', 'partial', 'empty', 'ambiguous'].includes(body.status) ||
             !Array.isArray(body.steps) || body.steps.length > 32 ||
-            !Array.isArray(body.gaps) || !Array.isArray(body.artifacts) ||
+            !Array.isArray(body.gaps) || body.gaps.length > 32 ||
+            !Array.isArray(body.artifacts) ||
             !isPlainObject(body.coverage)) return false;
         const coverage = body.coverage;
         if (!['linked_steps', 'observed_links', 'correlated_links', 'gap_count', 'percent']
           .every(field => isSafeIntegerInRange(coverage[field], 0, field === 'percent' ? 100 : 32)) ||
           coverage.linked_steps !== Math.max(0, body.steps.length - 1) ||
+          coverage.observed_links + coverage.correlated_links !== coverage.linked_steps ||
           coverage.gap_count !== body.gaps.length) return false;
         const validStep = step => isPlainObject(step) && isPlainObject(step.event) &&
           isCanonicalInteger(step.event.session_id, 0n, uint64Max) &&
@@ -1857,13 +1860,15 @@ export async function checkout(cart, fingerprint) {
           isCanonicalInteger(step.frame_id, 0n, uint64Max) &&
           isCanonicalInteger(step.artifact_id, 0n, uint64Max) &&
           isCanonicalInteger(step.request_id, 0n, uint64Max) &&
-          typeof step.category === 'string' && typeof step.operation === 'string' &&
-          typeof step.value === 'string' &&
+          eventCategories.has(step.category) &&
+          typeof step.operation === 'string' && step.operation.length > 0 &&
+          typeof step.value === 'string' && step.value.length <= 256 &&
           ['trace_target', 'parent_event', 'request_initiator', 'request_lifecycle', 'artifact_request'].includes(step.relation) &&
           ['observed', 'correlated'].includes(step.confidence);
         const validGap = gap => isPlainObject(gap) &&
           ['ambiguous_request', 'missing_event', 'no_predecessor', 'cycle', 'step_limit'].includes(gap.reason) &&
-          isSafeIntegerInRange(gap.after_step, 0, 31) && typeof gap.detail === 'string';
+          isSafeIntegerInRange(gap.after_step, 0, 31) &&
+          typeof gap.detail === 'string' && gap.detail.length > 0;
         return body.steps.every(validStep) && body.gaps.every(validGap);
       }
 
@@ -2463,6 +2468,7 @@ export async function checkout(cart, fingerprint) {
         state.originTraceError = null;
         state.originTraceKey = null;
         state.originTraceEtag = null;
+        state.originTraceGeneration += 1;
         updateSelectionSummary(request);
         if (request.traceable) {
           elements.prompt.textContent = 'Choose a request value and trace where it came from.';
@@ -2743,6 +2749,7 @@ export async function checkout(cart, fingerprint) {
       }
 
       async function refreshOriginTrace() {
+        const generation = ++state.originTraceGeneration;
         const selection = originTraceSelection();
         if (!selection || location.protocol === 'file:') {
           state.originTraceStatus = 'empty';
@@ -2763,6 +2770,7 @@ export async function checkout(cart, fingerprint) {
             root_sequence_number: integerText(selection.root, 'sequence_number')
           });
           const response = await fetch(`/api/origin-trace?${parameters}`, { cache: 'no-store', headers });
+          if (generation !== state.originTraceGeneration) return;
           if (response.status === 304 && state.originTrace) {
             state.originTraceStatus = 'ready';
             renderBacktrace();
@@ -2770,12 +2778,14 @@ export async function checkout(cart, fingerprint) {
           }
           if (!response.ok) throw new Error(`Origin trace store returned ${response.status}`);
           const body = await response.json();
+          if (generation !== state.originTraceGeneration) return;
           if (!isOriginTraceResponse(body)) throw new TypeError('Malformed origin trace response');
           state.originTrace = body;
           state.originTraceStatus = 'ready';
           state.originTraceKey = selection.key;
           state.originTraceEtag = response.headers.get('ETag');
         } catch (error) {
+          if (generation !== state.originTraceGeneration) return;
           state.originTraceStatus = 'error';
           state.originTraceError = error.message;
         }
@@ -2802,11 +2812,11 @@ export async function checkout(cart, fingerprint) {
         const selection = originTraceSelection();
         const request = selection?.request ?? state.requests.find(candidate => candidate.id === state.selectedRequestId);
         const models = [];
-        if (state.originTraceStatus === 'loading') {
+        if (state.originTraceStatus === 'loading' && !state.originTrace) {
           models.push({ index: '…', kind: 'Loading evidence', title: 'Building the bounded origin trace', meta: 'Reading normalized broker evidence', confidence: 'Pending', style: 'unknown', gap: true });
-        } else if (state.originTraceStatus === 'error' || !state.originTrace) {
+        } else if (state.originTraceStatus === 'error' && !state.originTrace) {
           models.push({ index: '?', kind: 'Trace unavailable', title: state.originTraceError || 'No broker-backed trace loaded', meta: 'Select a live request and run Trace origin', confidence: 'Unknown', style: 'unknown', gap: true });
-        } else {
+        } else if (state.originTrace) {
           const relationLabels = {
             trace_target: 'Trace target', parent_event: 'Observed parent', request_initiator: 'Request initiator',
             request_lifecycle: 'Request lifecycle', artifact_request: 'Artifact correlation'
@@ -2829,6 +2839,13 @@ export async function checkout(cart, fingerprint) {
             const gap = state.originTrace.gaps[0];
             models.push({ index: '?', kind: 'No retained origin', title: state.originTrace.status, meta: gap?.detail || 'No matching request evidence is retained.', confidence: 'Unknown', style: 'unknown', gap: true });
           }
+          if (state.originTraceStatus === 'loading') {
+            models.unshift({ index: '…', kind: 'Refreshing evidence', title: 'Last valid trace remains visible', meta: 'Checking the bounded stores for new relationships', confidence: 'Pending', style: 'unknown', gap: true });
+          } else if (state.originTraceStatus === 'error') {
+            models.push({ index: '!', kind: 'Refresh unavailable', title: 'Last valid trace retained', meta: state.originTraceError, confidence: 'Unknown', style: 'unknown', gap: true });
+          }
+        } else {
+          models.push({ index: '?', kind: 'Trace unavailable', title: state.originTraceError || 'No broker-backed trace loaded', meta: 'Select a live request and run Trace origin', confidence: 'Unknown', style: 'unknown', gap: true });
         }
         elements.backtraceSteps.replaceChildren(...models.map(traceStepElement));
         const coverage = state.originTrace?.coverage?.percent ?? 0;

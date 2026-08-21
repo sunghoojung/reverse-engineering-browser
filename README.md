@@ -97,8 +97,8 @@ localhost server. The application and broker stay local.
 
 The demo includes linked Navigator, Canvas, WebAssembly, and Network events,
 plus separately transferred JavaScript and WASM artifacts in the Sources tab.
-The research workflow starts from a request field and works backward through
-the available evidence.
+The research workflow starts from a live request and works backward through a
+versioned, bounded Origin Trace edge store to the available browser evidence.
 
 For browser-based UI development only, run:
 

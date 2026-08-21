@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
 import json
 import re
 import stat
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
+from origin_trace import OriginTraceError, build_origin_trace
 from vm_analyzer import (
     AnalysisError,
     analyze_store,
@@ -24,6 +26,11 @@ ARTIFACT_KINDS = {"javascript", "wasm", "source_map", "response_body"}
 MAX_ARTIFACT_RESPONSE_BYTES = 2 * 1024 * 1024
 JSONL_TAIL_CHUNK_BYTES = 64 * 1024
 MAX_EVENT_JSON_BYTES = 4 * 1024
+MAX_TRACE_EDGE_JSON_BYTES = 2 * 1024
+MAX_ARTIFACT_JSON_BYTES = 8 * 1024
+MAX_TRACE_EVENT_WINDOW = 10_000
+MAX_TRACE_EDGE_WINDOW = 30_000
+MAX_TRACE_ARTIFACT_WINDOW = 10_000
 PUBLIC_ARTIFACT_FIELDS = (
     "protocol_version",
     "artifact_id",
@@ -44,6 +51,7 @@ PUBLIC_ARTIFACT_FIELDS = (
 class ResearchHandler(SimpleHTTPRequestHandler):
     ui_directory: Path
     event_store: Path
+    trace_store: Path
     artifact_store: Path
     broker_socket: Optional[Path] = None
     analysis_lock = threading.Lock()
@@ -60,11 +68,88 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     "status": "ok",
                     "store": str(self.event_store),
                     "store_exists": self.event_store.exists(),
+                    "trace_store": str(self.trace_store),
+                    "trace_store_exists": self.trace_store.exists(),
                     "artifact_store": str(self.artifact_store),
                     "artifact_store_exists": self.artifact_store.exists(),
                     "broker_connected": self.broker_connected(),
                 }
             )
+            return
+        if parsed.path == "/api/origin-trace":
+            query = parse_qs(parsed.query)
+            request_id = query.get("request_id", [None])[0]
+            root_process_id = query.get("root_process_id", [None])[0]
+            root_sequence_number = query.get("root_sequence_number", [None])[0]
+            try:
+                if request_id is None:
+                    raise ValueError("Request ID is required")
+                if (
+                    not CANONICAL_UINT64.fullmatch(request_id)
+                    or int(request_id) >= 2**64
+                ):
+                    raise ValueError(
+                        "Request ID must be a canonical unsigned 64-bit integer"
+                    )
+                if (root_process_id is None) != (root_sequence_number is None):
+                    raise ValueError(
+                        "Root process ID and sequence number must be supplied together"
+                    )
+                if root_process_id is not None:
+                    parsed_process_id = int(root_process_id)
+                    if (
+                        str(parsed_process_id) != root_process_id
+                        or parsed_process_id >= 2**32
+                    ):
+                        raise ValueError(
+                            "Root process ID must be a canonical unsigned 32-bit integer"
+                        )
+                else:
+                    parsed_process_id = None
+                if root_sequence_number is not None and (
+                    not CANONICAL_UINT64.fullmatch(root_sequence_number)
+                    or int(root_sequence_number) >= 2**64
+                ):
+                    raise ValueError(
+                        "Root sequence number must be a canonical unsigned 64-bit integer"
+                    )
+            except ValueError as exception:
+                self.send_json({"error": str(exception)}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                signature = ":".join(
+                    (
+                        self.resource_etag(self.event_store),
+                        self.resource_etag(self.trace_store),
+                        self.resource_etag(self.artifact_store / "manifest.jsonl"),
+                        request_id,
+                        root_process_id or "auto",
+                        root_sequence_number or "auto",
+                    )
+                )
+                etag = f'"{hashlib.sha256(signature.encode()).hexdigest()}"'
+                if self.send_not_modified(etag):
+                    return
+                document = build_origin_trace(
+                    self.load_events(MAX_TRACE_EVENT_WINDOW),
+                    self.load_trace_edges(MAX_TRACE_EDGE_WINDOW),
+                    self.load_recent_artifacts(MAX_TRACE_ARTIFACT_WINDOW),
+                    request_id,
+                    root_process_id=parsed_process_id,
+                    root_sequence_number=root_sequence_number,
+                )
+            except (
+                OSError,
+                UnicodeDecodeError,
+                OriginTraceError,
+                ValueError,
+                json.JSONDecodeError,
+            ) as exception:
+                self.send_json(
+                    {"error": str(exception)}, HTTPStatus.INTERNAL_SERVER_ERROR
+                )
+                return
+            self.send_json(document, etag=etag)
             return
         if parsed.path == "/api/events":
             query = parse_qs(parsed.query)
@@ -208,12 +293,22 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         return events
 
     def read_recent_lines(self, limit: int) -> list[str]:
+        return self.read_recent_json_lines(
+            self.event_store, limit, MAX_EVENT_JSON_BYTES, "event"
+        )
+
+    @staticmethod
+    def read_recent_json_lines(
+        path: Path, limit: int, max_record_bytes: int, record_name: str
+    ) -> list[str]:
         if limit <= 0:
+            return []
+        if not path.exists():
             return []
 
         lines = []
         suffix = b""
-        with self.event_store.open("rb") as stream:
+        with path.open("rb") as stream:
             position = stream.seek(0, 2)
             while position > 0 and len(lines) < limit:
                 chunk_size = min(position, JSONL_TAIL_CHUNK_BYTES)
@@ -223,15 +318,25 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                 parts[-1] += suffix
                 for encoded_line in reversed(parts[1:]):
                     if encoded_line.strip():
-                        lines.append(self.decode_event_line(encoded_line))
+                        lines.append(
+                            ResearchHandler.decode_json_line(
+                                encoded_line, max_record_bytes, record_name
+                            )
+                        )
                         if len(lines) == limit:
                             break
                 suffix = parts[0]
-                if len(suffix) > MAX_EVENT_JSON_BYTES:
-                    raise ValueError("The evidence store contains an oversized event")
+                if len(suffix) > max_record_bytes:
+                    raise ValueError(
+                        f"The evidence store contains an oversized {record_name}"
+                    )
 
             if position == 0 and len(lines) < limit and suffix.strip():
-                lines.append(self.decode_event_line(suffix))
+                lines.append(
+                    ResearchHandler.decode_json_line(
+                        suffix, max_record_bytes, record_name
+                    )
+                )
 
         lines.reverse()
         return lines
@@ -245,9 +350,42 @@ class ResearchHandler(SimpleHTTPRequestHandler):
 
     @staticmethod
     def decode_event_line(encoded_line: bytes) -> str:
-        if len(encoded_line) > MAX_EVENT_JSON_BYTES:
-            raise ValueError("The evidence store contains an oversized event")
+        return ResearchHandler.decode_json_line(
+            encoded_line, MAX_EVENT_JSON_BYTES, "event"
+        )
+
+    @staticmethod
+    def decode_json_line(
+        encoded_line: bytes, max_record_bytes: int, record_name: str
+    ) -> str:
+        if len(encoded_line) > max_record_bytes:
+            raise ValueError(
+                f"The evidence store contains an oversized {record_name}"
+            )
         return encoded_line.decode("utf-8")
+
+    def load_trace_edges(self, limit: int) -> list[dict]:
+        return [
+            json.loads(line)
+            for line in self.read_recent_json_lines(
+                self.trace_store, limit, MAX_TRACE_EDGE_JSON_BYTES, "origin trace edge"
+            )
+        ]
+
+    def load_recent_artifacts(self, limit: int) -> list[dict]:
+        manifest = self.artifact_store / "manifest.jsonl"
+        artifacts = [
+            json.loads(line)
+            for line in self.read_recent_json_lines(
+                manifest, limit, MAX_ARTIFACT_JSON_BYTES, "artifact"
+            )
+        ]
+        if not all(self.is_artifact(artifact) for artifact in artifacts):
+            raise ValueError("The artifact manifest contains a malformed record")
+        identifiers = [artifact["artifact_id"] for artifact in artifacts]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("The artifact manifest contains a duplicate artifact ID")
+        return artifacts
 
     def load_artifacts(self) -> list[dict]:
         manifest = self.artifact_store / "manifest.jsonl"
@@ -431,6 +569,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=7319)
     parser.add_argument("--store", type=Path, default=Path("build/sessions/demo.jsonl"))
     parser.add_argument(
+        "--trace-store",
+        type=Path,
+        default=Path("build/sessions/origin-trace.jsonl"),
+    )
+    parser.add_argument(
         "--artifacts", type=Path, default=Path("build/sessions/artifacts")
     )
     parser.add_argument("--socket", type=Path)
@@ -441,11 +584,13 @@ def main() -> int:
     args = parse_args()
     ResearchHandler.ui_directory = Path(__file__).resolve().parent
     ResearchHandler.event_store = args.store.resolve()
+    ResearchHandler.trace_store = args.trace_store.resolve()
     ResearchHandler.artifact_store = args.artifacts.resolve()
     ResearchHandler.broker_socket = args.socket.resolve() if args.socket else None
     server = ThreadingHTTPServer((args.host, args.port), ResearchHandler)
     print(f"Research UI: http://{args.host}:{args.port}")
     print(f"Event store: {ResearchHandler.event_store}")
+    print(f"Origin trace store: {ResearchHandler.trace_store}")
     print(f"Artifact store: {ResearchHandler.artifact_store}")
     try:
         server.serve_forever()

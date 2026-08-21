@@ -13,9 +13,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -24,6 +26,7 @@
 #include "reb/event.hpp"
 #include "reb/event_broker.hpp"
 #include "reb/local_ipc.hpp"
+#include "reb/origin_trace.hpp"
 
 namespace {
 
@@ -31,6 +34,7 @@ constexpr std::size_t kSocketEventBatchCapacity = 256;
 
 struct Options final {
   std::string store_path;
+  std::string trace_store_path;
   std::string socket_path;
   std::string token_path;
   std::size_t capacity = 10'000;
@@ -73,10 +77,11 @@ class ScopedSocketPath final {
 };
 
 void PrintUsage(const char* program) {
-  std::cerr << "Usage: " << program << " --store PATH [--capacity COUNT]\n"
+  std::cerr << "Usage: " << program << " --store PATH [--trace-store PATH] [--capacity COUNT]\n"
             << "       " << program
             << " --store PATH --socket PATH --token-file PATH --session-id ID"
-               " --category-mask MASK --duration-seconds SECONDS [--capacity COUNT]\n";
+               " --category-mask MASK --duration-seconds SECONDS"
+               " [--trace-store PATH] [--capacity COUNT]\n";
 }
 
 template <typename Integer>
@@ -92,6 +97,8 @@ bool ParseOptions(const int argc, char* argv[], Options& options) {
     const std::string_view argument(argv[index]);
     if (argument == "--store" && index + 1 < argc) {
       options.store_path = argv[++index];
+    } else if (argument == "--trace-store" && index + 1 < argc) {
+      options.trace_store_path = argv[++index];
     } else if (argument == "--socket" && index + 1 < argc) {
       options.socket_path = argv[++index];
     } else if (argument == "--token-file" && index + 1 < argc) {
@@ -117,7 +124,18 @@ bool ParseOptions(const int argc, char* argv[], Options& options) {
     }
   }
 
-  if (options.store_path.empty()) {
+  std::error_code path_error;
+  const std::filesystem::path event_store_path =
+      std::filesystem::weakly_canonical(options.store_path, path_error);
+  if (path_error) {
+    return false;
+  }
+  const std::filesystem::path trace_store_path =
+      options.trace_store_path.empty()
+          ? std::filesystem::path{}
+          : std::filesystem::weakly_canonical(options.trace_store_path, path_error);
+  if (options.store_path.empty() || path_error ||
+      (!trace_store_path.empty() && trace_store_path == event_store_path)) {
     return false;
   }
   const bool any_socket_option = !options.socket_path.empty() || !options.token_path.empty() ||
@@ -162,7 +180,11 @@ bool MakeSessionPolicy(const Options& options, reb::SessionPolicy& policy) noexc
   return true;
 }
 
-bool StoreEvent(reb::EventBroker& broker, std::ofstream& store, const reb::EventRecord& event) {
+bool StoreEvent(reb::EventBroker& broker,
+                std::ofstream& store,
+                reb::OriginTraceIndex* trace_index,
+                std::ofstream* trace_store,
+                const reb::EventRecord& event) {
   if (broker.Ingest(event) != reb::IngestStatus::kAccepted) {
     return true;
   }
@@ -171,31 +193,51 @@ bool StoreEvent(reb::EventBroker& broker, std::ofstream& store, const reb::Event
     std::cerr << "Unable to write event store\n";
     return false;
   }
+  if (trace_index && trace_store) {
+    const reb::OriginTraceEdgeBatch edges = trace_index->Ingest(event);
+    for (std::size_t index = 0; index < edges.count; ++index) {
+      *trace_store << reb::OriginTraceEdgeToJson(edges.edges[index]) << '\n';
+    }
+    if (!*trace_store) {
+      std::cerr << "Unable to write origin trace store\n";
+      return false;
+    }
+  }
   return true;
 }
 
-bool FlushStore(std::ofstream& store) {
+bool FlushStores(std::ofstream& store, std::ofstream* trace_store) {
   store.flush();
   if (!store) {
     std::cerr << "Unable to write event store\n";
     return false;
   }
+  if (trace_store) {
+    trace_store->flush();
+    if (!*trace_store) {
+      std::cerr << "Unable to write origin trace store\n";
+      return false;
+    }
+  }
   return true;
 }
 
-bool IngestStandardInput(reb::EventBroker& broker, std::ofstream& store) {
+bool IngestStandardInput(reb::EventBroker& broker,
+                         std::ofstream& store,
+                         reb::OriginTraceIndex* trace_index,
+                         std::ofstream* trace_store) {
   reb::EventRecord event{};
   while (std::cin.read(reinterpret_cast<char*>(&event), sizeof(event))) {
-    if (!StoreEvent(broker, store, event)) {
+    if (!StoreEvent(broker, store, trace_index, trace_store, event)) {
       return false;
     }
   }
   if (std::cin.gcount() != 0) {
     std::cerr << "Truncated native event record received\n";
-    static_cast<void>(FlushStore(store));
+    static_cast<void>(FlushStores(store, trace_store));
     return false;
   }
-  return FlushStore(store);
+  return FlushStores(store, trace_store);
 }
 
 enum class TimedReadStatus {
@@ -301,7 +343,9 @@ bool IngestSocket(const int descriptor,
                   const reb::SessionPolicy& policy,
                   const reb::LocalIpcToken& expected_token,
                   reb::EventBroker& broker,
-                  std::ofstream& store) {
+                  std::ofstream& store,
+                  reb::OriginTraceIndex* trace_index,
+                  std::ofstream* trace_store) {
   reb::LocalIpcHello hello;
   std::string error;
   const TimedReadStatus hello_status =
@@ -351,15 +395,15 @@ bool IngestSocket(const int descriptor,
       if (event.header.session_id != options.session_id) {
         std::cerr << "Event session does not match authenticated broker session\n";
         if (index != 0) {
-          static_cast<void>(FlushStore(store));
+          static_cast<void>(FlushStores(store, trace_store));
         }
         return false;
       }
-      if (!StoreEvent(broker, store, event)) {
+      if (!StoreEvent(broker, store, trace_index, trace_store, event)) {
         return false;
       }
     }
-    if (!FlushStore(store)) {
+    if (!FlushStores(store, trace_store)) {
       return false;
     }
   }
@@ -424,6 +468,13 @@ void PrintStats(const reb::BrokerStats& stats) {
             << " evicted=" << stats.evicted << '\n';
 }
 
+void PrintTraceStats(const reb::OriginTraceIndexStats& stats) {
+  std::cerr << "Origin trace stopped: indexed_events=" << stats.indexed_events
+            << " emitted_edges=" << stats.emitted_edges
+            << " duplicate_events=" << stats.duplicate_events
+            << " evicted_events=" << stats.evicted_events << '\n';
+}
+
 }  // namespace
 
 int main(const int argc, char* argv[]) {
@@ -446,10 +497,22 @@ int main(const int argc, char* argv[]) {
     return 1;
   }
 
+  std::ofstream trace_store;
+  std::unique_ptr<reb::OriginTraceIndex> trace_index;
+  if (!options.trace_store_path.empty()) {
+    trace_store.open(options.trace_store_path, std::ios::out | std::ios::trunc);
+    if (!trace_store) {
+      std::cerr << "Unable to open origin trace store: " << options.trace_store_path << '\n';
+      return 1;
+    }
+    trace_index = std::make_unique<reb::OriginTraceIndex>(options.capacity);
+  }
+
   reb::EventBroker broker(options.capacity, policy);
   bool ingested = false;
   if (options.socket_path.empty()) {
-    ingested = IngestStandardInput(broker, store);
+    ingested =
+        IngestStandardInput(broker, store, trace_index.get(), trace_index ? &trace_store : nullptr);
   } else {
     reb::LocalIpcToken token{};
     std::string error;
@@ -473,11 +536,15 @@ int main(const int argc, char* argv[]) {
         std::cerr << "Unable to accept browser connection: " << std::strerror(errno) << '\n';
         return 1;
       }
-      ingested = IngestSocket(connection.get(), options, policy, token, broker, store);
+      ingested = IngestSocket(connection.get(), options, policy, token, broker, store,
+                              trace_index.get(), trace_index ? &trace_store : nullptr);
     }
   }
 
   const reb::BrokerStats stats = broker.Stats();
   PrintStats(stats);
+  if (trace_index) {
+    PrintTraceStats(trace_index->Stats());
+  }
   return ingested && stats.invalid == 0 ? 0 : 1;
 }

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://origin-trace.local/protocol/origin-trace-edge-v1.schema.json",
+  "title": "Origin Trace Edge v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "session_id", "from_process_id", "from_sequence_number", "to_process_id", "to_sequence_number", "relation", "confidence", "request_id", "artifact_id"],
+  "properties": {
+    "protocol_version": {"const": 1},
+    "session_id": {"$ref": "#/$defs/nonzeroUint64"},
+    "from_process_id": {"$ref": "#/$defs/uint32"},
+    "from_sequence_number": {"$ref": "#/$defs/nonzeroUint64"},
+    "to_process_id": {"$ref": "#/$defs/uint32"},
+    "to_sequence_number": {"$ref": "#/$defs/nonzeroUint64"},
+    "relation": {"enum": ["parent_event", "request_initiator", "request_lifecycle", "artifact_request"]},
+    "confidence": {"enum": ["observed", "correlated"]},
+    "request_id": {"$ref": "#/$defs/uint64"},
+    "artifact_id": {"$ref": "#/$defs/uint64"}
+  },
+  "$defs": {
+    "uint32": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+    "nonzeroUint64": {"type": "string", "minLength": 1, "maxLength": 20, "pattern": "^[1-9][0-9]*$"},
+    "uint64": {"type": "string", "minLength": 1, "maxLength": 20, "pattern": "^(?:0|[1-9][0-9]*)$"}
+  }
+}

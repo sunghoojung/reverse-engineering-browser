@@ -5,12 +5,20 @@ import WebKit
 private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let indexURL: URL
   private let eventStoreURL: URL
+  private let traceStoreURL: URL
   private let artifactStoreURL: URL
   private let brokerSocketURL: URL?
 
-  init(indexURL: URL, eventStoreURL: URL, artifactStoreURL: URL, brokerSocketURL: URL?) {
+  init(
+    indexURL: URL,
+    eventStoreURL: URL,
+    traceStoreURL: URL,
+    artifactStoreURL: URL,
+    brokerSocketURL: URL?
+  ) {
     self.indexURL = indexURL
     self.eventStoreURL = eventStoreURL
+    self.traceStoreURL = traceStoreURL
     self.artifactStoreURL = artifactStoreURL
     self.brokerSocketURL = brokerSocketURL
   }
@@ -33,6 +41,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         response = (try healthResponse(), "application/json; charset=utf-8", [:])
       case "/api/events":
         response = (try eventsResponse(for: requestURL), "application/json; charset=utf-8", [:])
+      case "/api/origin-trace":
+        response = (try originTraceResponse(for: requestURL), "application/json; charset=utf-8", [:])
       case "/api/artifacts":
         response = (try artifactsResponse(for: requestURL), "application/json; charset=utf-8", [:])
       case "/api/analysis/vm":
@@ -60,6 +70,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "status": "ok",
         "store": eventStoreURL.path,
         "store_exists": FileManager.default.fileExists(atPath: eventStoreURL.path),
+        "trace_store": traceStoreURL.path,
+        "trace_store_exists": FileManager.default.fileExists(atPath: traceStoreURL.path),
         "artifact_store": artifactStoreURL.path,
         "artifact_store_exists": FileManager.default.fileExists(atPath: artifactStoreURL.path),
         "broker_connected": brokerConnected(),
@@ -307,6 +319,122 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     return try JSONSerialization.data(withJSONObject: document, options: [])
   }
 
+  private func originTraceResponse(for requestURL: URL) throws -> Data {
+    let items = URLComponents(url: requestURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    guard let requestID = items.first(where: { $0.name == "request_id" })?.value,
+      requestID.range(of: #"^(?:0|[1-9][0-9]*)$"#, options: .regularExpression) != nil,
+      UInt64(requestID) != nil
+    else {
+      throw artifactError("Request ID must be a canonical unsigned 64-bit integer")
+    }
+    let processText = items.first(where: { $0.name == "root_process_id" })?.value
+    let rootSequence = items.first(where: { $0.name == "root_sequence_number" })?.value
+    let rootProcessID: UInt32?
+    if let processText {
+      guard processText.range(of: #"^(?:0|[1-9][0-9]*)$"#, options: .regularExpression) != nil,
+        let value = UInt32(processText)
+      else {
+        throw artifactError("Root process ID must be a canonical unsigned 32-bit integer")
+      }
+      rootProcessID = value
+    } else {
+      rootProcessID = nil
+    }
+
+    let events = try recentJSONObjects(
+      at: eventStoreURL,
+      limit: 10_000,
+      maxRecordBytes: 4 * 1024,
+      recordName: "event"
+    )
+    let edges = try recentJSONObjects(
+      at: traceStoreURL,
+      limit: 30_000,
+      maxRecordBytes: 2 * 1024,
+      recordName: "origin trace edge"
+    )
+    let document = try OriginTraceDocumentBuilder.build(
+      events: events,
+      edges: edges,
+      artifacts: recentArtifactEntries(),
+      requestID: requestID,
+      rootProcessID: rootProcessID,
+      rootSequenceNumber: rootSequence
+    )
+    return try JSONSerialization.data(withJSONObject: document, options: [])
+  }
+
+  private func recentArtifactEntries() throws -> [[String: Any]] {
+    let artifacts = try recentJSONObjects(
+      at: artifactStoreURL.appendingPathComponent("manifest.jsonl"),
+      limit: 10_000,
+      maxRecordBytes: 8 * 1024,
+      recordName: "artifact"
+    )
+    guard artifacts.allSatisfy(isValidArtifact) else {
+      throw artifactError("The artifact manifest contains a malformed record")
+    }
+    let identifiers = artifacts.compactMap { $0["artifact_id"] as? String }
+    guard identifiers.count == artifacts.count, Set(identifiers).count == identifiers.count else {
+      throw artifactError("The artifact manifest contains a duplicate artifact ID")
+    }
+    return artifacts
+  }
+
+  private func recentJSONObjects(
+    at url: URL,
+    limit: Int,
+    maxRecordBytes: Int,
+    recordName: String
+  ) throws -> [[String: Any]] {
+    guard FileManager.default.fileExists(atPath: url.path), limit > 0 else { return [] }
+    let handle = try FileHandle(forReadingFrom: url)
+    defer { try? handle.close() }
+    let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+    guard let fileSize = (attributes[.size] as? NSNumber)?.uint64Value else {
+      throw artifactError("The evidence store size is unavailable")
+    }
+
+    var position = fileSize
+    var suffix = Data()
+    var lines: [Data] = []
+    let chunkBytes = UInt64(64 * 1024)
+    while position > 0 && lines.count < limit {
+      let count = min(position, chunkBytes)
+      position -= count
+      try handle.seek(toOffset: position)
+      guard var block = try handle.read(upToCount: Int(count)) else { break }
+      block.append(suffix)
+      let parts = block.split(separator: 10, omittingEmptySubsequences: false)
+      for part in parts.dropFirst().reversed() where !isBlank(part) {
+        guard part.count <= maxRecordBytes else {
+          throw artifactError("The evidence store contains an oversized \(recordName)")
+        }
+        lines.append(Data(part))
+        if lines.count == limit { break }
+      }
+      suffix = parts.first.map { Data($0) } ?? Data()
+      if suffix.count > maxRecordBytes {
+        throw artifactError("The evidence store contains an oversized \(recordName)")
+      }
+    }
+    if position == 0 && lines.count < limit && !isBlank(suffix) {
+      lines.append(suffix)
+    }
+    lines.reverse()
+    return try lines.map { line in
+      let value = try JSONSerialization.jsonObject(with: line, options: [])
+      guard let object = value as? [String: Any] else {
+        throw artifactError("The evidence store contains a malformed \(recordName)")
+      }
+      return object
+    }
+  }
+
+  private func isBlank<T: DataProtocol>(_ data: T) -> Bool {
+    data.allSatisfy { byte in byte == 9 || byte == 10 || byte == 13 || byte == 32 }
+  }
+
   private func brokerConnected() -> Bool {
     guard let brokerSocketURL else { return true }
     guard
@@ -375,10 +503,12 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
 
     let indexURL = resourcesURL.appendingPathComponent("index.html")
     let eventStoreURL = configuredEventStore(resourcesURL: resourcesURL)
+    let traceStoreURL = configuredTraceStore(eventStoreURL: eventStoreURL)
     let artifactStoreURL = configuredArtifactStore(eventStoreURL: eventStoreURL)
     let handler = LocalContentHandler(
       indexURL: indexURL,
       eventStoreURL: eventStoreURL,
+      traceStoreURL: traceStoreURL,
       artifactStoreURL: artifactStoreURL,
       brokerSocketURL: configuredBrokerSocket()
     )
@@ -451,6 +581,19 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       return URL(fileURLWithPath: configuredPath).standardizedFileURL
     }
     return eventStoreURL.deletingLastPathComponent().appendingPathComponent("artifacts")
+  }
+
+  private func configuredTraceStore(eventStoreURL: URL) -> URL {
+    let arguments = CommandLine.arguments
+    if let storeFlag = arguments.firstIndex(of: "--trace-store"), storeFlag + 1 < arguments.count {
+      return URL(fileURLWithPath: arguments[storeFlag + 1]).standardizedFileURL
+    }
+    if let configuredPath = ProcessInfo.processInfo.environment["REB_ORIGIN_TRACE_STORE"],
+      !configuredPath.isEmpty
+    {
+      return URL(fileURLWithPath: configuredPath).standardizedFileURL
+    }
+    return eventStoreURL.deletingLastPathComponent().appendingPathComponent("origin-trace.jsonl")
   }
 
   private func configuredBrokerSocket() -> URL? {
@@ -545,27 +688,45 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     guard smokeTest else { return }
     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-      let script = """
-        JSON.stringify({
-          title: document.title,
-          nativeShell: document.documentElement.classList.contains('native-shell'),
-          requests: document.querySelectorAll('.request-row').length,
-          fields: document.querySelectorAll('.field-row').length,
-          artifacts: document.querySelectorAll('.source-tree-row[data-artifact-id]').length,
-          sourceLines: document.querySelectorAll('.source-line').length,
-          broker: document.querySelector('#broker-status')?.textContent,
-          traceEnabled: !document.querySelector('#trace-origin')?.disabled,
-          viewport: [window.innerWidth, window.innerHeight, window.devicePixelRatio],
-          trafficColumns: getComputedStyle(document.querySelector('.traffic-grid')).gridTemplateColumns
-        })
+      let exercise = """
+        [...document.querySelectorAll('.request-row')]
+          .find(row => row.textContent.includes('live'))?.click();
+        document.querySelector('#trace-origin')?.click();
         """
-      webView.evaluateJavaScript(script) { result, error in
-        if let error {
-          print("SMOKE_ERROR \(error.localizedDescription)")
-        } else {
-          print("SMOKE_OK \(result ?? "no result")")
+      webView.evaluateJavaScript(exercise) { _, exerciseError in
+        if let exerciseError {
+          print("SMOKE_ERROR \(exerciseError.localizedDescription)")
+          NSApp.terminate(nil)
+          return
         }
-        NSApp.terminate(nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+          let inspection = """
+            JSON.stringify({
+              title: document.title,
+              nativeShell: document.documentElement.classList.contains('native-shell'),
+              requests: document.querySelectorAll('.request-row').length,
+              fields: document.querySelectorAll('.field-row').length,
+              artifacts: document.querySelectorAll('.source-tree-row[data-artifact-id]').length,
+              sourceLines: document.querySelectorAll('.source-line').length,
+              broker: document.querySelector('#broker-status')?.textContent,
+              traceEnabled: !document.querySelector('#trace-origin')?.disabled,
+              traceSteps: document.querySelectorAll('#backtrace-steps .trace-step').length,
+              traceCoverage: document.querySelector('#coverage-value')?.textContent,
+              traceReachedCanvas: [...document.querySelectorAll('.step-title')]
+                .some(step => step.textContent === 'canvas · api_call'),
+              viewport: [window.innerWidth, window.innerHeight, window.devicePixelRatio],
+              trafficColumns: getComputedStyle(document.querySelector('.traffic-grid')).gridTemplateColumns
+            })
+            """
+          webView.evaluateJavaScript(inspection) { result, error in
+            if let error {
+              print("SMOKE_ERROR \(error.localizedDescription)")
+            } else {
+              print("SMOKE_OK \(result ?? "no result")")
+            }
+            NSApp.terminate(nil)
+          }
+        }
       }
     }
   }

@@ -13,8 +13,10 @@ contents_path="${app_path}/Contents"
 macos_path="${contents_path}/MacOS"
 resources_path="${contents_path}/Resources"
 swift_source="${repo_root}/apps/research-ui/macos/OriginTraceApp.swift"
+trace_document_source="${repo_root}/apps/research-ui/macos/OriginTraceDocument.swift"
 icon_source="${repo_root}/apps/research-ui/macos/assets/origin-trace-icon.png"
 event_store="${repo_root}/build/sessions/demo.jsonl"
+trace_store="${repo_root}/build/sessions/origin-trace.jsonl"
 artifact_store="${repo_root}/build/sessions/artifacts"
 iconset_path="${repo_root}/build/OriginTrace.iconset"
 
@@ -26,6 +28,7 @@ mkdir -p "${macos_path}" "${resources_path}"
 cp "${repo_root}/apps/research-ui/macos/Info.plist" "${contents_path}/Info.plist"
 cp "${repo_root}/apps/research-ui/index.html" "${resources_path}/index.html"
 cp "${event_store}" "${resources_path}/demo.jsonl"
+cp "${trace_store}" "${resources_path}/origin-trace.jsonl"
 cp -R "${artifact_store}" "${resources_path}/artifacts"
 
 rm -rf "${iconset_path}"
@@ -54,7 +57,7 @@ xcrun swiftc \
   -parse-as-library \
   -framework Cocoa \
   -framework WebKit \
-  "${swift_source}" \
+  "${swift_source}" "${trace_document_source}" \
   -o "${macos_path}/OriginTrace"
 
 codesign --force --deep --sign - "${app_path}" >/dev/null

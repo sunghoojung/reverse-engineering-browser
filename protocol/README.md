@@ -122,3 +122,17 @@ canonical decimal identifiers and digest formats, and includes top-level input
 coverage for bounded or malformed manifest and event records.
 
 Protocol changes must remain backward-readable for stored research sessions.
+
+## Request origin trace
+
+The optional broker cold-path correlation index writes version 1 edge records
+described by `origin-trace-edge-v1.schema.json`. Each edge connects two exact
+event references and names one relationship: explicit parent, explicit request
+initiator, request lifecycle, or artifact/request correlation. Edge confidence
+is only `observed` or `correlated`; the contract does not claim value causality.
+
+The research UI projects a selected request into the bounded version 1 document
+described by `origin-trace-document-v1.schema.json`. Missing predecessors,
+cycles, ambiguous reused request IDs, and the 32-step traversal limit become
+named gap records. Event and edge sidecars remain immutable inputs to this
+projection.

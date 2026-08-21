@@ -19,6 +19,7 @@ readonly session_id
 readonly live_session_root="${REB_LIVE_SESSION_ROOT:-${repository_root}/build/sessions/live}"
 readonly session_directory="${live_session_root}/${session_id}"
 readonly store_path="${session_directory}/events.jsonl"
+readonly trace_store_path="${session_directory}/origin-trace.jsonl"
 readonly artifact_store_path="${session_directory}/artifacts"
 readonly token_path="${session_directory}/broker.token"
 readonly profile_path="${repository_root}/build/brave-profile"
@@ -93,7 +94,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-"${broker_binary}" --store "${store_path}" --socket "${socket_path}" \
+"${broker_binary}" --store "${store_path}" --trace-store "${trace_store_path}" \
+  --socket "${socket_path}" \
   --token-file "${token_path}" --session-id "${session_id}" \
   --category-mask "${category_mask}" --duration-seconds "${duration_seconds}" \
   >"${broker_log}" 2>&1 &
@@ -171,10 +173,12 @@ analyze_captured_artifacts &
 analyzer_pid=$!
 
 "${open_command}" -n "${origin_trace_app}" --args --store "${store_path}" \
-  --artifacts "${artifact_store_path}" --broker-socket "${socket_path}"
+  --trace-store "${trace_store_path}" --artifacts "${artifact_store_path}" \
+  --broker-socket "${socket_path}"
 
 echo "Origin Trace live session ${session_id}"
 echo "Evidence store: ${store_path}"
+echo "Origin trace store: ${trace_store_path}"
 echo "Artifact store: ${artifact_store_path}"
 echo "Category mask: ${category_mask}; expires after ${duration_seconds} seconds"
 echo "Close Brave to stop this capture session."

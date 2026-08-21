@@ -57,6 +57,9 @@ Reverse Engineering Browser is a Brave-based research browser for authorized web
 
 ## Research workspace
 
+- Trace a selected live request backward through bounded parent, initiator,
+  lifecycle, artifact, WASM, and browser-signal evidence, with explicit gaps
+  and confidence labels.
 - Navigate from an event to source and from source to related events.
 - Use a short causal timeline instead of a raw event flood.
 - Record an authorized scenario as one evidence trail: navigation, human or agent action origin, created artifacts, browser-signal access, WebAssembly activity, requests, and outcomes.

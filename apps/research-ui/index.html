@@ -1391,74 +1391,29 @@
             </div>
           </section>
 
-          <section id="screen-backtrace" class="screen" aria-label="Request field backtrace" hidden>
+          <section id="screen-backtrace" class="screen" aria-label="Request origin trace" hidden>
             <header class="screen-head">
               <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
-              <div><h1>Request Field Backtrace</h1><div id="backtrace-subtitle" class="screen-subtitle">request-81 · Body · $.device.fingerprint</div></div>
+              <div><h1>Request Origin Trace</h1><div id="backtrace-subtitle" class="screen-subtitle">Select a live request to trace its observed origin</div></div>
               <div class="screen-head-actions"><button class="secondary-button" type="button" data-screen="evidence">Supporting evidence</button></div>
             </header>
             <div class="trace-layout">
               <div class="graph-panel">
                 <div class="graph-kicker">Working backward from what left the browser</div>
-                <ol class="backtrace">
-                  <li class="trace-step">
-                    <span class="step-index">01</span>
-                    <button class="step-card" type="button">
-                      <span><span class="step-kind">Request field</span><span class="step-title">POST /cart · body.device.fingerprint</span><span class="step-meta">request-81 · 24 bytes sent</span></span>
-                      <span class="confidence exact">Exact</span>
-                    </button>
-                  </li>
-                  <li class="trace-step">
-                    <span class="step-index">02</span>
-                    <button class="step-card" type="button">
-                      <span><span class="step-kind">Serialized by</span><span class="step-title">JSON.stringify(object-17)</span><span class="step-meta">script cart.js:418 · boundary observed</span></span>
-                      <span class="confidence exact">Exact</span>
-                    </button>
-                  </li>
-                  <li class="trace-step">
-                    <span class="step-index">03</span>
-                    <button class="step-card" type="button">
-                      <span><span class="step-kind">Derived from</span><span class="step-title">Base64 encoded bytes</span><span class="step-meta">reversible value match · 18 input bytes</span></span>
-                      <span class="confidence matched">Matched</span>
-                    </button>
-                  </li>
-                  <li class="trace-step gap">
-                    <span class="step-index">?</span>
-                    <button class="step-card gap-card" type="button">
-                      <span><span class="step-kind">Evidence gap</span><span class="step-title">Producer relationship not observed</span><span class="step-meta">A targeted replay can instrument only this missing boundary</span></span>
-                      <span class="confidence unknown">Unknown</span>
-                    </button>
-                  </li>
-                  <li class="trace-step correlated">
-                    <span class="step-index">04</span>
-                    <button class="step-card" type="button">
-                      <span><span class="step-kind">Candidate returned by</span><span class="step-title">wasm-4 export generate</span><span class="step-meta">same frame and task · causality not yet proven</span></span>
-                      <span class="confidence correlation">Correlated</span>
-                    </button>
-                  </li>
-                  <li class="trace-step">
-                    <span class="step-index">05</span>
-                    <button class="step-card" type="button">
-                      <span><span class="step-kind">Native probe evidence</span><span class="step-title">Canvas readback · event-194</span><span class="step-meta">CanvasRenderingContext2D.getImageData</span></span>
-                      <span class="confidence correlation">Correlated</span>
-                    </button>
-                  </li>
-                </ol>
+                <ol id="backtrace-steps" class="backtrace" aria-live="polite"></ol>
               </div>
               <aside class="trace-inspector" aria-label="Trace summary">
                 <h2 class="inspector-label">Trace target</h2>
-                <div class="target-card"><div id="summary-target-path" class="target-path">$.device.fingerprint</div><div id="summary-target-request" class="target-request">POST /cart · request-81</div></div>
-                <div class="coverage"><span>Evidence coverage</span><strong id="coverage-value">68%</strong><div class="coverage-bar"><span id="coverage-bar"></span></div></div>
+                <div class="target-card"><div id="summary-target-path" class="target-path">No request selected</div><div id="summary-target-request" class="target-request">Observed identifiers only</div></div>
+                <div class="coverage"><span>Evidence coverage</span><strong id="coverage-value">0%</strong><div class="coverage-bar"><span id="coverage-bar" style="width:0"></span></div></div>
                 <h2 class="inspector-label">Confidence</h2>
                 <div class="legend">
-                  <div class="legend-row"><strong class="exact">Exact</strong><span>Observed boundary</span></div>
-                  <div class="legend-row"><strong class="matched">Matched</strong><span>Reversible bytes</span></div>
-                  <div class="legend-row"><strong class="differential">Differential</strong><span>Changed together</span></div>
-                  <div class="legend-row"><strong class="correlation">Correlated</strong><span>Same context only</span></div>
+                  <div class="legend-row"><strong class="exact">Observed</strong><span>Explicit event relationship</span></div>
+                  <div class="legend-row"><strong class="correlation">Correlated</strong><span>Shared identifiers, not causality</span></div>
                   <div class="legend-row"><strong class="unknown">Unknown</strong><span>Evidence missing</span></div>
                 </div>
                 <div class="inspector-actions">
-                  <button class="trace-button" type="button" data-screen="experiments">Branch experiment</button>
+                  <button id="trace-branch-experiment" class="trace-button" type="button" data-screen="experiments">Branch experiment</button>
                   <button class="evidence-link" type="button" data-screen="evidence">Open supporting evidence · <span id="evidence-link-count">5</span> events →</button>
                 </div>
               </aside>
@@ -1617,7 +1572,12 @@ export async function checkout(cart, fingerprint) {
         vmAnalysisStatus: 'loading',
         vmAnalysisError: null,
         vmAnalysisRequestId: null,
-        vmAnalysisEtag: null
+        vmAnalysisEtag: null,
+        originTrace: null,
+        originTraceStatus: 'idle',
+        originTraceError: null,
+        originTraceKey: null,
+        originTraceEtag: null
       };
 
       const elements = {
@@ -1641,6 +1601,7 @@ export async function checkout(cart, fingerprint) {
         traceButton: document.querySelector('#trace-origin'),
         requestVmCandidates: document.querySelector('#request-vm-candidates'),
         backtraceSubtitle: document.querySelector('#backtrace-subtitle'),
+        backtraceSteps: document.querySelector('#backtrace-steps'),
         evidenceRows: document.querySelector('#evidence-rows'),
         evidenceCount: document.querySelector('#evidence-count'),
         evidenceLinkCount: document.querySelector('#evidence-link-count'),
@@ -1648,6 +1609,7 @@ export async function checkout(cart, fingerprint) {
         summaryTargetRequest: document.querySelector('#summary-target-request'),
         coverageValue: document.querySelector('#coverage-value'),
         coverageBar: document.querySelector('#coverage-bar'),
+        traceBranchExperiment: document.querySelector('#trace-branch-experiment'),
         experimentSubtitle: document.querySelector('#experiment-subtitle'),
         experimentCandidate: document.querySelector('#experiment-candidate'),
         experimentInput: document.querySelector('#experiment-input'),
@@ -1674,15 +1636,6 @@ export async function checkout(cart, fingerprint) {
         vmList: document.querySelector('#vm-list'),
         vmDetail: document.querySelector('#vm-detail')
       };
-
-      const bodyTraceSteps = [
-        { index: '01', kind: 'Request field', title: 'POST /cart · body.device.fingerprint', meta: 'request-81 · 24 bytes sent', confidence: 'Exact', style: 'exact' },
-        { index: '02', kind: 'Serialized by', title: 'JSON.stringify(object-17)', meta: 'script cart.js:418 · boundary observed', confidence: 'Exact', style: 'exact' },
-        { index: '03', kind: 'Derived from', title: 'Base64 encoded bytes', meta: 'reversible value match · 18 input bytes', confidence: 'Matched', style: 'matched' },
-        { index: '?', kind: 'Evidence gap', title: 'Producer relationship not observed', meta: 'A targeted replay can instrument only this missing boundary', confidence: 'Unknown', style: 'unknown', gap: true },
-        { index: '04', kind: 'Candidate returned by', title: 'wasm-4 export generate', meta: 'same frame and task · causality not yet proven', confidence: 'Correlated', style: 'correlation', correlated: true },
-        { index: '05', kind: 'Native probe evidence', title: 'Canvas readback · event-194', meta: 'CanvasRenderingContext2D.getImageData', confidence: 'Correlated', style: 'correlation' }
-      ];
 
       const eventCategories = new Set([
         'unknown', 'canvas', 'webgl', 'web_audio', 'navigator', 'permissions',
@@ -1879,6 +1832,39 @@ export async function checkout(cart, fingerprint) {
           isSafeIntegerInRange(body.count, 0, 5000) &&
           body.count === body.artifacts.length &&
           body.artifacts.every(isArtifact);
+      }
+
+      function isOriginTraceResponse(body) {
+        if (!isPlainObject(body) || body.contract_version !== 1 ||
+            body.document_kind !== 'origin-trace' ||
+            !isCanonicalInteger(body.request_id, 0n, uint64Max) ||
+            !['complete', 'partial', 'empty', 'ambiguous'].includes(body.status) ||
+            !Array.isArray(body.steps) || body.steps.length > 32 ||
+            !Array.isArray(body.gaps) || !Array.isArray(body.artifacts) ||
+            !isPlainObject(body.coverage)) return false;
+        const coverage = body.coverage;
+        if (!['linked_steps', 'observed_links', 'correlated_links', 'gap_count', 'percent']
+          .every(field => isSafeIntegerInRange(coverage[field], 0, field === 'percent' ? 100 : 32)) ||
+          coverage.linked_steps !== Math.max(0, body.steps.length - 1) ||
+          coverage.gap_count !== body.gaps.length) return false;
+        const validStep = step => isPlainObject(step) && isPlainObject(step.event) &&
+          isCanonicalInteger(step.event.session_id, 0n, uint64Max) &&
+          BigInt(step.event.session_id) > 0n &&
+          isSafeIntegerInRange(step.event.process_id, 0, 0xffffffff) &&
+          isCanonicalInteger(step.event.sequence_number, 0n, uint64Max) &&
+          BigInt(step.event.sequence_number) > 0n &&
+          isCanonicalInteger(step.monotonic_time_ns, 0n, uint64Max) &&
+          isCanonicalInteger(step.frame_id, 0n, uint64Max) &&
+          isCanonicalInteger(step.artifact_id, 0n, uint64Max) &&
+          isCanonicalInteger(step.request_id, 0n, uint64Max) &&
+          typeof step.category === 'string' && typeof step.operation === 'string' &&
+          typeof step.value === 'string' &&
+          ['trace_target', 'parent_event', 'request_initiator', 'request_lifecycle', 'artifact_request'].includes(step.relation) &&
+          ['observed', 'correlated'].includes(step.confidence);
+        const validGap = gap => isPlainObject(gap) &&
+          ['ambiguous_request', 'missing_event', 'no_predecessor', 'cycle', 'step_limit'].includes(gap.reason) &&
+          isSafeIntegerInRange(gap.after_step, 0, 31) && typeof gap.detail === 'string';
+        return body.steps.every(validStep) && body.gaps.every(validGap);
       }
 
       function legacyBrowserRequestKey(event) {
@@ -2472,6 +2458,11 @@ export async function checkout(cart, fingerprint) {
         const request = state.requests.find(candidate => candidate.id === id);
         if (!request) return;
         state.selectedRequestId = id;
+        state.originTrace = null;
+        state.originTraceStatus = 'idle';
+        state.originTraceError = null;
+        state.originTraceKey = null;
+        state.originTraceEtag = null;
         updateSelectionSummary(request);
         if (request.traceable) {
           elements.prompt.textContent = 'Choose a request value and trace where it came from.';
@@ -2509,6 +2500,19 @@ export async function checkout(cart, fingerprint) {
           .find(row => row.dataset.requestId === id)?.focus({ preventScroll: true });
       }
 
+      function requestTraceRoot(request) {
+        if (request?.origin !== 'live') return null;
+        const candidates = request.events ?? [];
+        return candidates.find(event => event.type === 'request_started' && integerText(event, 'request_id') !== '0') ??
+          candidates.find(event => event.type === 'request_initiated' && integerText(event, 'request_id') !== '0') ??
+          candidates.find(event => integerText(event, 'request_id') !== '0') ?? null;
+      }
+
+      function traceIsAvailable() {
+        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        return Boolean(requestTraceRoot(request) || state.selectedField);
+      }
+
       function renderFields() {
         document.querySelectorAll('.field-tab').forEach(tab => {
           const selected = tab.dataset.fieldTab === state.fieldTab;
@@ -2529,11 +2533,14 @@ export async function checkout(cart, fingerprint) {
           const empty = document.createElement('div');
           empty.className = 'field-empty';
           empty.textContent = request?.origin === 'live'
-            ? 'Request field capture is not available for this broker event. Select the sample POST /cart request to explore the field backtrace.'
-            : 'Select the sample POST /cart request to explore the field backtrace.';
+            ? 'Structured fields were not captured. Request-level origin evidence is still available.'
+            : 'Select a live request to build a broker-backed origin trace.';
           elements.fieldTree.replaceChildren(empty);
-          elements.traceTarget.textContent = 'No traceable request field selected';
-          elements.traceButton.disabled = true;
+          const root = requestTraceRoot(request);
+          elements.traceTarget.textContent = root
+            ? `${request.method} ${request.path} · request ${integerText(root, 'request_id')}`
+            : 'No broker-backed trace target selected';
+          elements.traceButton.disabled = !root;
           return;
         }
 
@@ -2591,11 +2598,14 @@ export async function checkout(cart, fingerprint) {
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         if (state.inspectorTab === 'payload') {
           const traceable = Boolean(request?.traceable);
+          const requestTraceable = Boolean(requestTraceRoot(request));
           elements.prompt.textContent = traceable
             ? 'Choose a request value and trace where it came from.'
-            : 'No structured request payload was captured.';
+            : requestTraceable
+              ? 'Trace this request backward through observed event relationships.'
+              : 'No structured request payload was captured.';
           elements.fieldTabs.hidden = !traceable;
-          elements.traceDock.hidden = !traceable;
+          elements.traceDock.hidden = !traceable && !requestTraceable;
           renderFields();
           return;
         }
@@ -2681,96 +2691,151 @@ export async function checkout(cart, fingerprint) {
       }
 
       function renderEvidence() {
-        const traceUnavailable = !state.selectedField;
-        document.querySelectorAll('.nav-button[data-screen="backtrace"], .nav-button[data-screen="experiments"]')
-          .forEach(button => { button.disabled = traceUnavailable; });
-        const selectedSampleEvidence = state.selectedField?.label === 'Body'
-          ? sampleEvidence
-          : [{
-              relative: '0.000 ms',
-              source: 'sample',
-              category: 'network',
-              type: 'request_field',
-              correlation: `req ${state.selectedRequestId} · nav 100`,
-              value: state.selectedField ? `${state.selectedField.label.toLowerCase()}.${state.selectedField.path}` : 'No selected field'
-            }];
-        const firstTime = state.events.length > 0
-          ? integerValue(state.events[0], 'monotonic_time_ns')
-          : 0n;
-        const liveEvidence = state.events.map((event, index) => {
-          const correlation = [
-            `session ${integerText(event, 'session_id')}`,
-            `process ${event.process_id}`,
-            `seq ${integerText(event, 'sequence_number')}`,
-            `nav ${integerText(event, 'navigation_id')}`,
-            `frame ${integerText(event, 'frame_id')}`,
-            `artifact ${integerText(event, 'artifact_id')}`,
-            `parent ${integerText(event, 'parent_event_id')}`
-          ];
-          if (event.protocol_version === 2) {
-            correlation.push(`request ${integerText(event, 'request_id')}`);
-            const context = browserContextToken(event);
-            if (context) correlation.push(`browser context ${context}`);
-          }
-          return {
-            relative: formatMilliseconds(integerValue(event, 'monotonic_time_ns') - firstTime, '+'),
-            source: 'live',
-            category: event.category,
-            type: event.type,
-            correlation: correlation.join(' · '),
-            value: summarizeEventValue(event),
-            index
-          };
-        });
-        const evidence = [...selectedSampleEvidence, ...liveEvidence];
+        document.querySelectorAll('.nav-button[data-screen="backtrace"]')
+          .forEach(button => { button.disabled = !traceIsAvailable(); });
+        document.querySelectorAll('.nav-button[data-screen="experiments"]')
+          .forEach(button => { button.disabled = !state.selectedField; });
+        elements.traceBranchExperiment.disabled = !state.selectedField;
+        const documentSteps = state.originTrace?.steps ?? [];
+        const firstTime = documentSteps.length ? BigInt(documentSteps[documentSteps.length - 1].monotonic_time_ns) : 0n;
+        const tracedEvidence = documentSteps.map(step => ({
+          relative: formatMilliseconds(BigInt(step.monotonic_time_ns) - firstTime, '+'),
+          source: step.confidence,
+          category: step.category,
+          type: step.operation,
+          correlation: `session ${step.event.session_id} · process ${step.event.process_id} · seq ${step.event.sequence_number} · frame ${step.frame_id} · request ${step.request_id} · artifact ${step.artifact_id}`,
+          value: step.value || step.relation
+        }));
+        const gapEvidence = (state.originTrace?.gaps ?? []).map(gap => ({
+          relative: 'gap', source: 'unknown', category: 'trace', type: gap.reason,
+          correlation: `after step ${gap.after_step + 1}`, value: gap.detail
+        }));
+        const selectedSampleEvidence = !state.originTrace && state.selectedField ? sampleEvidence : [];
+        const evidence = [...tracedEvidence, ...gapEvidence, ...selectedSampleEvidence];
         elements.evidenceRows.replaceChildren(...evidence.map(event => {
           const row = document.createElement('div'); row.className = 'evidence-row'; row.setAttribute('role', 'row');
           const values = [event.relative, event.source, event.category, event.type, event.correlation, event.value];
           values.forEach((value, index) => {
             const cell = document.createElement('span'); cell.textContent = String(value ?? ''); cell.title = cell.textContent;
             cell.setAttribute('role', 'cell');
-            if (index === 1) cell.className = event.source === 'live' ? 'source-live' : 'source-sample';
+            if (index === 1) cell.className = event.source === 'observed' ? 'source-live' : 'source-sample';
             if (index === 2) cell.className = 'category-cell';
             if (index === 4) cell.className = 'correlation-cell';
             row.append(cell);
           });
           return row;
         }));
-        elements.evidenceCount.textContent = `${evidence.length} events · ${state.events.length} live`;
+        elements.evidenceCount.textContent = `${evidence.length} trace records`;
         elements.evidenceLinkCount.textContent = String(evidence.length);
       }
 
-      function renderBacktrace() {
-        if (!state.selectedField) return;
-        const isBodyTrace = state.selectedField.label === 'Body';
+      function originTraceSelection() {
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
-        const fieldTarget = `${state.selectedField.label.toLowerCase()}.${state.selectedField.path.replace(/^\$\.?/, '')}`;
-        const steps = isBodyTrace
-          ? bodyTraceSteps
-          : [
-              { index: '01', kind: 'Request field', title: `${request.method} ${request.path} · ${fieldTarget}`, meta: `request-${request.id} · final value observed`, confidence: 'Exact', style: 'exact' },
-              { index: '?', kind: 'Evidence gap', title: 'Origin boundary not captured yet', meta: 'No transformation or producer relationship is available for this field', confidence: 'Unknown', style: 'unknown', gap: true }
-            ];
+        const root = requestTraceRoot(request);
+        if (!request || !root) return null;
+        const requestID = integerText(root, 'request_id');
+        return {
+          request,
+          root,
+          requestID,
+          key: `${request.id}:${root.process_id}:${integerText(root, 'sequence_number')}`
+        };
+      }
 
-        document.querySelectorAll('.trace-step').forEach((step, index) => {
-          const model = steps[index];
-          step.hidden = !model;
-          if (!model) return;
-          step.className = `trace-step${model.gap ? ' gap' : ''}${model.correlated ? ' correlated' : ''}`;
-          step.querySelector('.step-index').textContent = model.index;
-          step.querySelector('.step-kind').textContent = model.kind;
-          step.querySelector('.step-title').textContent = model.title;
-          step.querySelector('.step-meta').textContent = model.meta;
-          const confidence = step.querySelector('.confidence');
-          confidence.className = `confidence ${model.style}`;
-          confidence.textContent = model.confidence;
-          step.querySelector('.step-card').classList.toggle('gap-card', Boolean(model.gap));
-        });
+      async function refreshOriginTrace() {
+        const selection = originTraceSelection();
+        if (!selection || location.protocol === 'file:') {
+          state.originTraceStatus = 'empty';
+          state.originTraceError = 'A live broker request is required for origin tracing.';
+          renderBacktrace();
+          return;
+        }
+        state.originTraceStatus = 'loading';
+        state.originTraceError = null;
+        renderBacktrace();
+        try {
+          const headers = state.originTraceKey === selection.key && state.originTraceEtag
+            ? { 'If-None-Match': state.originTraceEtag }
+            : {};
+          const parameters = new URLSearchParams({
+            request_id: selection.requestID,
+            root_process_id: String(selection.root.process_id),
+            root_sequence_number: integerText(selection.root, 'sequence_number')
+          });
+          const response = await fetch(`/api/origin-trace?${parameters}`, { cache: 'no-store', headers });
+          if (response.status === 304 && state.originTrace) {
+            state.originTraceStatus = 'ready';
+            renderBacktrace();
+            return;
+          }
+          if (!response.ok) throw new Error(`Origin trace store returned ${response.status}`);
+          const body = await response.json();
+          if (!isOriginTraceResponse(body)) throw new TypeError('Malformed origin trace response');
+          state.originTrace = body;
+          state.originTraceStatus = 'ready';
+          state.originTraceKey = selection.key;
+          state.originTraceEtag = response.headers.get('ETag');
+        } catch (error) {
+          state.originTraceStatus = 'error';
+          state.originTraceError = error.message;
+        }
+        renderBacktrace();
+        renderEvidence();
+      }
 
-        elements.summaryTargetPath.textContent = state.selectedField.path;
-        elements.summaryTargetRequest.textContent = `${request.method} ${request.path} · request-${request.id}`;
-        elements.coverageValue.textContent = isBodyTrace ? '68%' : '18%';
-        elements.coverageBar.style.width = isBodyTrace ? '68%' : '18%';
+      function traceStepElement(model) {
+        const item = document.createElement('li');
+        item.className = `trace-step${model.gap ? ' gap' : ''}${model.correlated ? ' correlated' : ''}`;
+        const index = document.createElement('span'); index.className = 'step-index'; index.textContent = model.index;
+        const card = document.createElement('div'); card.className = `step-card${model.gap ? ' gap-card' : ''}`;
+        const copy = document.createElement('span');
+        const kind = document.createElement('span'); kind.className = 'step-kind'; kind.textContent = model.kind;
+        const title = document.createElement('span'); title.className = 'step-title'; title.textContent = model.title;
+        const meta = document.createElement('span'); meta.className = 'step-meta'; meta.textContent = model.meta;
+        const confidence = document.createElement('span');
+        confidence.className = `confidence ${model.style}`; confidence.textContent = model.confidence;
+        copy.append(kind, title, meta); card.append(copy, confidence); item.append(index, card);
+        return item;
+      }
+
+      function renderBacktrace() {
+        const selection = originTraceSelection();
+        const request = selection?.request ?? state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        const models = [];
+        if (state.originTraceStatus === 'loading') {
+          models.push({ index: '…', kind: 'Loading evidence', title: 'Building the bounded origin trace', meta: 'Reading normalized broker evidence', confidence: 'Pending', style: 'unknown', gap: true });
+        } else if (state.originTraceStatus === 'error' || !state.originTrace) {
+          models.push({ index: '?', kind: 'Trace unavailable', title: state.originTraceError || 'No broker-backed trace loaded', meta: 'Select a live request and run Trace origin', confidence: 'Unknown', style: 'unknown', gap: true });
+        } else {
+          const relationLabels = {
+            trace_target: 'Trace target', parent_event: 'Observed parent', request_initiator: 'Request initiator',
+            request_lifecycle: 'Request lifecycle', artifact_request: 'Artifact correlation'
+          };
+          state.originTrace.steps.forEach((step, index) => {
+            models.push({
+              index: String(index + 1).padStart(2, '0'),
+              kind: relationLabels[step.relation] || step.relation,
+              title: `${step.category} · ${step.operation}`,
+              meta: `process ${step.event.process_id} · event ${step.event.sequence_number}${step.value ? ` · ${step.value}` : ''}`,
+              confidence: step.confidence === 'observed' ? 'Observed' : 'Correlated',
+              style: step.confidence === 'observed' ? 'exact' : 'correlation',
+              correlated: step.confidence === 'correlated'
+            });
+            state.originTrace.gaps.filter(gap => gap.after_step === index).forEach(gap => {
+              models.push({ index: '?', kind: 'Evidence gap', title: gap.reason.replaceAll('_', ' '), meta: gap.detail, confidence: 'Unknown', style: 'unknown', gap: true });
+            });
+          });
+          if (!state.originTrace.steps.length) {
+            const gap = state.originTrace.gaps[0];
+            models.push({ index: '?', kind: 'No retained origin', title: state.originTrace.status, meta: gap?.detail || 'No matching request evidence is retained.', confidence: 'Unknown', style: 'unknown', gap: true });
+          }
+        }
+        elements.backtraceSteps.replaceChildren(...models.map(traceStepElement));
+        const coverage = state.originTrace?.coverage?.percent ?? 0;
+        elements.summaryTargetPath.textContent = selection ? `request ${selection.requestID}` : 'No live request target';
+        elements.summaryTargetRequest.textContent = request ? `${request.method} ${request.path} · identifiers only` : 'Observed identifiers only';
+        elements.coverageValue.textContent = `${coverage}%`;
+        elements.coverageBar.style.width = `${coverage}%`;
       }
 
       function renderExperiment() {
@@ -3204,16 +3269,19 @@ export async function checkout(cart, fingerprint) {
 
       function showScreen(name, trigger = null) {
         const screenName = name === 'backtraces' ? 'backtrace' : name;
-        if ((screenName === 'backtrace' || screenName === 'experiments') && !state.selectedField) return;
+        if (screenName === 'backtrace' && !traceIsAvailable()) return;
+        if (screenName === 'experiments' && !state.selectedField) return;
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
         elements.workspace.classList.toggle('sources-active', screenName === 'sources');
         document.querySelectorAll('.nav-button').forEach(button => {
           const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence');
           if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
         });
-        if (screenName === 'backtrace' && state.selectedField) {
-          const label = `request-${state.selectedRequestId} · ${state.selectedField.label} · ${state.selectedField.path}`;
-          elements.backtraceSubtitle.textContent = label;
+        if (screenName === 'backtrace') {
+          const selection = originTraceSelection();
+          elements.backtraceSubtitle.textContent = selection
+            ? `${selection.request.method} ${selection.request.path} · request ${selection.requestID}`
+            : `request-${state.selectedRequestId} · sample data has no broker trace`;
           renderBacktrace();
         }
         if (screenName === 'experiments') renderExperiment();
@@ -3351,7 +3419,10 @@ export async function checkout(cart, fingerprint) {
         }));
       }
 
-      document.querySelectorAll('[data-screen]').forEach(button => button.addEventListener('click', () => showScreen(button.dataset.screen, button)));
+      document.querySelectorAll('[data-screen]').forEach(button => button.addEventListener('click', async () => {
+        showScreen(button.dataset.screen, button);
+        if (button.dataset.screen === 'backtrace' && originTraceSelection()) await refreshOriginTrace();
+      }));
       document.querySelectorAll('.type-filter').forEach(button => button.addEventListener('click', () => {
         state.requestType = button.dataset.filter;
         document.querySelectorAll('.type-filter').forEach(candidate => candidate.setAttribute('aria-pressed', String(candidate === button)));
@@ -3379,7 +3450,10 @@ export async function checkout(cart, fingerprint) {
         document.querySelectorAll('.view-switch button').forEach(candidate => candidate.setAttribute('aria-pressed', String(candidate === button)));
       }));
       elements.requestFilter.addEventListener('input', renderRequests);
-      elements.traceButton.addEventListener('click', () => showScreen('backtrace', elements.traceButton));
+      elements.traceButton.addEventListener('click', async () => {
+        showScreen('backtrace', elements.traceButton);
+        await refreshOriginTrace();
+      });
       elements.requestVmCandidates.addEventListener('click', async () => {
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         const requestId = request?.event ? String(request.event.request_id) : /^\d+$/.test(request?.id ?? '') ? request.id : null;

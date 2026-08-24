@@ -126,6 +126,7 @@ readonly session_directory
 test -n "${session_directory}"
 test "$(wc -l <"${session_directory}/events.jsonl" | tr -d ' ')" = 5
 test -s "${session_directory}/origin-trace.jsonl"
+test -s "${session_directory}/request-signals.jsonl"
 test "$(wc -l <"${session_directory}/artifacts/manifest.jsonl" | tr -d ' ')" = 3
 grep -Fq '"category":"network"' "${session_directory}/events.jsonl"
 grep -Fq '"kind":"wasm"' "${session_directory}/artifacts/manifest.jsonl"
@@ -133,6 +134,8 @@ grep -Fxq -- '--artifacts' "${open_arguments}"
 grep -Fxq -- "${session_directory}/artifacts" "${open_arguments}"
 grep -Fxq -- '--trace-store' "${open_arguments}"
 grep -Fxq -- "${session_directory}/origin-trace.jsonl" "${open_arguments}"
+grep -Fxq -- '--signal-store' "${open_arguments}"
+grep -Fxq -- "${session_directory}/request-signals.jsonl" "${open_arguments}"
 grep -Fq 'accepted=3' "${session_directory}/artifact-receiver.log"
 test ! -e "/tmp/origin-trace-${UID}-$(basename "${session_directory}").sock"
 test ! -e "/tmp/origin-trace-${UID}-$(basename "${session_directory}")-artifacts.sock"
@@ -149,6 +152,7 @@ test "$(mode_of "${session_directory}")" = 700
 test "$(mode_of "${session_directory}/artifacts")" = 700
 test "$(mode_of "${session_directory}/events.jsonl")" = 600
 test "$(mode_of "${session_directory}/origin-trace.jsonl")" = 600
+test "$(mode_of "${session_directory}/request-signals.jsonl")" = 600
 test "$(mode_of "${session_directory}/broker.log")" = 600
 test "$(mode_of "${session_directory}/artifact-receiver.log")" = 600
 test "$(mode_of "${session_directory}/broker.token")" = 600

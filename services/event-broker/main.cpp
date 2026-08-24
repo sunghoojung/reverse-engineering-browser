@@ -27,6 +27,7 @@
 #include "reb/event_broker.hpp"
 #include "reb/local_ipc.hpp"
 #include "reb/origin_trace.hpp"
+#include "reb/request_signal_profile.hpp"
 
 namespace {
 
@@ -35,6 +36,7 @@ constexpr std::size_t kSocketEventBatchCapacity = 256;
 struct Options final {
   std::string store_path;
   std::string trace_store_path;
+  std::string signal_store_path;
   std::string socket_path;
   std::string token_path;
   std::size_t capacity = 10'000;
@@ -77,11 +79,12 @@ class ScopedSocketPath final {
 };
 
 void PrintUsage(const char* program) {
-  std::cerr << "Usage: " << program << " --store PATH [--trace-store PATH] [--capacity COUNT]\n"
+  std::cerr << "Usage: " << program
+            << " --store PATH [--trace-store PATH] [--signal-store PATH] [--capacity COUNT]\n"
             << "       " << program
             << " --store PATH --socket PATH --token-file PATH --session-id ID"
                " --category-mask MASK --duration-seconds SECONDS"
-               " [--trace-store PATH] [--capacity COUNT]\n";
+               " [--trace-store PATH] [--signal-store PATH] [--capacity COUNT]\n";
 }
 
 template <typename Integer>
@@ -99,6 +102,8 @@ bool ParseOptions(const int argc, char* argv[], Options& options) {
       options.store_path = argv[++index];
     } else if (argument == "--trace-store" && index + 1 < argc) {
       options.trace_store_path = argv[++index];
+    } else if (argument == "--signal-store" && index + 1 < argc) {
+      options.signal_store_path = argv[++index];
     } else if (argument == "--socket" && index + 1 < argc) {
       options.socket_path = argv[++index];
     } else if (argument == "--token-file" && index + 1 < argc) {
@@ -134,8 +139,14 @@ bool ParseOptions(const int argc, char* argv[], Options& options) {
       options.trace_store_path.empty()
           ? std::filesystem::path{}
           : std::filesystem::weakly_canonical(options.trace_store_path, path_error);
+  const std::filesystem::path signal_store_path =
+      options.signal_store_path.empty()
+          ? std::filesystem::path{}
+          : std::filesystem::weakly_canonical(options.signal_store_path, path_error);
   if (options.store_path.empty() || path_error ||
-      (!trace_store_path.empty() && trace_store_path == event_store_path)) {
+      (!trace_store_path.empty() && trace_store_path == event_store_path) ||
+      (!signal_store_path.empty() && signal_store_path == event_store_path) ||
+      (!signal_store_path.empty() && signal_store_path == trace_store_path)) {
     return false;
   }
   const bool any_socket_option = !options.socket_path.empty() || !options.token_path.empty() ||
@@ -184,6 +195,8 @@ bool StoreEvent(reb::EventBroker& broker,
                 std::ofstream& store,
                 reb::OriginTraceIndex* trace_index,
                 std::ofstream* trace_store,
+                reb::RequestSignalProfileIndex* signal_index,
+                std::ofstream* signal_store,
                 const reb::EventRecord& event) {
   if (broker.Ingest(event) != reb::IngestStatus::kAccepted) {
     return true;
@@ -203,10 +216,20 @@ bool StoreEvent(reb::EventBroker& broker,
       return false;
     }
   }
+  if (signal_index && signal_store) {
+    const std::optional<reb::RequestSignalProfile> profile = signal_index->Ingest(event);
+    if (profile) {
+      *signal_store << reb::RequestSignalProfileToJson(*profile) << '\n';
+    }
+    if (!*signal_store) {
+      std::cerr << "Unable to write request signal profile store\n";
+      return false;
+    }
+  }
   return true;
 }
 
-bool FlushStores(std::ofstream& store, std::ofstream* trace_store) {
+bool FlushStores(std::ofstream& store, std::ofstream* trace_store, std::ofstream* signal_store) {
   store.flush();
   if (!store) {
     std::cerr << "Unable to write event store\n";
@@ -219,25 +242,34 @@ bool FlushStores(std::ofstream& store, std::ofstream* trace_store) {
       return false;
     }
   }
+  if (signal_store) {
+    signal_store->flush();
+    if (!*signal_store) {
+      std::cerr << "Unable to write request signal profile store\n";
+      return false;
+    }
+  }
   return true;
 }
 
 bool IngestStandardInput(reb::EventBroker& broker,
                          std::ofstream& store,
                          reb::OriginTraceIndex* trace_index,
-                         std::ofstream* trace_store) {
+                         std::ofstream* trace_store,
+                         reb::RequestSignalProfileIndex* signal_index,
+                         std::ofstream* signal_store) {
   reb::EventRecord event{};
   while (std::cin.read(reinterpret_cast<char*>(&event), sizeof(event))) {
-    if (!StoreEvent(broker, store, trace_index, trace_store, event)) {
+    if (!StoreEvent(broker, store, trace_index, trace_store, signal_index, signal_store, event)) {
       return false;
     }
   }
   if (std::cin.gcount() != 0) {
     std::cerr << "Truncated native event record received\n";
-    static_cast<void>(FlushStores(store, trace_store));
+    static_cast<void>(FlushStores(store, trace_store, signal_store));
     return false;
   }
-  return FlushStores(store, trace_store);
+  return FlushStores(store, trace_store, signal_store);
 }
 
 enum class TimedReadStatus {
@@ -345,7 +377,9 @@ bool IngestSocket(const int descriptor,
                   reb::EventBroker& broker,
                   std::ofstream& store,
                   reb::OriginTraceIndex* trace_index,
-                  std::ofstream* trace_store) {
+                  std::ofstream* trace_store,
+                  reb::RequestSignalProfileIndex* signal_index,
+                  std::ofstream* signal_store) {
   reb::LocalIpcHello hello;
   std::string error;
   const TimedReadStatus hello_status =
@@ -395,15 +429,15 @@ bool IngestSocket(const int descriptor,
       if (event.header.session_id != options.session_id) {
         std::cerr << "Event session does not match authenticated broker session\n";
         if (index != 0) {
-          static_cast<void>(FlushStores(store, trace_store));
+          static_cast<void>(FlushStores(store, trace_store, signal_store));
         }
         return false;
       }
-      if (!StoreEvent(broker, store, trace_index, trace_store, event)) {
+      if (!StoreEvent(broker, store, trace_index, trace_store, signal_index, signal_store, event)) {
         return false;
       }
     }
-    if (!FlushStores(store, trace_store)) {
+    if (!FlushStores(store, trace_store, signal_store)) {
       return false;
     }
   }
@@ -475,6 +509,16 @@ void PrintTraceStats(const reb::OriginTraceIndexStats& stats) {
             << " evicted_events=" << stats.evicted_events << '\n';
 }
 
+void PrintSignalStats(const reb::RequestSignalProfileIndexStats& stats) {
+  std::cerr << "Request signal profile stopped: indexed_events=" << stats.indexed_events
+            << " emitted_profiles=" << stats.emitted_profiles
+            << " duplicate_events=" << stats.duplicate_events
+            << " evicted_events=" << stats.evicted_events
+            << " evicted_contexts=" << stats.evicted_contexts
+            << " evicted_profiles=" << stats.evicted_profiles
+            << " copied_profiles=" << stats.copied_profiles << '\n';
+}
+
 }  // namespace
 
 int main(const int argc, char* argv[]) {
@@ -508,11 +552,24 @@ int main(const int argc, char* argv[]) {
     trace_index = std::make_unique<reb::OriginTraceIndex>(options.capacity);
   }
 
+  std::ofstream signal_store;
+  std::unique_ptr<reb::RequestSignalProfileIndex> signal_index;
+  if (!options.signal_store_path.empty()) {
+    signal_store.open(options.signal_store_path, std::ios::out | std::ios::trunc);
+    if (!signal_store) {
+      std::cerr << "Unable to open request signal profile store: " << options.signal_store_path
+                << '\n';
+      return 1;
+    }
+    signal_index = std::make_unique<reb::RequestSignalProfileIndex>(options.capacity);
+  }
+
   reb::EventBroker broker(options.capacity, policy);
   bool ingested = false;
   if (options.socket_path.empty()) {
     ingested =
-        IngestStandardInput(broker, store, trace_index.get(), trace_index ? &trace_store : nullptr);
+        IngestStandardInput(broker, store, trace_index.get(), trace_index ? &trace_store : nullptr,
+                            signal_index.get(), signal_index ? &signal_store : nullptr);
   } else {
     reb::LocalIpcToken token{};
     std::string error;
@@ -537,7 +594,8 @@ int main(const int argc, char* argv[]) {
         return 1;
       }
       ingested = IngestSocket(connection.get(), options, policy, token, broker, store,
-                              trace_index.get(), trace_index ? &trace_store : nullptr);
+                              trace_index.get(), trace_index ? &trace_store : nullptr,
+                              signal_index.get(), signal_index ? &signal_store : nullptr);
     }
   }
 
@@ -545,6 +603,9 @@ int main(const int argc, char* argv[]) {
   PrintStats(stats);
   if (trace_index) {
     PrintTraceStats(trace_index->Stats());
+  }
+  if (signal_index) {
+    PrintSignalStats(signal_index->Stats());
   }
   return ingested && stats.invalid == 0 ? 0 : 1;
 }

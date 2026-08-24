@@ -55,7 +55,9 @@ make ui
 Open `http://127.0.0.1:7319`. The dependency-free local server reads the same
 JSONL evidence store written by the native broker. The network workspace groups
 lifecycle events by request and provides request filters plus Headers, Payload,
-Preview, Response, Initiator, and Timing inspectors. Loading, empty,
+Preview, Response, Initiator, Timing, and Signals inspectors. Signals presents
+the bounded Canvas, WebGL, Web Audio, Navigator, Permissions, Storage, and
+WebRTC evidence profile for one exact live request. Loading, empty,
 disconnected, malformed-event, and sequence-gap states remain visible. The
 trace workspace builds a live request-level origin chain from the broker's
 versioned edge sidecar. Structured request fields are not required. It selects
@@ -100,6 +102,13 @@ events, 30,000 edges, and 10,000 artifact records, rejects oversized or
 malformed records, traverses at most 32 steps, and supports entity-tag
 revalidation. The native application
 uses the same limits and contract without a localhost server.
+
+Pass `--signal-store /path/to/request-signals.jsonl` when the request signal
+profile sidecar is not next to the default demo store. The endpoint selects an
+exact session, request, process, and sequence root, reads at most 10,000
+profiles, rejects records larger than 8 KiB, and supports entity-tag
+revalidation. Observed parent chains and correlated same-context activity stay
+visibly distinct.
 
 Captured JavaScript and WebAssembly artifacts are analyzed automatically on
 the cold path. The UI reads `/api/analysis/vm` for the automatic scan and

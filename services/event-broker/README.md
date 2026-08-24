@@ -39,6 +39,13 @@ event, and never infers value flow. The renderer queue, browser transport, and
 disabled capture path are unchanged. Parent and initiator identifiers are
 observed relationships; artifact/request joins are visibly correlated.
 
+When `--signal-store` is present, a separate bounded cold-path index writes one
+request signal profile for every accepted request start. Profiles summarize
+Canvas, WebGL, Web Audio, Navigator, Permissions, Storage, and WebRTC activity
+using counts and exact event references only. Explicit parent-chain evidence is
+observed; earlier events sharing session, process, navigation, and frame are
+correlated. The index never records browser API values or request content.
+
 ```sh
 make e2e
 ```
@@ -61,6 +68,7 @@ session, and removes the socket after disconnect.
 build/reb-event-broker \
   --store build/sessions/live/events.jsonl \
   --trace-store build/sessions/live/origin-trace.jsonl \
+  --signal-store build/sessions/live/request-signals.jsonl \
   --socket /tmp/origin-trace.sock \
   --token-file build/sessions/live/broker.token \
   --session-id 123 \

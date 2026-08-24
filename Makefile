@@ -44,6 +44,7 @@ LIB_OBJECTS := \
 	$(BUILD_DIR)/src/event_broker.o \
 	$(BUILD_DIR)/src/local_ipc.o \
 	$(BUILD_DIR)/src/origin_trace.o \
+	$(BUILD_DIR)/src/request_signal_profile.o \
 	$(BUILD_DIR)/src/vm_finding.o
 DEMO_BINARY := $(BUILD_DIR)/reb-event-demo
 PRODUCER_BINARY := $(BUILD_DIR)/reb-event-producer
@@ -58,6 +59,7 @@ TEST_BINARIES := \
 	$(BUILD_DIR)/tests/local_ipc_test \
 	$(BUILD_DIR)/tests/native_probe_queue_test \
 	$(BUILD_DIR)/tests/origin_trace_test \
+	$(BUILD_DIR)/tests/request_signal_profile_test \
 	$(BUILD_DIR)/tests/spsc_ring_test \
 	$(BUILD_DIR)/tests/vm_finding_test
 
@@ -104,13 +106,16 @@ e2e: producer broker artifact-producer artifact-receiver
 	@mkdir -p $(BUILD_DIR)/sessions
 	$(PRODUCER_BINARY) | $(BROKER_BINARY) \
 		--store $(BUILD_DIR)/sessions/demo.jsonl \
-		--trace-store $(BUILD_DIR)/sessions/origin-trace.jsonl
+		--trace-store $(BUILD_DIR)/sessions/origin-trace.jsonl \
+		--signal-store $(BUILD_DIR)/sessions/request-signals.jsonl
 	$(RM) -r "$(BUILD_DIR)/sessions/artifacts"
 	$(ARTIFACT_PRODUCER_BINARY) | $(ARTIFACT_RECEIVER_BINARY) --store $(BUILD_DIR)/sessions/artifacts
 	python3 $(VM_ANALYZER) --artifacts $(BUILD_DIR)/sessions/artifacts --events $(BUILD_DIR)/sessions/demo.jsonl
 	test "$$(wc -l < $(BUILD_DIR)/sessions/demo.jsonl | tr -d ' ')" = "13"
 	test "$$(wc -l < $(BUILD_DIR)/sessions/origin-trace.jsonl | tr -d ' ')" = "11"
+	test "$$(wc -l < $(BUILD_DIR)/sessions/request-signals.jsonl | tr -d ' ')" = "2"
 	test "$$(grep -c '\"relation\":\"parent_event\"' $(BUILD_DIR)/sessions/origin-trace.jsonl)" = "11"
+	test "$$(grep -c '\"document_kind\":\"request-signal-profile\"' $(BUILD_DIR)/sessions/request-signals.jsonl)" = "2"
 	! $(BROKER_BINARY) --store $(BUILD_DIR)/sessions/demo.jsonl \
 		--trace-store $(BUILD_DIR)/sessions/../sessions/demo.jsonl </dev/null
 	test "$$(grep -c '\"payload\":\"$(DEMO_NETWORK_PAYLOAD_HEX)\"' $(BUILD_DIR)/sessions/demo.jsonl)" = "2"
@@ -132,7 +137,8 @@ artifact-socket-e2e: artifact-producer artifact-receiver
 ui: e2e
 	python3 apps/research-ui/server.py \
 		--store $(BUILD_DIR)/sessions/demo.jsonl \
-		--trace-store $(BUILD_DIR)/sessions/origin-trace.jsonl
+		--trace-store $(BUILD_DIR)/sessions/origin-trace.jsonl \
+		--signal-store $(BUILD_DIR)/sessions/request-signals.jsonl
 
 app-build: e2e
 	./scripts/build-research-app.sh
@@ -141,6 +147,7 @@ app: app-build
 	open "$(CURDIR)/$(BUILD_DIR)/Origin Trace.app" --args \
 		--store "$(CURDIR)/$(BUILD_DIR)/sessions/demo.jsonl" \
 		--trace-store "$(CURDIR)/$(BUILD_DIR)/sessions/origin-trace.jsonl" \
+		--signal-store "$(CURDIR)/$(BUILD_DIR)/sessions/request-signals.jsonl" \
 		--artifacts "$(CURDIR)/$(BUILD_DIR)/sessions/artifacts"
 
 live: app-build broker artifact-receiver

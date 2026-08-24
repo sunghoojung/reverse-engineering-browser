@@ -1298,6 +1298,7 @@
                 <div class="inspector-tabs" role="tablist" aria-label="Request inspector">
                   <button id="inspector-tab-headers" class="inspector-tab" type="button" role="tab" data-inspector-tab="headers" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Headers</button>
                   <button id="inspector-tab-payload" class="inspector-tab" type="button" role="tab" data-inspector-tab="payload" aria-controls="request-inspector" aria-selected="true">Payload</button>
+                  <button id="inspector-tab-signals" class="inspector-tab" type="button" role="tab" data-inspector-tab="signals" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Signals</button>
                   <button id="inspector-tab-preview" class="inspector-tab" type="button" role="tab" data-inspector-tab="preview" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Preview</button>
                   <button id="inspector-tab-response" class="inspector-tab" type="button" role="tab" data-inspector-tab="response" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Response</button>
                   <button id="inspector-tab-initiator" class="inspector-tab" type="button" role="tab" data-inspector-tab="initiator" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Initiator</button>
@@ -1578,7 +1579,13 @@ export async function checkout(cart, fingerprint) {
         originTraceError: null,
         originTraceKey: null,
         originTraceEtag: null,
-        originTraceGeneration: 0
+        originTraceGeneration: 0,
+        signalProfile: null,
+        signalProfileStatus: 'idle',
+        signalProfileError: null,
+        signalProfileKey: null,
+        signalProfileEtag: null,
+        signalProfileGeneration: 0
       };
 
       const elements = {
@@ -1641,6 +1648,9 @@ export async function checkout(cart, fingerprint) {
       const eventCategories = new Set([
         'unknown', 'canvas', 'webgl', 'web_audio', 'navigator', 'permissions',
         'storage', 'webrtc', 'wasm', 'network', 'vm', 'artifact'
+      ]);
+      const fingerprintSignalCategories = new Set([
+        'canvas', 'webgl', 'web_audio', 'navigator', 'permissions', 'storage', 'webrtc'
       ]);
       const eventTypes = {
         1: new Set([
@@ -1870,6 +1880,47 @@ export async function checkout(cart, fingerprint) {
           isSafeIntegerInRange(gap.after_step, 0, 31) &&
           typeof gap.detail === 'string' && gap.detail.length > 0;
         return body.steps.every(validStep) && body.gaps.every(validGap);
+      }
+
+      function isSignalEventReference(reference) {
+        return isPlainObject(reference) &&
+          Object.keys(reference).length === 2 &&
+          isSafeIntegerInRange(reference.process_id, 0, 0xffffffff) &&
+          isCanonicalInteger(reference.sequence_number, 1n, uint64Max);
+      }
+
+      function isRequestSignalProfile(body) {
+        if (!isPlainObject(body) || Object.keys(body).length !== 10 ||
+            body.protocol_version !== 1 || body.document_kind !== 'request-signal-profile' ||
+            !isCanonicalInteger(body.session_id, 1n, uint64Max) ||
+            !isCanonicalInteger(body.request_id, 1n, uint64Max) ||
+            !isCanonicalInteger(body.navigation_id, 0n, uint64Max) ||
+            !isCanonicalInteger(body.frame_id, 0n, uint64Max) ||
+            !isSignalEventReference(body.root_event) ||
+            (body.initiator_event !== null && !isSignalEventReference(body.initiator_event)) ||
+            !Array.isArray(body.signals) || body.signals.length > 7 ||
+            !isPlainObject(body.coverage)) return false;
+        const categories = new Set();
+        const validSignals = body.signals.every(signal => {
+          if (!isPlainObject(signal) || Object.keys(signal).length !== 6 ||
+              !fingerprintSignalCategories.has(signal.category) || categories.has(signal.category) ||
+              !['parent_chain', 'same_context'].includes(signal.relation) ||
+              !isCanonicalInteger(signal.event_count, 1n, uint64Max) ||
+              !isSignalEventReference(signal.first_event) ||
+              !isSignalEventReference(signal.last_event)) return false;
+          categories.add(signal.category);
+          return signal.confidence === (signal.relation === 'parent_chain' ? 'observed' : 'correlated');
+        });
+        const coverage = body.coverage;
+        return validSignals && Object.keys(coverage).length === 6 &&
+          isSafeIntegerInRange(coverage.parent_depth, 0, 32) &&
+          coverage.parent_depth_limit === 32 &&
+          typeof coverage.copied_from_initiator === 'boolean' &&
+          typeof coverage.retention_truncated === 'boolean' &&
+          typeof coverage.parent_depth_limited === 'boolean' &&
+          typeof coverage.count_saturated === 'boolean' &&
+          coverage.copied_from_initiator === (body.initiator_event !== null) &&
+          (!coverage.parent_depth_limited || coverage.parent_depth === 32);
       }
 
       function legacyBrowserRequestKey(event) {
@@ -2469,6 +2520,12 @@ export async function checkout(cart, fingerprint) {
         state.originTraceKey = null;
         state.originTraceEtag = null;
         state.originTraceGeneration += 1;
+        state.signalProfile = null;
+        state.signalProfileStatus = 'idle';
+        state.signalProfileError = null;
+        state.signalProfileKey = null;
+        state.signalProfileEtag = null;
+        state.signalProfileGeneration += 1;
         updateSelectionSummary(request);
         if (request.traceable) {
           elements.prompt.textContent = 'Choose a request value and trace where it came from.';
@@ -2483,6 +2540,7 @@ export async function checkout(cart, fingerprint) {
         renderRequests();
         renderInspector();
         renderEvidence();
+        refreshRequestSignalProfile();
       }
 
       function moveRequestSelection(event) {
@@ -2512,6 +2570,68 @@ export async function checkout(cart, fingerprint) {
         return candidates.find(event => event.type === 'request_started' && integerText(event, 'request_id') !== '0') ??
           candidates.find(event => event.type === 'request_initiated' && integerText(event, 'request_id') !== '0') ??
           candidates.find(event => integerText(event, 'request_id') !== '0') ?? null;
+      }
+
+      function requestSignalProfileSelection() {
+        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        const root = requestTraceRoot(request);
+        if (!request || !root) return null;
+        return {
+          request,
+          root,
+          requestID: integerText(root, 'request_id'),
+          sessionID: integerText(root, 'session_id'),
+          key: `${request.id}:${integerText(root, 'session_id')}:${root.process_id}:${integerText(root, 'sequence_number')}`
+        };
+      }
+
+      async function refreshRequestSignalProfile() {
+        const generation = ++state.signalProfileGeneration;
+        const selection = requestSignalProfileSelection();
+        if (!selection || location.protocol === 'file:') {
+          state.signalProfile = null;
+          state.signalProfileStatus = 'empty';
+          state.signalProfileError = null;
+          if (state.inspectorTab === 'signals') renderInspector();
+          return;
+        }
+        state.signalProfileStatus = 'loading';
+        state.signalProfileError = null;
+        if (state.inspectorTab === 'signals') renderInspector();
+        try {
+          const headers = state.signalProfileKey === selection.key && state.signalProfileEtag
+            ? { 'If-None-Match': state.signalProfileEtag }
+            : {};
+          const parameters = new URLSearchParams({
+            session_id: selection.sessionID,
+            request_id: selection.requestID,
+            root_process_id: String(selection.root.process_id),
+            root_sequence_number: integerText(selection.root, 'sequence_number')
+          });
+          const response = await fetch(`/api/request-signal-profile?${parameters}`, { cache: 'no-store', headers });
+          if (generation !== state.signalProfileGeneration) return;
+          if (response.status === 304 && state.signalProfile) {
+            state.signalProfileStatus = 'ready';
+          } else if (response.status === 404) {
+            state.signalProfile = null;
+            state.signalProfileStatus = 'empty';
+            state.signalProfileKey = selection.key;
+            state.signalProfileEtag = null;
+          } else {
+            if (!response.ok) throw new Error(`Request signal profile store returned ${response.status}`);
+            const body = await response.json();
+            if (!isRequestSignalProfile(body)) throw new TypeError('Malformed request signal profile');
+            state.signalProfile = body;
+            state.signalProfileStatus = 'ready';
+            state.signalProfileKey = selection.key;
+            state.signalProfileEtag = response.headers.get('ETag');
+          }
+        } catch (error) {
+          if (generation !== state.signalProfileGeneration) return;
+          state.signalProfileStatus = 'error';
+          state.signalProfileError = error.message;
+        }
+        if (state.inspectorTab === 'signals') renderInspector();
       }
 
       function traceIsAvailable() {
@@ -2627,6 +2747,48 @@ export async function checkout(cart, fingerprint) {
           } else {
             renderInspectorMessage('Request header capture is disabled for this session.');
           }
+          return;
+        }
+        if (state.inspectorTab === 'signals') {
+          elements.prompt.textContent = 'Request signal profile';
+          elements.fieldTabs.hidden = true;
+          elements.traceDock.hidden = !requestTraceRoot(request);
+          if (request?.origin !== 'live') {
+            renderInspectorMessage('Signal profiles are built from live broker evidence.');
+            return;
+          }
+          if (state.signalProfileStatus === 'loading') {
+            renderInspectorMessage('Building a bounded profile from retained browser-signal evidence.');
+            return;
+          }
+          if (state.signalProfileStatus === 'error') {
+            renderInspectorMessage(state.signalProfileError || 'The signal profile is unavailable.');
+            return;
+          }
+          if (!state.signalProfile) {
+            renderInspectorMessage('No request signal profile was retained for this request.');
+            return;
+          }
+          if (state.signalProfile.signals.length === 0) {
+            renderInspectorMessage('No fingerprint-relevant browser signals were retained for this request.');
+            return;
+          }
+          const labels = {
+            canvas: 'Canvas', webgl: 'WebGL', web_audio: 'Web Audio', navigator: 'Navigator',
+            permissions: 'Permissions', storage: 'Storage', webrtc: 'WebRTC'
+          };
+          const details = state.signalProfile.signals.map(signal => ({
+            key: labels[signal.category],
+            value: `${signal.event_count} event${signal.event_count === '1' ? '' : 's'} · process ${signal.last_event.process_id} · event ${signal.last_event.sequence_number}`,
+            type: signal.confidence === 'observed' ? 'Observed' : 'Correlated'
+          }));
+          const coverage = state.signalProfile.coverage;
+          details.push({
+            key: 'coverage',
+            value: `${coverage.parent_depth}/${coverage.parent_depth_limit} parent steps${coverage.copied_from_initiator ? ' · renderer initiator bridged' : ''}`,
+            type: coverage.retention_truncated || coverage.parent_depth_limited || coverage.count_saturated ? 'Partial' : 'Bounded'
+          });
+          renderInspectorDetails(details);
           return;
         }
         if (state.inspectorTab === 'initiator') {
@@ -3331,6 +3493,7 @@ export async function checkout(cart, fingerprint) {
           const headers = state.eventEtag ? { 'If-None-Match': state.eventEtag } : {};
           const response = await fetch('/api/events?limit=500', { cache: 'no-store', headers });
           if (response.status === 304) {
+            await refreshRequestSignalProfile();
             await refreshArtifacts();
             await refreshVmAnalysis();
             return;
@@ -3378,6 +3541,7 @@ export async function checkout(cart, fingerprint) {
           renderRequests();
           renderInspector();
           renderEvidence();
+          await refreshRequestSignalProfile();
           await refreshArtifacts();
           await refreshVmAnalysis();
           renderVmLab();
@@ -3460,6 +3624,7 @@ export async function checkout(cart, fingerprint) {
         }
         renderInspector();
         renderEvidence();
+        if (state.inspectorTab === 'signals') refreshRequestSignalProfile();
       }));
       enableTabKeyboardNavigation('.inspector-tab');
       enableTabKeyboardNavigation('.field-tab');

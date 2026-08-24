@@ -136,3 +136,17 @@ described by `origin-trace-document-v1.schema.json`. Missing predecessors,
 cycles, ambiguous reused request IDs, and the 32-step traversal limit become
 named gap records. Event and edge sidecars remain immutable inputs to this
 projection.
+
+## Request signal profile
+
+The optional broker cold-path signal index writes version 1 request summaries
+described by `request-signal-profile-v1.schema.json`. It includes only counts,
+categories, event references, and correlation context for Canvas, WebGL, Web
+Audio, Navigator, Permissions, Storage, and WebRTC evidence. It never records
+API return values or request header, cookie, credential, or body content.
+
+An explicit retained parent chain is `observed`. Earlier signal events in the
+same session, process, navigation, and frame are only `correlated`. Profiles
+carry a 32-event parent bound, deterministic retention state, and an optional
+renderer initiator reference when the browser-process request inherits its
+profile across the existing request-ID bridge.

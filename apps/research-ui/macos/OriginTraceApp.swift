@@ -2,10 +2,16 @@ import Cocoa
 import Foundation
 import WebKit
 
+private struct LocalHTTPError: Error {
+  let status: Int
+  let message: String
+}
+
 private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let indexURL: URL
   private let eventStoreURL: URL
   private let traceStoreURL: URL
+  private let signalStoreURL: URL
   private let artifactStoreURL: URL
   private let brokerSocketURL: URL?
 
@@ -13,12 +19,14 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     indexURL: URL,
     eventStoreURL: URL,
     traceStoreURL: URL,
+    signalStoreURL: URL,
     artifactStoreURL: URL,
     brokerSocketURL: URL?
   ) {
     self.indexURL = indexURL
     self.eventStoreURL = eventStoreURL
     self.traceStoreURL = traceStoreURL
+    self.signalStoreURL = signalStoreURL
     self.artifactStoreURL = artifactStoreURL
     self.brokerSocketURL = brokerSocketURL
   }
@@ -43,6 +51,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         response = (try eventsResponse(for: requestURL), "application/json; charset=utf-8", [:])
       case "/api/origin-trace":
         response = (try originTraceResponse(for: requestURL), "application/json; charset=utf-8", [:])
+      case "/api/request-signal-profile":
+        response = (try requestSignalProfileResponse(for: requestURL), "application/json; charset=utf-8", [:])
       case "/api/artifacts":
         response = (try artifactsResponse(for: requestURL), "application/json; charset=utf-8", [:])
       case "/api/analysis/vm":
@@ -57,6 +67,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         }
       }
       send(response.0, contentType: response.1, status: 200, headers: response.2, to: urlSchemeTask)
+    } catch let error as LocalHTTPError {
+      sendError(error.message, status: error.status, to: urlSchemeTask)
     } catch {
       sendError(error.localizedDescription, status: 500, to: urlSchemeTask)
     }
@@ -72,6 +84,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "store_exists": FileManager.default.fileExists(atPath: eventStoreURL.path),
         "trace_store": traceStoreURL.path,
         "trace_store_exists": FileManager.default.fileExists(atPath: traceStoreURL.path),
+        "signal_store": signalStoreURL.path,
+        "signal_store_exists": FileManager.default.fileExists(atPath: signalStoreURL.path),
         "artifact_store": artifactStoreURL.path,
         "artifact_store_exists": FileManager.default.fileExists(atPath: artifactStoreURL.path),
         "broker_connected": brokerConnected(),
@@ -364,6 +378,145 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     return try JSONSerialization.data(withJSONObject: document, options: [])
   }
 
+  private func requestSignalProfileResponse(for requestURL: URL) throws -> Data {
+    let items = URLComponents(url: requestURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    guard let sessionID = items.first(where: { $0.name == "session_id" })?.value,
+      isCanonicalUInt64(sessionID, nonzero: true),
+      let requestID = items.first(where: { $0.name == "request_id" })?.value,
+      isCanonicalUInt64(requestID, nonzero: true),
+      let processText = items.first(where: { $0.name == "root_process_id" })?.value,
+      processText.range(of: #"^(?:0|[1-9][0-9]*)$"#, options: .regularExpression) != nil,
+      let processID = UInt32(processText),
+      let sequenceNumber = items.first(where: { $0.name == "root_sequence_number" })?.value,
+      isCanonicalUInt64(sequenceNumber, nonzero: true)
+    else {
+      throw LocalHTTPError(
+        status: 400,
+        message: "Complete canonical request signal profile identity is required"
+      )
+    }
+    let profiles = try recentJSONObjects(
+      at: signalStoreURL,
+      limit: 10_000,
+      maxRecordBytes: 8 * 1024,
+      recordName: "request signal profile"
+    )
+    guard profiles.allSatisfy(isValidRequestSignalProfile) else {
+      throw artifactError("The request signal profile store contains a malformed record")
+    }
+    guard let document = profiles.reversed().first(where: { profile in
+      guard let root = profile["root_event"] as? [String: Any],
+        let rootProcessID = root["process_id"] as? NSNumber,
+        CFGetTypeID(rootProcessID) != CFBooleanGetTypeID()
+      else { return false }
+      return profile["session_id"] as? String == sessionID
+        && profile["request_id"] as? String == requestID
+        && rootProcessID.stringValue == String(processID)
+        && root["sequence_number"] as? String == sequenceNumber
+    }) else {
+      throw LocalHTTPError(
+        status: 404,
+        message: "No request signal profile matches the selected request"
+      )
+    }
+    return try JSONSerialization.data(withJSONObject: document, options: [])
+  }
+
+  private func isCanonicalUInt64(_ value: String, nonzero: Bool = false) -> Bool {
+    guard value.range(of: #"^(?:0|[1-9][0-9]*)$"#, options: .regularExpression) != nil,
+      let parsed = UInt64(value)
+    else { return false }
+    return !nonzero || parsed != 0
+  }
+
+  private func isSignalEventReference(_ value: Any?) -> Bool {
+    guard let reference = value as? [String: Any],
+      Set(reference.keys) == Set(["process_id", "sequence_number"]),
+      let processID = reference["process_id"] as? NSNumber,
+      CFGetTypeID(processID) != CFBooleanGetTypeID(),
+      processID.stringValue.range(
+        of: #"^(?:0|[1-9][0-9]*)$"#,
+        options: .regularExpression
+      ) != nil,
+      UInt32(processID.stringValue) != nil,
+      let sequenceNumber = reference["sequence_number"] as? String
+    else { return false }
+    return isCanonicalUInt64(sequenceNumber, nonzero: true)
+  }
+
+  private func isValidRequestSignalProfile(_ profile: [String: Any]) -> Bool {
+    let expectedKeys = Set([
+      "protocol_version", "document_kind", "session_id", "request_id", "root_event",
+      "initiator_event", "navigation_id", "frame_id", "signals", "coverage",
+    ])
+    let categories = Set([
+      "canvas", "webgl", "web_audio", "navigator", "permissions", "storage", "webrtc",
+    ])
+    guard Set(profile.keys) == expectedKeys,
+      let protocolVersion = profile["protocol_version"] as? NSNumber,
+      CFGetTypeID(protocolVersion) != CFBooleanGetTypeID(),
+      protocolVersion.stringValue == "1",
+      profile["document_kind"] as? String == "request-signal-profile",
+      let sessionID = profile["session_id"] as? String,
+      isCanonicalUInt64(sessionID, nonzero: true),
+      let requestID = profile["request_id"] as? String,
+      isCanonicalUInt64(requestID, nonzero: true),
+      let navigationID = profile["navigation_id"] as? String,
+      isCanonicalUInt64(navigationID),
+      let frameID = profile["frame_id"] as? String,
+      isCanonicalUInt64(frameID),
+      isSignalEventReference(profile["root_event"]),
+      profile["initiator_event"] is NSNull || isSignalEventReference(profile["initiator_event"]),
+      let signals = profile["signals"] as? [[String: Any]],
+      signals.count <= categories.count,
+      let coverage = profile["coverage"] as? [String: Any]
+    else { return false }
+
+    var seenCategories = Set<String>()
+    for signal in signals {
+      let expectedSignalKeys = Set([
+        "category", "relation", "confidence", "event_count", "first_event", "last_event",
+      ])
+      guard Set(signal.keys) == expectedSignalKeys,
+        let category = signal["category"] as? String,
+        categories.contains(category),
+        seenCategories.insert(category).inserted,
+        let relation = signal["relation"] as? String,
+        Set(["parent_chain", "same_context"]).contains(relation),
+        signal["confidence"] as? String == (relation == "parent_chain" ? "observed" : "correlated"),
+        let eventCount = signal["event_count"] as? String,
+        isCanonicalUInt64(eventCount, nonzero: true),
+        isSignalEventReference(signal["first_event"]),
+        isSignalEventReference(signal["last_event"])
+      else { return false }
+    }
+
+    let expectedCoverageKeys = Set([
+      "parent_depth", "parent_depth_limit", "copied_from_initiator", "retention_truncated",
+      "parent_depth_limited", "count_saturated",
+    ])
+    guard Set(coverage.keys) == expectedCoverageKeys,
+      let parentDepth = coverage["parent_depth"] as? NSNumber,
+      CFGetTypeID(parentDepth) != CFBooleanGetTypeID(),
+      parentDepth.stringValue.range(
+        of: #"^(?:0|[1-9][0-9]*)$"#,
+        options: .regularExpression
+      ) != nil,
+      let parsedParentDepth = Int(parentDepth.stringValue),
+      parsedParentDepth <= 32,
+      let parentDepthLimit = coverage["parent_depth_limit"] as? NSNumber,
+      CFGetTypeID(parentDepthLimit) != CFBooleanGetTypeID(),
+      parentDepthLimit.stringValue == "32",
+      let copied = coverage["copied_from_initiator"] as? Bool,
+      coverage["retention_truncated"] is Bool,
+      let parentDepthLimited = coverage["parent_depth_limited"] as? Bool,
+      coverage["count_saturated"] is Bool,
+      copied == !(profile["initiator_event"] is NSNull),
+      !parentDepthLimited || parsedParentDepth == 32
+    else { return false }
+    return true
+  }
+
   private func recentArtifactEntries() throws -> [[String: Any]] {
     let artifacts = try recentJSONObjects(
       at: artifactStoreURL.appendingPathComponent("manifest.jsonl"),
@@ -504,11 +657,13 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     let indexURL = resourcesURL.appendingPathComponent("index.html")
     let eventStoreURL = configuredEventStore(resourcesURL: resourcesURL)
     let traceStoreURL = configuredTraceStore(eventStoreURL: eventStoreURL)
+    let signalStoreURL = configuredSignalStore(eventStoreURL: eventStoreURL)
     let artifactStoreURL = configuredArtifactStore(eventStoreURL: eventStoreURL)
     let handler = LocalContentHandler(
       indexURL: indexURL,
       eventStoreURL: eventStoreURL,
       traceStoreURL: traceStoreURL,
+      signalStoreURL: signalStoreURL,
       artifactStoreURL: artifactStoreURL,
       brokerSocketURL: configuredBrokerSocket()
     )
@@ -594,6 +749,19 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       return URL(fileURLWithPath: configuredPath).standardizedFileURL
     }
     return eventStoreURL.deletingLastPathComponent().appendingPathComponent("origin-trace.jsonl")
+  }
+
+  private func configuredSignalStore(eventStoreURL: URL) -> URL {
+    let arguments = CommandLine.arguments
+    if let storeFlag = arguments.firstIndex(of: "--signal-store"), storeFlag + 1 < arguments.count {
+      return URL(fileURLWithPath: arguments[storeFlag + 1]).standardizedFileURL
+    }
+    if let configuredPath = ProcessInfo.processInfo.environment["REB_REQUEST_SIGNAL_STORE"],
+      !configuredPath.isEmpty
+    {
+      return URL(fileURLWithPath: configuredPath).standardizedFileURL
+    }
+    return eventStoreURL.deletingLastPathComponent().appendingPathComponent("request-signals.jsonl")
   }
 
   private func configuredBrokerSocket() -> URL? {

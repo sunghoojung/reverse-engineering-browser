@@ -58,6 +58,7 @@ The repository includes a dependency-free C++ vertical slice for the probe event
 - a bounded broker with validation, sequence-gap detection, and eviction accounting;
 - an authenticated, user-only Unix socket from Brave to the broker;
 - a native binary event stream and versioned JSONL evidence store;
+- a bounded request signal profile for fingerprint-relevant browser activity;
 - an authenticated, acknowledged artifact socket with immutable SHA-256 blobs;
 - a native macOS Origin Trace application that reads the broker evidence store;
 - a threaded producer and consumer demo;
@@ -99,6 +100,9 @@ The demo includes linked Navigator, Canvas, WebAssembly, and Network events,
 plus separately transferred JavaScript and WASM artifacts in the Sources tab.
 The research workflow starts from a live request and works backward through a
 versioned, bounded Origin Trace edge store to the available browser evidence.
+The request inspector also summarizes retained Canvas, WebGL, Web Audio,
+Navigator, Permissions, Storage, and WebRTC activity with explicit confidence
+and coverage.
 
 For browser-based UI development only, run:
 

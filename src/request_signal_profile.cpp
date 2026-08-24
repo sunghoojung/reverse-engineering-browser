@@ -76,12 +76,19 @@ RequestSignalEvidence* AddSignal(RequestSignalProfile& profile,
 }
 
 void SortSignals(RequestSignalProfile& profile) noexcept {
-  std::sort(profile.signals.begin(),
-            profile.signals.begin() + static_cast<std::ptrdiff_t>(profile.signal_count),
-            [](const RequestSignalEvidence& left, const RequestSignalEvidence& right) {
-              return static_cast<std::uint16_t>(left.category) <
-                     static_cast<std::uint16_t>(right.category);
-            });
+  // The array contains at most seven entries. This makes the maximum sorting
+  // work explicit instead of routing the small range through generic helpers.
+  for (std::size_t index = 1; index < profile.signal_count; ++index) {
+    const RequestSignalEvidence value = profile.signals[index];
+    std::size_t destination = index;
+    while (destination > 0 &&
+           static_cast<std::uint16_t>(value.category) <
+               static_cast<std::uint16_t>(profile.signals[destination - 1].category)) {
+      profile.signals[destination] = profile.signals[destination - 1];
+      --destination;
+    }
+    profile.signals[destination] = value;
+  }
 }
 
 void AppendReference(std::string& output, const RequestSignalEventReference& reference) {

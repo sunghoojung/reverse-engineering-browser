@@ -217,6 +217,108 @@ class ResearchUiTests(unittest.TestCase):
                 server.server_close()
                 thread.join()
 
+    def test_request_signal_profile_api_validates_identity_and_records(self) -> None:
+        profile = {
+            "protocol_version": 1,
+            "document_kind": "request-signal-profile",
+            "session_id": "7",
+            "request_id": "81",
+            "root_event": {"process_id": 10, "sequence_number": "5"},
+            "initiator_event": None,
+            "navigation_id": "20",
+            "frame_id": "30",
+            "signals": [
+                {
+                    "category": "web_audio",
+                    "relation": "same_context",
+                    "confidence": "correlated",
+                    "event_count": "2",
+                    "first_event": {"process_id": 10, "sequence_number": "1"},
+                    "last_event": {"process_id": 10, "sequence_number": "3"},
+                }
+            ],
+            "coverage": {
+                "parent_depth": 0,
+                "parent_depth_limit": 32,
+                "copied_from_initiator": False,
+                "retention_truncated": False,
+                "parent_depth_limited": False,
+                "count_saturated": False,
+            },
+        }
+        self.assertTrue(ResearchHandler.is_request_signal_profile(profile))
+        wrong_process = json.loads(json.dumps(profile))
+        wrong_process["signals"][0]["last_event"]["process_id"] = 11
+        self.assertFalse(ResearchHandler.is_request_signal_profile(wrong_process))
+        false_saturation = json.loads(json.dumps(profile))
+        false_saturation["coverage"]["count_saturated"] = True
+        self.assertFalse(ResearchHandler.is_request_signal_profile(false_saturation))
+        saturated = json.loads(json.dumps(false_saturation))
+        saturated["signals"][0]["event_count"] = str(2**64 - 1)
+        self.assertTrue(ResearchHandler.is_request_signal_profile(saturated))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            signal_store = root / "request-signals.jsonl"
+            signal_store.write_text(json.dumps(profile) + "\n", encoding="utf-8")
+            ResearchHandler.ui_directory = Path(__file__).parent
+            ResearchHandler.event_store = root / "events.jsonl"
+            ResearchHandler.trace_store = root / "origin-trace.jsonl"
+            ResearchHandler.signal_store = signal_store
+            ResearchHandler.artifact_store = root / "artifacts"
+            ResearchHandler.broker_socket = None
+            server = ThreadingHTTPServer(("127.0.0.1", 0), ResearchHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base_url = f"http://127.0.0.1:{server.server_port}"
+                profile_url = (
+                    f"{base_url}/api/request-signal-profile?session_id=7&"
+                    "request_id=81&root_process_id=10&root_sequence_number=5"
+                )
+                with urllib.request.urlopen(profile_url) as response:
+                    self.assertEqual(json.load(response), profile)
+                    etag = response.headers["ETag"]
+
+                unchanged = urllib.request.Request(
+                    profile_url, headers={"If-None-Match": etag}
+                )
+                with self.assertRaises(urllib.error.HTTPError) as not_modified:
+                    urllib.request.urlopen(unchanged)
+                self.assertEqual(not_modified.exception.code, HTTPStatus.NOT_MODIFIED)
+
+                with self.assertRaises(urllib.error.HTTPError) as incomplete:
+                    urllib.request.urlopen(
+                        f"{base_url}/api/request-signal-profile?request_id=81"
+                    )
+                self.assertEqual(incomplete.exception.code, HTTPStatus.BAD_REQUEST)
+
+                with self.assertRaises(urllib.error.HTTPError) as missing:
+                    urllib.request.urlopen(profile_url.replace("request_id=81", "request_id=82"))
+                self.assertEqual(missing.exception.code, HTTPStatus.NOT_FOUND)
+                missing_etag = missing.exception.headers["ETag"]
+                cached_missing = urllib.request.Request(
+                    profile_url.replace("request_id=81", "request_id=82"),
+                    headers={"If-None-Match": missing_etag},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as unchanged_missing:
+                    urllib.request.urlopen(cached_missing)
+                self.assertEqual(
+                    unchanged_missing.exception.code, HTTPStatus.NOT_MODIFIED
+                )
+
+                malformed = dict(profile)
+                malformed["protocol_version"] = True
+                signal_store.write_text(json.dumps(malformed) + "\n", encoding="utf-8")
+                with self.assertRaises(urllib.error.HTTPError) as rejected:
+                    urllib.request.urlopen(profile_url)
+                self.assertEqual(
+                    rejected.exception.code, HTTPStatus.INTERNAL_SERVER_ERROR
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+
     def test_artifact_manifest_and_content_are_validated(self) -> None:
         content = b"export function checkout() { return true; }\n"
         digest = hashlib.sha256(content).hexdigest()
@@ -556,6 +658,7 @@ class ResearchUiTests(unittest.TestCase):
             "Response",
             "Initiator",
             "Timing",
+            "Signals",
         ):
             self.assertIn(f">{label}</button>", html)
         self.assertIn('data-kind="loading"', html)
@@ -577,6 +680,107 @@ class ResearchUiTests(unittest.TestCase):
         self.assertIn("function browserContextToken(event)", html)
         self.assertIn("[13, 'xhr']", html)
         self.assertIn("No requests match the current filters", html)
+        self.assertIn("/api/request-signal-profile?", html)
+        self.assertIn("function isRequestSignalProfile(body)", html)
+        self.assertIn("No fingerprint-relevant browser signals", html)
+
+    def test_request_signal_profile_model_rejects_ambiguous_evidence(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        start = html.index("      function isPlainObject")
+        end = html.index("      function legacyBrowserRequestKey")
+        model = """
+const uint64Max = 18446744073709551615n;
+const fingerprintSignalCategories = new Set([
+  'canvas', 'webgl', 'web_audio', 'navigator', 'permissions', 'storage', 'webrtc'
+]);
+""" + html[start:end]
+        exercise = r"""
+const profile = {
+  protocol_version: 1,
+  document_kind: 'request-signal-profile',
+  session_id: '7',
+  request_id: '81',
+  root_event: {process_id: 10, sequence_number: '5'},
+  initiator_event: null,
+  navigation_id: '20',
+  frame_id: '30',
+  signals: [{
+    category: 'web_audio',
+    relation: 'same_context',
+    confidence: 'correlated',
+    event_count: '2',
+    first_event: {process_id: 10, sequence_number: '1'},
+    last_event: {process_id: 10, sequence_number: '3'}
+  }],
+  coverage: {
+    parent_depth: 0,
+    parent_depth_limit: 32,
+    copied_from_initiator: false,
+    retention_truncated: false,
+    parent_depth_limited: false,
+    count_saturated: false
+  }
+};
+process.stdout.write(JSON.stringify({
+  accepted: isRequestSignalProfile(profile),
+  confidenceBound: !isRequestSignalProfile({
+    ...profile,
+    signals: [{...profile.signals[0], confidence: 'observed'}]
+  }),
+  categoriesUnique: !isRequestSignalProfile({
+    ...profile,
+    signals: [profile.signals[0], profile.signals[0]]
+  }),
+  copiedIdentityBound: !isRequestSignalProfile({
+    ...profile,
+    coverage: {...profile.coverage, copied_from_initiator: true}
+  }),
+  canonicalCountRequired: !isRequestSignalProfile({
+    ...profile,
+    signals: [{...profile.signals[0], event_count: '02'}]
+  }),
+  processIdentityBound: !isRequestSignalProfile({
+    ...profile,
+    signals: [{
+      ...profile.signals[0],
+      last_event: {...profile.signals[0].last_event, process_id: 11}
+    }]
+  }),
+  saturationBound: !isRequestSignalProfile({
+    ...profile,
+    coverage: {...profile.coverage, count_saturated: true}
+  }),
+  saturationAccepted: isRequestSignalProfile({
+    ...profile,
+    signals: [{...profile.signals[0], event_count: '18446744073709551615'}],
+    coverage: {...profile.coverage, count_saturated: true}
+  })
+}));
+"""
+        completed = subprocess.run(
+            [node, "-e", model + exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "accepted": True,
+                "confidenceBound": True,
+                "categoriesUnique": True,
+                "copiedIdentityBound": True,
+                "canonicalCountRequired": True,
+                "processIdentityBound": True,
+                "saturationBound": True,
+                "saturationAccepted": True,
+            },
+        )
 
     def test_sources_workspace_matches_the_devtools_navigation_model(self) -> None:
         html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
@@ -1133,13 +1337,18 @@ process.stdout.write(JSON.stringify({
         self.assertIn('case "/api/artifacts":', application)
         self.assertIn('case "/api/analysis/vm":', application)
         self.assertIn('case "/api/origin-trace":', application)
+        self.assertIn('case "/api/request-signal-profile":', application)
         self.assertIn("originTraceResponse(for: requestURL)", application)
+        self.assertIn("requestSignalProfileResponse(", application)
+        self.assertIn('value(forHTTPHeaderField: "If-None-Match")', application)
+        self.assertIn('["ETag": etag]', application)
         self.assertIn("vmAnalysisResponse(for: requestURL)", application)
         self.assertIn("artifactContentResponse(for: requestURL)", application)
         self.assertIn('"Content-Security-Policy": "sandbox"', application)
         self.assertIn('"X-Artifact-Truncated"', application)
         self.assertIn('firstIndex(of: "--artifacts")', application)
         self.assertIn('firstIndex(of: "--trace-store")', application)
+        self.assertIn('firstIndex(of: "--signal-store")', application)
         self.assertIn("source-tree-row[data-artifact-id]", application)
         self.assertIn("sourceLines", application)
         self.assertIn("<key>CFBundleIconFile</key>", plist)
@@ -1148,6 +1357,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn("build/sessions/artifacts", build_script)
         self.assertIn('"${resources_path}/artifacts"', build_script)
         self.assertIn('"${resources_path}/origin-trace.jsonl"', build_script)
+        self.assertIn('"${resources_path}/request-signals.jsonl"', build_script)
         self.assertIn('"${trace_document_source}"', build_script)
         self.assertIn("iconutil -c icns", build_script)
 

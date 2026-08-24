@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reverse-engineering-browser.local/protocol/request-signal-profile-v1.schema.json",
+  "title": "Request Signal Profile v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "document_kind",
+    "session_id",
+    "request_id",
+    "root_event",
+    "initiator_event",
+    "navigation_id",
+    "frame_id",
+    "signals",
+    "coverage"
+  ],
+  "properties": {
+    "protocol_version": { "const": 1 },
+    "document_kind": { "const": "request-signal-profile" },
+    "session_id": { "$ref": "#/$defs/nonzero_uint64" },
+    "request_id": { "$ref": "#/$defs/nonzero_uint64" },
+    "root_event": { "$ref": "#/$defs/event_reference" },
+    "initiator_event": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/event_reference" }
+      ]
+    },
+    "navigation_id": { "$ref": "#/$defs/uint64" },
+    "frame_id": { "$ref": "#/$defs/uint64" },
+    "signals": {
+      "type": "array",
+      "maxItems": 7,
+      "items": { "$ref": "#/$defs/signal" }
+    },
+    "coverage": { "$ref": "#/$defs/coverage" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "initiator_event": { "type": "null" } } },
+      "then": {
+        "properties": {
+          "coverage": {
+            "properties": { "copied_from_initiator": { "const": false } }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "coverage": {
+            "properties": { "copied_from_initiator": { "const": true } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "coverage": {
+            "properties": { "count_saturated": { "const": true } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "signals": {
+            "contains": {
+              "properties": {
+                "event_count": { "const": "18446744073709551615" }
+              },
+              "required": ["event_count"]
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "uint32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "uint64": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$"
+    },
+    "nonzero_uint64": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,19}$"
+    },
+    "event_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["process_id", "sequence_number"],
+      "properties": {
+        "process_id": { "$ref": "#/$defs/uint32" },
+        "sequence_number": { "$ref": "#/$defs/nonzero_uint64" }
+      }
+    },
+    "signal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "category",
+        "relation",
+        "confidence",
+        "event_count",
+        "first_event",
+        "last_event"
+      ],
+      "properties": {
+        "category": {
+          "enum": [
+            "canvas",
+            "webgl",
+            "web_audio",
+            "navigator",
+            "permissions",
+            "storage",
+            "webrtc"
+          ]
+        },
+        "relation": { "enum": ["parent_chain", "same_context"] },
+        "confidence": { "enum": ["observed", "correlated"] },
+        "event_count": { "$ref": "#/$defs/nonzero_uint64" },
+        "first_event": { "$ref": "#/$defs/event_reference" },
+        "last_event": { "$ref": "#/$defs/event_reference" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "relation": { "const": "parent_chain" } } },
+          "then": { "properties": { "confidence": { "const": "observed" } } },
+          "else": { "properties": { "confidence": { "const": "correlated" } } }
+        }
+      ]
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parent_depth",
+        "parent_depth_limit",
+        "copied_from_initiator",
+        "retention_truncated",
+        "parent_depth_limited",
+        "count_saturated"
+      ],
+      "properties": {
+        "parent_depth": { "type": "integer", "minimum": 0, "maximum": 32 },
+        "parent_depth_limit": { "const": 32 },
+        "copied_from_initiator": { "type": "boolean" },
+        "retention_truncated": { "type": "boolean" },
+        "parent_depth_limited": { "type": "boolean" },
+        "count_saturated": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "parent_depth_limited": { "const": true } }
+          },
+          "then": { "properties": { "parent_depth": { "const": 32 } } }
+        }
+      ]
+    }
+  }
+}

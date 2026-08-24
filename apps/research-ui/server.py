@@ -27,10 +27,21 @@ MAX_ARTIFACT_RESPONSE_BYTES = 2 * 1024 * 1024
 JSONL_TAIL_CHUNK_BYTES = 64 * 1024
 MAX_EVENT_JSON_BYTES = 4 * 1024
 MAX_TRACE_EDGE_JSON_BYTES = 2 * 1024
+MAX_SIGNAL_PROFILE_JSON_BYTES = 8 * 1024
 MAX_ARTIFACT_JSON_BYTES = 8 * 1024
 MAX_TRACE_EVENT_WINDOW = 10_000
 MAX_TRACE_EDGE_WINDOW = 30_000
 MAX_TRACE_ARTIFACT_WINDOW = 10_000
+MAX_SIGNAL_PROFILE_WINDOW = 10_000
+SIGNAL_CATEGORIES = {
+    "canvas",
+    "webgl",
+    "web_audio",
+    "navigator",
+    "permissions",
+    "storage",
+    "webrtc",
+}
 PUBLIC_ARTIFACT_FIELDS = (
     "protocol_version",
     "artifact_id",
@@ -52,6 +63,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
     ui_directory: Path
     event_store: Path
     trace_store: Path
+    signal_store: Path
     artifact_store: Path
     broker_socket: Optional[Path] = None
     analysis_lock = threading.Lock()
@@ -70,6 +82,8 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     "store_exists": self.event_store.exists(),
                     "trace_store": str(self.trace_store),
                     "trace_store_exists": self.trace_store.exists(),
+                    "signal_store": str(self.signal_store),
+                    "signal_store_exists": self.signal_store.exists(),
                     "artifact_store": str(self.artifact_store),
                     "artifact_store_exists": self.artifact_store.exists(),
                     "broker_connected": self.broker_connected(),
@@ -148,6 +162,87 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             ) as exception:
                 self.send_json(
                     {"error": str(exception)}, HTTPStatus.INTERNAL_SERVER_ERROR
+                )
+                return
+            self.send_json(document, etag=etag)
+            return
+        if parsed.path == "/api/request-signal-profile":
+            query = parse_qs(parsed.query)
+            session_id = query.get("session_id", [None])[0]
+            request_id = query.get("request_id", [None])[0]
+            root_process_id = query.get("root_process_id", [None])[0]
+            root_sequence_number = query.get("root_sequence_number", [None])[0]
+            try:
+                if not all(
+                    value is not None
+                    for value in (
+                        session_id,
+                        request_id,
+                        root_process_id,
+                        root_sequence_number,
+                    )
+                ):
+                    raise ValueError("Complete request signal profile identity is required")
+                if not self.is_canonical_uint(session_id, 64, nonzero=True):
+                    raise ValueError("Session ID must be a nonzero unsigned 64-bit integer")
+                if not self.is_canonical_uint(request_id, 64, nonzero=True):
+                    raise ValueError("Request ID must be a nonzero unsigned 64-bit integer")
+                if not self.is_canonical_uint(root_process_id, 32):
+                    raise ValueError("Root process ID must be an unsigned 32-bit integer")
+                if not self.is_canonical_uint(
+                    root_sequence_number, 64, nonzero=True
+                ):
+                    raise ValueError(
+                        "Root sequence number must be a nonzero unsigned 64-bit integer"
+                    )
+            except ValueError as exception:
+                self.send_json({"error": str(exception)}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                etag = self.resource_etag(
+                    self.signal_store,
+                    ":".join(
+                        (
+                            session_id,
+                            request_id,
+                            root_process_id,
+                            root_sequence_number,
+                        )
+                    ),
+                )
+                if self.send_not_modified(etag):
+                    return
+                profiles = self.load_request_signal_profiles(
+                    MAX_SIGNAL_PROFILE_WINDOW
+                )
+                document = next(
+                    (
+                        profile
+                        for profile in reversed(profiles)
+                        if profile["session_id"] == session_id
+                        and profile["request_id"] == request_id
+                        and str(profile["root_event"]["process_id"])
+                        == root_process_id
+                        and profile["root_event"]["sequence_number"]
+                        == root_sequence_number
+                    ),
+                    None,
+                )
+            except (
+                OSError,
+                ValueError,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+            ) as exception:
+                self.send_json(
+                    {"error": str(exception)}, HTTPStatus.INTERNAL_SERVER_ERROR
+                )
+                return
+            if document is None:
+                self.send_json(
+                    {"error": "No request signal profile matches the selected request"},
+                    HTTPStatus.NOT_FOUND,
+                    etag=etag,
                 )
                 return
             self.send_json(document, etag=etag)
@@ -373,6 +468,141 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             )
         ]
 
+    def load_request_signal_profiles(self, limit: int) -> list[dict]:
+        profiles = [
+            json.loads(line)
+            for line in self.read_recent_json_lines(
+                self.signal_store,
+                limit,
+                MAX_SIGNAL_PROFILE_JSON_BYTES,
+                "request signal profile",
+            )
+        ]
+        if not all(self.is_request_signal_profile(profile) for profile in profiles):
+            raise ValueError(
+                "The request signal profile store contains a malformed record"
+            )
+        return profiles
+
+    @staticmethod
+    def is_canonical_uint(value: object, bits: int, nonzero: bool = False) -> bool:
+        if not isinstance(value, str) or CANONICAL_UINT64.fullmatch(value) is None:
+            return False
+        number = int(value)
+        return (not nonzero or number != 0) and number < 2**bits
+
+    @classmethod
+    def is_signal_event_reference(cls, value: object) -> bool:
+        return (
+            isinstance(value, dict)
+            and set(value) == {"process_id", "sequence_number"}
+            and isinstance(value["process_id"], int)
+            and not isinstance(value["process_id"], bool)
+            and 0 <= value["process_id"] < 2**32
+            and cls.is_canonical_uint(value["sequence_number"], 64, nonzero=True)
+        )
+
+    @classmethod
+    def is_request_signal_profile(cls, value: object) -> bool:
+        if not isinstance(value, dict) or set(value) != {
+            "protocol_version",
+            "document_kind",
+            "session_id",
+            "request_id",
+            "root_event",
+            "initiator_event",
+            "navigation_id",
+            "frame_id",
+            "signals",
+            "coverage",
+        }:
+            return False
+        if (
+            not isinstance(value["protocol_version"], int)
+            or isinstance(value["protocol_version"], bool)
+            or value["protocol_version"] != 1
+            or value["document_kind"] != "request-signal-profile"
+            or not cls.is_canonical_uint(value["session_id"], 64, nonzero=True)
+            or not cls.is_canonical_uint(value["request_id"], 64, nonzero=True)
+            or not cls.is_canonical_uint(value["navigation_id"], 64)
+            or not cls.is_canonical_uint(value["frame_id"], 64)
+            or not cls.is_signal_event_reference(value["root_event"])
+            or (
+                value["initiator_event"] is not None
+                and not cls.is_signal_event_reference(value["initiator_event"])
+            )
+            or not isinstance(value["signals"], list)
+            or len(value["signals"]) > len(SIGNAL_CATEGORIES)
+        ):
+            return False
+        categories = set()
+        expected_process_id = (
+            value["initiator_event"] or value["root_event"]
+        )["process_id"]
+        has_saturated_count = False
+        for signal in value["signals"]:
+            if not isinstance(signal, dict) or set(signal) != {
+                "category",
+                "relation",
+                "confidence",
+                "event_count",
+                "first_event",
+                "last_event",
+            }:
+                return False
+            category = signal["category"]
+            relation = signal["relation"]
+            if (
+                category not in SIGNAL_CATEGORIES
+                or category in categories
+                or relation not in {"parent_chain", "same_context"}
+                or signal["confidence"]
+                != ("observed" if relation == "parent_chain" else "correlated")
+                or not cls.is_canonical_uint(signal["event_count"], 64, nonzero=True)
+                or not cls.is_signal_event_reference(signal["first_event"])
+                or not cls.is_signal_event_reference(signal["last_event"])
+                or signal["first_event"]["process_id"] != expected_process_id
+                or signal["last_event"]["process_id"] != expected_process_id
+            ):
+                return False
+            categories.add(category)
+            has_saturated_count = has_saturated_count or signal["event_count"] == str(
+                2**64 - 1
+            )
+        coverage = value["coverage"]
+        return (
+            isinstance(coverage, dict)
+            and set(coverage)
+            == {
+                "parent_depth",
+                "parent_depth_limit",
+                "copied_from_initiator",
+                "retention_truncated",
+                "parent_depth_limited",
+                "count_saturated",
+            }
+            and isinstance(coverage["parent_depth"], int)
+            and not isinstance(coverage["parent_depth"], bool)
+            and 0 <= coverage["parent_depth"] <= 32
+            and coverage["parent_depth_limit"] == 32
+            and all(
+                isinstance(coverage[field], bool)
+                for field in (
+                    "copied_from_initiator",
+                    "retention_truncated",
+                    "parent_depth_limited",
+                    "count_saturated",
+                )
+            )
+            and (value["initiator_event"] is not None)
+            == coverage["copied_from_initiator"]
+            and (not coverage["count_saturated"] or has_saturated_count)
+            and (
+                not coverage["parent_depth_limited"]
+                or coverage["parent_depth"] == 32
+            )
+        )
+
     def load_recent_artifacts(self, limit: int) -> list[dict]:
         manifest = self.artifact_store / "manifest.jsonl"
         artifacts = [
@@ -575,6 +805,11 @@ def parse_args() -> argparse.Namespace:
         default=Path("build/sessions/origin-trace.jsonl"),
     )
     parser.add_argument(
+        "--signal-store",
+        type=Path,
+        default=Path("build/sessions/request-signals.jsonl"),
+    )
+    parser.add_argument(
         "--artifacts", type=Path, default=Path("build/sessions/artifacts")
     )
     parser.add_argument("--socket", type=Path)
@@ -586,12 +821,14 @@ def main() -> int:
     ResearchHandler.ui_directory = Path(__file__).resolve().parent
     ResearchHandler.event_store = args.store.resolve()
     ResearchHandler.trace_store = args.trace_store.resolve()
+    ResearchHandler.signal_store = args.signal_store.resolve()
     ResearchHandler.artifact_store = args.artifacts.resolve()
     ResearchHandler.broker_socket = args.socket.resolve() if args.socket else None
     server = ThreadingHTTPServer((args.host, args.port), ResearchHandler)
     print(f"Research UI: http://{args.host}:{args.port}")
     print(f"Event store: {ResearchHandler.event_store}")
     print(f"Origin trace store: {ResearchHandler.trace_store}")
+    print(f"Request signal profile store: {ResearchHandler.signal_store}")
     print(f"Artifact store: {ResearchHandler.artifact_store}")
     try:
         server.serve_forever()

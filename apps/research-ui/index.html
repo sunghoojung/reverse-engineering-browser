@@ -1901,14 +1901,19 @@ export async function checkout(cart, fingerprint) {
             !Array.isArray(body.signals) || body.signals.length > 7 ||
             !isPlainObject(body.coverage)) return false;
         const categories = new Set();
+        const expectedProcessID = (body.initiator_event ?? body.root_event).process_id;
+        let hasSaturatedCount = false;
         const validSignals = body.signals.every(signal => {
           if (!isPlainObject(signal) || Object.keys(signal).length !== 6 ||
               !fingerprintSignalCategories.has(signal.category) || categories.has(signal.category) ||
               !['parent_chain', 'same_context'].includes(signal.relation) ||
               !isCanonicalInteger(signal.event_count, 1n, uint64Max) ||
               !isSignalEventReference(signal.first_event) ||
-              !isSignalEventReference(signal.last_event)) return false;
+              !isSignalEventReference(signal.last_event) ||
+              signal.first_event.process_id !== expectedProcessID ||
+              signal.last_event.process_id !== expectedProcessID) return false;
           categories.add(signal.category);
+          hasSaturatedCount ||= signal.event_count === String(uint64Max);
           return signal.confidence === (signal.relation === 'parent_chain' ? 'observed' : 'correlated');
         });
         const coverage = body.coverage;
@@ -1920,6 +1925,7 @@ export async function checkout(cart, fingerprint) {
           typeof coverage.parent_depth_limited === 'boolean' &&
           typeof coverage.count_saturated === 'boolean' &&
           coverage.copied_from_initiator === (body.initiator_event !== null) &&
+          (!coverage.count_saturated || hasSaturatedCount) &&
           (!coverage.parent_depth_limited || coverage.parent_depth === 32);
       }
 
@@ -2610,13 +2616,13 @@ export async function checkout(cart, fingerprint) {
           });
           const response = await fetch(`/api/request-signal-profile?${parameters}`, { cache: 'no-store', headers });
           if (generation !== state.signalProfileGeneration) return;
-          if (response.status === 304 && state.signalProfile) {
-            state.signalProfileStatus = 'ready';
+          if (response.status === 304) {
+            state.signalProfileStatus = state.signalProfile ? 'ready' : 'empty';
           } else if (response.status === 404) {
             state.signalProfile = null;
             state.signalProfileStatus = 'empty';
             state.signalProfileKey = selection.key;
-            state.signalProfileEtag = null;
+            state.signalProfileEtag = response.headers.get('ETag');
           } else {
             if (!response.ok) throw new Error(`Request signal profile store returned ${response.status}`);
             const body = await response.json();

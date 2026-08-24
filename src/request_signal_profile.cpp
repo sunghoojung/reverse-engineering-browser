@@ -227,14 +227,17 @@ void RequestSignalProfileIndex::RememberEvent(const EventRecord& event) {
   }
   const RequestSignalEventReference reference = Reference(event);
   events_.emplace(reference,
-                  EventState{reference, event.header.parent_event_id, event.header.navigation_id,
-                             event.header.frame_id, event.header.category});
+                  EventState{reference, event.header.parent_event_id, event.header.category});
   event_order_.push_back(reference);
 }
 
 void RequestSignalProfileIndex::RememberContextSignal(const EventRecord& event) {
   const std::size_t category_index = SignalCategoryIndex(event.header.category);
   if (category_index == kSignalCategories.size()) {
+    return;
+  }
+  const RequestSignalEventReference reference = Reference(event);
+  if (!ReferenceIsSet(reference)) {
     return;
   }
   const ContextKey key{event.header.session_id, event.header.navigation_id, event.header.frame_id,
@@ -250,7 +253,6 @@ void RequestSignalProfileIndex::RememberContextSignal(const EventRecord& event) 
     context_order_.push_back(key);
   }
   ContextSignalState& signal = context->second.signals[category_index];
-  const RequestSignalEventReference reference = Reference(event);
   if (signal.event_count == 0) {
     signal.first_event = reference;
   }
@@ -349,6 +351,10 @@ bool IsValidRequestSignalProfile(const RequestSignalProfile& profile) noexcept {
     return false;
   }
   std::array<bool, kRequestSignalProfileCategoryCount> categories{};
+  bool has_saturated_count = false;
+  const std::uint32_t expected_process_id = ReferenceIsSet(profile.initiator_event)
+                                                ? profile.initiator_event.process_id
+                                                : profile.root_event.process_id;
   for (std::size_t index = 0; index < profile.signal_count; ++index) {
     const RequestSignalEvidence& signal = profile.signals[index];
     const std::size_t category_index = SignalCategoryIndex(signal.category);
@@ -357,14 +363,17 @@ bool IsValidRequestSignalProfile(const RequestSignalProfile& profile) noexcept {
          signal.relation != RequestSignalRelation::kSameContext) ||
         signal.event_count == 0 || !ReferenceIsSet(signal.first_event) ||
         !ReferenceIsSet(signal.last_event) || signal.first_event.reserved != 0 ||
-        signal.last_event.reserved != 0 ||
+        signal.last_event.reserved != 0 || signal.first_event.process_id != expected_process_id ||
+        signal.last_event.process_id != expected_process_id ||
         signal.first_event.session_id != profile.root_event.session_id ||
         signal.last_event.session_id != profile.root_event.session_id) {
       return false;
     }
+    has_saturated_count =
+        has_saturated_count || signal.event_count == std::numeric_limits<std::uint64_t>::max();
     categories[category_index] = true;
   }
-  return true;
+  return !profile.count_saturated || has_saturated_count;
 }
 
 std::string RequestSignalProfileToJson(const RequestSignalProfile& profile) {

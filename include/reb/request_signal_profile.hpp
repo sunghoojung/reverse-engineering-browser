@@ -106,8 +106,6 @@ class RequestSignalProfileIndex final {
   struct EventState final {
     RequestSignalEventReference reference{};
     std::uint64_t parent_event_id = 0;
-    std::uint64_t navigation_id = 0;
-    std::uint64_t frame_id = 0;
     EventCategory category = EventCategory::kUnknown;
   };
 

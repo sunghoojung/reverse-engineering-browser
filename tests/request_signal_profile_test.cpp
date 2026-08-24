@@ -114,6 +114,17 @@ int main() {
   missing_identity.header.request_id = 82;
   CHECK(!index.Ingest(missing_identity));
 
+  reb::RequestSignalProfileIndex missing_signal_identity_index(8);
+  CHECK(!missing_signal_identity_index.Ingest(
+      Event(reb::EventCategory::kCanvas, reb::EventType::kApiCall, 0)));
+  reb::EventRecord request_after_missing_signal =
+      Event(reb::EventCategory::kNetwork, reb::EventType::kRequestInitiated, 1);
+  request_after_missing_signal.header.request_id = 84;
+  const auto profile_after_missing_signal =
+      missing_signal_identity_index.Ingest(request_after_missing_signal);
+  CHECK(profile_after_missing_signal);
+  CHECK(profile_after_missing_signal->signal_count == 0);
+
   reb::RequestSignalProfileIndex bounded(2);
   CHECK(!bounded.Ingest(Event(reb::EventCategory::kCanvas, reb::EventType::kApiCall, 1)));
   CHECK(!bounded.Ingest(Event(reb::EventCategory::kCanvas, reb::EventType::kApiCall, 2)));
@@ -166,23 +177,44 @@ int main() {
   invalid_profile.signals[0].relation = static_cast<reb::RequestSignalRelation>(255);
   CHECK(!reb::IsValidRequestSignalProfile(invalid_profile));
   invalid_profile = *started_profile;
+  invalid_profile.signals[0].last_event.process_id = 11;
+  CHECK(!reb::IsValidRequestSignalProfile(invalid_profile));
+  invalid_profile = *started_profile;
   invalid_profile.count_saturated = true;
+  CHECK(!reb::IsValidRequestSignalProfile(invalid_profile));
+  invalid_profile.signals[0].event_count = std::numeric_limits<std::uint64_t>::max();
   CHECK(reb::IsValidRequestSignalProfile(invalid_profile));
   CHECK(reb::RequestSignalProfileToJson(invalid_profile).find("\"count_saturated\":true") !=
         std::string::npos);
 
   constexpr std::uint64_t kBenchmarkEvents = 1'000'000;
   reb::RequestSignalProfileIndex benchmark(1024);
+  std::size_t serialized_profile_bytes = 0;
   const auto begin = std::chrono::steady_clock::now();
   for (std::uint64_t sequence = 1; sequence <= kBenchmarkEvents; ++sequence) {
-    reb::EventRecord event =
-        Event(reb::EventCategory::kArtifact, reb::EventType::kArtifactCaptured, sequence);
-    static_cast<void>(benchmark.Ingest(event));
+    const bool is_request = sequence % 64 == 0;
+    const bool is_signal = !is_request && sequence % 16 == 0;
+    reb::EventRecord event = Event(is_request  ? reb::EventCategory::kNetwork
+                                   : is_signal ? reb::EventCategory::kCanvas
+                                               : reb::EventCategory::kArtifact,
+                                   is_request  ? reb::EventType::kRequestInitiated
+                                   : is_signal ? reb::EventType::kApiCall
+                                               : reb::EventType::kArtifactCaptured,
+                                   sequence);
+    if (is_request) {
+      event.header.request_id = sequence;
+      event.header.parent_event_id = sequence - 1;
+    }
+    const auto profile = benchmark.Ingest(event);
+    if (profile) {
+      serialized_profile_bytes += reb::RequestSignalProfileToJson(*profile).size();
+    }
   }
   const double seconds =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
   const auto events_per_second = static_cast<std::uint64_t>(kBenchmarkEvents / seconds);
   CHECK(events_per_second > 500'000);
+  CHECK(serialized_profile_bytes > 0);
 
   std::cout << "request_signal_profile_test passed (" << events_per_second
             << " cold-path events/s)\n";

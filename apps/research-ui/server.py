@@ -242,6 +242,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                 self.send_json(
                     {"error": "No request signal profile matches the selected request"},
                     HTTPStatus.NOT_FOUND,
+                    etag=etag,
                 )
                 return
             self.send_json(document, etag=etag)
@@ -535,6 +536,10 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         ):
             return False
         categories = set()
+        expected_process_id = (
+            value["initiator_event"] or value["root_event"]
+        )["process_id"]
+        has_saturated_count = False
         for signal in value["signals"]:
             if not isinstance(signal, dict) or set(signal) != {
                 "category",
@@ -556,9 +561,14 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                 or not cls.is_canonical_uint(signal["event_count"], 64, nonzero=True)
                 or not cls.is_signal_event_reference(signal["first_event"])
                 or not cls.is_signal_event_reference(signal["last_event"])
+                or signal["first_event"]["process_id"] != expected_process_id
+                or signal["last_event"]["process_id"] != expected_process_id
             ):
                 return False
             categories.add(category)
+            has_saturated_count = has_saturated_count or signal["event_count"] == str(
+                2**64 - 1
+            )
         coverage = value["coverage"]
         return (
             isinstance(coverage, dict)
@@ -586,6 +596,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             )
             and (value["initiator_event"] is not None)
             == coverage["copied_from_initiator"]
+            and (not coverage["count_saturated"] or has_saturated_count)
             and (
                 not coverage["parent_depth_limited"]
                 or coverage["parent_depth"] == 32

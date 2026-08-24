@@ -246,6 +246,16 @@ class ResearchUiTests(unittest.TestCase):
                 "count_saturated": False,
             },
         }
+        self.assertTrue(ResearchHandler.is_request_signal_profile(profile))
+        wrong_process = json.loads(json.dumps(profile))
+        wrong_process["signals"][0]["last_event"]["process_id"] = 11
+        self.assertFalse(ResearchHandler.is_request_signal_profile(wrong_process))
+        false_saturation = json.loads(json.dumps(profile))
+        false_saturation["coverage"]["count_saturated"] = True
+        self.assertFalse(ResearchHandler.is_request_signal_profile(false_saturation))
+        saturated = json.loads(json.dumps(false_saturation))
+        saturated["signals"][0]["event_count"] = str(2**64 - 1)
+        self.assertTrue(ResearchHandler.is_request_signal_profile(saturated))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             signal_store = root / "request-signals.jsonl"
@@ -285,6 +295,16 @@ class ResearchUiTests(unittest.TestCase):
                 with self.assertRaises(urllib.error.HTTPError) as missing:
                     urllib.request.urlopen(profile_url.replace("request_id=81", "request_id=82"))
                 self.assertEqual(missing.exception.code, HTTPStatus.NOT_FOUND)
+                missing_etag = missing.exception.headers["ETag"]
+                cached_missing = urllib.request.Request(
+                    profile_url.replace("request_id=81", "request_id=82"),
+                    headers={"If-None-Match": missing_etag},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as unchanged_missing:
+                    urllib.request.urlopen(cached_missing)
+                self.assertEqual(
+                    unchanged_missing.exception.code, HTTPStatus.NOT_MODIFIED
+                )
 
                 malformed = dict(profile)
                 malformed["protocol_version"] = True
@@ -722,6 +742,22 @@ process.stdout.write(JSON.stringify({
   canonicalCountRequired: !isRequestSignalProfile({
     ...profile,
     signals: [{...profile.signals[0], event_count: '02'}]
+  }),
+  processIdentityBound: !isRequestSignalProfile({
+    ...profile,
+    signals: [{
+      ...profile.signals[0],
+      last_event: {...profile.signals[0].last_event, process_id: 11}
+    }]
+  }),
+  saturationBound: !isRequestSignalProfile({
+    ...profile,
+    coverage: {...profile.coverage, count_saturated: true}
+  }),
+  saturationAccepted: isRequestSignalProfile({
+    ...profile,
+    signals: [{...profile.signals[0], event_count: '18446744073709551615'}],
+    coverage: {...profile.coverage, count_saturated: true}
   })
 }));
 """
@@ -740,6 +776,9 @@ process.stdout.write(JSON.stringify({
                 "categoriesUnique": True,
                 "copiedIdentityBound": True,
                 "canonicalCountRequired": True,
+                "processIdentityBound": True,
+                "saturationBound": True,
+                "saturationAccepted": True,
             },
         )
 
@@ -1300,7 +1339,9 @@ process.stdout.write(JSON.stringify({
         self.assertIn('case "/api/origin-trace":', application)
         self.assertIn('case "/api/request-signal-profile":', application)
         self.assertIn("originTraceResponse(for: requestURL)", application)
-        self.assertIn("requestSignalProfileResponse(for: requestURL)", application)
+        self.assertIn("requestSignalProfileResponse(", application)
+        self.assertIn('value(forHTTPHeaderField: "If-None-Match")', application)
+        self.assertIn('["ETag": etag]', application)
         self.assertIn("vmAnalysisResponse(for: requestURL)", application)
         self.assertIn("artifactContentResponse(for: requestURL)", application)
         self.assertIn('"Content-Security-Policy": "sandbox"', application)

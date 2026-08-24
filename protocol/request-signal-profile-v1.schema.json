@@ -54,6 +54,27 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "coverage": {
+            "properties": { "count_saturated": { "const": true } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "signals": {
+            "contains": {
+              "properties": {
+                "event_count": { "const": "18446744073709551615" }
+              },
+              "required": ["event_count"]
+            }
+          }
+        }
+      }
     }
   ],
   "$defs": {

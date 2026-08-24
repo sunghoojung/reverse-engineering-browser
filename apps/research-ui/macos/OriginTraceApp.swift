@@ -41,32 +41,47 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     }
 
     do {
-      let response: (Data, String, [String: String])
+      let response: (Data, String, Int, [String: String])
       switch requestURL.path {
       case "", "/", "/index.html":
-        response = (try Data(contentsOf: indexURL), "text/html; charset=utf-8", [:])
+        response = (try Data(contentsOf: indexURL), "text/html; charset=utf-8", 200, [:])
       case "/api/health":
-        response = (try healthResponse(), "application/json; charset=utf-8", [:])
+        response = (try healthResponse(), "application/json; charset=utf-8", 200, [:])
       case "/api/events":
-        response = (try eventsResponse(for: requestURL), "application/json; charset=utf-8", [:])
+        response = (try eventsResponse(for: requestURL), "application/json; charset=utf-8", 200, [:])
       case "/api/origin-trace":
-        response = (try originTraceResponse(for: requestURL), "application/json; charset=utf-8", [:])
+        response = (try originTraceResponse(for: requestURL), "application/json; charset=utf-8", 200, [:])
       case "/api/request-signal-profile":
-        response = (try requestSignalProfileResponse(for: requestURL), "application/json; charset=utf-8", [:])
+        let profileResponse = try requestSignalProfileResponse(
+          for: requestURL,
+          ifNoneMatch: urlSchemeTask.request.value(forHTTPHeaderField: "If-None-Match")
+        )
+        response = (
+          profileResponse.0,
+          "application/json; charset=utf-8",
+          profileResponse.1,
+          profileResponse.2
+        )
       case "/api/artifacts":
-        response = (try artifactsResponse(for: requestURL), "application/json; charset=utf-8", [:])
+        response = (try artifactsResponse(for: requestURL), "application/json; charset=utf-8", 200, [:])
       case "/api/analysis/vm":
-        response = (try vmAnalysisResponse(for: requestURL), "application/json; charset=utf-8", [:])
+        response = (try vmAnalysisResponse(for: requestURL), "application/json; charset=utf-8", 200, [:])
       default:
         if requestURL.path.hasPrefix("/api/artifacts/") && requestURL.path.hasSuffix("/content") {
           let content = try artifactContentResponse(for: requestURL)
-          response = (content.0, "application/octet-stream", content.1)
+          response = (content.0, "application/octet-stream", 200, content.1)
         } else {
           sendError("Application resource not found", status: 404, to: urlSchemeTask)
           return
         }
       }
-      send(response.0, contentType: response.1, status: 200, headers: response.2, to: urlSchemeTask)
+      send(
+        response.0,
+        contentType: response.1,
+        status: response.2,
+        headers: response.3,
+        to: urlSchemeTask
+      )
     } catch let error as LocalHTTPError {
       sendError(error.message, status: error.status, to: urlSchemeTask)
     } catch {
@@ -378,7 +393,10 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     return try JSONSerialization.data(withJSONObject: document, options: [])
   }
 
-  private func requestSignalProfileResponse(for requestURL: URL) throws -> Data {
+  private func requestSignalProfileResponse(
+    for requestURL: URL,
+    ifNoneMatch: String?
+  ) throws -> (Data, Int, [String: String]) {
     let items = URLComponents(url: requestURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
     guard let sessionID = items.first(where: { $0.name == "session_id" })?.value,
       isCanonicalUInt64(sessionID, nonzero: true),
@@ -394,6 +412,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         status: 400,
         message: "Complete canonical request signal profile identity is required"
       )
+    }
+    let etag = resourceETag(
+      at: signalStoreURL,
+      state: "\(sessionID):\(requestID):\(processID):\(sequenceNumber)"
+    )
+    if ifNoneMatch == etag {
+      return (Data(), 304, ["ETag": etag])
     }
     let profiles = try recentJSONObjects(
       at: signalStoreURL,
@@ -414,12 +439,28 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         && rootProcessID.stringValue == String(processID)
         && root["sequence_number"] as? String == sequenceNumber
     }) else {
-      throw LocalHTTPError(
-        status: 404,
-        message: "No request signal profile matches the selected request"
+      let body = try JSONSerialization.data(
+        withJSONObject: [
+          "error": "No request signal profile matches the selected request"
+        ],
+        options: []
       )
+      return (body, 404, ["ETag": etag])
     }
-    return try JSONSerialization.data(withJSONObject: document, options: [])
+    let body = try JSONSerialization.data(withJSONObject: document, options: [])
+    return (body, 200, ["ETag": etag])
+  }
+
+  private func resourceETag(at url: URL, state: String) -> String {
+    guard
+      let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+      let size = attributes[.size] as? NSNumber,
+      let modified = attributes[.modificationDate] as? Date
+    else {
+      return "\"missing-\(state)\""
+    }
+    let fileNumber = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
+    return "\"\(fileNumber)-\(size.uint64Value)-\(modified.timeIntervalSince1970.bitPattern)-\(state)\""
   }
 
   private func isCanonicalUInt64(_ value: String, nonzero: Bool = false) -> Bool {
@@ -473,6 +514,18 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     else { return false }
 
     var seenCategories = Set<String>()
+    guard let rootEvent = profile["root_event"] as? [String: Any],
+      let rootProcessID = rootEvent["process_id"] as? NSNumber
+    else { return false }
+    let expectedProcessID: String
+    if let initiator = profile["initiator_event"] as? [String: Any],
+      let initiatorProcessID = initiator["process_id"] as? NSNumber
+    {
+      expectedProcessID = initiatorProcessID.stringValue
+    } else {
+      expectedProcessID = rootProcessID.stringValue
+    }
+    var hasSaturatedCount = false
     for signal in signals {
       let expectedSignalKeys = Set([
         "category", "relation", "confidence", "event_count", "first_event", "last_event",
@@ -487,8 +540,15 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         let eventCount = signal["event_count"] as? String,
         isCanonicalUInt64(eventCount, nonzero: true),
         isSignalEventReference(signal["first_event"]),
-        isSignalEventReference(signal["last_event"])
+        isSignalEventReference(signal["last_event"]),
+        let firstEvent = signal["first_event"] as? [String: Any],
+        let firstProcessID = firstEvent["process_id"] as? NSNumber,
+        firstProcessID.stringValue == expectedProcessID,
+        let lastEvent = signal["last_event"] as? [String: Any],
+        let lastProcessID = lastEvent["process_id"] as? NSNumber,
+        lastProcessID.stringValue == expectedProcessID
       else { return false }
+      hasSaturatedCount = hasSaturatedCount || eventCount == String(UInt64.max)
     }
 
     let expectedCoverageKeys = Set([
@@ -510,8 +570,9 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       let copied = coverage["copied_from_initiator"] as? Bool,
       coverage["retention_truncated"] is Bool,
       let parentDepthLimited = coverage["parent_depth_limited"] as? Bool,
-      coverage["count_saturated"] is Bool,
+      let countSaturated = coverage["count_saturated"] as? Bool,
       copied == !(profile["initiator_event"] is NSNull),
+      !countSaturated || hasSaturatedCount,
       !parentDepthLimited || parsedParentDepth == 32
     else { return false }
     return true

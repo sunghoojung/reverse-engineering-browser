@@ -47,6 +47,16 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         response = (try Data(contentsOf: indexURL), "text/html; charset=utf-8", 200, [:])
       case "/api/health":
         response = (try healthResponse(), "application/json; charset=utf-8", 200, [:])
+      case "/api/debugger":
+        let debuggerResponse = try debuggerUnavailableResponse(
+          ifNoneMatch: urlSchemeTask.request.value(forHTTPHeaderField: "If-None-Match")
+        )
+        response = (
+          debuggerResponse.0,
+          "application/json; charset=utf-8",
+          debuggerResponse.1,
+          debuggerResponse.2
+        )
       case "/api/events":
         response = (try eventsResponse(for: requestURL), "application/json; charset=utf-8", 200, [:])
       case "/api/origin-trace":
@@ -107,6 +117,45 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       ],
       options: []
     )
+  }
+
+  private func debuggerUnavailableResponse(
+    ifNoneMatch: String?
+  ) throws -> (Data, Int, [String: String]) {
+    let etag = "\"debugger-unavailable-v1\""
+    if ifNoneMatch == etag {
+      return (Data(), 304, ["ETag": etag])
+    }
+    let body = try JSONSerialization.data(
+      withJSONObject: [
+        "protocol_version": 1,
+        "state": "unavailable",
+        "generation": 0,
+        "error": NSNull(),
+        "target": NSNull(),
+        "targets": [],
+        "scripts": [],
+        "paused": NSNull(),
+        "breakpoints": [],
+        "watches": [],
+        "console": [],
+        "settings": [
+          "breakpoints_active": true,
+          "pause_on_exceptions": "none",
+          "xhr_breakpoints": [],
+          "event_breakpoints": [],
+        ],
+        "limits": [
+          "scripts": 5_000,
+          "call_frames": 64,
+          "scope_properties": 2_000,
+          "console_entries": 500,
+          "source_bytes": 2 * 1_024 * 1_024,
+        ],
+      ],
+      options: []
+    )
+    return (body, 200, ["ETag": etag])
   }
 
   private func eventsResponse(for requestURL: URL) throws -> Data {
@@ -758,7 +807,13 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     if !smokeTest {
       NSApp.activate(ignoringOtherApps: true)
     }
-    webView.load(URLRequest(url: URL(string: "reb://app/index.html?native=1")!))
+    let localApplicationURL = URL(string: "reb://app/index.html?native=1")!
+    let requestedUIURL = configuredUIURL()
+    if CommandLine.arguments.contains("--ui-url"), requestedUIURL == nil {
+      presentFatalError("The live UI URL must be an explicit loopback HTTP address")
+      return
+    }
+    webView.load(URLRequest(url: requestedUIURL ?? localApplicationURL))
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -838,6 +893,23 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       return URL(fileURLWithPath: configuredPath).standardizedFileURL
     }
     return nil
+  }
+
+  private func configuredUIURL() -> URL? {
+    let arguments = CommandLine.arguments
+    guard let urlFlag = arguments.firstIndex(of: "--ui-url"), urlFlag + 1 < arguments.count,
+      let url = URL(string: arguments[urlFlag + 1]),
+      let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+      components.scheme == "http",
+      Set(["127.0.0.1", "localhost", "::1"]).contains(components.host ?? ""),
+      components.port != nil,
+      components.user == nil,
+      components.password == nil,
+      components.fragment == nil
+    else {
+      return nil
+    }
+    return url
   }
 
   private func configureApplicationMenu() {
@@ -938,6 +1010,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
               artifacts: document.querySelectorAll('.source-tree-row[data-artifact-id]').length,
               sourceLines: document.querySelectorAll('.source-line').length,
               broker: document.querySelector('#broker-status')?.textContent,
+              debuggerState: document.querySelector('#debug-state strong')?.textContent,
               traceEnabled: !document.querySelector('#trace-origin')?.disabled,
               traceSteps: document.querySelectorAll('#backtrace-steps .trace-step').length,
               traceCoverage: document.querySelector('#coverage-value')?.textContent,

@@ -36,6 +36,7 @@ readonly fake_analyzer="${test_root}/fake-analyzer.py"
 readonly analyzer_started="${test_root}/analyzer-started"
 readonly analyzer_stopped="${test_root}/analyzer-stopped"
 readonly open_arguments="${test_root}/open-arguments"
+readonly brave_arguments="${test_root}/brave-arguments"
 mkdir -p "${fake_app}"
 
 # The single-quoted values are the literal source of the generated fixture.
@@ -43,6 +44,7 @@ mkdir -p "${fake_app}"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
   'set -euo pipefail' \
+  'printf "%s\n" "$@" >"${REB_BRAVE_ARGUMENTS}"' \
   'event_socket=""' \
   'artifact_socket=""' \
   'token_file=""' \
@@ -108,6 +110,7 @@ REB_ANALYZER_STOPPED="${analyzer_stopped}" \
 REB_LIVE_SESSION_ROOT="${test_root}/sessions" \
 REB_OPEN_COMMAND="${fake_open}" \
 REB_OPEN_ARGUMENTS="${open_arguments}" \
+REB_BRAVE_ARGUMENTS="${brave_arguments}" \
 REB_EVENT_PRODUCER="${event_producer}" \
 REB_ARTIFACT_PRODUCER="${artifact_producer}" \
 REB_CAPTURE_DURATION_SECONDS=60 \
@@ -139,6 +142,10 @@ grep -Fxq -- '--trace-store' "${open_arguments}"
 grep -Fxq -- "${session_directory}/origin-trace.jsonl" "${open_arguments}"
 grep -Fxq -- '--signal-store' "${open_arguments}"
 grep -Fxq -- "${session_directory}/request-signals.jsonl" "${open_arguments}"
+grep -Fxq -- '--ui-url' "${open_arguments}"
+grep -Eq '^http://127\.0\.0\.1:[0-9]+/$' "${open_arguments}"
+grep -Fxq -- '--remote-debugging-port=0' "${brave_arguments}"
+grep -Fxq -- "--user-data-dir=${session_directory}/brave-profile" "${brave_arguments}"
 grep -Fq 'accepted=3' "${session_directory}/artifact-receiver.log"
 test ! -e "/tmp/origin-trace-${UID}-$(basename "${session_directory}").sock"
 test ! -e "/tmp/origin-trace-${UID}-$(basename "${session_directory}")-artifacts.sock"
@@ -158,6 +165,7 @@ test "$(mode_of "${session_directory}/origin-trace.jsonl")" = 600
 test "$(mode_of "${session_directory}/request-signals.jsonl")" = 600
 test "$(mode_of "${session_directory}/broker.log")" = 600
 test "$(mode_of "${session_directory}/artifact-receiver.log")" = 600
+test "$(mode_of "${session_directory}/research-ui.log")" = 600
 test "$(mode_of "${session_directory}/broker.token")" = 600
 test "$(mode_of "${session_directory}/artifacts/manifest.jsonl")" = 600
 artifact_blob="$(find "${session_directory}/artifacts/blobs" -type f -name '*.bin' -print -quit)"
@@ -170,6 +178,7 @@ REB_ORIGIN_TRACE_APP="${fake_app}" \
 REB_LIVE_SESSION_ROOT="${disabled_sessions}" \
 REB_OPEN_COMMAND="${fake_open}" \
 REB_OPEN_ARGUMENTS="${open_arguments}" \
+REB_BRAVE_ARGUMENTS="${brave_arguments}" \
 REB_EVENT_PRODUCER="${event_producer}" \
 REB_ARTIFACT_PRODUCER="${artifact_producer}" \
 REB_CAPTURE_CATEGORY_MASK=257 \

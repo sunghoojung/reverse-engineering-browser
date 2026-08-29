@@ -77,13 +77,30 @@ Event and artifact polling also sends explicit entity tags. When neither store
 nor broker connectivity changed, the server returns an empty `304` response and
 the UI skips JSON parsing and DOM reconstruction.
 
-The Sources workspace reads the separate artifact manifest and immutable blobs
-created by `reb-artifact-receiver`. Its Page navigator follows the DevTools
-frame, origin, directory, and file organization. The center editor provides
-tabs, line numbers, `Command+P` or `Control+P` open-file navigation,
-`Command+F` or `Control+F` search, original and readable-derived views, and WASM
-hex display. The right side keeps the familiar debugger pane structure while
-runtime controls remain disabled until native debugging is implemented.
+The Sources workspace separates the live Page tree from Captured evidence.
+Captured reads the artifact manifest and immutable blobs created by
+`reb-artifact-receiver`. Page reads scripts reported by the authorized live
+Brave debugger. Both use the DevTools origin, directory, and file organization.
+The center editor provides tabs, line numbers, `Command+P` or `Control+P`
+open-file navigation, `Command+F` or `Control+F` search, original and
+readable-derived views, and WASM display.
+
+During `make live`, the debugger sidebar uses Chromium's Debugger, Runtime,
+Log, and DOMDebugger protocol domains. It supports line breakpoints, pause,
+resume, step over, step into async continuations, step out, frame restart,
+synchronous and async call stacks, bounded local, closure, and global scopes,
+watch expressions, pause-on-exception modes, XHR/fetch and selected event
+listener breakpoints, multiple page target selection, and a bounded console
+drawer. Watch evaluation requests `throwOnSideEffect` with a 500 ms timeout.
+Arbitrary protocol commands, interactive console evaluation, variable edits,
+and live source edits are not exposed in Baseline mode.
+
+The live debugger is ephemeral. Brave uses a private profile inside the
+session directory and chooses a random loopback debugging port. The research
+server validates the browser endpoint, exposes only allowlisted actions,
+rejects cross-site requests, caps scripts, frames, properties, messages,
+expressions, and source bytes, and never writes runtime scope or console values
+to the evidence store. Closing the session stops the bridge.
 
 During `make live`, Brave captures authorized JavaScript and WASM response
 bodies through the separate authenticated artifact socket. The catalog refreshes
@@ -98,6 +115,10 @@ visible even when the viewer shows a bounded preview.
 
 Pass `--socket /path/to/broker.sock` to the development server when it should
 also report live broker connectivity.
+
+Pass `--devtools-active-port /path/to/DevToolsActivePort` to enable the live
+debugger bridge. This path must belong to an explicitly authorized browser
+launched with `--remote-debugging-port=0` and an isolated user-data directory.
 
 Pass `--trace-store /path/to/origin-trace.jsonl` when the edge sidecar is not
 next to the default demo store. The origin-trace endpoint reads at most 10,000

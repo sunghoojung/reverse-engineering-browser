@@ -164,8 +164,11 @@ or JavaScript never enters an HTML parsing or execution sink.
 
 The Sources workspace follows the Chrome DevTools organization model: Page
 navigator, origin and directory tree, editor tabs, line numbers, open-file and
-find shortcuts, a readable derived view, and debugger side panes. Editing and
-runtime debugging remain disabled because stored evidence is immutable.
+find shortcuts, a readable derived view, and debugger side panes. The Captured
+tree remains immutable and never becomes a debugger source of truth. During an
+authorized live session, a separate Page tree reads Chromium debugger scripts
+and provides runtime pause, stack, scope, watch, breakpoint, and console state.
+No runtime value is copied back into the immutable artifact store.
 
 ## Failure and recovery behavior
 

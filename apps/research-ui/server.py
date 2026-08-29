@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 import re
 import stat
 import threading
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
+from debugger_bridge import DebuggerBridge, DebuggerBridgeError, ProtocolError
 from origin_trace import OriginTraceError, build_origin_trace
 from vm_analyzer import (
     AnalysisError,
@@ -29,6 +31,7 @@ MAX_EVENT_JSON_BYTES = 4 * 1024
 MAX_TRACE_EDGE_JSON_BYTES = 2 * 1024
 MAX_SIGNAL_PROFILE_JSON_BYTES = 8 * 1024
 MAX_ARTIFACT_JSON_BYTES = 8 * 1024
+MAX_DEBUGGER_ACTION_BYTES = 16 * 1024
 MAX_TRACE_EVENT_WINDOW = 10_000
 MAX_TRACE_EDGE_WINDOW = 30_000
 MAX_TRACE_ARTIFACT_WINDOW = 10_000
@@ -66,6 +69,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
     signal_store: Path
     artifact_store: Path
     broker_socket: Optional[Path] = None
+    debugger: Optional[DebuggerBridge] = None
     analysis_lock = threading.Lock()
     analysis_signature: Optional[str] = None
 
@@ -74,6 +78,11 @@ class ResearchHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/") and not self.is_trusted_local_request():
+            self.send_json(
+                {"error": "Local request origin rejected"}, HTTPStatus.FORBIDDEN
+            )
+            return
         if parsed.path == "/api/health":
             self.send_json(
                 {
@@ -87,8 +96,33 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     "artifact_store": str(self.artifact_store),
                     "artifact_store_exists": self.artifact_store.exists(),
                     "broker_connected": self.broker_connected(),
+                    "debugger_state": self.debugger_state(),
                 }
             )
+            return
+        if parsed.path == "/api/debugger":
+            snapshot = self.debugger_snapshot()
+            etag = f'"debugger-{snapshot["generation"]}"'
+            if self.send_not_modified(etag):
+                return
+            self.send_json(snapshot, etag=etag)
+            return
+        if parsed.path == "/api/debugger/source":
+            query = parse_qs(parsed.query)
+            script_id = query.get("script_id", [None])[0]
+            if script_id is None:
+                self.send_json(
+                    {"error": "Script ID is required"}, HTTPStatus.BAD_REQUEST
+                )
+                return
+            try:
+                if self.debugger is None:
+                    raise DebuggerBridgeError("Live debugging is not enabled")
+                source = self.debugger.get_script_source(script_id)
+            except DebuggerBridgeError as exception:
+                self.send_json({"error": str(exception)}, HTTPStatus.CONFLICT)
+                return
+            self.send_json(source)
             return
         if parsed.path == "/api/origin-trace":
             query = parse_qs(parsed.query)
@@ -182,16 +216,22 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                         root_sequence_number,
                     )
                 ):
-                    raise ValueError("Complete request signal profile identity is required")
+                    raise ValueError(
+                        "Complete request signal profile identity is required"
+                    )
                 if not self.is_canonical_uint(session_id, 64, nonzero=True):
-                    raise ValueError("Session ID must be a nonzero unsigned 64-bit integer")
+                    raise ValueError(
+                        "Session ID must be a nonzero unsigned 64-bit integer"
+                    )
                 if not self.is_canonical_uint(request_id, 64, nonzero=True):
-                    raise ValueError("Request ID must be a nonzero unsigned 64-bit integer")
+                    raise ValueError(
+                        "Request ID must be a nonzero unsigned 64-bit integer"
+                    )
                 if not self.is_canonical_uint(root_process_id, 32):
-                    raise ValueError("Root process ID must be an unsigned 32-bit integer")
-                if not self.is_canonical_uint(
-                    root_sequence_number, 64, nonzero=True
-                ):
+                    raise ValueError(
+                        "Root process ID must be an unsigned 32-bit integer"
+                    )
+                if not self.is_canonical_uint(root_sequence_number, 64, nonzero=True):
                     raise ValueError(
                         "Root sequence number must be a nonzero unsigned 64-bit integer"
                     )
@@ -212,17 +252,14 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                 )
                 if self.send_not_modified(etag):
                     return
-                profiles = self.load_request_signal_profiles(
-                    MAX_SIGNAL_PROFILE_WINDOW
-                )
+                profiles = self.load_request_signal_profiles(MAX_SIGNAL_PROFILE_WINDOW)
                 document = next(
                     (
                         profile
                         for profile in reversed(profiles)
                         if profile["session_id"] == session_id
                         and profile["request_id"] == request_id
-                        and str(profile["root_event"]["process_id"])
-                        == root_process_id
+                        and str(profile["root_event"]["process_id"]) == root_process_id
                         and profile["root_event"]["sequence_number"]
                         == root_sequence_number
                     ),
@@ -372,6 +409,49 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             return
         super().do_GET()
 
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if not self.is_trusted_local_request():
+            self.send_json(
+                {"error": "Local request origin rejected"}, HTTPStatus.FORBIDDEN
+            )
+            return
+        if parsed.path != "/api/debugger/actions":
+            self.send_json(
+                {"error": "Application resource not found"}, HTTPStatus.NOT_FOUND
+            )
+            return
+        try:
+            request = self.read_json_body(MAX_DEBUGGER_ACTION_BYTES)
+            if self.debugger is None:
+                raise DebuggerBridgeError("Live debugging is not enabled")
+            response = self.debugger.action(request)
+        except ValueError as exception:
+            self.send_json({"error": str(exception)}, HTTPStatus.BAD_REQUEST)
+            return
+        except ProtocolError as exception:
+            self.send_json({"error": str(exception)}, HTTPStatus.UNPROCESSABLE_ENTITY)
+            return
+        except DebuggerBridgeError as exception:
+            self.send_json({"error": str(exception)}, HTTPStatus.CONFLICT)
+            return
+        self.send_json(response)
+
+    def read_json_body(self, max_bytes: int) -> dict:
+        content_length = self.headers.get("Content-Length")
+        if content_length is None or not content_length.isdigit():
+            raise ValueError("A valid content length is required")
+        length = int(content_length)
+        if length <= 0 or length > max_bytes:
+            raise ValueError("The request body size is invalid")
+        try:
+            value = json.loads(self.rfile.read(length))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exception:
+            raise ValueError("The request body is malformed JSON") from exception
+        if not isinstance(value, dict):
+            raise ValueError("The request body must be an object")
+        return value
+
     def load_events(self, limit: Optional[int] = None) -> list[dict]:
         if not self.event_store.exists():
             return []
@@ -455,9 +535,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         encoded_line: bytes, max_record_bytes: int, record_name: str
     ) -> str:
         if len(encoded_line) > max_record_bytes:
-            raise ValueError(
-                f"The evidence store contains an oversized {record_name}"
-            )
+            raise ValueError(f"The evidence store contains an oversized {record_name}")
         return encoded_line.decode("utf-8")
 
     def load_trace_edges(self, limit: int) -> list[dict]:
@@ -536,9 +614,9 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         ):
             return False
         categories = set()
-        expected_process_id = (
-            value["initiator_event"] or value["root_event"]
-        )["process_id"]
+        expected_process_id = (value["initiator_event"] or value["root_event"])[
+            "process_id"
+        ]
         has_saturated_count = False
         for signal in value["signals"]:
             if not isinstance(signal, dict) or set(signal) != {
@@ -597,10 +675,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             and (value["initiator_event"] is not None)
             == coverage["copied_from_initiator"]
             and (not coverage["count_saturated"] or has_saturated_count)
-            and (
-                not coverage["parent_depth_limited"]
-                or coverage["parent_depth"] == 32
-            )
+            and (not coverage["parent_depth_limited"] or coverage["parent_depth"] == 32)
         )
 
     def load_recent_artifacts(self, limit: int) -> list[dict]:
@@ -737,6 +812,75 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         except OSError:
             return False
 
+    def debugger_snapshot(self) -> dict:
+        if self.debugger is not None:
+            return self.debugger.snapshot()
+        return {
+            "protocol_version": 1,
+            "state": "unavailable",
+            "generation": 0,
+            "error": None,
+            "target": None,
+            "targets": [],
+            "scripts": [],
+            "paused": None,
+            "breakpoints": [],
+            "watches": [],
+            "console": [],
+            "settings": {
+                "breakpoints_active": True,
+                "pause_on_exceptions": "none",
+                "xhr_breakpoints": [],
+                "event_breakpoints": [],
+            },
+            "limits": {
+                "scripts": 5000,
+                "call_frames": 64,
+                "scope_properties": 2000,
+                "console_entries": 500,
+                "source_bytes": MAX_ARTIFACT_RESPONSE_BYTES,
+            },
+        }
+
+    def debugger_state(self) -> str:
+        return str(self.debugger_snapshot()["state"])
+
+    def is_trusted_local_request(self) -> bool:
+        host_header = self.headers.get("Host")
+        if not host_header:
+            return False
+        try:
+            parsed_host = urlparse(f"//{host_header}")
+            host_port = parsed_host.port
+        except ValueError:
+            return False
+        if parsed_host.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            return False
+        expected_port = int(self.server.server_address[1])
+        if host_port != expected_port:
+            return False
+        if self.headers.get("Sec-Fetch-Site") == "cross-site":
+            return False
+        origin = self.headers.get("Origin")
+        if origin is None:
+            return True
+        try:
+            parsed_origin = urlparse(origin)
+            origin_port = parsed_origin.port
+        except ValueError:
+            return False
+        return (
+            parsed_origin.scheme == "http"
+            and parsed_origin.hostname in {"127.0.0.1", "localhost", "::1"}
+            and origin_port == expected_port
+            and parsed_origin.username is None
+            and parsed_origin.password is None
+            and parsed_origin.path in {"", "/"}
+            and not parsed_origin.params
+            and not parsed_origin.query
+            and not parsed_origin.fragment
+        )
+
     @staticmethod
     def resource_etag(path: Path, state: str = "") -> str:
         try:
@@ -813,6 +957,8 @@ def parse_args() -> argparse.Namespace:
         "--artifacts", type=Path, default=Path("build/sessions/artifacts")
     )
     parser.add_argument("--socket", type=Path)
+    parser.add_argument("--devtools-active-port", type=Path)
+    parser.add_argument("--endpoint-file", type=Path)
     return parser.parse_args()
 
 
@@ -824,8 +970,22 @@ def main() -> int:
     ResearchHandler.signal_store = args.signal_store.resolve()
     ResearchHandler.artifact_store = args.artifacts.resolve()
     ResearchHandler.broker_socket = args.socket.resolve() if args.socket else None
+    debugger = DebuggerBridge(
+        args.devtools_active_port.resolve() if args.devtools_active_port else None
+    )
+    ResearchHandler.debugger = debugger
+    debugger.start()
     server = ThreadingHTTPServer((args.host, args.port), ResearchHandler)
-    print(f"Research UI: http://{args.host}:{args.port}")
+    bound_port = int(server.server_address[1])
+    endpoint = f"http://{args.host}:{bound_port}"
+    if args.endpoint_file is not None:
+        endpoint_file = args.endpoint_file.resolve()
+        endpoint_file.parent.mkdir(parents=True, exist_ok=True)
+        endpoint_file.write_text(endpoint + "\n", encoding="utf-8")
+        os.chmod(endpoint_file, 0o600)
+    else:
+        endpoint_file = None
+    print(f"Research UI: {endpoint}")
     print(f"Event store: {ResearchHandler.event_store}")
     print(f"Origin trace store: {ResearchHandler.trace_store}")
     print(f"Request signal profile store: {ResearchHandler.signal_store}")
@@ -836,6 +996,12 @@ def main() -> int:
         pass
     finally:
         server.server_close()
+        debugger.stop()
+        if endpoint_file is not None:
+            try:
+                endpoint_file.unlink()
+            except FileNotFoundError:
+                pass
     return 0
 
 

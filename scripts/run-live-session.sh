@@ -23,7 +23,7 @@ readonly trace_store_path="${session_directory}/origin-trace.jsonl"
 readonly signal_store_path="${session_directory}/request-signals.jsonl"
 readonly artifact_store_path="${session_directory}/artifacts"
 readonly token_path="${session_directory}/broker.token"
-readonly profile_path="${repository_root}/build/brave-profile"
+readonly profile_path="${REB_BRAVE_PROFILE:-${session_directory}/brave-profile}"
 readonly category_mask="${REB_CAPTURE_CATEGORY_MASK:-1285}"
 readonly duration_seconds="${REB_CAPTURE_DURATION_SECONDS:-3600}"
 readonly open_command="${REB_OPEN_COMMAND:-open}"
@@ -35,6 +35,9 @@ readonly socket_path="/tmp/origin-trace-${UID}-${session_id}.sock"
 readonly artifact_socket_path="/tmp/origin-trace-${UID}-${session_id}-artifacts.sock"
 readonly broker_log="${session_directory}/broker.log"
 readonly artifact_receiver_log="${session_directory}/artifact-receiver.log"
+readonly ui_log="${session_directory}/research-ui.log"
+readonly ui_endpoint_path="${session_directory}/research-ui.endpoint"
+readonly devtools_active_port="${profile_path}/DevToolsActivePort"
 
 brave_binary="${REB_BRAVE_BINARY:-}"
 if [[ -z "${brave_binary}" ]]; then
@@ -73,6 +76,7 @@ fi
 broker_pid=""
 artifact_receiver_pid=""
 analyzer_pid=""
+ui_pid=""
 cleanup() {
   if [[ -n "${analyzer_pid}" ]] && kill -0 "${analyzer_pid}" 2>/dev/null; then
     kill "${analyzer_pid}" 2>/dev/null || true
@@ -85,6 +89,10 @@ cleanup() {
   if [[ -n "${artifact_receiver_pid}" ]] && kill -0 "${artifact_receiver_pid}" 2>/dev/null; then
     kill "${artifact_receiver_pid}" 2>/dev/null || true
     wait "${artifact_receiver_pid}" 2>/dev/null || true
+  fi
+  if [[ -n "${ui_pid}" ]] && kill -0 "${ui_pid}" 2>/dev/null; then
+    kill "${ui_pid}" 2>/dev/null || true
+    wait "${ui_pid}" 2>/dev/null || true
   fi
   if [[ -S "${socket_path}" ]]; then
     rm -f "${socket_path}"
@@ -174,10 +182,34 @@ analyze_captured_artifacts() {
 analyze_captured_artifacts &
 analyzer_pid=$!
 
+python3 "${repository_root}/apps/research-ui/server.py" \
+  --host 127.0.0.1 --port 0 --endpoint-file "${ui_endpoint_path}" \
+  --store "${store_path}" --trace-store "${trace_store_path}" \
+  --signal-store "${signal_store_path}" --artifacts "${artifact_store_path}" \
+  --socket "${socket_path}" --devtools-active-port "${devtools_active_port}" \
+  >"${ui_log}" 2>&1 &
+ui_pid=$!
+for _ in {1..100}; do
+  if [[ -s "${ui_endpoint_path}" ]]; then
+    break
+  fi
+  if ! kill -0 "${ui_pid}" 2>/dev/null; then
+    echo "Research UI stopped during startup. See: ${ui_log}" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+if [[ ! -s "${ui_endpoint_path}" ]]; then
+  echo "Research UI endpoint did not become ready. See: ${ui_log}" >&2
+  exit 1
+fi
+ui_endpoint="$(tr -d '\r\n' < "${ui_endpoint_path}")"
+readonly ui_endpoint
+
 "${open_command}" -n "${origin_trace_app}" --args --store "${store_path}" \
   --trace-store "${trace_store_path}" --signal-store "${signal_store_path}" \
   --artifacts "${artifact_store_path}" \
-  --broker-socket "${socket_path}"
+  --broker-socket "${socket_path}" --ui-url "${ui_endpoint}/"
 
 echo "Origin Trace live session ${session_id}"
 echo "Evidence store: ${store_path}"
@@ -185,10 +217,12 @@ echo "Origin trace store: ${trace_store_path}"
 echo "Request signal profile store: ${signal_store_path}"
 echo "Artifact store: ${artifact_store_path}"
 echo "Category mask: ${category_mask}; expires after ${duration_seconds} seconds"
+echo "Live debugger: ${ui_endpoint}"
 echo "Close Brave to stop this capture session."
 
 "${brave_binary}" \
   --user-data-dir="${profile_path}" \
+  --remote-debugging-port=0 \
   --reb-broker-socket="${socket_path}" \
   --reb-artifact-socket="${artifact_socket_path}" \
   --reb-broker-token-file="${token_path}" \

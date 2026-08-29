@@ -778,7 +778,7 @@
 
       #screen-sources:not([hidden]) {
         display: grid;
-        grid-template-columns: 252px minmax(360px, 1fr) 244px;
+        grid-template-columns: 252px minmax(420px, 1fr) 340px;
         min-height: 0;
       }
       .sources-navigator, .sources-debugger {
@@ -850,6 +850,9 @@
         grid-template-rows: 35px 32px minmax(0, 1fr) 27px;
         background: var(--panel);
       }
+      .sources-editor.console-open {
+        grid-template-rows: 35px 32px minmax(160px, 1fr) 27px minmax(130px, 34%);
+      }
       .source-editor-tab {
         min-width: 120px;
         max-width: 210px;
@@ -870,6 +873,7 @@
         background: var(--accent);
       }
       .source-editor-tab span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .source-editor-tab .source-tab-kind { flex: 0 0 auto; color: var(--faint); font: 7px var(--mono); text-transform: uppercase; }
       .source-tab-close { margin-left: auto; color: var(--faint); }
       .source-tab-placeholder { display: flex; align-items: center; padding: 0 11px; color: var(--faint); }
       .source-editor-toolbar {
@@ -924,23 +928,41 @@
       }
       .source-line {
         min-height: 20px;
-        display: block;
-        padding: 0 16px 0 64px;
+        display: grid;
+        grid-template-columns: 58px minmax(max-content, 1fr);
+        padding: 0 16px 0 0;
         position: relative;
         white-space: pre;
       }
-      .source-line::before {
-        counter-increment: source-line;
-        content: counter(source-line);
-        position: absolute;
-        left: 0;
-        width: 49px;
+      .source-line.current { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+      .source-line.breakpoint .source-gutter { color: #f28b82; }
+      .source-line.breakpoint .source-gutter::before {
+        content: "";
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #f28b82;
+      }
+      .source-gutter {
+        min-height: 20px;
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 5px;
         padding-right: 8px;
         color: var(--faint);
         border-right: 1px solid var(--line-soft);
+        border-top: 0;
+        border-bottom: 0;
+        border-left: 0;
+        background: transparent;
         text-align: right;
         user-select: none;
+        font: inherit;
       }
+      .source-gutter:disabled { cursor: default; }
+      .source-gutter:not(:disabled):hover { color: var(--text); }
+      .source-text { padding-left: 7px; }
       .source-line.search-match { background: color-mix(in srgb, var(--amber) 13%, transparent); }
       .source-empty {
         min-height: 100%;
@@ -980,8 +1002,13 @@
         background: transparent;
         color: var(--muted);
       }
+      .debug-control:hover:not(:disabled) { color: var(--text); background: var(--panel-3); }
       .debug-control:disabled { opacity: .42; cursor: not-allowed; }
-      .debug-state { padding: 8px 10px; color: var(--muted); border-bottom: 1px solid var(--line); font-size: 9px; }
+      .debug-state { min-width: 0; padding: 7px 10px; color: var(--muted); border-bottom: 1px solid var(--line); font-size: 9px; }
+      .debug-state-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+      .debug-state-line strong { color: var(--text); }
+      .debug-target { min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .debug-state-error { margin-top: 5px; color: #f28b82; overflow-wrap: anywhere; }
       .debug-panes { min-height: 0; overflow: auto; }
       .debug-pane { border-bottom: 1px solid var(--line); }
       .debug-pane summary {
@@ -996,6 +1023,50 @@
       .debug-pane summary::before { content: "›"; width: 14px; color: var(--muted); }
       .debug-pane[open] summary::before { content: "⌄"; }
       .debug-pane-body { padding: 4px 11px 10px 23px; color: var(--muted); font-size: 9px; line-height: 1.55; }
+      .debug-pane-empty { padding: 5px 0; color: var(--faint); }
+      .debug-form { display: flex; gap: 4px; margin: 3px 0 7px; }
+      .debug-form input, .debug-select {
+        min-width: 0;
+        height: 24px;
+        border: 1px solid var(--line);
+        border-radius: 2px;
+        background: var(--panel);
+        color: var(--text);
+        font: 9px var(--mono);
+      }
+      .debug-form input { flex: 1; padding: 0 6px; }
+      .debug-form button, .debug-row-action {
+        min-width: 24px;
+        height: 24px;
+        padding: 0 6px;
+        border: 1px solid var(--line);
+        border-radius: 2px;
+        background: var(--panel-2);
+        color: var(--muted);
+        font: 9px var(--mono);
+      }
+      .debug-form button:hover, .debug-row-action:hover { color: var(--text); background: var(--panel-3); }
+      .debug-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 6px; padding: 4px 0; border-bottom: 1px solid var(--line-soft); }
+      .debug-row:last-child { border-bottom: 0; }
+      .debug-row-actions { display: flex; gap: 3px; }
+      .debug-row-editor { grid-column: 1 / -1; display: grid; grid-template-columns: 82px minmax(0, 1fr) auto; gap: 4px; padding-top: 3px; }
+      .debug-row-editor input, .debug-row-editor select { min-width: 0; height: 24px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: 9px var(--mono); }
+      .debug-row-editor input { padding: 0 5px; }
+      .debug-row-main { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .debug-row-value { color: var(--text); font-family: var(--mono); overflow-wrap: anywhere; }
+      .debug-row-meta { color: var(--faint); font: 8px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .call-frame { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 5px 0; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; color: var(--muted); text-align: left; font: 9px var(--mono); }
+      .call-frame:hover, .call-frame[aria-selected="true"] { color: var(--text); background: var(--accent-soft); }
+      .call-frame-name, .call-frame-location { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .call-frame-location { color: var(--faint); }
+      .async-stack-label { margin: 7px 0 2px; color: var(--accent); font: 8px var(--mono); text-transform: uppercase; }
+      .scope-group { margin-bottom: 6px; }
+      .scope-group summary { cursor: pointer; color: var(--muted); }
+      .scope-property { display: grid; grid-template-columns: minmax(64px, .7fr) minmax(0, 1.3fr); gap: 7px; padding: 2px 0 2px 12px; font-family: var(--mono); }
+      .scope-property-name { color: var(--blue); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .scope-property-value { color: var(--text); overflow-wrap: anywhere; }
+      .debug-checkbox { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
+      .debug-checkbox input { accent-color: var(--accent); }
       .artifact-facts { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 5px 8px; font: 8px/1.5 var(--mono); }
       .artifact-facts dt { color: var(--faint); }
       .artifact-facts dd { margin: 0; overflow-wrap: anywhere; color: var(--muted); }
@@ -1034,6 +1105,16 @@
       }
       .quick-open-row:hover, .quick-open-row:focus { background: var(--accent-soft); }
       .quick-open-row small { color: var(--faint); font: 8px var(--mono); }
+      .console-drawer { min-height: 0; display: grid; grid-template-rows: 29px minmax(0, 1fr); border-top: 1px solid var(--line); background: var(--chrome); }
+      .console-drawer[hidden] { display: none; }
+      .console-head { display: flex; align-items: center; gap: 8px; padding: 0 8px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 9px; }
+      .console-head strong { color: var(--text); }
+      .console-head button { margin-left: auto; border: 0; background: transparent; color: var(--muted); font-size: 9px; }
+      .console-entries { min-height: 0; overflow: auto; font: 9px/1.5 var(--mono); }
+      .console-entry { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 7px; padding: 4px 8px; border-bottom: 1px solid var(--line-soft); }
+      .console-entry.error { color: #f28b82; background: color-mix(in srgb, #f28b82 8%, transparent); }
+      .console-entry.warn, .console-entry.warning { color: var(--amber); }
+      .console-entry-source { color: var(--faint); }
 
       .experiment-content { padding: 22px; }
       .experiment-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(240px, .7fr); gap: 14px; }
@@ -1326,11 +1407,12 @@
           <section id="screen-sources" class="screen" aria-label="Sources" hidden>
             <aside class="sources-navigator" aria-label="Sources navigator">
               <div class="source-side-tabs" role="tablist" aria-label="Source collections">
-                <button id="source-tab-page" class="source-side-tab" type="button" role="tab" aria-selected="true" aria-controls="source-tree">Page</button>
-                <button class="source-side-tab" type="button" role="tab" aria-selected="false" tabindex="-1" disabled>Filesystem</button>
+                <button id="source-tab-page" class="source-side-tab" type="button" role="tab" data-source-collection="page" aria-selected="false" aria-controls="source-tree" tabindex="-1">Page</button>
+                <button id="source-tab-captured" class="source-side-tab" type="button" role="tab" data-source-collection="captured" aria-selected="true" aria-controls="source-tree">Captured</button>
+                <button class="source-side-tab" type="button" role="tab" aria-selected="false" tabindex="-1" disabled>Workspace</button>
                 <button class="source-side-tab" type="button" role="tab" aria-selected="false" tabindex="-1" disabled>Overrides</button>
               </div>
-              <div id="source-tree" class="source-tree" role="tree" aria-labelledby="source-tab-page"></div>
+              <div id="source-tree" class="source-tree" role="tree" aria-labelledby="source-tab-captured"></div>
             </aside>
 
             <section class="sources-editor" aria-label="Source editor">
@@ -1340,6 +1422,7 @@
                 <button id="source-quick-open" class="source-tool" type="button" aria-label="Open file" title="Open file (⌘P)">⌘P</button>
                 <label><span class="sr-only" hidden>Find in source</span><input id="source-search" class="source-search" type="search" placeholder="Find" aria-label="Find in source" /></label>
                 <button id="source-pretty" class="source-tool" type="button" aria-label="Show readable representation" title="Show readable representation" disabled>{ }</button>
+                <button id="console-toggle" class="source-tool" type="button" aria-label="Toggle console drawer" title="Toggle console drawer (Escape)">Console</button>
               </div>
               <div id="source-code-wrap" class="source-code-wrap" tabindex="0">
                 <div id="source-code-empty" class="source-empty">Select a JavaScript file, WASM module, source map, or approved response body.</div>
@@ -1351,6 +1434,10 @@
                 <span id="source-view-kind">Original evidence</span>
                 <span id="source-hash" class="source-hash"></span>
               </div>
+              <section id="console-drawer" class="console-drawer" aria-label="Console drawer" hidden>
+                <div class="console-head"><strong>Console</strong><span id="console-count">0 messages</span><button id="console-clear" type="button">Clear</button></div>
+                <div id="console-entries" class="console-entries" role="log" aria-live="polite"></div>
+              </section>
               <div id="quick-open" class="quick-open" role="dialog" aria-label="Open a source file" hidden>
                 <input id="quick-open-input" type="search" placeholder="Open file" aria-label="File name" />
                 <div id="quick-open-results" class="quick-open-results"></div>
@@ -1359,21 +1446,23 @@
 
             <aside class="sources-debugger" aria-label="Debugger sidebar">
               <div class="debug-controls" aria-label="Debugger controls">
-                <button class="debug-control" type="button" aria-label="Resume script execution" title="Resume script execution" disabled>▶</button>
-                <button class="debug-control" type="button" aria-label="Step over" title="Step over" disabled>↷</button>
-                <button class="debug-control" type="button" aria-label="Step into" title="Step into" disabled>↓</button>
-                <button class="debug-control" type="button" aria-label="Step out" title="Step out" disabled>↑</button>
-                <button class="debug-control" type="button" aria-label="Deactivate breakpoints" title="Deactivate breakpoints" disabled>◇</button>
+                <button id="debug-resume" class="debug-control" type="button" aria-label="Resume script execution" title="Resume script execution (F8)" disabled>▶</button>
+                <button id="debug-pause" class="debug-control" type="button" aria-label="Pause script execution" title="Pause script execution" disabled>Ⅱ</button>
+                <button id="debug-step-over" class="debug-control" type="button" aria-label="Step over" title="Step over (F10)" disabled>↷</button>
+                <button id="debug-step-into" class="debug-control" type="button" aria-label="Step into" title="Step into (F11)" disabled>↓</button>
+                <button id="debug-step-out" class="debug-control" type="button" aria-label="Step out" title="Step out (Shift+F11)" disabled>↑</button>
+                <button id="debug-breakpoints-active" class="debug-control" type="button" aria-label="Deactivate breakpoints" title="Deactivate breakpoints" disabled>◇</button>
               </div>
-              <div class="debug-state">Not paused</div>
+              <div id="debug-state" class="debug-state"><div class="debug-state-line"><strong>Offline</strong><span class="debug-target">Run a live session to attach</span></div></div>
               <div class="debug-panes">
-                <details id="artifact-details" class="debug-pane" open><summary>Artifact details</summary><div id="artifact-facts" class="debug-pane-body">Select an artifact to inspect immutable capture metadata.</div></details>
-                <details class="debug-pane"><summary>Watch</summary><div class="debug-pane-body">No watch expressions</div></details>
-                <details class="debug-pane"><summary>Breakpoints</summary><div class="debug-pane-body">Runtime debugging is not enabled for this evidence session.</div></details>
-                <details class="debug-pane"><summary>Scope</summary><div class="debug-pane-body">Not paused</div></details>
-                <details class="debug-pane"><summary>Call Stack</summary><div class="debug-pane-body">Not paused</div></details>
-                <details class="debug-pane"><summary>XHR/fetch Breakpoints</summary><div class="debug-pane-body">No breakpoints</div></details>
-                <details class="debug-pane"><summary>Event Listener Breakpoints</summary><div class="debug-pane-body">No breakpoints</div></details>
+                <details id="artifact-details" class="debug-pane"><summary>Source details</summary><div id="artifact-facts" class="debug-pane-body">Select a source to inspect capture or runtime metadata.</div></details>
+                <details class="debug-pane" open><summary>Watch</summary><div class="debug-pane-body"><form id="watch-form" class="debug-form"><input id="watch-expression" type="text" placeholder="Add expression" aria-label="Watch expression" autocomplete="off" /><button type="submit" aria-label="Add watch expression">+</button></form><div id="watch-list"></div></div></details>
+                <details class="debug-pane" open><summary>Breakpoints</summary><div id="breakpoint-list" class="debug-pane-body">No breakpoints</div></details>
+                <details class="debug-pane" open><summary>Scope</summary><div id="scope-list" class="debug-pane-body">Not paused</div></details>
+                <details class="debug-pane" open><summary>Call Stack</summary><div id="call-stack" class="debug-pane-body">Not paused</div></details>
+                <details class="debug-pane"><summary>Pause on exceptions</summary><div class="debug-pane-body"><select id="pause-on-exceptions" class="debug-select" aria-label="Pause on exceptions"><option value="none">Don't pause</option><option value="uncaught">Uncaught exceptions</option><option value="all">Caught and uncaught</option></select></div></details>
+                <details class="debug-pane"><summary>XHR/fetch Breakpoints</summary><div class="debug-pane-body"><form id="xhr-breakpoint-form" class="debug-form"><input id="xhr-breakpoint-pattern" type="text" placeholder="URL contains" aria-label="XHR or fetch URL pattern" autocomplete="off" /><button type="submit" aria-label="Add XHR breakpoint">+</button></form><div id="xhr-breakpoint-list"></div></div></details>
+                <details class="debug-pane"><summary>Event Listener Breakpoints</summary><div id="event-breakpoint-list" class="debug-pane-body"></div></details>
               </div>
             </aside>
           </section>
@@ -1555,8 +1644,21 @@ export async function checkout(cart, fingerprint) {
         selectedArtifactId: 'sample-300',
         artifactRefreshing: false,
         artifactEtag: null,
+        sourceCollection: 'captured',
+        openScriptIds: [],
+        selectedScriptId: null,
+        liveScriptContent: new Map(),
+        pendingSourceLine: null,
         sourcePretty: false,
         sourceTruncated: false,
+        consoleOpen: false,
+        debuggerSession: null,
+        debuggerEtag: null,
+        debuggerRefreshing: false,
+        debuggerActionPending: false,
+        debuggerError: null,
+        selectedCallFrameId: null,
+        editingBreakpointId: null,
         selectedRequestId: '81',
         inspectorTab: 'payload',
         fieldTab: 'body',
@@ -1636,6 +1738,30 @@ export async function checkout(cart, fingerprint) {
         sourceViewKind: document.querySelector('#source-view-kind'),
         sourceHash: document.querySelector('#source-hash'),
         artifactFacts: document.querySelector('#artifact-facts'),
+        sourcesEditor: document.querySelector('.sources-editor'),
+        consoleToggle: document.querySelector('#console-toggle'),
+        consoleDrawer: document.querySelector('#console-drawer'),
+        consoleEntries: document.querySelector('#console-entries'),
+        consoleCount: document.querySelector('#console-count'),
+        consoleClear: document.querySelector('#console-clear'),
+        debugState: document.querySelector('#debug-state'),
+        debugResume: document.querySelector('#debug-resume'),
+        debugPause: document.querySelector('#debug-pause'),
+        debugStepOver: document.querySelector('#debug-step-over'),
+        debugStepInto: document.querySelector('#debug-step-into'),
+        debugStepOut: document.querySelector('#debug-step-out'),
+        debugBreakpointsActive: document.querySelector('#debug-breakpoints-active'),
+        watchForm: document.querySelector('#watch-form'),
+        watchExpression: document.querySelector('#watch-expression'),
+        watchList: document.querySelector('#watch-list'),
+        breakpointList: document.querySelector('#breakpoint-list'),
+        scopeList: document.querySelector('#scope-list'),
+        callStack: document.querySelector('#call-stack'),
+        pauseOnExceptions: document.querySelector('#pause-on-exceptions'),
+        xhrBreakpointForm: document.querySelector('#xhr-breakpoint-form'),
+        xhrBreakpointPattern: document.querySelector('#xhr-breakpoint-pattern'),
+        xhrBreakpointList: document.querySelector('#xhr-breakpoint-list'),
+        eventBreakpointList: document.querySelector('#event-breakpoint-list'),
         quickOpen: document.querySelector('#quick-open'),
         quickOpenInput: document.querySelector('#quick-open-input'),
         quickOpenResults: document.querySelector('#quick-open-results'),
@@ -1843,6 +1969,123 @@ export async function checkout(cart, fingerprint) {
           isSafeIntegerInRange(body.count, 0, 5000) &&
           body.count === body.artifacts.length &&
           body.artifacts.every(isArtifact);
+      }
+
+      function isDebuggerLocation(location) {
+        return isPlainObject(location) && typeof location.script_id === 'string' &&
+          isSafeIntegerInRange(location.line, 0, 0x7fffffff) &&
+          isSafeIntegerInRange(location.column, 0, 0x7fffffff);
+      }
+
+      function isDebuggerRemoteValue(value) {
+        return value === null || (isPlainObject(value) && typeof value.type === 'string' &&
+          (value.object_id === null || typeof value.object_id === 'string') &&
+          (value.description === null || typeof value.description === 'string') &&
+          (value.subtype === null || typeof value.subtype === 'string') &&
+          (value.class_name === null || typeof value.class_name === 'string') &&
+          (value.unserializable_value === null || typeof value.unserializable_value === 'string') &&
+          typeof value.value_truncated === 'boolean' &&
+          (value.value === null || ['boolean', 'number', 'string'].includes(typeof value.value)) &&
+          (value.preview === undefined || (isPlainObject(value.preview) &&
+            (value.preview.description === null || typeof value.preview.description === 'string') &&
+            typeof value.preview.overflow === 'boolean')));
+      }
+
+      function isDebuggerTarget(target) {
+        return isPlainObject(target) && ['id', 'type', 'title', 'url'].every(field =>
+          typeof target[field] === 'string');
+      }
+
+      function isDebuggerScript(script) {
+        return isPlainObject(script) && typeof script.script_id === 'string' && script.script_id.length > 0 &&
+          typeof script.url === 'string' && typeof script.hash === 'string' &&
+          typeof script.source_map_url === 'string' && ['JavaScript', 'WebAssembly'].includes(script.language) &&
+          ['start_line', 'start_column', 'end_line', 'end_column', 'execution_context_id', 'length']
+            .every(field => isSafeIntegerInRange(script[field], 0, Number.MAX_SAFE_INTEGER)) &&
+          typeof script.has_source_url === 'boolean' && typeof script.is_module === 'boolean';
+      }
+
+      function isDebuggerFrame(frame) {
+        if (!isPlainObject(frame) || typeof frame.id !== 'string' || typeof frame.function_name !== 'string' ||
+            typeof frame.url !== 'string' || !isDebuggerLocation(frame.location) ||
+            (frame.function_location !== null && !isDebuggerLocation(frame.function_location)) ||
+            !isDebuggerRemoteValue(frame.this) || !isDebuggerRemoteValue(frame.return_value) ||
+            !Array.isArray(frame.scopes) || frame.scopes.length > 12) return false;
+        return frame.scopes.every(scope => isPlainObject(scope) && typeof scope.type === 'string' &&
+          typeof scope.name === 'string' && isDebuggerRemoteValue(scope.object) &&
+          (scope.location === null || isDebuggerLocation(scope.location)) &&
+          Array.isArray(scope.properties) && scope.properties.length <= 100 &&
+          scope.properties.every(property => isPlainObject(property) && typeof property.name === 'string' &&
+            isDebuggerRemoteValue(property.value) && isDebuggerRemoteValue(property.get) &&
+            isDebuggerRemoteValue(property.set) && ['writable', 'enumerable', 'configurable']
+              .every(field => typeof property[field] === 'boolean')));
+      }
+
+      function isDebuggerAsyncStack(stack) {
+        return isPlainObject(stack) && typeof stack.description === 'string' &&
+          Array.isArray(stack.call_frames) && stack.call_frames.length <= 64 &&
+          stack.call_frames.every(frame => isPlainObject(frame) && typeof frame.function_name === 'string' &&
+            typeof frame.url === 'string' && isDebuggerLocation(frame.location));
+      }
+
+      function isDebuggerBreakpoint(breakpoint) {
+        return isPlainObject(breakpoint) && ['id', 'url', 'script_id', 'condition', 'expression']
+          .every(field => typeof breakpoint[field] === 'string') &&
+          ['line', 'conditional', 'logpoint'].includes(breakpoint.kind) &&
+          isSafeIntegerInRange(breakpoint.line, 0, 0x7fffffff) &&
+          isSafeIntegerInRange(breakpoint.column, 0, 0x7fffffff) &&
+          Array.isArray(breakpoint.locations) && breakpoint.locations.length <= 256 &&
+          breakpoint.locations.every(isDebuggerLocation) && typeof breakpoint.locations_truncated === 'boolean';
+      }
+
+      function isDebuggerWatch(watch) {
+        return isPlainObject(watch) && typeof watch.id === 'string' && typeof watch.expression === 'string' &&
+          isDebuggerRemoteValue(watch.result) && (watch.error === null || typeof watch.error === 'string');
+      }
+
+      function isDebuggerConsoleEntry(entry) {
+        return isPlainObject(entry) && typeof entry.id === 'string' && typeof entry.type === 'string' &&
+          (entry.timestamp === null || (typeof entry.timestamp === 'number' && Number.isFinite(entry.timestamp))) &&
+          Array.isArray(entry.arguments) && entry.arguments.length <= 32 &&
+          entry.arguments.every(value => value !== null && isDebuggerRemoteValue(value)) &&
+          Array.isArray(entry.stack) && entry.stack.length <= 64 && entry.stack.every(frame =>
+            isPlainObject(frame) && typeof frame.function_name === 'string' && typeof frame.url === 'string' &&
+            isSafeIntegerInRange(frame.line, 0, 0x7fffffff) && isSafeIntegerInRange(frame.column, 0, 0x7fffffff));
+      }
+
+      function isDebuggerResponse(body) {
+        if (!isPlainObject(body) || body.protocol_version !== 1 ||
+            !['unavailable', 'waiting', 'connecting', 'running', 'paused'].includes(body.state) ||
+            !isSafeIntegerInRange(body.generation, 0, Number.MAX_SAFE_INTEGER) ||
+            (body.error !== null && typeof body.error !== 'string') ||
+            !Array.isArray(body.targets) || body.targets.length > 128 || !body.targets.every(isDebuggerTarget) ||
+            !Array.isArray(body.scripts) || body.scripts.length > 5000 || !body.scripts.every(isDebuggerScript) ||
+            !Array.isArray(body.breakpoints) || body.breakpoints.length > 1000 || !body.breakpoints.every(isDebuggerBreakpoint) ||
+            !Array.isArray(body.watches) || body.watches.length > 100 || !body.watches.every(isDebuggerWatch) ||
+            !Array.isArray(body.console) || body.console.length > 500 || !body.console.every(isDebuggerConsoleEntry) ||
+            !isPlainObject(body.settings) || !isPlainObject(body.limits)) return false;
+        if (body.target !== null && !isDebuggerTarget(body.target)) return false;
+        if (body.paused !== null && (!isPlainObject(body.paused) || typeof body.paused.reason !== 'string' ||
+            (body.paused.description !== null && typeof body.paused.description !== 'string') ||
+            !Array.isArray(body.paused.call_frames) || body.paused.call_frames.length > 64 ||
+            !body.paused.call_frames.every(isDebuggerFrame) || !Array.isArray(body.paused.async_stack) ||
+            body.paused.async_stack.length > 32 || !body.paused.async_stack.every(isDebuggerAsyncStack) ||
+            !Array.isArray(body.paused.hit_breakpoints) || body.paused.hit_breakpoints.length > 1000 ||
+            !body.paused.hit_breakpoints.every(value => typeof value === 'string') ||
+            !isPlainObject(body.paused.scope_coverage) ||
+            !['loading', 'complete', 'partial'].includes(body.paused.scope_coverage.status) ||
+            !isSafeIntegerInRange(body.paused.scope_coverage.properties, 0, 2000) ||
+            body.paused.scope_coverage.limit !== 2000)) return false;
+        if ((body.state === 'paused') !== (body.paused !== null) ||
+            (['running', 'paused'].includes(body.state) && body.target === null)) return false;
+        return typeof body.settings.breakpoints_active === 'boolean' &&
+          ['none', 'uncaught', 'all'].includes(body.settings.pause_on_exceptions) &&
+          Array.isArray(body.settings.xhr_breakpoints) && body.settings.xhr_breakpoints.length <= 100 &&
+          body.settings.xhr_breakpoints.every(value => typeof value === 'string') &&
+          Array.isArray(body.settings.event_breakpoints) && body.settings.event_breakpoints.length <= 256 &&
+          body.settings.event_breakpoints.every(value => typeof value === 'string') &&
+          ['scripts', 'call_frames', 'scope_properties', 'console_entries', 'source_bytes']
+            .every(field => isSafeIntegerInRange(body.limits[field], 1, Number.MAX_SAFE_INTEGER));
       }
 
       function isOriginTraceResponse(body) {
@@ -3055,31 +3298,60 @@ export async function checkout(cart, fingerprint) {
         elements.experimentNote.textContent = 'The origin is still Unknown. This draft does not claim a producer until a controlled replay verifies one.';
       }
 
-      function sourceName(artifact) {
+      function liveSources() {
+        return (state.debuggerSession?.scripts ?? []).map(script => {
+          const cached = state.liveScriptContent.get(script.script_id) ?? {};
+          return {
+            ...script,
+            ...cached,
+            source_type: 'script',
+            key: `script:${script.script_id}`,
+            kind: script.language === 'WebAssembly' ? 'wasm' : 'javascript',
+            mime_type: script.language === 'WebAssembly' ? 'application/wasm' : 'text/javascript',
+            byte_size: script.length,
+            sha256: script.hash,
+            sensitive: false
+          };
+        });
+      }
+
+      function capturedSources() {
+        return state.artifacts.map(artifact => ({ ...artifact, source_type: 'artifact', key: `artifact:${artifact.artifact_id}` }));
+      }
+
+      function sourceName(source) {
+        if (!source.url) return source.source_type === 'script' ? `(anonymous ${source.script_id})` : `artifact-${source.artifact_id}`;
         try {
-          const path = new URL(artifact.url).pathname;
-          return path.split('/').filter(Boolean).at(-1) || artifact.url;
+          const path = new URL(source.url).pathname;
+          return path.split('/').filter(Boolean).at(-1) || source.url;
         } catch {
-          return artifact.url.split('/').filter(Boolean).at(-1) || `artifact-${artifact.artifact_id}`;
+          return source.url.split('/').filter(Boolean).at(-1) || source.url;
         }
       }
 
-      function sourceOrigin(artifact) {
-        try { return new URL(artifact.url).origin; } catch { return '(generated)'; }
+      function sourceOrigin(source) {
+        try { return source.url ? new URL(source.url).origin : '(anonymous)'; } catch { return '(generated)'; }
       }
 
-      function sourcePathParts(artifact) {
-        try { return new URL(artifact.url).pathname.split('/').filter(Boolean); } catch { return [sourceName(artifact)]; }
+      function sourcePathParts(source) {
+        try { return source.url ? new URL(source.url).pathname.split('/').filter(Boolean) : [sourceName(source)]; } catch { return [sourceName(source)]; }
       }
 
-      function sourceIcon(artifact) {
-        if (artifact.kind === 'wasm') return 'W';
-        if (artifact.kind === 'source_map') return '{}';
-        if (artifact.kind === 'response_body') return 'R';
+      function sourceIcon(source) {
+        if (source.kind === 'wasm') return 'W';
+        if (source.kind === 'source_map') return '{}';
+        if (source.kind === 'response_body') return 'R';
         return 'JS';
       }
 
-      function sourceTreeRow(label, glyph, depth, artifact = null, meta = '') {
+      function selectedSource() {
+        if (state.selectedScriptId !== null) {
+          return liveSources().find(source => source.script_id === state.selectedScriptId) ?? null;
+        }
+        return capturedSources().find(source => source.artifact_id === state.selectedArtifactId) ?? null;
+      }
+
+      function sourceTreeRow(label, glyph, depth, source = null, meta = '') {
         const row = document.createElement('button');
         row.type = 'button';
         row.className = 'source-tree-row';
@@ -3087,20 +3359,26 @@ export async function checkout(cart, fingerprint) {
         row.setAttribute('role', 'treeitem');
         row.setAttribute('aria-level', String(depth + 1));
         const icon = document.createElement('span');
-        icon.className = artifact ? `source-file-icon ${artifact.kind}` : 'tree-glyph';
+        icon.className = source ? `source-file-icon ${source.kind}` : 'tree-glyph';
         icon.textContent = glyph;
         const name = document.createElement('span');
         name.className = 'source-tree-name';
         name.textContent = label;
-        name.title = artifact?.url ?? label;
+        name.title = source?.url ?? label;
         const detail = document.createElement('span');
         detail.className = 'source-tree-meta';
         detail.textContent = meta;
         row.append(icon, name, detail);
-        if (artifact) {
-          row.dataset.artifactId = artifact.artifact_id;
-          row.setAttribute('aria-selected', String(artifact.artifact_id === state.selectedArtifactId));
-          row.addEventListener('click', () => selectArtifact(artifact.artifact_id));
+        if (source) {
+          if (source.source_type === 'artifact') row.dataset.artifactId = source.artifact_id;
+          if (source.source_type === 'script') row.dataset.scriptId = source.script_id;
+          const selected = source.source_type === 'artifact'
+            ? source.artifact_id === state.selectedArtifactId && state.selectedScriptId === null
+            : source.script_id === state.selectedScriptId;
+          row.setAttribute('aria-selected', String(selected));
+          row.addEventListener('click', () => source.source_type === 'script'
+            ? selectScript(source.script_id)
+            : selectArtifact(source.artifact_id));
         } else {
           row.setAttribute('aria-expanded', 'true');
         }
@@ -3108,25 +3386,30 @@ export async function checkout(cart, fingerprint) {
       }
 
       function renderSourceTree() {
-        if (state.artifacts.length === 0) {
+        const sources = state.sourceCollection === 'page' ? liveSources() : capturedSources();
+        if (sources.length === 0) {
           const empty = document.createElement('div');
           empty.className = 'source-tree-empty';
-          empty.textContent = 'No artifacts captured. JavaScript, WASM, source maps, and approved response bodies will appear here.';
+          empty.textContent = state.sourceCollection === 'page'
+            ? state.debuggerSession?.state === 'waiting' || state.debuggerSession?.state === 'connecting'
+              ? 'Waiting for an authorized browser target. Open a page in the live Brave session.'
+              : 'Live scripts appear here when Origin Trace is started with make live.'
+            : 'No artifacts captured. JavaScript, WASM, source maps, and approved response bodies will appear here.';
           elements.sourceTree.replaceChildren(empty);
           return;
         }
-        const rows = [sourceTreeRow('top', '⌄', 0, null, `${state.artifacts.length}`)];
+        const rows = [sourceTreeRow('top', '⌄', 0, null, `${sources.length}`)];
         const byOrigin = new Map();
-        state.artifacts.forEach(artifact => {
-          const origin = sourceOrigin(artifact);
+        sources.forEach(source => {
+          const origin = sourceOrigin(source);
           if (!byOrigin.has(origin)) byOrigin.set(origin, []);
-          byOrigin.get(origin).push(artifact);
+          byOrigin.get(origin).push(source);
         });
-        [...byOrigin.entries()].sort(([left], [right]) => left.localeCompare(right)).forEach(([origin, artifacts]) => {
-          rows.push(sourceTreeRow(origin.replace(/^https?:\/\//, ''), '⌄', 1, null, `${artifacts.length}`));
+        [...byOrigin.entries()].sort(([left], [right]) => left.localeCompare(right)).forEach(([origin, originSources]) => {
+          rows.push(sourceTreeRow(origin.replace(/^https?:\/\//, ''), '⌄', 1, null, `${originSources.length}`));
           const renderedDirectories = new Set();
-          artifacts.sort((left, right) => left.url.localeCompare(right.url)).forEach(artifact => {
-            const parts = sourcePathParts(artifact);
+          originSources.sort((left, right) => left.url.localeCompare(right.url)).forEach(source => {
+            const parts = sourcePathParts(source);
             parts.slice(0, -1).forEach((directory, index) => {
               const key = parts.slice(0, index + 1).join('/');
               if (renderedDirectories.has(key)) return;
@@ -3134,11 +3417,11 @@ export async function checkout(cart, fingerprint) {
               rows.push(sourceTreeRow(directory, '⌄', index + 2));
             });
             rows.push(sourceTreeRow(
-              sourceName(artifact),
-              sourceIcon(artifact),
+              sourceName(source),
+              sourceIcon(source),
               Math.max(2, parts.length + 1),
-              artifact,
-              artifact.origin === 'sample' ? 'sample' : ''
+              source,
+              source.source_type === 'script' ? 'live' : source.origin === 'sample' ? 'sample' : 'evidence'
             ));
           });
         });
@@ -3146,64 +3429,71 @@ export async function checkout(cart, fingerprint) {
       }
 
       function renderSourceTabs() {
-        const artifacts = state.openArtifactIds
-          .map(id => state.artifacts.find(artifact => artifact.artifact_id === id))
-          .filter(Boolean);
-        if (artifacts.length === 0) {
+        const sources = [
+          ...state.openScriptIds.map(id => liveSources().find(source => source.script_id === id)),
+          ...state.openArtifactIds.map(id => capturedSources().find(source => source.artifact_id === id))
+        ].filter(Boolean);
+        if (sources.length === 0) {
           const placeholder = document.createElement('span');
           placeholder.className = 'source-tab-placeholder';
           placeholder.textContent = 'No file open';
           elements.sourceEditorTabs.replaceChildren(placeholder);
           return;
         }
-        const tabs = artifacts.map(artifact => {
+        const tabs = sources.map(source => {
           const tab = document.createElement('button');
           tab.type = 'button';
           tab.className = 'source-editor-tab';
           tab.setAttribute('role', 'tab');
-          tab.setAttribute('aria-selected', String(artifact.artifact_id === state.selectedArtifactId));
-          tab.tabIndex = artifact.artifact_id === state.selectedArtifactId ? 0 : -1;
+          const selected = source.source_type === 'script'
+            ? source.script_id === state.selectedScriptId
+            : source.artifact_id === state.selectedArtifactId && state.selectedScriptId === null;
+          tab.setAttribute('aria-selected', String(selected));
+          tab.tabIndex = selected ? 0 : -1;
           const icon = document.createElement('span');
-          icon.className = `source-file-icon ${artifact.kind}`;
-          icon.textContent = sourceIcon(artifact);
+          icon.className = `source-file-icon ${source.kind}`;
+          icon.textContent = sourceIcon(source);
           const name = document.createElement('span');
-          name.textContent = sourceName(artifact);
+          name.textContent = sourceName(source);
           const close = document.createElement('span');
           close.className = 'source-tab-close';
           close.textContent = '×';
           close.setAttribute('aria-hidden', 'true');
-          tab.append(icon, name, close);
+          const kind = document.createElement('span'); kind.className = 'source-tab-kind'; kind.textContent = source.source_type === 'script' ? 'live' : 'captured';
+          tab.append(icon, name, kind, close);
           tab.addEventListener('click', event => {
             if (event.target === close) {
-              closeArtifact(artifact.artifact_id);
+              closeSource(source);
               return;
             }
-            selectArtifact(artifact.artifact_id);
+            if (source.source_type === 'script') selectScript(source.script_id);
+            else selectArtifact(source.artifact_id);
           });
           return tab;
         });
         elements.sourceEditorTabs.replaceChildren(...tabs);
       }
 
-      function renderArtifactFacts(artifact) {
-        if (!artifact) {
-          elements.artifactFacts.textContent = 'Select an artifact to inspect immutable capture metadata.';
+      function renderSourceFacts(source) {
+        if (!source) {
+          elements.artifactFacts.textContent = 'Select a source to inspect capture or runtime metadata.';
           return;
         }
         const list = document.createElement('dl');
         list.className = 'artifact-facts';
-        const facts = [
-          ['Artifact', artifact.artifact_id],
-          ['Kind', artifact.kind],
-          ['Session', artifact.session_id],
-          ['Navigation', artifact.navigation_id],
-          ['Frame', artifact.frame_id],
-          ['Creator', artifact.creator_event_id],
-          ['Parent', artifact.parent_artifact_id],
-          ['MIME', artifact.mime_type],
-          ['SHA-256', artifact.sha256],
-          ['Sensitive', artifact.sensitive ? 'approved' : 'no']
-        ];
+        const facts = source.source_type === 'script'
+          ? [
+              ['Runtime', 'live target'], ['Script', source.script_id],
+              ['Context', source.execution_context_id], ['Language', source.language],
+              ['Module', source.is_module ? 'yes' : 'no'], ['Source map', source.source_map_url || 'none'],
+              ['Hash', source.hash || 'unreported'], ['Length', formatByteSize(source.length)]
+            ]
+          : [
+              ['Artifact', source.artifact_id], ['Kind', source.kind], ['Session', source.session_id],
+              ['Navigation', source.navigation_id], ['Frame', source.frame_id], ['Creator', source.creator_event_id],
+              ['Parent', source.parent_artifact_id], ['MIME', source.mime_type], ['SHA-256', source.sha256],
+              ['Sensitive', source.sensitive ? 'approved' : 'no']
+            ];
         facts.forEach(([label, value]) => {
           const term = document.createElement('dt'); term.textContent = label;
           const detail = document.createElement('dd'); detail.textContent = String(value);
@@ -3281,7 +3571,7 @@ export async function checkout(cart, fingerprint) {
         let matches = 0;
         let first = null;
         elements.sourceCode.querySelectorAll('.source-line').forEach(line => {
-          const matched = Boolean(needle) && line.textContent.toLowerCase().includes(needle);
+          const matched = Boolean(needle) && line.querySelector('.source-text')?.textContent.toLowerCase().includes(needle);
           line.classList.toggle('search-match', matched);
           if (matched) { matches += 1; first ??= line; }
         });
@@ -3293,41 +3583,83 @@ export async function checkout(cart, fingerprint) {
         }
       }
 
-      function renderSourceContent(artifact) {
-        if (!artifact) {
+      function sourceRuntimeLine(source, sourceLine) {
+        return source?.source_type === 'script' ? source.start_line + sourceLine : sourceLine;
+      }
+
+      function sourceRuntimeColumn(source, sourceLine) {
+        return source?.source_type === 'script' && sourceLine === 0 ? source.start_column : 0;
+      }
+
+      function breakpointAt(source, line) {
+        if (source?.source_type !== 'script') return null;
+        return state.debuggerSession?.breakpoints.find(breakpoint => {
+          const resolved = breakpoint.locations?.filter(location => location.script_id === source.script_id) ?? [];
+          if (resolved.length > 0) return resolved.some(location => location.line === line);
+          return breakpoint.line === line &&
+            ((source.url && breakpoint.url === source.url) || breakpoint.script_id === source.script_id);
+        }) ?? null;
+      }
+
+      function renderSourceContent(source) {
+        if (!source) {
           elements.sourceCode.hidden = true;
           elements.sourceCodeEmpty.hidden = false;
           elements.sourceCodeEmpty.textContent = 'Select a JavaScript file, WASM module, source map, or approved response body.';
           return;
         }
-        if (artifact.loading) {
+        if (source.loading) {
           elements.sourceCode.hidden = true;
           elements.sourceCodeEmpty.hidden = false;
-          elements.sourceCodeEmpty.textContent = 'Loading immutable artifact bytes…';
+          elements.sourceCodeEmpty.textContent = source.source_type === 'script' ? 'Loading live script source…' : 'Loading immutable artifact bytes…';
           return;
         }
-        if (artifact.loadError) {
+        if (source.loadError) {
           elements.sourceCode.hidden = true;
           elements.sourceCodeEmpty.hidden = false;
-          elements.sourceCodeEmpty.textContent = artifact.loadError;
+          elements.sourceCodeEmpty.textContent = source.loadError;
           return;
         }
-        const original = artifact.content ?? '';
-        const content = state.sourcePretty && artifact.kind === 'javascript'
+        const original = source.content ?? '';
+        const content = state.sourcePretty && source.kind === 'javascript'
           ? formatJavaScript(original)
           : original;
         const lines = content.split('\n');
         const renderedLines = lines.slice(0, 20000);
-        const nodes = renderedLines.map(line => {
+        const nodes = renderedLines.map((line, index) => {
+          const runtimeLine = sourceRuntimeLine(source, index);
           const row = document.createElement('span');
           row.className = 'source-line';
-          row.textContent = line || ' ';
+          row.dataset.line = String(runtimeLine + 1);
+          const breakpoint = breakpointAt(source, runtimeLine);
+          if (breakpoint) row.classList.add('breakpoint');
+          if (source.source_type === 'script' && state.pendingSourceLine?.scriptId === source.script_id && state.pendingSourceLine.line === runtimeLine) {
+            row.classList.add('current');
+          }
+          const gutter = document.createElement('button');
+          gutter.type = 'button';
+          gutter.className = 'source-gutter';
+          gutter.textContent = String(runtimeLine + 1);
+          gutter.disabled = source.source_type !== 'script' || state.sourcePretty || !['running', 'paused'].includes(state.debuggerSession?.state);
+          gutter.title = state.sourcePretty ? 'Show original source to edit breakpoints' : '';
+          gutter.setAttribute('aria-label', `${breakpoint ? 'Remove' : 'Add'} breakpoint on line ${runtimeLine + 1}`);
+          gutter.addEventListener('click', event => {
+            event.stopPropagation();
+            toggleLineBreakpoint(source, runtimeLine, sourceRuntimeColumn(source, index), breakpoint);
+          });
+          const text = document.createElement('span');
+          text.className = 'source-text';
+          text.textContent = line || ' ';
+          row.append(gutter, text);
           return row;
         });
         if (lines.length > renderedLines.length) {
           const notice = document.createElement('span');
           notice.className = 'source-line';
-          notice.textContent = `Viewer limit reached. ${lines.length - renderedLines.length} more lines remain in the immutable artifact.`;
+          const gutter = document.createElement('button'); gutter.type = 'button'; gutter.className = 'source-gutter'; gutter.disabled = true; gutter.textContent = '…';
+          const text = document.createElement('span'); text.className = 'source-text';
+          text.textContent = `Viewer limit reached. ${lines.length - renderedLines.length} more lines remain in the source.`;
+          notice.append(gutter, text);
           nodes.push(notice);
         }
         elements.sourceCode.replaceChildren(...nodes);
@@ -3335,21 +3667,30 @@ export async function checkout(cart, fingerprint) {
         elements.sourceCodeEmpty.hidden = true;
         elements.sourceCodeWrap.scrollTop = 0;
         applySourceSearch();
+        elements.sourceCode.querySelector('.source-line.current')?.scrollIntoView({ block: 'center' });
       }
 
       function renderSources() {
-        const artifact = state.artifacts.find(candidate => candidate.artifact_id === state.selectedArtifactId) ?? null;
+        const source = selectedSource();
+        document.querySelectorAll('[data-source-collection]').forEach(tab => {
+          const selected = tab.dataset.sourceCollection === state.sourceCollection;
+          tab.setAttribute('aria-selected', String(selected));
+          tab.tabIndex = selected ? 0 : -1;
+        });
+        elements.sourceTree.setAttribute('aria-labelledby', `source-tab-${state.sourceCollection}`);
         renderSourceTree();
         renderSourceTabs();
-        renderArtifactFacts(artifact);
-        elements.sourceLocation.textContent = artifact?.url ?? 'Select a captured artifact';
-        elements.sourceSize.textContent = artifact ? formatByteSize(artifact.byte_size) : '0 bytes';
-        elements.sourceHash.textContent = artifact ? `sha256 ${artifact.sha256}` : '';
-        elements.sourceViewKind.textContent = state.sourcePretty ? 'Readable derived view' : 'Original evidence';
-        elements.sourcePretty.disabled = artifact?.kind !== 'javascript' || !artifact.content;
+        renderSourceFacts(source);
+        elements.sourceLocation.textContent = source?.url || (source ? sourceName(source) : 'Select a source');
+        elements.sourceSize.textContent = source ? formatByteSize(source.byte_size) : '0 bytes';
+        elements.sourceHash.textContent = source?.sha256 ? `${source.source_type === 'script' ? 'hash' : 'sha256'} ${source.sha256}` : '';
+        elements.sourceViewKind.textContent = state.sourcePretty
+          ? 'Readable derived view'
+          : source?.source_type === 'script' ? 'Live runtime source' : 'Original evidence';
+        elements.sourcePretty.disabled = source?.kind !== 'javascript' || !source.content;
         elements.sourcePretty.setAttribute('aria-pressed', String(state.sourcePretty));
         elements.sourcePretty.title = state.sourcePretty ? 'Show original evidence' : 'Show readable representation';
-        renderSourceContent(artifact);
+        renderSourceContent(source);
       }
 
       async function loadArtifactContent(artifact) {
@@ -3377,38 +3718,95 @@ export async function checkout(cart, fingerprint) {
       function selectArtifact(artifactId) {
         const artifact = state.artifacts.find(candidate => candidate.artifact_id === artifactId);
         if (!artifact) return;
+        state.sourceCollection = 'captured';
+        state.selectedScriptId = null;
         state.selectedArtifactId = artifactId;
+        state.pendingSourceLine = null;
         state.sourcePretty = false;
         if (!state.openArtifactIds.includes(artifactId)) state.openArtifactIds.push(artifactId);
         renderSources();
         loadArtifactContent(artifact);
       }
 
-      function closeArtifact(artifactId) {
-        const closedIndex = state.openArtifactIds.indexOf(artifactId);
-        state.openArtifactIds = state.openArtifactIds.filter(id => id !== artifactId);
-        if (state.selectedArtifactId === artifactId) {
-          state.selectedArtifactId = state.openArtifactIds[Math.max(0, closedIndex - 1)] ?? null;
+      function selectScript(scriptId, line = null) {
+        const source = liveSources().find(candidate => candidate.script_id === scriptId);
+        if (!source) return;
+        state.sourceCollection = 'page';
+        state.selectedScriptId = scriptId;
+        state.selectedArtifactId = null;
+        state.pendingSourceLine = line === null ? null : { scriptId, line };
+        state.sourcePretty = false;
+        if (!state.openScriptIds.includes(scriptId)) state.openScriptIds.push(scriptId);
+        renderSources();
+        loadScriptContent(source);
+      }
+
+      function closeSource(source) {
+        if (source.source_type === 'script') {
+          const closedIndex = state.openScriptIds.indexOf(source.script_id);
+          state.openScriptIds = state.openScriptIds.filter(id => id !== source.script_id);
+          if (state.selectedScriptId === source.script_id) {
+            state.selectedScriptId = state.openScriptIds[Math.max(0, closedIndex - 1)] ?? null;
+            if (state.selectedScriptId === null) {
+              state.selectedArtifactId = state.openArtifactIds.at(-1) ?? null;
+              state.sourceCollection = 'captured';
+            }
+          }
+        } else {
+          const closedIndex = state.openArtifactIds.indexOf(source.artifact_id);
+          state.openArtifactIds = state.openArtifactIds.filter(id => id !== source.artifact_id);
+          if (state.selectedArtifactId === source.artifact_id && state.selectedScriptId === null) {
+            state.selectedArtifactId = state.openArtifactIds[Math.max(0, closedIndex - 1)] ?? null;
+          }
         }
+        state.pendingSourceLine = null;
         state.sourcePretty = false;
         renderSources();
       }
 
+      async function loadScriptContent(source) {
+        const existing = state.liveScriptContent.get(source.script_id);
+        if (existing?.content !== undefined || existing?.loading) return;
+        state.liveScriptContent.set(source.script_id, { loading: true, loadError: null });
+        renderSources();
+        try {
+          const response = await fetch(`/api/debugger/source?script_id=${encodeURIComponent(source.script_id)}`, { cache: 'no-store' });
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.error || `Debugger returned ${response.status}`);
+          if (!isPlainObject(body) || body.protocol_version !== 1 || body.script_id !== source.script_id ||
+              typeof body.source !== 'string' || typeof body.truncated !== 'boolean') throw new TypeError('Malformed debugger source response');
+          const content = source.kind === 'wasm'
+            ? body.source
+            : body.source + (body.truncated ? '\n\n[Live source preview limited to the first 2 MB]' : '');
+          state.liveScriptContent.set(source.script_id, { loading: false, loadError: null, content, contentTruncated: body.truncated });
+        } catch (error) {
+          state.liveScriptContent.set(source.script_id, { loading: false, loadError: `Live source is unavailable: ${error.message}` });
+        }
+        renderSources();
+      }
+
+      async function toggleLineBreakpoint(source, line, column, breakpoint) {
+        if (state.debuggerActionPending) return;
+        if (breakpoint) await debuggerAction({ action: 'remove_breakpoint', breakpoint_id: breakpoint.id });
+        else await debuggerAction({ action: 'set_breakpoint', url: source.url, script_id: source.script_id, line, column, condition: '' });
+      }
+
       function renderQuickOpen() {
         const needle = elements.quickOpenInput.value.trim().toLowerCase();
-        const matches = state.artifacts.filter(artifact =>
-          !needle || `${sourceName(artifact)} ${artifact.url}`.toLowerCase().includes(needle)
+        const matches = [...liveSources(), ...capturedSources()].filter(source =>
+          !needle || `${sourceName(source)} ${source.url}`.toLowerCase().includes(needle)
         );
-        const rows = matches.map(artifact => {
+        const rows = matches.map(source => {
           const row = document.createElement('button');
           row.type = 'button';
           row.className = 'quick-open-row';
-          const name = document.createElement('span'); name.textContent = sourceName(artifact);
-          const path = document.createElement('small'); path.textContent = artifact.url;
+          const name = document.createElement('span'); name.textContent = sourceName(source);
+          const path = document.createElement('small'); path.textContent = `${source.source_type === 'script' ? 'Live' : 'Captured'} · ${source.url || '(anonymous)'}`;
           row.append(name, path);
           row.addEventListener('click', () => {
             elements.quickOpen.hidden = true;
-            selectArtifact(artifact.artifact_id);
+            if (source.source_type === 'script') selectScript(source.script_id);
+            else selectArtifact(source.artifact_id);
           });
           return row;
         });
@@ -3420,6 +3818,345 @@ export async function checkout(cart, fingerprint) {
         elements.quickOpenInput.value = '';
         renderQuickOpen();
         requestAnimationFrame(() => elements.quickOpenInput.focus());
+      }
+
+      function debuggerValueText(value) {
+        if (!value) return 'unavailable';
+        if (value.unserializable_value) return value.unserializable_value;
+        const suffix = value.value_truncated ? '…' : '';
+        if (value.type === 'string') return `${JSON.stringify(value.value ?? '')}${suffix}`;
+        if (value.value !== null && value.value !== undefined) return `${String(value.value)}${suffix}`;
+        return value.description || value.class_name || value.subtype || value.type;
+      }
+
+      function debuggerScriptName(scriptId, fallbackUrl = '') {
+        const script = state.debuggerSession?.scripts.find(candidate => candidate.script_id === scriptId);
+        if (script) return sourceName({ ...script, source_type: 'script' });
+        if (fallbackUrl) return sourceName({ url: fallbackUrl, source_type: 'script', script_id: scriptId });
+        return `(script ${scriptId})`;
+      }
+
+      function debuggerLocationText(location, fallbackUrl = '') {
+        return `${debuggerScriptName(location.script_id, fallbackUrl)}:${location.line + 1}:${location.column + 1}`;
+      }
+
+      function selectedCallFrame() {
+        const frames = state.debuggerSession?.paused?.call_frames ?? [];
+        return frames.find(frame => frame.id === state.selectedCallFrameId) ?? frames[0] ?? null;
+      }
+
+      function renderDebuggerState() {
+        const session = state.debuggerSession;
+        const stateLabels = {
+          unavailable: 'Offline', waiting: 'Waiting', connecting: 'Attaching', running: 'Running', paused: 'Paused'
+        };
+        const line = document.createElement('div'); line.className = 'debug-state-line';
+        const label = document.createElement('strong'); label.textContent = stateLabels[session?.state] ?? 'Offline';
+        const target = document.createElement('span'); target.className = 'debug-target';
+        target.textContent = session?.target?.title || (session?.state === 'unavailable'
+          ? 'Run make live to attach the browser debugger'
+          : 'Waiting for an authorized browser target');
+        line.append(label, target);
+        const nodes = [line];
+        if ((session?.targets.length ?? 0) > 1) {
+          const select = document.createElement('select'); select.className = 'debug-select'; select.setAttribute('aria-label', 'Debugger target');
+          session.targets.filter(candidate => ['page', 'webview'].includes(candidate.type)).forEach(candidate => {
+            const option = document.createElement('option'); option.value = candidate.id; option.textContent = candidate.title || candidate.url || candidate.id;
+            option.selected = candidate.id === session.target?.id; select.append(option);
+          });
+          select.addEventListener('change', () => debuggerAction({ action: 'select_target', target_id: select.value }));
+          nodes.push(select);
+        }
+        if (state.debuggerError || session?.error) {
+          const error = document.createElement('div'); error.className = 'debug-state-error'; error.textContent = state.debuggerError || session.error; nodes.push(error);
+        }
+        elements.debugState.replaceChildren(...nodes);
+      }
+
+      function renderCallStack() {
+        const paused = state.debuggerSession?.paused;
+        if (!paused || paused.call_frames.length === 0) {
+          elements.callStack.textContent = state.debuggerSession?.state === 'paused' ? 'No JavaScript frames were reported.' : 'Not paused';
+          return;
+        }
+        const nodes = [];
+        const appendFrame = (frame, async = false) => {
+          const row = document.createElement('button'); row.type = 'button'; row.className = 'call-frame';
+          row.setAttribute('aria-selected', String(!async && frame.id === state.selectedCallFrameId));
+          const name = document.createElement('span'); name.className = 'call-frame-name'; name.textContent = frame.function_name || '(anonymous)';
+          const location = document.createElement('span'); location.className = 'call-frame-location'; location.textContent = debuggerLocationText(frame.location, frame.url);
+          row.append(name, location);
+          row.addEventListener('click', () => {
+            if (async) {
+              revealDebuggerLocation(frame.location);
+              return;
+            }
+            selectCallFrame(frame);
+          });
+          nodes.push(row);
+        };
+        paused.call_frames.forEach(frame => appendFrame(frame));
+        paused.async_stack.forEach(stack => {
+          const label = document.createElement('div'); label.className = 'async-stack-label'; label.textContent = stack.description || 'Async'; nodes.push(label);
+          (stack.call_frames ?? []).forEach(frame => appendFrame(frame, true));
+        });
+        const tools = document.createElement('div'); tools.className = 'debug-form';
+        const restart = document.createElement('button'); restart.type = 'button'; restart.textContent = 'Restart frame';
+        restart.addEventListener('click', () => {
+          const frame = selectedCallFrame();
+          if (frame) debuggerAction({ action: 'restart_frame', call_frame_id: frame.id });
+        });
+        const copy = document.createElement('button'); copy.type = 'button'; copy.textContent = 'Copy stack';
+        copy.addEventListener('click', () => copyStackTrace(paused));
+        tools.append(restart, copy); nodes.push(tools);
+        elements.callStack.replaceChildren(...nodes);
+      }
+
+      async function copyStackTrace(paused) {
+        const lines = paused.call_frames.map(frame => `${frame.function_name} (${debuggerLocationText(frame.location, frame.url)})`);
+        paused.async_stack.forEach(stack => {
+          lines.push(`--- ${stack.description || 'Async'} ---`);
+          (stack.call_frames ?? []).forEach(frame => lines.push(`${frame.function_name} (${debuggerLocationText(frame.location, frame.url)})`));
+        });
+        try { await navigator.clipboard.writeText(lines.join('\n')); }
+        catch { state.debuggerError = 'The call stack could not be copied to the clipboard.'; renderDebuggerState(); }
+      }
+
+      function selectCallFrame(frame) {
+        state.selectedCallFrameId = frame.id;
+        revealDebuggerLocation(frame.location);
+        debuggerAction({ action: 'evaluate_watches', call_frame_id: frame.id });
+        renderDebugger();
+      }
+
+      function revealDebuggerLocation(location) {
+        const source = liveSources().find(candidate => candidate.script_id === location.script_id);
+        if (source) selectScript(source.script_id, location.line);
+      }
+
+      function renderScope() {
+        const frame = selectedCallFrame();
+        if (!frame) {
+          elements.scopeList.textContent = 'Not paused';
+          return;
+        }
+        const nodes = [];
+        frame.scopes.forEach((scope, index) => {
+          const group = document.createElement('details'); group.className = 'scope-group'; group.open = index < 2;
+          const summary = document.createElement('summary'); summary.textContent = scope.name || `${scope.type[0].toUpperCase()}${scope.type.slice(1)}`;
+          const properties = scope.properties.map(property => {
+            const row = document.createElement('div'); row.className = 'scope-property';
+            const name = document.createElement('span'); name.className = 'scope-property-name'; name.textContent = property.name;
+            const value = document.createElement('span'); value.className = 'scope-property-value'; value.textContent = debuggerValueText(property.value ?? property.get);
+            row.append(name, value); return row;
+          });
+          if (properties.length === 0) properties.push(textElement('div', 'debug-pane-empty', 'No retained properties'));
+          group.append(summary, ...properties); nodes.push(group);
+        });
+        if (frame.this) {
+          const row = document.createElement('div'); row.className = 'scope-property';
+          const name = document.createElement('span'); name.className = 'scope-property-name'; name.textContent = 'this';
+          const value = document.createElement('span'); value.className = 'scope-property-value'; value.textContent = debuggerValueText(frame.this);
+          row.append(name, value); nodes.unshift(row);
+        }
+        const coverage = state.debuggerSession.paused.scope_coverage;
+        const note = document.createElement('div'); note.className = 'debug-row-meta';
+        note.textContent = `${coverage.status} · ${coverage.properties}/${coverage.limit} bounded properties`;
+        nodes.push(note);
+        elements.scopeList.replaceChildren(...nodes);
+      }
+
+      function renderWatches() {
+        const watches = state.debuggerSession?.watches ?? [];
+        const nodes = watches.map(watch => {
+          const row = document.createElement('div'); row.className = 'debug-row';
+          const main = document.createElement('div'); main.className = 'debug-row-main';
+          const expression = document.createElement('div'); expression.textContent = watch.expression;
+          const value = document.createElement('div'); value.className = watch.error ? 'debug-state-error' : 'debug-row-value';
+          value.textContent = watch.error || debuggerValueText(watch.result);
+          main.append(expression, value);
+          const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'debug-row-action'; remove.textContent = '×'; remove.setAttribute('aria-label', `Remove watch ${watch.expression}`);
+          remove.addEventListener('click', () => debuggerAction({ action: 'remove_watch', watch_id: watch.id }));
+          row.append(main, remove); return row;
+        });
+        if (nodes.length === 0) nodes.push(textElement('div', 'debug-pane-empty', 'No watch expressions'));
+        elements.watchList.replaceChildren(...nodes);
+      }
+
+      function renderBreakpoints() {
+        const breakpoints = state.debuggerSession?.breakpoints ?? [];
+        const nodes = breakpoints.map(breakpoint => {
+          const row = document.createElement('div'); row.className = 'debug-row';
+          const reveal = document.createElement('button'); reveal.type = 'button'; reveal.className = 'call-frame';
+          const name = document.createElement('span'); name.className = 'call-frame-name';
+          name.textContent = breakpoint.kind === 'logpoint'
+            ? `Logpoint: ${breakpoint.expression}`
+            : breakpoint.kind === 'conditional' ? `Conditional: ${breakpoint.expression}` : 'Line breakpoint';
+          const location = document.createElement('span'); location.className = 'call-frame-location';
+          const resolved = breakpoint.locations?.[0] ?? { script_id: '', line: breakpoint.line, column: breakpoint.column };
+          const script = liveSources().find(candidate => candidate.url === breakpoint.url || candidate.script_id === resolved.script_id || candidate.script_id === breakpoint.script_id);
+          location.textContent = `${script ? sourceName(script) : sourceName({ url: breakpoint.url, source_type: 'script', script_id: breakpoint.script_id })}:${resolved.line + 1}${breakpoint.locations_truncated ? ' · more locations' : ''}`;
+          reveal.append(name, location);
+          reveal.addEventListener('click', () => {
+            const script = liveSources().find(candidate => candidate.url === breakpoint.url || candidate.script_id === resolved.script_id);
+            if (script) selectScript(script.script_id, resolved.line);
+          });
+          const actions = document.createElement('div'); actions.className = 'debug-row-actions';
+          const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'debug-row-action'; edit.textContent = '✎'; edit.setAttribute('aria-label', `Edit breakpoint on line ${breakpoint.line + 1}`);
+          edit.addEventListener('click', () => { state.editingBreakpointId = state.editingBreakpointId === breakpoint.id ? null : breakpoint.id; renderBreakpoints(); });
+          const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'debug-row-action'; remove.textContent = '×'; remove.setAttribute('aria-label', `Remove breakpoint on line ${breakpoint.line + 1}`);
+          remove.addEventListener('click', () => debuggerAction({ action: 'remove_breakpoint', breakpoint_id: breakpoint.id }));
+          actions.append(edit, remove);
+          row.append(reveal, actions);
+          if (state.editingBreakpointId === breakpoint.id) {
+            const editor = document.createElement('form'); editor.className = 'debug-row-editor';
+            const kind = document.createElement('select'); kind.setAttribute('aria-label', 'Breakpoint type');
+            [['line', 'Line'], ['conditional', 'Conditional'], ['logpoint', 'Logpoint']].forEach(([value, label]) => {
+              const option = document.createElement('option'); option.value = value; option.textContent = label; option.selected = value === breakpoint.kind; kind.append(option);
+            });
+            const expression = document.createElement('input'); expression.type = 'text'; expression.value = breakpoint.expression ?? ''; expression.placeholder = 'Expression'; expression.setAttribute('aria-label', 'Breakpoint expression');
+            const save = document.createElement('button'); save.type = 'submit'; save.className = 'debug-row-action'; save.textContent = 'Save';
+            const updateVisibility = () => { expression.hidden = kind.value === 'line'; };
+            kind.addEventListener('change', updateVisibility); updateVisibility();
+            editor.addEventListener('submit', event => {
+              event.preventDefault();
+              if (kind.value !== 'line' && !expression.value.trim()) return;
+              state.editingBreakpointId = null;
+              debuggerAction({ action: 'update_breakpoint', breakpoint_id: breakpoint.id, kind: kind.value, expression: expression.value.trim() });
+            });
+            editor.append(kind, expression, save); row.append(editor);
+          }
+          return row;
+        });
+        if (nodes.length === 0) nodes.push(textElement('div', 'debug-pane-empty', 'No breakpoints'));
+        elements.breakpointList.replaceChildren(...nodes);
+      }
+
+      function renderSpecialBreakpoints() {
+        const settings = state.debuggerSession?.settings;
+        elements.pauseOnExceptions.value = settings?.pause_on_exceptions ?? 'none';
+        const xhrRows = (settings?.xhr_breakpoints ?? []).map(pattern => {
+          const row = document.createElement('div'); row.className = 'debug-row';
+          const value = document.createElement('span'); value.className = 'debug-row-value'; value.textContent = pattern || 'Any XHR or fetch';
+          const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'debug-row-action'; remove.textContent = '×';
+          remove.addEventListener('click', () => debuggerAction({ action: 'remove_xhr_breakpoint', pattern }));
+          row.append(value, remove); return row;
+        });
+        if (xhrRows.length === 0) xhrRows.push(textElement('div', 'debug-pane-empty', 'No XHR/fetch breakpoints'));
+        elements.xhrBreakpointList.replaceChildren(...xhrRows);
+        const events = [
+          ['listener:click', 'Mouse · click'], ['listener:keydown', 'Keyboard · keydown'],
+          ['listener:submit', 'Control · submit'], ['listener:DOMContentLoaded', 'Load · DOMContentLoaded'],
+          ['instrumentation:setTimeout.callback', 'Timer · setTimeout']
+        ];
+        const eventRows = events.map(([eventName, label]) => {
+          const row = document.createElement('label'); row.className = 'debug-checkbox';
+          const input = document.createElement('input'); input.type = 'checkbox'; input.checked = settings?.event_breakpoints.includes(eventName) ?? false;
+          input.addEventListener('change', () => debuggerAction({ action: input.checked ? 'set_event_breakpoint' : 'remove_event_breakpoint', event_name: eventName }));
+          const text = document.createElement('span'); text.textContent = label; row.append(input, text); return row;
+        });
+        elements.eventBreakpointList.replaceChildren(...eventRows);
+      }
+
+      function renderConsole() {
+        const entries = state.debuggerSession?.console ?? [];
+        elements.consoleCount.textContent = `${entries.length} ${entries.length === 1 ? 'message' : 'messages'}`;
+        const nodes = entries.map(entry => {
+          const row = document.createElement('div'); row.className = `console-entry ${entry.type}`;
+          const type = document.createElement('span'); type.textContent = entry.type;
+          const message = document.createElement('span'); message.textContent = (entry.arguments ?? []).map(debuggerValueText).join(' ') || '(no value)';
+          const source = document.createElement('span'); source.className = 'console-entry-source';
+          const frame = entry.stack?.[0]; source.textContent = frame ? `${sourceName({ url: frame.url, source_type: 'script', script_id: '' })}:${frame.line + 1}` : '';
+          row.append(type, message, source); return row;
+        });
+        if (nodes.length === 0) nodes.push(textElement('div', 'debug-pane-empty', 'No console messages from the attached target.'));
+        elements.consoleEntries.replaceChildren(...nodes);
+      }
+
+      function renderDebugger() {
+        const session = state.debuggerSession;
+        const paused = session?.state === 'paused';
+        const running = session?.state === 'running';
+        const attached = paused || running;
+        elements.debugResume.disabled = !paused || state.debuggerActionPending;
+        elements.debugPause.disabled = !running || state.debuggerActionPending;
+        [elements.debugStepOver, elements.debugStepInto, elements.debugStepOut].forEach(button => { button.disabled = !paused || state.debuggerActionPending; });
+        elements.debugBreakpointsActive.disabled = !attached || state.debuggerActionPending;
+        elements.debugBreakpointsActive.setAttribute('aria-pressed', String(session?.settings.breakpoints_active ?? true));
+        elements.debugBreakpointsActive.title = session?.settings.breakpoints_active ? 'Deactivate breakpoints' : 'Activate breakpoints';
+        elements.watchExpression.disabled = !attached;
+        elements.pauseOnExceptions.disabled = !attached;
+        elements.xhrBreakpointPattern.disabled = !attached;
+        renderDebuggerState();
+        renderCallStack();
+        renderScope();
+        renderWatches();
+        renderBreakpoints();
+        renderSpecialBreakpoints();
+        renderConsole();
+        renderSources();
+      }
+
+      async function debuggerAction(request) {
+        if (state.debuggerActionPending) return;
+        state.debuggerActionPending = true;
+        state.debuggerError = null;
+        renderDebugger();
+        try {
+          const response = await fetch('/api/debugger/actions', {
+            method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request)
+          });
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.error || `Debugger returned ${response.status}`);
+          await refreshDebugger(true);
+        } catch (error) {
+          state.debuggerError = error.message;
+        } finally {
+          state.debuggerActionPending = false;
+          renderDebugger();
+        }
+      }
+
+      async function refreshDebugger(force = false) {
+        if (state.debuggerRefreshing || location.protocol === 'file:') return;
+        state.debuggerRefreshing = true;
+        try {
+          const headers = !force && state.debuggerEtag ? { 'If-None-Match': state.debuggerEtag } : {};
+          const response = await fetch('/api/debugger', { cache: 'no-store', headers });
+          if (response.status === 304) return;
+          if (!response.ok) throw new Error(`Debugger returned ${response.status}`);
+          const body = await response.json();
+          if (!isDebuggerResponse(body)) throw new TypeError('Malformed debugger response');
+          const previousState = state.debuggerSession?.state;
+          const previousFrame = state.debuggerSession?.paused?.call_frames?.[0]?.id;
+          state.debuggerSession = body;
+          state.debuggerEtag = response.headers.get('ETag');
+          state.debuggerError = null;
+          state.openScriptIds = state.openScriptIds.filter(id => body.scripts.some(script => script.script_id === id));
+          if (state.editingBreakpointId !== null && !body.breakpoints.some(breakpoint => breakpoint.id === state.editingBreakpointId)) {
+            state.editingBreakpointId = null;
+          }
+          if (state.selectedScriptId !== null && !body.scripts.some(script => script.script_id === state.selectedScriptId)) {
+            state.selectedScriptId = null;
+            state.pendingSourceLine = null;
+            state.selectedArtifactId = state.openArtifactIds.at(-1) ?? null;
+            state.sourceCollection = 'captured';
+          }
+          const firstFrame = body.paused?.call_frames?.[0] ?? null;
+          if (firstFrame && (previousState !== 'paused' || previousFrame !== firstFrame.id)) {
+            state.selectedCallFrameId = firstFrame.id;
+            revealDebuggerLocation(firstFrame.location);
+          } else if (!firstFrame) {
+            state.selectedCallFrameId = null;
+            state.pendingSourceLine = null;
+          }
+          renderDebugger();
+        } catch (error) {
+          state.debuggerError = error instanceof TypeError ? 'The debugger returned malformed state. The last valid pause is retained.' : error.message;
+          renderDebuggerState();
+        } finally {
+          state.debuggerRefreshing = false;
+        }
       }
 
       async function refreshArtifacts() {
@@ -3435,7 +4172,17 @@ export async function checkout(cart, fingerprint) {
           state.artifactEtag = response.headers.get('ETag');
           if (body.artifacts.length === 0) return;
           const existing = new Map(state.artifacts.map(artifact => [artifact.artifact_id, artifact]));
-          state.artifacts = body.artifacts.map(artifact => ({ ...artifact, origin: 'live', content: existing.get(artifact.artifact_id)?.content }));
+          state.artifacts = body.artifacts.map(artifact => {
+            const cached = existing.get(artifact.artifact_id);
+            return {
+              ...artifact,
+              origin: 'live',
+              content: cached?.content,
+              loading: cached?.loading,
+              loadError: cached?.loadError,
+              contentTruncated: cached?.contentTruncated
+            };
+          });
           state.openArtifactIds = state.openArtifactIds.filter(id => state.artifacts.some(artifact => artifact.artifact_id === id));
           if (!state.artifacts.some(artifact => artifact.artifact_id === state.selectedArtifactId)) {
             state.selectedArtifactId = state.artifacts[0].artifact_id;
@@ -3471,9 +4218,10 @@ export async function checkout(cart, fingerprint) {
         }
         if (screenName === 'experiments') renderExperiment();
         if (screenName === 'sources') {
-          renderSources();
-          const artifact = state.artifacts.find(candidate => candidate.artifact_id === state.selectedArtifactId);
-          if (artifact) loadArtifactContent(artifact);
+          renderDebugger();
+          const source = selectedSource();
+          if (source?.source_type === 'script') loadScriptContent(source);
+          else if (source) loadArtifactContent(state.artifacts.find(candidate => candidate.artifact_id === source.artifact_id));
         }
         if (screenName === 'vm') {
           if (trigger?.id === 'nav-vm' && state.vmAnalysisRequestId !== null) refreshVmAnalysis(null);
@@ -3585,7 +4333,7 @@ export async function checkout(cart, fingerprint) {
         setNetworkNotice('empty', 'Standalone preview. Open the local app to capture live requests.');
         renderRequests();
         renderEvidence();
-        renderSources();
+        renderDebugger();
         renderVmLab();
       }
 
@@ -3634,6 +4382,7 @@ export async function checkout(cart, fingerprint) {
       }));
       enableTabKeyboardNavigation('.inspector-tab');
       enableTabKeyboardNavigation('.field-tab');
+      enableTabKeyboardNavigation('.source-side-tab:not(:disabled)');
       document.querySelectorAll('.view-switch button').forEach(button => button.addEventListener('click', () => {
         document.querySelectorAll('.view-switch button').forEach(candidate => candidate.setAttribute('aria-pressed', String(candidate === button)));
       }));
@@ -3649,6 +4398,20 @@ export async function checkout(cart, fingerprint) {
         showScreen('vm', elements.requestVmCandidates);
       });
       elements.sourceSearch.addEventListener('input', applySourceSearch);
+      document.querySelectorAll('[data-source-collection]').forEach(button => button.addEventListener('click', () => {
+        state.sourceCollection = button.dataset.sourceCollection;
+        if (state.sourceCollection === 'page') {
+          const script = liveSources().find(source => source.script_id === state.selectedScriptId) ?? liveSources()[0];
+          if (script) selectScript(script.script_id);
+          else renderSources();
+        } else {
+          state.selectedScriptId = null;
+          state.pendingSourceLine = null;
+          const artifact = state.artifacts.find(candidate => candidate.artifact_id === state.selectedArtifactId) ?? state.artifacts[0];
+          if (artifact) selectArtifact(artifact.artifact_id);
+          else renderSources();
+        }
+      }));
       elements.sourcePretty.addEventListener('click', () => {
         state.sourcePretty = !state.sourcePretty;
         renderSources();
@@ -3665,10 +4428,57 @@ export async function checkout(cart, fingerprint) {
       elements.sourceCode.addEventListener('click', event => {
         const line = event.target.closest('.source-line');
         if (!line) return;
-        const lines = [...elements.sourceCode.querySelectorAll('.source-line')];
-        elements.sourcePosition.textContent = `Line ${lines.indexOf(line) + 1}, Column 1`;
+        elements.sourcePosition.textContent = `Line ${line.dataset.line ?? 1}, Column 1`;
+      });
+      const setConsoleOpen = open => {
+        state.consoleOpen = open;
+        elements.consoleDrawer.hidden = !open;
+        elements.sourcesEditor.classList.toggle('console-open', open);
+        elements.consoleToggle.setAttribute('aria-pressed', String(open));
+      };
+      elements.consoleToggle.addEventListener('click', () => setConsoleOpen(!state.consoleOpen));
+      elements.consoleClear.addEventListener('click', () => debuggerAction({ action: 'clear_console' }));
+      elements.debugResume.addEventListener('click', () => debuggerAction({ action: 'resume' }));
+      elements.debugPause.addEventListener('click', () => debuggerAction({ action: 'pause' }));
+      elements.debugStepOver.addEventListener('click', () => debuggerAction({ action: 'step_over' }));
+      elements.debugStepInto.addEventListener('click', () => debuggerAction({ action: 'step_into' }));
+      elements.debugStepOut.addEventListener('click', () => debuggerAction({ action: 'step_out' }));
+      elements.debugBreakpointsActive.addEventListener('click', () => debuggerAction({
+        action: 'set_breakpoints_active', active: !(state.debuggerSession?.settings.breakpoints_active ?? true)
+      }));
+      elements.watchForm.addEventListener('submit', event => {
+        event.preventDefault();
+        const expression = elements.watchExpression.value.trim();
+        if (!expression) return;
+        elements.watchExpression.value = '';
+        debuggerAction({ action: 'add_watch', expression });
+      });
+      elements.pauseOnExceptions.addEventListener('change', () => debuggerAction({
+        action: 'set_pause_on_exceptions', mode: elements.pauseOnExceptions.value
+      }));
+      elements.xhrBreakpointForm.addEventListener('submit', event => {
+        event.preventDefault();
+        const pattern = elements.xhrBreakpointPattern.value.trim();
+        elements.xhrBreakpointPattern.value = '';
+        debuggerAction({ action: 'set_xhr_breakpoint', pattern });
       });
       document.addEventListener('keydown', event => {
+        const sourcesVisible = !document.querySelector('#screen-sources').hidden;
+        if (sourcesVisible && event.key === 'Escape' && elements.quickOpen.hidden) {
+          event.preventDefault();
+          setConsoleOpen(!state.consoleOpen);
+          return;
+        }
+        if (sourcesVisible && ['F8', 'F10', 'F11'].includes(event.key)) {
+          const debugState = state.debuggerSession?.state;
+          if (!['running', 'paused'].includes(debugState)) return;
+          if (event.key !== 'F8' && debugState !== 'paused') return;
+          event.preventDefault();
+          if (event.key === 'F8') debuggerAction({ action: debugState === 'paused' ? 'resume' : 'pause' });
+          if (event.key === 'F10') debuggerAction({ action: 'step_over' });
+          if (event.key === 'F11') debuggerAction({ action: event.shiftKey ? 'step_out' : 'step_into' });
+          return;
+        }
         const commandKey = navigator.platform.includes('Mac') ? event.metaKey : event.ctrlKey;
         if (!commandKey || event.altKey) return;
         if (event.key.toLowerCase() === 'p') {
@@ -3694,13 +4504,15 @@ export async function checkout(cart, fingerprint) {
       renderRequests();
       renderInspector();
       renderEvidence();
-      renderSources();
+      renderDebugger();
       renderVmLab();
       if (location.protocol === 'file:') {
         useStandalonePreview();
       } else {
         refresh();
+        refreshDebugger();
         setInterval(refresh, 2000);
+        setInterval(refreshDebugger, 500);
       }
     </script>
   </body>

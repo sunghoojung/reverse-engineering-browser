@@ -248,6 +248,7 @@ class DebuggerBridge:
     def __init__(self, active_port_path: Optional[Path] = None) -> None:
         self.active_port_path = active_port_path
         self._lock = threading.RLock()
+        self._condition = threading.Condition(self._lock)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._reader_thread: Optional[threading.Thread] = None
@@ -284,31 +285,50 @@ class DebuggerBridge:
 
     def stop(self) -> None:
         self._stop.set()
-        with self._lock:
+        with self._condition:
             connection = self._connection
+            self._condition.notify_all()
         if connection is not None:
             connection.close()
         if self._thread is not None:
             self._thread.join(timeout=3.0)
         self._fail_pending(DebuggerBridgeError("Debugger bridge stopped"))
 
+    def generation(self) -> int:
+        with self._lock:
+            return self._generation
+
+    def state(self) -> str:
+        with self._lock:
+            return self._state
+
+    def wait_for_change(self, generation: int, timeout: float) -> int:
+        with self._condition:
+            self._condition.wait_for(
+                lambda: self._generation != generation or self._stop.is_set(),
+                timeout=max(0.0, timeout),
+            )
+            return self._generation
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
-            snapshot = {
+            return {
                 "protocol_version": 1,
                 "state": self._state,
                 "generation": self._generation,
                 "error": self._error,
-                "target": self._target,
+                "target": dict(self._target) if self._target is not None else None,
                 "targets": [
                     {key: target[key] for key in ("id", "type", "title", "url")}
                     for target in self._targets
                 ],
-                "scripts": list(self._scripts.values()),
-                "paused": self._paused,
-                "breakpoints": list(self._breakpoints.values()),
-                "watches": list(self._watches),
-                "console": list(self._console),
+                # Script records contain only scalar values, so copying each mapping
+                # preserves snapshot isolation without a full recursive traversal.
+                "scripts": [dict(script) for script in self._scripts.values()],
+                "paused": copy.deepcopy(self._paused),
+                "breakpoints": copy.deepcopy(list(self._breakpoints.values())),
+                "watches": copy.deepcopy(self._watches),
+                "console": copy.deepcopy(self._console),
                 "settings": {
                     "breakpoints_active": self._breakpoints_active,
                     "pause_on_exceptions": self._pause_on_exceptions,
@@ -323,7 +343,6 @@ class DebuggerBridge:
                     "source_bytes": MAX_SCRIPT_SOURCE_BYTES,
                 },
             }
-            return copy.deepcopy(snapshot)
 
     def action(self, request: dict[str, Any]) -> dict[str, Any]:
         action = request.get("action")
@@ -483,7 +502,7 @@ class DebuggerBridge:
                 self._changed()
         else:
             raise DebuggerBridgeError("Debugger action is not allowed")
-        return {"ok": True, "generation": self.snapshot()["generation"]}
+        return {"ok": True, "generation": self.generation()}
 
     def get_script_source(self, script_id: str) -> dict[str, Any]:
         if not script_id or len(script_id.encode("utf-8")) > 4_096:
@@ -520,8 +539,10 @@ class DebuggerBridge:
             try:
                 targets = self._discover_targets()
                 with self._lock:
-                    self._targets = targets[:MAX_TARGETS]
-                    self._changed()
+                    current_targets = targets[:MAX_TARGETS]
+                    if current_targets != self._targets:
+                        self._targets = current_targets
+                        self._changed()
                 pages = [
                     target
                     for target in targets
@@ -1452,6 +1473,7 @@ class DebuggerBridge:
 
     def _changed(self) -> None:
         self._generation += 1
+        self._condition.notify_all()
 
     @staticmethod
     def _bounded_integer(value: Any) -> int:

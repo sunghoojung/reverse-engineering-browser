@@ -269,6 +269,26 @@ class DebuggerBridgeTests(unittest.TestCase):
             time.sleep(0.01)
         self.fail("Timed out waiting for debugger state")
 
+    def test_generation_wait_wakes_without_building_a_snapshot(self) -> None:
+        bridge = DebuggerBridge()
+        initial_generation = bridge.generation()
+        started = threading.Event()
+        result = []
+
+        def wait_for_change() -> None:
+            started.set()
+            result.append(bridge.wait_for_change(initial_generation, 1.0))
+
+        waiter = threading.Thread(target=wait_for_change)
+        waiter.start()
+        self.assertTrue(started.wait(timeout=1.0))
+        bridge.action({"action": "clear_console"})
+        waiter.join(timeout=1.0)
+
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(result, [initial_generation + 1])
+        self.assertEqual(bridge.state(), "unavailable")
+
     def test_real_protocol_state_drives_scripts_pause_scopes_watches_and_breakpoints(
         self,
     ) -> None:
@@ -306,8 +326,16 @@ class DebuggerBridgeTests(unittest.TestCase):
                     "Debugger.setAsyncCallStackDepth",
                     [command["method"] for command in web_socket.commands],
                 )
+                snapshot["scripts"][0]["url"] = "https://mutated.test/"
+                snapshot["console"][0]["arguments"][0]["value"] = "mutated"
                 snapshot["scripts"].clear()
-                self.assertEqual(len(bridge.snapshot()["scripts"]), 1)
+                isolated = bridge.snapshot()
+                self.assertEqual(len(isolated["scripts"]), 1)
+                self.assertEqual(
+                    isolated["scripts"][0]["url"],
+                    "https://checkout.test/cart.js",
+                )
+                self.assertEqual(isolated["console"][0]["arguments"][0]["value"], "ready")
 
                 bridge.action(
                     {"action": "add_watch", "expression": "cart.items.length"}

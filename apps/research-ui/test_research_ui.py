@@ -219,8 +219,23 @@ class ResearchUiTests(unittest.TestCase):
 
     def test_debugger_api_exposes_only_the_bounded_bridge_surface(self) -> None:
         class FakeDebugger:
+            def __init__(self):
+                self.snapshot_calls = 0
+                self.wait_calls = []
+
             def snapshot(self):
+                self.snapshot_calls += 1
                 return {"protocol_version": 1, "state": "paused", "generation": 7}
+
+            def generation(self):
+                return 7
+
+            def state(self):
+                return "paused"
+
+            def wait_for_change(self, generation, timeout):
+                self.wait_calls.append((generation, timeout))
+                return generation
 
             def get_script_source(self, script_id):
                 if script_id != "script-1":
@@ -245,7 +260,8 @@ class ResearchUiTests(unittest.TestCase):
             ResearchHandler.signal_store = root / "request-signals.jsonl"
             ResearchHandler.artifact_store = root / "artifacts"
             ResearchHandler.broker_socket = None
-            ResearchHandler.debugger = FakeDebugger()
+            debugger = FakeDebugger()
+            ResearchHandler.debugger = debugger
             server = ThreadingHTTPServer(("127.0.0.1", 0), ResearchHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -261,6 +277,22 @@ class ResearchUiTests(unittest.TestCase):
                 with self.assertRaises(urllib.error.HTTPError) as unchanged:
                     urllib.request.urlopen(unchanged_debugger)
                 self.assertEqual(unchanged.exception.code, HTTPStatus.NOT_MODIFIED)
+                self.assertEqual(debugger.snapshot_calls, 1)
+                with urllib.request.urlopen(f"{base_url}/api/health") as response:
+                    self.assertEqual(json.load(response)["debugger_state"], "paused")
+                self.assertEqual(debugger.snapshot_calls, 1)
+                long_poll = urllib.request.Request(
+                    f"{base_url}/api/debugger?wait_ms=25",
+                    headers={"If-None-Match": debugger_etag},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as unchanged:
+                    urllib.request.urlopen(long_poll)
+                self.assertEqual(unchanged.exception.code, HTTPStatus.NOT_MODIFIED)
+                self.assertEqual(debugger.wait_calls, [(7, 0.025)])
+                self.assertEqual(debugger.snapshot_calls, 1)
+                with self.assertRaises(urllib.error.HTTPError) as invalid_wait:
+                    urllib.request.urlopen(f"{base_url}/api/debugger?wait_ms=25001")
+                self.assertEqual(invalid_wait.exception.code, HTTPStatus.BAD_REQUEST)
                 with urllib.request.urlopen(
                     f"{base_url}/api/debugger/source?script_id=script-1"
                 ) as response:
@@ -922,11 +954,16 @@ process.stdout.write(JSON.stringify({
         self.assertIn("Original evidence", html)
         self.assertIn("elements.sourceCode.replaceChildren", html)
         self.assertIn("function refreshDebugger(force = false)", html)
+        self.assertIn("function scheduleDebuggerRefresh(delay = 0)", html)
+        self.assertIn("?wait_ms=${wait}", html)
+        self.assertNotIn("setInterval(refreshDebugger", html)
         self.assertIn("function renderCallStack()", html)
         self.assertIn("function renderScope()", html)
         self.assertIn("function renderWatches()", html)
         self.assertIn("function renderBreakpoints()", html)
         self.assertIn("function renderConsole()", html)
+        self.assertIn("function breakpointLinesForSource(source)", html)
+        self.assertIn("function updateSourceDecorations()", html)
         self.assertIn("function sourceRuntimeLine(source, sourceLine)", html)
         self.assertIn(
             "function toggleLineBreakpoint(source, line, column, breakpoint)", html

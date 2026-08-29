@@ -102,6 +102,12 @@ rejects cross-site requests, caps scripts, frames, properties, messages,
 expressions, and source bytes, and never writes runtime scope or console values
 to the evidence store. Closing the session stops the bridge.
 
+Debugger state delivery is generation-tagged and change-driven. A conditional
+request can wait for up to 25 seconds, and an unchanged request reads only the
+generation counter instead of copying the bounded debugger snapshot. The UI
+coalesces update bursts, reuses console rows, skips unchanged debugger panes,
+and updates source decorations without rebuilding the source editor.
+
 During `make live`, Brave captures authorized JavaScript and WASM response
 bodies through the separate authenticated artifact socket. The catalog refreshes
 while the session runs, so acknowledged artifacts appear without restarting

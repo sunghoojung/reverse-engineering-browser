@@ -32,6 +32,7 @@ MAX_TRACE_EDGE_JSON_BYTES = 2 * 1024
 MAX_SIGNAL_PROFILE_JSON_BYTES = 8 * 1024
 MAX_ARTIFACT_JSON_BYTES = 8 * 1024
 MAX_DEBUGGER_ACTION_BYTES = 16 * 1024
+MAX_DEBUGGER_WAIT_MS = 25_000
 MAX_TRACE_EVENT_WINDOW = 10_000
 MAX_TRACE_EDGE_WINDOW = 30_000
 MAX_TRACE_ARTIFACT_WINDOW = 10_000
@@ -101,10 +102,32 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             )
             return
         if parsed.path == "/api/debugger":
-            snapshot = self.debugger_snapshot()
-            etag = f'"debugger-{snapshot["generation"]}"'
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            wait_values = query.get("wait_ms", ["0"])
+            if (
+                len(wait_values) != 1
+                or not CANONICAL_UINT64.fullmatch(wait_values[0])
+                or int(wait_values[0]) > MAX_DEBUGGER_WAIT_MS
+            ):
+                self.send_json(
+                    {"error": "Debugger wait must be between 0 and 25000 milliseconds"},
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            wait_seconds = int(wait_values[0]) / 1_000
+            generation = self.debugger_generation()
+            etag = f'"debugger-{generation}"'
+            if (
+                wait_seconds > 0
+                and self.debugger is not None
+                and self.headers.get("If-None-Match") == etag
+            ):
+                generation = self.debugger.wait_for_change(generation, wait_seconds)
+                etag = f'"debugger-{generation}"'
             if self.send_not_modified(etag):
                 return
+            snapshot = self.debugger_snapshot()
+            etag = f'"debugger-{snapshot["generation"]}"'
             self.send_json(snapshot, etag=etag)
             return
         if parsed.path == "/api/debugger/source":
@@ -843,7 +866,14 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         }
 
     def debugger_state(self) -> str:
-        return str(self.debugger_snapshot()["state"])
+        if self.debugger is not None:
+            return self.debugger.state()
+        return "unavailable"
+
+    def debugger_generation(self) -> int:
+        if self.debugger is not None:
+            return self.debugger.generation()
+        return 0
 
     def is_trusted_local_request(self) -> bool:
         host_header = self.headers.get("Host")

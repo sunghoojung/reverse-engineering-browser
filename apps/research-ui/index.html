@@ -834,6 +834,8 @@
         color: var(--muted);
         text-align: left;
         font-size: 10px;
+        content-visibility: auto;
+        contain-intrinsic-size: auto 24px;
       }
       .source-tree-row:hover { background: var(--panel-3); color: var(--text); }
       .source-tree-row[aria-selected="true"] { background: var(--accent-soft); color: var(--text); }
@@ -1111,7 +1113,7 @@
       .console-head strong { color: var(--text); }
       .console-head button { margin-left: auto; border: 0; background: transparent; color: var(--muted); font-size: 9px; }
       .console-entries { min-height: 0; overflow: auto; font: 9px/1.5 var(--mono); }
-      .console-entry { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 7px; padding: 4px 8px; border-bottom: 1px solid var(--line-soft); }
+      .console-entry { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 7px; padding: 4px 8px; border-bottom: 1px solid var(--line-soft); content-visibility: auto; contain-intrinsic-size: auto 22px; }
       .console-entry.error { color: #f28b82; background: color-mix(in srgb, #f28b82 8%, transparent); }
       .console-entry.warn, .console-entry.warning { color: var(--amber); }
       .console-entry-source { color: var(--faint); }
@@ -1655,8 +1657,11 @@ export async function checkout(cart, fingerprint) {
         debuggerSession: null,
         debuggerEtag: null,
         debuggerRefreshing: false,
+        debuggerRefreshTimer: null,
         debuggerActionPending: false,
         debuggerError: null,
+        debuggerRenderKeys: {},
+        renderedConsoleSignature: null,
         selectedCallFrameId: null,
         editingBreakpointId: null,
         selectedRequestId: '81',
@@ -3591,14 +3596,24 @@ export async function checkout(cart, fingerprint) {
         return source?.source_type === 'script' && sourceLine === 0 ? source.start_column : 0;
       }
 
-      function breakpointAt(source, line) {
-        if (source?.source_type !== 'script') return null;
-        return state.debuggerSession?.breakpoints.find(breakpoint => {
+      function breakpointLinesForSource(source) {
+        const byLine = new Map();
+        if (source?.source_type !== 'script') return byLine;
+        (state.debuggerSession?.breakpoints ?? []).forEach(breakpoint => {
           const resolved = breakpoint.locations?.filter(location => location.script_id === source.script_id) ?? [];
-          if (resolved.length > 0) return resolved.some(location => location.line === line);
-          return breakpoint.line === line &&
-            ((source.url && breakpoint.url === source.url) || breakpoint.script_id === source.script_id);
-        }) ?? null;
+          if (resolved.length > 0) {
+            resolved.forEach(location => { if (!byLine.has(location.line)) byLine.set(location.line, breakpoint); });
+            return;
+          }
+          if ((source.url && breakpoint.url === source.url) || breakpoint.script_id === source.script_id) {
+            if (!byLine.has(breakpoint.line)) byLine.set(breakpoint.line, breakpoint);
+          }
+        });
+        return byLine;
+      }
+
+      function breakpointAt(source, line) {
+        return breakpointLinesForSource(source).get(line) ?? null;
       }
 
       function renderSourceContent(source) {
@@ -3626,12 +3641,13 @@ export async function checkout(cart, fingerprint) {
           : original;
         const lines = content.split('\n');
         const renderedLines = lines.slice(0, 20000);
+        const breakpointsByLine = breakpointLinesForSource(source);
         const nodes = renderedLines.map((line, index) => {
           const runtimeLine = sourceRuntimeLine(source, index);
           const row = document.createElement('span');
           row.className = 'source-line';
           row.dataset.line = String(runtimeLine + 1);
-          const breakpoint = breakpointAt(source, runtimeLine);
+          const breakpoint = breakpointsByLine.get(runtimeLine) ?? null;
           if (breakpoint) row.classList.add('breakpoint');
           if (source.source_type === 'script' && state.pendingSourceLine?.scriptId === source.script_id && state.pendingSourceLine.line === runtimeLine) {
             row.classList.add('current');
@@ -3645,7 +3661,7 @@ export async function checkout(cart, fingerprint) {
           gutter.setAttribute('aria-label', `${breakpoint ? 'Remove' : 'Add'} breakpoint on line ${runtimeLine + 1}`);
           gutter.addEventListener('click', event => {
             event.stopPropagation();
-            toggleLineBreakpoint(source, runtimeLine, sourceRuntimeColumn(source, index), breakpoint);
+            toggleLineBreakpoint(source, runtimeLine, sourceRuntimeColumn(source, index), breakpointAt(source, runtimeLine));
           });
           const text = document.createElement('span');
           text.className = 'source-text';
@@ -3667,6 +3683,25 @@ export async function checkout(cart, fingerprint) {
         elements.sourceCodeEmpty.hidden = true;
         elements.sourceCodeWrap.scrollTop = 0;
         applySourceSearch();
+        elements.sourceCode.querySelector('.source-line.current')?.scrollIntoView({ block: 'center' });
+      }
+
+      function updateSourceDecorations() {
+        const source = selectedSource();
+        if (source?.source_type !== 'script' || elements.sourceCode.hidden) return;
+        const breakpointsByLine = breakpointLinesForSource(source);
+        const enabled = !state.sourcePretty && ['running', 'paused'].includes(state.debuggerSession?.state);
+        elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row => {
+          const runtimeLine = Number(row.dataset.line) - 1;
+          const breakpoint = breakpointsByLine.get(runtimeLine) ?? null;
+          const current = state.pendingSourceLine?.scriptId === source.script_id && state.pendingSourceLine.line === runtimeLine;
+          row.classList.toggle('breakpoint', Boolean(breakpoint));
+          row.classList.toggle('current', current);
+          const gutter = row.querySelector('.source-gutter');
+          if (!gutter) return;
+          gutter.disabled = !enabled;
+          gutter.setAttribute('aria-label', `${breakpoint ? 'Remove' : 'Add'} breakpoint on line ${runtimeLine + 1}`);
+        });
         elements.sourceCode.querySelector('.source-line.current')?.scrollIntoView({ block: 'center' });
       }
 
@@ -3931,7 +3966,9 @@ export async function checkout(cart, fingerprint) {
 
       function revealDebuggerLocation(location) {
         const source = liveSources().find(candidate => candidate.script_id === location.script_id);
-        if (source) selectScript(source.script_id, location.line);
+        if (!source) return false;
+        selectScript(source.script_id, location.line);
+        return true;
       }
 
       function renderScope() {
@@ -4058,19 +4095,37 @@ export async function checkout(cart, fingerprint) {
         elements.eventBreakpointList.replaceChildren(...eventRows);
       }
 
+      function consoleEntryNode(entry) {
+        const row = document.createElement('div'); row.className = `console-entry ${entry.type}`; row.dataset.consoleId = entry.id;
+        const type = document.createElement('span'); type.textContent = entry.type;
+        const message = document.createElement('span'); message.textContent = (entry.arguments ?? []).map(debuggerValueText).join(' ') || '(no value)';
+        const source = document.createElement('span'); source.className = 'console-entry-source';
+        const frame = entry.stack?.[0]; source.textContent = frame ? `${sourceName({ url: frame.url, source_type: 'script', script_id: '' })}:${frame.line + 1}` : '';
+        row.append(type, message, source);
+        return row;
+      }
+
       function renderConsole() {
         const entries = state.debuggerSession?.console ?? [];
         elements.consoleCount.textContent = `${entries.length} ${entries.length === 1 ? 'message' : 'messages'}`;
-        const nodes = entries.map(entry => {
-          const row = document.createElement('div'); row.className = `console-entry ${entry.type}`;
-          const type = document.createElement('span'); type.textContent = entry.type;
-          const message = document.createElement('span'); message.textContent = (entry.arguments ?? []).map(debuggerValueText).join(' ') || '(no value)';
-          const source = document.createElement('span'); source.className = 'console-entry-source';
-          const frame = entry.stack?.[0]; source.textContent = frame ? `${sourceName({ url: frame.url, source_type: 'script', script_id: '' })}:${frame.line + 1}` : '';
-          row.append(type, message, source); return row;
-        });
-        if (nodes.length === 0) nodes.push(textElement('div', 'debug-pane-empty', 'No console messages from the attached target.'));
-        elements.consoleEntries.replaceChildren(...nodes);
+        const signature = entries.length === 0 ? 'empty' : `${entries.length}:${entries[0].id}:${entries.at(-1).id}`;
+        if (state.renderedConsoleSignature === signature) return;
+        state.renderedConsoleSignature = signature;
+        if (entries.length === 0) {
+          elements.consoleEntries.replaceChildren(textElement('div', 'debug-pane-empty', 'No console messages from the attached target.'));
+          return;
+        }
+        const existing = new Map(
+          [...elements.consoleEntries.querySelectorAll('.console-entry[data-console-id]')]
+            .map(row => [row.dataset.consoleId, row])
+        );
+        elements.consoleEntries.replaceChildren(...entries.map(entry => existing.get(entry.id) ?? consoleEntryNode(entry)));
+      }
+
+      function renderDebuggerPart(name, signature, render) {
+        if (state.debuggerRenderKeys[name] === signature) return;
+        state.debuggerRenderKeys[name] = signature;
+        render();
       }
 
       function renderDebugger() {
@@ -4087,14 +4142,15 @@ export async function checkout(cart, fingerprint) {
         elements.watchExpression.disabled = !attached;
         elements.pauseOnExceptions.disabled = !attached;
         elements.xhrBreakpointPattern.disabled = !attached;
-        renderDebuggerState();
-        renderCallStack();
-        renderScope();
-        renderWatches();
-        renderBreakpoints();
-        renderSpecialBreakpoints();
+        const pausedSignature = JSON.stringify(session?.paused ?? null);
+        const selectedPauseSignature = `${state.selectedCallFrameId ?? ''}:${pausedSignature}`;
+        renderDebuggerPart('state', JSON.stringify([session?.state, session?.error, session?.target, session?.targets, state.debuggerError]), renderDebuggerState);
+        renderDebuggerPart('callStack', selectedPauseSignature, renderCallStack);
+        renderDebuggerPart('scope', selectedPauseSignature, renderScope);
+        renderDebuggerPart('watches', JSON.stringify(session?.watches ?? []), renderWatches);
+        renderDebuggerPart('breakpoints', JSON.stringify(session?.breakpoints ?? []), renderBreakpoints);
+        renderDebuggerPart('specialBreakpoints', JSON.stringify(session?.settings ?? null), renderSpecialBreakpoints);
         renderConsole();
-        renderSources();
       }
 
       async function debuggerAction(request) {
@@ -4108,13 +4164,30 @@ export async function checkout(cart, fingerprint) {
           });
           const body = await response.json();
           if (!response.ok) throw new Error(body.error || `Debugger returned ${response.status}`);
-          await refreshDebugger(true);
         } catch (error) {
           state.debuggerError = error.message;
         } finally {
           state.debuggerActionPending = false;
           renderDebugger();
+          if (!state.debuggerRefreshing) scheduleDebuggerRefresh(0);
         }
+      }
+
+      function debuggerScriptCatalogSignature(session) {
+        const scripts = session?.scripts ?? [];
+        if (scripts.length === 0) return `${session?.target?.id ?? ''}:empty`;
+        const first = scripts[0];
+        const last = scripts.at(-1);
+        return `${session?.target?.id ?? ''}:${scripts.length}:${first.script_id}:${first.hash}:${last.script_id}:${last.hash}`;
+      }
+
+      function scheduleDebuggerRefresh(delay = 0) {
+        if (location.protocol === 'file:') return;
+        if (state.debuggerRefreshTimer !== null) clearTimeout(state.debuggerRefreshTimer);
+        state.debuggerRefreshTimer = setTimeout(() => {
+          state.debuggerRefreshTimer = null;
+          refreshDebugger();
+        }, delay);
       }
 
       async function refreshDebugger(force = false) {
@@ -4122,13 +4195,19 @@ export async function checkout(cart, fingerprint) {
         state.debuggerRefreshing = true;
         try {
           const headers = !force && state.debuggerEtag ? { 'If-None-Match': state.debuggerEtag } : {};
-          const response = await fetch('/api/debugger', { cache: 'no-store', headers });
+          const wait = !force && state.debuggerEtag && state.debuggerSession?.state !== 'unavailable' ? 25000 : 0;
+          const response = await fetch(`/api/debugger?wait_ms=${wait}`, { cache: 'no-store', headers });
           if (response.status === 304) return;
           if (!response.ok) throw new Error(`Debugger returned ${response.status}`);
           const body = await response.json();
           if (!isDebuggerResponse(body)) throw new TypeError('Malformed debugger response');
+          const previousSession = state.debuggerSession;
           const previousState = state.debuggerSession?.state;
           const previousFrame = state.debuggerSession?.paused?.call_frames?.[0]?.id;
+          const previousCatalog = debuggerScriptCatalogSignature(previousSession);
+          const previousBreakpoints = JSON.stringify(previousSession?.breakpoints ?? []);
+          const previousOpenScripts = state.openScriptIds.join('\u0000');
+          const previousPendingLine = state.pendingSourceLine ? `${state.pendingSourceLine.scriptId}:${state.pendingSourceLine.line}` : '';
           state.debuggerSession = body;
           state.debuggerEtag = response.headers.get('ETag');
           state.debuggerError = null;
@@ -4143,19 +4222,37 @@ export async function checkout(cart, fingerprint) {
             state.sourceCollection = 'captured';
           }
           const firstFrame = body.paused?.call_frames?.[0] ?? null;
+          let sourceRendered = false;
           if (firstFrame && (previousState !== 'paused' || previousFrame !== firstFrame.id)) {
             state.selectedCallFrameId = firstFrame.id;
-            revealDebuggerLocation(firstFrame.location);
+            sourceRendered = revealDebuggerLocation(firstFrame.location);
           } else if (!firstFrame) {
             state.selectedCallFrameId = null;
             state.pendingSourceLine = null;
           }
           renderDebugger();
+          const sourcesVisible = !document.querySelector('#screen-sources').hidden;
+          if (sourcesVisible && !sourceRendered) {
+            const catalogChanged = previousCatalog !== debuggerScriptCatalogSignature(body);
+            const openScriptsChanged = previousOpenScripts !== state.openScriptIds.join('\u0000');
+            const pendingLine = state.pendingSourceLine ? `${state.pendingSourceLine.scriptId}:${state.pendingSourceLine.line}` : '';
+            if (openScriptsChanged || (state.selectedScriptId === null && previousSession?.scripts?.length > 0 && body.scripts.length === 0)) {
+              renderSources();
+            } else {
+              if (catalogChanged && state.sourceCollection === 'page') renderSourceTree();
+              if (catalogChanged && state.openScriptIds.length > 0) renderSourceTabs();
+              if (previousBreakpoints !== JSON.stringify(body.breakpoints) || previousPendingLine !== pendingLine || previousState !== body.state) {
+                updateSourceDecorations();
+              }
+            }
+          }
         } catch (error) {
           state.debuggerError = error instanceof TypeError ? 'The debugger returned malformed state. The last valid pause is retained.' : error.message;
-          renderDebuggerState();
+          renderDebugger();
         } finally {
           state.debuggerRefreshing = false;
+          const quiet = document.hidden || state.debuggerSession?.state === 'unavailable' || state.debuggerError;
+          scheduleDebuggerRefresh(quiet ? 1000 : 50);
         }
       }
 
@@ -4219,6 +4316,7 @@ export async function checkout(cart, fingerprint) {
         if (screenName === 'experiments') renderExperiment();
         if (screenName === 'sources') {
           renderDebugger();
+          renderSources();
           const source = selectedSource();
           if (source?.source_type === 'script') loadScriptContent(source);
           else if (source) loadArtifactContent(state.artifacts.find(candidate => candidate.artifact_id === source.artifact_id));
@@ -4334,6 +4432,7 @@ export async function checkout(cart, fingerprint) {
         renderRequests();
         renderEvidence();
         renderDebugger();
+        renderSources();
         renderVmLab();
       }
 
@@ -4501,18 +4600,27 @@ export async function checkout(cart, fingerprint) {
       try { savedTheme = localStorage.getItem('reb-theme'); } catch { /* Keep the system theme. */ }
       if (savedTheme === 'light' || savedTheme === 'dark') document.documentElement.dataset.theme = savedTheme;
 
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden || location.protocol === 'file:') return;
+        state.debuggerRenderKeys = {};
+        state.renderedConsoleSignature = null;
+        renderDebugger();
+        if (!document.querySelector('#screen-sources').hidden) renderSources();
+        scheduleDebuggerRefresh(0);
+      });
+
       renderRequests();
       renderInspector();
       renderEvidence();
       renderDebugger();
+      renderSources();
       renderVmLab();
       if (location.protocol === 'file:') {
         useStandalonePreview();
       } else {
         refresh();
-        refreshDebugger();
+        scheduleDebuggerRefresh();
         setInterval(refresh, 2000);
-        setInterval(refreshDebugger, 500);
       }
     </script>
   </body>

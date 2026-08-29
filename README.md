@@ -124,7 +124,11 @@ make live
 
 The launcher creates session-scoped event and artifact sockets with one
 user-only token, opens Origin Trace, and starts the custom Brave executable
-with the matching session flags. Artifact success events are emitted only
+with the matching session flags. It also starts the research UI on a random
+loopback port and attaches an allowlisted debugger bridge to Brave's isolated,
+session-scoped profile. Sources then provides live scripts, breakpoints,
+stepping, sync and async call stacks, bounded scopes and watches, special
+breakpoints, and a console drawer. Artifact success events are emitted only
 after the receiver has committed the manifest record; capture or transfer
 failures remain visible as normal evidence events. Session directories and
 evidence files are user-only. When the Artifact category is disabled, the

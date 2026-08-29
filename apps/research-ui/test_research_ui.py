@@ -12,10 +12,23 @@ from http import HTTPStatus
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from server import JSONL_TAIL_CHUNK_BYTES, MAX_EVENT_JSON_BYTES, ResearchHandler
+from server import (
+    JSONL_TAIL_CHUNK_BYTES,
+    MAX_EVENT_JSON_BYTES,
+    LoopbackThreadingHTTPServer,
+    ResearchHandler,
+)
 
 
 class ResearchUiTests(unittest.TestCase):
+    def test_loopback_server_binds_without_hostname_resolution(self) -> None:
+        server = LoopbackThreadingHTTPServer(("127.0.0.1", 0), ResearchHandler)
+        try:
+            self.assertEqual(server.server_name, "127.0.0.1")
+            self.assertGreater(server.server_port, 0)
+        finally:
+            server.server_close()
+
     def test_evidence_contract_rejects_unexpected_and_sensitive_fields(self) -> None:
         validator = Path(__file__).parents[2] / "tools" / "validate-evidence-store.py"
         valid_event = {
@@ -217,6 +230,146 @@ class ResearchUiTests(unittest.TestCase):
                 server.server_close()
                 thread.join()
 
+    def test_debugger_api_exposes_only_the_bounded_bridge_surface(self) -> None:
+        class FakeDebugger:
+            def __init__(self):
+                self.snapshot_calls = 0
+                self.wait_calls = []
+
+            def snapshot(self):
+                self.snapshot_calls += 1
+                return {"protocol_version": 1, "state": "paused", "generation": 7}
+
+            def generation(self):
+                return 7
+
+            def state(self):
+                return "paused"
+
+            def wait_for_change(self, generation, timeout):
+                self.wait_calls.append((generation, timeout))
+                return generation
+
+            def get_script_source(self, script_id):
+                if script_id != "script-1":
+                    raise AssertionError("unexpected script")
+                return {
+                    "protocol_version": 1,
+                    "script_id": script_id,
+                    "source": "const ready = true;",
+                    "truncated": False,
+                }
+
+            def action(self, request):
+                if request != {"action": "resume"}:
+                    raise AssertionError("unexpected debugger action")
+                return {"ok": True, "generation": 8}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ResearchHandler.ui_directory = Path(__file__).parent
+            ResearchHandler.event_store = root / "events.jsonl"
+            ResearchHandler.trace_store = root / "origin-trace.jsonl"
+            ResearchHandler.signal_store = root / "request-signals.jsonl"
+            ResearchHandler.artifact_store = root / "artifacts"
+            ResearchHandler.broker_socket = None
+            debugger = FakeDebugger()
+            ResearchHandler.debugger = debugger
+            server = ThreadingHTTPServer(("127.0.0.1", 0), ResearchHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base_url = f"http://127.0.0.1:{server.server_port}"
+                with urllib.request.urlopen(f"{base_url}/api/debugger") as response:
+                    self.assertEqual(json.load(response)["state"], "paused")
+                    debugger_etag = response.headers["ETag"]
+                unchanged_debugger = urllib.request.Request(
+                    f"{base_url}/api/debugger",
+                    headers={"If-None-Match": debugger_etag},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as unchanged:
+                    urllib.request.urlopen(unchanged_debugger)
+                self.assertEqual(unchanged.exception.code, HTTPStatus.NOT_MODIFIED)
+                self.assertEqual(debugger.snapshot_calls, 1)
+                with urllib.request.urlopen(f"{base_url}/api/health") as response:
+                    self.assertEqual(json.load(response)["debugger_state"], "paused")
+                self.assertEqual(debugger.snapshot_calls, 1)
+                long_poll = urllib.request.Request(
+                    f"{base_url}/api/debugger?wait_ms=25",
+                    headers={"If-None-Match": debugger_etag},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as unchanged:
+                    urllib.request.urlopen(long_poll)
+                self.assertEqual(unchanged.exception.code, HTTPStatus.NOT_MODIFIED)
+                self.assertEqual(debugger.wait_calls, [(7, 0.025)])
+                self.assertEqual(debugger.snapshot_calls, 1)
+                with self.assertRaises(urllib.error.HTTPError) as invalid_wait:
+                    urllib.request.urlopen(f"{base_url}/api/debugger?wait_ms=25001")
+                self.assertEqual(invalid_wait.exception.code, HTTPStatus.BAD_REQUEST)
+                with urllib.request.urlopen(
+                    f"{base_url}/api/debugger/source?script_id=script-1"
+                ) as response:
+                    self.assertIn("const ready", json.load(response)["source"])
+
+                action = urllib.request.Request(
+                    f"{base_url}/api/debugger/actions",
+                    data=b'{"action":"resume"}',
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(action) as response:
+                    self.assertEqual(json.load(response), {"ok": True, "generation": 8})
+
+                malformed = urllib.request.Request(
+                    f"{base_url}/api/debugger/actions",
+                    data=b"[]",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as rejected:
+                    urllib.request.urlopen(malformed)
+                self.assertEqual(rejected.exception.code, HTTPStatus.BAD_REQUEST)
+
+                cross_site = urllib.request.Request(
+                    f"{base_url}/api/debugger/actions",
+                    data=b'{"action":"resume"}',
+                    headers={
+                        "Content-Type": "application/json",
+                        "Origin": "https://attacker.test",
+                        "Sec-Fetch-Site": "cross-site",
+                    },
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as forbidden:
+                    urllib.request.urlopen(cross_site)
+                self.assertEqual(forbidden.exception.code, HTTPStatus.FORBIDDEN)
+
+                malformed_origin = urllib.request.Request(
+                    f"{base_url}/api/debugger/actions",
+                    data=b'{"action":"resume"}',
+                    headers={
+                        "Content-Type": "application/json",
+                        "Origin": f"{base_url}/not-an-origin",
+                    },
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as forbidden:
+                    urllib.request.urlopen(malformed_origin)
+                self.assertEqual(forbidden.exception.code, HTTPStatus.FORBIDDEN)
+
+                malformed_host = urllib.request.Request(
+                    f"{base_url}/api/debugger",
+                    headers={"Host": "127.0.0.1:not-a-port"},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as forbidden:
+                    urllib.request.urlopen(malformed_host)
+                self.assertEqual(forbidden.exception.code, HTTPStatus.FORBIDDEN)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+                ResearchHandler.debugger = None
+
     def test_request_signal_profile_api_validates_identity_and_records(self) -> None:
         profile = {
             "protocol_version": 1,
@@ -293,7 +446,9 @@ class ResearchUiTests(unittest.TestCase):
                 self.assertEqual(incomplete.exception.code, HTTPStatus.BAD_REQUEST)
 
                 with self.assertRaises(urllib.error.HTTPError) as missing:
-                    urllib.request.urlopen(profile_url.replace("request_id=81", "request_id=82"))
+                    urllib.request.urlopen(
+                        profile_url.replace("request_id=81", "request_id=82")
+                    )
                 self.assertEqual(missing.exception.code, HTTPStatus.NOT_FOUND)
                 missing_etag = missing.exception.headers["ETag"]
                 cached_missing = urllib.request.Request(
@@ -788,16 +943,18 @@ process.stdout.write(JSON.stringify({
         self.assertIn('data-screen="sources">Sources</button>', html)
         self.assertIn('aria-label="Sources navigator"', html)
         self.assertIn(">Page</button>", html)
-        self.assertIn(">Filesystem</button>", html)
+        self.assertIn(">Captured</button>", html)
+        self.assertIn(">Workspace</button>", html)
         self.assertIn(">Overrides</button>", html)
         self.assertIn('aria-label="Source editor"', html)
         self.assertIn('aria-label="Debugger sidebar"', html)
         for pane in (
-            "Artifact details",
+            "Source details",
             "Watch",
             "Breakpoints",
             "Scope",
             "Call Stack",
+            "Pause on exceptions",
             "XHR/fetch Breakpoints",
             "Event Listener Breakpoints",
         ):
@@ -809,6 +966,164 @@ process.stdout.write(JSON.stringify({
         self.assertIn("Readable derived view", html)
         self.assertIn("Original evidence", html)
         self.assertIn("elements.sourceCode.replaceChildren", html)
+        self.assertIn("function refreshDebugger(force = false)", html)
+        self.assertIn("function scheduleDebuggerRefresh(delay = 0)", html)
+        self.assertIn("?wait_ms=${wait}", html)
+        self.assertNotIn("setInterval(refreshDebugger", html)
+        self.assertIn("function renderCallStack()", html)
+        self.assertIn("function renderScope()", html)
+        self.assertIn("function renderWatches()", html)
+        self.assertIn("function renderBreakpoints()", html)
+        self.assertIn("function renderConsole()", html)
+        self.assertIn("function breakpointLinesForSource(source)", html)
+        self.assertIn("function updateSourceDecorations()", html)
+        self.assertIn("function sourceRuntimeLine(source, sourceLine)", html)
+        self.assertIn(
+            "function toggleLineBreakpoint(source, line, column, breakpoint)", html
+        )
+
+    def test_sources_map_inline_script_lines_to_runtime_locations(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        start = html.index("      function sourceRuntimeLine")
+        end = html.index("      function renderSourceContent")
+        model = html[start:end]
+        exercise = r"""
+const source = {
+  source_type: 'script', script_id: 'script-5', url: 'http://127.0.0.1/app',
+  start_line: 1566, start_column: 12
+};
+const state = {debuggerSession: {breakpoints: [{
+  id: 'bp-1', line: 1825, url: source.url, script_id: source.script_id,
+  locations: [{script_id: source.script_id, line: 1826, column: 8}]
+}]}};
+process.stdout.write(JSON.stringify({
+  firstLine: sourceRuntimeLine(source, 0),
+  secondLine: sourceRuntimeLine(source, 1),
+  firstColumn: sourceRuntimeColumn(source, 0),
+  secondColumn: sourceRuntimeColumn(source, 1),
+  requestedLineHidden: breakpointAt(source, 1825) === null,
+  resolvedLineShown: breakpointAt(source, 1826)?.id === 'bp-1'
+}));
+"""
+        completed = subprocess.run(
+            [node, "-e", model + exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "firstLine": 1566,
+                "secondLine": 1567,
+                "firstColumn": 12,
+                "secondColumn": 0,
+                "requestedLineHidden": True,
+                "resolvedLineShown": True,
+            },
+        )
+
+    def test_debugger_model_rejects_malformed_runtime_state(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        start = html.index("      function isPlainObject")
+        end = html.index("      function isOriginTraceResponse")
+        model = html[start:end]
+        exercise = r"""
+const script = {
+  script_id: 'script-1', url: 'https://checkout.test/cart.js', start_line: 0,
+  start_column: 0, end_line: 10, end_column: 1, execution_context_id: 1,
+  hash: 'abc', source_map_url: '', has_source_url: false, is_module: true,
+  length: 42, language: 'JavaScript'
+};
+const remote = {
+  type: 'object', subtype: null, class_name: 'Object', description: 'Object',
+  object_id: 'object-1', unserializable_value: null, value: null,
+  value_truncated: false
+};
+const frame = {
+  id: 'frame-1', function_name: 'checkout', url: script.url,
+  location: {script_id: script.script_id, line: 3, column: 2},
+  function_location: null, this: remote, return_value: null,
+  scopes: [{
+    type: 'local', name: '', object: remote, location: null,
+    properties: [{name: 'cart', value: remote, get: null, set: null,
+      writable: true, enumerable: true, configurable: true}]
+  }]
+};
+const target = {
+  id: 'page-1', type: 'page', title: 'Checkout', url: 'https://checkout.test/'
+};
+const breakpoint = {
+  id: 'breakpoint-1', url: script.url, script_id: script.script_id,
+  line: 3, column: 0, condition: '', kind: 'line', expression: '',
+  locations: [frame.location], locations_truncated: false
+};
+const snapshot = {
+  protocol_version: 1, state: 'paused', generation: 7, error: null,
+  target, targets: [target], scripts: [script],
+  paused: {reason: 'breakpoint', description: null, call_frames: [frame],
+    async_stack: [{description: 'Promise.then', call_frames: [{
+      function_name: 'submit', url: script.url, location: frame.location
+    }]}], hit_breakpoints: [breakpoint.id],
+    scope_coverage: {status: 'complete', properties: 1, limit: 2000}},
+  breakpoints: [breakpoint],
+  watches: [{id: 'watch-1', expression: 'cart', result: remote, error: null}],
+  console: [{id: 'console-1', type: 'log', timestamp: 1,
+    arguments: [remote], stack: [{function_name: 'checkout', url: script.url,
+      line: 3, column: 2}]}],
+  settings: {breakpoints_active: true, pause_on_exceptions: 'none',
+    xhr_breakpoints: [], event_breakpoints: []},
+  limits: {scripts: 5000, call_frames: 64, scope_properties: 2000,
+    console_entries: 500, source_bytes: 2097152}
+};
+process.stdout.write(JSON.stringify({
+  accepted: isDebuggerResponse(snapshot),
+  badStateRejected: !isDebuggerResponse({...snapshot, state: 'owned'}),
+  badScriptRejected: !isDebuggerResponse({...snapshot, scripts: [{...script, length: -1}]}),
+  badFrameRejected: !isDebuggerResponse({...snapshot, paused: {...snapshot.paused,
+    call_frames: [{...frame, location: {script_id: 'script-1', line: -1, column: 0}}]}}),
+  badTargetRejected: !isDebuggerResponse({...snapshot, targets: [null]}),
+  badBreakpointRejected: !isDebuggerResponse({...snapshot, breakpoints: [null]}),
+  badWatchRejected: !isDebuggerResponse({...snapshot, watches: [null]}),
+  badConsoleRejected: !isDebuggerResponse({...snapshot, console: [null]}),
+  badAsyncStackRejected: !isDebuggerResponse({...snapshot, paused: {
+    ...snapshot.paused, async_stack: [null]}}),
+  badSettingsRejected: !isDebuggerResponse({...snapshot, settings: {
+    ...snapshot.settings, xhr_breakpoints: Array(101).fill('request')}}),
+  oversizedRejected: !isDebuggerResponse({...snapshot, scripts: Array(5001).fill(script)})
+}));
+"""
+        completed = subprocess.run(
+            [node, "-e", model + exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "accepted": True,
+                "badStateRejected": True,
+                "badScriptRejected": True,
+                "badFrameRejected": True,
+                "badTargetRejected": True,
+                "badBreakpointRejected": True,
+                "badWatchRejected": True,
+                "badConsoleRejected": True,
+                "badAsyncStackRejected": True,
+                "badSettingsRejected": True,
+                "oversizedRejected": True,
+            },
+        )
 
     def test_sources_model_rejects_malformed_artifact_catalogs(self) -> None:
         node = shutil.which("node")
@@ -1338,6 +1653,8 @@ process.stdout.write(JSON.stringify({
         self.assertIn('case "/api/analysis/vm":', application)
         self.assertIn('case "/api/origin-trace":', application)
         self.assertIn('case "/api/request-signal-profile":', application)
+        self.assertIn('case "/api/debugger":', application)
+        self.assertIn("debuggerUnavailableResponse(", application)
         self.assertIn("originTraceResponse(for: requestURL)", application)
         self.assertIn("requestSignalProfileResponse(", application)
         self.assertIn('value(forHTTPHeaderField: "If-None-Match")', application)
@@ -1349,10 +1666,13 @@ process.stdout.write(JSON.stringify({
         self.assertIn('firstIndex(of: "--artifacts")', application)
         self.assertIn('firstIndex(of: "--trace-store")', application)
         self.assertIn('firstIndex(of: "--signal-store")', application)
+        self.assertIn('firstIndex(of: "--ui-url")', application)
+        self.assertIn('Set(["127.0.0.1", "localhost", "::1"])', application)
         self.assertIn("source-tree-row[data-artifact-id]", application)
         self.assertIn("sourceLines", application)
         self.assertIn("<key>CFBundleIconFile</key>", plist)
         self.assertIn("<string>OriginTrace</string>", plist)
+        self.assertIn("<key>NSAllowsLocalNetworking</key>", plist)
         self.assertIn("origin-trace-icon.png", build_script)
         self.assertIn("build/sessions/artifacts", build_script)
         self.assertIn('"${resources_path}/artifacts"', build_script)

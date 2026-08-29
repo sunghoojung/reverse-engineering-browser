@@ -13,7 +13,7 @@ readonly output_directory="${REB_BRAVE_OUTPUT_DIRECTORY:-out/Component_arm64}"
 readonly brave_jobs="${REB_BRAVE_JOBS:-}"
 readonly probe_objects=(
   "obj/brave/components/reverse_engineering_browser/queue/native_probe_queue.o"
-  "obj/brave/components/reverse_engineering_browser/renderer/native_probe_sink.o"
+  "obj/brave/components/reverse_engineering_browser/renderer_sink/native_probe_sink.o"
   "obj/brave/components/reverse_engineering_browser/renderer/native_probe_transport.o"
   "obj/brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.o"
   "obj/brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.o"
@@ -26,7 +26,16 @@ readonly probe_objects=(
   "obj/brave/browser/core/brave_proxying_url_loader_factory.o"
   "obj/brave/browser/core/brave_content_browser_client.o"
   "obj/chrome/renderer/renderer/brave_content_renderer_client.o"
+  "obj/third_party/blink/renderer/core/core/html_canvas_element.o"
   "obj/third_party/blink/renderer/platform/loader/loader/resource_request_sender.o"
+)
+readonly web_audio_objects=(
+  "obj/third_party/blink/renderer/modules/webaudio/webaudio/audio_buffer.o"
+  "obj/third_party/blink/renderer/modules/webaudio/webaudio/audio_node.o"
+  "obj/third_party/blink/renderer/modules/webaudio/webaudio/audio_scheduled_source_node.o"
+  "obj/third_party/blink/renderer/modules/webaudio/webaudio/base_audio_context.o"
+  "obj/third_party/blink/renderer/modules/webaudio/webaudio/offline_audio_context.o"
+  "obj/third_party/blink/renderer/modules/webaudio/webaudio/analyser_node.o"
 )
 
 usage() {
@@ -129,8 +138,11 @@ case "${command_name}" in
         autoninja_arguments+=("-j${brave_jobs}")
       fi
       autoninja "${autoninja_arguments[@]}" "${probe_objects[@]}" \
-        brave/components/reverse_engineering_browser:native_artifact_body_tee_unittests
+        "${web_audio_objects[@]}" \
+        brave/components/reverse_engineering_browser:native_artifact_body_tee_unittests \
+        brave/components/reverse_engineering_browser:native_probe_sink_unittests
       "${output_directory}/native_artifact_body_tee_unittests"
+      "${output_directory}/native_probe_sink_unittests"
     )
     ;;
   build|start)

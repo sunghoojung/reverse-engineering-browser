@@ -34,8 +34,13 @@ profile without exposing a profile path.
 
 All probes remain dormant until a session-scoped, non-blocking, non-throwing
 emitter is registered. Their inactive paths perform one atomic load and do not
-change network or Canvas behavior. Renderer events use a bounded shared-memory
-queue with Mojo lifecycle control and coalesced wake-ups. The browser process
+change network, Canvas, or Web Audio behavior. The Web Audio probe records only
+fixed operation names for selected graph construction, connection, rendering,
+and readback calls. It never copies audio samples or rendered buffers. Web Audio
+uses category-mask bit `4`; the renderer sink rejects the call before assigning
+a sequence number when that bit is disabled or the session has expired.
+Renderer events use a bounded shared-memory queue with Mojo lifecycle control
+and coalesced wake-ups. The browser process
 authenticates to the event broker with a session identifier and a mode-0600
 token file, then sends exact fixed-size records over a Unix socket. A bounded
 browser-process queue keeps those socket writes off the capture paths.

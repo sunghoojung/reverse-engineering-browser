@@ -72,15 +72,16 @@ build/reb-event-broker \
   --socket /tmp/origin-trace.sock \
   --token-file build/sessions/live/broker.token \
   --session-id 123 \
-  --category-mask 257 \
+  --category-mask 261 \
   --duration-seconds 3600
 ```
 
 Socket sessions require both policy options. Category bits follow the native
 category enum: Canvas is `1`, WebGL `2`, Web Audio `4`, Navigator `8`,
 Permissions `16`, Storage `32`, WebRTC `64`, WASM `128`, and Network `256`.
-Mask `257` enables the currently implemented Canvas and Network probes. The
-broker rejects categories outside the mask before sequence accounting or
+Mask `261` enables the currently implemented Canvas, Web Audio, and Network
+probes. Mask `257` excludes Web Audio while leaving Canvas and Network enabled.
+The broker rejects categories outside the mask before sequence accounting or
 storage, and closes its listener or browser connection when the monotonic
 deadline expires.
 

@@ -1,0 +1,176 @@
+diff --git a/third_party/blink/renderer/modules/webaudio/BUILD.gn b/third_party/blink/renderer/modules/webaudio/BUILD.gn
+index 8fb8758cf2..c7ea7e5473 100644
+--- a/third_party/blink/renderer/modules/webaudio/BUILD.gn
++++ b/third_party/blink/renderer/modules/webaudio/BUILD.gn
+@@ -191,6 +191,7 @@ blink_modules_sources("webaudio") {
+     sources += [ "cpu/arm/oscillator_kernel_neon.cc" ]
+   }
+   deps = [
++    "//brave/components/reverse_engineering_browser:renderer_sink",
+     "//services/metrics/public/cpp:ukm_builders",
+     "//third_party/blink/renderer/modules/mediastream",
+     "//third_party/blink/renderer/modules/peerconnection",
+diff --git a/third_party/blink/renderer/modules/webaudio/analyser_node.cc b/third_party/blink/renderer/modules/webaudio/analyser_node.cc
+index 688a2fec77..af9b0aff3c 100644
+--- a/third_party/blink/renderer/modules/webaudio/analyser_node.cc
++++ b/third_party/blink/renderer/modules/webaudio/analyser_node.cc
+@@ -25,6 +25,7 @@
+ 
+ #include "third_party/blink/renderer/modules/webaudio/analyser_node.h"
+ 
++#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_analyser_options.h"
+ #include "third_party/blink/renderer/modules/webaudio/analyser_handler.h"
+ #include "third_party/blink/renderer/modules/webaudio/audio_graph_tracer.h"
+@@ -117,20 +118,28 @@ double AnalyserNode::smoothingTimeConstant() const {
+ }
+ 
+ void AnalyserNode::getFloatFrequencyData(NotShared<DOMFloat32Array> array) {
++  ::reb::NativeProbeSink::Get().RecordWebAudioCall(
++      "AnalyserNode.getFloatFrequencyData");
+   GetAnalyserHandler().GetFloatFrequencyData(array.Get(),
+                                              context()->currentTime());
+ }
+ 
+ void AnalyserNode::getByteFrequencyData(NotShared<DOMUint8Array> array) {
++  ::reb::NativeProbeSink::Get().RecordWebAudioCall(
++      "AnalyserNode.getByteFrequencyData");
+   GetAnalyserHandler().GetByteFrequencyData(array.Get(),
+                                             context()->currentTime());
+ }
+ 
+ void AnalyserNode::getFloatTimeDomainData(NotShared<DOMFloat32Array> array) {
++  ::reb::NativeProbeSink::Get().RecordWebAudioCall(
++      "AnalyserNode.getFloatTimeDomainData");
+   GetAnalyserHandler().GetFloatTimeDomainData(array.Get());
+ }
+ 
+ void AnalyserNode::getByteTimeDomainData(NotShared<DOMUint8Array> array) {
++  ::reb::NativeProbeSink::Get().RecordWebAudioCall(
++      "AnalyserNode.getByteTimeDomainData");
+   GetAnalyserHandler().GetByteTimeDomainData(array.Get());
+ }
+ 
+diff --git a/third_party/blink/renderer/modules/webaudio/audio_buffer.cc b/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
+index bc4c0c6ca0..dfb19ef6bf 100644
+--- a/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
+@@ -237,6 +237,7 @@ void AudioBuffer::copyFromChannel(ScriptState* script_state,
+                                   int32_t channel_number,
+                                   size_t buffer_offset,
+                                   ExceptionState& exception_state) {
++  BRAVE_AUDIOBUFFER_COPYFROMCHANNEL_ENTRY
+   if (!destination->length()) {
+     return;
+   }
+diff --git a/third_party/blink/renderer/modules/webaudio/audio_node.cc b/third_party/blink/renderer/modules/webaudio/audio_node.cc
+index 36d92bd527..a03ce5b794 100644
+--- a/third_party/blink/renderer/modules/webaudio/audio_node.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_node.cc
+@@ -27,6 +27,7 @@
+ 
+ #include <inttypes.h>
+ 
++#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "third_party/blink/public/platform/modules/webrtc/webrtc_logging.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_audio_node_options.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_channel_count_mode.h"
+@@ -228,6 +229,7 @@ AudioNode* AudioNode::connect(AudioNode* destination,
+   Handler().UpdatePullStatusIfNeeded();
+ 
+   GraphTracer().DidConnectNodes(this, destination, output_index, input_index);
++  ::reb::NativeProbeSink::Get().RecordWebAudioCall("AudioNode.connect");
+ 
+   return destination;
+ }
+@@ -274,6 +276,7 @@ void AudioNode::connect(AudioParam* param,
+   Handler().UpdatePullStatusIfNeeded();
+ 
+   GraphTracer().DidConnectNodeParam(this, param, output_index);
++  ::reb::NativeProbeSink::Get().RecordWebAudioCall("AudioNode.connect");
+ }
+ 
+ void AudioNode::DisconnectAllFromOutput(unsigned output_index) {
+diff --git a/third_party/blink/renderer/modules/webaudio/audio_scheduled_source_node.cc b/third_party/blink/renderer/modules/webaudio/audio_scheduled_source_node.cc
+index c51f074df6..a448748815 100644
+--- a/third_party/blink/renderer/modules/webaudio/audio_scheduled_source_node.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_scheduled_source_node.cc
+@@ -25,6 +25,7 @@
+ 
+ #include "third_party/blink/renderer/modules/webaudio/audio_scheduled_source_node.h"
+ 
++#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "third_party/blink/public/platform/task_type.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/modules/event_modules.h"
+@@ -53,6 +54,10 @@ void AudioScheduledSourceNode::start(ExceptionState& exception_state) {
+ void AudioScheduledSourceNode::start(double when,
+                                      ExceptionState& exception_state) {
+   GetAudioScheduledSourceHandler().Start(when, exception_state);
++  if (!exception_state.HadException()) {
++    ::reb::NativeProbeSink::Get().RecordWebAudioCall(
++        "AudioScheduledSourceNode.start");
++  }
+ }
+ 
+ void AudioScheduledSourceNode::stop(ExceptionState& exception_state) {
+diff --git a/third_party/blink/renderer/modules/webaudio/base_audio_context.cc b/third_party/blink/renderer/modules/webaudio/base_audio_context.cc
+index 9706af3d58..d0b01dc641 100644
+--- a/third_party/blink/renderer/modules/webaudio/base_audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/base_audio_context.cc
+@@ -26,6 +26,7 @@
+ #include "third_party/blink/renderer/modules/webaudio/base_audio_context.h"
+ 
+ #include "base/metrics/histogram_functions.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "build/build_config.h"
+ #include "media/base/audio_bus.h"
+ #include "third_party/blink/public/mojom/devtools/console_message.mojom-blink.h"
+@@ -571,6 +572,8 @@ DynamicsCompressorNode* BaseAudioContext::createDynamicsCompressor(
+     ExceptionState& exception_state) {
+   DCHECK(IsMainThread());
+ 
++  ::reb::NativeProbeSink::Get().RecordWebAudioCall(
++      "BaseAudioContext.createDynamicsCompressor");
+   return DynamicsCompressorNode::Create(*this, exception_state);
+ }
+ 
+@@ -578,6 +581,8 @@ AnalyserNode* BaseAudioContext::createAnalyser(
+     ExceptionState& exception_state) {
+   DCHECK(IsMainThread());
+ 
++  ::reb::NativeProbeSink::Get().RecordWebAudioCall(
++      "BaseAudioContext.createAnalyser");
+   return AnalyserNode::Create(*this, exception_state);
+ }
+ 
+@@ -634,6 +639,8 @@ OscillatorNode* BaseAudioContext::createOscillator(
+     ExceptionState& exception_state) {
+   DCHECK(IsMainThread());
+ 
++  ::reb::NativeProbeSink::Get().RecordWebAudioCall(
++      "BaseAudioContext.createOscillator");
+   return OscillatorNode::Create(*this, "sine", nullptr, exception_state);
+ }
+ 
+diff --git a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+index aed92e0ec4..99d022ab45 100644
+--- a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+@@ -27,6 +27,7 @@
+ 
+ #include "base/metrics/histogram_functions.h"
+ #include "base/metrics/histogram_macros.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "media/base/audio_glitch_info.h"
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+@@ -273,6 +274,8 @@ ScriptPromise<AudioBuffer> OfflineAudioContext::startOfflineRendering(
+   static_cast<OfflineAudioDestinationNode*>(destination())
+       ->SetDestinationBuffer(render_target);
+   DestinationHandler().StartRendering();
++  ::reb::NativeProbeSink::Get().RecordWebAudioCall(
++      "OfflineAudioContext.startRendering");
+   return complete_resolver_->Promise();
+ }
+ 

@@ -24,7 +24,7 @@ readonly signal_store_path="${session_directory}/request-signals.jsonl"
 readonly artifact_store_path="${session_directory}/artifacts"
 readonly token_path="${session_directory}/broker.token"
 readonly profile_path="${repository_root}/build/brave-profile"
-readonly category_mask="${REB_CAPTURE_CATEGORY_MASK:-1281}"
+readonly category_mask="${REB_CAPTURE_CATEGORY_MASK:-1285}"
 readonly duration_seconds="${REB_CAPTURE_DURATION_SECONDS:-3600}"
 readonly open_command="${REB_OPEN_COMMAND:-open}"
 

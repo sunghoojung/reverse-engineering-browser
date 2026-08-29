@@ -56,22 +56,39 @@ void NativeProbeSink::SetEmitter(const NativeProbeEmitter emitter,
                                  const std::uint64_t session_id,
                                  const std::uint64_t category_mask,
                                  const std::uint64_t expires_at_monotonic_ns) noexcept {
+  // SetEmitter is serialized by NativeProbeTransport's bound sequence. Stop
+  // new readers before marking the independently atomic configuration fields
+  // unstable. The completed even generation release-publishes the relaxed
+  // policy fields and emitter together. Active readers acquire an even
+  // generation, snapshot those fields, and accept only an unchanged final
+  // generation.
   emitter_.store(nullptr, std::memory_order_release);
+  config_generation_.fetch_add(1, std::memory_order_acq_rel);
   session_id_.store(emitter ? session_id : 0, std::memory_order_relaxed);
   category_mask_.store(emitter ? category_mask : 0, std::memory_order_relaxed);
   expires_at_monotonic_ns_.store(emitter ? expires_at_monotonic_ns : 0, std::memory_order_relaxed);
-  emitter_.store(emitter, std::memory_order_release);
+  emitter_.store(emitter, std::memory_order_relaxed);
+  config_generation_.fetch_add(1, std::memory_order_release);
 }
 
 void NativeProbeSink::RecordCanvasToDataUrl() noexcept {
-  const NativeProbeEmitter emitter = emitter_.load(std::memory_order_acquire);
-  if (!emitter) [[likely]] {
+  if (!emitter_.load(std::memory_order_acquire)) [[likely]] {
+    return;
+  }
+  const std::uint64_t config_generation = config_generation_.load(std::memory_order_acquire);
+  if ((config_generation & 1U) != 0) {
     return;
   }
   const std::uint64_t monotonic_time_ns = MonotonicTimeNs();
-  if ((category_mask_.load(std::memory_order_relaxed) &
-       NativeProbeCategoryMask(NativeProbeCategory::kCanvas)) == 0 ||
-      monotonic_time_ns >= expires_at_monotonic_ns_.load(std::memory_order_relaxed)) {
+  const std::uint64_t category_mask = category_mask_.load(std::memory_order_relaxed);
+  const std::uint64_t expires_at_monotonic_ns =
+      expires_at_monotonic_ns_.load(std::memory_order_relaxed);
+  const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
+  const NativeProbeEmitter emitter = emitter_.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (config_generation_.load(std::memory_order_acquire) != config_generation || !emitter ||
+      (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kCanvas)) == 0 ||
+      monotonic_time_ns >= expires_at_monotonic_ns) {
     return;
   }
 
@@ -79,7 +96,7 @@ void NativeProbeSink::RecordCanvasToDataUrl() noexcept {
   event.header.category = NativeProbeCategory::kCanvas;
   event.header.type = NativeProbeType::kApiCall;
   event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
-  event.header.session_id = session_id_.load(std::memory_order_relaxed);
+  event.header.session_id = session_id;
   event.header.monotonic_time_ns = monotonic_time_ns;
   event.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
   event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
@@ -87,17 +104,59 @@ void NativeProbeSink::RecordCanvasToDataUrl() noexcept {
   emitter(event);
 }
 
-void NativeProbeSink::RecordRequestInitiated(const std::int32_t request_id,
-                                             const std::string_view method,
-                                             const std::string_view url) noexcept {
-  const NativeProbeEmitter emitter = emitter_.load(std::memory_order_acquire);
-  if (!emitter) [[likely]] {
+void NativeProbeSink::RecordWebAudioCall(const std::string_view operation) noexcept {
+  if (!emitter_.load(std::memory_order_acquire)) [[likely]] {
+    return;
+  }
+  const std::uint64_t config_generation = config_generation_.load(std::memory_order_acquire);
+  if ((config_generation & 1U) != 0) {
     return;
   }
   const std::uint64_t monotonic_time_ns = MonotonicTimeNs();
-  if ((category_mask_.load(std::memory_order_relaxed) &
-       NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) == 0 ||
-      monotonic_time_ns >= expires_at_monotonic_ns_.load(std::memory_order_relaxed)) {
+  const std::uint64_t category_mask = category_mask_.load(std::memory_order_relaxed);
+  const std::uint64_t expires_at_monotonic_ns =
+      expires_at_monotonic_ns_.load(std::memory_order_relaxed);
+  const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
+  const NativeProbeEmitter emitter = emitter_.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (config_generation_.load(std::memory_order_acquire) != config_generation || !emitter ||
+      (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kWebAudio)) == 0 ||
+      monotonic_time_ns >= expires_at_monotonic_ns) {
+    return;
+  }
+
+  NativeProbeEvent event;
+  event.header.category = NativeProbeCategory::kWebAudio;
+  event.header.type = NativeProbeType::kApiCall;
+  event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  event.header.session_id = session_id;
+  event.header.monotonic_time_ns = monotonic_time_ns;
+  event.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
+  event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  SetPayload(event, operation);
+  emitter(event);
+}
+
+void NativeProbeSink::RecordRequestInitiated(const std::int32_t request_id,
+                                             const std::string_view method,
+                                             const std::string_view url) noexcept {
+  if (!emitter_.load(std::memory_order_acquire)) [[likely]] {
+    return;
+  }
+  const std::uint64_t config_generation = config_generation_.load(std::memory_order_acquire);
+  if ((config_generation & 1U) != 0) {
+    return;
+  }
+  const std::uint64_t monotonic_time_ns = MonotonicTimeNs();
+  const std::uint64_t category_mask = category_mask_.load(std::memory_order_relaxed);
+  const std::uint64_t expires_at_monotonic_ns =
+      expires_at_monotonic_ns_.load(std::memory_order_relaxed);
+  const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
+  const NativeProbeEmitter emitter = emitter_.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (config_generation_.load(std::memory_order_acquire) != config_generation || !emitter ||
+      (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) == 0 ||
+      monotonic_time_ns >= expires_at_monotonic_ns) {
     return;
   }
 
@@ -106,7 +165,7 @@ void NativeProbeSink::RecordRequestInitiated(const std::int32_t request_id,
   event.header.type = NativeProbeType::kRequestInitiated;
   event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
   event.header.monotonic_time_ns = monotonic_time_ns;
-  event.header.session_id = session_id_.load(std::memory_order_relaxed);
+  event.header.session_id = session_id;
   event.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
   event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
   event.header.request_id = static_cast<std::uint64_t>(static_cast<std::uint32_t>(request_id));

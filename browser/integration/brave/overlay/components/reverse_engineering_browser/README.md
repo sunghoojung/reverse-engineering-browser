@@ -8,6 +8,13 @@ existing Chromium source override. The inactive path performs one atomic
 emitter check and returns without allocating, blocking, or changing the Canvas
 result.
 
+Web Audio call sites observe selected graph construction, connection, source
+start, offline rendering, analyser readback, and audio-buffer readback APIs.
+Each event contains one fixed operation name. Audio samples, rendered buffers,
+node parameters, and return values are never copied into the event record. Web
+Audio uses category-mask bit `4`; disabled or expired calls return before
+sequence assignment and queue insertion.
+
 The renderer request hook records the request identifier immediately after
 Chromium allocates it. The browser hook observes Brave's existing URL loader
 factory and client proxies, preserving the request, initiator process, frame,

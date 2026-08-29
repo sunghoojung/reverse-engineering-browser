@@ -29,3 +29,15 @@ index 751e5aa18..160deef00 100644
      "//v8",
    ]
  
+diff --git a/third_party/blink/renderer/includes.gni b/third_party/blink/renderer/includes.gni
+index d389a28b5..9a3eb4a83 100644
+--- a/third_party/blink/renderer/includes.gni
++++ b/third_party/blink/renderer/includes.gni
+@@ -39,6 +39,7 @@ brave_blink_renderer_core_sources = [
+ brave_blink_renderer_core_deps = [
+   "//brave/components/brave_shields/core/common:mojom",
+   "//brave/components/brave_shields/core/common/",
++  "//brave/components/reverse_engineering_browser:renderer_sink",
+ ]
+ 
+ if (!is_android && !is_ios) {

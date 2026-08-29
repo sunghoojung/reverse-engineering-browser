@@ -18,12 +18,23 @@ source_set("queue") {
   ]
 }
 
-source_set("renderer") {
+component("renderer_sink") {
+  output_name = "reverse_engineering_browser_renderer_sink"
+
+  defines = [ "IS_REB_NATIVE_PROBE_SINK_IMPL" ]
+
   sources = [
     "common/native_probe_event.h",
-    "common/native_vm_finding.h",
     "renderer/native_probe_sink.cc",
     "renderer/native_probe_sink.h",
+  ]
+
+  deps = [ "//base" ]
+}
+
+source_set("renderer") {
+  sources = [
+    "common/native_vm_finding.h",
     "renderer/native_probe_transport.cc",
     "renderer/native_probe_transport.h",
   ]
@@ -31,6 +42,7 @@ source_set("renderer") {
   deps = [
     ":mojom",
     ":queue",
+    ":renderer_sink",
     "//base",
     "//mojo/public/cpp/base",
     "//mojo/public/cpp/bindings",
@@ -86,6 +98,18 @@ executable("native_artifact_body_tee_unittests") {
     "//base/test:test_support",
     "//mojo/core/embedder",
     "//mojo/public/cpp/system",
+    "//testing/gtest",
+  ]
+}
+
+executable("native_probe_sink_unittests") {
+  testonly = true
+  sources = [ "renderer/native_probe_sink_unittest.cc" ]
+
+  deps = [
+    ":renderer_sink",
+    "//base",
+    "//base/test:test_support",
     "//testing/gtest",
   ]
 }

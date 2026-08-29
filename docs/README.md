@@ -6,6 +6,8 @@
 - [Feature catalog](./product/feature-catalog.md)
 - [Anti-bot VM detection v1](./product/anti-bot-vm-detection-v1.md)
 - [Request Origin Trace v1](./product/request-origin-trace-v1.md)
+- [Request Signal Profile v1](./product/request-signal-profile-v1.md)
+- [Web Audio function-call capture v1](./product/web-audio-call-capture-v1.md)
 
 ## Architecture
 

@@ -182,14 +182,16 @@ analyze_captured_artifacts() {
 analyze_captured_artifacts &
 analyzer_pid=$!
 
-python3 "${repository_root}/apps/research-ui/server.py" \
+python3 -u "${repository_root}/apps/research-ui/server.py" \
   --host 127.0.0.1 --port 0 --endpoint-file "${ui_endpoint_path}" \
   --store "${store_path}" --trace-store "${trace_store_path}" \
   --signal-store "${signal_store_path}" --artifacts "${artifact_store_path}" \
   --socket "${socket_path}" --devtools-active-port "${devtools_active_port}" \
   >"${ui_log}" 2>&1 &
 ui_pid=$!
-for _ in {1..100}; do
+# App-build CI can be CPU constrained immediately after compilation. Give the
+# UI the same bounded startup window as a normal application launch.
+for _ in {1..300}; do
   if [[ -s "${ui_endpoint_path}" ]]; then
     break
   fi

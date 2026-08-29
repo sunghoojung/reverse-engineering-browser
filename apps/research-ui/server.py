@@ -10,6 +10,7 @@ import threading
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -61,6 +62,17 @@ PUBLIC_ARTIFACT_FIELDS = (
     "sha256",
     "sensitive",
 )
+
+
+class LoopbackThreadingHTTPServer(ThreadingHTTPServer):
+    def server_bind(self) -> None:
+        # HTTPServer performs a reverse-DNS lookup during bind. The research UI
+        # validates request hosts independently and does not use server_name for
+        # routing, so that lookup adds no value and can stall startup.
+        TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
 
 
 class ResearchHandler(SimpleHTTPRequestHandler):
@@ -1004,8 +1016,7 @@ def main() -> int:
         args.devtools_active_port.resolve() if args.devtools_active_port else None
     )
     ResearchHandler.debugger = debugger
-    debugger.start()
-    server = ThreadingHTTPServer((args.host, args.port), ResearchHandler)
+    server = LoopbackThreadingHTTPServer((args.host, args.port), ResearchHandler)
     bound_port = int(server.server_address[1])
     endpoint = f"http://{args.host}:{bound_port}"
     if args.endpoint_file is not None:
@@ -1020,6 +1031,7 @@ def main() -> int:
     print(f"Origin trace store: {ResearchHandler.trace_store}")
     print(f"Request signal profile store: {ResearchHandler.signal_store}")
     print(f"Artifact store: {ResearchHandler.artifact_store}")
+    debugger.start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

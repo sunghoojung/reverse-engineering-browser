@@ -12,10 +12,23 @@ from http import HTTPStatus
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from server import JSONL_TAIL_CHUNK_BYTES, MAX_EVENT_JSON_BYTES, ResearchHandler
+from server import (
+    JSONL_TAIL_CHUNK_BYTES,
+    MAX_EVENT_JSON_BYTES,
+    LoopbackThreadingHTTPServer,
+    ResearchHandler,
+)
 
 
 class ResearchUiTests(unittest.TestCase):
+    def test_loopback_server_binds_without_hostname_resolution(self) -> None:
+        server = LoopbackThreadingHTTPServer(("127.0.0.1", 0), ResearchHandler)
+        try:
+            self.assertEqual(server.server_name, "127.0.0.1")
+            self.assertGreater(server.server_port, 0)
+        finally:
+            server.server_close()
+
     def test_evidence_contract_rejects_unexpected_and_sensitive_fields(self) -> None:
         validator = Path(__file__).parents[2] / "tools" / "validate-evidence-store.py"
         valid_event = {

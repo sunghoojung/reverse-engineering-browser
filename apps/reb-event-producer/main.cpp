@@ -166,33 +166,36 @@ int main(const int argc, char* argv[]) {
                  "navigator.languages", options.session_id),
       BuildEvent(reb::EventCategory::kCanvas, reb::EventType::kApiCall, 2, "canvas.toDataURL",
                  options.session_id),
-      BuildEvent(reb::EventCategory::kWasm, reb::EventType::kModuleInstantiated, 3, "wasm-module-2",
+      BuildEvent(reb::EventCategory::kWebAudio, reb::EventType::kApiCall, 3,
+                 "OfflineAudioContext.startRendering", options.session_id),
+      BuildEvent(reb::EventCategory::kWasm, reb::EventType::kModuleInstantiated, 4, "wasm-module-2",
                  options.session_id),
-      BuildNetworkEvent(reb::EventType::kRequestInitiated, 4, "POST collector.example.test",
+      BuildNetworkEvent(reb::EventType::kRequestInitiated, 5, "POST collector.example.test",
                         options.session_id),
-      BuildNetworkEvent(reb::EventType::kRequestStarted, 5, "POST collector.example.test",
+      BuildNetworkEvent(reb::EventType::kRequestStarted, 6, "POST collector.example.test",
                         options.session_id),
-      BuildNetworkEvent(reb::EventType::kResponseStarted, 6, "application/json; protocol=h2",
+      BuildNetworkEvent(reb::EventType::kResponseStarted, 7, "application/json; protocol=h2",
                         options.session_id),
-      BuildNetworkEvent(reb::EventType::kRequestCompleted, 7, "completed", options.session_id),
-      BuildVmEvent(interpreter, 8, options.session_id),
-      BuildVmEvent(guest, 9, options.session_id),
-      BuildVmEvent(invocation, 10, options.session_id),
-      BuildVmEvent(binding, 11, options.session_id),
-      BuildVmEvent(hypothesis, 12, options.session_id),
-      BuildVmEvent(coverage, 13, options.session_id),
+      BuildNetworkEvent(reb::EventType::kRequestCompleted, 8, "completed", options.session_id),
+      BuildVmEvent(interpreter, 9, options.session_id),
+      BuildVmEvent(guest, 10, options.session_id),
+      BuildVmEvent(invocation, 11, options.session_id),
+      BuildVmEvent(binding, 12, options.session_id),
+      BuildVmEvent(hypothesis, 13, options.session_id),
+      BuildVmEvent(coverage, 14, options.session_id),
   };
 
   events[2].header.parent_event_id = 2;
   events[3].header.parent_event_id = 3;
   events[4].header.parent_event_id = 4;
   events[5].header.parent_event_id = 5;
-  events[5].header.status_code = 200;
   events[6].header.parent_event_id = 6;
   events[6].header.status_code = 200;
-  events[6].header.encoded_data_length = 391;
-  events[6].header.decoded_body_length = 447;
-  for (std::size_t index = 7; index < events.size(); ++index) {
+  events[7].header.parent_event_id = 7;
+  events[7].header.status_code = 200;
+  events[7].header.encoded_data_length = 391;
+  events[7].header.decoded_body_length = 447;
+  for (std::size_t index = 8; index < events.size(); ++index) {
     events[index].header.parent_event_id = static_cast<std::uint64_t>(index);
   }
 

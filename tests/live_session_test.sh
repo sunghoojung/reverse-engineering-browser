@@ -10,6 +10,7 @@ fi
 readonly live_script="$1"
 readonly event_producer="$2"
 readonly artifact_producer="$3"
+readonly web_audio_payload_hex="4f66666c696e65417564696f436f6e746578742e737461727452656e646572696e67"
 test_root="$(mktemp -d)"
 readonly test_root
 test_succeeded=false
@@ -124,11 +125,13 @@ fi
 session_directory="$(find "${test_root}/sessions" -mindepth 1 -maxdepth 1 -type d -print -quit)"
 readonly session_directory
 test -n "${session_directory}"
-test "$(wc -l <"${session_directory}/events.jsonl" | tr -d ' ')" = 5
+test "$(wc -l <"${session_directory}/events.jsonl" | tr -d ' ')" = 6
 test -s "${session_directory}/origin-trace.jsonl"
 test -s "${session_directory}/request-signals.jsonl"
 test "$(wc -l <"${session_directory}/artifacts/manifest.jsonl" | tr -d ' ')" = 3
 grep -Fq '"category":"network"' "${session_directory}/events.jsonl"
+test "$(grep -c "\"category\":\"web_audio\",\"type\":\"api_call\".*\"payload\":\"${web_audio_payload_hex}\"" "${session_directory}/events.jsonl")" = 1
+test "$(grep -c '\"category\":\"web_audio\",\"relation\":\"same_context\",\"confidence\":\"correlated\",\"event_count\":\"1\"' "${session_directory}/request-signals.jsonl")" = 2
 grep -Fq '"kind":"wasm"' "${session_directory}/artifacts/manifest.jsonl"
 grep -Fxq -- '--artifacts' "${open_arguments}"
 grep -Fxq -- "${session_directory}/artifacts" "${open_arguments}"
@@ -188,6 +191,11 @@ live_pid=""
 disabled_session_directory="$(find "${disabled_sessions}" -mindepth 1 -maxdepth 1 -type d -print -quit)"
 test -n "${disabled_session_directory}"
 test "$(wc -l <"${disabled_session_directory}/events.jsonl" | tr -d ' ')" = 5
+if grep -Fq '"category":"web_audio"' "${disabled_session_directory}/events.jsonl" ||
+  grep -Fq '"category":"web_audio"' "${disabled_session_directory}/request-signals.jsonl"; then
+  echo "Live session retained Web Audio outside the authorized category mask" >&2
+  exit 1
+fi
 test ! -e "${disabled_session_directory}/artifact-receiver.log"
 test ! -e "${disabled_session_directory}/artifacts/manifest.jsonl"
 

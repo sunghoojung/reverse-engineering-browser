@@ -14,6 +14,7 @@ NATIVE_PROBE_QUEUE_SOURCE := \
 FORMATTED_SOURCES := $(shell git ls-files '*.cc' '*.cpp' '*.h' '*.hpp')
 SHELL_SOURCES := $(shell git ls-files '*.sh')
 DEMO_NETWORK_PAYLOAD_HEX := 504f535420636f6c6c6563746f722e6578616d706c652e74657374
+DEMO_WEB_AUDIO_PAYLOAD_HEX := 4f66666c696e65417564696f436f6e746578742e737461727452656e646572696e67
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
@@ -111,14 +112,16 @@ e2e: producer broker artifact-producer artifact-receiver
 	$(RM) -r "$(BUILD_DIR)/sessions/artifacts"
 	$(ARTIFACT_PRODUCER_BINARY) | $(ARTIFACT_RECEIVER_BINARY) --store $(BUILD_DIR)/sessions/artifacts
 	python3 $(VM_ANALYZER) --artifacts $(BUILD_DIR)/sessions/artifacts --events $(BUILD_DIR)/sessions/demo.jsonl
-	test "$$(wc -l < $(BUILD_DIR)/sessions/demo.jsonl | tr -d ' ')" = "13"
-	test "$$(wc -l < $(BUILD_DIR)/sessions/origin-trace.jsonl | tr -d ' ')" = "11"
+	test "$$(wc -l < $(BUILD_DIR)/sessions/demo.jsonl | tr -d ' ')" = "14"
+	test "$$(wc -l < $(BUILD_DIR)/sessions/origin-trace.jsonl | tr -d ' ')" = "12"
 	test "$$(wc -l < $(BUILD_DIR)/sessions/request-signals.jsonl | tr -d ' ')" = "2"
-	test "$$(grep -c '\"relation\":\"parent_event\"' $(BUILD_DIR)/sessions/origin-trace.jsonl)" = "11"
+	test "$$(grep -c '\"relation\":\"parent_event\"' $(BUILD_DIR)/sessions/origin-trace.jsonl)" = "12"
 	test "$$(grep -c '\"document_kind\":\"request-signal-profile\"' $(BUILD_DIR)/sessions/request-signals.jsonl)" = "2"
+	test "$$(grep -c '\"category\":\"web_audio\",\"relation\":\"parent_chain\",\"confidence\":\"observed\",\"event_count\":\"1\",\"first_event\":{\"process_id\":10,\"sequence_number\":\"3\"},\"last_event\":{\"process_id\":10,\"sequence_number\":\"3\"}' $(BUILD_DIR)/sessions/request-signals.jsonl)" = "2"
 	! $(BROKER_BINARY) --store $(BUILD_DIR)/sessions/demo.jsonl \
 		--trace-store $(BUILD_DIR)/sessions/../sessions/demo.jsonl </dev/null
 	test "$$(grep -c '\"payload\":\"$(DEMO_NETWORK_PAYLOAD_HEX)\"' $(BUILD_DIR)/sessions/demo.jsonl)" = "2"
+	test "$$(grep -c '\"category\":\"web_audio\",\"type\":\"api_call\".*\"payload\":\"$(DEMO_WEB_AUDIO_PAYLOAD_HEX)\"' $(BUILD_DIR)/sessions/demo.jsonl)" = "1"
 	test "$$(grep -c '\"category\":\"vm\"' $(BUILD_DIR)/sessions/demo.jsonl)" = "6"
 	test "$$(wc -l < $(BUILD_DIR)/sessions/artifacts/manifest.jsonl | tr -d ' ')" = "3"
 	test "$$(grep -c 'vm-sample.js' $(BUILD_DIR)/sessions/artifacts/manifest.jsonl)" = "1"

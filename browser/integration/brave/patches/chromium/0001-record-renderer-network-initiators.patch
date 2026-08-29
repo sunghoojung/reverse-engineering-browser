@@ -6,7 +6,7 @@ index a9d5281da7d26..31bf5a662a607 100644
    deps = [
      ":make_platform_loader_generated_delivery_type_names",
      ":make_platform_loader_generated_fetch_initiator_type_names",
-+    "//brave/components/reverse_engineering_browser:renderer",
++    "//brave/components/reverse_engineering_browser:renderer_sink",
      "//components/link_header_util",
      "//components/persistent_cache",
      "//components/variations/net",

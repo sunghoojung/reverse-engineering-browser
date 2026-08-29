@@ -42,9 +42,10 @@ The launcher passes the broker evidence store and Unix-socket path to Origin
 Trace. The application continues to show the last valid evidence if the broker
 disconnects or the session expires and marks the capture as offline. Raw
 browser records stay on the Brave-to-broker socket; the UI reads the broker's
-normalized store. Live sessions enable Canvas and Network for one hour by
-default; `REB_CAPTURE_CATEGORY_MASK` and `REB_CAPTURE_DURATION_SECONDS` change
-those low-level startup limits.
+normalized store. Live sessions enable Canvas, Web Audio, Network, and Artifact
+for one hour by default with category mask `1285`;
+`REB_CAPTURE_CATEGORY_MASK` and `REB_CAPTURE_DURATION_SECONDS` change those
+low-level startup limits.
 
 For development, the same interface can still run in a browser:
 
@@ -59,7 +60,9 @@ Preview, Response, Initiator, Timing, and Signals inspectors. Signals presents
 the bounded Canvas, WebGL, Web Audio, Navigator, Permissions, Storage, and
 WebRTC evidence profile for one exact live request. Loading, empty,
 disconnected, malformed-event, and sequence-gap states remain visible. The
-trace workspace builds a live request-level origin chain from the broker's
+timeline shows each Web Audio event's fixed operation name, while Signals keeps
+only its bounded category count, relation, confidence, and event references.
+The trace workspace builds a live request-level origin chain from the broker's
 versioned edge sidecar. Structured request fields are not required. It selects
 one exact request-start event, shows observed and correlated links separately,
 and makes missing retained evidence visible as named gaps.

@@ -74,10 +74,12 @@ overlay tree. Small changes to upstream files belong in ordered patch files.
 That makes every project change visible and reproducible from the pinned Brave
 revision.
 
-The current integration contains dormant native Canvas and network lifecycle
-probe boundaries. Network observation reuses Brave's production URL loader
-factory proxy and correlates browser lifecycle records with the renderer request
-identifier. A bounded shared-memory queue and Mojo lifecycle bridge carry
-renderer records into the browser process. The browser process connects to the
-event broker through an authenticated, session-scoped Unix socket and a second
-bounded queue keeps socket writes off probe paths. No MCP layer is included.
+The current integration contains dormant native Canvas, Web Audio function-call,
+and network lifecycle probe boundaries. Web Audio observations retain only a
+fixed operation name and never copy samples, buffers, parameters, or results.
+Network observation reuses Brave's production URL loader factory proxy and
+correlates browser lifecycle records with the renderer request identifier. A
+bounded shared-memory queue and Mojo lifecycle bridge carry renderer records
+into the browser process. The browser process connects to the event broker
+through an authenticated, session-scoped Unix socket and a second bounded queue
+keeps socket writes off probe paths. No MCP layer is included.

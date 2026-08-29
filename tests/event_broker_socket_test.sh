@@ -10,6 +10,7 @@ fi
 readonly broker="$1"
 readonly producer="$2"
 readonly expected_payload_hex="$3"
+readonly web_audio_payload_hex="4f66666c696e65417564696f436f6e746578742e737461727452656e646572696e67"
 test_root="$(mktemp -d)"
 readonly test_root
 broker_pid=""
@@ -86,7 +87,11 @@ broker_pid=""
 test "$(wc -l < "${store_path}" | tr -d ' ')" = 4
 test "$(grep -c "\"payload\":\"${expected_payload_hex}\"" "${store_path}")" = 2
 test "$(grep -c '\"category\":\"network\"' "${store_path}")" = 4
-grep -Fq 'accepted=4 invalid=0 category_rejected=9 expired=0 sequence_gaps=0' \
+if grep -Fq '\"category\":\"web_audio\"' "${store_path}"; then
+  echo "Broker retained Web Audio outside the authorized category mask" >&2
+  exit 1
+fi
+grep -Fq 'accepted=4 invalid=0 category_rejected=10 expired=0 sequence_gaps=0' \
   "${test_root}/broker.err"
 test ! -e "${socket_path}"
 
@@ -134,8 +139,10 @@ PY
 wait "${broker_pid}"
 broker_pid=""
 
-test "$(wc -l < "${batch_store_path}" | tr -d ' ')" = 520
-grep -Fq 'accepted=520 invalid=0 category_rejected=0 expired=0 sequence_gaps=0' \
+test "$(wc -l < "${batch_store_path}" | tr -d ' ')" = 560
+test "$(grep -c '\"category\":\"web_audio\"' "${batch_store_path}")" = 40
+test "$(grep -c "\"category\":\"web_audio\",\"type\":\"api_call\".*\"payload\":\"${web_audio_payload_hex}\"" "${batch_store_path}")" = 40
+grep -Fq 'accepted=560 invalid=0 category_rejected=0 expired=0 sequence_gaps=0' \
   "${test_root}/batch-broker.err"
 test ! -e "${batch_socket_path}"
 
@@ -176,10 +183,10 @@ if wait "${broker_pid}"; then
 fi
 broker_pid=""
 
-test "$(wc -l < "${truncated_store_path}" | tr -d ' ')" = 13
+test "$(wc -l < "${truncated_store_path}" | tr -d ' ')" = 14
 grep -Fq 'Unable to read native event: unexpected end of stream' \
   "${test_root}/truncated-broker.err"
-grep -Fq 'accepted=13 invalid=0 category_rejected=0 expired=0 sequence_gaps=0' \
+grep -Fq 'accepted=14 invalid=0 category_rejected=0 expired=0 sequence_gaps=0' \
   "${test_root}/truncated-broker.err"
 test ! -e "${truncated_socket_path}"
 

@@ -1,0 +1,34 @@
+diff --git a/chromium_src/third_party/blink/renderer/modules/webaudio/audio_buffer.cc b/chromium_src/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
+index 300eea713..e86a8f4a3 100644
+--- a/chromium_src/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
++++ b/chromium_src/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
+@@ -4,6 +4,7 @@
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "base/functional/callback.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "brave/third_party/blink/renderer/brave_farbling_constants.h"
+ #include "brave/third_party/blink/renderer/core/farbling/brave_session_cache.h"
+ #include "third_party/blink/public/platform/web_content_settings_client.h"
+@@ -15,6 +16,8 @@
+ 
+ #define BRAVE_AUDIOBUFFER_GETCHANNELDATA                                      \
+   {                                                                           \
++    ::reb::NativeProbeSink::Get().RecordWebAudioCall(                         \
++        "AudioBuffer.getChannelData");                                        \
+     NotShared<DOMFloat32Array> destination = getChannelData(channel_index);   \
+     base::span<float> dst = destination->AsSpan();                            \
+     if (!dst.empty()) {                                                       \
+@@ -30,7 +33,12 @@
+         dst.first(count));                                                \
+   }
+ 
++#define BRAVE_AUDIOBUFFER_COPYFROMCHANNEL_ENTRY            \
++  ::reb::NativeProbeSink::Get().RecordWebAudioCall(        \
++      "AudioBuffer.copyFromChannel");
++
+ #include <third_party/blink/renderer/modules/webaudio/audio_buffer.cc>
+ 
+ #undef BRAVE_AUDIOBUFFER_GETCHANNELDATA
+ #undef BRAVE_AUDIOBUFFER_COPYFROMCHANNEL
++#undef BRAVE_AUDIOBUFFER_COPYFROMCHANNEL_ENTRY

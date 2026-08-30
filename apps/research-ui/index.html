@@ -1153,10 +1153,10 @@
       .memory-grid { min-height: 0; display: grid; grid-template-columns: 292px minmax(0, 1fr); }
       .memory-search-pane { min-width: 0; overflow: auto; padding: 14px; border-right: 1px solid var(--line); background: var(--chrome); }
       .memory-form { display: grid; gap: 11px; }
-      .memory-mode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+      .memory-mode-switch { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
       .memory-mode-button { min-height: 30px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel-2); color: var(--muted); font: 8px var(--mono); }
       .memory-mode-button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
-      .memory-live-only[hidden] { display: none; }
+      .memory-live-only[hidden], .memory-search-only[hidden], .memory-diff-only[hidden] { display: none; }
       .memory-form label { display: grid; gap: 5px; color: var(--muted); font: 8px var(--mono); text-transform: uppercase; }
       .memory-form input[type="text"], .memory-form input[type="number"], .memory-form textarea {
         width: 100%;
@@ -1176,6 +1176,14 @@
       .memory-search-button { width: 100%; margin: 2px 0 0; }
       .memory-search-button[aria-busy="true"] { cursor: progress; }
       .memory-search-help { margin: 1px 0 0; color: var(--faint); font: 8px/1.5 var(--mono); }
+      .memory-diff-controls { display: grid; gap: 8px; }
+      .memory-baseline-card { display: grid; gap: 4px; padding: 10px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel-2); }
+      .memory-baseline-card span { color: var(--faint); font: 650 7px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+      .memory-baseline-card strong { color: var(--text); font: 600 10px var(--mono); }
+      .memory-baseline-card small { color: var(--muted); font: 8px/1.45 var(--mono); }
+      .memory-diff-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+      .memory-diff-actions button { min-height: 31px; }
+      .memory-diff-actions .memory-diff-primary { grid-column: 1 / -1; }
       .memory-results-pane { min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(250px, 38%) minmax(0, 1fr); }
       .memory-results-list { min-width: 0; overflow: auto; border-right: 1px solid var(--line); }
       .memory-results-head { display: grid; grid-template-columns: minmax(0, 1fr) 62px; gap: 8px; padding: 9px 11px; border-bottom: 1px solid var(--line); color: var(--faint); font: 650 8px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
@@ -1187,11 +1195,13 @@
       .memory-result-meta { grid-column: 1 / -1; overflow: hidden; color: var(--faint); font: 8px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
       .memory-detail { min-width: 0; overflow: auto; padding: 18px; }
       .memory-detail-card { border: 1px solid var(--line); background: var(--panel-2); }
+      .memory-detail-card + .memory-detail-card { margin-top: 12px; }
       .memory-detail-head { display: flex; align-items: flex-start; gap: 12px; padding: 13px; border-bottom: 1px solid var(--line); }
       .memory-detail-head h2 { margin: 0; font: 600 13px var(--mono); }
       .memory-detail-head p { margin: 5px 0 0; color: var(--muted); font: 8px var(--mono); }
       .memory-readonly { margin-left: auto; padding: 3px 5px; border: 1px solid var(--line); border-radius: 3px; color: var(--green); font: 650 7px var(--mono); text-transform: uppercase; }
       .memory-properties { display: grid; }
+      .memory-properties .memory-empty { min-height: 100px; }
       .memory-property { min-width: 0; display: grid; grid-template-columns: minmax(100px, .7fr) 70px minmax(130px, 1.3fr); border-bottom: 1px solid var(--line-soft); font: 9px var(--mono); }
       .memory-property:last-child { border-bottom: 0; }
       .memory-property > span { min-width: 0; padding: 8px 10px; overflow-wrap: anywhere; border-right: 1px solid var(--line-soft); }
@@ -1360,7 +1370,7 @@
         .memory-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
         .memory-search-pane { max-height: min(420px, 48vh); border-right: 0; border-bottom: 1px solid var(--line); }
         .memory-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .memory-mode-switch, .memory-form[data-mode="snapshot"] .memory-value-field, .memory-shape-field, .memory-options, .memory-search-button, .memory-search-help { grid-column: 1 / -1; }
+        .memory-mode-switch, .memory-form[data-mode="snapshot"] .memory-value-field, .memory-shape-field, .memory-options, .memory-search-button, .memory-diff-controls, .memory-search-help { grid-column: 1 / -1; }
         .memory-results-pane { grid-template-columns: 1fr; grid-template-rows: minmax(170px, .8fr) minmax(190px, 1fr); }
         .memory-results-list { border-right: 0; border-bottom: 1px solid var(--line); }
         .memory-property { grid-template-columns: minmax(90px, .7fr) 62px minmax(100px, 1.3fr); }
@@ -1559,8 +1569,8 @@
 
           <section id="screen-memory" class="screen" aria-label="Memory investigation" hidden>
             <header class="screen-head">
-              <div><h1>Memory Explorer</h1><div class="screen-subtitle">Bounded live objects and native C++ V8 heap-snapshot search</div></div>
-              <div class="screen-head-actions"><span class="memory-readonly">Baseline read-only</span></div>
+              <div><h1>Memory Explorer</h1><div class="screen-subtitle">Bounded live objects, native snapshots, and retained-memory comparisons</div></div>
+              <div class="screen-head-actions"><span class="memory-readonly">Local analysis</span></div>
             </header>
             <div id="memory-notice" class="memory-notice" data-kind="offline" role="status" aria-live="polite">Run a live session to attach an authorized browser target.</div>
             <div class="memory-grid">
@@ -1569,9 +1579,10 @@
                   <div class="memory-mode-switch" role="group" aria-label="Memory search mode">
                     <button class="memory-mode-button" type="button" data-memory-mode="live" aria-pressed="true">Live objects</button>
                     <button class="memory-mode-button" type="button" data-memory-mode="snapshot" aria-pressed="false">Heap snapshot</button>
+                    <button class="memory-mode-button" type="button" data-memory-mode="diff" aria-pressed="false">Heap diff</button>
                   </div>
                   <label class="memory-live-only">Property name<input id="memory-property-query" type="text" placeholder="token, config, fingerprint" maxlength="512" autocomplete="off" /></label>
-                  <label class="memory-value-field"><span id="memory-value-caption">Primitive value</span><input id="memory-value-query" type="text" placeholder="exact text or pattern" maxlength="512" autocomplete="off" /></label>
+                  <label class="memory-search-only memory-value-field"><span id="memory-value-caption">Primitive value</span><input id="memory-value-query" type="text" placeholder="exact text or pattern" maxlength="512" autocomplete="off" /></label>
                   <label class="memory-live-only">Class name<input id="memory-class-query" type="text" placeholder="Object, Array, CartState" maxlength="512" autocomplete="off" /></label>
                   <label class="memory-live-only memory-shape-field">Structural shape<textarea id="memory-shape-query" placeholder='{"device":{"fingerprint":""}}' maxlength="4096" spellcheck="false"></textarea></label>
                   <label class="memory-live-only">Similarity threshold<input id="memory-similarity-threshold" type="number" min="0" max="1" step="0.05" value="0.75" /></label>
@@ -1580,13 +1591,25 @@
                     <label class="memory-check"><input id="memory-case-sensitive" type="checkbox" /> Case sensitive</label>
                     <label class="memory-check"><input id="memory-shape-values" type="checkbox" /> Match shape values</label>
                   </div>
-                  <button id="memory-search-button" class="trace-button memory-search-button" type="submit" disabled>Search live objects</button>
+                  <button id="memory-search-button" class="trace-button memory-search-button memory-search-only" type="submit" disabled>Search live objects</button>
+                  <div id="memory-diff-controls" class="memory-diff-controls memory-diff-only" hidden>
+                    <div class="memory-baseline-card">
+                      <span>Comparison baseline</span>
+                      <strong id="memory-baseline-title">Not captured</strong>
+                      <small id="memory-baseline-meta">Capture the target before the activity you want to measure.</small>
+                    </div>
+                    <div class="memory-diff-actions">
+                      <button id="memory-capture-baseline" class="secondary-button" type="button">Capture baseline</button>
+                      <button id="memory-clear-baseline" class="secondary-button" type="button" disabled>Reset</button>
+                      <button id="memory-compare-snapshot" class="trace-button memory-diff-primary" type="button" disabled>Capture current and compare</button>
+                    </div>
+                  </div>
                   <p id="memory-search-help" class="memory-search-help">Accessors are reported without invoking getters. Results are ephemeral and are never added to the evidence store.</p>
                 </form>
               </aside>
               <div class="memory-results-pane">
                 <div class="memory-results-list">
-                  <div class="memory-results-head"><span>Matches</span><span id="memory-result-count">0</span></div>
+                  <div class="memory-results-head"><span id="memory-result-label">Matches</span><span id="memory-result-count">0</span></div>
                   <div id="memory-results" role="listbox" aria-label="Live object matches"></div>
                 </div>
                 <div id="memory-detail" class="memory-detail" tabindex="0"><div class="memory-empty">Attach a live page, enter at least one criterion, then start a bounded search.</div></div>
@@ -1796,6 +1819,7 @@ export async function checkout(cart, fingerprint) {
         memorySearchStatus: 'offline',
         memorySearchMessage: null,
         memorySearchMeta: null,
+        memoryDiffBaseline: null,
         memoryTargetId: null,
         selectedRequestId: '81',
         inspectorTab: 'payload',
@@ -1915,6 +1939,13 @@ export async function checkout(cart, fingerprint) {
         memoryShapeValues: document.querySelector('#memory-shape-values'),
         memorySearchButton: document.querySelector('#memory-search-button'),
         memorySearchHelp: document.querySelector('#memory-search-help'),
+        memoryDiffControls: document.querySelector('#memory-diff-controls'),
+        memoryBaselineTitle: document.querySelector('#memory-baseline-title'),
+        memoryBaselineMeta: document.querySelector('#memory-baseline-meta'),
+        memoryCaptureBaseline: document.querySelector('#memory-capture-baseline'),
+        memoryClearBaseline: document.querySelector('#memory-clear-baseline'),
+        memoryCompareSnapshot: document.querySelector('#memory-compare-snapshot'),
+        memoryResultLabel: document.querySelector('#memory-result-label'),
         memoryResultCount: document.querySelector('#memory-result-count'),
         memoryResults: document.querySelector('#memory-results'),
         memoryDetail: document.querySelector('#memory-detail'),
@@ -2220,6 +2251,10 @@ export async function checkout(cart, fingerprint) {
             !Array.isArray(body.watches) || body.watches.length > 100 || !body.watches.every(isDebuggerWatch) ||
             !Array.isArray(body.console) || body.console.length > 500 || !body.console.every(isDebuggerConsoleEntry) ||
             !isPlainObject(body.settings) || !isPlainObject(body.limits)) return false;
+        if (body.heap_diff_baseline !== null && (!isPlainObject(body.heap_diff_baseline) ||
+            typeof body.heap_diff_baseline.target_id !== 'string' ||
+            !isSafeIntegerInRange(body.heap_diff_baseline.file_bytes, 1, 256 * 1024 * 1024) ||
+            !isSafeIntegerInRange(body.heap_diff_baseline.captured_at_ms, 0, Number.MAX_SAFE_INTEGER))) return false;
         if (body.target !== null && !isDebuggerTarget(body.target)) return false;
         if (body.paused !== null && (!isPlainObject(body.paused) || typeof body.paused.reason !== 'string' ||
             (body.paused.description !== null && typeof body.paused.description !== 'string') ||
@@ -2295,6 +2330,56 @@ export async function checkout(cart, fingerprint) {
           Array.isArray(result.retaining_path) && result.retaining_path.length <= 12 &&
           result.retaining_path.every(step => isPlainObject(step) &&
             ['edge', 'type', 'name'].every(field => typeof step[field] === 'string')));
+      }
+
+      function isHeapDiffBaselineResponse(body) {
+        return isPlainObject(body) && body.ok === true &&
+          isSafeIntegerInRange(body.generation, 0, Number.MAX_SAFE_INTEGER) &&
+          isPlainObject(body.baseline) && typeof body.baseline.target_id === 'string' &&
+          isSafeIntegerInRange(body.baseline.file_bytes, 1, 256 * 1024 * 1024) &&
+          isSafeIntegerInRange(body.baseline.captured_at_ms, 0, Number.MAX_SAFE_INTEGER);
+      }
+
+      function isHeapSnapshotDiffResponse(body) {
+        if (!isPlainObject(body) || body.ok !== true ||
+            !isSafeIntegerInRange(body.generation, 0, Number.MAX_SAFE_INTEGER) ||
+            !isPlainObject(body.diff)) return false;
+        const diff = body.diff;
+        const integerFields = [
+          'baseline_file_bytes', 'current_file_bytes', 'baseline_nodes', 'current_nodes',
+          'baseline_edges', 'current_edges', 'baseline_reachable_nodes',
+          'current_reachable_nodes', 'baseline_self_size', 'current_self_size',
+          'duration_ms', 'result_limit'
+        ];
+        const booleanFields = [
+          'group_result_limit_reached', 'dominator_result_limit_reached',
+          'aggregation_limit_reached', 'baseline_node_limit_reached',
+          'baseline_edge_limit_reached', 'baseline_string_limit_reached',
+          'current_node_limit_reached', 'current_edge_limit_reached',
+          'current_string_limit_reached', 'retained_size_saturated'
+        ];
+        if (diff.protocol_version !== 1 ||
+            !integerFields.every(field => isSafeIntegerInRange(diff[field], 0, Number.MAX_SAFE_INTEGER)) ||
+            !Number.isSafeInteger(diff.self_size_delta) || diff.result_limit !== 50 ||
+            diff.baseline_file_bytes > 256 * 1024 * 1024 || diff.current_file_bytes > 256 * 1024 * 1024 ||
+            diff.baseline_reachable_nodes > diff.baseline_nodes || diff.current_reachable_nodes > diff.current_nodes ||
+            diff.self_size_delta !== diff.current_self_size - diff.baseline_self_size ||
+            !booleanFields.every(field => typeof diff[field] === 'boolean') ||
+            !Array.isArray(diff.groups) || diff.groups.length > diff.result_limit ||
+            !Array.isArray(diff.dominators) || diff.dominators.length > diff.result_limit) return false;
+        const validDelta = (baseline, current, delta) =>
+          isSafeIntegerInRange(baseline, 0, Number.MAX_SAFE_INTEGER) &&
+          isSafeIntegerInRange(current, 0, Number.MAX_SAFE_INTEGER) &&
+          Number.isSafeInteger(delta) && delta === current - baseline;
+        return diff.groups.every(group => isPlainObject(group) &&
+          typeof group.type === 'string' && typeof group.name === 'string' &&
+          validDelta(group.baseline_count, group.current_count, group.count_delta) &&
+          validDelta(group.baseline_self_size, group.current_self_size, group.self_size_delta)) &&
+          diff.dominators.every(change => isPlainObject(change) &&
+            typeof change.id === 'string' && /^(?:0|[1-9][0-9]*)$/.test(change.id) &&
+            change.id.length <= 20 && typeof change.type === 'string' &&
+            typeof change.name === 'string' && validDelta(change.baseline_retained_size,
+              change.current_retained_size, change.retained_size_delta));
       }
 
       function isOriginTraceResponse(body) {
@@ -4090,8 +4175,93 @@ export async function checkout(cart, fingerprint) {
         selectMemoryResult(rows[next].dataset.resultId, true);
       }
 
+      function formatSignedByteSize(value) {
+        if (value === 0) return '0 bytes';
+        return `${value > 0 ? '+' : '-'}${formatByteSize(Math.abs(value))}`;
+      }
+
+      function formatSignedCount(value) {
+        return `${value > 0 ? '+' : ''}${value.toLocaleString()}`;
+      }
+
+      function memoryFactRow(name, type, value) {
+        const row = document.createElement('div'); row.className = 'memory-property';
+        row.append(
+          textElement('span', 'memory-property-name', name),
+          textElement('span', 'memory-property-type', type),
+          textElement('span', 'memory-property-value', value)
+        );
+        return row;
+      }
+
+      function renderHeapDiffDetail(result) {
+        const diff = state.memorySearchMeta;
+        if (!diff) {
+          elements.memoryDetail.replaceChildren(textElement('div', 'memory-empty',
+            state.memoryDiffBaseline
+              ? 'Run the page activity you want to measure, then capture the current heap.'
+              : 'Capture a baseline before the page activity you want to measure.'));
+          return;
+        }
+        const cards = [];
+        const summaryCard = document.createElement('article'); summaryCard.className = 'memory-detail-card';
+        const summaryHead = document.createElement('header'); summaryHead.className = 'memory-detail-head';
+        const summaryTitle = document.createElement('div');
+        summaryTitle.append(
+          textElement('h2', '', result ? result.name || `(${result.type})` : 'Heap comparison'),
+          textElement('p', '', result
+            ? `${result.type} · ${formatSignedByteSize(result.self_size_delta)} self memory`
+            : `${formatSignedByteSize(diff.self_size_delta)} total self memory · ${diff.duration_ms} ms native analysis`)
+        );
+        summaryHead.append(summaryTitle, textElement('span', 'memory-readonly', 'Exact diff'));
+        const facts = document.createElement('div'); facts.className = 'memory-properties';
+        if (result) {
+          facts.append(
+            memoryFactRow('object count', 'baseline → current', `${result.baseline_count.toLocaleString()} → ${result.current_count.toLocaleString()} (${formatSignedCount(result.count_delta)})`),
+            memoryFactRow('self memory', 'baseline → current', `${formatByteSize(result.baseline_self_size)} → ${formatByteSize(result.current_self_size)} (${formatSignedByteSize(result.self_size_delta)})`),
+            memoryFactRow('signature', result.type, result.name || '(anonymous)')
+          );
+        } else {
+          facts.append(
+            memoryFactRow('heap nodes', 'baseline → current', `${diff.baseline_nodes.toLocaleString()} → ${diff.current_nodes.toLocaleString()}`),
+            memoryFactRow('reachable nodes', 'baseline → current', `${diff.baseline_reachable_nodes.toLocaleString()} → ${diff.current_reachable_nodes.toLocaleString()}`),
+            memoryFactRow('self memory', 'baseline → current', `${formatByteSize(diff.baseline_self_size)} → ${formatByteSize(diff.current_self_size)} (${formatSignedByteSize(diff.self_size_delta)})`)
+          );
+        }
+        summaryCard.append(summaryHead, facts);
+        cards.push(summaryCard);
+
+        const ownersCard = document.createElement('article'); ownersCard.className = 'memory-detail-card';
+        const ownersHead = document.createElement('header'); ownersHead.className = 'memory-detail-head';
+        const ownersTitle = document.createElement('div');
+        ownersTitle.append(
+          textElement('h2', '', 'Top retained-memory changes'),
+          textElement('p', '', 'Exact dominators over reachable non-weak V8 heap edges')
+        );
+        ownersHead.append(ownersTitle, textElement('span', 'memory-readonly', 'Native C++'));
+        const owners = document.createElement('div'); owners.className = 'memory-properties';
+        if (diff.dominators.length === 0) {
+          owners.append(textElement('div', 'memory-empty', 'No individual retained-size changes were detected.'));
+        } else {
+          diff.dominators.forEach(change => {
+            owners.append(memoryFactRow(
+              change.name || `(${change.type})`,
+              `${change.type} · node ${change.id}`,
+              `${formatSignedByteSize(change.retained_size_delta)} · ${formatByteSize(change.baseline_retained_size)} → ${formatByteSize(change.current_retained_size)}`
+            ));
+          });
+        }
+        ownersCard.append(ownersHead, owners);
+        cards.push(ownersCard);
+        elements.memoryDetail.replaceChildren(...cards);
+      }
+
       function renderMemoryDetail() {
         const result = state.memoryResults.find(candidate => candidate.id === state.selectedMemoryResultId);
+        if (state.memoryMode === 'diff') {
+          renderHeapDiffDetail(result);
+          return;
+        }
         if (!result) {
           const empty = textElement('div', 'memory-empty', memoryAttached()
             ? 'Enter at least one criterion, then start a bounded search.'
@@ -4184,6 +4354,7 @@ export async function checkout(cart, fingerprint) {
           state.selectedMemoryResultId = null;
           state.memorySearchMeta = null;
           state.memorySearchMessage = null;
+          state.memoryDiffBaseline = null;
           state.memoryTargetId = null;
           state.memorySearchStatus = attached ? 'idle' : 'offline';
         } else if (!attached && state.memorySearchStatus !== 'searching') {
@@ -4192,19 +4363,29 @@ export async function checkout(cart, fingerprint) {
           state.memorySearchStatus = 'idle';
         }
         const snapshotMode = state.memoryMode === 'snapshot';
+        const diffMode = state.memoryMode === 'diff';
+        const liveMode = state.memoryMode === 'live';
         elements.memorySearchForm.dataset.mode = state.memoryMode;
         elements.memoryModeButtons.forEach(button => {
           button.setAttribute('aria-pressed', String(button.dataset.memoryMode === state.memoryMode));
           button.disabled = state.memorySearchPending;
         });
         elements.memorySearchForm.querySelectorAll('.memory-live-only').forEach(element => {
-          element.hidden = snapshotMode;
+          element.hidden = !liveMode;
+        });
+        elements.memorySearchForm.querySelectorAll('.memory-search-only').forEach(element => {
+          element.hidden = diffMode;
+        });
+        elements.memorySearchForm.querySelectorAll('.memory-diff-only').forEach(element => {
+          element.hidden = !diffMode;
         });
         elements.memoryValueCaption.textContent = snapshotMode ? 'Snapshot value or node name' : 'Primitive value';
         elements.memoryValueQuery.placeholder = snapshotMode ? 'value from a request, closure, or unreachable object' : 'exact text or pattern';
-        elements.memorySearchHelp.textContent = snapshotMode
-          ? 'Capturing briefly pauses the target. The snapshot is searched by native C++ and its temporary file is deleted immediately.'
-          : 'Accessors are reported without invoking getters. Results are ephemeral and are never added to the evidence store.';
+        elements.memorySearchHelp.textContent = diffMode
+          ? 'The baseline stays in local temporary storage until reset, target change, or shutdown. Current captures are deleted after native comparison.'
+          : snapshotMode
+            ? 'Capturing briefly pauses the target. The snapshot is searched by native C++ and its temporary file is deleted immediately.'
+            : 'Accessors are reported without invoking getters. Results are ephemeral and are never added to the evidence store.';
         const controls = elements.memorySearchForm.querySelectorAll('input, textarea');
         controls.forEach(control => { control.disabled = !attached || state.memorySearchPending; });
         elements.memorySearchButton.disabled = !attached || state.memorySearchPending;
@@ -4212,8 +4393,30 @@ export async function checkout(cart, fingerprint) {
         elements.memorySearchButton.textContent = state.memorySearchPending
           ? snapshotMode ? 'Capturing and indexing...' : 'Searching...'
           : snapshotMode ? 'Capture and search snapshot' : 'Search live objects';
+        const baseline = state.memoryDiffBaseline;
+        elements.memoryBaselineTitle.textContent = baseline ? 'Baseline ready' : 'Not captured';
+        elements.memoryBaselineMeta.textContent = baseline
+          ? `${formatByteSize(baseline.file_bytes)} · captured ${new Date(baseline.captured_at_ms).toLocaleTimeString()}`
+          : 'Capture the target before the activity you want to measure.';
+        elements.memoryCaptureBaseline.disabled = !attached || state.memorySearchPending;
+        elements.memoryClearBaseline.disabled = !baseline || state.memorySearchPending;
+        elements.memoryCompareSnapshot.disabled = !attached || !baseline || state.memorySearchPending;
+        elements.memoryCaptureBaseline.textContent = state.memorySearchPending && diffMode && !baseline
+          ? 'Capturing baseline...' : baseline ? 'Replace baseline' : 'Capture baseline';
+        elements.memoryCompareSnapshot.textContent = state.memorySearchPending && diffMode && baseline
+          ? 'Capturing and comparing...' : 'Capture current and compare';
 
-        const messages = snapshotMode ? {
+        const messages = diffMode ? {
+          offline: 'Run a live session to attach an authorized browser target.',
+          idle: state.memorySearchMessage || (baseline
+            ? 'Baseline ready. Run the activity you want to measure, then compare.'
+            : 'Capture a baseline before the page activity you want to measure.'),
+          searching: state.memorySearchMessage || 'Capturing a bounded heap snapshot for native comparison.',
+          empty: state.memorySearchMessage || 'The compared heaps have no reported memory changes.',
+          ready: state.memorySearchMessage || 'Native retained-memory comparison completed.',
+          partial: state.memorySearchMessage || 'Heap comparison completed with explicit bounded coverage.',
+          error: state.memorySearchMessage || 'Native heap comparison failed.'
+        } : snapshotMode ? {
           offline: 'Run a live session to attach an authorized browser target.',
           idle: state.memorySearchMessage || 'Enter a value to capture and search the full V8 heap, including unreachable nodes.',
           searching: 'Capturing the target heap, then building a bounded native C++ retaining-path index.',
@@ -4232,15 +4435,16 @@ export async function checkout(cart, fingerprint) {
         };
         elements.memoryNotice.dataset.kind = state.memorySearchStatus;
         elements.memoryNotice.textContent = messages[state.memorySearchStatus] ?? messages.idle;
+        elements.memoryResultLabel.textContent = diffMode ? 'Changed groups' : 'Matches';
         elements.memoryResultCount.textContent = String(state.memoryResults.length);
-        elements.memoryResults.setAttribute('aria-label', snapshotMode ? 'Heap snapshot matches' : 'Live object matches');
+        elements.memoryResults.setAttribute('aria-label', diffMode ? 'Heap growth groups' : snapshotMode ? 'Heap snapshot matches' : 'Live object matches');
 
         if (state.memoryResults.length === 0) {
           const empty = textElement('div', 'memory-empty', state.memorySearchStatus === 'empty'
             ? 'No objects matched. Broaden one criterion or lower the similarity threshold.'
             : state.memorySearchStatus === 'error'
               ? 'The last search did not replace any retained results.'
-              : snapshotMode ? 'No heap snapshot search results yet.' : 'No live object search results yet.');
+              : diffMode ? 'No heap comparison results yet.' : snapshotMode ? 'No heap snapshot search results yet.' : 'No live object search results yet.');
           elements.memoryResults.removeAttribute('role');
           elements.memoryResults.replaceChildren(empty);
           renderMemoryDetail();
@@ -4256,11 +4460,15 @@ export async function checkout(cart, fingerprint) {
           row.setAttribute('role', 'option');
           row.setAttribute('aria-selected', String(result.id === state.selectedMemoryResultId));
           row.tabIndex = result.id === state.selectedMemoryResultId ? 0 : -1;
-          const score = snapshotMode
+          const score = diffMode
+            ? formatSignedByteSize(result.self_size_delta)
+            : snapshotMode
             ? result.type
             : result.similarity === null ? 'match' : `${Math.round(result.similarity * 100)}%`;
-          const title = snapshotMode ? result.name || `(${result.type})` : result.class_name || 'Object';
-          const metadata = snapshotMode
+          const title = diffMode ? result.name || `(${result.type})` : snapshotMode ? result.name || `(${result.type})` : result.class_name || 'Object';
+          const metadata = diffMode
+            ? `${result.type} · ${result.baseline_count.toLocaleString()} → ${result.current_count.toLocaleString()} objects (${formatSignedCount(result.count_delta)})`
+            : snapshotMode
             ? `${result.self_size.toLocaleString()} self bytes · ${result.retaining_path.length} retaining steps`
             : `${result.property_count} properties · ${result.preview.slice(0, 5).map(property => property.name).join(', ') || 'no own properties'}`;
           row.append(
@@ -4277,6 +4485,10 @@ export async function checkout(cart, fingerprint) {
 
       async function runLiveObjectSearch() {
         if (!memoryAttached() || state.memorySearchPending) return;
+        if (state.memoryMode === 'diff') {
+          await runHeapSnapshotDiff();
+          return;
+        }
         if (state.memoryMode === 'snapshot') {
           await runHeapSnapshotSearch();
           return;
@@ -4367,8 +4579,95 @@ export async function checkout(cart, fingerprint) {
         renderMemory();
       }
 
+      async function captureHeapDiffBaseline() {
+        if (!memoryAttached() || state.memorySearchPending) return;
+        state.memorySearchPending = true;
+        state.memorySearchStatus = 'searching';
+        state.memorySearchMessage = 'Capturing the comparison baseline. The target may pause briefly.';
+        renderMemory();
+        const body = await debuggerAction({ action: 'capture_heap_diff_baseline' });
+        state.memorySearchPending = false;
+        if (!isHeapDiffBaselineResponse(body)) {
+          state.memorySearchStatus = 'error';
+          state.memorySearchMessage = state.debuggerError || 'The debugger returned malformed baseline metadata.';
+          renderMemory();
+          return;
+        }
+        state.memoryDiffBaseline = body.baseline;
+        state.memoryResults = [];
+        state.selectedMemoryResultId = null;
+        state.memorySearchMeta = null;
+        state.memoryTargetId = state.debuggerSession?.target?.id ?? null;
+        state.memorySearchStatus = 'ready';
+        state.memorySearchMessage = `${formatByteSize(body.baseline.file_bytes)} baseline captured. Run the activity you want to measure, then compare.`;
+        renderMemory();
+      }
+
+      async function clearHeapDiffBaseline() {
+        if (state.memorySearchPending || !state.memoryDiffBaseline) return;
+        state.memorySearchPending = true;
+        renderMemory();
+        const body = await debuggerAction({ action: 'clear_heap_diff_baseline' });
+        state.memorySearchPending = false;
+        if (!isPlainObject(body) || body.ok !== true) {
+          state.memorySearchStatus = 'error';
+          state.memorySearchMessage = state.debuggerError || 'The heap comparison baseline could not be reset.';
+          renderMemory();
+          return;
+        }
+        state.memoryDiffBaseline = null;
+        state.memoryResults = [];
+        state.selectedMemoryResultId = null;
+        state.memorySearchMeta = null;
+        state.memorySearchStatus = memoryAttached() ? 'idle' : 'offline';
+        state.memorySearchMessage = 'Baseline reset and its local temporary file was deleted.';
+        renderMemory();
+      }
+
+      async function runHeapSnapshotDiff() {
+        if (!memoryAttached() || state.memorySearchPending) return;
+        if (!state.memoryDiffBaseline) {
+          state.memorySearchStatus = 'error';
+          state.memorySearchMessage = 'Capture a baseline before comparing the heap.';
+          renderMemory();
+          elements.memoryCaptureBaseline.focus();
+          return;
+        }
+        state.memorySearchPending = true;
+        state.memorySearchStatus = 'searching';
+        state.memorySearchMessage = 'Capturing the current heap, then computing exact dominators and retained-size changes.';
+        renderMemory();
+        const body = await debuggerAction({ action: 'compare_heap_diff' });
+        state.memorySearchPending = false;
+        if (!isHeapSnapshotDiffResponse(body)) {
+          state.memorySearchStatus = 'error';
+          state.memorySearchMessage = state.debuggerError || 'The native heap comparison returned malformed results.';
+          renderMemory();
+          return;
+        }
+        const diff = body.diff;
+        state.memoryResults = diff.groups.map((group, index) => ({ ...group, id: `heap-diff-${index}` }));
+        state.selectedMemoryResultId = state.memoryResults[0]?.id ?? null;
+        state.memorySearchMeta = diff;
+        state.memoryTargetId = state.debuggerSession?.target?.id ?? null;
+        const limits = [];
+        if (diff.group_result_limit_reached) limits.push(`${diff.result_limit} group limit reached`);
+        if (diff.dominator_result_limit_reached) limits.push(`${diff.result_limit} dominator limit reached`);
+        if (diff.aggregation_limit_reached) limits.push('signature budget reached');
+        if (diff.baseline_node_limit_reached || diff.current_node_limit_reached) limits.push('node limit reached');
+        if (diff.baseline_edge_limit_reached || diff.current_edge_limit_reached) limits.push('edge limit reached');
+        if (diff.baseline_string_limit_reached || diff.current_string_limit_reached) limits.push('string budget reached');
+        if (diff.retained_size_saturated) limits.push('size counter saturated');
+        const summary = `${diff.groups.length} changed ${diff.groups.length === 1 ? 'group' : 'groups'}, ${diff.dominators.length} retained owners, ${formatSignedByteSize(diff.self_size_delta)} total self memory in ${diff.duration_ms} ms`;
+        state.memorySearchMessage = limits.length > 0 ? `${summary} · ${limits.join(' · ')}` : summary;
+        state.memorySearchStatus = limits.length > 0
+          ? 'partial'
+          : diff.groups.length > 0 || diff.dominators.length > 0 ? 'ready' : 'empty';
+        renderMemory();
+      }
+
       function setMemoryMode(mode) {
-        if (!['live', 'snapshot'].includes(mode) || state.memorySearchPending || mode === state.memoryMode) return;
+        if (!['live', 'snapshot', 'diff'].includes(mode) || state.memorySearchPending || mode === state.memoryMode) return;
         state.memoryMode = mode;
         state.memoryResults = [];
         state.selectedMemoryResultId = null;
@@ -4735,6 +5034,7 @@ export async function checkout(cart, fingerprint) {
           const previousOpenScripts = state.openScriptIds.join('\u0000');
           const previousPendingLine = state.pendingSourceLine ? `${state.pendingSourceLine.scriptId}:${state.pendingSourceLine.line}` : '';
           state.debuggerSession = body;
+          state.memoryDiffBaseline = body.heap_diff_baseline;
           state.debuggerEtag = response.headers.get('ETag');
           state.debuggerError = null;
           state.openScriptIds = state.openScriptIds.filter(id => body.scripts.some(script => script.script_id === id));
@@ -5123,6 +5423,9 @@ export async function checkout(cart, fingerprint) {
       elements.memoryModeButtons.forEach(button => button.addEventListener('click', () => {
         setMemoryMode(button.dataset.memoryMode);
       }));
+      elements.memoryCaptureBaseline.addEventListener('click', captureHeapDiffBaseline);
+      elements.memoryClearBaseline.addEventListener('click', clearHeapDiffBaseline);
+      elements.memoryCompareSnapshot.addEventListener('click', runHeapSnapshotDiff);
       document.addEventListener('keydown', event => {
         const sourcesVisible = !document.querySelector('#screen-sources').hidden;
         if (sourcesVisible && event.key === 'Escape' && elements.quickOpen.hidden) {

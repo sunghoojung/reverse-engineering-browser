@@ -117,6 +117,17 @@ matching nodes with shortest non-weak retaining paths capped at 12 steps. Every
 limit is visible in the response, and the temporary snapshot is deleted after
 each search.
 
+Heap Diff mode captures an explicit baseline, lets the researcher perform page
+activity, and compares a later snapshot with the same bounded native C++20
+analyzer. It groups count and self-size changes by bounded V8 node type and
+name, then ranks individual objects by exact retained-size change using
+dominators over reachable non-weak edges. Baseline and current snapshots are
+parsed sequentially to bound peak memory. The response reports baseline and
+current coverage, result truncation, signature aggregation limits, and size
+counter saturation. The baseline remains in user-only temporary storage until
+reset, target change, disconnect, or shutdown. Each current snapshot is
+deleted immediately after comparison.
+
 The Traffic workspace can pivot a selected request value into Memory. The pivot
 only prefills an ephemeral query. It does not persist the selected value or
 begin a heap capture without a separate user action.

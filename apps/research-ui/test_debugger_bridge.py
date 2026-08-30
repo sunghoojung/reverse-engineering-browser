@@ -410,6 +410,10 @@ class DebuggerBridgeTests(unittest.TestCase):
             target=target_server.serve_forever, daemon=True
         )
         target_thread.start()
+        self.addCleanup(web_socket.close)
+        self.addCleanup(target_thread.join, timeout=2)
+        self.addCleanup(target_server.server_close)
+        self.addCleanup(target_server.shutdown)
         with tempfile.TemporaryDirectory() as directory:
             active_port = Path(directory) / "DevToolsActivePort"
             active_port.write_text(
@@ -638,16 +642,19 @@ class DebuggerBridgeTests(unittest.TestCase):
                     origin_trace["steps"][0]["match"]["name"], "secret-value"
                 )
                 self.assertEqual(origin_trace["steps"][0]["indexed_edges"], 0)
+                self.wait_for(
+                    lambda: any(
+                        command["method"]
+                        == "DOMDebugger.removeEventListenerBreakpoint"
+                        for command in web_socket.commands
+                    )
+                )
                 methods = [command["method"] for command in web_socket.commands]
                 self.assertIn("DOMDebugger.setEventListenerBreakpoint", methods)
                 self.assertIn("DOMDebugger.removeEventListenerBreakpoint", methods)
                 self.wait_for(lambda: bridge.snapshot()["state"] == "running")
             finally:
                 bridge.stop()
-        target_server.shutdown()
-        target_server.server_close()
-        target_thread.join(timeout=2)
-        web_socket.close()
 
     def test_only_allowlisted_actions_and_known_scripts_are_accepted(self) -> None:
         bridge = DebuggerBridge()

@@ -535,6 +535,17 @@ class DebuggerBridgeTests(unittest.TestCase):
                     "HeapProfiler.takeHeapSnapshot",
                     [command["method"] for command in web_socket.commands],
                 )
+                baseline = bridge.action(
+                    {"action": "capture_heap_diff_baseline"}
+                )
+                self.assertEqual(baseline["baseline"]["target_id"], "page-1")
+                self.assertGreater(baseline["baseline"]["file_bytes"], 0)
+                heap_diff = bridge.action({"action": "compare_heap_diff"})
+                self.assertEqual(heap_diff["diff"]["self_size_delta"], 0)
+                self.assertEqual(heap_diff["diff"]["groups"], [])
+                self.assertEqual(heap_diff["diff"]["dominators"], [])
+                bridge.action({"action": "clear_heap_diff_baseline"})
+                self.assertIsNone(bridge.snapshot()["heap_diff_baseline"])
                 update = bridge.action(
                     {
                         "action": "update_breakpoint",
@@ -769,6 +780,7 @@ process.stdout.write(JSON.stringify({{
         connection = RecordingConnection()
         bridge = FailingCaptureBridge(heap_snapshot_binary=Path("/usr/bin/true"))
         bridge._connection = connection
+        bridge._target = {"id": "page-1"}
 
         with self.assertRaisesRegex(DebuggerBridgeError, "capture failed"):
             bridge._search_heap_snapshot({"query": "token"})

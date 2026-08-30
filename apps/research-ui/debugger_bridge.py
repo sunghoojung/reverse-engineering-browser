@@ -49,6 +49,7 @@ MAX_HEAP_SNAPSHOT_RESULTS = 50
 MAX_HEAP_RETAINING_PATH = 12
 HEAP_SNAPSHOT_CAPTURE_TIMEOUT_SECONDS = 60.0
 HEAP_SNAPSHOT_SEARCH_TIMEOUT_SECONDS = 20.0
+HEAP_SNAPSHOT_DIFF_TIMEOUT_SECONDS = 60.0
 MAX_ACTIVE_PORT_BYTES = 4_096
 MAX_TARGET_LIST_BYTES = 2 * 1024 * 1024
 MAX_TARGET_ID_BYTES = 4_096
@@ -277,6 +278,14 @@ class HeapSnapshotCollector:
                 self.error = "Heap snapshot temporary storage could not be closed"
 
 
+@dataclass(frozen=True)
+class HeapSnapshotCapture:
+    path: Path
+    target_id: str
+    byte_count: int
+    captured_at_ms: int
+
+
 class WebSocketClient:
     def __init__(self, url: str) -> None:
         parsed = urlparse(url)
@@ -498,6 +507,8 @@ class DebuggerBridge:
         self._xhr_breakpoints: list[str] = []
         self._event_breakpoints: list[str] = []
         self._heap_snapshot_collector: Optional[HeapSnapshotCollector] = None
+        self._heap_diff_baseline: Optional[HeapSnapshotCapture] = None
+        self._heap_diff_busy = False
 
     def start(self) -> None:
         if self.active_port_path is None or self._thread is not None:
@@ -517,6 +528,7 @@ class DebuggerBridge:
         if self._thread is not None:
             self._thread.join(timeout=3.0)
         self._fail_pending(DebuggerBridgeError("Debugger bridge stopped"))
+        self._clear_heap_diff_baseline(force=True)
 
     def generation(self) -> int:
         with self._lock:
@@ -559,6 +571,7 @@ class DebuggerBridge:
                     "xhr_breakpoints": list(self._xhr_breakpoints),
                     "event_breakpoints": list(self._event_breakpoints),
                 },
+                "heap_diff_baseline": self._heap_diff_baseline_metadata(),
                 "limits": {
                     "scripts": MAX_SCRIPTS,
                     "call_frames": MAX_CALL_FRAMES,
@@ -716,14 +729,23 @@ class DebuggerBridge:
             with self._lock:
                 if not any(target["id"] == target_id for target in self._targets):
                     raise DebuggerBridgeError("Debugger target is unavailable")
+                if self._heap_diff_busy:
+                    raise DebuggerBridgeError("Heap snapshot comparison is running")
                 self._preferred_target_id = target_id
                 connection = self._connection
+            self._clear_heap_diff_baseline()
             if connection is not None:
                 connection.close()
         elif action == "search_live_objects":
             return self._search_live_objects(request)
         elif action == "search_heap_snapshot":
             return self._search_heap_snapshot(request)
+        elif action == "capture_heap_diff_baseline":
+            return self._capture_heap_diff_baseline()
+        elif action == "compare_heap_diff":
+            return self._compare_heap_diff()
+        elif action == "clear_heap_diff_baseline":
+            self._clear_heap_diff_baseline()
         elif action == "clear_console":
             with self._lock:
                 self._console = []
@@ -994,17 +1016,49 @@ class DebuggerBridge:
             raise DebuggerBridgeError("Heap snapshot search requires a value")
         if not isinstance(case_sensitive, bool):
             raise DebuggerBridgeError("Heap snapshot search options must be boolean")
+        binary = self._heap_snapshot_binary()
+
+        capture = self._capture_heap_snapshot()
+        try:
+            command = [
+                str(binary),
+                "--snapshot",
+                str(capture.path),
+                "--query",
+                query,
+                "--limit",
+                str(MAX_HEAP_SNAPSHOT_RESULTS),
+            ]
+            if case_sensitive:
+                command.append("--case-sensitive")
+            document = self._run_native_heap_snapshot(
+                command,
+                HEAP_SNAPSHOT_SEARCH_TIMEOUT_SECONDS,
+                "search",
+            )
+            return self._normalize_heap_snapshot_search(document)
+        finally:
+            capture.path.unlink(missing_ok=True)
+
+    def _heap_snapshot_binary(self) -> Path:
         binary = self.heap_snapshot_binary.resolve()
         if not binary.is_file() or not os.access(binary, os.X_OK):
             raise DebuggerBridgeError(
-                "Native heap snapshot search is unavailable; run make heap-snapshot"
+                "Native heap snapshot analysis is unavailable; run make heap-snapshot"
             )
+        return binary
 
+    def _capture_heap_snapshot(self) -> HeapSnapshotCapture:
         temporary = tempfile.NamedTemporaryFile(
             mode="wb", prefix="reb-heap-", suffix=".heapsnapshot", delete=False
         )
         collector = HeapSnapshotCollector(Path(temporary.name), temporary)
         with self._lock:
+            target_id = self._target["id"] if self._target is not None else None
+            if target_id is None:
+                collector.close()
+                collector.path.unlink(missing_ok=True)
+                raise DebuggerBridgeError("Debugger target is unavailable")
             if self._heap_snapshot_collector is not None:
                 collector.close()
                 collector.path.unlink(missing_ok=True)
@@ -1040,46 +1094,150 @@ class DebuggerBridge:
                 raise DebuggerBridgeError(collector.error)
             if collector.chunk_count == 0 or collector.byte_count == 0:
                 raise ProtocolError("Debugger returned an empty heap snapshot")
-            command = [
-                str(binary),
-                "--snapshot",
-                str(collector.path),
-                "--query",
-                query,
-                "--limit",
-                str(MAX_HEAP_SNAPSHOT_RESULTS),
-            ]
-            if case_sensitive:
-                command.append("--case-sensitive")
-            try:
-                completed = subprocess.run(
-                    command,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    timeout=HEAP_SNAPSHOT_SEARCH_TIMEOUT_SECONDS,
-                )
-            except subprocess.TimeoutExpired as exception:
-                raise DebuggerBridgeError(
-                    "Native heap snapshot search exceeded its 20 second limit"
-                ) from exception
-            if completed.returncode != 0:
-                detail = self._truncate_text(completed.stderr.strip(), 512)
-                raise DebuggerBridgeError(
-                    detail or "Native heap snapshot search rejected the snapshot"
-                )
-            if len(completed.stdout.encode("utf-8")) > 512 * 1024:
-                raise ProtocolError("Native heap snapshot search returned oversized output")
-            try:
-                document = json.loads(completed.stdout)
-            except json.JSONDecodeError as exception:
-                raise ProtocolError(
-                    "Native heap snapshot search returned malformed JSON"
-                ) from exception
-            return self._normalize_heap_snapshot_search(document)
-        finally:
+            return HeapSnapshotCapture(
+                path=collector.path,
+                target_id=target_id,
+                byte_count=collector.byte_count,
+                captured_at_ms=int(time.time() * 1_000),
+            )
+        except BaseException:
             collector.path.unlink(missing_ok=True)
+            raise
+
+    def _run_native_heap_snapshot(
+        self, command: list[str], timeout: float, operation: str
+    ) -> Any:
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exception:
+            raise DebuggerBridgeError(
+                f"Native heap snapshot {operation} exceeded its {int(timeout)} second limit"
+            ) from exception
+        if completed.returncode != 0:
+            detail = self._truncate_text(completed.stderr.strip(), 512)
+            raise DebuggerBridgeError(
+                detail or f"Native heap snapshot {operation} rejected the snapshot"
+            )
+        if len(completed.stdout.encode("utf-8")) > 512 * 1024:
+            raise ProtocolError(
+                f"Native heap snapshot {operation} returned oversized output"
+            )
+        try:
+            return json.loads(completed.stdout)
+        except json.JSONDecodeError as exception:
+            raise ProtocolError(
+                f"Native heap snapshot {operation} returned malformed JSON"
+            ) from exception
+
+    def _heap_diff_baseline_metadata(self) -> Optional[dict[str, Any]]:
+        baseline = self._heap_diff_baseline
+        if baseline is None:
+            return None
+        return {
+            "target_id": baseline.target_id,
+            "file_bytes": baseline.byte_count,
+            "captured_at_ms": baseline.captured_at_ms,
+        }
+
+    def _clear_heap_diff_baseline(self, force: bool = False) -> None:
+        with self._lock:
+            if self._heap_diff_busy and not force:
+                raise DebuggerBridgeError("Heap snapshot comparison is running")
+            baseline = self._heap_diff_baseline
+            self._heap_diff_baseline = None
+            if baseline is not None:
+                self._changed()
+        if baseline is not None:
+            baseline.path.unlink(missing_ok=True)
+
+    def _finish_heap_diff_operation(self) -> None:
+        with self._lock:
+            self._heap_diff_busy = False
+            baseline = self._heap_diff_baseline
+            target_id = self._target["id"] if self._target is not None else None
+            if baseline is not None and baseline.target_id != target_id:
+                self._heap_diff_baseline = None
+                self._changed()
+            else:
+                baseline = None
+        if baseline is not None:
+            baseline.path.unlink(missing_ok=True)
+
+    def _capture_heap_diff_baseline(self) -> dict[str, Any]:
+        self._heap_snapshot_binary()
+        with self._lock:
+            if self._heap_diff_busy:
+                raise DebuggerBridgeError("Heap snapshot comparison is running")
+            self._heap_diff_busy = True
+        capture: Optional[HeapSnapshotCapture] = None
+        previous: Optional[HeapSnapshotCapture] = None
+        try:
+            capture = self._capture_heap_snapshot()
+            with self._lock:
+                previous = self._heap_diff_baseline
+                self._heap_diff_baseline = capture
+                metadata = self._heap_diff_baseline_metadata()
+                self._changed()
+            if previous is not None:
+                previous.path.unlink(missing_ok=True)
+            return {
+                "ok": True,
+                "baseline": metadata,
+                "generation": self.generation(),
+            }
+        except BaseException:
+            if capture is not None:
+                capture.path.unlink(missing_ok=True)
+            raise
+        finally:
+            self._finish_heap_diff_operation()
+
+    def _compare_heap_diff(self) -> dict[str, Any]:
+        binary = self._heap_snapshot_binary()
+        with self._lock:
+            if self._heap_diff_busy:
+                raise DebuggerBridgeError("Heap snapshot comparison is running")
+            baseline = self._heap_diff_baseline
+            target_id = self._target["id"] if self._target is not None else None
+            if baseline is None:
+                raise DebuggerBridgeError("Capture a heap snapshot baseline first")
+            if target_id != baseline.target_id:
+                raise DebuggerBridgeError(
+                    "Heap snapshot baseline belongs to a different debugger target"
+                )
+            self._heap_diff_busy = True
+        current: Optional[HeapSnapshotCapture] = None
+        try:
+            current = self._capture_heap_snapshot()
+            if current.target_id != baseline.target_id:
+                raise DebuggerBridgeError(
+                    "Debugger target changed during heap snapshot comparison"
+                )
+            document = self._run_native_heap_snapshot(
+                [
+                    str(binary),
+                    "--baseline",
+                    str(baseline.path),
+                    "--current",
+                    str(current.path),
+                    "--limit",
+                    str(MAX_HEAP_SNAPSHOT_RESULTS),
+                ],
+                HEAP_SNAPSHOT_DIFF_TIMEOUT_SECONDS,
+                "comparison",
+            )
+            return self._normalize_heap_snapshot_diff(document)
+        finally:
+            if current is not None:
+                current.path.unlink(missing_ok=True)
+            self._finish_heap_diff_operation()
 
     def _normalize_heap_snapshot_search(self, value: Any) -> dict[str, Any]:
         if not isinstance(value, dict) or value.get("protocol_version") != 1:
@@ -1183,6 +1341,190 @@ class DebuggerBridge:
                 )
             }
             | {"results": results},
+            "generation": self.generation(),
+        }
+
+    def _normalize_heap_snapshot_diff(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict) or value.get("protocol_version") != 1:
+            raise ProtocolError("Native heap snapshot comparison returned malformed output")
+        integer_fields = (
+            "baseline_file_bytes",
+            "current_file_bytes",
+            "baseline_nodes",
+            "current_nodes",
+            "baseline_edges",
+            "current_edges",
+            "baseline_reachable_nodes",
+            "current_reachable_nodes",
+            "baseline_self_size",
+            "current_self_size",
+            "duration_ms",
+            "result_limit",
+        )
+        if any(
+            not isinstance(value.get(field), int)
+            or isinstance(value.get(field), bool)
+            or value[field] < 0
+            or value[field] > 2**53 - 1
+            for field in integer_fields
+        ):
+            raise ProtocolError("Native heap snapshot comparison returned invalid counts")
+        self_size_delta = value.get("self_size_delta")
+        if (
+            not isinstance(self_size_delta, int)
+            or isinstance(self_size_delta, bool)
+            or abs(self_size_delta) > 2**53 - 1
+            or self_size_delta
+            != value["current_self_size"] - value["baseline_self_size"]
+        ):
+            raise ProtocolError("Native heap snapshot comparison returned invalid totals")
+        if (
+            value["baseline_file_bytes"] > MAX_HEAP_SNAPSHOT_BYTES
+            or value["current_file_bytes"] > MAX_HEAP_SNAPSHOT_BYTES
+            or value["baseline_reachable_nodes"] > value["baseline_nodes"]
+            or value["current_reachable_nodes"] > value["current_nodes"]
+            or value["result_limit"] != MAX_HEAP_SNAPSHOT_RESULTS
+        ):
+            raise ProtocolError("Native heap snapshot comparison returned invalid coverage")
+        boolean_fields = (
+            "group_result_limit_reached",
+            "dominator_result_limit_reached",
+            "aggregation_limit_reached",
+            "baseline_node_limit_reached",
+            "baseline_edge_limit_reached",
+            "baseline_string_limit_reached",
+            "current_node_limit_reached",
+            "current_edge_limit_reached",
+            "current_string_limit_reached",
+            "retained_size_saturated",
+        )
+        if any(not isinstance(value.get(field), bool) for field in boolean_fields):
+            raise ProtocolError("Native heap snapshot comparison returned invalid limits")
+
+        raw_groups = value.get("groups")
+        if not isinstance(raw_groups, list) or len(raw_groups) > MAX_HEAP_SNAPSHOT_RESULTS:
+            raise ProtocolError("Native heap snapshot comparison returned too many groups")
+        groups = []
+        for raw_group in raw_groups:
+            if not isinstance(raw_group, dict):
+                raise ProtocolError(
+                    "Native heap snapshot comparison returned a malformed group"
+                )
+            node_type = raw_group.get("type")
+            node_name = raw_group.get("name")
+            baseline_count = raw_group.get("baseline_count")
+            current_count = raw_group.get("current_count")
+            count_delta = raw_group.get("count_delta")
+            baseline_size = raw_group.get("baseline_self_size")
+            current_size = raw_group.get("current_self_size")
+            size_delta = raw_group.get("self_size_delta")
+            unsigned_values = (
+                baseline_count,
+                current_count,
+                baseline_size,
+                current_size,
+            )
+            signed_values = (count_delta, size_delta)
+            if (
+                not isinstance(node_type, str)
+                or not isinstance(node_name, str)
+                or any(
+                    not isinstance(item, int)
+                    or isinstance(item, bool)
+                    or item < 0
+                    or item > 2**53 - 1
+                    for item in unsigned_values
+                )
+                or any(
+                    not isinstance(item, int)
+                    or isinstance(item, bool)
+                    or abs(item) > 2**53 - 1
+                    for item in signed_values
+                )
+                or count_delta != current_count - baseline_count
+                or size_delta != current_size - baseline_size
+                or baseline_count > value["baseline_nodes"]
+                or current_count > value["current_nodes"]
+            ):
+                raise ProtocolError(
+                    "Native heap snapshot comparison returned a malformed group"
+                )
+            groups.append(
+                {
+                    "type": self._truncate_text(node_type, 64),
+                    "name": self._truncate_text(node_name, 256),
+                    "baseline_count": baseline_count,
+                    "current_count": current_count,
+                    "count_delta": count_delta,
+                    "baseline_self_size": baseline_size,
+                    "current_self_size": current_size,
+                    "self_size_delta": size_delta,
+                }
+            )
+
+        raw_dominators = value.get("dominators")
+        if (
+            not isinstance(raw_dominators, list)
+            or len(raw_dominators) > MAX_HEAP_SNAPSHOT_RESULTS
+        ):
+            raise ProtocolError(
+                "Native heap snapshot comparison returned too many dominators"
+            )
+        dominators = []
+        for raw_change in raw_dominators:
+            if not isinstance(raw_change, dict):
+                raise ProtocolError(
+                    "Native heap snapshot comparison returned a malformed dominator"
+                )
+            node_id = raw_change.get("id")
+            node_type = raw_change.get("type")
+            node_name = raw_change.get("name")
+            baseline_size = raw_change.get("baseline_retained_size")
+            current_size = raw_change.get("current_retained_size")
+            size_delta = raw_change.get("retained_size_delta")
+            if (
+                not isinstance(node_id, str)
+                or not node_id.isdecimal()
+                or len(node_id) > 20
+                or not isinstance(node_type, str)
+                or not isinstance(node_name, str)
+                or any(
+                    not isinstance(item, int)
+                    or isinstance(item, bool)
+                    or item < 0
+                    or item > 2**53 - 1
+                    for item in (baseline_size, current_size)
+                )
+                or not isinstance(size_delta, int)
+                or isinstance(size_delta, bool)
+                or abs(size_delta) > 2**53 - 1
+                or size_delta != current_size - baseline_size
+            ):
+                raise ProtocolError(
+                    "Native heap snapshot comparison returned a malformed dominator"
+                )
+            dominators.append(
+                {
+                    "id": node_id,
+                    "type": self._truncate_text(node_type, 64),
+                    "name": self._truncate_text(node_name, 256),
+                    "baseline_retained_size": baseline_size,
+                    "current_retained_size": current_size,
+                    "retained_size_delta": size_delta,
+                }
+            )
+        return {
+            "ok": True,
+            "diff": {
+                field: value[field]
+                for field in (
+                    "protocol_version",
+                    *integer_fields,
+                    "self_size_delta",
+                    *boolean_fields,
+                )
+            }
+            | {"groups": groups, "dominators": dominators},
             "generation": self.generation(),
         }
 
@@ -1340,6 +1682,9 @@ class DebuggerBridge:
             connection.close()
             reader.join(timeout=1.0)
             with self._lock:
+                clear_heap_baseline = (
+                    self._connection is connection and not self._heap_diff_busy
+                )
                 if self._connection is connection:
                     self._connection = None
                     self._target = None
@@ -1349,6 +1694,8 @@ class DebuggerBridge:
                     self._watch_frame_id = None
                     self._pause_serial += 1
                     self._changed()
+            if clear_heap_baseline:
+                self._clear_heap_diff_baseline()
 
     def _read_messages(self, connection: WebSocketClient) -> None:
         error: Optional[BaseException] = None

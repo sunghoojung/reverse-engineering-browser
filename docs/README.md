@@ -4,7 +4,9 @@
 
 - [Feature roadmap](./product/feature-list.md)
 - [Feature catalog](./product/feature-catalog.md)
+- [WireBrowser parity inventory](./product/wirebrowser-parity.md)
 - [Heap Reference Inspection v2](./product/heap-reference-inspection-v2.md)
+- [Memory Origin Trace v1](./product/memory-origin-trace-v1.md)
 - [Anti-bot VM detection v1](./product/anti-bot-vm-detection-v1.md)
 - [Request Origin Trace v1](./product/request-origin-trace-v1.md)
 - [Request Signal Profile v1](./product/request-signal-profile-v1.md)

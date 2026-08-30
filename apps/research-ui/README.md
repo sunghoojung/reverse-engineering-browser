@@ -138,6 +138,17 @@ baseline remains in user-only temporary storage until reset, target change,
 disconnect, or shutdown. Each current snapshot is deleted immediately after
 comparison.
 
+Origin Trace mode arms a temporary click breakpoint and samples the V8 heap at
+bounded function-return pauses. It retains at most eight steps before the first
+match and sixteen after it, with a hard limit of 32 sampled pauses and five
+minutes. Each snapshot is deleted immediately after the native C++ probe. The
+`all`-scope probe stops at the first match without allocating a reachability or
+incoming-reference index; reachable and unreachable scopes build only a compact
+one-byte reachability map and 32-bit traversal queue. The UI highlights the
+first sampled appearance, shows the surrounding function locations and explicit
+coverage, and can open the candidate source. See
+[Memory Origin Trace v1](../../docs/product/memory-origin-trace-v1.md).
+
 The Traffic workspace can pivot a selected request value into Memory. The pivot
 only prefills an ephemeral query. It does not persist the selected value or
 begin a heap capture without a separate user action.

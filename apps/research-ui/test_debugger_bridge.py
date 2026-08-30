@@ -17,6 +17,7 @@ from debugger_bridge import (
     MAX_HEAP_SNAPSHOT_BYTES,
     DebuggerBridge,
     DebuggerBridgeError,
+    HeapSnapshotCapture,
     HeapSnapshotCollector,
     ProtocolError,
 )
@@ -310,6 +311,33 @@ class FakeDebuggerWebSocket:
             "Debugger.stepOut",
         }:
             self.send_json({"method": "Debugger.resumed", "params": {}})
+        elif (
+            method == "DOMDebugger.setEventListenerBreakpoint"
+            and command["params"].get("eventName") == "click"
+        ):
+            self.send_json(
+                {
+                    "method": "Debugger.paused",
+                    "params": {
+                        "reason": "EventListener",
+                        "callFrames": [
+                            {
+                                "callFrameId": "origin-frame-1",
+                                "functionName": "createCheckoutToken",
+                                "url": "https://checkout.test/cart.js",
+                                "location": {
+                                    "scriptId": "script-1",
+                                    "lineNumber": 7,
+                                    "columnNumber": 4,
+                                },
+                                "scopeChain": [],
+                                "this": {"type": "undefined"},
+                            }
+                        ],
+                        "hitBreakpoints": [],
+                    },
+                }
+            )
 
     @staticmethod
     def assert_frame(condition: bool) -> None:
@@ -576,6 +604,43 @@ class DebuggerBridgeTests(unittest.TestCase):
                 self.assertEqual(updated["kind"], "logpoint")
                 self.assertEqual(updated["expression"], "cart.items.length")
                 bridge.action({"action": "step_over"})
+                self.wait_for(lambda: bridge.snapshot()["state"] == "running")
+                started_trace = bridge.action(
+                    {
+                        "action": "start_memory_origin_trace",
+                        "query": "secret-value",
+                        "scope": "all",
+                        "before_steps": 0,
+                        "after_steps": 0,
+                    }
+                )
+                self.assertIn(
+                    started_trace["trace"]["state"], {"armed", "capturing", "found"}
+                )
+                traced = self.wait_for(
+                    lambda: (
+                        (value := bridge.snapshot())["memory_origin_trace"]["state"]
+                        == "found"
+                        and value
+                    ),
+                    timeout=10.0,
+                )
+                origin_trace = traced["memory_origin_trace"]
+                self.assertEqual(origin_trace["first_match_step"], 1)
+                self.assertEqual(origin_trace["step_count"], 1)
+                self.assertEqual(len(origin_trace["steps"]), 1)
+                self.assertTrue(origin_trace["steps"][0]["is_first_match"])
+                self.assertEqual(
+                    origin_trace["steps"][0]["location"]["function_name"],
+                    "createCheckoutToken",
+                )
+                self.assertEqual(
+                    origin_trace["steps"][0]["match"]["name"], "secret-value"
+                )
+                self.assertEqual(origin_trace["steps"][0]["indexed_edges"], 0)
+                methods = [command["method"] for command in web_socket.commands]
+                self.assertIn("DOMDebugger.setEventListenerBreakpoint", methods)
+                self.assertIn("DOMDebugger.removeEventListenerBreakpoint", methods)
                 self.wait_for(lambda: bridge.snapshot()["state"] == "running")
             finally:
                 bridge.stop()
@@ -859,6 +924,201 @@ process.stdout.write(JSON.stringify({{
 
         self.assertTrue(connection.closed)
         self.assertIsNone(bridge._heap_snapshot_collector)
+
+    def test_memory_origin_trace_rejects_invalid_limits_and_probe_documents(
+        self,
+    ) -> None:
+        bridge = DebuggerBridge()
+        with self.assertRaisesRegex(DebuggerBridgeError, "tolerance window"):
+            bridge.action(
+                {
+                    "action": "start_memory_origin_trace",
+                    "query": "token",
+                    "before_steps": 9,
+                }
+            )
+
+        valid = {
+            "protocol_version": 1,
+            "file_bytes": 10,
+            "total_nodes": 4,
+            "analyzed_nodes": 3,
+            "reachable_nodes": 0,
+            "total_edges": 3,
+            "indexed_edges": 0,
+            "total_strings": 7,
+            "duration_ms": 1,
+            "scope": "all",
+            "match_found": True,
+            "reachability_indexed": False,
+            "node_limit_reached": False,
+            "edge_limit_reached": False,
+            "string_limit_reached": False,
+            "match": {
+                "id": "5",
+                "type": "string",
+                "name": "secret-value",
+                "self_size": 24,
+            },
+        }
+        normalized = bridge._normalize_heap_snapshot_probe(valid)
+        self.assertTrue(normalized["match_found"])
+        self.assertEqual(normalized["match"]["id"], "5")
+
+        with self.assertRaisesRegex(ProtocolError, "invalid coverage"):
+            bridge._normalize_heap_snapshot_probe(
+                dict(valid, reachability_indexed=True, indexed_edges=3)
+            )
+        with self.assertRaisesRegex(ProtocolError, "malformed match"):
+            bridge._normalize_heap_snapshot_probe(
+                dict(valid, match={**valid["match"], "id": "05"})
+            )
+        with self.assertRaisesRegex(ProtocolError, "malformed match"):
+            bridge._normalize_heap_snapshot_probe(
+                dict(
+                    valid,
+                    match_found=False,
+                    match=valid["match"],
+                    analyzed_nodes=4,
+                )
+            )
+        with self.assertRaisesRegex(ProtocolError, "invalid coverage"):
+            bridge._normalize_heap_snapshot_probe(
+                dict(
+                    valid,
+                    match_found=False,
+                    match=None,
+                    analyzed_nodes=3,
+                )
+            )
+
+    def test_memory_origin_trace_keeps_bounded_before_and_after_window(self) -> None:
+        def probe_document(found: bool) -> dict:
+            return {
+                "protocol_version": 1,
+                "file_bytes": 10,
+                "total_nodes": 4,
+                "analyzed_nodes": 3 if found else 4,
+                "reachable_nodes": 0,
+                "total_edges": 3,
+                "indexed_edges": 0,
+                "total_strings": 7,
+                "duration_ms": 1,
+                "scope": "all",
+                "match_found": found,
+                "reachability_indexed": False,
+                "node_limit_reached": False,
+                "edge_limit_reached": False,
+                "string_limit_reached": False,
+                "match": {
+                    "id": "5",
+                    "type": "string",
+                    "name": "secret-value",
+                    "self_size": 24,
+                }
+                if found
+                else None,
+            }
+
+        class TemporalBridge(DebuggerBridge):
+            def __init__(self) -> None:
+                super().__init__(heap_snapshot_binary=Path("/usr/bin/true"))
+                self.documents = [
+                    probe_document(False),
+                    probe_document(False),
+                    probe_document(False),
+                    probe_document(True),
+                    probe_document(True),
+                ]
+                self.capture_paths = []
+                self.commands = []
+                self._state = "running"
+                self._target = {
+                    "id": "page-1",
+                    "type": "page",
+                    "title": "Checkout",
+                    "url": "https://checkout.test/",
+                }
+
+            def _heap_snapshot_binary(self) -> Path:
+                return Path("/usr/bin/true")
+
+            def _capture_heap_snapshot(self) -> HeapSnapshotCapture:
+                temporary = tempfile.NamedTemporaryFile(delete=False)
+                temporary.write(b"snapshot")
+                temporary.close()
+                path = Path(temporary.name)
+                self.capture_paths.append(path)
+                return HeapSnapshotCapture(path, "page-1", 8, 1)
+
+            def _run_native_heap_snapshot(self, *_args, **_kwargs) -> dict:
+                return self.documents.pop(0)
+
+            def _command(self, method: str, *_args, **_kwargs) -> dict:
+                self.commands.append(method)
+                if method in {"Debugger.stepOut", "Debugger.resume"}:
+                    self._handle_event("Debugger.resumed", {})
+                return {}
+
+        bridge = TemporalBridge()
+        started = bridge.action(
+            {
+                "action": "start_memory_origin_trace",
+                "query": "secret-value",
+                "before_steps": 2,
+                "after_steps": 1,
+            }
+        )
+        self.assertEqual(started["trace"]["state"], "armed")
+
+        def pause(step: int) -> None:
+            bridge._handle_event(
+                "Debugger.paused",
+                {
+                    "reason": "step",
+                    "callFrames": [
+                        {
+                            "callFrameId": f"frame-{step}",
+                            "functionName": f"boundary{step}",
+                            "url": "https://checkout.test/cart.js",
+                            "location": {
+                                "scriptId": "script-1",
+                                "lineNumber": step,
+                                "columnNumber": 0,
+                            },
+                            "scopeChain": [],
+                            "this": {"type": "undefined"},
+                        }
+                    ],
+                    "hitBreakpoints": [],
+                },
+            )
+
+        for step in range(1, 5):
+            pause(step)
+            self.wait_for(
+                lambda: bridge.snapshot()["memory_origin_trace"]["step_count"]
+                == step
+                and bridge.snapshot()["memory_origin_trace"]["state"] == "stepping"
+            )
+        pause(5)
+        trace = self.wait_for(
+            lambda: (
+                (value := bridge.snapshot()["memory_origin_trace"])["state"]
+                == "found"
+                and value
+            )
+        )
+        self.assertEqual(trace["first_match_step"], 4)
+        self.assertEqual(trace["step_count"], 5)
+        self.assertEqual([step["step"] for step in trace["steps"]], [2, 3, 4, 5])
+        self.assertEqual(
+            [step["is_first_match"] for step in trace["steps"]],
+            [False, False, True, False],
+        )
+        self.assertTrue(all(not path.exists() for path in bridge.capture_paths))
+        self.assertEqual(bridge.documents, [])
+        self.assertIn("DOMDebugger.removeEventListenerBreakpoint", bridge.commands)
 
 
 if __name__ == "__main__":

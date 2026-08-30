@@ -11,7 +11,8 @@ namespace {
 
 void Usage() {
   std::cerr << "Usage: reb-heap-snapshot --snapshot PATH --query TEXT "
-               "[--case-sensitive] [--scope all|reachable|unreachable] [--limit COUNT]\n"
+               "[--case-sensitive] [--scope all|reachable|unreachable] "
+               "[--limit COUNT | --probe]\n"
                "       reb-heap-snapshot --baseline PATH --current PATH [--limit COUNT]\n";
 }
 
@@ -47,6 +48,8 @@ int main(const int argc, const char* const argv[]) {
   std::size_t result_limit = reb::kHeapSnapshotMaxResults;
   reb::HeapSnapshotSearchScope scope = reb::HeapSnapshotSearchScope::kAll;
   bool case_sensitive = false;
+  bool probe_only = false;
+  bool limit_supplied = false;
   for (int index = 1; index < argc; ++index) {
     const std::string_view argument(argv[index]);
     if (argument == "--snapshot" && index + 1 < argc) {
@@ -62,6 +65,7 @@ int main(const int argc, const char* const argv[]) {
         Usage();
         return 2;
       }
+      limit_supplied = true;
     } else if (argument == "--scope" && index + 1 < argc) {
       if (!ParseScope(argv[++index], scope)) {
         Usage();
@@ -69,6 +73,8 @@ int main(const int argc, const char* const argv[]) {
       }
     } else if (argument == "--case-sensitive") {
       case_sensitive = true;
+    } else if (argument == "--probe") {
+      probe_only = true;
     } else {
       Usage();
       return 2;
@@ -77,8 +83,9 @@ int main(const int argc, const char* const argv[]) {
   const bool search_mode = !snapshot_path.empty() && baseline_path.empty() && current_path.empty();
   const bool diff_mode = snapshot_path.empty() && !baseline_path.empty() && !current_path.empty();
   if ((!search_mode && !diff_mode) || (search_mode && (query.empty() || query.size() > 512)) ||
-      (diff_mode &&
-       (!query.empty() || case_sensitive || scope != reb::HeapSnapshotSearchScope::kAll))) {
+      (probe_only && (!search_mode || limit_supplied)) ||
+      (diff_mode && (!query.empty() || case_sensitive || probe_only ||
+                     scope != reb::HeapSnapshotSearchScope::kAll))) {
     Usage();
     return 2;
   }
@@ -86,13 +93,22 @@ int main(const int argc, const char* const argv[]) {
   std::string error;
   try {
     if (search_mode) {
-      reb::HeapSnapshotSearchResult result;
-      if (!reb::SearchV8HeapSnapshot(snapshot_path, query, case_sensitive, scope, result_limit,
-                                     result, error)) {
-        std::cerr << error << '\n';
-        return 1;
+      if (probe_only) {
+        reb::HeapSnapshotProbeResult result;
+        if (!reb::ProbeV8HeapSnapshot(snapshot_path, query, case_sensitive, scope, result, error)) {
+          std::cerr << error << '\n';
+          return 1;
+        }
+        std::cout << reb::HeapSnapshotProbeResultToJson(result) << '\n';
+      } else {
+        reb::HeapSnapshotSearchResult result;
+        if (!reb::SearchV8HeapSnapshot(snapshot_path, query, case_sensitive, scope, result_limit,
+                                       result, error)) {
+          std::cerr << error << '\n';
+          return 1;
+        }
+        std::cout << reb::HeapSnapshotSearchResultToJson(result) << '\n';
       }
-      std::cout << reb::HeapSnapshotSearchResultToJson(result) << '\n';
     } else {
       reb::HeapSnapshotDiffResult result;
       if (!reb::CompareV8HeapSnapshots(baseline_path, current_path, result_limit, result, error)) {

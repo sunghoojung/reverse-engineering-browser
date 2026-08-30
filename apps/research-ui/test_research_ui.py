@@ -1067,9 +1067,32 @@ const breakpoint = {
   line: 3, column: 0, condition: '', kind: 'line', expression: '',
   locations: [frame.location], locations_truncated: false
 };
+const originIdle = {
+  protocol_version: 1, trace_id: 0, state: 'idle', target_id: null, query: '',
+  scope: 'all', case_sensitive: false, before_steps: 0, after_steps: 0,
+  step_limit: 32, step_count: 0, first_match_step: null,
+  started_at_ms: 0, elapsed_ms: 0, partial: false, limit_reason: null,
+  message: 'Enter a value and arm a trace.', steps: []
+};
+const originFound = {
+  protocol_version: 1, trace_id: 3, state: 'found', target_id: 'page-1',
+  query: 'secret-value', scope: 'all', case_sensitive: false,
+  before_steps: 3, after_steps: 8, step_limit: 32, step_count: 1,
+  first_match_step: 1, started_at_ms: 1, elapsed_ms: 4, partial: false,
+  limit_reason: null, message: 'First appearance found.', steps: [{
+    id: 'origin-3-1', step: 1, captured_at_ms: 2, capture_bytes: 4096,
+    duration_ms: 1, analyzed_nodes: 3, total_nodes: 4, indexed_edges: 0,
+    total_edges: 3, matched: true, coverage_partial: false,
+    is_first_match: true,
+    location: {script_id: 'script-1', url: script.url,
+      function_name: 'createCheckoutToken', line: 7, column: 4,
+      framework_filtered: false},
+    match: {id: '5', type: 'string', name: 'secret-value', self_size: 24}
+  }]
+};
 const snapshot = {
   protocol_version: 1, state: 'paused', generation: 7, error: null,
-  heap_diff_baseline: null,
+  heap_diff_baseline: null, memory_origin_trace: originIdle,
   target, targets: [target], scripts: [script],
   paused: {reason: 'breakpoint', description: null, call_frames: [frame],
     async_stack: [{description: 'Promise.then', call_frames: [{
@@ -1157,6 +1180,12 @@ process.stdout.write(JSON.stringify({
   badSettingsRejected: !isDebuggerResponse({...snapshot, settings: {
     ...snapshot.settings, xhr_breakpoints: Array(101).fill('request')}}),
   oversizedRejected: !isDebuggerResponse({...snapshot, scripts: Array(5001).fill(script)}),
+  originFoundAccepted: isMemoryOriginTrace(originFound),
+  originStepBound: !isMemoryOriginTrace({...originFound, step_count: 33}),
+  originCanonicalIdRequired: !isMemoryOriginTrace({...originFound, steps: [{
+    ...originFound.steps[0], match: {...originFound.steps[0].match, id: '05'}}]}),
+  originFirstMatchRequired: !isMemoryOriginTrace({...originFound, first_match_step: null}),
+  missingOriginRejected: !isDebuggerResponse({...snapshot, memory_origin_trace: undefined}),
   liveSearchAccepted: isLiveObjectSearchResponse(liveSearch),
   liveSearchResultLimitRequired: !isLiveObjectSearchResponse({...liveSearch,
     search: {...liveSearch.search, result_limit: 51}}),
@@ -1205,6 +1234,11 @@ process.stdout.write(JSON.stringify({
                 "badAsyncStackRejected": True,
                 "badSettingsRejected": True,
                 "oversizedRejected": True,
+                "originFoundAccepted": True,
+                "originStepBound": True,
+                "originCanonicalIdRequired": True,
+                "originFirstMatchRequired": True,
+                "missingOriginRejected": True,
                 "liveSearchAccepted": True,
                 "liveSearchResultLimitRequired": True,
                 "liveSearchSimilarityBound": True,
@@ -1219,7 +1253,7 @@ process.stdout.write(JSON.stringify({
             },
         )
 
-    def test_memory_workspace_exposes_live_snapshot_and_heap_comparison(self) -> None:
+    def test_memory_workspace_exposes_live_snapshot_diff_and_origin_trace(self) -> None:
         html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
 
         self.assertIn('data-screen="memory">Memory</button>', html)
@@ -1229,25 +1263,32 @@ process.stdout.write(JSON.stringify({
         self.assertIn("function isLiveObjectSearchResponse(body)", html)
         self.assertIn("function isHeapSnapshotSearchResponse(body)", html)
         self.assertIn("function isHeapSnapshotDiffResponse(body)", html)
+        self.assertIn("function isMemoryOriginTrace(trace)", html)
         self.assertIn("function runLiveObjectSearch()", html)
         self.assertIn("function runHeapSnapshotSearch()", html)
         self.assertIn("function runHeapSnapshotDiff()", html)
+        self.assertIn("function runMemoryOriginTrace()", html)
         self.assertIn("function renderMemory()", html)
         self.assertIn("function renderMemoryDetail()", html)
         self.assertIn("action: 'search_live_objects'", html)
         self.assertIn("action: 'search_heap_snapshot'", html)
         self.assertIn("action: 'capture_heap_diff_baseline'", html)
         self.assertIn("action: 'compare_heap_diff'", html)
+        self.assertIn("action: 'start_memory_origin_trace'", html)
+        self.assertIn("action: 'stop_memory_origin_trace'", html)
         self.assertIn('id="request-memory-pivot"', html)
         self.assertIn('data-mode="live"', html)
         self.assertIn('memory-form[data-mode="snapshot"] .memory-value-field', html)
+        self.assertIn('data-memory-mode="origin"', html)
+        self.assertIn('id="memory-origin-before"', html)
+        self.assertIn('id="memory-origin-after"', html)
         self.assertIn("Capturing briefly pauses the target", html)
         self.assertIn("Accessors are reported without invoking getters", html)
         self.assertIn("Top retained-memory changes", html)
         self.assertIn('id="memory-reference-scope"', html)
         self.assertIn("Incoming references", html)
         self.assertIn("incoming_reference_limit_reached", html)
-        self.assertIn("event.key !== 'Enter' || state.memoryMode !== 'snapshot'", html)
+        self.assertIn("!['snapshot', 'origin'].includes(state.memoryMode)", html)
         self.assertNotIn("expose_live_object", html)
 
     def test_sources_model_rejects_malformed_artifact_catalogs(self) -> None:

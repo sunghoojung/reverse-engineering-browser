@@ -137,6 +137,29 @@ int main() {
   CHECK(json.find("\"name\":\"secret-value\"") != std::string::npos);
   CHECK(json.find("\"edge\":\"token\"") != std::string::npos);
 
+  reb::HeapSnapshotProbeResult probe;
+  CHECK(reb::ProbeV8HeapSnapshot(snapshot.Path(), "SECRET", false,
+                                 reb::HeapSnapshotSearchScope::kAll, probe, error));
+  CHECK(probe.match_found);
+  CHECK(!probe.reachability_indexed);
+  CHECK(probe.indexed_edges == 0);
+  CHECK(probe.analyzed_nodes == 3);
+  CHECK(probe.match.node_id == 5);
+  CHECK(probe.match.node_type == "string");
+  CHECK(probe.match.node_name == "secret-value");
+  CHECK(probe.match.self_size == 24);
+  const std::string probe_json = reb::HeapSnapshotProbeResultToJson(probe);
+  CHECK(probe_json.find("\"protocol_version\":1") != std::string::npos);
+  CHECK(probe_json.find("\"match_found\":true") != std::string::npos);
+  CHECK(probe_json.find("\"reachability_indexed\":false") != std::string::npos);
+  CHECK(probe_json.find("\"match\":{\"id\":\"5\"") != std::string::npos);
+
+  reb::HeapSnapshotProbeResult missing_probe;
+  CHECK(reb::ProbeV8HeapSnapshot(snapshot.Path(), "SECRET", true,
+                                 reb::HeapSnapshotSearchScope::kAll, missing_probe, error));
+  CHECK(!missing_probe.match_found);
+  CHECK(missing_probe.analyzed_nodes == missing_probe.total_nodes);
+
   reb::HeapSnapshotSearchResult limited;
   CHECK(reb::SearchV8HeapSnapshot(snapshot.Path(), "t", false, reb::HeapSnapshotSearchScope::kAll,
                                   1, limited, error));
@@ -195,6 +218,16 @@ int main() {
                                   error));
   CHECK(reachable_only.matches.empty());
   CHECK(reachable_only.matched_nodes == 0);
+
+  reb::HeapSnapshotProbeResult unreachable_probe;
+  CHECK(reb::ProbeV8HeapSnapshot(unreachable_snapshot.Path(), "secret", false,
+                                 reb::HeapSnapshotSearchScope::kUnreachable, unreachable_probe,
+                                 error));
+  CHECK(unreachable_probe.match_found);
+  CHECK(unreachable_probe.reachability_indexed);
+  CHECK(unreachable_probe.reachable_nodes == 1);
+  CHECK(unreachable_probe.indexed_edges == unreachable_probe.total_edges);
+  CHECK(unreachable_probe.match.node_id == 5);
 
   TemporarySnapshot baseline_snapshot;
   std::ofstream baseline_output(baseline_snapshot.Path(), std::ios::binary);
@@ -349,6 +382,9 @@ int main() {
   CHECK(mismatched_edges_output.good());
   CHECK(!reb::SearchV8HeapSnapshot(mismatched_edges.Path(), "x", false,
                                    reb::HeapSnapshotSearchScope::kAll, 50, result, error));
+  CHECK(error.find("edge counts") != std::string::npos);
+  CHECK(!reb::ProbeV8HeapSnapshot(mismatched_edges.Path(), "x", false,
+                                  reb::HeapSnapshotSearchScope::kAll, probe, error));
   CHECK(error.find("edge counts") != std::string::npos);
 
   std::cout << "heap_snapshot_test passed\n";

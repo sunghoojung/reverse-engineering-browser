@@ -902,6 +902,26 @@ bool BuildEdgeStarts(const SnapshotData& data,
   return true;
 }
 
+bool ValidateEdgeCounts(const SnapshotData& data,
+                        const SnapshotLayout& layout,
+                        std::string& error) {
+  std::uint64_t edge_count = 0;
+  for (std::size_t ordinal = 0; ordinal < layout.stored_nodes; ++ordinal) {
+    const std::uint64_t count =
+        data.nodes[ordinal * layout.node_width + layout.node_edge_count_field];
+    if (count > std::numeric_limits<std::uint64_t>::max() - edge_count) {
+      error = "Heap snapshot edge counts overflow the native index";
+      return false;
+    }
+    edge_count += count;
+  }
+  if (!data.edge_values_truncated && edge_count != layout.stored_edges) {
+    error = "Heap snapshot node edge counts do not match its edge array";
+    return false;
+  }
+  return true;
+}
+
 struct SnapshotNodeSummary final {
   std::uint64_t node_id = 0;
   std::uint64_t self_size = 0;
@@ -1864,6 +1884,141 @@ std::string HeapSnapshotSearchResultToJson(const HeapSnapshotSearchResult& resul
     output << "]}";
   }
   output << "]}";
+  return output.str();
+}
+
+bool ProbeV8HeapSnapshot(const std::filesystem::path& snapshot_path,
+                         const std::string_view query,
+                         const bool case_sensitive,
+                         const HeapSnapshotSearchScope scope,
+                         HeapSnapshotProbeResult& result,
+                         std::string& error) {
+  const auto started = std::chrono::steady_clock::now();
+  result = {};
+  result.scope = scope;
+  error.clear();
+  if (query.empty() || query.size() > 512 ||
+      (scope != HeapSnapshotSearchScope::kAll && scope != HeapSnapshotSearchScope::kReachable &&
+       scope != HeapSnapshotSearchScope::kUnreachable)) {
+    error = "Heap snapshot probe query or scope is invalid";
+    return false;
+  }
+
+  SnapshotData data;
+  SnapshotLayout layout;
+  SnapshotStats stats;
+  if (!LoadSnapshot(snapshot_path, data, layout, stats, error)) {
+    return false;
+  }
+  if (layout.stored_nodes >= std::numeric_limits<GraphIndex>::max() ||
+      layout.stored_edges >= std::numeric_limits<GraphIndex>::max()) {
+    error = "Heap snapshot exceeds the native reference index";
+    return false;
+  }
+  if (!ValidateEdgeCounts(data, layout, error)) {
+    return false;
+  }
+
+  result.file_bytes = stats.file_bytes;
+  result.total_nodes = stats.total_nodes;
+  result.total_edges = stats.total_edges;
+  result.total_strings = stats.total_strings;
+  result.node_limit_reached = stats.node_limit_reached;
+  result.edge_limit_reached = stats.edge_limit_reached;
+  result.string_limit_reached = stats.string_limit_reached;
+
+  std::vector<std::uint8_t> reachable;
+  if (scope != HeapSnapshotSearchScope::kAll) {
+    result.reachability_indexed = true;
+    result.indexed_edges = layout.stored_edges;
+  }
+  if (scope != HeapSnapshotSearchScope::kAll && layout.stored_nodes > 0) {
+    std::vector<GraphIndex> edge_starts;
+    if (!BuildEdgeStarts(data, layout, edge_starts, error)) {
+      return false;
+    }
+    reachable.assign(layout.stored_nodes, 0);
+    reachable[0] = 1;
+    std::vector<GraphIndex> pending;
+    pending.reserve(std::min(layout.stored_nodes, kInitialBfsQueueReserve));
+    pending.push_back(0);
+    for (std::size_t pending_index = 0; pending_index < pending.size(); ++pending_index) {
+      const GraphIndex source = pending[pending_index];
+      const std::size_t first_edge = edge_starts[source];
+      const std::uint64_t count_value =
+          data.nodes[static_cast<std::size_t>(source) * layout.node_width +
+                     layout.node_edge_count_field];
+      const std::size_t end_edge =
+          std::min(layout.stored_edges, first_edge + static_cast<std::size_t>(count_value));
+      for (std::size_t edge_ordinal = first_edge; edge_ordinal < end_edge; ++edge_ordinal) {
+        GraphIndex target = 0;
+        if (!EdgeTarget(data, layout, edge_ordinal, target) || reachable[target] != 0) {
+          continue;
+        }
+        reachable[target] = 1;
+        pending.push_back(target);
+      }
+    }
+    result.reachable_nodes = pending.size();
+  }
+
+  std::string folded_query(query);
+  if (!case_sensitive) {
+    std::transform(folded_query.begin(), folded_query.end(), folded_query.begin(), AsciiFold);
+  }
+  const std::string_view search_query = case_sensitive ? query : std::string_view(folded_query);
+  for (std::size_t ordinal = 0; ordinal < layout.stored_nodes; ++ordinal) {
+    ++result.analyzed_nodes;
+    const bool node_reachable = !reachable.empty() && reachable[ordinal] != 0;
+    if (!MatchesSearchScope(node_reachable, scope)) {
+      continue;
+    }
+    const std::size_t offset = ordinal * layout.node_width;
+    const std::string_view name = StringAt(data, data.nodes[offset + layout.node_name_field]);
+    if (!ContainsText(name, search_query, case_sensitive)) {
+      continue;
+    }
+    result.match_found = true;
+    result.match.node_id = data.nodes[offset + layout.node_id_field];
+    result.match.self_size = data.nodes[offset + layout.node_size_field];
+    result.match.node_type = BoundedText(NodeTypeAt(data, offset, layout.node_type_field), 64);
+    result.match.node_name = BoundedText(name);
+    break;
+  }
+
+  result.duration_ms =
+      static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - started)
+                                     .count());
+  return true;
+}
+
+std::string HeapSnapshotProbeResultToJson(const HeapSnapshotProbeResult& result) {
+  std::ostringstream output;
+  output << "{\"protocol_version\":" << result.protocol_version
+         << ",\"file_bytes\":" << result.file_bytes << ",\"total_nodes\":" << result.total_nodes
+         << ",\"analyzed_nodes\":" << result.analyzed_nodes
+         << ",\"reachable_nodes\":" << result.reachable_nodes
+         << ",\"total_edges\":" << result.total_edges
+         << ",\"indexed_edges\":" << result.indexed_edges
+         << ",\"total_strings\":" << result.total_strings
+         << ",\"duration_ms\":" << result.duration_ms << ",\"scope\":\""
+         << SearchScopeName(result.scope)
+         << "\",\"match_found\":" << (result.match_found ? "true" : "false")
+         << ",\"reachability_indexed\":" << (result.reachability_indexed ? "true" : "false")
+         << ",\"node_limit_reached\":" << (result.node_limit_reached ? "true" : "false")
+         << ",\"edge_limit_reached\":" << (result.edge_limit_reached ? "true" : "false")
+         << ",\"string_limit_reached\":" << (result.string_limit_reached ? "true" : "false")
+         << ",\"match\":";
+  if (result.match_found) {
+    output << "{\"id\":\"" << result.match.node_id << "\",\"type\":\""
+           << JsonEscape(result.match.node_type) << "\",\"name\":\""
+           << JsonEscape(result.match.node_name) << "\",\"self_size\":" << result.match.self_size
+           << '}';
+  } else {
+    output << "null";
+  }
+  output << '}';
   return output.str();
 }
 

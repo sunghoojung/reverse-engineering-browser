@@ -26,6 +26,7 @@ or documentation unless the user explicitly brings it back into scope.
 ## Repository map
 
 ```text
+.agents/skills/         Repo-scoped validation and testing workflows
 .github/workflows/      pull-request checks and tag-triggered release builds
 apps/
   reb-event-demo/       Small concurrency and event-path demonstration
@@ -140,6 +141,16 @@ drop counter or emit a gap marker as soon as capacity returns.
 Do not use the `no-mistakes` skill, gate, remote, or pipeline in this
 repository. Use the explicit validation commands below and normal GitHub pull
 request checks.
+
+Use the repository skills under `.agents/skills/` for task-specific workflows:
+
+- `reb-validation` selects focused checks and records the complete handoff gate.
+- `reb-ui-e2e` reproduces and verifies user-visible Origin Trace behavior.
+- `reb-brave-verify` proves tracked browser integration changes are reproducible.
+
+This file owns permanent project rules, and the Makefile owns executable check
+commands. Skills coordinate those sources without replacing or duplicating
+them.
 
 1. Inspect the relevant contract and existing tests before editing.
 2. Reproduce bugs through the closest available end-to-end path.

@@ -186,6 +186,7 @@ make sanitize
 ## Layout
 
 ```text
+.agents/skills/         repo-scoped validation and testing workflows
 .github/workflows/      pull-request checks and tag-triggered releases
 apps/                   runnable demos, producers, and Origin Trace
   research-ui/macos/    native macOS shell and application icon source

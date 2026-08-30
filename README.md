@@ -61,6 +61,7 @@ The repository includes a dependency-free C++ vertical slice for the probe event
 - a bounded request signal profile for fingerprint-relevant browser activity;
 - an authenticated, acknowledged artifact socket with immutable SHA-256 blobs;
 - a native macOS Origin Trace application that reads the broker evidence store;
+- bounded read-only live JavaScript object and structural-similarity search;
 - a threaded producer and consumer demo;
 - unit tests and sanitizer support.
 
@@ -128,11 +129,15 @@ with the matching session flags. It also starts the research UI on a random
 loopback port and attaches an allowlisted debugger bridge to Brave's isolated,
 session-scoped profile. Sources then provides live scripts, breakpoints,
 stepping, sync and async call stacks, bounded scopes and watches, special
-breakpoints, and a console drawer. Artifact success events are emitted only
-after the receiver has committed the manifest record; capture or transfer
-failures remain visible as normal evidence events. Session directories and
-evidence files are user-only. When the Artifact category is disabled, the
-launcher omits the artifact receiver and exits normally with Brave.
+breakpoints, and a console drawer. Memory adds property, primitive value,
+class, regular expression, and JSON-shape search over live JavaScript objects.
+The scan never invokes accessors, returns read-only previews, and enforces
+time, candidate, property, and result limits. Artifact success events are
+emitted only after the receiver has committed the manifest record; capture or
+transfer failures remain visible as normal evidence events. Session
+directories and evidence files are user-only. When the Artifact category is
+disabled, the launcher omits the artifact receiver and exits normally with
+Brave.
 Set `REB_BRAVE_BINARY` when the executable is outside the default component
 output directory. Live sessions enable Canvas, Web Audio, Network, and Artifact
 by default with category mask `1285` and expire after one hour. Override those

@@ -1085,6 +1085,18 @@ const snapshot = {
   limits: {scripts: 5000, call_frames: 64, scope_properties: 2000,
     console_entries: 500, source_bytes: 2097152}
 };
+const liveSearch = {
+  ok: true, generation: 7,
+  search: {
+    protocol_version: 1, analyzed: 17, total_objects: 17, result_limit: 50,
+    duration_ms: 3, result_limit_reached: false, scan_limit_reached: false,
+    timed_out: false, results: [{
+      id: '4', class_name: 'CheckoutState', property_count: 2,
+      properties_truncated: false, similarity: 0.875,
+      preview: [{name: 'ready', type: 'boolean', value: 'true'}]
+    }]
+  }
+};
 process.stdout.write(JSON.stringify({
   accepted: isDebuggerResponse(snapshot),
   badStateRejected: !isDebuggerResponse({...snapshot, state: 'owned'}),
@@ -1099,7 +1111,15 @@ process.stdout.write(JSON.stringify({
     ...snapshot.paused, async_stack: [null]}}),
   badSettingsRejected: !isDebuggerResponse({...snapshot, settings: {
     ...snapshot.settings, xhr_breakpoints: Array(101).fill('request')}}),
-  oversizedRejected: !isDebuggerResponse({...snapshot, scripts: Array(5001).fill(script)})
+  oversizedRejected: !isDebuggerResponse({...snapshot, scripts: Array(5001).fill(script)}),
+  liveSearchAccepted: isLiveObjectSearchResponse(liveSearch),
+  liveSearchResultLimitRequired: !isLiveObjectSearchResponse({...liveSearch,
+    search: {...liveSearch.search, result_limit: 51}}),
+  liveSearchSimilarityBound: !isLiveObjectSearchResponse({...liveSearch,
+    search: {...liveSearch.search, results: [{...liveSearch.search.results[0], similarity: 2}]}}),
+  liveSearchPreviewBound: !isLiveObjectSearchResponse({...liveSearch,
+    search: {...liveSearch.search, results: [{...liveSearch.search.results[0],
+      preview: Array(17).fill({name: 'x', type: 'string', value: 'x'})}]}})
 }));
 """
         completed = subprocess.run(
@@ -1122,8 +1142,28 @@ process.stdout.write(JSON.stringify({
                 "badAsyncStackRejected": True,
                 "badSettingsRejected": True,
                 "oversizedRejected": True,
+                "liveSearchAccepted": True,
+                "liveSearchResultLimitRequired": True,
+                "liveSearchSimilarityBound": True,
+                "liveSearchPreviewBound": True,
             },
         )
+
+    def test_memory_workspace_exposes_bounded_read_only_live_search(self) -> None:
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('data-screen="memory">Memory</button>', html)
+        self.assertIn('id="screen-memory"', html)
+        self.assertIn('aria-label="Live object search criteria"', html)
+        self.assertIn('role="listbox" aria-label="Live object matches"', html)
+        self.assertIn("function isLiveObjectSearchResponse(body)", html)
+        self.assertIn("function runLiveObjectSearch()", html)
+        self.assertIn("function renderMemory()", html)
+        self.assertIn("function renderMemoryDetail()", html)
+        self.assertIn("action: 'search_live_objects'", html)
+        self.assertIn("Accessors are reported without invoking getters", html)
+        self.assertIn("Baseline read-only", html)
+        self.assertNotIn("expose_live_object", html)
 
     def test_sources_model_rejects_malformed_artifact_catalogs(self) -> None:
         node = shutil.which("node")

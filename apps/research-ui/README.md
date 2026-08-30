@@ -149,6 +149,19 @@ first sampled appearance, shows the surrounding function locations and explicit
 coverage, and can open the candidate source. See
 [Memory Origin Trace v1](../../docs/product/memory-origin-trace-v1.md).
 
+The Request Interception Lab creates a new disposable DevTools BrowserContext
+and page for each experiment. It never arms Fetch interception on the baseline
+target and never shares that target's cookies or storage. One URL-pattern rule
+can continue, block, drop, rewrite, or fulfill a request. Requests always use
+`credentials: omit`, and credential, cookie, connection, host, and framing
+headers are rejected. Rules and explicit requests are limited to 64 headers,
+16 KiB total header text, and 64 KiB bodies. At most 16 paused requests are
+processed concurrently; overflow requests continue unchanged and create a
+visible audit record. Results are capped at 64 KiB, while the 128-entry audit
+stores only redacted URLs and mutation metadata. Disposal deletes the complete
+BrowserContext before the ephemeral result can be cleared. See
+[Request Interception v1](../../docs/product/request-interception-v1.md).
+
 The Traffic workspace can pivot a selected request value into Memory. The pivot
 only prefills an ephemeral query. It does not persist the selected value or
 begin a heap capture without a separate user action.

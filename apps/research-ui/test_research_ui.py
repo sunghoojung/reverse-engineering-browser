@@ -1090,9 +1090,35 @@ const originFound = {
     match: {id: '5', type: 'string', name: 'secret-value', self_size: 24}
   }]
 };
+const interceptionIdle = {
+  protocol_version: 1, experiment_id: 0, state: 'idle', isolated: false,
+  target_id: null, created_at_ms: 0, disposed_at_ms: 0,
+  rule: {mode: 'continue', url_pattern: '*', method_filter: '', rewrite_url: '',
+    rewrite_method: '', rewrite_header_count: 0, rewrite_body_bytes: 0,
+    response_code: 200, response_header_count: 0, response_body_bytes: 0},
+  last_request: null, result: null, audit: [], audit_evictions: 0,
+  pending_requests: 0, message: 'Create an isolated experiment.',
+  limits: {audit_entries: 128, pending_requests: 16, headers: 64,
+    body_bytes: 65536, response_bytes: 65536}
+};
+const interceptionReady = {
+  ...interceptionIdle, experiment_id: 4, state: 'ready', isolated: true,
+  target_id: 'page-1', created_at_ms: 1,
+  rule: {...interceptionIdle.rule, mode: 'fulfill', response_header_count: 1,
+    response_body_bytes: 11},
+  last_request: {url: 'https://checkout.test/cart', method: 'POST',
+    header_count: 1, body_bytes: 2},
+  result: {protocol_version: 1, ok: true, status: 201, status_text: 'Created',
+    url: 'https://checkout.test/cart', headers: [{name: 'content-type', value: 'application/json'}],
+    headers_truncated: false, body: '{"ok":true}', body_truncated: false, error: null},
+  audit: [{id: 1, occurred_at_ms: 2, request_id: 'fetch-1', method: 'POST',
+    url: 'https://checkout.test/cart', resource_type: 'Fetch', rule_mode: 'fulfill',
+    outcome: 'fulfilled', detail: 'Synthetic response 201 returned.'}]
+};
 const snapshot = {
   protocol_version: 1, state: 'paused', generation: 7, error: null,
   heap_diff_baseline: null, memory_origin_trace: originIdle,
+  request_interception: interceptionIdle,
   target, targets: [target], scripts: [script],
   paused: {reason: 'breakpoint', description: null, call_frames: [frame],
     async_stack: [{description: 'Promise.then', call_frames: [{
@@ -1186,6 +1212,16 @@ process.stdout.write(JSON.stringify({
     ...originFound.steps[0], match: {...originFound.steps[0].match, id: '05'}}]}),
   originFirstMatchRequired: !isMemoryOriginTrace({...originFound, first_match_step: null}),
   missingOriginRejected: !isDebuggerResponse({...snapshot, memory_origin_trace: undefined}),
+  interceptionReadyAccepted: isRequestInterception(interceptionReady),
+  interceptionAuditBound: !isRequestInterception({...interceptionReady,
+    audit: Array(129).fill(interceptionReady.audit[0])}),
+  interceptionCredentialRejected: !isRequestInterception({...interceptionReady,
+    result: {...interceptionReady.result,
+      headers: [{name: 'set-cookie', value: 'private=1'}]}}),
+  interceptionBodyByteBound: !isRequestInterception({...interceptionReady,
+    result: {...interceptionReady.result, body: 'é'.repeat(32769)}}),
+  interceptionPendingBound: !isRequestInterception({...interceptionReady, pending_requests: 17}),
+  missingInterceptionRejected: !isDebuggerResponse({...snapshot, request_interception: undefined}),
   liveSearchAccepted: isLiveObjectSearchResponse(liveSearch),
   liveSearchResultLimitRequired: !isLiveObjectSearchResponse({...liveSearch,
     search: {...liveSearch.search, result_limit: 51}}),
@@ -1239,6 +1275,12 @@ process.stdout.write(JSON.stringify({
                 "originCanonicalIdRequired": True,
                 "originFirstMatchRequired": True,
                 "missingOriginRejected": True,
+                "interceptionReadyAccepted": True,
+                "interceptionAuditBound": True,
+                "interceptionCredentialRejected": True,
+                "interceptionBodyByteBound": True,
+                "interceptionPendingBound": True,
+                "missingInterceptionRejected": True,
                 "liveSearchAccepted": True,
                 "liveSearchResultLimitRequired": True,
                 "liveSearchSimilarityBound": True,
@@ -1290,6 +1332,23 @@ process.stdout.write(JSON.stringify({
         self.assertIn("incoming_reference_limit_reached", html)
         self.assertIn("!['snapshot', 'origin'].includes(state.memoryMode)", html)
         self.assertNotIn("expose_live_object", html)
+
+    def test_experiment_workspace_exposes_isolated_request_interception(self) -> None:
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("Request Interception Lab", html)
+        self.assertIn('id="experiment-create"', html)
+        self.assertIn('id="experiment-rule-form"', html)
+        self.assertIn('id="experiment-request-form"', html)
+        self.assertIn("function isRequestInterception(experiment)", html)
+        self.assertIn("function renderExperiment()", html)
+        self.assertIn("action: 'create_request_interception_experiment'", html)
+        self.assertIn("action: 'configure_request_interception'", html)
+        self.assertIn("action: 'run_request_interception'", html)
+        self.assertIn("action: 'dispose_request_interception_experiment'", html)
+        self.assertIn("Credentials are always omitted", html)
+        self.assertIn("128 entries", html)
+        self.assertIn("64 KiB", html)
 
     def test_sources_model_rejects_malformed_artifact_catalogs(self) -> None:
         node = shutil.which("node")

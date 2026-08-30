@@ -1119,17 +1119,89 @@
       .console-entry.warn, .console-entry.warning { color: var(--amber); }
       .console-entry-source { color: var(--faint); }
 
-      .experiment-content { padding: 22px; }
-      .experiment-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(240px, .7fr); gap: 14px; }
       .experiment-card { border: 1px solid var(--line); border-radius: 5px; background: var(--panel-2); }
       .experiment-card header { padding: 12px; border-bottom: 1px solid var(--line); }
       .experiment-card h2 { margin: 0; font-size: 11px; }
       .experiment-card p { margin: 5px 0 0; color: var(--muted); font-size: 9px; }
       .experiment-body { padding: 13px; }
-      .experiment-step { display: grid; grid-template-columns: 21px 1fr; gap: 8px; padding: 8px 0; color: var(--muted); font-size: 9px; }
-      .experiment-step b { display: grid; place-items: center; width: 20px; height: 20px; border: 1px solid var(--line); border-radius: 50%; color: var(--text); font: 8px var(--mono); }
-      .experiment-input { padding: 10px; border: 1px solid var(--line); background: var(--panel); font: 9px var(--mono); }
-      .experiment-note { margin-top: 10px; color: var(--amber); font: 8px var(--mono); }
+      #screen-experiments:not([hidden]) { display: grid; grid-template-rows: 60px auto minmax(0, 1fr); }
+      .experiment-notice {
+        min-height: 34px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 13px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel-2);
+        color: var(--muted);
+        font-size: 10px;
+      }
+      .experiment-notice::before { content: ""; width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--faint); }
+      .experiment-notice[data-kind="ready"]::before { background: var(--green); }
+      .experiment-notice[data-kind="working"]::before { background: var(--accent); }
+      .experiment-notice[data-kind="error"]::before { background: var(--red); }
+      .experiment-workspace {
+        min-height: 0;
+        display: grid;
+        grid-template-columns: minmax(260px, .78fr) minmax(300px, 1fr) minmax(300px, 1fr);
+        gap: 12px;
+        padding: 12px;
+        overflow: auto;
+      }
+      .experiment-column { min-width: 0; display: grid; align-content: start; gap: 12px; }
+      .experiment-card { min-width: 0; overflow: hidden; }
+      .experiment-card header { display: flex; align-items: flex-start; gap: 10px; }
+      .experiment-card header > div:first-child { min-width: 0; }
+      .experiment-card-badge {
+        margin-left: auto;
+        padding: 3px 5px;
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        color: var(--green);
+        font: 650 7px var(--mono);
+        text-transform: uppercase;
+        white-space: nowrap;
+      }
+      .experiment-card-badge[data-kind="offline"] { color: var(--faint); }
+      .experiment-card-badge[data-kind="error"] { color: var(--red); }
+      .experiment-form { display: grid; gap: 10px; }
+      .experiment-form label { display: grid; gap: 5px; color: var(--muted); font: 8px var(--mono); text-transform: uppercase; }
+      .experiment-form input, .experiment-form select, .experiment-form textarea {
+        width: 100%;
+        min-height: 31px;
+        padding: 7px 8px;
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        background: var(--panel);
+        color: var(--text);
+        font: 9px/1.45 var(--mono);
+        text-transform: none;
+      }
+      .experiment-form textarea { min-height: 78px; resize: vertical; }
+      .experiment-form-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(96px, .4fr); gap: 8px; }
+      .experiment-rule-options { display: grid; gap: 10px; }
+      .experiment-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+      .experiment-actions button { min-height: 32px; }
+      .experiment-actions .experiment-primary { grid-column: 1 / -1; }
+      .experiment-context-facts { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--line-soft); }
+      .experiment-context-fact { padding: 9px 10px; border-right: 1px solid var(--line-soft); }
+      .experiment-context-fact:last-child { border-right: 0; }
+      .experiment-context-fact span { display: block; color: var(--faint); font: 7px var(--mono); text-transform: uppercase; }
+      .experiment-context-fact strong { display: block; margin-top: 4px; color: var(--text); font: 9px var(--mono); overflow-wrap: anywhere; }
+      .experiment-result-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid var(--line-soft); }
+      .experiment-result-summary > div { padding: 9px; border-right: 1px solid var(--line-soft); }
+      .experiment-result-summary > div:last-child { border-right: 0; }
+      .experiment-result-summary span { display: block; color: var(--faint); font: 7px var(--mono); text-transform: uppercase; }
+      .experiment-result-summary strong { display: block; margin-top: 4px; font: 10px var(--mono); overflow-wrap: anywhere; }
+      .experiment-result-body { min-height: 130px; max-height: 300px; margin: 0; padding: 11px; overflow: auto; color: var(--muted); background: var(--panel); font: 9px/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+      .experiment-audit { display: grid; max-height: 420px; overflow: auto; }
+      .experiment-audit-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 8px; padding: 9px 10px; border-bottom: 1px solid var(--line-soft); }
+      .experiment-audit-row:last-child { border-bottom: 0; }
+      .experiment-audit-title { min-width: 0; overflow: hidden; font: 9px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+      .experiment-audit-outcome { color: var(--accent); font: 8px var(--mono); text-transform: uppercase; }
+      .experiment-audit-meta { grid-column: 1 / -1; color: var(--faint); font: 8px/1.4 var(--mono); overflow-wrap: anywhere; }
+      .experiment-empty { min-height: 120px; display: grid; place-items: center; padding: 18px; color: var(--muted); text-align: center; }
+      .experiment-privacy { margin: 0; color: var(--faint); font: 8px/1.5 var(--mono); }
 
       #screen-memory:not([hidden]) { display: grid; grid-template-rows: 60px auto minmax(0, 1fr); }
       #screen-memory > .screen-head { grid-row: 1; }
@@ -1333,6 +1405,8 @@
       @media (max-width: 1100px) and (min-width: 901px) {
         .request-head, .request-row { grid-template-columns: minmax(150px, 1fr) 56px 52px 58px; }
         .request-head > :nth-child(5), .request-row > :nth-child(5) { display: none; }
+        .experiment-workspace { grid-template-columns: minmax(260px, .8fr) minmax(320px, 1.2fr); }
+        .experiment-column:last-child { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
       }
       @media (max-width: 900px) {
         .traffic-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
@@ -1348,6 +1422,8 @@
         .vm-summary { grid-template-columns: repeat(2, minmax(100px, 1fr)); }
         .memory-grid { grid-template-columns: 245px minmax(0, 1fr); }
         .memory-results-pane { grid-template-columns: minmax(210px, 42%) minmax(0, 1fr); }
+        .experiment-workspace { grid-template-columns: minmax(260px, .8fr) minmax(320px, 1.2fr); }
+        .experiment-column:last-child { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
       }
       @media (max-width: 880px) {
         .workspace { grid-template-columns: 178px minmax(0, 1fr); }
@@ -1380,7 +1456,9 @@
         .confidence { justify-self: start; }
         .screen-head { padding: 9px 10px; }
         .screen-head-actions .secondary-button { display: none; }
-        .experiment-grid { grid-template-columns: 1fr; }
+        .experiment-workspace { grid-template-columns: 1fr; }
+        .experiment-column:last-child { grid-column: auto; grid-template-columns: 1fr; }
+        .experiment-form-row { grid-template-columns: 1fr; }
         .vm-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
         .memory-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
         .memory-search-pane { max-height: min(420px, 48vh); border-right: 0; border-bottom: 1px solid var(--line); }
@@ -1706,25 +1784,87 @@
           <section id="screen-experiments" class="screen" aria-label="Experiments" hidden>
             <header class="screen-head">
               <button class="back-button" type="button" data-screen="backtrace" aria-label="Back to trace">←</button>
-              <div><h1>Verify the Missing Link</h1><div id="experiment-subtitle" class="screen-subtitle">Draft experiment · nothing has been replayed or changed</div></div>
+              <div><h1>Request Interception Lab</h1><div id="experiment-subtitle" class="screen-subtitle">Disposable context · no baseline cookies, storage, or credentials</div></div>
+              <div class="screen-head-actions"><span class="memory-readonly">Experiment only</span></div>
             </header>
-            <div class="experiment-content">
-              <div class="experiment-grid">
+            <div id="experiment-notice" class="experiment-notice" data-kind="idle" role="status" aria-live="polite">Create an isolated experiment to configure request interception.</div>
+            <div class="experiment-workspace">
+              <div class="experiment-column">
                 <article class="experiment-card">
-                  <header><h2>Controlled replay plan</h2><p>Change one harmless candidate input, then compare only the selected request field.</p></header>
+                  <header>
+                    <div><h2>Disposable context</h2><p id="experiment-context-message">No isolated browser context exists.</p></div>
+                    <span id="experiment-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span>
+                  </header>
                   <div class="experiment-body">
-                    <div class="experiment-step"><b>1</b><span>Pause immediately before <code>JSON.stringify</code> receives object-17.</span></div>
-                    <div class="experiment-step"><b>2</b><span>Replace the candidate Canvas readback hash with a fixed test value.</span></div>
-                    <div class="experiment-step"><b>3</b><span>Replay the authorized request and compare the WASM result and selected field.</span></div>
-                    <div class="experiment-step"><b>4</b><span>Add a Differential edge only if the downstream values change together.</span></div>
+                    <div class="experiment-actions">
+                      <button id="experiment-create" class="trace-button experiment-primary" type="button">Create isolated context</button>
+                      <button id="experiment-dispose" class="secondary-button" type="button" disabled>Dispose context</button>
+                      <button id="experiment-clear" class="secondary-button" type="button" disabled>Clear result</button>
+                    </div>
+                  </div>
+                  <div class="experiment-context-facts">
+                    <div class="experiment-context-fact"><span>Storage</span><strong id="experiment-storage-state">Not allocated</strong></div>
+                    <div class="experiment-context-fact"><span>Pending</span><strong id="experiment-pending-count">0 / 16</strong></div>
                   </div>
                 </article>
                 <article class="experiment-card">
-                  <header><h2>Candidate input</h2><p id="experiment-candidate">event-194 · Canvas readback</p></header>
+                  <header><div><h2>Interception rule</h2><p>One bounded Fetch-domain rule scoped to the disposable page.</p></div><span id="experiment-rule-badge" class="experiment-card-badge" data-kind="offline">Unarmed</span></header>
                   <div class="experiment-body">
-                    <div id="experiment-input" class="experiment-input">getImageData() → fixed-test-hash-01</div>
-                    <div id="experiment-note" class="experiment-note">Draft only. Experiment execution is not implemented in this proof of concept.</div>
-                    <button class="secondary-button" type="button" data-screen="backtrace" style="width:100%; margin-top:14px">Return to trace</button>
+                    <form id="experiment-rule-form" class="experiment-form">
+                      <label>URL pattern<input id="experiment-url-pattern" type="text" value="*" maxlength="2048" autocomplete="off" /></label>
+                      <div class="experiment-form-row">
+                        <label>Action<select id="experiment-rule-mode"><option value="continue">Continue unchanged</option><option value="block">Block by client</option><option value="drop">Drop / abort</option><option value="rewrite">Rewrite request</option><option value="fulfill">Synthetic response</option></select></label>
+                        <label>Method filter<input id="experiment-method-filter" type="text" maxlength="32" placeholder="Any" autocomplete="off" /></label>
+                      </div>
+                      <div id="experiment-rewrite-options" class="experiment-rule-options" hidden>
+                        <label>Rewrite URL<input id="experiment-rewrite-url" type="url" maxlength="8192" placeholder="Leave unchanged" autocomplete="off" /></label>
+                        <label>Rewrite method<input id="experiment-rewrite-method" type="text" maxlength="32" placeholder="Leave unchanged" autocomplete="off" /></label>
+                        <label>Rewrite headers (JSON)<textarea id="experiment-rewrite-headers" maxlength="20000" spellcheck="false" placeholder='{"x-experiment":"1"}'></textarea></label>
+                        <label>Rewrite body<textarea id="experiment-rewrite-body" maxlength="65536" spellcheck="false" placeholder="Leave unchanged"></textarea></label>
+                      </div>
+                      <div id="experiment-fulfill-options" class="experiment-rule-options" hidden>
+                        <label>Status code<input id="experiment-response-code" type="number" min="100" max="599" step="1" value="200" /></label>
+                        <label>Response headers (JSON)<textarea id="experiment-response-headers" maxlength="20000" spellcheck="false" placeholder='{"content-type":"application/json"}'></textarea></label>
+                        <label>Response body<textarea id="experiment-response-body" maxlength="65536" spellcheck="false" placeholder='{"ok":true}'></textarea></label>
+                      </div>
+                      <button id="experiment-arm-rule" class="secondary-button" type="submit" disabled>Arm interception rule</button>
+                    </form>
+                  </div>
+                </article>
+              </div>
+              <div class="experiment-column">
+                <article class="experiment-card">
+                  <header><div><h2>Credential-free request</h2><p>Send one explicit request through the isolated rule.</p></div><span class="experiment-card-badge">Ephemeral</span></header>
+                  <div class="experiment-body">
+                    <form id="experiment-request-form" class="experiment-form">
+                      <label>Request URL<input id="experiment-request-url" type="url" maxlength="8192" placeholder="https://api.example.test/path" autocomplete="off" /></label>
+                      <label>Method<input id="experiment-request-method" type="text" value="GET" maxlength="32" autocomplete="off" /></label>
+                      <label>Headers (JSON)<textarea id="experiment-request-headers" maxlength="20000" spellcheck="false" placeholder='{"accept":"application/json"}'></textarea></label>
+                      <label>Body<textarea id="experiment-request-body" maxlength="65536" spellcheck="false" placeholder="Optional for non-GET requests"></textarea></label>
+                      <button id="experiment-run" class="trace-button" type="submit" disabled>Run isolated request</button>
+                      <p class="experiment-privacy">Credentials are always omitted. Authorization, Cookie, Set-Cookie, Host, Content-Length, connection, and transfer-encoding headers are rejected before DevTools receives the command.</p>
+                    </form>
+                  </div>
+                </article>
+                <article class="experiment-card">
+                  <header><div><h2>Response</h2><p id="experiment-result-meta">No experiment request has run.</p></div><span id="experiment-result-badge" class="experiment-card-badge" data-kind="offline">No result</span></header>
+                  <div id="experiment-result" class="experiment-empty">Create a context, arm a rule, then run a request.</div>
+                </article>
+              </div>
+              <div class="experiment-column">
+                <article class="experiment-card">
+                  <header><div><h2>Mutation audit</h2><p>Metadata only. Query strings, headers, and bodies are not retained.</p></div><span id="experiment-audit-count" class="experiment-card-badge" data-kind="offline">0 entries</span></header>
+                  <div id="experiment-audit" class="experiment-audit"><div class="experiment-empty">No intercepted requests yet.</div></div>
+                </article>
+                <article class="experiment-card">
+                  <header><div><h2>Hard limits</h2><p>Visible boundaries keep the control plane predictable.</p></div><span class="experiment-card-badge">Protocol v1</span></header>
+                  <div class="experiment-context-facts">
+                    <div class="experiment-context-fact"><span>Audit</span><strong>128 entries</strong></div>
+                    <div class="experiment-context-fact"><span>Bodies</span><strong>64 KiB</strong></div>
+                  </div>
+                  <div class="experiment-context-facts">
+                    <div class="experiment-context-fact"><span>Headers</span><strong>64 / 16 KiB</strong></div>
+                    <div class="experiment-context-fact"><span>Concurrent</span><strong>16 requests</strong></div>
                   </div>
                 </article>
               </div>
@@ -1872,6 +2012,9 @@ export async function checkout(cart, fingerprint) {
         originTraceKey: null,
         originTraceEtag: null,
         originTraceGeneration: 0,
+        experimentPending: false,
+        experimentError: null,
+        experimentPrefillKey: null,
         signalProfile: null,
         signalProfileStatus: 'idle',
         signalProfileError: null,
@@ -1912,9 +2055,40 @@ export async function checkout(cart, fingerprint) {
         coverageBar: document.querySelector('#coverage-bar'),
         traceBranchExperiment: document.querySelector('#trace-branch-experiment'),
         experimentSubtitle: document.querySelector('#experiment-subtitle'),
-        experimentCandidate: document.querySelector('#experiment-candidate'),
-        experimentInput: document.querySelector('#experiment-input'),
-        experimentNote: document.querySelector('#experiment-note'),
+        experimentNotice: document.querySelector('#experiment-notice'),
+        experimentContextMessage: document.querySelector('#experiment-context-message'),
+        experimentContextBadge: document.querySelector('#experiment-context-badge'),
+        experimentStorageState: document.querySelector('#experiment-storage-state'),
+        experimentPendingCount: document.querySelector('#experiment-pending-count'),
+        experimentCreate: document.querySelector('#experiment-create'),
+        experimentDispose: document.querySelector('#experiment-dispose'),
+        experimentClear: document.querySelector('#experiment-clear'),
+        experimentRuleForm: document.querySelector('#experiment-rule-form'),
+        experimentUrlPattern: document.querySelector('#experiment-url-pattern'),
+        experimentRuleMode: document.querySelector('#experiment-rule-mode'),
+        experimentMethodFilter: document.querySelector('#experiment-method-filter'),
+        experimentRewriteOptions: document.querySelector('#experiment-rewrite-options'),
+        experimentRewriteUrl: document.querySelector('#experiment-rewrite-url'),
+        experimentRewriteMethod: document.querySelector('#experiment-rewrite-method'),
+        experimentRewriteHeaders: document.querySelector('#experiment-rewrite-headers'),
+        experimentRewriteBody: document.querySelector('#experiment-rewrite-body'),
+        experimentFulfillOptions: document.querySelector('#experiment-fulfill-options'),
+        experimentResponseCode: document.querySelector('#experiment-response-code'),
+        experimentResponseHeaders: document.querySelector('#experiment-response-headers'),
+        experimentResponseBody: document.querySelector('#experiment-response-body'),
+        experimentArmRule: document.querySelector('#experiment-arm-rule'),
+        experimentRuleBadge: document.querySelector('#experiment-rule-badge'),
+        experimentRequestForm: document.querySelector('#experiment-request-form'),
+        experimentRequestUrl: document.querySelector('#experiment-request-url'),
+        experimentRequestMethod: document.querySelector('#experiment-request-method'),
+        experimentRequestHeaders: document.querySelector('#experiment-request-headers'),
+        experimentRequestBody: document.querySelector('#experiment-request-body'),
+        experimentRun: document.querySelector('#experiment-run'),
+        experimentResultMeta: document.querySelector('#experiment-result-meta'),
+        experimentResultBadge: document.querySelector('#experiment-result-badge'),
+        experimentResult: document.querySelector('#experiment-result'),
+        experimentAuditCount: document.querySelector('#experiment-audit-count'),
+        experimentAudit: document.querySelector('#experiment-audit'),
         workspace: document.querySelector('#workspace'),
         sourceTree: document.querySelector('#source-tree'),
         sourceEditorTabs: document.querySelector('#source-editor-tabs'),
@@ -2049,6 +2223,15 @@ export async function checkout(cart, fingerprint) {
 
       function isSafeIntegerInRange(value, minimum, maximum) {
         return Number.isSafeInteger(value) && value >= minimum && value <= maximum;
+      }
+
+      function utf8ByteLength(value) {
+        utf8ByteLength.encoder ??= new TextEncoder();
+        return utf8ByteLength.encoder.encode(value).byteLength;
+      }
+
+      function isBoundedText(value, maximumBytes) {
+        return typeof value === 'string' && utf8ByteLength(value) <= maximumBytes;
       }
 
       function isCanonicalInteger(value, minimum, maximum, signed = false) {
@@ -2338,6 +2521,79 @@ export async function checkout(cart, fingerprint) {
           (!activeStates.includes(trace.state) || trace.limit_reason === null || trace.partial);
       }
 
+      function isRequestInterceptionRule(rule) {
+        return isPlainObject(rule) && ['continue', 'block', 'drop', 'rewrite', 'fulfill'].includes(rule.mode) &&
+          isBoundedText(rule.url_pattern, 2 * 1024) && isBoundedText(rule.method_filter, 32) &&
+          isBoundedText(rule.rewrite_url, 8 * 1024) && isBoundedText(rule.rewrite_method, 32) &&
+          isSafeIntegerInRange(rule.rewrite_header_count, 0, 64) &&
+          isSafeIntegerInRange(rule.rewrite_body_bytes, 0, 64 * 1024) &&
+          isSafeIntegerInRange(rule.response_code, 100, 599) &&
+          isSafeIntegerInRange(rule.response_header_count, 0, 64) &&
+          isSafeIntegerInRange(rule.response_body_bytes, 0, 64 * 1024);
+      }
+
+      function isRequestInterceptionResult(result) {
+        if (result === null) return true;
+        if (!isPlainObject(result) || result.protocol_version !== 1 || typeof result.ok !== 'boolean' ||
+            !isSafeIntegerInRange(result.status, 0, 599) || !isBoundedText(result.status_text, 256) ||
+            !isBoundedText(result.url, 8 * 1024) || !Array.isArray(result.headers) || result.headers.length > 64 ||
+            typeof result.headers_truncated !== 'boolean' ||
+            !isBoundedText(result.body, 64 * 1024) || typeof result.body_truncated !== 'boolean' ||
+            (result.error !== null && !isBoundedText(result.error, 512))) return false;
+        let headerBytes = 0;
+        if (!result.headers.every(header => {
+          if (!isPlainObject(header) || !isBoundedText(header.name, 128) || !isBoundedText(header.value, 2 * 1024) ||
+              ['authorization', 'cookie', 'proxy-authorization', 'set-cookie'].includes(header.name.toLowerCase())) return false;
+          headerBytes += utf8ByteLength(header.name) + utf8ByteLength(header.value);
+          return headerBytes <= 16 * 1024;
+        })) return false;
+        return result.ok ? result.status > 0 && result.error === null
+          : result.status === 0 && typeof result.error === 'string';
+      }
+
+      function isRequestInterception(experiment) {
+        const states = ['idle', 'creating', 'ready', 'running', 'disposing', 'disposed', 'error'];
+        if (!isPlainObject(experiment) || experiment.protocol_version !== 1 ||
+            !isSafeIntegerInRange(experiment.experiment_id, 0, Number.MAX_SAFE_INTEGER) ||
+            !states.includes(experiment.state) || typeof experiment.isolated !== 'boolean' ||
+            (experiment.target_id !== null && !isBoundedText(experiment.target_id, 4 * 1024)) ||
+            !isSafeIntegerInRange(experiment.created_at_ms, 0, Number.MAX_SAFE_INTEGER) ||
+            !isSafeIntegerInRange(experiment.disposed_at_ms, 0, Number.MAX_SAFE_INTEGER) ||
+            !isRequestInterceptionRule(experiment.rule) ||
+            (experiment.last_request !== null && (!isPlainObject(experiment.last_request) ||
+              !isBoundedText(experiment.last_request.url, 8 * 1024) || !isBoundedText(experiment.last_request.method, 32) ||
+              !isSafeIntegerInRange(experiment.last_request.header_count, 0, 64) ||
+              !isSafeIntegerInRange(experiment.last_request.body_bytes, 0, 64 * 1024))) ||
+            !isRequestInterceptionResult(experiment.result) || !Array.isArray(experiment.audit) ||
+            experiment.audit.length > 128 || !isSafeIntegerInRange(experiment.audit_evictions, 0, Number.MAX_SAFE_INTEGER) ||
+            !isSafeIntegerInRange(experiment.pending_requests, 0, 16) || !isBoundedText(experiment.message, 512) ||
+            !isPlainObject(experiment.limits) || experiment.limits.audit_entries !== 128 ||
+            experiment.limits.pending_requests !== 16 || experiment.limits.headers !== 64 ||
+            experiment.limits.body_bytes !== 64 * 1024 || experiment.limits.response_bytes !== 64 * 1024) return false;
+        if (!experiment.audit.every(entry => isPlainObject(entry) &&
+            isSafeIntegerInRange(entry.id, 1, Number.MAX_SAFE_INTEGER) &&
+            isSafeIntegerInRange(entry.occurred_at_ms, 1, Number.MAX_SAFE_INTEGER) &&
+            isBoundedText(entry.request_id, 256) && isBoundedText(entry.method, 32) &&
+            isBoundedText(entry.url, 8 * 1024) && isBoundedText(entry.resource_type, 128) &&
+            isBoundedText(entry.detail, 512) &&
+            ['continue', 'block', 'drop', 'rewrite', 'fulfill'].includes(entry.rule_mode) &&
+            ['continued', 'bypassed', 'blocked', 'dropped', 'rewritten', 'fulfilled', 'overflow_continue', 'error']
+              .includes(entry.outcome))) return false;
+        if (experiment.audit.some((entry, index) => index > 0 && experiment.audit[index - 1].id >= entry.id)) return false;
+        if (experiment.state === 'idle') {
+          return experiment.experiment_id === 0 && !experiment.isolated && experiment.target_id === null &&
+            experiment.created_at_ms === 0 && experiment.disposed_at_ms === 0 && experiment.audit.length === 0;
+        }
+        if (experiment.state === 'disposed') {
+          return experiment.experiment_id > 0 && !experiment.isolated && experiment.target_id === null &&
+            experiment.created_at_ms > 0 && experiment.disposed_at_ms >= experiment.created_at_ms &&
+            experiment.pending_requests === 0;
+        }
+        return experiment.experiment_id > 0 && experiment.created_at_ms > 0 &&
+          (experiment.state === 'creating' || experiment.state === 'error' ||
+            (experiment.isolated && typeof experiment.target_id === 'string' && experiment.target_id.length > 0));
+      }
+
       function isDebuggerResponse(body) {
         if (!isPlainObject(body) || body.protocol_version !== 1 ||
             !['unavailable', 'waiting', 'connecting', 'running', 'paused'].includes(body.state) ||
@@ -2349,6 +2605,7 @@ export async function checkout(cart, fingerprint) {
             !Array.isArray(body.watches) || body.watches.length > 100 || !body.watches.every(isDebuggerWatch) ||
             !Array.isArray(body.console) || body.console.length > 500 || !body.console.every(isDebuggerConsoleEntry) ||
             !isMemoryOriginTrace(body.memory_origin_trace) ||
+            !isRequestInterception(body.request_interception) ||
             !isPlainObject(body.settings) || !isPlainObject(body.limits)) return false;
         if (body.heap_diff_baseline !== null && (!isPlainObject(body.heap_diff_baseline) ||
             typeof body.heap_diff_baseline.target_id !== 'string' ||
@@ -3681,36 +3938,234 @@ export async function checkout(cart, fingerprint) {
         elements.coverageBar.style.width = `${coverage}%`;
       }
 
-      function renderExperiment() {
-        if (!state.selectedField) return;
-        const isBodyTrace = state.selectedField.label === 'Body';
+      function requestInterception() {
+        return state.debuggerSession?.request_interception ?? null;
+      }
+
+      function setExperimentNotice(kind, message) {
+        elements.experimentNotice.dataset.kind = kind;
+        elements.experimentNotice.textContent = message;
+      }
+
+      function parseExperimentHeaders(value, label) {
+        const source = value.trim();
+        if (!source) return {};
+        let headers;
+        try { headers = JSON.parse(source); }
+        catch { throw new TypeError(`${label} must be a JSON object.`); }
+        if (!isPlainObject(headers) || Object.values(headers).some(item => typeof item !== 'string')) {
+          throw new TypeError(`${label} must map header names to text values.`);
+        }
+        return headers;
+      }
+
+      function setExperimentRuleVisibility() {
+        const mode = elements.experimentRuleMode.value;
+        elements.experimentRewriteOptions.hidden = mode !== 'rewrite';
+        elements.experimentFulfillOptions.hidden = mode !== 'fulfill';
+      }
+
+      function prefillExperimentRequest() {
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
-        const steps = document.querySelectorAll('.experiment-step span');
-        elements.experimentSubtitle.textContent = `Draft for request-${request.id} · ${state.selectedField.label} · ${state.selectedField.path}`;
-        if (isBodyTrace) {
-          const bodySteps = [
-            'Pause immediately before JSON.stringify receives object-17.',
-            'Replace the candidate Canvas readback hash with a fixed test value.',
-            'Replay the authorized request and compare the WASM result and selected field.',
-            'Add a Differential edge only if the downstream values change together.'
-          ];
-          steps.forEach((step, index) => { step.textContent = bodySteps[index]; });
-          elements.experimentCandidate.textContent = 'event-194 · Canvas readback';
-          elements.experimentInput.textContent = 'getImageData() → fixed-test-hash-01';
-          elements.experimentNote.textContent = 'Draft only. Experiment execution is not implemented in this proof of concept.';
+        if (!request) return;
+        const key = `${request.id}:${request.method}:${request.path}`;
+        if (state.experimentPrefillKey === key) return;
+        state.experimentPrefillKey = key;
+        let requestUrl = request.path;
+        if (!/^https?:\/\//i.test(requestUrl)) {
+          requestUrl = `https://checkout.acme.test${requestUrl.startsWith('/') ? '' : '/'}${requestUrl}`;
+        }
+        try {
+          const parsed = new URL(requestUrl);
+          parsed.search = '';
+          parsed.hash = '';
+          elements.experimentRequestUrl.value = parsed.toString();
+          elements.experimentUrlPattern.value = `${parsed.origin}${parsed.pathname}*`;
+        } catch {
+          elements.experimentRequestUrl.value = '';
+          elements.experimentUrlPattern.value = '*';
+        }
+        elements.experimentRequestMethod.value = /^[A-Z][A-Z0-9!#$%&'*+.^_`|~-]{0,31}$/.test(request.method)
+          ? request.method : 'GET';
+        elements.experimentRequestBody.value = '';
+      }
+
+      function experimentFact(label, value) {
+        const fact = document.createElement('div');
+        const name = document.createElement('span'); name.textContent = label;
+        const detail = document.createElement('strong'); detail.textContent = value;
+        fact.append(name, detail);
+        return fact;
+      }
+
+      function renderExperimentResult(experiment) {
+        const result = experiment?.result;
+        if (!result) {
+          elements.experimentResult.className = 'experiment-empty';
+          elements.experimentResult.textContent = experiment?.state === 'disposed'
+            ? 'No response was retained before the disposable context was deleted.'
+            : 'Create a context, arm a rule, then run a request.';
+          elements.experimentResultMeta.textContent = experiment?.last_request
+            ? `${experiment.last_request.method} ${experiment.last_request.url}`
+            : 'No experiment request has run.';
+          elements.experimentResultBadge.dataset.kind = 'offline';
+          elements.experimentResultBadge.textContent = 'No result';
           return;
         }
+        elements.experimentResult.className = '';
+        const summary = document.createElement('div'); summary.className = 'experiment-result-summary';
+        summary.append(
+          experimentFact('Status', result.ok ? `${result.status} ${result.status_text}`.trim() : 'Request error'),
+          experimentFact('Response URL', result.url || 'Not available'),
+          experimentFact('Body', `${utf8ByteLength(result.body)} bytes${result.body_truncated ? ' · truncated' : ''}`)
+        );
+        const body = document.createElement('pre'); body.className = 'experiment-result-body';
+        body.textContent = result.ok ? result.body || '(empty response body)' : result.error;
+        elements.experimentResult.replaceChildren(summary, body);
+        elements.experimentResultMeta.textContent = experiment.last_request
+          ? `${experiment.last_request.method} ${experiment.last_request.url} · ${result.headers.length} response headers${result.headers_truncated ? ' · truncated' : ''}`
+          : `${result.headers.length} response headers${result.headers_truncated ? ' · truncated' : ''}`;
+        elements.experimentResultBadge.dataset.kind = result.ok ? '' : 'error';
+        elements.experimentResultBadge.textContent = result.ok ? 'Complete' : 'Error';
+      }
 
-        const genericSteps = [
-          `Pause immediately before request-${request.id} is assembled.`,
-          `Choose and hook one candidate producer for ${state.selectedField.label} ${state.selectedField.path}.`,
-          'Replay the authorized request and compare only the selected field.',
-          'Add a Differential edge only if the candidate and field change together.'
-        ];
-        steps.forEach((step, index) => { step.textContent = genericSteps[index]; });
-        elements.experimentCandidate.textContent = 'No candidate selected';
-        elements.experimentInput.textContent = 'Choose a candidate from Supporting Evidence';
-        elements.experimentNote.textContent = 'The origin is still Unknown. This draft does not claim a producer until a controlled replay verifies one.';
+      function renderExperimentAudit(experiment) {
+        const audit = experiment?.audit ?? [];
+        const countLabel = `${audit.length} ${audit.length === 1 ? 'entry' : 'entries'}`;
+        elements.experimentAuditCount.textContent = experiment?.audit_evictions
+          ? `${countLabel} · ${experiment.audit_evictions} evicted`
+          : countLabel;
+        elements.experimentAuditCount.dataset.kind = audit.length ? '' : 'offline';
+        if (!audit.length) {
+          elements.experimentAudit.replaceChildren(textElement('div', 'experiment-empty', 'No intercepted requests yet.'));
+          return;
+        }
+        elements.experimentAudit.replaceChildren(...[...audit].reverse().map(entry => {
+          const row = document.createElement('div'); row.className = 'experiment-audit-row';
+          const title = textElement('div', 'experiment-audit-title', `${entry.method || 'REQUEST'} ${entry.url || '(invalid URL)'}`);
+          const outcome = textElement('div', 'experiment-audit-outcome', entry.outcome.replaceAll('_', ' '));
+          const occurred = new Date(entry.occurred_at_ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          const meta = textElement('div', 'experiment-audit-meta', `${occurred} · ${entry.resource_type} · ${entry.rule_mode} · ${entry.request_id} · ${entry.detail}`);
+          row.append(title, outcome, meta);
+          return row;
+        }));
+      }
+
+      function renderExperiment() {
+        prefillExperimentRequest();
+        setExperimentRuleVisibility();
+        const experiment = requestInterception();
+        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
+        const working = state.experimentPending || ['creating', 'running', 'disposing'].includes(experiment?.state);
+        const hasPendingRequests = (experiment?.pending_requests ?? 0) > 0;
+        const contextReady = attached && experiment?.isolated &&
+          experiment.target_id === state.debuggerSession?.target?.id && ['ready', 'error'].includes(experiment.state);
+        const canDispose = experiment?.isolated && ['ready', 'error'].includes(experiment.state) && experiment.pending_requests === 0;
+        elements.experimentSubtitle.textContent = request && state.selectedField
+          ? `request-${request.id} · ${state.selectedField.label} ${state.selectedField.path} · isolated replay only`
+          : 'Disposable context · no baseline cookies, storage, or credentials';
+
+        if (state.experimentError) setExperimentNotice('error', state.experimentError);
+        else if (!experiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
+        else if (working) setExperimentNotice('working', experiment.message);
+        else if (experiment.state === 'error' || experiment.result?.ok === false) setExperimentNotice('error', experiment.message);
+        else if (contextReady) setExperimentNotice('ready', experiment.message);
+        else if (experiment.state === 'disposed') setExperimentNotice('ready', experiment.message);
+        else if (!attached) setExperimentNotice('idle', 'Attach an authorized browser target before creating an experiment.');
+        else setExperimentNotice('idle', experiment.message);
+
+        const contextKind = experiment?.state === 'error' ? 'error' : experiment?.isolated ? '' : 'offline';
+        elements.experimentContextBadge.dataset.kind = contextKind;
+        elements.experimentContextBadge.textContent = experiment?.state === 'creating' ? 'Creating'
+          : experiment?.state === 'disposing' ? 'Disposing'
+            : experiment?.isolated ? 'Isolated'
+              : experiment?.state === 'disposed' ? 'Disposed' : 'Not created';
+        elements.experimentContextMessage.textContent = experiment?.state === 'error'
+          ? experiment.message
+          : experiment?.isolated
+            ? contextReady ? 'Disposable page attached. Its cookies and storage are isolated from the baseline target.'
+              : 'Disposable context exists. Waiting for its page debugger to attach.'
+            : experiment?.message ?? 'No isolated browser context exists.';
+        elements.experimentStorageState.textContent = experiment?.isolated ? 'Ephemeral and isolated'
+          : experiment?.state === 'disposed' ? 'Deleted' : 'Not allocated';
+        elements.experimentPendingCount.textContent = `${experiment?.pending_requests ?? 0} / ${experiment?.limits?.pending_requests ?? 16}`;
+
+        elements.experimentCreate.disabled = !attached || Boolean(experiment?.isolated) || working || state.debuggerActionPending;
+        elements.experimentDispose.disabled = !canDispose || working || state.debuggerActionPending;
+        elements.experimentClear.disabled = !experiment || !['disposed', 'error'].includes(experiment.state) || experiment.isolated || working || state.debuggerActionPending;
+        elements.experimentArmRule.disabled = !contextReady || hasPendingRequests || working || state.debuggerActionPending;
+        elements.experimentRun.disabled = !contextReady || hasPendingRequests || working || state.debuggerActionPending;
+        const fields = elements.experimentRuleForm.querySelectorAll('input, select, textarea');
+        fields.forEach(field => { field.disabled = !contextReady || working; });
+        elements.experimentRequestForm.querySelectorAll('input, textarea').forEach(field => { field.disabled = !contextReady || working; });
+
+        const modeLabels = { continue: 'Continue', block: 'Block', drop: 'Drop', rewrite: 'Rewrite', fulfill: 'Fulfill' };
+        elements.experimentRuleBadge.dataset.kind = contextReady ? '' : 'offline';
+        elements.experimentRuleBadge.textContent = experiment && experiment.experiment_id > 0
+          ? modeLabels[experiment.rule.mode] : 'Unarmed';
+        renderExperimentResult(experiment);
+        renderExperimentAudit(experiment);
+      }
+
+      async function runExperimentAction(request) {
+        if (state.experimentPending) return null;
+        state.experimentPending = true;
+        state.experimentError = null;
+        renderExperiment();
+        const response = await debuggerAction(request);
+        if (response?.experiment && isRequestInterception(response.experiment) && state.debuggerSession) {
+          state.debuggerSession.request_interception = response.experiment;
+        }
+        if (!response) state.experimentError = state.debuggerError || 'The experiment action did not complete.';
+        state.experimentPending = false;
+        renderExperiment();
+        return response;
+      }
+
+      async function configureExperimentRule() {
+        try {
+          const mode = elements.experimentRuleMode.value;
+          const request = {
+            action: 'configure_request_interception',
+            url_pattern: elements.experimentUrlPattern.value.trim(),
+            method_filter: elements.experimentMethodFilter.value.trim(),
+            mode
+          };
+          if (mode === 'rewrite') Object.assign(request, {
+            rewrite_url: elements.experimentRewriteUrl.value.trim(),
+            rewrite_method: elements.experimentRewriteMethod.value.trim(),
+            rewrite_headers: parseExperimentHeaders(elements.experimentRewriteHeaders.value, 'Rewrite headers'),
+            rewrite_body: elements.experimentRewriteBody.value
+          });
+          if (mode === 'fulfill') Object.assign(request, {
+            response_code: Number(elements.experimentResponseCode.value),
+            response_headers: parseExperimentHeaders(elements.experimentResponseHeaders.value, 'Response headers'),
+            response_body: elements.experimentResponseBody.value
+          });
+          await runExperimentAction(request);
+        } catch (error) {
+          state.experimentError = error.message;
+          renderExperiment();
+        }
+      }
+
+      async function runExperimentRequest() {
+        try {
+          const method = elements.experimentRequestMethod.value.trim().toUpperCase();
+          const body = elements.experimentRequestBody.value;
+          if (['GET', 'HEAD'].includes(method) && body) throw new TypeError(`${method} requests cannot include a body.`);
+          await runExperimentAction({
+            action: 'run_request_interception',
+            url: elements.experimentRequestUrl.value.trim(),
+            method,
+            headers: parseExperimentHeaders(elements.experimentRequestHeaders.value, 'Request headers'),
+            body
+          });
+        } catch (error) {
+          state.experimentError = error.message;
+          renderExperiment();
+        }
       }
 
       function liveSources() {
@@ -5440,6 +5895,7 @@ export async function checkout(cart, fingerprint) {
           }
           renderDebugger();
           renderMemory();
+          if (!document.querySelector('#screen-experiments').hidden) renderExperiment();
           const sourcesVisible = !document.querySelector('#screen-sources').hidden;
           if (sourcesVisible && !sourceRendered) {
             const catalogChanged = previousCatalog !== debuggerScriptCatalogSignature(body);
@@ -5459,6 +5915,7 @@ export async function checkout(cart, fingerprint) {
           state.debuggerError = error instanceof TypeError ? 'The debugger returned malformed state. The last valid pause is retained.' : error.message;
           renderDebugger();
           renderMemory();
+          if (!document.querySelector('#screen-experiments').hidden) renderExperiment();
         } finally {
           state.debuggerRefreshing = false;
           const quiet = document.hidden || state.debuggerSession?.state === 'unavailable' || state.debuggerError;
@@ -5798,6 +6255,31 @@ export async function checkout(cart, fingerprint) {
         elements.xhrBreakpointPattern.value = '';
         debuggerAction({ action: 'set_xhr_breakpoint', pattern });
       });
+      elements.experimentCreate.addEventListener('click', () => runExperimentAction({
+        action: 'create_request_interception_experiment'
+      }));
+      elements.experimentDispose.addEventListener('click', () => runExperimentAction({
+        action: 'dispose_request_interception_experiment'
+      }));
+      elements.experimentClear.addEventListener('click', async () => {
+        const response = await runExperimentAction({ action: 'clear_request_interception_result' });
+        if (response) {
+          state.experimentPrefillKey = null;
+          prefillExperimentRequest();
+        }
+      });
+      elements.experimentRuleMode.addEventListener('change', () => {
+        state.experimentError = null;
+        setExperimentRuleVisibility();
+      });
+      elements.experimentRuleForm.addEventListener('submit', event => {
+        event.preventDefault();
+        configureExperimentRule();
+      });
+      elements.experimentRequestForm.addEventListener('submit', event => {
+        event.preventDefault();
+        runExperimentRequest();
+      });
       elements.memorySearchForm.addEventListener('submit', event => {
         event.preventDefault();
         runLiveObjectSearch();
@@ -5875,6 +6357,7 @@ export async function checkout(cart, fingerprint) {
         state.debuggerRenderKeys = {};
         state.renderedConsoleSignature = null;
         renderDebugger();
+        if (!document.querySelector('#screen-experiments').hidden) renderExperiment();
         if (!document.querySelector('#screen-sources').hidden) renderSources();
         scheduleDebuggerRefresh(0);
       });

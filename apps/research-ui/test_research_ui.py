@@ -1069,6 +1069,7 @@ const breakpoint = {
 };
 const snapshot = {
   protocol_version: 1, state: 'paused', generation: 7, error: null,
+  heap_diff_baseline: null,
   target, targets: [target], scripts: [script],
   paused: {reason: 'breakpoint', description: null, call_frames: [frame],
     async_stack: [{description: 'Promise.then', call_frames: [{
@@ -1112,8 +1113,33 @@ const heapSearch = {
     }]
   }
 };
+const heapDiff = {
+  ok: true, generation: 7,
+  diff: {
+    protocol_version: 1, baseline_file_bytes: 4096, current_file_bytes: 5120,
+    baseline_nodes: 3, current_nodes: 4, baseline_edges: 2, current_edges: 3,
+    baseline_reachable_nodes: 3, current_reachable_nodes: 4,
+    baseline_self_size: 88, current_self_size: 128, self_size_delta: 40,
+    duration_ms: 2, result_limit: 50, group_result_limit_reached: false,
+    dominator_result_limit_reached: false, aggregation_limit_reached: false,
+    baseline_node_limit_reached: false, baseline_edge_limit_reached: false,
+    baseline_string_limit_reached: false, current_node_limit_reached: false,
+    current_edge_limit_reached: false, current_string_limit_reached: false,
+    retained_size_saturated: false,
+    groups: [{type: 'object', name: 'Added', baseline_count: 0, current_count: 1,
+      count_delta: 1, baseline_self_size: 0, current_self_size: 40,
+      self_size_delta: 40}],
+    dominators: [{id: '9', type: 'object', name: 'Added',
+      baseline_retained_size: 0, current_retained_size: 40,
+      retained_size_delta: 40}]
+  }
+};
 process.stdout.write(JSON.stringify({
   accepted: isDebuggerResponse(snapshot),
+  baselineAccepted: isDebuggerResponse({...snapshot, heap_diff_baseline: {
+    target_id: 'page-1', file_bytes: 4096, captured_at_ms: 1}}),
+  badBaselineRejected: !isDebuggerResponse({...snapshot, heap_diff_baseline: {
+    target_id: 'page-1', file_bytes: 0, captured_at_ms: 1}}),
   badStateRejected: !isDebuggerResponse({...snapshot, state: 'owned'}),
   badScriptRejected: !isDebuggerResponse({...snapshot, scripts: [{...script, length: -1}]}),
   badFrameRejected: !isDebuggerResponse({...snapshot, paused: {...snapshot.paused,
@@ -1140,7 +1166,12 @@ process.stdout.write(JSON.stringify({
     snapshot: {...heapSearch.snapshot, analyzed_nodes: 4}}),
   heapSearchPathBound: !isHeapSnapshotSearchResponse({...heapSearch,
     snapshot: {...heapSearch.snapshot, results: [{...heapSearch.snapshot.results[0],
-      retaining_path: Array(13).fill({edge: 'x', type: 'object', name: 'x'})}]}})
+      retaining_path: Array(13).fill({edge: 'x', type: 'object', name: 'x'})}]}}),
+  heapDiffAccepted: isHeapSnapshotDiffResponse(heapDiff),
+  heapDiffDeltaRequired: !isHeapSnapshotDiffResponse({...heapDiff, diff: {
+    ...heapDiff.diff, self_size_delta: 41}}),
+  heapDiffDominatorBound: !isHeapSnapshotDiffResponse({...heapDiff, diff: {
+    ...heapDiff.diff, dominators: Array(51).fill(heapDiff.diff.dominators[0])}})
 }));
 """
         completed = subprocess.run(
@@ -1153,6 +1184,8 @@ process.stdout.write(JSON.stringify({
             json.loads(completed.stdout),
             {
                 "accepted": True,
+                "baselineAccepted": True,
+                "badBaselineRejected": True,
                 "badStateRejected": True,
                 "badScriptRejected": True,
                 "badFrameRejected": True,
@@ -1170,10 +1203,13 @@ process.stdout.write(JSON.stringify({
                 "heapSearchAccepted": True,
                 "heapSearchNodeCoverageBound": True,
                 "heapSearchPathBound": True,
+                "heapDiffAccepted": True,
+                "heapDiffDeltaRequired": True,
+                "heapDiffDominatorBound": True,
             },
         )
 
-    def test_memory_workspace_exposes_live_and_native_snapshot_search(self) -> None:
+    def test_memory_workspace_exposes_live_snapshot_and_heap_comparison(self) -> None:
         html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
 
         self.assertIn('data-screen="memory">Memory</button>', html)
@@ -1182,18 +1218,22 @@ process.stdout.write(JSON.stringify({
         self.assertIn('role="listbox" aria-label="Live object matches"', html)
         self.assertIn("function isLiveObjectSearchResponse(body)", html)
         self.assertIn("function isHeapSnapshotSearchResponse(body)", html)
+        self.assertIn("function isHeapSnapshotDiffResponse(body)", html)
         self.assertIn("function runLiveObjectSearch()", html)
         self.assertIn("function runHeapSnapshotSearch()", html)
+        self.assertIn("function runHeapSnapshotDiff()", html)
         self.assertIn("function renderMemory()", html)
         self.assertIn("function renderMemoryDetail()", html)
         self.assertIn("action: 'search_live_objects'", html)
         self.assertIn("action: 'search_heap_snapshot'", html)
+        self.assertIn("action: 'capture_heap_diff_baseline'", html)
+        self.assertIn("action: 'compare_heap_diff'", html)
         self.assertIn('id="request-memory-pivot"', html)
         self.assertIn('data-mode="live"', html)
         self.assertIn('memory-form[data-mode="snapshot"] .memory-value-field', html)
         self.assertIn("Capturing briefly pauses the target", html)
         self.assertIn("Accessors are reported without invoking getters", html)
-        self.assertIn("Baseline read-only", html)
+        self.assertIn("Top retained-memory changes", html)
         self.assertNotIn("expose_live_object", html)
 
     def test_sources_model_rejects_malformed_artifact_catalogs(self) -> None:

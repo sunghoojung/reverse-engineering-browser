@@ -98,6 +98,23 @@ int main() {
   CHECK(long_name_result.matches[0].node_name.size() == 256);
   CHECK(long_name_result.matches[0].node_name.ends_with("..."));
 
+  TemporarySnapshot long_name_current;
+  std::ofstream long_name_current_output(long_name_current.Path(), std::ios::binary);
+  long_name_current_output
+      << R"({"snapshot":{"meta":{"node_fields":["type","name","id","self_size","edge_count"],"node_types":[["synthetic","string"],"string","number","number","number"],"edge_fields":["type","name_or_index","to_node"],"edge_types":[["property"],"string_or_number","node"]},"node_count":2,"edge_count":1},"nodes":[0,0,1,0,1,1,1,3,350,0],"edges":[0,2,5],"strings":["",")"
+      << long_name << R"(","value"]})";
+  long_name_current_output.close();
+  CHECK(long_name_current_output.good());
+  reb::HeapSnapshotDiffResult long_name_diff;
+  CHECK(reb::CompareV8HeapSnapshots(long_name_snapshot.Path(), long_name_current.Path(), 50,
+                                    long_name_diff, error));
+  CHECK(long_name_diff.groups.size() == 1);
+  CHECK(long_name_diff.groups[0].baseline_count == 1);
+  CHECK(long_name_diff.groups[0].current_count == 1);
+  CHECK(long_name_diff.groups[0].self_size_delta == 50);
+  CHECK(long_name_diff.groups[0].node_name.size() == 256);
+  CHECK(long_name_diff.groups[0].node_name.ends_with("..."));
+
   const std::string json = reb::HeapSnapshotSearchResultToJson(result);
   CHECK(json.find("\"protocol_version\":1") != std::string::npos);
   CHECK(json.find("\"name\":\"secret-value\"") != std::string::npos);
@@ -109,11 +126,144 @@ int main() {
   CHECK(limited.result_limit_reached);
   CHECK(limited.analyzed_nodes < limited.total_nodes);
 
+  TemporarySnapshot baseline_snapshot;
+  std::ofstream baseline_output(baseline_snapshot.Path(), std::ios::binary);
+  baseline_output << R"({
+    "snapshot": {
+      "meta": {
+        "node_fields": ["type", "name", "id", "self_size", "edge_count"],
+        "node_types": [["synthetic", "object"], "string", "number", "number", "number"],
+        "edge_fields": ["type", "name_or_index", "to_node"],
+        "edge_types": [["property", "weak"], "string_or_number", "node"]
+      },
+      "node_count": 4,
+      "edge_count": 3
+    },
+    "nodes": [0,0,1,0,2, 1,1,3,10,1, 1,2,5,20,0, 1,3,7,5,0],
+    "edges": [0,5,5, 0,6,15, 0,7,10],
+    "strings": ["", "Owner", "Stable", "Removed", "Added", "owner", "removed", "stable"]
+  })";
+  baseline_output.close();
+  CHECK(baseline_output.good());
+
+  TemporarySnapshot current_snapshot;
+  std::ofstream current_output(current_snapshot.Path(), std::ios::binary);
+  current_output << R"({
+    "snapshot": {
+      "meta": {
+        "node_fields": ["type", "name", "id", "self_size", "edge_count"],
+        "node_types": [["synthetic", "object"], "string", "number", "number", "number"],
+        "edge_fields": ["type", "name_or_index", "to_node"],
+        "edge_types": [["property", "weak"], "string_or_number", "node"]
+      },
+      "node_count": 4,
+      "edge_count": 3
+    },
+    "nodes": [0,0,1,0,1, 1,1,3,10,2, 1,2,5,20,0, 1,4,9,40,0],
+    "edges": [0,5,5, 0,7,10, 0,8,15],
+    "strings": ["", "Owner", "Stable", "Removed", "Added", "owner", "removed", "stable", "added"]
+  })";
+  current_output.close();
+  CHECK(current_output.good());
+
+  reb::HeapSnapshotDiffResult diff;
+  CHECK(reb::CompareV8HeapSnapshots(baseline_snapshot.Path(), current_snapshot.Path(), 50, diff,
+                                    error));
+  CHECK(error.empty());
+  CHECK(diff.baseline_nodes == 4);
+  CHECK(diff.current_nodes == 4);
+  CHECK(diff.baseline_reachable_nodes == 4);
+  CHECK(diff.current_reachable_nodes == 4);
+  CHECK(diff.baseline_self_size == 35);
+  CHECK(diff.current_self_size == 70);
+  CHECK(diff.self_size_delta == 35);
+  CHECK(diff.groups.size() == 2);
+  CHECK(diff.groups[0].node_name == "Added");
+  CHECK(diff.groups[0].count_delta == 1);
+  CHECK(diff.groups[0].self_size_delta == 40);
+  CHECK(diff.groups[1].node_name == "Removed");
+  CHECK(diff.groups[1].count_delta == -1);
+  CHECK(diff.groups[1].self_size_delta == -5);
+  CHECK(diff.dominators.size() == 3);
+  CHECK(diff.dominators[0].node_id == 3);
+  CHECK(diff.dominators[0].baseline_retained_size == 30);
+  CHECK(diff.dominators[0].current_retained_size == 70);
+  CHECK(diff.dominators[0].retained_size_delta == 40);
+  CHECK(diff.dominators[1].node_id == 9);
+  CHECK(diff.dominators[1].retained_size_delta == 40);
+  CHECK(diff.dominators[2].node_id == 7);
+  CHECK(diff.dominators[2].retained_size_delta == -5);
+  CHECK(!diff.retained_size_saturated);
+
+  reb::HeapSnapshotDiffResult limited_diff;
+  CHECK(reb::CompareV8HeapSnapshots(baseline_snapshot.Path(), current_snapshot.Path(), 1,
+                                    limited_diff, error));
+  CHECK(limited_diff.groups.size() == 1);
+  CHECK(limited_diff.groups[0].node_name == "Added");
+  CHECK(limited_diff.group_result_limit_reached);
+  CHECK(limited_diff.dominators.size() == 1);
+  CHECK(limited_diff.dominators[0].node_id == 3);
+  CHECK(limited_diff.dominator_result_limit_reached);
+
+  const std::string diff_json = reb::HeapSnapshotDiffResultToJson(diff);
+  CHECK(diff_json.find("\"self_size_delta\":35") != std::string::npos);
+  CHECK(diff_json.find("\"name\":\"Added\"") != std::string::npos);
+  CHECK(diff_json.find("\"retained_size_delta\":40") != std::string::npos);
+
+  reb::HeapSnapshotDiffResult unchanged;
+  CHECK(reb::CompareV8HeapSnapshots(baseline_snapshot.Path(), baseline_snapshot.Path(), 50,
+                                    unchanged, error));
+  CHECK(unchanged.groups.empty());
+  CHECK(unchanged.dominators.empty());
+
+  TemporarySnapshot diamond_baseline;
+  std::ofstream diamond_baseline_output(diamond_baseline.Path(), std::ios::binary);
+  diamond_baseline_output << R"({
+    "snapshot":{"meta":{
+      "node_fields":["type","name","id","self_size","edge_count"],
+      "node_types":[["synthetic","object"],"string","number","number","number"],
+      "edge_fields":["type","name_or_index","to_node"],
+      "edge_types":[["property"],"string_or_number","node"]},
+      "node_count":4,"edge_count":4},
+    "nodes":[0,0,1,0,2, 1,1,3,3,1, 1,2,5,4,1, 1,3,7,5,0],
+    "edges":[0,4,5, 0,5,10, 0,6,15, 0,6,15],
+    "strings":["","Left","Right","Shared","left","right","shared"]
+  })";
+  diamond_baseline_output.close();
+  CHECK(diamond_baseline_output.good());
+
+  TemporarySnapshot diamond_current;
+  std::ofstream diamond_current_output(diamond_current.Path(), std::ios::binary);
+  diamond_current_output << R"({
+    "snapshot":{"meta":{
+      "node_fields":["type","name","id","self_size","edge_count"],
+      "node_types":[["synthetic","object"],"string","number","number","number"],
+      "edge_fields":["type","name_or_index","to_node"],
+      "edge_types":[["property"],"string_or_number","node"]},
+      "node_count":4,"edge_count":4},
+    "nodes":[0,0,1,0,2, 1,1,3,3,1, 1,2,5,4,1, 1,3,7,15,0],
+    "edges":[0,4,5, 0,5,10, 0,6,15, 0,6,15],
+    "strings":["","Left","Right","Shared","left","right","shared"]
+  })";
+  diamond_current_output.close();
+  CHECK(diamond_current_output.good());
+
+  reb::HeapSnapshotDiffResult diamond_diff;
+  CHECK(reb::CompareV8HeapSnapshots(diamond_baseline.Path(), diamond_current.Path(), 50,
+                                    diamond_diff, error));
+  CHECK(diamond_diff.dominators.size() == 1);
+  CHECK(diamond_diff.dominators[0].node_id == 7);
+  CHECK(diamond_diff.dominators[0].baseline_retained_size == 5);
+  CHECK(diamond_diff.dominators[0].current_retained_size == 15);
+  CHECK(diamond_diff.dominators[0].retained_size_delta == 10);
+
   TemporarySnapshot malformed;
   std::ofstream malformed_output(malformed.Path(), std::ios::binary);
   malformed_output << "{\"snapshot\":{},\"nodes\":[]}";
   malformed_output.close();
   CHECK(!reb::SearchV8HeapSnapshot(malformed.Path(), "x", false, 50, result, error));
+  CHECK(!error.empty());
+  CHECK(!reb::CompareV8HeapSnapshots(malformed.Path(), current_snapshot.Path(), 50, diff, error));
   CHECK(!error.empty());
 
   std::cout << "heap_snapshot_test passed\n";

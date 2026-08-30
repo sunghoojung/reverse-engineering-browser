@@ -1360,7 +1360,7 @@
         .memory-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
         .memory-search-pane { max-height: min(420px, 48vh); border-right: 0; border-bottom: 1px solid var(--line); }
         .memory-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .memory-mode-switch, .memory-shape-field, .memory-options, .memory-search-button, .memory-search-help { grid-column: 1 / -1; }
+        .memory-mode-switch, .memory-form[data-mode="snapshot"] .memory-value-field, .memory-shape-field, .memory-options, .memory-search-button, .memory-search-help { grid-column: 1 / -1; }
         .memory-results-pane { grid-template-columns: 1fr; grid-template-rows: minmax(170px, .8fr) minmax(190px, 1fr); }
         .memory-results-list { border-right: 0; border-bottom: 1px solid var(--line); }
         .memory-property { grid-template-columns: minmax(90px, .7fr) 62px minmax(100px, 1.3fr); }
@@ -1565,13 +1565,13 @@
             <div id="memory-notice" class="memory-notice" data-kind="offline" role="status" aria-live="polite">Run a live session to attach an authorized browser target.</div>
             <div class="memory-grid">
               <aside class="memory-search-pane" aria-label="Memory search criteria">
-                <form id="memory-search-form" class="memory-form">
+                <form id="memory-search-form" class="memory-form" data-mode="live">
                   <div class="memory-mode-switch" role="group" aria-label="Memory search mode">
                     <button class="memory-mode-button" type="button" data-memory-mode="live" aria-pressed="true">Live objects</button>
                     <button class="memory-mode-button" type="button" data-memory-mode="snapshot" aria-pressed="false">Heap snapshot</button>
                   </div>
                   <label class="memory-live-only">Property name<input id="memory-property-query" type="text" placeholder="token, config, fingerprint" maxlength="512" autocomplete="off" /></label>
-                  <label><span id="memory-value-caption">Primitive value</span><input id="memory-value-query" type="text" placeholder="exact text or pattern" maxlength="512" autocomplete="off" /></label>
+                  <label class="memory-value-field"><span id="memory-value-caption">Primitive value</span><input id="memory-value-query" type="text" placeholder="exact text or pattern" maxlength="512" autocomplete="off" /></label>
                   <label class="memory-live-only">Class name<input id="memory-class-query" type="text" placeholder="Object, Array, CartState" maxlength="512" autocomplete="off" /></label>
                   <label class="memory-live-only memory-shape-field">Structural shape<textarea id="memory-shape-query" placeholder='{"device":{"fingerprint":""}}' maxlength="4096" spellcheck="false"></textarea></label>
                   <label class="memory-live-only">Similarity threshold<input id="memory-similarity-threshold" type="number" min="0" max="1" step="0.05" value="0.75" /></label>
@@ -2249,11 +2249,11 @@ export async function checkout(cart, fingerprint) {
             !isSafeIntegerInRange(body.generation, 0, Number.MAX_SAFE_INTEGER) ||
             !isPlainObject(body.search)) return false;
         const search = body.search;
-        if (search.protocol_version !== 1 ||
+        if (search.protocol_version !== 2 ||
             !['analyzed', 'total_objects', 'result_limit', 'duration_ms'].every(field =>
               isSafeIntegerInRange(search[field], 0, Number.MAX_SAFE_INTEGER)) ||
             search.result_limit !== 50 ||
-            !['result_limit_reached', 'scan_limit_reached', 'timed_out'].every(field =>
+            !['result_limit_reached', 'scan_limit_reached', 'property_limit_reached', 'timed_out'].every(field =>
               typeof search[field] === 'boolean') ||
             !Array.isArray(search.results) || search.results.length > search.result_limit) return false;
         return search.results.every(result => isPlainObject(result) &&
@@ -4192,6 +4192,7 @@ export async function checkout(cart, fingerprint) {
           state.memorySearchStatus = 'idle';
         }
         const snapshotMode = state.memoryMode === 'snapshot';
+        elements.memorySearchForm.dataset.mode = state.memoryMode;
         elements.memoryModeButtons.forEach(button => {
           button.setAttribute('aria-pressed', String(button.dataset.memoryMode === state.memoryMode));
           button.disabled = state.memorySearchPending;
@@ -4319,6 +4320,7 @@ export async function checkout(cart, fingerprint) {
         if (search.timed_out) limits.push('time limit reached');
         if (search.result_limit_reached) limits.push(`${search.result_limit} result limit reached`);
         if (search.scan_limit_reached) limits.push('candidate limit reached');
+        if (search.property_limit_reached) limits.push('property limit reached');
         const summary = `${search.results.length} ${search.results.length === 1 ? 'match' : 'matches'} from ${search.analyzed} inspected objects in ${search.duration_ms} ms`;
         state.memorySearchMessage = limits.length > 0 ? `${summary} · ${limits.join(' · ')}` : summary;
         state.memorySearchStatus = limits.length > 0 ? 'partial' : search.results.length > 0 ? 'ready' : 'empty';

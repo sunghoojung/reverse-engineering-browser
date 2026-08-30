@@ -41,6 +41,7 @@ MAX_LIVE_OBJECT_SCAN = 25_000
 MAX_LIVE_OBJECT_QUERY_BYTES = 512
 MAX_LIVE_OBJECT_SHAPE_BYTES = 4_096
 MAX_LIVE_OBJECT_PREVIEW_PROPERTIES = 16
+MAX_LIVE_OBJECT_SEARCH_PROPERTIES = 256
 LIVE_OBJECT_SEARCH_TIMEOUT_MS = 750
 MAX_HEAP_SNAPSHOT_BYTES = 256 * 1024 * 1024
 MAX_HEAP_SNAPSHOT_CHUNK_BYTES = 8 * 1024 * 1024
@@ -59,6 +60,7 @@ MAX_REMOTE_TEXT_BYTES = 4_096
 LIVE_OBJECT_SEARCH_FUNCTION = r"""function(criteria) {
   const started = Date.now();
   const deadline = started + criteria.timeoutMs;
+  let propertyLimitReached = false;
   const hasQuery = value => typeof value === "string" && value.length > 0;
   const compile = value => {
     if (!hasQuery(value)) return null;
@@ -94,7 +96,10 @@ LIVE_OBJECT_SEARCH_FUNCTION = r"""function(criteria) {
     const tokens = [];
     const seen = new WeakSet();
     const walk = (value, path, depth) => {
-      if (tokens.length >= 256 || depth > 3) return;
+      if (tokens.length >= 256 || depth > 3) {
+        propertyLimitReached = true;
+        return;
+      }
       if ((typeof value !== "object" && typeof value !== "function") || value === null) {
         const type = primitiveType(value);
         tokens.push(includeValues ? `${path}:${type}=${boundedText(value)}` : `${path}:${type}`);
@@ -105,14 +110,18 @@ LIVE_OBJECT_SEARCH_FUNCTION = r"""function(criteria) {
         return;
       }
       seen.add(value);
-      let descriptors;
-      try { descriptors = Object.getOwnPropertyDescriptors(value); } catch { return; }
-      const names = Object.keys(descriptors).sort().slice(0, 96);
+      let names;
+      try { names = Object.getOwnPropertyNames(value); } catch { return; }
+      if (names.length > 96) propertyLimitReached = true;
+      names = names.slice(0, 96).sort();
       if (names.length === 0) tokens.push(`${path}:empty`);
       for (const name of names) {
         if (tokens.length >= 256) break;
-        const descriptor = descriptors[name];
-        const childPath = path ? `${path}.${name}` : name;
+        let descriptor;
+        try { descriptor = Object.getOwnPropertyDescriptor(value, name); } catch { continue; }
+        if (name.length > 160) propertyLimitReached = true;
+        const boundedName = name.slice(0, 160);
+        const childPath = path ? `${path}.${boundedName}` : boundedName;
         if (!descriptor || !("value" in descriptor)) {
           tokens.push(`${childPath}:accessor`);
           continue;
@@ -134,8 +143,9 @@ LIVE_OBJECT_SEARCH_FUNCTION = r"""function(criteria) {
     const union = candidateTokens.size + shapeTokens.size - intersection;
     return union === 0 ? 1 : intersection / union;
   };
-  const preview = (descriptors, names) => names.slice(0, criteria.previewProperties).map(name => {
-    const descriptor = descriptors[name];
+  const preview = (candidate, names) => names.slice(0, criteria.previewProperties).map(name => {
+    let descriptor;
+    try { descriptor = Object.getOwnPropertyDescriptor(candidate, name); } catch {}
     if (!descriptor || !("value" in descriptor)) {
       return {name: name.slice(0, 256), type: "accessor", value: "<getter not invoked>"};
     }
@@ -161,19 +171,24 @@ LIVE_OBJECT_SEARCH_FUNCTION = r"""function(criteria) {
     }
     visited += 1;
     let candidate;
-    let descriptors;
+    let names;
     try {
       candidate = this[index];
       if ((typeof candidate !== "object" && typeof candidate !== "function") || candidate === null) continue;
-      descriptors = Object.getOwnPropertyDescriptors(candidate);
+      names = Object.getOwnPropertyNames(candidate);
     } catch { continue; }
     analyzed += 1;
-    const names = Object.keys(descriptors);
+    if (names.length > criteria.propertyScanLimit) propertyLimitReached = true;
+    const inspectedNames = names.slice(0, criteria.propertyScanLimit);
     const candidateClass = className(candidate);
-    if (propertyMatches && !names.some(propertyMatches)) continue;
+    if (propertyMatches && !inspectedNames.some(name => {
+      if (name.length > 512) propertyLimitReached = true;
+      return propertyMatches(name.slice(0, 512));
+    })) continue;
     if (classMatches && !classMatches(candidateClass)) continue;
-    if (valueMatches && !names.some(name => {
-      const descriptor = descriptors[name];
+    if (valueMatches && !inspectedNames.some(name => {
+      let descriptor;
+      try { descriptor = Object.getOwnPropertyDescriptor(candidate, name); } catch { return false; }
       if (!descriptor || !("value" in descriptor)) return false;
       const value = descriptor.value;
       if ((typeof value === "object" && value !== null) || typeof value === "function") return false;
@@ -187,18 +202,19 @@ LIVE_OBJECT_SEARCH_FUNCTION = r"""function(criteria) {
       propertyCount: names.length,
       propertiesTruncated: names.length > criteria.previewProperties,
       similarity: score,
-      preview: preview(descriptors, names)
+      preview: preview(candidate, inspectedNames)
     });
     if (results.length >= criteria.resultLimit) break;
   }
   return {
-    protocolVersion: 1,
+    protocolVersion: 2,
     analyzed,
     totalObjects,
     results,
     resultLimit: criteria.resultLimit,
     resultLimitReached: results.length >= criteria.resultLimit,
     scanLimitReached: totalObjects > scanLimit || visited < scanLimit,
+    propertyLimitReached,
     timedOut,
     durationMs: Math.max(0, Date.now() - started)
   };
@@ -800,6 +816,7 @@ class DebuggerBridge:
             "resultLimit": MAX_LIVE_OBJECT_RESULTS,
             "scanLimit": MAX_LIVE_OBJECT_SCAN,
             "previewProperties": MAX_LIVE_OBJECT_PREVIEW_PROPERTIES,
+            "propertyScanLimit": MAX_LIVE_OBJECT_SEARCH_PROPERTIES,
             "timeoutMs": LIVE_OBJECT_SEARCH_TIMEOUT_MS,
         }
         prototype_id: Optional[str] = None
@@ -865,7 +882,7 @@ class DebuggerBridge:
         return object_id
 
     def _normalize_live_object_search(self, value: Any) -> dict[str, Any]:
-        if not isinstance(value, dict) or value.get("protocolVersion") != 1:
+        if not isinstance(value, dict) or value.get("protocolVersion") != 2:
             raise ProtocolError("Debugger returned a malformed live object search")
         integer_fields = (
             "analyzed",
@@ -886,6 +903,7 @@ class DebuggerBridge:
         boolean_fields = (
             "resultLimitReached",
             "scanLimitReached",
+            "propertyLimitReached",
             "timedOut",
         )
         if any(not isinstance(value.get(field), bool) for field in boolean_fields):
@@ -955,12 +973,13 @@ class DebuggerBridge:
         return {
             "ok": True,
             "search": {
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "analyzed": value["analyzed"],
                 "total_objects": value["totalObjects"],
                 "result_limit": value["resultLimit"],
                 "result_limit_reached": value["resultLimitReached"],
                 "scan_limit_reached": value["scanLimitReached"],
+                "property_limit_reached": value["propertyLimitReached"],
                 "timed_out": value["timedOut"],
                 "duration_ms": value["durationMs"],
                 "results": results,

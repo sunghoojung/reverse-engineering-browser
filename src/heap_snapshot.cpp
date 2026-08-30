@@ -8,10 +8,8 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
-#include <queue>
 #include <sstream>
 #include <system_error>
-#include <unordered_map>
 #include <utility>
 
 namespace reb {
@@ -20,6 +18,9 @@ namespace {
 constexpr std::size_t kMaxJsonDepth = 64;
 constexpr std::size_t kMaxMetadataFields = 64;
 constexpr std::size_t kMaxMetadataTextBytes = 256;
+constexpr std::size_t kMaxStoredNodeBytes = 128U * 1024U * 1024U;
+constexpr std::size_t kMaxStoredEdgeBytes = 192U * 1024U * 1024U;
+constexpr std::size_t kInitialBfsQueueReserve = 64U * 1024U;
 constexpr std::size_t kNoNode = std::numeric_limits<std::size_t>::max();
 
 struct SnapshotData final {
@@ -574,17 +575,39 @@ bool ParseSnapshotDocument(const std::string_view document, SnapshotData& data) 
     } else if (key == "nodes") {
       if (data.node_fields.empty() ||
           data.node_fields.size() >
-              std::numeric_limits<std::size_t>::max() / kHeapSnapshotMaxNodes ||
-          !ParseUnsignedArray(reader, data.nodes, data.node_fields.size() * kHeapSnapshotMaxNodes,
-                              data.node_values_seen, data.node_values_truncated)) {
+              std::numeric_limits<std::size_t>::max() / kHeapSnapshotMaxNodes) {
+        return false;
+      }
+      const std::size_t maximum_records =
+          std::min(kHeapSnapshotMaxNodes,
+                   kMaxStoredNodeBytes / sizeof(std::uint64_t) / data.node_fields.size());
+      const std::size_t maximum_values = data.node_fields.size() * maximum_records;
+      const std::uint64_t reserved_nodes =
+          std::min<std::uint64_t>(data.declared_nodes, maximum_records);
+      const std::size_t reserved_values =
+          static_cast<std::size_t>(reserved_nodes) * data.node_fields.size();
+      data.nodes.reserve(std::min(reserved_values, document.size() / 2 + 1));
+      if (!ParseUnsignedArray(reader, data.nodes, maximum_values, data.node_values_seen,
+                              data.node_values_truncated)) {
         return false;
       }
     } else if (key == "edges") {
       if (data.edge_fields.empty() ||
           data.edge_fields.size() >
-              std::numeric_limits<std::size_t>::max() / kHeapSnapshotMaxEdges ||
-          !ParseUnsignedArray(reader, data.edges, data.edge_fields.size() * kHeapSnapshotMaxEdges,
-                              data.edge_values_seen, data.edge_values_truncated)) {
+              std::numeric_limits<std::size_t>::max() / kHeapSnapshotMaxEdges) {
+        return false;
+      }
+      const std::size_t maximum_records =
+          std::min(kHeapSnapshotMaxEdges,
+                   kMaxStoredEdgeBytes / sizeof(std::uint64_t) / data.edge_fields.size());
+      const std::size_t maximum_values = data.edge_fields.size() * maximum_records;
+      const std::uint64_t reserved_edges =
+          std::min<std::uint64_t>(data.declared_edges, maximum_records);
+      const std::size_t reserved_values =
+          static_cast<std::size_t>(reserved_edges) * data.edge_fields.size();
+      data.edges.reserve(std::min(reserved_values, document.size() / 2 + 1));
+      if (!ParseUnsignedArray(reader, data.edges, maximum_values, data.edge_values_seen,
+                              data.edge_values_truncated)) {
         return false;
       }
     } else if (key == "strings") {
@@ -637,16 +660,18 @@ bool ContainsText(const std::string_view haystack,
     return haystack.find(needle) != std::string_view::npos;
   }
   return std::search(haystack.begin(), haystack.end(), needle.begin(), needle.end(),
-                     [](const char left, const char right) {
-                       return AsciiFold(left) == AsciiFold(right);
-                     }) != haystack.end();
+                     [](const char left, const char right) { return AsciiFold(left) == right; }) !=
+         haystack.end();
 }
 
 std::string BoundedText(const std::string_view value, const std::size_t limit = 256) {
   if (value.size() <= limit) {
     return std::string(value);
   }
-  std::string output(value.substr(0, limit));
+  if (limit <= 3) {
+    return std::string(value.substr(0, limit));
+  }
+  std::string output(value.substr(0, limit - 3));
   output.append("...");
   return output;
 }
@@ -790,13 +815,19 @@ bool SearchV8HeapSnapshot(const std::filesystem::path& snapshot_path,
   result.edge_limit_reached = data.edge_values_truncated;
   result.string_limit_reached = data.strings_truncated;
 
+  std::string folded_query(query);
+  if (!case_sensitive) {
+    std::transform(folded_query.begin(), folded_query.end(), folded_query.begin(), AsciiFold);
+  }
+  const std::string_view search_query = case_sensitive ? query : std::string_view(folded_query);
+
   std::vector<std::size_t> match_nodes;
   match_nodes.reserve(result.result_limit);
   for (std::size_t ordinal = 0; ordinal < stored_nodes; ++ordinal) {
     const std::size_t offset = ordinal * node_width;
     ++result.analyzed_nodes;
     const std::string_view name = StringAt(data, data.nodes[offset + node_name_field]);
-    if (!ContainsText(name, query, case_sensitive)) {
+    if (!ContainsText(name, search_query, case_sensitive)) {
       continue;
     }
     HeapSnapshotMatch match;
@@ -827,12 +858,21 @@ bool SearchV8HeapSnapshot(const std::filesystem::path& snapshot_path,
 
     std::vector<std::size_t> parents(stored_nodes, kNoNode);
     std::vector<std::size_t> parent_edges(stored_nodes, kNoNode);
-    std::queue<std::size_t> pending;
+    std::vector<bool> target_nodes(stored_nodes, false);
+    for (const std::size_t target : match_nodes) {
+      target_nodes[target] = true;
+    }
+    std::size_t remaining_targets = match_nodes.size();
     parents[0] = 0;
-    pending.push(0);
-    while (!pending.empty()) {
-      const std::size_t from = pending.front();
-      pending.pop();
+    if (target_nodes[0]) {
+      --remaining_targets;
+    }
+    std::vector<std::size_t> pending;
+    pending.reserve(std::min(stored_nodes, kInitialBfsQueueReserve));
+    pending.push_back(0);
+    std::size_t pending_index = 0;
+    while (pending_index < pending.size() && remaining_targets > 0) {
+      const std::size_t from = pending[pending_index++];
       const std::size_t first_edge = edge_starts[from];
       const std::uint64_t count_value = data.nodes[from * node_width + node_edge_count_field];
       const std::size_t count = static_cast<std::size_t>(count_value);
@@ -856,7 +896,10 @@ bool SearchV8HeapSnapshot(const std::filesystem::path& snapshot_path,
         }
         parents[target] = from;
         parent_edges[target] = edge_ordinal;
-        pending.push(target);
+        pending.push_back(target);
+        if (target_nodes[target]) {
+          --remaining_targets;
+        }
       }
     }
 

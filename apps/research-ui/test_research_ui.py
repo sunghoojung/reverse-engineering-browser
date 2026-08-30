@@ -1088,8 +1088,9 @@ const snapshot = {
 const liveSearch = {
   ok: true, generation: 7,
   search: {
-    protocol_version: 1, analyzed: 17, total_objects: 17, result_limit: 50,
+    protocol_version: 2, analyzed: 17, total_objects: 17, result_limit: 50,
     duration_ms: 3, result_limit_reached: false, scan_limit_reached: false,
+    property_limit_reached: false,
     timed_out: false, results: [{
       id: '4', class_name: 'CheckoutState', property_count: 2,
       properties_truncated: false, similarity: 0.875,
@@ -1188,6 +1189,8 @@ process.stdout.write(JSON.stringify({
         self.assertIn("action: 'search_live_objects'", html)
         self.assertIn("action: 'search_heap_snapshot'", html)
         self.assertIn('id="request-memory-pivot"', html)
+        self.assertIn('data-mode="live"', html)
+        self.assertIn('memory-form[data-mode="snapshot"] .memory-value-field', html)
         self.assertIn("Capturing briefly pauses the target", html)
         self.assertIn("Accessors are reported without invoking getters", html)
         self.assertIn("Baseline read-only", html)

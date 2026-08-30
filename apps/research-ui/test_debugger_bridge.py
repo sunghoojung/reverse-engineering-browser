@@ -165,7 +165,7 @@ class FakeDebuggerWebSocket:
                 "result": {
                     "type": "object",
                     "value": {
-                        "protocolVersion": 1,
+                        "protocolVersion": 2,
                         "analyzed": 17,
                         "totalObjects": 17,
                         "results": [
@@ -192,6 +192,7 @@ class FakeDebuggerWebSocket:
                         "resultLimit": 50,
                         "resultLimitReached": False,
                         "scanLimitReached": False,
+                        "propertyLimitReached": False,
                         "timedOut": False,
                         "durationMs": 3,
                     },
@@ -491,8 +492,22 @@ class DebuggerBridgeTests(unittest.TestCase):
                 self.assertTrue(search_command["params"]["silent"])
                 self.assertTrue(search_command["params"]["throwOnSideEffect"])
                 self.assertIn(
+                    "Object.getOwnPropertyNames",
+                    search_command["params"]["functionDeclaration"],
+                )
+                self.assertIn(
+                    "Object.getOwnPropertyDescriptor",
+                    search_command["params"]["functionDeclaration"],
+                )
+                self.assertNotIn(
                     "Object.getOwnPropertyDescriptors",
                     search_command["params"]["functionDeclaration"],
+                )
+                self.assertEqual(
+                    search_command["params"]["arguments"][0]["value"][
+                        "propertyScanLimit"
+                    ],
+                    256,
                 )
                 self.assertIn("Runtime.releaseObject", methods)
                 heap_snapshot = bridge.action(
@@ -589,7 +604,7 @@ const criteria = overrides => ({{
   propertyQuery: '', valueQuery: '', classQuery: '', regex: false,
   caseSensitive: false, shape: null, includeShapeValues: false,
   similarityThreshold: 0.75, resultLimit: 50, scanLimit: 25000,
-  previewProperties: 16, timeoutMs: 750, ...overrides
+  previewProperties: 16, propertyScanLimit: 256, timeoutMs: 750, ...overrides
 }});
 let getterCalls = 0;
 const accessor = {{token: 'visible'}};
@@ -607,6 +622,12 @@ const boundedResult = search.call(
   Array.from({{length: 100}}, (_, index) => ({{match: index}})),
   criteria({{propertyQuery: 'match', resultLimit: 5, scanLimit: 10}})
 );
+const propertyBounded = Object.fromEntries(
+  Array.from({{length: 300}}, (_, index) => [`property${{index}}`, index])
+);
+const propertyBoundedResult = search.call(
+  [propertyBounded], criteria({{propertyQuery: 'property299'}})
+);
 process.stdout.write(JSON.stringify({{
   getterCalls,
   accessorPreview: propertyResult.results[0].preview.find(item => item.name === 'secret'),
@@ -616,7 +637,9 @@ process.stdout.write(JSON.stringify({{
   boundedMatches: boundedResult.results.length,
   boundedAnalyzed: boundedResult.analyzed,
   resultLimitReached: boundedResult.resultLimitReached,
-  boundedSearchIsPartial: boundedResult.scanLimitReached
+  boundedSearchIsPartial: boundedResult.scanLimitReached,
+  propertyBoundedMatches: propertyBoundedResult.results.length,
+  propertyLimitReached: propertyBoundedResult.propertyLimitReached
 }}));
 """
         completed = subprocess.run(
@@ -641,19 +664,22 @@ process.stdout.write(JSON.stringify({{
                 "boundedAnalyzed": 5,
                 "resultLimitReached": True,
                 "boundedSearchIsPartial": True,
+                "propertyBoundedMatches": 0,
+                "propertyLimitReached": True,
             },
         )
 
     def test_live_object_search_rejects_oversized_target_results(self) -> None:
         bridge = DebuggerBridge()
         valid = {
-            "protocolVersion": 1,
+            "protocolVersion": 2,
             "analyzed": 1,
             "totalObjects": 1,
             "results": [],
             "resultLimit": 50,
             "resultLimitReached": False,
             "scanLimitReached": False,
+            "propertyLimitReached": False,
             "timedOut": False,
             "durationMs": 1,
         }

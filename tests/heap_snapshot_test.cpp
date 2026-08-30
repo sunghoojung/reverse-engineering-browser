@@ -78,6 +78,26 @@ int main() {
   CHECK(result.matches[0].retaining_path[1].edge_name == "token");
   CHECK(result.matches[0].retaining_path[1].node_name == "secret-value");
 
+  reb::HeapSnapshotSearchResult case_sensitive;
+  CHECK(reb::SearchV8HeapSnapshot(snapshot.Path(), "SECRET", true, 50, case_sensitive, error));
+  CHECK(case_sensitive.matches.empty());
+
+  TemporarySnapshot long_name_snapshot;
+  std::ofstream long_name_output(long_name_snapshot.Path(), std::ios::binary);
+  const std::string long_name(300, 'x');
+  long_name_output
+      << R"({"snapshot":{"meta":{"node_fields":["type","name","id","self_size","edge_count"],"node_types":[["synthetic","string"],"string","number","number","number"],"edge_fields":["type","name_or_index","to_node"],"edge_types":[["property"],"string_or_number","node"]},"node_count":2,"edge_count":1},"nodes":[0,0,1,0,1,1,1,3,300,0],"edges":[0,2,5],"strings":["",")"
+      << long_name << R"(","value"]})";
+  long_name_output.close();
+  CHECK(long_name_output.good());
+
+  reb::HeapSnapshotSearchResult long_name_result;
+  CHECK(reb::SearchV8HeapSnapshot(long_name_snapshot.Path(), "xxxx", false, 50, long_name_result,
+                                  error));
+  CHECK(long_name_result.matches.size() == 1);
+  CHECK(long_name_result.matches[0].node_name.size() == 256);
+  CHECK(long_name_result.matches[0].node_name.ends_with("..."));
+
   const std::string json = reb::HeapSnapshotSearchResultToJson(result);
   CHECK(json.find("\"protocol_version\":1") != std::string::npos);
   CHECK(json.find("\"name\":\"secret-value\"") != std::string::npos);

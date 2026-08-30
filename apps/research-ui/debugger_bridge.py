@@ -9,6 +9,8 @@ import os
 import select
 import socket
 import struct
+import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -40,6 +42,12 @@ MAX_LIVE_OBJECT_QUERY_BYTES = 512
 MAX_LIVE_OBJECT_SHAPE_BYTES = 4_096
 MAX_LIVE_OBJECT_PREVIEW_PROPERTIES = 16
 LIVE_OBJECT_SEARCH_TIMEOUT_MS = 750
+MAX_HEAP_SNAPSHOT_BYTES = 256 * 1024 * 1024
+MAX_HEAP_SNAPSHOT_CHUNK_BYTES = 8 * 1024 * 1024
+MAX_HEAP_SNAPSHOT_RESULTS = 50
+MAX_HEAP_RETAINING_PATH = 12
+HEAP_SNAPSHOT_CAPTURE_TIMEOUT_SECONDS = 60.0
+HEAP_SNAPSHOT_SEARCH_TIMEOUT_SECONDS = 20.0
 MAX_ACTIVE_PORT_BYTES = 4_096
 MAX_TARGET_LIST_BYTES = 2 * 1024 * 1024
 MAX_TARGET_ID_BYTES = 4_096
@@ -214,6 +222,43 @@ class PendingCommand:
     event: threading.Event
     response: Optional[dict[str, Any]] = None
     error: Optional[BaseException] = None
+
+
+@dataclass
+class HeapSnapshotCollector:
+    path: Path
+    stream: Any
+    byte_count: int = 0
+    chunk_count: int = 0
+    error: Optional[str] = None
+
+    def append(self, chunk: Any) -> None:
+        if self.error is not None:
+            return
+        if not isinstance(chunk, str):
+            self.error = "Debugger returned a malformed heap snapshot chunk"
+            return
+        encoded = chunk.encode("utf-8")
+        if len(encoded) > MAX_HEAP_SNAPSHOT_CHUNK_BYTES:
+            self.error = "Debugger returned an oversized heap snapshot chunk"
+            return
+        if self.byte_count + len(encoded) > MAX_HEAP_SNAPSHOT_BYTES:
+            self.error = "Heap snapshot exceeds the 256 MiB capture limit"
+            return
+        try:
+            self.stream.write(encoded)
+        except OSError:
+            self.error = "Heap snapshot could not be written to local temporary storage"
+            return
+        self.byte_count += len(encoded)
+        self.chunk_count += 1
+
+    def close(self) -> None:
+        try:
+            self.stream.close()
+        except OSError:
+            if self.error is None:
+                self.error = "Heap snapshot temporary storage could not be closed"
 
 
 class WebSocketClient:
@@ -400,8 +445,15 @@ class WebSocketClient:
 
 
 class DebuggerBridge:
-    def __init__(self, active_port_path: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        active_port_path: Optional[Path] = None,
+        heap_snapshot_binary: Optional[Path] = None,
+    ) -> None:
         self.active_port_path = active_port_path
+        self.heap_snapshot_binary = heap_snapshot_binary or (
+            Path(__file__).resolve().parents[2] / "build" / "reb-heap-snapshot"
+        )
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._stop = threading.Event()
@@ -429,6 +481,7 @@ class DebuggerBridge:
         self._pause_on_exceptions = "none"
         self._xhr_breakpoints: list[str] = []
         self._event_breakpoints: list[str] = []
+        self._heap_snapshot_collector: Optional[HeapSnapshotCollector] = None
 
     def start(self) -> None:
         if self.active_port_path is None or self._thread is not None:
@@ -653,6 +706,8 @@ class DebuggerBridge:
                 connection.close()
         elif action == "search_live_objects":
             return self._search_live_objects(request)
+        elif action == "search_heap_snapshot":
+            return self._search_heap_snapshot(request)
         elif action == "clear_console":
             with self._lock:
                 self._console = []
@@ -913,6 +968,205 @@ class DebuggerBridge:
             "generation": self.generation(),
         }
 
+    def _search_heap_snapshot(self, request: dict[str, Any]) -> dict[str, Any]:
+        query = self._optional_search_text(request, "query").strip()
+        case_sensitive = request.get("case_sensitive", False)
+        if not query:
+            raise DebuggerBridgeError("Heap snapshot search requires a value")
+        if not isinstance(case_sensitive, bool):
+            raise DebuggerBridgeError("Heap snapshot search options must be boolean")
+        binary = self.heap_snapshot_binary.resolve()
+        if not binary.is_file() or not os.access(binary, os.X_OK):
+            raise DebuggerBridgeError(
+                "Native heap snapshot search is unavailable; run make heap-snapshot"
+            )
+
+        temporary = tempfile.NamedTemporaryFile(
+            mode="wb", prefix="reb-heap-", suffix=".heapsnapshot", delete=False
+        )
+        collector = HeapSnapshotCollector(Path(temporary.name), temporary)
+        with self._lock:
+            if self._heap_snapshot_collector is not None:
+                collector.close()
+                collector.path.unlink(missing_ok=True)
+                raise DebuggerBridgeError("A heap snapshot capture is already running")
+            self._heap_snapshot_collector = collector
+        try:
+            self._command("HeapProfiler.enable")
+            self._command(
+                "HeapProfiler.takeHeapSnapshot",
+                {
+                    "reportProgress": False,
+                    "captureNumericValue": True,
+                    "exposeInternals": False,
+                },
+                timeout=HEAP_SNAPSHOT_CAPTURE_TIMEOUT_SECONDS,
+            )
+        except BaseException:
+            collector.close()
+            collector.path.unlink(missing_ok=True)
+            with self._lock:
+                connection = self._connection
+            if connection is not None:
+                connection.close()
+            raise
+        finally:
+            with self._lock:
+                if self._heap_snapshot_collector is collector:
+                    self._heap_snapshot_collector = None
+            collector.close()
+
+        try:
+            if collector.error is not None:
+                raise DebuggerBridgeError(collector.error)
+            if collector.chunk_count == 0 or collector.byte_count == 0:
+                raise ProtocolError("Debugger returned an empty heap snapshot")
+            command = [
+                str(binary),
+                "--snapshot",
+                str(collector.path),
+                "--query",
+                query,
+                "--limit",
+                str(MAX_HEAP_SNAPSHOT_RESULTS),
+            ]
+            if case_sensitive:
+                command.append("--case-sensitive")
+            try:
+                completed = subprocess.run(
+                    command,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=HEAP_SNAPSHOT_SEARCH_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exception:
+                raise DebuggerBridgeError(
+                    "Native heap snapshot search exceeded its 20 second limit"
+                ) from exception
+            if completed.returncode != 0:
+                detail = self._truncate_text(completed.stderr.strip(), 512)
+                raise DebuggerBridgeError(
+                    detail or "Native heap snapshot search rejected the snapshot"
+                )
+            if len(completed.stdout.encode("utf-8")) > 512 * 1024:
+                raise ProtocolError("Native heap snapshot search returned oversized output")
+            try:
+                document = json.loads(completed.stdout)
+            except json.JSONDecodeError as exception:
+                raise ProtocolError(
+                    "Native heap snapshot search returned malformed JSON"
+                ) from exception
+            return self._normalize_heap_snapshot_search(document)
+        finally:
+            collector.path.unlink(missing_ok=True)
+
+    def _normalize_heap_snapshot_search(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict) or value.get("protocol_version") != 1:
+            raise ProtocolError("Native heap snapshot search returned malformed output")
+        integer_fields = (
+            "file_bytes",
+            "total_nodes",
+            "analyzed_nodes",
+            "total_edges",
+            "indexed_edges",
+            "total_strings",
+            "duration_ms",
+            "result_limit",
+        )
+        if any(
+            not isinstance(value.get(field), int)
+            or isinstance(value.get(field), bool)
+            or value[field] < 0
+            or value[field] > 2**53 - 1
+            for field in integer_fields
+        ):
+            raise ProtocolError("Native heap snapshot search returned invalid counts")
+        if (
+            value["file_bytes"] > MAX_HEAP_SNAPSHOT_BYTES
+            or value["analyzed_nodes"] > value["total_nodes"]
+            or value["indexed_edges"] > value["total_edges"]
+            or value["result_limit"] != MAX_HEAP_SNAPSHOT_RESULTS
+        ):
+            raise ProtocolError("Native heap snapshot search returned invalid coverage")
+        boolean_fields = (
+            "result_limit_reached",
+            "node_limit_reached",
+            "edge_limit_reached",
+            "string_limit_reached",
+            "retaining_paths_partial",
+        )
+        if any(not isinstance(value.get(field), bool) for field in boolean_fields):
+            raise ProtocolError("Native heap snapshot search returned invalid limits")
+        raw_results = value.get("results")
+        if not isinstance(raw_results, list) or len(raw_results) > MAX_HEAP_SNAPSHOT_RESULTS:
+            raise ProtocolError("Native heap snapshot search returned too many results")
+        results = []
+        for raw_result in raw_results:
+            if not isinstance(raw_result, dict):
+                raise ProtocolError("Native heap snapshot search returned a malformed result")
+            result_id = raw_result.get("id")
+            node_type = raw_result.get("type")
+            node_name = raw_result.get("name")
+            self_size = raw_result.get("self_size")
+            path_complete = raw_result.get("retaining_path_complete")
+            raw_path = raw_result.get("retaining_path")
+            if (
+                not isinstance(result_id, str)
+                or not result_id.isdecimal()
+                or len(result_id) > 20
+                or not isinstance(node_type, str)
+                or not isinstance(node_name, str)
+                or not isinstance(self_size, int)
+                or isinstance(self_size, bool)
+                or self_size < 0
+                or self_size > 2**53 - 1
+                or not isinstance(path_complete, bool)
+                or not isinstance(raw_path, list)
+                or len(raw_path) > MAX_HEAP_RETAINING_PATH
+            ):
+                raise ProtocolError("Native heap snapshot search returned a malformed result")
+            retaining_path = []
+            for raw_step in raw_path:
+                if not isinstance(raw_step, dict) or any(
+                    not isinstance(raw_step.get(field), str)
+                    for field in ("edge", "type", "name")
+                ):
+                    raise ProtocolError(
+                        "Native heap snapshot search returned a malformed retaining path"
+                    )
+                retaining_path.append(
+                    {
+                        "edge": self._truncate_text(raw_step["edge"], 128),
+                        "type": self._truncate_text(raw_step["type"], 64),
+                        "name": self._truncate_text(raw_step["name"], 256),
+                    }
+                )
+            results.append(
+                {
+                    "id": result_id,
+                    "type": self._truncate_text(node_type, 64),
+                    "name": self._truncate_text(node_name, 256),
+                    "self_size": self_size,
+                    "retaining_path_complete": path_complete,
+                    "retaining_path": retaining_path,
+                }
+            )
+        return {
+            "ok": True,
+            "snapshot": {
+                field: value[field]
+                for field in (
+                    "protocol_version",
+                    *integer_fields,
+                    *boolean_fields,
+                )
+            }
+            | {"results": results},
+            "generation": self.generation(),
+        }
+
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
@@ -1103,6 +1357,12 @@ class DebuggerBridge:
             connection.close()
 
     def _handle_event(self, method: str, params: dict[str, Any]) -> None:
+        if method == "HeapProfiler.addHeapSnapshotChunk":
+            with self._lock:
+                collector = self._heap_snapshot_collector
+            if collector is not None:
+                collector.append(params.get("chunk"))
+            return
         if method == "Debugger.scriptParsed":
             script = self._parse_script(params)
             if script is not None:

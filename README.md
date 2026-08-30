@@ -61,7 +61,8 @@ The repository includes a dependency-free C++ vertical slice for the probe event
 - a bounded request signal profile for fingerprint-relevant browser activity;
 - an authenticated, acknowledged artifact socket with immutable SHA-256 blobs;
 - a native macOS Origin Trace application that reads the broker evidence store;
-- bounded read-only live JavaScript object and structural-similarity search;
+- bounded read-only live JavaScript object search plus native C++ V8
+  heap-snapshot search with retaining paths;
 - a threaded producer and consumer demo;
 - unit tests and sanitizer support.
 
@@ -132,7 +133,10 @@ stepping, sync and async call stacks, bounded scopes and watches, special
 breakpoints, and a console drawer. Memory adds property, primitive value,
 class, regular expression, and JSON-shape search over live JavaScript objects.
 The scan never invokes accessors, returns read-only previews, and enforces
-time, candidate, property, and result limits. Artifact success events are
+time, candidate, property, and result limits. Memory can also search an
+explicit temporary V8 heap snapshot through a bounded native C++ indexer,
+including unreachable values and retaining paths. Selected request values can
+pivot directly into a prefilled Memory search. Artifact success events are
 emitted only after the receiver has committed the manifest record; capture or
 transfer failures remain visible as normal evidence events. Session
 directories and evidence files are user-only. When the Artifact category is

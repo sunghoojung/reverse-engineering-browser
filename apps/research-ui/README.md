@@ -114,8 +114,14 @@ user-only temporary file, then runs `build/reb-heap-snapshot`. The
 dependency-free C++20 indexer reads at most 2,000,000 nodes, 8,000,000 edges,
 2,000,000 strings, and 64 MiB of retained string text. It returns at most 50
 matching nodes with shortest non-weak retaining paths capped at 12 steps. Every
-limit is visible in the response, and the temporary snapshot is deleted after
-each search.
+match is classified as root-reachable or unreachable. The native index returns
+at most 12 prioritized incoming references per result, ordering internal and
+hidden edges before weak and ordinary references while preserving the full
+incoming count. The UI can scope a search to all, root-reachable, or unreachable
+nodes. Every limit is visible in the response, and the temporary snapshot is
+deleted after each search. See
+[Heap Reference Inspection v2](../../docs/product/heap-reference-inspection-v2.md)
+for the graph and response contract.
 
 Heap Diff mode captures an explicit baseline, lets the researcher perform page
 activity, and compares a later snapshot with the same bounded native C++20

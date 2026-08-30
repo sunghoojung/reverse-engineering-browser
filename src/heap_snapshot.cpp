@@ -732,15 +732,20 @@ std::string BoundedText(const std::string_view value, const std::size_t limit = 
   return output;
 }
 
+std::string_view EdgeTypeAt(const SnapshotData& data,
+                            const std::size_t edge_offset,
+                            const std::size_t edge_type_field) noexcept {
+  const std::uint64_t type_index = data.edges[edge_offset + edge_type_field];
+  return type_index < data.edge_types.size()
+             ? std::string_view(data.edge_types[static_cast<std::size_t>(type_index)])
+             : std::string_view("unknown");
+}
+
 std::string EdgeName(const SnapshotData& data,
                      const std::size_t edge_offset,
                      const std::size_t edge_type_field,
                      const std::size_t edge_name_field) {
-  const std::uint64_t type_index = data.edges[edge_offset + edge_type_field];
-  const std::string_view type =
-      type_index < data.edge_types.size()
-          ? std::string_view(data.edge_types[static_cast<std::size_t>(type_index)])
-          : std::string_view("unknown");
+  const std::string_view type = EdgeTypeAt(data, edge_offset, edge_type_field);
   const std::uint64_t name_or_index = data.edges[edge_offset + edge_name_field];
   if (type == "element" || type == "hidden") {
     return "[" + std::to_string(name_or_index) + "]";
@@ -752,9 +757,7 @@ std::string EdgeName(const SnapshotData& data,
 bool IsWeakEdge(const SnapshotData& data,
                 const std::size_t edge_offset,
                 const std::size_t edge_type_field) noexcept {
-  const std::uint64_t type_index = data.edges[edge_offset + edge_type_field];
-  return type_index < data.edge_types.size() &&
-         data.edge_types[static_cast<std::size_t>(type_index)] == "weak";
+  return EdgeTypeAt(data, edge_offset, edge_type_field) == "weak";
 }
 
 std::string JsonEscape(const std::string_view text) {
@@ -873,27 +876,31 @@ bool LoadSnapshot(const std::filesystem::path& snapshot_path,
   return true;
 }
 
+using GraphIndex = std::uint32_t;
+constexpr GraphIndex kNoGraphIndex = std::numeric_limits<GraphIndex>::max();
+
 bool BuildEdgeStarts(const SnapshotData& data,
                      const SnapshotLayout& layout,
-                     std::vector<std::size_t>& edge_starts,
+                     std::vector<GraphIndex>& edge_starts,
                      std::string& error) {
   edge_starts.assign(layout.stored_nodes, 0);
-  std::size_t edge_cursor = 0;
+  GraphIndex edge_cursor = 0;
   for (std::size_t ordinal = 0; ordinal < layout.stored_nodes; ++ordinal) {
     edge_starts[ordinal] = edge_cursor;
     const std::uint64_t count =
         data.nodes[ordinal * layout.node_width + layout.node_edge_count_field];
-    if (count > std::numeric_limits<std::size_t>::max() - edge_cursor) {
+    if (count > static_cast<std::uint64_t>(kNoGraphIndex - edge_cursor)) {
       error = "Heap snapshot edge counts overflow the native index";
       return false;
     }
-    edge_cursor += static_cast<std::size_t>(count);
+    edge_cursor += static_cast<GraphIndex>(count);
+  }
+  if (!data.edge_values_truncated && edge_cursor != layout.stored_edges) {
+    error = "Heap snapshot node edge counts do not match its edge array";
+    return false;
   }
   return true;
 }
-
-using GraphIndex = std::uint32_t;
-constexpr GraphIndex kNoGraphIndex = std::numeric_limits<GraphIndex>::max();
 
 struct SnapshotNodeSummary final {
   std::uint64_t node_id = 0;
@@ -929,8 +936,8 @@ struct SnapshotSummary final {
 
 struct DfsFrame final {
   GraphIndex node = 0;
-  std::size_t next_edge = 0;
-  std::size_t end_edge = 0;
+  GraphIndex next_edge = 0;
+  GraphIndex end_edge = 0;
 };
 
 std::uint64_t SaturatingAdd(const std::uint64_t left,
@@ -1000,13 +1007,15 @@ bool EdgeTarget(const SnapshotData& data,
 
 DfsFrame MakeDfsFrame(const SnapshotData& data,
                       const SnapshotLayout& layout,
-                      const std::vector<std::size_t>& edge_starts,
+                      const std::vector<GraphIndex>& edge_starts,
                       const GraphIndex node) noexcept {
-  const std::size_t first_edge = edge_starts[node];
+  const GraphIndex first_edge = edge_starts[node];
   const std::uint64_t count_value =
       data.nodes[static_cast<std::size_t>(node) * layout.node_width + layout.node_edge_count_field];
-  const std::size_t count = static_cast<std::size_t>(count_value);
-  return {node, first_edge, std::min(layout.stored_edges, first_edge + count)};
+  const GraphIndex count = static_cast<GraphIndex>(count_value);
+  return {node, first_edge,
+          std::min(static_cast<GraphIndex>(layout.stored_edges),
+                   static_cast<GraphIndex>(first_edge + count))};
 }
 
 bool BuildSnapshotSummary(const std::filesystem::path& snapshot_path,
@@ -1030,7 +1039,7 @@ bool BuildSnapshotSummary(const std::filesystem::path& snapshot_path,
     return false;
   }
 
-  std::vector<std::size_t> edge_starts;
+  std::vector<GraphIndex> edge_starts;
   if (!BuildEdgeStarts(data, layout, edge_starts, error)) {
     return false;
   }
@@ -1113,7 +1122,7 @@ bool BuildSnapshotSummary(const std::filesystem::path& snapshot_path,
     }
   }
   std::vector<GraphIndex>().swap(predecessor_counts);
-  std::vector<std::size_t>().swap(edge_starts);
+  std::vector<GraphIndex>().swap(edge_starts);
   std::vector<std::uint64_t>().swap(data.edges);
   std::vector<std::string>().swap(data.edge_types);
 
@@ -1513,19 +1522,90 @@ void KeepTopDiffGroup(const DiffAccumulator& accumulator,
   std::push_heap(groups.begin(), groups.end(), BetterDiffGroup);
 }
 
+std::string_view SearchScopeName(const HeapSnapshotSearchScope scope) noexcept {
+  switch (scope) {
+    case HeapSnapshotSearchScope::kReachable:
+      return "reachable";
+    case HeapSnapshotSearchScope::kUnreachable:
+      return "unreachable";
+    case HeapSnapshotSearchScope::kAll:
+      return "all";
+  }
+  return "all";
+}
+
+bool MatchesSearchScope(const bool reachable, const HeapSnapshotSearchScope scope) noexcept {
+  return scope == HeapSnapshotSearchScope::kAll ||
+         (scope == HeapSnapshotSearchScope::kReachable && reachable) ||
+         (scope == HeapSnapshotSearchScope::kUnreachable && !reachable);
+}
+
+std::uint8_t IncomingReferencePriority(const std::string_view edge_type) noexcept {
+  if (edge_type == "internal" || edge_type == "hidden") {
+    return 0;
+  }
+  if (edge_type == "weak") {
+    return 1;
+  }
+  if (edge_type == "context" || edge_type == "shortcut") {
+    return 2;
+  }
+  return 3;
+}
+
+struct IncomingReferenceCandidate final {
+  std::uint64_t source_node_id = 0;
+  GraphIndex source_node = 0;
+  GraphIndex edge = 0;
+  std::uint8_t priority = 0;
+};
+
+bool BetterIncomingReferenceCandidate(const IncomingReferenceCandidate& left,
+                                      const IncomingReferenceCandidate& right) noexcept {
+  if (left.priority != right.priority) {
+    return left.priority < right.priority;
+  }
+  if (left.source_node_id != right.source_node_id) {
+    return left.source_node_id < right.source_node_id;
+  }
+  return left.edge < right.edge;
+}
+
+void KeepTopIncomingReference(const IncomingReferenceCandidate candidate,
+                              std::vector<IncomingReferenceCandidate>& references) {
+  if (references.size() < kHeapSnapshotMaxIncomingReferences) {
+    references.push_back(candidate);
+    if (references.size() == kHeapSnapshotMaxIncomingReferences) {
+      std::make_heap(references.begin(), references.end(), BetterIncomingReferenceCandidate);
+    }
+    return;
+  }
+  if (!BetterIncomingReferenceCandidate(candidate, references.front())) {
+    return;
+  }
+  std::pop_heap(references.begin(), references.end(), BetterIncomingReferenceCandidate);
+  references.back() = candidate;
+  std::push_heap(references.begin(), references.end(), BetterIncomingReferenceCandidate);
+}
+
 }  // namespace
 
 bool SearchV8HeapSnapshot(const std::filesystem::path& snapshot_path,
                           const std::string_view query,
                           const bool case_sensitive,
+                          const HeapSnapshotSearchScope scope,
                           const std::size_t requested_result_limit,
                           HeapSnapshotSearchResult& result,
                           std::string& error) {
   const auto started = std::chrono::steady_clock::now();
   result = {};
   result.result_limit = std::min(requested_result_limit, kHeapSnapshotMaxResults);
+  result.reference_limit = kHeapSnapshotMaxIncomingReferences;
+  result.scope = scope;
   error.clear();
-  if (query.empty() || query.size() > 512 || result.result_limit == 0) {
+  if (query.empty() || query.size() > 512 || result.result_limit == 0 ||
+      (scope != HeapSnapshotSearchScope::kAll && scope != HeapSnapshotSearchScope::kReachable &&
+       scope != HeapSnapshotSearchScope::kUnreachable)) {
     error = "Heap snapshot query or result limit is invalid";
     return false;
   }
@@ -1556,19 +1636,64 @@ bool SearchV8HeapSnapshot(const std::filesystem::path& snapshot_path,
   result.edge_limit_reached = stats.edge_limit_reached;
   result.string_limit_reached = stats.string_limit_reached;
 
+  if (stored_nodes >= std::numeric_limits<GraphIndex>::max() ||
+      stored_edges >= std::numeric_limits<GraphIndex>::max()) {
+    error = "Heap snapshot exceeds the native reference index";
+    return false;
+  }
+
+  std::vector<GraphIndex> edge_starts;
+  std::vector<GraphIndex> parents(stored_nodes, kNoGraphIndex);
+  std::vector<GraphIndex> parent_edges(stored_nodes, kNoGraphIndex);
+  if (stored_nodes > 0) {
+    if (!BuildEdgeStarts(data, layout, edge_starts, error)) {
+      return false;
+    }
+    parents[0] = 0;
+    std::vector<GraphIndex> pending;
+    pending.reserve(std::min(stored_nodes, kInitialBfsQueueReserve));
+    pending.push_back(0);
+    for (std::size_t pending_index = 0; pending_index < pending.size(); ++pending_index) {
+      const GraphIndex source = pending[pending_index];
+      const std::size_t first_edge = edge_starts[source];
+      const std::uint64_t count_value =
+          data.nodes[static_cast<std::size_t>(source) * node_width + node_edge_count_field];
+      const std::size_t end_edge =
+          std::min(stored_edges, first_edge + static_cast<std::size_t>(count_value));
+      for (std::size_t edge_ordinal = first_edge; edge_ordinal < end_edge; ++edge_ordinal) {
+        GraphIndex target = 0;
+        if (!EdgeTarget(data, layout, edge_ordinal, target) || parents[target] != kNoGraphIndex) {
+          continue;
+        }
+        parents[target] = source;
+        parent_edges[target] = static_cast<GraphIndex>(edge_ordinal);
+        pending.push_back(target);
+      }
+    }
+    result.reachable_nodes = pending.size();
+  }
+
   std::string folded_query(query);
   if (!case_sensitive) {
     std::transform(folded_query.begin(), folded_query.end(), folded_query.begin(), AsciiFold);
   }
   const std::string_view search_query = case_sensitive ? query : std::string_view(folded_query);
 
-  std::vector<std::size_t> match_nodes;
+  std::vector<GraphIndex> match_nodes;
   match_nodes.reserve(result.result_limit);
   for (std::size_t ordinal = 0; ordinal < stored_nodes; ++ordinal) {
     const std::size_t offset = ordinal * node_width;
     ++result.analyzed_nodes;
+    const bool reachable = parents[ordinal] != kNoGraphIndex;
+    if (!MatchesSearchScope(reachable, scope)) {
+      continue;
+    }
     const std::string_view name = StringAt(data, data.nodes[offset + node_name_field]);
     if (!ContainsText(name, search_query, case_sensitive)) {
+      continue;
+    }
+    ++result.matched_nodes;
+    if (result.matches.size() >= result.result_limit) {
       continue;
     }
     HeapSnapshotMatch match;
@@ -1576,84 +1701,30 @@ bool SearchV8HeapSnapshot(const std::filesystem::path& snapshot_path,
     match.self_size = data.nodes[offset + node_size_field];
     match.node_type = BoundedText(NodeTypeAt(data, offset, node_type_field), 64);
     match.node_name = BoundedText(name);
+    match.reachable = reachable;
     result.matches.push_back(std::move(match));
-    match_nodes.push_back(ordinal);
-    if (result.matches.size() >= result.result_limit) {
-      result.result_limit_reached = true;
-      break;
-    }
+    match_nodes.push_back(static_cast<GraphIndex>(ordinal));
   }
+  result.result_limit_reached = result.matched_nodes > result.result_limit;
 
-  if (!match_nodes.empty() && stored_nodes > 0) {
-    std::vector<std::size_t> edge_starts;
-    if (!BuildEdgeStarts(data, layout, edge_starts, error)) {
-      return false;
-    }
-
-    std::vector<std::size_t> parents(stored_nodes, kNoNode);
-    std::vector<std::size_t> parent_edges(stored_nodes, kNoNode);
-    std::vector<bool> target_nodes(stored_nodes, false);
-    for (const std::size_t target : match_nodes) {
-      target_nodes[target] = true;
-    }
-    std::size_t remaining_targets = match_nodes.size();
-    parents[0] = 0;
-    if (target_nodes[0]) {
-      --remaining_targets;
-    }
-    std::vector<std::size_t> pending;
-    pending.reserve(std::min(stored_nodes, kInitialBfsQueueReserve));
-    pending.push_back(0);
-    std::size_t pending_index = 0;
-    while (pending_index < pending.size() && remaining_targets > 0) {
-      const std::size_t from = pending[pending_index++];
-      const std::size_t first_edge = edge_starts[from];
-      const std::uint64_t count_value = data.nodes[from * node_width + node_edge_count_field];
-      const std::size_t count = static_cast<std::size_t>(count_value);
-      for (std::size_t local = 0; local < count && first_edge + local < stored_edges; ++local) {
-        const std::size_t edge_ordinal = first_edge + local;
-        const std::size_t edge_offset = edge_ordinal * edge_width;
-        if (IsWeakEdge(data, edge_offset, edge_type_field)) {
-          continue;
-        }
-        const std::uint64_t raw_target = data.edges[edge_offset + edge_target_field];
-        if (raw_target % node_width != 0) {
-          continue;
-        }
-        const std::uint64_t target_value = raw_target / node_width;
-        if (target_value >= stored_nodes) {
-          continue;
-        }
-        const std::size_t target = static_cast<std::size_t>(target_value);
-        if (parents[target] != kNoNode) {
-          continue;
-        }
-        parents[target] = from;
-        parent_edges[target] = edge_ordinal;
-        pending.push_back(target);
-        if (target_nodes[target]) {
-          --remaining_targets;
-        }
-      }
-    }
-
+  if (!match_nodes.empty()) {
     for (std::size_t match_index = 0; match_index < match_nodes.size(); ++match_index) {
-      const std::size_t target = match_nodes[match_index];
+      const GraphIndex target = match_nodes[match_index];
       auto& match = result.matches[match_index];
-      if (parents[target] == kNoNode) {
-        result.retaining_paths_partial = true;
+      if (!match.reachable) {
         continue;
       }
       std::vector<HeapSnapshotRetainingStep> reverse_path;
-      std::size_t current = target;
+      GraphIndex current = target;
       while (current != 0 && reverse_path.size() < kHeapSnapshotMaxRetainingDepth) {
-        const std::size_t edge_ordinal = parent_edges[current];
-        if (edge_ordinal == kNoNode || edge_ordinal >= stored_edges) {
+        const GraphIndex edge_ordinal = parent_edges[current];
+        if (edge_ordinal == kNoGraphIndex || edge_ordinal >= stored_edges) {
           break;
         }
-        const std::size_t node_offset = current * node_width;
-        const std::size_t edge_offset = edge_ordinal * edge_width;
+        const std::size_t node_offset = static_cast<std::size_t>(current) * node_width;
+        const std::size_t edge_offset = static_cast<std::size_t>(edge_ordinal) * edge_width;
         reverse_path.push_back({
+            BoundedText(EdgeTypeAt(data, edge_offset, edge_type_field), 32),
             EdgeName(data, edge_offset, edge_type_field, edge_name_field),
             BoundedText(NodeTypeAt(data, node_offset, node_type_field), 64),
             BoundedText(StringAt(data, data.nodes[node_offset + node_name_field])),
@@ -1666,6 +1737,65 @@ bool SearchV8HeapSnapshot(const std::filesystem::path& snapshot_path,
       }
       std::reverse(reverse_path.begin(), reverse_path.end());
       match.retaining_path = std::move(reverse_path);
+    }
+
+    constexpr std::uint8_t kNoMatch = std::numeric_limits<std::uint8_t>::max();
+    std::vector<std::uint8_t> match_lookup(stored_nodes, kNoMatch);
+    for (std::size_t index = 0; index < match_nodes.size(); ++index) {
+      match_lookup[match_nodes[index]] = static_cast<std::uint8_t>(index);
+    }
+    std::vector<std::vector<IncomingReferenceCandidate>> reference_candidates(match_nodes.size());
+    for (auto& references : reference_candidates) {
+      references.reserve(kHeapSnapshotMaxIncomingReferences);
+    }
+    for (std::size_t source = 0; source < stored_nodes; ++source) {
+      const std::size_t first_edge = edge_starts[source];
+      const std::uint64_t count_value = data.nodes[source * node_width + node_edge_count_field];
+      const std::size_t end_edge =
+          std::min(stored_edges, first_edge + static_cast<std::size_t>(count_value));
+      const std::uint64_t source_node_id = data.nodes[source * node_width + node_id_field];
+      for (std::size_t edge_ordinal = first_edge; edge_ordinal < end_edge; ++edge_ordinal) {
+        const std::size_t edge_offset = edge_ordinal * edge_width;
+        const std::uint64_t raw_target = data.edges[edge_offset + edge_target_field];
+        if (raw_target % node_width != 0) {
+          continue;
+        }
+        const std::uint64_t target_value = raw_target / node_width;
+        if (target_value >= stored_nodes) {
+          continue;
+        }
+        const std::uint8_t match_index = match_lookup[static_cast<std::size_t>(target_value)];
+        if (match_index == kNoMatch) {
+          continue;
+        }
+        auto& match = result.matches[match_index];
+        ++match.incoming_reference_count;
+        KeepTopIncomingReference(
+            {source_node_id, static_cast<GraphIndex>(source), static_cast<GraphIndex>(edge_ordinal),
+             IncomingReferencePriority(EdgeTypeAt(data, edge_offset, edge_type_field))},
+            reference_candidates[match_index]);
+      }
+    }
+    std::vector<std::uint8_t>().swap(match_lookup);
+
+    for (std::size_t match_index = 0; match_index < match_nodes.size(); ++match_index) {
+      auto& candidates = reference_candidates[match_index];
+      std::sort(candidates.begin(), candidates.end(), BetterIncomingReferenceCandidate);
+      auto& match = result.matches[match_index];
+      match.incoming_reference_limit_reached = match.incoming_reference_count > candidates.size();
+      match.incoming_references.reserve(candidates.size());
+      for (const IncomingReferenceCandidate& candidate : candidates) {
+        const std::size_t source_offset =
+            static_cast<std::size_t>(candidate.source_node) * node_width;
+        const std::size_t edge_offset = static_cast<std::size_t>(candidate.edge) * edge_width;
+        match.incoming_references.push_back({
+            candidate.source_node_id,
+            BoundedText(EdgeTypeAt(data, edge_offset, edge_type_field), 32),
+            EdgeName(data, edge_offset, edge_type_field, edge_name_field),
+            BoundedText(NodeTypeAt(data, source_offset, node_type_field), 64),
+            BoundedText(StringAt(data, data.nodes[source_offset + node_name_field])),
+        });
+      }
     }
   }
 
@@ -1681,10 +1811,14 @@ std::string HeapSnapshotSearchResultToJson(const HeapSnapshotSearchResult& resul
   output << "{\"protocol_version\":" << result.protocol_version
          << ",\"file_bytes\":" << result.file_bytes << ",\"total_nodes\":" << result.total_nodes
          << ",\"analyzed_nodes\":" << result.analyzed_nodes
+         << ",\"matched_nodes\":" << result.matched_nodes
+         << ",\"reachable_nodes\":" << result.reachable_nodes
          << ",\"total_edges\":" << result.total_edges
          << ",\"indexed_edges\":" << result.indexed_edges
          << ",\"total_strings\":" << result.total_strings
-         << ",\"duration_ms\":" << result.duration_ms << ",\"result_limit\":" << result.result_limit
+         << ",\"duration_ms\":" << result.duration_ms << ",\"scope\":\""
+         << SearchScopeName(result.scope) << "\",\"result_limit\":" << result.result_limit
+         << ",\"reference_limit\":" << result.reference_limit
          << ",\"result_limit_reached\":" << (result.result_limit_reached ? "true" : "false")
          << ",\"node_limit_reached\":" << (result.node_limit_reached ? "true" : "false")
          << ",\"edge_limit_reached\":" << (result.edge_limit_reached ? "true" : "false")
@@ -1699,6 +1833,10 @@ std::string HeapSnapshotSearchResultToJson(const HeapSnapshotSearchResult& resul
     output << "{\"id\":\"" << match.node_id << "\",\"type\":\"" << JsonEscape(match.node_type)
            << "\",\"name\":\"" << JsonEscape(match.node_name)
            << "\",\"self_size\":" << match.self_size
+           << ",\"reachable\":" << (match.reachable ? "true" : "false")
+           << ",\"incoming_reference_count\":" << match.incoming_reference_count
+           << ",\"incoming_reference_limit_reached\":"
+           << (match.incoming_reference_limit_reached ? "true" : "false")
            << ",\"retaining_path_complete\":" << (match.retaining_path_complete ? "true" : "false")
            << ",\"retaining_path\":[";
     for (std::size_t path_index = 0; path_index < match.retaining_path.size(); ++path_index) {
@@ -1706,9 +1844,22 @@ std::string HeapSnapshotSearchResultToJson(const HeapSnapshotSearchResult& resul
         output << ',';
       }
       const auto& step = match.retaining_path[path_index];
-      output << "{\"edge\":\"" << JsonEscape(step.edge_name) << "\",\"type\":\""
-             << JsonEscape(step.node_type) << "\",\"name\":\"" << JsonEscape(step.node_name)
-             << "\"}";
+      output << "{\"edge_type\":\"" << JsonEscape(step.edge_type) << "\",\"edge\":\""
+             << JsonEscape(step.edge_name) << "\",\"type\":\"" << JsonEscape(step.node_type)
+             << "\",\"name\":\"" << JsonEscape(step.node_name) << "\"}";
+    }
+    output << "],\"incoming_references\":[";
+    for (std::size_t reference_index = 0; reference_index < match.incoming_references.size();
+         ++reference_index) {
+      if (reference_index != 0) {
+        output << ',';
+      }
+      const auto& reference = match.incoming_references[reference_index];
+      output << "{\"source_id\":\"" << reference.source_node_id << "\",\"edge_type\":\""
+             << JsonEscape(reference.edge_type) << "\",\"edge\":\""
+             << JsonEscape(reference.edge_name) << "\",\"source_type\":\""
+             << JsonEscape(reference.source_node_type) << "\",\"source_name\":\""
+             << JsonEscape(reference.source_node_name) << "\"}";
     }
     output << "]}";
   }

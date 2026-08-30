@@ -5,13 +5,17 @@
 #include <cctype>
 #include <charconv>
 #include <chrono>
-#include <fstream>
 #include <iomanip>
 #include <limits>
 #include <sstream>
 #include <system_error>
 #include <unordered_map>
 #include <utility>
+
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace reb {
 namespace {
@@ -23,6 +27,57 @@ constexpr std::size_t kMaxStoredNodeBytes = 128U * 1024U * 1024U;
 constexpr std::size_t kMaxStoredEdgeBytes = 192U * 1024U * 1024U;
 constexpr std::size_t kInitialBfsQueueReserve = 64U * 1024U;
 constexpr std::size_t kNoNode = std::numeric_limits<std::size_t>::max();
+
+class ReadOnlyFileMapping final {
+ public:
+  ReadOnlyFileMapping() = default;
+  ReadOnlyFileMapping(const ReadOnlyFileMapping&) = delete;
+  ReadOnlyFileMapping& operator=(const ReadOnlyFileMapping&) = delete;
+
+  ~ReadOnlyFileMapping() {
+    if (data_ != MAP_FAILED) {
+      static_cast<void>(munmap(data_, size_));
+    }
+  }
+
+  bool Open(const std::filesystem::path& path, std::string& error) noexcept {
+    const int descriptor = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (descriptor < 0) {
+      error = "Heap snapshot file could not be opened";
+      return false;
+    }
+    struct stat metadata {};
+    const bool valid_metadata =
+        fstat(descriptor, &metadata) == 0 && S_ISREG(metadata.st_mode) && metadata.st_size > 0 &&
+        static_cast<std::uintmax_t>(metadata.st_size) <= kHeapSnapshotMaxFileBytes &&
+        static_cast<std::uintmax_t>(metadata.st_size) <= std::numeric_limits<std::size_t>::max();
+    if (!valid_metadata) {
+      static_cast<void>(close(descriptor));
+      error = "Heap snapshot file is missing, empty, or exceeds 256 MiB";
+      return false;
+    }
+    size_ = static_cast<std::size_t>(metadata.st_size);
+    data_ = mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, descriptor, 0);
+    static_cast<void>(close(descriptor));
+    if (data_ == MAP_FAILED) {
+      size_ = 0;
+      error = "Heap snapshot file could not be mapped";
+      return false;
+    }
+    static_cast<void>(madvise(data_, size_, MADV_SEQUENTIAL));
+    return true;
+  }
+
+  [[nodiscard]] std::string_view View() const noexcept {
+    return {static_cast<const char*>(data_), size_};
+  }
+
+  [[nodiscard]] std::size_t Size() const noexcept { return size_; }
+
+ private:
+  void* data_ = MAP_FAILED;
+  std::size_t size_ = 0;
+};
 
 struct SnapshotData final {
   std::uint64_t declared_nodes = 0;
@@ -770,25 +825,11 @@ bool LoadSnapshot(const std::filesystem::path& snapshot_path,
                   SnapshotLayout& layout,
                   SnapshotStats& stats,
                   std::string& error) {
-  std::error_code file_error;
-  const std::uintmax_t file_size = std::filesystem::file_size(snapshot_path, file_error);
-  if (file_error || file_size == 0 || file_size > kHeapSnapshotMaxFileBytes ||
-      file_size > std::numeric_limits<std::size_t>::max()) {
-    error = "Heap snapshot file is missing, empty, or exceeds 256 MiB";
+  ReadOnlyFileMapping document;
+  if (!document.Open(snapshot_path, error)) {
     return false;
   }
-  std::ifstream input(snapshot_path, std::ios::binary);
-  if (!input) {
-    error = "Heap snapshot file could not be opened";
-    return false;
-  }
-  std::string document(static_cast<std::size_t>(file_size), '\0');
-  input.read(document.data(), static_cast<std::streamsize>(document.size()));
-  if (!input || input.gcount() != static_cast<std::streamsize>(document.size())) {
-    error = "Heap snapshot file could not be read completely";
-    return false;
-  }
-  if (!ParseSnapshotDocument(document, data)) {
+  if (!ParseSnapshotDocument(document.View(), data)) {
     error = "Heap snapshot JSON is malformed or unsupported";
     return false;
   }
@@ -822,7 +863,7 @@ bool LoadSnapshot(const std::filesystem::path& snapshot_path,
 
   layout.stored_nodes = data.nodes.size() / layout.node_width;
   layout.stored_edges = data.edges.size() / layout.edge_width;
-  stats.file_bytes = static_cast<std::uint64_t>(file_size);
+  stats.file_bytes = static_cast<std::uint64_t>(document.Size());
   stats.total_nodes = data.declared_nodes;
   stats.total_edges = data.declared_edges;
   stats.total_strings = data.strings_seen;
@@ -859,10 +900,22 @@ struct SnapshotNodeSummary final {
   std::uint64_t self_size = 0;
   std::uint64_t retained_size = 0;
   GraphIndex name_index = kNoGraphIndex;
-  GraphIndex type_index = kNoGraphIndex;
-  bool reachable = false;
-  bool root = false;
+  std::uint16_t type_index = std::numeric_limits<std::uint16_t>::max();
+  std::uint8_t flags = 0;
 };
+
+static_assert(sizeof(SnapshotNodeSummary) == 32);
+
+constexpr std::uint8_t kSnapshotNodeReachable = 1U << 0U;
+constexpr std::uint8_t kSnapshotNodeRoot = 1U << 1U;
+
+bool IsReachable(const SnapshotNodeSummary& node) noexcept {
+  return (node.flags & kSnapshotNodeReachable) != 0;
+}
+
+bool IsRoot(const SnapshotNodeSummary& node) noexcept {
+  return (node.flags & kSnapshotNodeRoot) != 0;
+}
 
 struct SnapshotSummary final {
   SnapshotStats stats;
@@ -1044,7 +1097,7 @@ bool BuildSnapshotSummary(const std::filesystem::path& snapshot_path,
   }
   std::vector<GraphIndex> predecessors(predecessor_offsets[static_cast<std::size_t>(reachable) + 1],
                                        0);
-  std::vector<GraphIndex> predecessor_cursor = predecessor_offsets;
+  predecessor_counts = predecessor_offsets;
   for (GraphIndex dfs_number = 1; dfs_number <= reachable; ++dfs_number) {
     const GraphIndex node = vertex[dfs_number];
     const DfsFrame frame = MakeDfsFrame(data, layout, edge_starts, node);
@@ -1055,13 +1108,14 @@ bool BuildSnapshotSummary(const std::filesystem::path& snapshot_path,
       }
       const GraphIndex target_dfs = node_to_dfs[target];
       if (target_dfs != 0) {
-        predecessors[predecessor_cursor[target_dfs]++] = dfs_number;
+        predecessors[predecessor_counts[target_dfs]++] = dfs_number;
       }
     }
   }
   std::vector<GraphIndex>().swap(predecessor_counts);
-  std::vector<GraphIndex>().swap(predecessor_cursor);
   std::vector<std::size_t>().swap(edge_starts);
+  std::vector<std::uint64_t>().swap(data.edges);
+  std::vector<std::string>().swap(data.edge_types);
 
   const std::size_t dominator_size = static_cast<std::size_t>(reachable) + 1;
   std::vector<GraphIndex> semi(dominator_size, 0);
@@ -1125,6 +1179,16 @@ bool BuildSnapshotSummary(const std::filesystem::path& snapshot_path,
   }
   immediate_dominator[1] = 1;
 
+  std::vector<GraphIndex>().swap(parent);
+  std::vector<GraphIndex>().swap(predecessor_offsets);
+  std::vector<GraphIndex>().swap(predecessors);
+  std::vector<GraphIndex>().swap(semi);
+  std::vector<GraphIndex>().swap(ancestor);
+  std::vector<GraphIndex>().swap(label);
+  std::vector<GraphIndex>().swap(bucket_head);
+  std::vector<GraphIndex>().swap(bucket_next);
+  std::vector<GraphIndex>().swap(compression_path);
+
   std::vector<std::uint64_t> retained_sizes(layout.stored_nodes, 0);
   for (std::size_t ordinal = 0; ordinal < layout.stored_nodes; ++ordinal) {
     const std::uint64_t self_size =
@@ -1139,6 +1203,8 @@ bool BuildSnapshotSummary(const std::filesystem::path& snapshot_path,
     retained_sizes[dominator_node] =
         SaturatingAdd(retained_sizes[dominator_node], retained_sizes[node], summary.size_saturated);
   }
+  std::vector<GraphIndex>().swap(vertex);
+  std::vector<GraphIndex>().swap(immediate_dominator);
 
   summary.nodes.reserve(layout.stored_nodes);
   for (std::size_t ordinal = 0; ordinal < layout.stored_nodes; ++ordinal) {
@@ -1152,11 +1218,15 @@ bool BuildSnapshotSummary(const std::filesystem::path& snapshot_path,
     node.name_index = raw_name < std::numeric_limits<GraphIndex>::max()
                           ? static_cast<GraphIndex>(raw_name)
                           : kNoGraphIndex;
-    node.type_index = raw_type < std::numeric_limits<GraphIndex>::max()
-                          ? static_cast<GraphIndex>(raw_type)
-                          : kNoGraphIndex;
-    node.reachable = node_to_dfs[ordinal] != 0;
-    node.root = ordinal == 0;
+    node.type_index = raw_type < std::numeric_limits<std::uint16_t>::max()
+                          ? static_cast<std::uint16_t>(raw_type)
+                          : std::numeric_limits<std::uint16_t>::max();
+    if (node_to_dfs[ordinal] != 0) {
+      node.flags |= kSnapshotNodeReachable;
+    }
+    if (ordinal == 0) {
+      node.flags |= kSnapshotNodeRoot;
+    }
     summary.nodes.push_back(node);
   }
   std::sort(summary.nodes.begin(), summary.nodes.end(),
@@ -1327,19 +1397,120 @@ bool BetterDominatorChange(const HeapSnapshotDominatorChange& left,
   return left.node_id < right.node_id;
 }
 
-void KeepTopDominatorChange(HeapSnapshotDominatorChange change,
+bool BetterDominatorCandidate(const std::uint64_t node_id,
+                              const std::int64_t retained_size_delta,
+                              const HeapSnapshotDominatorChange& right) noexcept {
+  const std::uint64_t left_magnitude = DeltaMagnitude(retained_size_delta);
+  const std::uint64_t right_magnitude = DeltaMagnitude(right.retained_size_delta);
+  return left_magnitude != right_magnitude ? left_magnitude > right_magnitude
+                                           : node_id < right.node_id;
+}
+
+void KeepTopDominatorChange(const std::uint64_t node_id,
+                            const std::string_view node_type,
+                            const std::string_view node_name,
+                            const std::uint64_t baseline_retained_size,
+                            const std::uint64_t current_retained_size,
+                            const std::int64_t retained_size_delta,
                             const std::size_t result_limit,
                             std::size_t& change_count,
+                            bool& heap_ready,
                             std::vector<HeapSnapshotDominatorChange>& changes) {
   ++change_count;
-  if (changes.size() < result_limit) {
-    changes.push_back(std::move(change));
+  if (heap_ready && !BetterDominatorCandidate(node_id, retained_size_delta, changes.front())) {
     return;
   }
-  const auto weakest = std::max_element(changes.begin(), changes.end(), BetterDominatorChange);
-  if (weakest != changes.end() && BetterDominatorChange(change, *weakest)) {
-    *weakest = std::move(change);
+  HeapSnapshotDominatorChange change;
+  change.node_id = node_id;
+  change.node_type = BoundedText(node_type, 64);
+  change.node_name = BoundedText(node_name);
+  change.baseline_retained_size = baseline_retained_size;
+  change.current_retained_size = current_retained_size;
+  change.retained_size_delta = retained_size_delta;
+  if (changes.size() < result_limit) {
+    changes.push_back(std::move(change));
+    if (changes.size() == result_limit) {
+      std::make_heap(changes.begin(), changes.end(), BetterDominatorChange);
+      heap_ready = true;
+    }
+    return;
   }
+  std::pop_heap(changes.begin(), changes.end(), BetterDominatorChange);
+  changes.back() = std::move(change);
+  std::push_heap(changes.begin(), changes.end(), BetterDominatorChange);
+}
+
+bool BetterDiffGroup(const HeapSnapshotDiffGroup& left,
+                     const HeapSnapshotDiffGroup& right) noexcept {
+  const std::uint64_t left_size = DeltaMagnitude(left.self_size_delta);
+  const std::uint64_t right_size = DeltaMagnitude(right.self_size_delta);
+  if (left_size != right_size) {
+    return left_size > right_size;
+  }
+  const std::uint64_t left_count = DeltaMagnitude(left.count_delta);
+  const std::uint64_t right_count = DeltaMagnitude(right.count_delta);
+  if (left_count != right_count) {
+    return left_count > right_count;
+  }
+  if (left.node_type != right.node_type) {
+    return left.node_type < right.node_type;
+  }
+  return left.node_name < right.node_name;
+}
+
+bool BetterDiffGroupCandidate(const std::int64_t self_size_delta,
+                              const std::int64_t count_delta,
+                              const DiffSignature& signature,
+                              const HeapSnapshotDiffGroup& right) noexcept {
+  const std::uint64_t left_size = DeltaMagnitude(self_size_delta);
+  const std::uint64_t right_size = DeltaMagnitude(right.self_size_delta);
+  if (left_size != right_size) {
+    return left_size > right_size;
+  }
+  const std::uint64_t left_count = DeltaMagnitude(count_delta);
+  const std::uint64_t right_count = DeltaMagnitude(right.count_delta);
+  if (left_count != right_count) {
+    return left_count > right_count;
+  }
+  if (signature.node_type != right.node_type) {
+    return signature.node_type < right.node_type;
+  }
+  return signature.node_name < right.node_name;
+}
+
+void KeepTopDiffGroup(const DiffAccumulator& accumulator,
+                      const std::int64_t count_delta,
+                      const std::int64_t self_size_delta,
+                      const DiffSignature& signature,
+                      const std::size_t result_limit,
+                      std::size_t& change_count,
+                      bool& heap_ready,
+                      std::vector<HeapSnapshotDiffGroup>& groups) {
+  ++change_count;
+  if (heap_ready &&
+      !BetterDiffGroupCandidate(self_size_delta, count_delta, signature, groups.front())) {
+    return;
+  }
+  HeapSnapshotDiffGroup group;
+  group.node_type = signature.node_type;
+  group.node_name = signature.node_name;
+  group.baseline_count = accumulator.baseline_count;
+  group.current_count = accumulator.current_count;
+  group.count_delta = count_delta;
+  group.baseline_self_size = accumulator.baseline_self_size;
+  group.current_self_size = accumulator.current_self_size;
+  group.self_size_delta = self_size_delta;
+  if (groups.size() < result_limit) {
+    groups.push_back(std::move(group));
+    if (groups.size() == result_limit) {
+      std::make_heap(groups.begin(), groups.end(), BetterDiffGroup);
+      heap_ready = true;
+    }
+    return;
+  }
+  std::pop_heap(groups.begin(), groups.end(), BetterDiffGroup);
+  groups.back() = std::move(group);
+  std::push_heap(groups.begin(), groups.end(), BetterDiffGroup);
 }
 
 }  // namespace
@@ -1603,7 +1774,9 @@ bool CompareV8HeapSnapshots(const std::filesystem::path& baseline_path,
                        result.aggregation_limit_reached, result.retained_size_saturated);
 
   std::vector<HeapSnapshotDiffGroup> groups;
-  groups.reserve(accumulators.size());
+  groups.reserve(result.result_limit);
+  std::size_t group_change_count = 0;
+  bool group_heap_ready = false;
   for (std::size_t index = 0; index < accumulators.size(); ++index) {
     const DiffAccumulator& accumulator = accumulators[index];
     bool delta_saturated = false;
@@ -1616,44 +1789,17 @@ bool CompareV8HeapSnapshots(const std::filesystem::path& baseline_path,
       continue;
     }
     const DiffSignature& signature = *signature_keys[index];
-    HeapSnapshotDiffGroup group;
-    group.node_type = signature.node_type;
-    group.node_name = signature.node_name;
-    group.baseline_count = accumulator.baseline_count;
-    group.current_count = accumulator.current_count;
-    group.count_delta = count_delta;
-    group.baseline_self_size = accumulator.baseline_self_size;
-    group.current_self_size = accumulator.current_self_size;
-    group.self_size_delta = self_size_delta;
-    groups.push_back(std::move(group));
+    KeepTopDiffGroup(accumulator, count_delta, self_size_delta, signature, result.result_limit,
+                     group_change_count, group_heap_ready, groups);
   }
-  const auto better_group = [](const HeapSnapshotDiffGroup& left,
-                               const HeapSnapshotDiffGroup& right) {
-    const std::uint64_t left_size = DeltaMagnitude(left.self_size_delta);
-    const std::uint64_t right_size = DeltaMagnitude(right.self_size_delta);
-    if (left_size != right_size) {
-      return left_size > right_size;
-    }
-    const std::uint64_t left_count = DeltaMagnitude(left.count_delta);
-    const std::uint64_t right_count = DeltaMagnitude(right.count_delta);
-    if (left_count != right_count) {
-      return left_count > right_count;
-    }
-    if (left.node_type != right.node_type) {
-      return left.node_type < right.node_type;
-    }
-    return left.node_name < right.node_name;
-  };
-  std::sort(groups.begin(), groups.end(), better_group);
-  result.group_result_limit_reached = groups.size() > result.result_limit;
-  if (result.group_result_limit_reached) {
-    groups.resize(result.result_limit);
-  }
+  std::sort(groups.begin(), groups.end(), BetterDiffGroup);
+  result.group_result_limit_reached = group_change_count > result.result_limit;
   result.groups = std::move(groups);
 
   std::size_t baseline_index = 0;
   std::size_t current_index = 0;
   std::size_t dominator_change_count = 0;
+  bool dominator_heap_ready = false;
   std::vector<HeapSnapshotDominatorChange> dominators;
   dominators.reserve(result.result_limit);
   while (baseline_index < baseline.nodes.size() || current_index < current.nodes.size()) {
@@ -1670,14 +1816,14 @@ bool CompareV8HeapSnapshots(const std::filesystem::path& baseline_path,
       baseline_node = &baseline.nodes[baseline_index++];
       current_node = &current.nodes[current_index++];
     }
-    if ((baseline_node != nullptr && baseline_node->root) ||
-        (current_node != nullptr && current_node->root)) {
+    if ((baseline_node != nullptr && IsRoot(*baseline_node)) ||
+        (current_node != nullptr && IsRoot(*current_node))) {
       continue;
     }
     const std::uint64_t baseline_retained =
-        baseline_node != nullptr && baseline_node->reachable ? baseline_node->retained_size : 0;
+        baseline_node != nullptr && IsReachable(*baseline_node) ? baseline_node->retained_size : 0;
     const std::uint64_t current_retained =
-        current_node != nullptr && current_node->reachable ? current_node->retained_size : 0;
+        current_node != nullptr && IsReachable(*current_node) ? current_node->retained_size : 0;
     bool delta_saturated = false;
     const std::int64_t retained_delta =
         SaturatingDelta(current_retained, baseline_retained, delta_saturated);
@@ -1688,15 +1834,10 @@ bool CompareV8HeapSnapshots(const std::filesystem::path& baseline_path,
     const bool use_current = current_node != nullptr;
     const SnapshotSummary& name_summary = use_current ? current : baseline;
     const SnapshotNodeSummary& name_node = use_current ? *current_node : *baseline_node;
-    HeapSnapshotDominatorChange change;
-    change.node_id = name_node.node_id;
-    change.node_type = BoundedText(SummaryType(name_summary, name_node), 64);
-    change.node_name = BoundedText(SummaryName(name_summary, name_node));
-    change.baseline_retained_size = baseline_retained;
-    change.current_retained_size = current_retained;
-    change.retained_size_delta = retained_delta;
-    KeepTopDominatorChange(std::move(change), result.result_limit, dominator_change_count,
-                           dominators);
+    KeepTopDominatorChange(name_node.node_id, SummaryType(name_summary, name_node),
+                           SummaryName(name_summary, name_node), baseline_retained,
+                           current_retained, retained_delta, result.result_limit,
+                           dominator_change_count, dominator_heap_ready, dominators);
   }
   std::sort(dominators.begin(), dominators.end(), BetterDominatorChange);
   result.dominator_result_limit_reached = dominator_change_count > result.result_limit;

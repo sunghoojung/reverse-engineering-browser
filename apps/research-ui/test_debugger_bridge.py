@@ -1,8 +1,10 @@
 import base64
 import hashlib
 import json
+import shutil
 import socket
 import struct
+import subprocess
 import tempfile
 import threading
 import time
@@ -10,7 +12,11 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from debugger_bridge import DebuggerBridge, DebuggerBridgeError
+from debugger_bridge import (
+    LIVE_OBJECT_SEARCH_FUNCTION,
+    DebuggerBridge,
+    DebuggerBridgeError,
+)
 
 
 class FakeDebuggerWebSocket:
@@ -123,6 +129,59 @@ class FakeDebuggerWebSocket:
             }
         elif method == "Debugger.getScriptSource":
             result = {"scriptSource": "function checkout(cart) { return cart; }"}
+        elif method == "Runtime.evaluate":
+            result = {
+                "result": {
+                    "type": "object",
+                    "className": "Object",
+                    "objectId": "prototype-1",
+                }
+            }
+        elif method == "Runtime.queryObjects":
+            result = {
+                "result": {
+                    "type": "object",
+                    "subtype": "array",
+                    "objectId": "objects-1",
+                }
+            }
+        elif method == "Runtime.callFunctionOn":
+            result = {
+                "result": {
+                    "type": "object",
+                    "value": {
+                        "protocolVersion": 1,
+                        "analyzed": 17,
+                        "totalObjects": 17,
+                        "results": [
+                            {
+                                "id": "4",
+                                "className": "CheckoutState",
+                                "propertyCount": 2,
+                                "propertiesTruncated": False,
+                                "similarity": 0.875,
+                                "preview": [
+                                    {
+                                        "name": "cart",
+                                        "type": "object",
+                                        "value": "[Object]",
+                                    },
+                                    {
+                                        "name": "ready",
+                                        "type": "boolean",
+                                        "value": "true",
+                                    },
+                                ],
+                            }
+                        ],
+                        "resultLimit": 50,
+                        "resultLimitReached": False,
+                        "scanLimitReached": False,
+                        "timedOut": False,
+                        "durationMs": 3,
+                    },
+                }
+            }
         elif method == "Runtime.getProperties":
             result = {
                 "result": [
@@ -382,6 +441,38 @@ class DebuggerBridgeTests(unittest.TestCase):
 
                 source = bridge.get_script_source("script-1")
                 self.assertIn("function checkout", source["source"])
+                live_objects = bridge.action(
+                    {
+                        "action": "search_live_objects",
+                        "property_query": "cart",
+                        "shape": '{"cart":{},"ready":true}',
+                        "similarity_threshold": 0.75,
+                    }
+                )
+                self.assertEqual(live_objects["search"]["analyzed"], 17)
+                self.assertEqual(
+                    live_objects["search"]["results"][0]["class_name"],
+                    "CheckoutState",
+                )
+                self.assertEqual(
+                    live_objects["search"]["results"][0]["preview"][1],
+                    {"name": "ready", "type": "boolean", "value": "true"},
+                )
+                methods = [command["method"] for command in web_socket.commands]
+                self.assertIn("Runtime.queryObjects", methods)
+                search_command = next(
+                    command
+                    for command in web_socket.commands
+                    if command["method"] == "Runtime.callFunctionOn"
+                )
+                self.assertTrue(search_command["params"]["returnByValue"])
+                self.assertTrue(search_command["params"]["silent"])
+                self.assertTrue(search_command["params"]["throwOnSideEffect"])
+                self.assertIn(
+                    "Object.getOwnPropertyDescriptors",
+                    search_command["params"]["functionDeclaration"],
+                )
+                self.assertIn("Runtime.releaseObject", methods)
                 update = bridge.action(
                     {
                         "action": "update_breakpoint",
@@ -419,6 +510,127 @@ class DebuggerBridgeTests(unittest.TestCase):
         self.assertLessEqual(len(remote["value"].encode("utf-8")), 4_096)
         nonfinite = bridge._remote_object({"type": "number", "value": float("inf")})
         self.assertIsNone(nonfinite["value"])
+
+    def test_live_object_search_rejects_unbounded_or_empty_criteria(self) -> None:
+        bridge = DebuggerBridge()
+        with self.assertRaisesRegex(DebuggerBridgeError, "at least one criterion"):
+            bridge.action({"action": "search_live_objects"})
+        with self.assertRaisesRegex(DebuggerBridgeError, "valid JSON"):
+            bridge.action({"action": "search_live_objects", "shape": "{"})
+        with self.assertRaisesRegex(DebuggerBridgeError, "object or array"):
+            bridge.action({"action": "search_live_objects", "shape": '"value"'})
+        with self.assertRaisesRegex(DebuggerBridgeError, "between 0 and 1"):
+            bridge.action(
+                {
+                    "action": "search_live_objects",
+                    "property_query": "cart",
+                    "similarity_threshold": 2,
+                }
+            )
+        with self.assertRaisesRegex(DebuggerBridgeError, "512 bytes"):
+            bridge.action(
+                {"action": "search_live_objects", "property_query": "x" * 513}
+            )
+
+    def test_live_object_search_matches_shape_without_invoking_getters(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+        exercise = f"""
+const search = ({LIVE_OBJECT_SEARCH_FUNCTION});
+const criteria = overrides => ({{
+  propertyQuery: '', valueQuery: '', classQuery: '', regex: false,
+  caseSensitive: false, shape: null, includeShapeValues: false,
+  similarityThreshold: 0.75, resultLimit: 50, scanLimit: 25000,
+  previewProperties: 16, timeoutMs: 750, ...overrides
+}});
+let getterCalls = 0;
+const accessor = {{token: 'visible'}};
+Object.defineProperty(accessor, 'secret', {{
+  enumerable: true,
+  get() {{ getterCalls += 1; return 'must-not-run'; }}
+}});
+const shaped = {{device: {{fingerprint: 'abc'}}, ready: true}};
+const propertyResult = search.call([accessor], criteria({{propertyQuery: 'secret'}}));
+const shapeResult = search.call([shaped], criteria({{
+  shape: {{device: {{fingerprint: ''}}, ready: false}},
+  similarityThreshold: 1
+}}));
+const boundedResult = search.call(
+  Array.from({{length: 100}}, (_, index) => ({{match: index}})),
+  criteria({{propertyQuery: 'match', resultLimit: 5, scanLimit: 10}})
+);
+process.stdout.write(JSON.stringify({{
+  getterCalls,
+  accessorPreview: propertyResult.results[0].preview.find(item => item.name === 'secret'),
+  shapeMatches: shapeResult.results.length,
+  similarity: shapeResult.results[0].similarity,
+  partial: shapeResult.scanLimitReached || shapeResult.timedOut,
+  boundedMatches: boundedResult.results.length,
+  boundedAnalyzed: boundedResult.analyzed,
+  resultLimitReached: boundedResult.resultLimitReached,
+  boundedSearchIsPartial: boundedResult.scanLimitReached
+}}));
+"""
+        completed = subprocess.run(
+            [node, "-e", exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "getterCalls": 0,
+                "accessorPreview": {
+                    "name": "secret",
+                    "type": "accessor",
+                    "value": "<getter not invoked>",
+                },
+                "shapeMatches": 1,
+                "similarity": 1,
+                "partial": False,
+                "boundedMatches": 5,
+                "boundedAnalyzed": 5,
+                "resultLimitReached": True,
+                "boundedSearchIsPartial": True,
+            },
+        )
+
+    def test_live_object_search_rejects_oversized_target_results(self) -> None:
+        bridge = DebuggerBridge()
+        valid = {
+            "protocolVersion": 1,
+            "analyzed": 1,
+            "totalObjects": 1,
+            "results": [],
+            "resultLimit": 50,
+            "resultLimitReached": False,
+            "scanLimitReached": False,
+            "timedOut": False,
+            "durationMs": 1,
+        }
+        oversized_results = dict(valid, results=[{}] * 51)
+        with self.assertRaisesRegex(DebuggerBridgeError, "too many"):
+            bridge._normalize_live_object_search(oversized_results)
+        oversized_preview = dict(
+            valid,
+            results=[
+                {
+                    "id": "1",
+                    "className": "Object",
+                    "propertyCount": 17,
+                    "propertiesTruncated": True,
+                    "similarity": None,
+                    "preview": [
+                        {"name": "x", "type": "string", "value": "x"}
+                    ]
+                    * 17,
+                }
+            ],
+        )
+        with self.assertRaisesRegex(DebuggerBridgeError, "malformed"):
+            bridge._normalize_live_object_search(oversized_preview)
 
 
 if __name__ == "__main__":

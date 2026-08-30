@@ -34,12 +34,167 @@ MAX_SCRIPT_SOURCE_BYTES = 2 * 1024 * 1024
 MAX_BREAKPOINT_TEXT_BYTES = 4_096
 MAX_XHR_BREAKPOINTS = 100
 MAX_EVENT_BREAKPOINTS = 256
+MAX_LIVE_OBJECT_RESULTS = 50
+MAX_LIVE_OBJECT_SCAN = 25_000
+MAX_LIVE_OBJECT_QUERY_BYTES = 512
+MAX_LIVE_OBJECT_SHAPE_BYTES = 4_096
+MAX_LIVE_OBJECT_PREVIEW_PROPERTIES = 16
+LIVE_OBJECT_SEARCH_TIMEOUT_MS = 750
 MAX_ACTIVE_PORT_BYTES = 4_096
 MAX_TARGET_LIST_BYTES = 2 * 1024 * 1024
 MAX_TARGET_ID_BYTES = 4_096
 MAX_TARGET_TYPE_BYTES = 128
 MAX_TARGET_URL_BYTES = 64 * 1024
 MAX_REMOTE_TEXT_BYTES = 4_096
+
+
+LIVE_OBJECT_SEARCH_FUNCTION = r"""function(criteria) {
+  const started = Date.now();
+  const deadline = started + criteria.timeoutMs;
+  const hasQuery = value => typeof value === "string" && value.length > 0;
+  const compile = value => {
+    if (!hasQuery(value)) return null;
+    if (!criteria.regex) {
+      const needle = criteria.caseSensitive ? value : value.toLowerCase();
+      return input => {
+        const text = criteria.caseSensitive ? String(input) : String(input).toLowerCase();
+        return text.includes(needle);
+      };
+    }
+    const expression = new RegExp(value, criteria.caseSensitive ? "" : "i");
+    return input => expression.test(String(input));
+  };
+  const propertyMatches = compile(criteria.propertyQuery);
+  const valueMatches = compile(criteria.valueQuery);
+  const classMatches = compile(criteria.classQuery);
+  const boundedText = value => {
+    let text;
+    try { text = String(value); } catch { return "<unavailable>"; }
+    return text.length > 160 ? `${text.slice(0, 160)}...` : text;
+  };
+  const className = value => {
+    if (Array.isArray(value)) return "Array";
+    try {
+      const prototype = Object.getPrototypeOf(value);
+      const descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, "constructor");
+      const name = descriptor && "value" in descriptor && descriptor.value && descriptor.value.name;
+      return typeof name === "string" && name ? name.slice(0, 160) : "Object";
+    } catch { return "Object"; }
+  };
+  const primitiveType = value => value === null ? "null" : typeof value;
+  const tokenSet = (root, includeValues) => {
+    const tokens = [];
+    const seen = new WeakSet();
+    const walk = (value, path, depth) => {
+      if (tokens.length >= 256 || depth > 3) return;
+      if ((typeof value !== "object" && typeof value !== "function") || value === null) {
+        const type = primitiveType(value);
+        tokens.push(includeValues ? `${path}:${type}=${boundedText(value)}` : `${path}:${type}`);
+        return;
+      }
+      if (seen.has(value)) {
+        tokens.push(`${path}:circular`);
+        return;
+      }
+      seen.add(value);
+      let descriptors;
+      try { descriptors = Object.getOwnPropertyDescriptors(value); } catch { return; }
+      const names = Object.keys(descriptors).sort().slice(0, 96);
+      if (names.length === 0) tokens.push(`${path}:empty`);
+      for (const name of names) {
+        if (tokens.length >= 256) break;
+        const descriptor = descriptors[name];
+        const childPath = path ? `${path}.${name}` : name;
+        if (!descriptor || !("value" in descriptor)) {
+          tokens.push(`${childPath}:accessor`);
+          continue;
+        }
+        walk(descriptor.value, childPath, depth + 1);
+      }
+    };
+    walk(root, "", 0);
+    return new Set(tokens);
+  };
+  const shapeTokens = criteria.shape === null
+    ? null
+    : tokenSet(criteria.shape, criteria.includeShapeValues);
+  const similarity = candidate => {
+    if (shapeTokens === null) return null;
+    const candidateTokens = tokenSet(candidate, criteria.includeShapeValues);
+    let intersection = 0;
+    for (const token of candidateTokens) if (shapeTokens.has(token)) intersection += 1;
+    const union = candidateTokens.size + shapeTokens.size - intersection;
+    return union === 0 ? 1 : intersection / union;
+  };
+  const preview = (descriptors, names) => names.slice(0, criteria.previewProperties).map(name => {
+    const descriptor = descriptors[name];
+    if (!descriptor || !("value" in descriptor)) {
+      return {name: name.slice(0, 256), type: "accessor", value: "<getter not invoked>"};
+    }
+    const value = descriptor.value;
+    const type = primitiveType(value);
+    if ((typeof value === "object" && value !== null) || typeof value === "function") {
+      return {name: name.slice(0, 256), type, value: `[${className(value)}]`};
+    }
+    return {name: name.slice(0, 256), type, value: boundedText(value)};
+  });
+
+  let totalObjects = 0;
+  try { totalObjects = Number(this.length) || 0; } catch { totalObjects = 0; }
+  const scanLimit = Math.min(totalObjects, criteria.scanLimit);
+  const results = [];
+  let analyzed = 0;
+  let visited = 0;
+  let timedOut = false;
+  for (let index = 0; index < scanLimit; index += 1) {
+    if (Date.now() >= deadline) {
+      timedOut = true;
+      break;
+    }
+    visited += 1;
+    let candidate;
+    let descriptors;
+    try {
+      candidate = this[index];
+      if ((typeof candidate !== "object" && typeof candidate !== "function") || candidate === null) continue;
+      descriptors = Object.getOwnPropertyDescriptors(candidate);
+    } catch { continue; }
+    analyzed += 1;
+    const names = Object.keys(descriptors);
+    const candidateClass = className(candidate);
+    if (propertyMatches && !names.some(propertyMatches)) continue;
+    if (classMatches && !classMatches(candidateClass)) continue;
+    if (valueMatches && !names.some(name => {
+      const descriptor = descriptors[name];
+      if (!descriptor || !("value" in descriptor)) return false;
+      const value = descriptor.value;
+      if ((typeof value === "object" && value !== null) || typeof value === "function") return false;
+      return valueMatches(boundedText(value));
+    })) continue;
+    const score = similarity(candidate);
+    if (score !== null && score < criteria.similarityThreshold) continue;
+    results.push({
+      id: String(index),
+      className: candidateClass,
+      propertyCount: names.length,
+      propertiesTruncated: names.length > criteria.previewProperties,
+      similarity: score,
+      preview: preview(descriptors, names)
+    });
+    if (results.length >= criteria.resultLimit) break;
+  }
+  return {
+    protocolVersion: 1,
+    analyzed,
+    totalObjects,
+    results,
+    resultLimit: criteria.resultLimit,
+    resultLimitReached: results.length >= criteria.resultLimit,
+    scanLimitReached: totalObjects > scanLimit || visited < scanLimit,
+    timedOut,
+    durationMs: Math.max(0, Date.now() - started)
+  };
+}"""
 
 
 class DebuggerBridgeError(RuntimeError):
@@ -496,6 +651,8 @@ class DebuggerBridge:
                 connection = self._connection
             if connection is not None:
                 connection.close()
+        elif action == "search_live_objects":
+            return self._search_live_objects(request)
         elif action == "clear_console":
             with self._lock:
                 self._console = []
@@ -532,6 +689,228 @@ class DebuggerBridge:
             "script_id": script_id,
             "source": source,
             "truncated": truncated,
+        }
+
+    def _search_live_objects(self, request: dict[str, Any]) -> dict[str, Any]:
+        property_query = self._optional_search_text(request, "property_query")
+        value_query = self._optional_search_text(request, "value_query")
+        class_query = self._optional_search_text(request, "class_query")
+        regex = request.get("regex", False)
+        case_sensitive = request.get("case_sensitive", False)
+        include_shape_values = request.get("include_shape_values", False)
+        if not all(
+            isinstance(value, bool)
+            for value in (regex, case_sensitive, include_shape_values)
+        ):
+            raise DebuggerBridgeError("Live object search options must be boolean")
+
+        shape_text = request.get("shape", "")
+        if not isinstance(shape_text, str):
+            raise DebuggerBridgeError("Live object shape must be JSON text")
+        if len(shape_text.encode("utf-8")) > MAX_LIVE_OBJECT_SHAPE_BYTES:
+            raise DebuggerBridgeError("Live object shape exceeds the 4 KiB limit")
+        shape: Optional[Any] = None
+        if shape_text.strip():
+            try:
+                shape = json.loads(shape_text)
+            except json.JSONDecodeError as exception:
+                raise DebuggerBridgeError(
+                    "Live object shape must be valid JSON"
+                ) from exception
+            if not isinstance(shape, (dict, list)):
+                raise DebuggerBridgeError("Live object shape must be an object or array")
+
+        threshold = request.get("similarity_threshold", 0.75)
+        if (
+            not self._is_finite_protocol_number(threshold)
+            or isinstance(threshold, bool)
+            or threshold < 0
+            or threshold > 1
+        ):
+            raise DebuggerBridgeError(
+                "Live object similarity threshold must be between 0 and 1"
+            )
+        if not any((property_query, value_query, class_query, shape is not None)):
+            raise DebuggerBridgeError("Live object search requires at least one criterion")
+
+        criteria = {
+            "propertyQuery": property_query,
+            "valueQuery": value_query,
+            "classQuery": class_query,
+            "regex": regex,
+            "caseSensitive": case_sensitive,
+            "shape": shape,
+            "includeShapeValues": include_shape_values,
+            "similarityThreshold": float(threshold),
+            "resultLimit": MAX_LIVE_OBJECT_RESULTS,
+            "scanLimit": MAX_LIVE_OBJECT_SCAN,
+            "previewProperties": MAX_LIVE_OBJECT_PREVIEW_PROPERTIES,
+            "timeoutMs": LIVE_OBJECT_SEARCH_TIMEOUT_MS,
+        }
+        prototype_id: Optional[str] = None
+        objects_id: Optional[str] = None
+        try:
+            prototype = self._command(
+                "Runtime.evaluate",
+                {
+                    "expression": "Object.prototype",
+                    "objectGroup": "reb-live-object-search",
+                    "silent": True,
+                },
+            )
+            prototype_id = self._runtime_result_object_id(prototype, "prototype")
+            objects = self._command(
+                "Runtime.queryObjects", {"prototypeObjectId": prototype_id}, timeout=5.0
+            )
+            objects_id = self._runtime_result_object_id(objects, "object collection")
+            evaluated = self._command(
+                "Runtime.callFunctionOn",
+                {
+                    "objectId": objects_id,
+                    "functionDeclaration": LIVE_OBJECT_SEARCH_FUNCTION,
+                    "arguments": [{"value": criteria}],
+                    "returnByValue": True,
+                    "silent": True,
+                    "awaitPromise": False,
+                    "userGesture": False,
+                    "throwOnSideEffect": True,
+                    "timeout": LIVE_OBJECT_SEARCH_TIMEOUT_MS,
+                },
+                timeout=3.0,
+            )
+        finally:
+            for object_id in (objects_id, prototype_id):
+                if object_id is None:
+                    continue
+                try:
+                    self._command("Runtime.releaseObject", {"objectId": object_id})
+                except DebuggerBridgeError:
+                    pass
+
+        if isinstance(evaluated.get("exceptionDetails"), dict):
+            raise DebuggerBridgeError("Live object search failed in the target")
+        remote = evaluated.get("result")
+        document = remote.get("value") if isinstance(remote, dict) else None
+        return self._normalize_live_object_search(document)
+
+    def _optional_search_text(self, request: dict[str, Any], field: str) -> str:
+        value = request.get(field, "")
+        if not isinstance(value, str):
+            raise DebuggerBridgeError("Live object search criteria must be text")
+        if len(value.encode("utf-8")) > MAX_LIVE_OBJECT_QUERY_BYTES:
+            raise DebuggerBridgeError("Live object search criterion exceeds 512 bytes")
+        return value
+
+    @staticmethod
+    def _runtime_result_object_id(result: dict[str, Any], label: str) -> str:
+        remote = result.get("result")
+        object_id = remote.get("objectId") if isinstance(remote, dict) else None
+        if not isinstance(object_id, str) or not object_id:
+            raise ProtocolError(f"Debugger returned a malformed {label}")
+        return object_id
+
+    def _normalize_live_object_search(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict) or value.get("protocolVersion") != 1:
+            raise ProtocolError("Debugger returned a malformed live object search")
+        integer_fields = (
+            "analyzed",
+            "totalObjects",
+            "resultLimit",
+            "durationMs",
+        )
+        if any(
+            not isinstance(value.get(field), int)
+            or isinstance(value.get(field), bool)
+            or value[field] < 0
+            or value[field] > 2**53 - 1
+            for field in integer_fields
+        ):
+            raise ProtocolError("Debugger returned invalid live object search counts")
+        if value["resultLimit"] != MAX_LIVE_OBJECT_RESULTS:
+            raise ProtocolError("Debugger returned an invalid live object result limit")
+        boolean_fields = (
+            "resultLimitReached",
+            "scanLimitReached",
+            "timedOut",
+        )
+        if any(not isinstance(value.get(field), bool) for field in boolean_fields):
+            raise ProtocolError("Debugger returned invalid live object coverage")
+        raw_results = value.get("results")
+        if not isinstance(raw_results, list) or len(raw_results) > MAX_LIVE_OBJECT_RESULTS:
+            raise ProtocolError("Debugger returned too many live object results")
+        results = []
+        for raw_result in raw_results:
+            if not isinstance(raw_result, dict):
+                raise ProtocolError("Debugger returned a malformed live object result")
+            result_id = raw_result.get("id")
+            class_name = raw_result.get("className")
+            property_count = raw_result.get("propertyCount")
+            properties_truncated = raw_result.get("propertiesTruncated")
+            similarity = raw_result.get("similarity")
+            preview = raw_result.get("preview")
+            if (
+                not isinstance(result_id, str)
+                or not isinstance(class_name, str)
+                or not isinstance(property_count, int)
+                or isinstance(property_count, bool)
+                or property_count < 0
+                or property_count > 2**31 - 1
+                or not isinstance(properties_truncated, bool)
+                or (
+                    similarity is not None
+                    and (
+                        not self._is_finite_protocol_number(similarity)
+                        or isinstance(similarity, bool)
+                        or similarity < 0
+                        or similarity > 1
+                    )
+                )
+                or not isinstance(preview, list)
+                or len(preview) > MAX_LIVE_OBJECT_PREVIEW_PROPERTIES
+            ):
+                raise ProtocolError("Debugger returned a malformed live object result")
+            properties = []
+            for raw_property in preview:
+                if not isinstance(raw_property, dict) or any(
+                    not isinstance(raw_property.get(field), str)
+                    for field in ("name", "type", "value")
+                ):
+                    raise ProtocolError(
+                        "Debugger returned a malformed live object preview"
+                    )
+                properties.append(
+                    {
+                        "name": self._truncate_text(raw_property["name"]),
+                        "type": self._truncate_text(raw_property["type"], 128),
+                        "value": self._truncate_text(raw_property["value"]),
+                    }
+                )
+            results.append(
+                {
+                    "id": self._truncate_text(result_id, 128),
+                    "class_name": self._truncate_text(class_name, 256),
+                    "property_count": property_count,
+                    "properties_truncated": properties_truncated,
+                    "similarity": float(similarity)
+                    if similarity is not None
+                    else None,
+                    "preview": properties,
+                }
+            )
+        return {
+            "ok": True,
+            "search": {
+                "protocol_version": 1,
+                "analyzed": value["analyzed"],
+                "total_objects": value["totalObjects"],
+                "result_limit": value["resultLimit"],
+                "result_limit_reached": value["resultLimitReached"],
+                "scan_limit_reached": value["scanLimitReached"],
+                "timed_out": value["timedOut"],
+                "duration_ms": value["durationMs"],
+                "results": results,
+            },
+            "generation": self.generation(),
         }
 
     def _run(self) -> None:

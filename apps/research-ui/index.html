@@ -1130,6 +1130,72 @@
       .experiment-input { padding: 10px; border: 1px solid var(--line); background: var(--panel); font: 9px var(--mono); }
       .experiment-note { margin-top: 10px; color: var(--amber); font: 8px var(--mono); }
 
+      #screen-memory:not([hidden]) { display: grid; grid-template-rows: 60px auto minmax(0, 1fr); }
+      #screen-memory > .screen-head { grid-row: 1; }
+      #screen-memory > .memory-notice { grid-row: 2; }
+      #screen-memory > .memory-grid { grid-row: 3; }
+      .memory-notice {
+        min-height: 34px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 13px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel-2);
+        color: var(--muted);
+        font-size: 10px;
+      }
+      .memory-notice::before { content: ""; width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--accent); }
+      .memory-notice[data-kind="idle"]::before, .memory-notice[data-kind="empty"]::before { background: var(--faint); }
+      .memory-notice[data-kind="partial"]::before { background: var(--amber); }
+      .memory-notice[data-kind="offline"]::before, .memory-notice[data-kind="error"]::before { background: var(--red); }
+      .memory-grid { min-height: 0; display: grid; grid-template-columns: 292px minmax(0, 1fr); }
+      .memory-search-pane { min-width: 0; overflow: auto; padding: 14px; border-right: 1px solid var(--line); background: var(--chrome); }
+      .memory-form { display: grid; gap: 11px; }
+      .memory-form label { display: grid; gap: 5px; color: var(--muted); font: 8px var(--mono); text-transform: uppercase; }
+      .memory-form input[type="text"], .memory-form input[type="number"], .memory-form textarea {
+        width: 100%;
+        min-height: 30px;
+        padding: 6px 8px;
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        background: var(--panel);
+        color: var(--text);
+        font: 10px/1.45 var(--mono);
+        text-transform: none;
+      }
+      .memory-form textarea { min-height: 92px; resize: vertical; }
+      .memory-options { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+      .memory-check { display: flex !important; grid-template-columns: none; align-items: center; gap: 7px !important; min-height: 26px; color: var(--muted) !important; font: 9px var(--sans) !important; text-transform: none !important; }
+      .memory-check input { accent-color: var(--accent); }
+      .memory-search-button { width: 100%; margin: 2px 0 0; }
+      .memory-search-button[aria-busy="true"] { cursor: progress; }
+      .memory-search-help { margin: 1px 0 0; color: var(--faint); font: 8px/1.5 var(--mono); }
+      .memory-results-pane { min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(250px, 38%) minmax(0, 1fr); }
+      .memory-results-list { min-width: 0; overflow: auto; border-right: 1px solid var(--line); }
+      .memory-results-head { display: grid; grid-template-columns: minmax(0, 1fr) 62px; gap: 8px; padding: 9px 11px; border-bottom: 1px solid var(--line); color: var(--faint); font: 650 8px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+      .memory-result-row { width: 100%; min-height: 54px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 8px; padding: 9px 11px; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; color: var(--text); text-align: left; }
+      .memory-result-row:hover { background: var(--panel-3); }
+      .memory-result-row[aria-selected="true"] { background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
+      .memory-result-class { overflow: hidden; font: 600 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+      .memory-result-score { color: var(--accent); font: 8px var(--mono); }
+      .memory-result-meta { grid-column: 1 / -1; overflow: hidden; color: var(--faint); font: 8px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+      .memory-detail { min-width: 0; overflow: auto; padding: 18px; }
+      .memory-detail-card { border: 1px solid var(--line); background: var(--panel-2); }
+      .memory-detail-head { display: flex; align-items: flex-start; gap: 12px; padding: 13px; border-bottom: 1px solid var(--line); }
+      .memory-detail-head h2 { margin: 0; font: 600 13px var(--mono); }
+      .memory-detail-head p { margin: 5px 0 0; color: var(--muted); font: 8px var(--mono); }
+      .memory-readonly { margin-left: auto; padding: 3px 5px; border: 1px solid var(--line); border-radius: 3px; color: var(--green); font: 650 7px var(--mono); text-transform: uppercase; }
+      .memory-properties { display: grid; }
+      .memory-property { min-width: 0; display: grid; grid-template-columns: minmax(100px, .7fr) 70px minmax(130px, 1.3fr); border-bottom: 1px solid var(--line-soft); font: 9px var(--mono); }
+      .memory-property:last-child { border-bottom: 0; }
+      .memory-property > span { min-width: 0; padding: 8px 10px; overflow-wrap: anywhere; border-right: 1px solid var(--line-soft); }
+      .memory-property > span:last-child { border-right: 0; }
+      .memory-property-name { color: var(--text); }
+      .memory-property-type { color: var(--faint); }
+      .memory-property-value { color: var(--muted); }
+      .memory-empty { min-height: 220px; display: grid; place-items: center; padding: 24px; color: var(--muted); text-align: center; }
+
       #screen-vm:not([hidden]) { display: grid; grid-template-rows: 60px auto minmax(0, 1fr); }
       #screen-vm > .screen-head { grid-row: 1; }
       #screen-vm > .vm-notice { grid-row: 2; }
@@ -1244,6 +1310,8 @@
         #screen-sources:not([hidden]) { grid-template-columns: 210px minmax(330px, 1fr); }
         .sources-debugger { display: none; }
         .vm-summary { grid-template-columns: repeat(2, minmax(100px, 1fr)); }
+        .memory-grid { grid-template-columns: 245px minmax(0, 1fr); }
+        .memory-results-pane { grid-template-columns: minmax(210px, 42%) minmax(0, 1fr); }
       }
       @media (max-width: 880px) {
         .workspace { grid-template-columns: 178px minmax(0, 1fr); }
@@ -1278,6 +1346,13 @@
         .screen-head-actions .secondary-button { display: none; }
         .experiment-grid { grid-template-columns: 1fr; }
         .vm-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+        .memory-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+        .memory-search-pane { max-height: min(420px, 48vh); border-right: 0; border-bottom: 1px solid var(--line); }
+        .memory-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .memory-form > label:nth-child(4), .memory-options, .memory-search-button, .memory-search-help { grid-column: 1 / -1; }
+        .memory-results-pane { grid-template-columns: 1fr; grid-template-rows: minmax(170px, .8fr) minmax(190px, 1fr); }
+        .memory-results-list { border-right: 0; border-bottom: 1px solid var(--line); }
+        .memory-property { grid-template-columns: minmax(90px, .7fr) 62px minmax(100px, 1.3fr); }
         .vm-list-pane { max-height: 210px; border-right: 0; border-bottom: 1px solid var(--line); }
         .vm-fields { grid-template-columns: 1fr; }
         .vm-detail { padding: 12px; }
@@ -1309,6 +1384,7 @@
         <nav class="primary-nav" aria-label="Workspace">
           <button class="nav-button" data-screen="traffic" aria-current="page">Traffic</button>
           <button class="nav-button" data-screen="sources">Sources</button>
+          <button id="nav-memory" class="nav-button" data-screen="memory">Memory</button>
           <button id="nav-vm" class="nav-button" data-screen="vm">VM Lab</button>
           <button class="nav-button" data-screen="backtrace">Backtraces</button>
           <button class="nav-button" data-screen="experiments">Experiments</button>
@@ -1467,6 +1543,39 @@
                 <details class="debug-pane"><summary>Event Listener Breakpoints</summary><div id="event-breakpoint-list" class="debug-pane-body"></div></details>
               </div>
             </aside>
+          </section>
+
+          <section id="screen-memory" class="screen" aria-label="Live memory investigation" hidden>
+            <header class="screen-head">
+              <div><h1>Live Object Search</h1><div class="screen-subtitle">Bounded read-only discovery across JavaScript objects in the attached page</div></div>
+              <div class="screen-head-actions"><span class="memory-readonly">Baseline read-only</span></div>
+            </header>
+            <div id="memory-notice" class="memory-notice" data-kind="offline" role="status" aria-live="polite">Run a live session to attach an authorized browser target.</div>
+            <div class="memory-grid">
+              <aside class="memory-search-pane" aria-label="Live object search criteria">
+                <form id="memory-search-form" class="memory-form">
+                  <label>Property name<input id="memory-property-query" type="text" placeholder="token, config, fingerprint" maxlength="512" autocomplete="off" /></label>
+                  <label>Primitive value<input id="memory-value-query" type="text" placeholder="exact text or pattern" maxlength="512" autocomplete="off" /></label>
+                  <label>Class name<input id="memory-class-query" type="text" placeholder="Object, Array, CartState" maxlength="512" autocomplete="off" /></label>
+                  <label>Structural shape<textarea id="memory-shape-query" placeholder='{"device":{"fingerprint":""}}' maxlength="4096" spellcheck="false"></textarea></label>
+                  <label>Similarity threshold<input id="memory-similarity-threshold" type="number" min="0" max="1" step="0.05" value="0.75" /></label>
+                  <div class="memory-options">
+                    <label class="memory-check"><input id="memory-regex" type="checkbox" /> Regular expression</label>
+                    <label class="memory-check"><input id="memory-case-sensitive" type="checkbox" /> Case sensitive</label>
+                    <label class="memory-check"><input id="memory-shape-values" type="checkbox" /> Match shape values</label>
+                  </div>
+                  <button id="memory-search-button" class="trace-button memory-search-button" type="submit" disabled>Search live objects</button>
+                  <p class="memory-search-help">Accessors are reported without invoking getters. Results are ephemeral and are never added to the evidence store.</p>
+                </form>
+              </aside>
+              <div class="memory-results-pane">
+                <div class="memory-results-list">
+                  <div class="memory-results-head"><span>Matches</span><span id="memory-result-count">0</span></div>
+                  <div id="memory-results" role="listbox" aria-label="Live object matches"></div>
+                </div>
+                <div id="memory-detail" class="memory-detail" tabindex="0"><div class="memory-empty">Attach a live page, enter at least one criterion, then start a bounded search.</div></div>
+              </div>
+            </div>
           </section>
 
           <section id="screen-vm" class="screen" aria-label="Virtual machine investigation" hidden>
@@ -1664,6 +1773,13 @@ export async function checkout(cart, fingerprint) {
         renderedConsoleSignature: null,
         selectedCallFrameId: null,
         editingBreakpointId: null,
+        memoryResults: [],
+        selectedMemoryResultId: null,
+        memorySearchPending: false,
+        memorySearchStatus: 'offline',
+        memorySearchMessage: null,
+        memorySearchMeta: null,
+        memoryTargetId: null,
         selectedRequestId: '81',
         inspectorTab: 'payload',
         fieldTab: 'body',
@@ -1767,6 +1883,20 @@ export async function checkout(cart, fingerprint) {
         xhrBreakpointPattern: document.querySelector('#xhr-breakpoint-pattern'),
         xhrBreakpointList: document.querySelector('#xhr-breakpoint-list'),
         eventBreakpointList: document.querySelector('#event-breakpoint-list'),
+        memoryNotice: document.querySelector('#memory-notice'),
+        memorySearchForm: document.querySelector('#memory-search-form'),
+        memoryPropertyQuery: document.querySelector('#memory-property-query'),
+        memoryValueQuery: document.querySelector('#memory-value-query'),
+        memoryClassQuery: document.querySelector('#memory-class-query'),
+        memoryShapeQuery: document.querySelector('#memory-shape-query'),
+        memorySimilarityThreshold: document.querySelector('#memory-similarity-threshold'),
+        memoryRegex: document.querySelector('#memory-regex'),
+        memoryCaseSensitive: document.querySelector('#memory-case-sensitive'),
+        memoryShapeValues: document.querySelector('#memory-shape-values'),
+        memorySearchButton: document.querySelector('#memory-search-button'),
+        memoryResultCount: document.querySelector('#memory-result-count'),
+        memoryResults: document.querySelector('#memory-results'),
+        memoryDetail: document.querySelector('#memory-detail'),
         quickOpen: document.querySelector('#quick-open'),
         quickOpenInput: document.querySelector('#quick-open-input'),
         quickOpenResults: document.querySelector('#quick-open-results'),
@@ -2091,6 +2221,29 @@ export async function checkout(cart, fingerprint) {
           body.settings.event_breakpoints.every(value => typeof value === 'string') &&
           ['scripts', 'call_frames', 'scope_properties', 'console_entries', 'source_bytes']
             .every(field => isSafeIntegerInRange(body.limits[field], 1, Number.MAX_SAFE_INTEGER));
+      }
+
+      function isLiveObjectSearchResponse(body) {
+        if (!isPlainObject(body) || body.ok !== true ||
+            !isSafeIntegerInRange(body.generation, 0, Number.MAX_SAFE_INTEGER) ||
+            !isPlainObject(body.search)) return false;
+        const search = body.search;
+        if (search.protocol_version !== 1 ||
+            !['analyzed', 'total_objects', 'result_limit', 'duration_ms'].every(field =>
+              isSafeIntegerInRange(search[field], 0, Number.MAX_SAFE_INTEGER)) ||
+            search.result_limit !== 50 ||
+            !['result_limit_reached', 'scan_limit_reached', 'timed_out'].every(field =>
+              typeof search[field] === 'boolean') ||
+            !Array.isArray(search.results) || search.results.length > search.result_limit) return false;
+        return search.results.every(result => isPlainObject(result) &&
+          typeof result.id === 'string' && typeof result.class_name === 'string' &&
+          isSafeIntegerInRange(result.property_count, 0, 0x7fffffff) &&
+          typeof result.properties_truncated === 'boolean' &&
+          (result.similarity === null || (typeof result.similarity === 'number' &&
+            Number.isFinite(result.similarity) && result.similarity >= 0 && result.similarity <= 1)) &&
+          Array.isArray(result.preview) && result.preview.length <= 16 &&
+          result.preview.every(property => isPlainObject(property) &&
+            ['name', 'type', 'value'].every(field => typeof property[field] === 'string')));
       }
 
       function isOriginTraceResponse(body) {
@@ -3855,6 +4008,196 @@ export async function checkout(cart, fingerprint) {
         requestAnimationFrame(() => elements.quickOpenInput.focus());
       }
 
+      function memoryAttached() {
+        return ['running', 'paused'].includes(state.debuggerSession?.state);
+      }
+
+      function selectMemoryResult(id, focus = false) {
+        const result = state.memoryResults.find(candidate => candidate.id === id);
+        if (!result) return;
+        state.selectedMemoryResultId = id;
+        renderMemory();
+        if (focus) {
+          [...elements.memoryResults.querySelectorAll('.memory-result-row')]
+            .find(row => row.dataset.resultId === id)?.focus({ preventScroll: true });
+        }
+      }
+
+      function moveMemorySelection(event) {
+        if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+        const rows = [...elements.memoryResults.querySelectorAll('.memory-result-row')];
+        const current = rows.indexOf(event.currentTarget);
+        if (current < 0 || rows.length === 0) return;
+        event.preventDefault();
+        const next = event.key === 'Home'
+          ? 0
+          : event.key === 'End'
+            ? rows.length - 1
+            : Math.max(0, Math.min(rows.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1)));
+        selectMemoryResult(rows[next].dataset.resultId, true);
+      }
+
+      function renderMemoryDetail() {
+        const result = state.memoryResults.find(candidate => candidate.id === state.selectedMemoryResultId);
+        if (!result) {
+          const empty = textElement('div', 'memory-empty', memoryAttached()
+            ? 'Enter at least one criterion, then start a bounded search.'
+            : 'Run make live to attach an authorized browser target.');
+          elements.memoryDetail.replaceChildren(empty);
+          return;
+        }
+        const card = document.createElement('article'); card.className = 'memory-detail-card';
+        const head = document.createElement('header'); head.className = 'memory-detail-head';
+        const title = document.createElement('div');
+        const similarity = result.similarity === null ? 'shape filter not used' : `${Math.round(result.similarity * 100)}% structural similarity`;
+        title.append(
+          textElement('h2', '', result.class_name || 'Object'),
+          textElement('p', '', `${result.property_count} own properties · ${similarity}`)
+        );
+        head.append(title, textElement('span', 'memory-readonly', 'Read-only preview'));
+        const properties = document.createElement('div'); properties.className = 'memory-properties';
+        if (result.preview.length === 0) {
+          properties.append(textElement('div', 'memory-empty', 'The matched object has no previewable own properties.'));
+        } else {
+          result.preview.forEach(property => {
+            const row = document.createElement('div'); row.className = 'memory-property';
+            row.append(
+              textElement('span', 'memory-property-name', property.name),
+              textElement('span', 'memory-property-type', property.type),
+              textElement('span', 'memory-property-value', property.value)
+            );
+            properties.append(row);
+          });
+          if (result.properties_truncated) {
+            const row = document.createElement('div'); row.className = 'memory-property';
+            row.append(
+              textElement('span', 'memory-property-name', 'preview'),
+              textElement('span', 'memory-property-type', 'bounded'),
+              textElement('span', 'memory-property-value', `Showing ${result.preview.length} of ${result.property_count} properties`)
+            );
+            properties.append(row);
+          }
+        }
+        card.append(head, properties);
+        elements.memoryDetail.replaceChildren(card);
+      }
+
+      function renderMemory() {
+        const attached = memoryAttached();
+        const targetId = state.debuggerSession?.target?.id ?? null;
+        if (state.memoryTargetId !== null && state.memoryTargetId !== targetId) {
+          state.memoryResults = [];
+          state.selectedMemoryResultId = null;
+          state.memorySearchMeta = null;
+          state.memorySearchMessage = null;
+          state.memoryTargetId = null;
+          state.memorySearchStatus = attached ? 'idle' : 'offline';
+        } else if (!attached && state.memorySearchStatus !== 'searching') {
+          state.memorySearchStatus = 'offline';
+        } else if (attached && state.memorySearchStatus === 'offline') {
+          state.memorySearchStatus = 'idle';
+        }
+        const controls = elements.memorySearchForm.querySelectorAll('input, textarea');
+        controls.forEach(control => { control.disabled = !attached || state.memorySearchPending; });
+        elements.memorySearchButton.disabled = !attached || state.memorySearchPending;
+        elements.memorySearchButton.setAttribute('aria-busy', String(state.memorySearchPending));
+        elements.memorySearchButton.textContent = state.memorySearchPending ? 'Searching...' : 'Search live objects';
+
+        const messages = {
+          offline: 'Run a live session to attach an authorized browser target.',
+          idle: 'Enter a property, primitive value, class, or JSON shape to search live objects.',
+          searching: 'Scanning the attached page with explicit time, candidate, and result limits.',
+          empty: state.memorySearchMessage || 'No live objects matched the current criteria.',
+          ready: state.memorySearchMessage || 'Live object search completed.',
+          partial: state.memorySearchMessage || 'Live object search returned partial bounded results.',
+          error: state.memorySearchMessage || 'Live object search failed.'
+        };
+        elements.memoryNotice.dataset.kind = state.memorySearchStatus;
+        elements.memoryNotice.textContent = messages[state.memorySearchStatus] ?? messages.idle;
+        elements.memoryResultCount.textContent = String(state.memoryResults.length);
+
+        if (state.memoryResults.length === 0) {
+          const empty = textElement('div', 'memory-empty', state.memorySearchStatus === 'empty'
+            ? 'No objects matched. Broaden one criterion or lower the similarity threshold.'
+            : state.memorySearchStatus === 'error'
+              ? 'The last search did not replace any retained results.'
+              : 'No live object search results yet.');
+          elements.memoryResults.removeAttribute('role');
+          elements.memoryResults.replaceChildren(empty);
+          renderMemoryDetail();
+          return;
+        }
+        elements.memoryResults.setAttribute('role', 'listbox');
+        if (!state.memoryResults.some(result => result.id === state.selectedMemoryResultId)) {
+          state.selectedMemoryResultId = state.memoryResults[0].id;
+        }
+        elements.memoryResults.replaceChildren(...state.memoryResults.map(result => {
+          const row = document.createElement('button');
+          row.type = 'button'; row.className = 'memory-result-row'; row.dataset.resultId = result.id;
+          row.setAttribute('role', 'option');
+          row.setAttribute('aria-selected', String(result.id === state.selectedMemoryResultId));
+          row.tabIndex = result.id === state.selectedMemoryResultId ? 0 : -1;
+          const score = result.similarity === null ? 'match' : `${Math.round(result.similarity * 100)}%`;
+          const previewNames = result.preview.slice(0, 5).map(property => property.name).join(', ') || 'no own properties';
+          row.append(
+            textElement('span', 'memory-result-class', result.class_name || 'Object'),
+            textElement('span', 'memory-result-score', score),
+            textElement('span', 'memory-result-meta', `${result.property_count} properties · ${previewNames}`)
+          );
+          row.addEventListener('click', () => selectMemoryResult(result.id));
+          row.addEventListener('keydown', moveMemorySelection);
+          return row;
+        }));
+        renderMemoryDetail();
+      }
+
+      async function runLiveObjectSearch() {
+        if (!memoryAttached() || state.memorySearchPending) return;
+        const request = {
+          action: 'search_live_objects',
+          property_query: elements.memoryPropertyQuery.value.trim(),
+          value_query: elements.memoryValueQuery.value.trim(),
+          class_query: elements.memoryClassQuery.value.trim(),
+          shape: elements.memoryShapeQuery.value.trim(),
+          similarity_threshold: Number(elements.memorySimilarityThreshold.value),
+          regex: elements.memoryRegex.checked,
+          case_sensitive: elements.memoryCaseSensitive.checked,
+          include_shape_values: elements.memoryShapeValues.checked
+        };
+        if (!request.property_query && !request.value_query && !request.class_query && !request.shape) {
+          state.memorySearchStatus = 'error';
+          state.memorySearchMessage = 'Enter at least one property, value, class, or structural shape criterion.';
+          renderMemory();
+          elements.memoryPropertyQuery.focus();
+          return;
+        }
+        state.memorySearchPending = true;
+        state.memorySearchStatus = 'searching';
+        state.memorySearchMessage = null;
+        renderMemory();
+        const body = await debuggerAction(request);
+        state.memorySearchPending = false;
+        if (!isLiveObjectSearchResponse(body)) {
+          state.memorySearchStatus = 'error';
+          state.memorySearchMessage = state.debuggerError || 'The debugger returned malformed live object results.';
+          renderMemory();
+          return;
+        }
+        const search = body.search;
+        state.memoryResults = search.results;
+        state.selectedMemoryResultId = search.results[0]?.id ?? null;
+        state.memorySearchMeta = search;
+        state.memoryTargetId = state.debuggerSession?.target?.id ?? null;
+        const limits = [];
+        if (search.timed_out) limits.push('time limit reached');
+        if (search.result_limit_reached) limits.push(`${search.result_limit} result limit reached`);
+        if (search.scan_limit_reached) limits.push('candidate limit reached');
+        const summary = `${search.results.length} matches from ${search.analyzed} inspected objects in ${search.duration_ms} ms`;
+        state.memorySearchMessage = limits.length > 0 ? `${summary} · ${limits.join(' · ')}` : summary;
+        state.memorySearchStatus = limits.length > 0 ? 'partial' : search.results.length > 0 ? 'ready' : 'empty';
+        renderMemory();
+      }
+
       function debuggerValueText(value) {
         if (!value) return 'unavailable';
         if (value.unserializable_value) return value.unserializable_value;
@@ -4154,16 +4497,18 @@ export async function checkout(cart, fingerprint) {
       }
 
       async function debuggerAction(request) {
-        if (state.debuggerActionPending) return;
+        if (state.debuggerActionPending) return null;
         state.debuggerActionPending = true;
         state.debuggerError = null;
         renderDebugger();
+        let result = null;
         try {
           const response = await fetch('/api/debugger/actions', {
             method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request)
           });
           const body = await response.json();
           if (!response.ok) throw new Error(body.error || `Debugger returned ${response.status}`);
+          result = body;
         } catch (error) {
           state.debuggerError = error.message;
         } finally {
@@ -4171,6 +4516,7 @@ export async function checkout(cart, fingerprint) {
           renderDebugger();
           if (!state.debuggerRefreshing) scheduleDebuggerRefresh(0);
         }
+        return result;
       }
 
       function debuggerScriptCatalogSignature(session) {
@@ -4231,6 +4577,7 @@ export async function checkout(cart, fingerprint) {
             state.pendingSourceLine = null;
           }
           renderDebugger();
+          renderMemory();
           const sourcesVisible = !document.querySelector('#screen-sources').hidden;
           if (sourcesVisible && !sourceRendered) {
             const catalogChanged = previousCatalog !== debuggerScriptCatalogSignature(body);
@@ -4249,6 +4596,7 @@ export async function checkout(cart, fingerprint) {
         } catch (error) {
           state.debuggerError = error instanceof TypeError ? 'The debugger returned malformed state. The last valid pause is retained.' : error.message;
           renderDebugger();
+          renderMemory();
         } finally {
           state.debuggerRefreshing = false;
           const quiet = document.hidden || state.debuggerSession?.state === 'unavailable' || state.debuggerError;
@@ -4321,6 +4669,7 @@ export async function checkout(cart, fingerprint) {
           if (source?.source_type === 'script') loadScriptContent(source);
           else if (source) loadArtifactContent(state.artifacts.find(candidate => candidate.artifact_id === source.artifact_id));
         }
+        if (screenName === 'memory') renderMemory();
         if (screenName === 'vm') {
           if (trigger?.id === 'nav-vm' && state.vmAnalysisRequestId !== null) refreshVmAnalysis(null);
           renderVmLab();
@@ -4561,6 +4910,10 @@ export async function checkout(cart, fingerprint) {
         elements.xhrBreakpointPattern.value = '';
         debuggerAction({ action: 'set_xhr_breakpoint', pattern });
       });
+      elements.memorySearchForm.addEventListener('submit', event => {
+        event.preventDefault();
+        runLiveObjectSearch();
+      });
       document.addEventListener('keydown', event => {
         const sourcesVisible = !document.querySelector('#screen-sources').hidden;
         if (sourcesVisible && event.key === 'Escape' && elements.quickOpen.hidden) {
@@ -4613,6 +4966,7 @@ export async function checkout(cart, fingerprint) {
       renderInspector();
       renderEvidence();
       renderDebugger();
+      renderMemory();
       renderSources();
       renderVmLab();
       if (location.protocol === 'file:') {

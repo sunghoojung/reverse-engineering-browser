@@ -100,12 +100,26 @@ read-only object discovery. A search can combine an own-property name,
 primitive value, class name, regular expression, and JSON structural shape.
 Structural matching compares bounded property-and-type tokens and can
 optionally include primitive values. Each request examines at most 25,000
-candidates for 750 milliseconds, returns at most 50 objects, and previews at
-most 16 own properties per result. Accessor properties remain visible as
-accessors, but their getters are never invoked. Object references are released
-after every search, results remain ephemeral, and the evidence store is not
-changed. Candidate, result, and time limits are reported as partial coverage
-instead of being hidden.
+candidates for 750 milliseconds, searches at most 256 own properties per
+candidate, returns at most 50 objects, and previews at most 16 own properties
+per result. Accessor properties remain visible as accessors, but their getters
+are never invoked. Object references are released after every search, results
+remain ephemeral, and the evidence store is not changed. Candidate, property,
+result, and time limits are reported as partial coverage instead of being
+hidden.
+
+Heap Snapshot mode is an explicit, read-only action because V8 pauses the target
+while it captures the heap. The debugger bridge streams at most 256 MiB to a
+user-only temporary file, then runs `build/reb-heap-snapshot`. The
+dependency-free C++20 indexer reads at most 2,000,000 nodes, 8,000,000 edges,
+2,000,000 strings, and 64 MiB of retained string text. It returns at most 50
+matching nodes with shortest non-weak retaining paths capped at 12 steps. Every
+limit is visible in the response, and the temporary snapshot is deleted after
+each search.
+
+The Traffic workspace can pivot a selected request value into Memory. The pivot
+only prefills an ephemeral query. It does not persist the selected value or
+begin a heap capture without a separate user action.
 
 The live debugger is ephemeral. Brave uses a private profile inside the
 session directory and chooses a random loopback debugging port. The research

@@ -1088,12 +1088,27 @@ const snapshot = {
 const liveSearch = {
   ok: true, generation: 7,
   search: {
-    protocol_version: 1, analyzed: 17, total_objects: 17, result_limit: 50,
+    protocol_version: 2, analyzed: 17, total_objects: 17, result_limit: 50,
     duration_ms: 3, result_limit_reached: false, scan_limit_reached: false,
+    property_limit_reached: false,
     timed_out: false, results: [{
       id: '4', class_name: 'CheckoutState', property_count: 2,
       properties_truncated: false, similarity: 0.875,
       preview: [{name: 'ready', type: 'boolean', value: 'true'}]
+    }]
+  }
+};
+const heapSearch = {
+  ok: true, generation: 7,
+  snapshot: {
+    protocol_version: 1, file_bytes: 4096, total_nodes: 3, analyzed_nodes: 3,
+    total_edges: 2, indexed_edges: 2, total_strings: 5, duration_ms: 1,
+    result_limit: 50, result_limit_reached: false, node_limit_reached: false,
+    edge_limit_reached: false, string_limit_reached: false,
+    retaining_paths_partial: false, results: [{
+      id: '5', type: 'string', name: 'secret-value', self_size: 24,
+      retaining_path_complete: true,
+      retaining_path: [{edge: 'token', type: 'string', name: 'secret-value'}]
     }]
   }
 };
@@ -1119,7 +1134,13 @@ process.stdout.write(JSON.stringify({
     search: {...liveSearch.search, results: [{...liveSearch.search.results[0], similarity: 2}]}}),
   liveSearchPreviewBound: !isLiveObjectSearchResponse({...liveSearch,
     search: {...liveSearch.search, results: [{...liveSearch.search.results[0],
-      preview: Array(17).fill({name: 'x', type: 'string', value: 'x'})}]}})
+      preview: Array(17).fill({name: 'x', type: 'string', value: 'x'})}]}}),
+  heapSearchAccepted: isHeapSnapshotSearchResponse(heapSearch),
+  heapSearchNodeCoverageBound: !isHeapSnapshotSearchResponse({...heapSearch,
+    snapshot: {...heapSearch.snapshot, analyzed_nodes: 4}}),
+  heapSearchPathBound: !isHeapSnapshotSearchResponse({...heapSearch,
+    snapshot: {...heapSearch.snapshot, results: [{...heapSearch.snapshot.results[0],
+      retaining_path: Array(13).fill({edge: 'x', type: 'object', name: 'x'})}]}})
 }));
 """
         completed = subprocess.run(
@@ -1146,21 +1167,31 @@ process.stdout.write(JSON.stringify({
                 "liveSearchResultLimitRequired": True,
                 "liveSearchSimilarityBound": True,
                 "liveSearchPreviewBound": True,
+                "heapSearchAccepted": True,
+                "heapSearchNodeCoverageBound": True,
+                "heapSearchPathBound": True,
             },
         )
 
-    def test_memory_workspace_exposes_bounded_read_only_live_search(self) -> None:
+    def test_memory_workspace_exposes_live_and_native_snapshot_search(self) -> None:
         html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
 
         self.assertIn('data-screen="memory">Memory</button>', html)
         self.assertIn('id="screen-memory"', html)
-        self.assertIn('aria-label="Live object search criteria"', html)
+        self.assertIn('aria-label="Memory search criteria"', html)
         self.assertIn('role="listbox" aria-label="Live object matches"', html)
         self.assertIn("function isLiveObjectSearchResponse(body)", html)
+        self.assertIn("function isHeapSnapshotSearchResponse(body)", html)
         self.assertIn("function runLiveObjectSearch()", html)
+        self.assertIn("function runHeapSnapshotSearch()", html)
         self.assertIn("function renderMemory()", html)
         self.assertIn("function renderMemoryDetail()", html)
         self.assertIn("action: 'search_live_objects'", html)
+        self.assertIn("action: 'search_heap_snapshot'", html)
+        self.assertIn('id="request-memory-pivot"', html)
+        self.assertIn('data-mode="live"', html)
+        self.assertIn('memory-form[data-mode="snapshot"] .memory-value-field', html)
+        self.assertIn("Capturing briefly pauses the target", html)
         self.assertIn("Accessors are reported without invoking getters", html)
         self.assertIn("Baseline read-only", html)
         self.assertNotIn("expose_live_object", html)

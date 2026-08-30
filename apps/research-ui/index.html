@@ -551,7 +551,7 @@
         min-height: 62px;
         display: flex;
         align-items: center;
-        gap: 14px;
+        gap: 8px;
         padding: 10px 13px;
         border: 1px solid var(--line);
         border-radius: 2px;
@@ -577,6 +577,7 @@
       .trace-button:disabled { cursor: not-allowed; opacity: .45; filter: grayscale(.5); }
       .secondary-button { color: var(--text); border-color: var(--line); background: var(--panel-2); }
       .secondary-button:hover { border-color: var(--accent); }
+      .secondary-button:disabled { cursor: not-allowed; opacity: .45; }
 
       .screen-head {
         min-height: 60px;
@@ -1152,6 +1153,10 @@
       .memory-grid { min-height: 0; display: grid; grid-template-columns: 292px minmax(0, 1fr); }
       .memory-search-pane { min-width: 0; overflow: auto; padding: 14px; border-right: 1px solid var(--line); background: var(--chrome); }
       .memory-form { display: grid; gap: 11px; }
+      .memory-mode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+      .memory-mode-button { min-height: 30px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel-2); color: var(--muted); font: 8px var(--mono); }
+      .memory-mode-button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+      .memory-live-only[hidden] { display: none; }
       .memory-form label { display: grid; gap: 5px; color: var(--muted); font: 8px var(--mono); text-transform: uppercase; }
       .memory-form input[type="text"], .memory-form input[type="number"], .memory-form textarea {
         width: 100%;
@@ -1194,6 +1199,12 @@
       .memory-property-name { color: var(--text); }
       .memory-property-type { color: var(--faint); }
       .memory-property-value { color: var(--muted); }
+      .memory-retaining-path { display: grid; padding: 8px 0; }
+      .memory-path-step { position: relative; display: grid; grid-template-columns: minmax(80px, .55fr) 70px minmax(120px, 1.2fr); gap: 8px; padding: 7px 12px; color: var(--muted); font: 9px var(--mono); }
+      .memory-path-step::before { content: "↳"; position: absolute; color: var(--faint); }
+      .memory-path-edge { padding-left: 14px; color: var(--accent); overflow-wrap: anywhere; }
+      .memory-path-type { color: var(--faint); }
+      .memory-path-name { overflow-wrap: anywhere; }
       .memory-empty { min-height: 220px; display: grid; place-items: center; padding: 24px; color: var(--muted); text-align: center; }
 
       #screen-vm:not([hidden]) { display: grid; grid-template-rows: 60px auto minmax(0, 1fr); }
@@ -1349,7 +1360,7 @@
         .memory-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
         .memory-search-pane { max-height: min(420px, 48vh); border-right: 0; border-bottom: 1px solid var(--line); }
         .memory-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .memory-form > label:nth-child(4), .memory-options, .memory-search-button, .memory-search-help { grid-column: 1 / -1; }
+        .memory-mode-switch, .memory-form[data-mode="snapshot"] .memory-value-field, .memory-shape-field, .memory-options, .memory-search-button, .memory-search-help { grid-column: 1 / -1; }
         .memory-results-pane { grid-template-columns: 1fr; grid-template-rows: minmax(170px, .8fr) minmax(190px, 1fr); }
         .memory-results-list { border-right: 0; border-bottom: 1px solid var(--line); }
         .memory-property { grid-template-columns: minmax(90px, .7fr) 62px minmax(100px, 1.3fr); }
@@ -1474,6 +1485,7 @@
                   <div id="field-tree" class="field-tree" role="tabpanel" aria-labelledby="field-tab-body" tabindex="0"></div>
                   <div id="trace-dock" class="trace-dock">
                     <div><div class="trace-label">Selected request field</div><div id="trace-target" class="trace-target">request-81 · Body · $.device.fingerprint</div></div>
+                    <button id="request-memory-pivot" class="secondary-button" type="button">Find in Memory</button>
                     <button id="request-vm-candidates" class="secondary-button" type="button">Related VM candidates</button>
                     <button id="trace-origin" class="trace-button" type="button">⌘ Trace origin</button>
                   </div>
@@ -1545,27 +1557,31 @@
             </aside>
           </section>
 
-          <section id="screen-memory" class="screen" aria-label="Live memory investigation" hidden>
+          <section id="screen-memory" class="screen" aria-label="Memory investigation" hidden>
             <header class="screen-head">
-              <div><h1>Live Object Search</h1><div class="screen-subtitle">Bounded read-only discovery across JavaScript objects in the attached page</div></div>
+              <div><h1>Memory Explorer</h1><div class="screen-subtitle">Bounded live objects and native C++ V8 heap-snapshot search</div></div>
               <div class="screen-head-actions"><span class="memory-readonly">Baseline read-only</span></div>
             </header>
             <div id="memory-notice" class="memory-notice" data-kind="offline" role="status" aria-live="polite">Run a live session to attach an authorized browser target.</div>
             <div class="memory-grid">
-              <aside class="memory-search-pane" aria-label="Live object search criteria">
-                <form id="memory-search-form" class="memory-form">
-                  <label>Property name<input id="memory-property-query" type="text" placeholder="token, config, fingerprint" maxlength="512" autocomplete="off" /></label>
-                  <label>Primitive value<input id="memory-value-query" type="text" placeholder="exact text or pattern" maxlength="512" autocomplete="off" /></label>
-                  <label>Class name<input id="memory-class-query" type="text" placeholder="Object, Array, CartState" maxlength="512" autocomplete="off" /></label>
-                  <label>Structural shape<textarea id="memory-shape-query" placeholder='{"device":{"fingerprint":""}}' maxlength="4096" spellcheck="false"></textarea></label>
-                  <label>Similarity threshold<input id="memory-similarity-threshold" type="number" min="0" max="1" step="0.05" value="0.75" /></label>
-                  <div class="memory-options">
+              <aside class="memory-search-pane" aria-label="Memory search criteria">
+                <form id="memory-search-form" class="memory-form" data-mode="live">
+                  <div class="memory-mode-switch" role="group" aria-label="Memory search mode">
+                    <button class="memory-mode-button" type="button" data-memory-mode="live" aria-pressed="true">Live objects</button>
+                    <button class="memory-mode-button" type="button" data-memory-mode="snapshot" aria-pressed="false">Heap snapshot</button>
+                  </div>
+                  <label class="memory-live-only">Property name<input id="memory-property-query" type="text" placeholder="token, config, fingerprint" maxlength="512" autocomplete="off" /></label>
+                  <label class="memory-value-field"><span id="memory-value-caption">Primitive value</span><input id="memory-value-query" type="text" placeholder="exact text or pattern" maxlength="512" autocomplete="off" /></label>
+                  <label class="memory-live-only">Class name<input id="memory-class-query" type="text" placeholder="Object, Array, CartState" maxlength="512" autocomplete="off" /></label>
+                  <label class="memory-live-only memory-shape-field">Structural shape<textarea id="memory-shape-query" placeholder='{"device":{"fingerprint":""}}' maxlength="4096" spellcheck="false"></textarea></label>
+                  <label class="memory-live-only">Similarity threshold<input id="memory-similarity-threshold" type="number" min="0" max="1" step="0.05" value="0.75" /></label>
+                  <div class="memory-options memory-live-only">
                     <label class="memory-check"><input id="memory-regex" type="checkbox" /> Regular expression</label>
                     <label class="memory-check"><input id="memory-case-sensitive" type="checkbox" /> Case sensitive</label>
                     <label class="memory-check"><input id="memory-shape-values" type="checkbox" /> Match shape values</label>
                   </div>
                   <button id="memory-search-button" class="trace-button memory-search-button" type="submit" disabled>Search live objects</button>
-                  <p class="memory-search-help">Accessors are reported without invoking getters. Results are ephemeral and are never added to the evidence store.</p>
+                  <p id="memory-search-help" class="memory-search-help">Accessors are reported without invoking getters. Results are ephemeral and are never added to the evidence store.</p>
                 </form>
               </aside>
               <div class="memory-results-pane">
@@ -1773,6 +1789,7 @@ export async function checkout(cart, fingerprint) {
         renderedConsoleSignature: null,
         selectedCallFrameId: null,
         editingBreakpointId: null,
+        memoryMode: 'live',
         memoryResults: [],
         selectedMemoryResultId: null,
         memorySearchPending: false,
@@ -1830,6 +1847,7 @@ export async function checkout(cart, fingerprint) {
         traceDock: document.querySelector('#trace-dock'),
         traceTarget: document.querySelector('#trace-target'),
         traceButton: document.querySelector('#trace-origin'),
+        requestMemoryPivot: document.querySelector('#request-memory-pivot'),
         requestVmCandidates: document.querySelector('#request-vm-candidates'),
         backtraceSubtitle: document.querySelector('#backtrace-subtitle'),
         backtraceSteps: document.querySelector('#backtrace-steps'),
@@ -1885,8 +1903,10 @@ export async function checkout(cart, fingerprint) {
         eventBreakpointList: document.querySelector('#event-breakpoint-list'),
         memoryNotice: document.querySelector('#memory-notice'),
         memorySearchForm: document.querySelector('#memory-search-form'),
+        memoryModeButtons: [...document.querySelectorAll('[data-memory-mode]')],
         memoryPropertyQuery: document.querySelector('#memory-property-query'),
         memoryValueQuery: document.querySelector('#memory-value-query'),
+        memoryValueCaption: document.querySelector('#memory-value-caption'),
         memoryClassQuery: document.querySelector('#memory-class-query'),
         memoryShapeQuery: document.querySelector('#memory-shape-query'),
         memorySimilarityThreshold: document.querySelector('#memory-similarity-threshold'),
@@ -1894,6 +1914,7 @@ export async function checkout(cart, fingerprint) {
         memoryCaseSensitive: document.querySelector('#memory-case-sensitive'),
         memoryShapeValues: document.querySelector('#memory-shape-values'),
         memorySearchButton: document.querySelector('#memory-search-button'),
+        memorySearchHelp: document.querySelector('#memory-search-help'),
         memoryResultCount: document.querySelector('#memory-result-count'),
         memoryResults: document.querySelector('#memory-results'),
         memoryDetail: document.querySelector('#memory-detail'),
@@ -2228,11 +2249,11 @@ export async function checkout(cart, fingerprint) {
             !isSafeIntegerInRange(body.generation, 0, Number.MAX_SAFE_INTEGER) ||
             !isPlainObject(body.search)) return false;
         const search = body.search;
-        if (search.protocol_version !== 1 ||
+        if (search.protocol_version !== 2 ||
             !['analyzed', 'total_objects', 'result_limit', 'duration_ms'].every(field =>
               isSafeIntegerInRange(search[field], 0, Number.MAX_SAFE_INTEGER)) ||
             search.result_limit !== 50 ||
-            !['result_limit_reached', 'scan_limit_reached', 'timed_out'].every(field =>
+            !['result_limit_reached', 'scan_limit_reached', 'property_limit_reached', 'timed_out'].every(field =>
               typeof search[field] === 'boolean') ||
             !Array.isArray(search.results) || search.results.length > search.result_limit) return false;
         return search.results.every(result => isPlainObject(result) &&
@@ -2244,6 +2265,36 @@ export async function checkout(cart, fingerprint) {
           Array.isArray(result.preview) && result.preview.length <= 16 &&
           result.preview.every(property => isPlainObject(property) &&
             ['name', 'type', 'value'].every(field => typeof property[field] === 'string')));
+      }
+
+      function isHeapSnapshotSearchResponse(body) {
+        if (!isPlainObject(body) || body.ok !== true ||
+            !isSafeIntegerInRange(body.generation, 0, Number.MAX_SAFE_INTEGER) ||
+            !isPlainObject(body.snapshot)) return false;
+        const snapshot = body.snapshot;
+        const integerFields = [
+          'file_bytes', 'total_nodes', 'analyzed_nodes', 'total_edges',
+          'indexed_edges', 'total_strings', 'duration_ms', 'result_limit'
+        ];
+        const booleanFields = [
+          'result_limit_reached', 'node_limit_reached', 'edge_limit_reached',
+          'string_limit_reached', 'retaining_paths_partial'
+        ];
+        if (snapshot.protocol_version !== 1 ||
+            !integerFields.every(field => isSafeIntegerInRange(snapshot[field], 0, Number.MAX_SAFE_INTEGER)) ||
+            snapshot.file_bytes > 256 * 1024 * 1024 || snapshot.result_limit !== 50 ||
+            snapshot.analyzed_nodes > snapshot.total_nodes || snapshot.indexed_edges > snapshot.total_edges ||
+            !booleanFields.every(field => typeof snapshot[field] === 'boolean') ||
+            !Array.isArray(snapshot.results) || snapshot.results.length > snapshot.result_limit) return false;
+        return snapshot.results.every(result => isPlainObject(result) &&
+          typeof result.id === 'string' && /^(?:0|[1-9][0-9]*)$/.test(result.id) &&
+          result.id.length <= 20 && typeof result.type === 'string' &&
+          typeof result.name === 'string' &&
+          isSafeIntegerInRange(result.self_size, 0, Number.MAX_SAFE_INTEGER) &&
+          typeof result.retaining_path_complete === 'boolean' &&
+          Array.isArray(result.retaining_path) && result.retaining_path.length <= 12 &&
+          result.retaining_path.every(step => isPlainObject(step) &&
+            ['edge', 'type', 'name'].every(field => typeof step[field] === 'string')));
       }
 
       function isOriginTraceResponse(body) {
@@ -3074,6 +3125,7 @@ export async function checkout(cart, fingerprint) {
             ? `${request.method} ${request.path} · request ${integerText(root, 'request_id')}`
             : 'No broker-backed trace target selected';
           elements.traceButton.disabled = !root;
+          elements.requestMemoryPivot.disabled = true;
           return;
         }
 
@@ -3095,6 +3147,7 @@ export async function checkout(cart, fingerprint) {
           ? `request-${state.selectedRequestId} · ${selected.label} · ${selected.path}`
           : 'Select a traceable field';
         elements.traceButton.disabled = !selected;
+        elements.requestMemoryPivot.disabled = !selected;
       }
 
       function renderInspectorMessage(message) {
@@ -4049,6 +4102,47 @@ export async function checkout(cart, fingerprint) {
         const card = document.createElement('article'); card.className = 'memory-detail-card';
         const head = document.createElement('header'); head.className = 'memory-detail-head';
         const title = document.createElement('div');
+        if (state.memoryMode === 'snapshot') {
+          title.append(
+            textElement('h2', '', result.name || `(${result.type})`),
+            textElement('p', '', `${result.type} · node ${result.id} · ${result.self_size.toLocaleString()} self bytes`)
+          );
+          head.append(title, textElement('span', 'memory-readonly', 'Native snapshot'));
+          const facts = document.createElement('div'); facts.className = 'memory-properties';
+          [
+            ['node id', 'uint64', result.id],
+            ['type', 'V8 node', result.type],
+            ['self size', 'bytes', result.self_size.toLocaleString()]
+          ].forEach(([name, type, value]) => {
+            const row = document.createElement('div'); row.className = 'memory-property';
+            row.append(
+              textElement('span', 'memory-property-name', name),
+              textElement('span', 'memory-property-type', type),
+              textElement('span', 'memory-property-value', value)
+            );
+            facts.append(row);
+          });
+          const path = document.createElement('div'); path.className = 'memory-retaining-path';
+          path.append(textElement('div', 'memory-results-head', result.retaining_path_complete
+            ? 'Shortest retaining path from a V8 root'
+            : 'Partial retaining path'));
+          if (result.retaining_path.length === 0) {
+            path.append(textElement('div', 'memory-empty', 'No retaining path was available inside the bounded native index.'));
+          } else {
+            result.retaining_path.forEach(step => {
+              const row = document.createElement('div'); row.className = 'memory-path-step';
+              row.append(
+                textElement('span', 'memory-path-edge', step.edge),
+                textElement('span', 'memory-path-type', step.type),
+                textElement('span', 'memory-path-name', step.name || '(anonymous)')
+              );
+              path.append(row);
+            });
+          }
+          card.append(head, facts, path);
+          elements.memoryDetail.replaceChildren(card);
+          return;
+        }
         const similarity = result.similarity === null ? 'shape filter not used' : `${Math.round(result.similarity * 100)}% structural similarity`;
         title.append(
           textElement('h2', '', result.class_name || 'Object'),
@@ -4097,15 +4191,39 @@ export async function checkout(cart, fingerprint) {
         } else if (attached && state.memorySearchStatus === 'offline') {
           state.memorySearchStatus = 'idle';
         }
+        const snapshotMode = state.memoryMode === 'snapshot';
+        elements.memorySearchForm.dataset.mode = state.memoryMode;
+        elements.memoryModeButtons.forEach(button => {
+          button.setAttribute('aria-pressed', String(button.dataset.memoryMode === state.memoryMode));
+          button.disabled = state.memorySearchPending;
+        });
+        elements.memorySearchForm.querySelectorAll('.memory-live-only').forEach(element => {
+          element.hidden = snapshotMode;
+        });
+        elements.memoryValueCaption.textContent = snapshotMode ? 'Snapshot value or node name' : 'Primitive value';
+        elements.memoryValueQuery.placeholder = snapshotMode ? 'value from a request, closure, or unreachable object' : 'exact text or pattern';
+        elements.memorySearchHelp.textContent = snapshotMode
+          ? 'Capturing briefly pauses the target. The snapshot is searched by native C++ and its temporary file is deleted immediately.'
+          : 'Accessors are reported without invoking getters. Results are ephemeral and are never added to the evidence store.';
         const controls = elements.memorySearchForm.querySelectorAll('input, textarea');
         controls.forEach(control => { control.disabled = !attached || state.memorySearchPending; });
         elements.memorySearchButton.disabled = !attached || state.memorySearchPending;
         elements.memorySearchButton.setAttribute('aria-busy', String(state.memorySearchPending));
-        elements.memorySearchButton.textContent = state.memorySearchPending ? 'Searching...' : 'Search live objects';
+        elements.memorySearchButton.textContent = state.memorySearchPending
+          ? snapshotMode ? 'Capturing and indexing...' : 'Searching...'
+          : snapshotMode ? 'Capture and search snapshot' : 'Search live objects';
 
-        const messages = {
+        const messages = snapshotMode ? {
           offline: 'Run a live session to attach an authorized browser target.',
-          idle: 'Enter a property, primitive value, class, or JSON shape to search live objects.',
+          idle: state.memorySearchMessage || 'Enter a value to capture and search the full V8 heap, including unreachable nodes.',
+          searching: 'Capturing the target heap, then building a bounded native C++ retaining-path index.',
+          empty: state.memorySearchMessage || 'No snapshot nodes matched the current value.',
+          ready: state.memorySearchMessage || 'Native heap snapshot search completed.',
+          partial: state.memorySearchMessage || 'Native heap snapshot search returned explicit partial coverage.',
+          error: state.memorySearchMessage || 'Native heap snapshot search failed.'
+        } : {
+          offline: 'Run a live session to attach an authorized browser target.',
+          idle: state.memorySearchMessage || 'Enter a property, primitive value, class, or JSON shape to search live objects.',
           searching: 'Scanning the attached page with explicit time, candidate, and result limits.',
           empty: state.memorySearchMessage || 'No live objects matched the current criteria.',
           ready: state.memorySearchMessage || 'Live object search completed.',
@@ -4115,13 +4233,14 @@ export async function checkout(cart, fingerprint) {
         elements.memoryNotice.dataset.kind = state.memorySearchStatus;
         elements.memoryNotice.textContent = messages[state.memorySearchStatus] ?? messages.idle;
         elements.memoryResultCount.textContent = String(state.memoryResults.length);
+        elements.memoryResults.setAttribute('aria-label', snapshotMode ? 'Heap snapshot matches' : 'Live object matches');
 
         if (state.memoryResults.length === 0) {
           const empty = textElement('div', 'memory-empty', state.memorySearchStatus === 'empty'
             ? 'No objects matched. Broaden one criterion or lower the similarity threshold.'
             : state.memorySearchStatus === 'error'
               ? 'The last search did not replace any retained results.'
-              : 'No live object search results yet.');
+              : snapshotMode ? 'No heap snapshot search results yet.' : 'No live object search results yet.');
           elements.memoryResults.removeAttribute('role');
           elements.memoryResults.replaceChildren(empty);
           renderMemoryDetail();
@@ -4137,12 +4256,17 @@ export async function checkout(cart, fingerprint) {
           row.setAttribute('role', 'option');
           row.setAttribute('aria-selected', String(result.id === state.selectedMemoryResultId));
           row.tabIndex = result.id === state.selectedMemoryResultId ? 0 : -1;
-          const score = result.similarity === null ? 'match' : `${Math.round(result.similarity * 100)}%`;
-          const previewNames = result.preview.slice(0, 5).map(property => property.name).join(', ') || 'no own properties';
+          const score = snapshotMode
+            ? result.type
+            : result.similarity === null ? 'match' : `${Math.round(result.similarity * 100)}%`;
+          const title = snapshotMode ? result.name || `(${result.type})` : result.class_name || 'Object';
+          const metadata = snapshotMode
+            ? `${result.self_size.toLocaleString()} self bytes · ${result.retaining_path.length} retaining steps`
+            : `${result.property_count} properties · ${result.preview.slice(0, 5).map(property => property.name).join(', ') || 'no own properties'}`;
           row.append(
-            textElement('span', 'memory-result-class', result.class_name || 'Object'),
+            textElement('span', 'memory-result-class', title),
             textElement('span', 'memory-result-score', score),
-            textElement('span', 'memory-result-meta', `${result.property_count} properties · ${previewNames}`)
+            textElement('span', 'memory-result-meta', metadata)
           );
           row.addEventListener('click', () => selectMemoryResult(result.id));
           row.addEventListener('keydown', moveMemorySelection);
@@ -4153,6 +4277,10 @@ export async function checkout(cart, fingerprint) {
 
       async function runLiveObjectSearch() {
         if (!memoryAttached() || state.memorySearchPending) return;
+        if (state.memoryMode === 'snapshot') {
+          await runHeapSnapshotSearch();
+          return;
+        }
         const request = {
           action: 'search_live_objects',
           property_query: elements.memoryPropertyQuery.value.trim(),
@@ -4192,9 +4320,61 @@ export async function checkout(cart, fingerprint) {
         if (search.timed_out) limits.push('time limit reached');
         if (search.result_limit_reached) limits.push(`${search.result_limit} result limit reached`);
         if (search.scan_limit_reached) limits.push('candidate limit reached');
-        const summary = `${search.results.length} matches from ${search.analyzed} inspected objects in ${search.duration_ms} ms`;
+        if (search.property_limit_reached) limits.push('property limit reached');
+        const summary = `${search.results.length} ${search.results.length === 1 ? 'match' : 'matches'} from ${search.analyzed} inspected objects in ${search.duration_ms} ms`;
         state.memorySearchMessage = limits.length > 0 ? `${summary} · ${limits.join(' · ')}` : summary;
         state.memorySearchStatus = limits.length > 0 ? 'partial' : search.results.length > 0 ? 'ready' : 'empty';
+        renderMemory();
+      }
+
+      async function runHeapSnapshotSearch() {
+        const query = elements.memoryValueQuery.value.trim();
+        if (!query) {
+          state.memorySearchStatus = 'error';
+          state.memorySearchMessage = 'Enter one snapshot value or node name.';
+          renderMemory();
+          elements.memoryValueQuery.focus();
+          return;
+        }
+        state.memorySearchPending = true;
+        state.memorySearchStatus = 'searching';
+        state.memorySearchMessage = null;
+        renderMemory();
+        const body = await debuggerAction({
+          action: 'search_heap_snapshot', query, case_sensitive: false
+        });
+        state.memorySearchPending = false;
+        if (!isHeapSnapshotSearchResponse(body)) {
+          state.memorySearchStatus = 'error';
+          state.memorySearchMessage = state.debuggerError || 'The native snapshot index returned malformed results.';
+          renderMemory();
+          return;
+        }
+        const snapshot = body.snapshot;
+        state.memoryResults = snapshot.results;
+        state.selectedMemoryResultId = snapshot.results[0]?.id ?? null;
+        state.memorySearchMeta = snapshot;
+        state.memoryTargetId = state.debuggerSession?.target?.id ?? null;
+        const limits = [];
+        if (snapshot.result_limit_reached) limits.push(`${snapshot.result_limit} result limit reached`);
+        if (snapshot.node_limit_reached) limits.push('node limit reached');
+        if (snapshot.edge_limit_reached) limits.push('edge limit reached');
+        if (snapshot.string_limit_reached) limits.push('string budget reached');
+        if (snapshot.retaining_paths_partial) limits.push('some retaining paths are partial');
+        const summary = `${snapshot.results.length} ${snapshot.results.length === 1 ? 'match' : 'matches'} across ${snapshot.analyzed_nodes.toLocaleString()} nodes in ${snapshot.duration_ms} ms`;
+        state.memorySearchMessage = limits.length > 0 ? `${summary} · ${limits.join(' · ')}` : summary;
+        state.memorySearchStatus = limits.length > 0 ? 'partial' : snapshot.results.length > 0 ? 'ready' : 'empty';
+        renderMemory();
+      }
+
+      function setMemoryMode(mode) {
+        if (!['live', 'snapshot'].includes(mode) || state.memorySearchPending || mode === state.memoryMode) return;
+        state.memoryMode = mode;
+        state.memoryResults = [];
+        state.selectedMemoryResultId = null;
+        state.memorySearchMeta = null;
+        state.memorySearchMessage = null;
+        state.memorySearchStatus = memoryAttached() ? 'idle' : 'offline';
         renderMemory();
       }
 
@@ -4839,6 +5019,32 @@ export async function checkout(cart, fingerprint) {
         showScreen('backtrace', elements.traceButton);
         await refreshOriginTrace();
       });
+      elements.requestMemoryPivot.addEventListener('click', () => {
+        const selected = state.selectedField;
+        if (!selected) return;
+        let value = String(selected.value ?? '').trim();
+        if (selected.type === 'str' && value.startsWith('"') && value.endsWith('"')) {
+          value = value.slice(1, -1);
+        }
+        value = value.replace(/(?:…|\.{3})+$/u, '').slice(0, 512);
+        if (!value) return;
+        state.memoryMode = 'live';
+        state.memoryResults = [];
+        state.selectedMemoryResultId = null;
+        state.memorySearchMeta = null;
+        state.memoryTargetId = null;
+        state.memorySearchStatus = memoryAttached() ? 'idle' : 'offline';
+        state.memorySearchMessage = `Pivoted from request-${state.selectedRequestId} · ${selected.label} · ${selected.path}`;
+        elements.memoryPropertyQuery.value = '';
+        elements.memoryValueQuery.value = value;
+        elements.memoryClassQuery.value = '';
+        elements.memoryShapeQuery.value = '';
+        elements.memoryRegex.checked = false;
+        elements.memoryCaseSensitive.checked = false;
+        elements.memoryShapeValues.checked = false;
+        showScreen('memory', elements.requestMemoryPivot);
+        requestAnimationFrame(() => elements.memoryValueQuery.focus({ preventScroll: true }));
+      });
       elements.requestVmCandidates.addEventListener('click', async () => {
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         const requestId = request?.event ? String(request.event.request_id) : /^\d+$/.test(request?.id ?? '') ? request.id : null;
@@ -4914,6 +5120,9 @@ export async function checkout(cart, fingerprint) {
         event.preventDefault();
         runLiveObjectSearch();
       });
+      elements.memoryModeButtons.forEach(button => button.addEventListener('click', () => {
+        setMemoryMode(button.dataset.memoryMode);
+      }));
       document.addEventListener('keydown', event => {
         const sourcesVisible = !document.querySelector('#screen-sources').hidden;
         if (sourcesVisible && event.key === 'Escape' && elements.quickOpen.hidden) {

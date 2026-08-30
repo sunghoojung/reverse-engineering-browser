@@ -14,9 +14,24 @@ from pathlib import Path
 
 from debugger_bridge import (
     LIVE_OBJECT_SEARCH_FUNCTION,
+    MAX_HEAP_SNAPSHOT_BYTES,
     DebuggerBridge,
     DebuggerBridgeError,
+    HeapSnapshotCollector,
 )
+
+
+HEAP_SNAPSHOT_FIXTURE = """{
+  "snapshot":{"meta":{
+    "node_fields":["type","name","id","self_size","edge_count"],
+    "node_types":[["hidden","array","string","object","code","closure","synthetic"],"string","number","number","number"],
+    "edge_fields":["type","name_or_index","to_node"],
+    "edge_types":[["context","element","property","internal","hidden","shortcut","weak"],"string_or_number","node"]
+  },"node_count":3,"edge_count":2},
+  "nodes":[6,0,1,0,1,3,1,3,64,1,2,2,5,24,0],
+  "edges":[2,3,5,2,4,10],
+  "strings":["","CheckoutState","secret-value","app","token"]
+}"""
 
 
 class FakeDebuggerWebSocket:
@@ -150,7 +165,7 @@ class FakeDebuggerWebSocket:
                 "result": {
                     "type": "object",
                     "value": {
-                        "protocolVersion": 1,
+                        "protocolVersion": 2,
                         "analyzed": 17,
                         "totalObjects": 17,
                         "results": [
@@ -177,11 +192,19 @@ class FakeDebuggerWebSocket:
                         "resultLimit": 50,
                         "resultLimitReached": False,
                         "scanLimitReached": False,
+                        "propertyLimitReached": False,
                         "timedOut": False,
                         "durationMs": 3,
                     },
                 }
             }
+        elif method == "HeapProfiler.takeHeapSnapshot":
+            self.send_json(
+                {
+                    "method": "HeapProfiler.addHeapSnapshotChunk",
+                    "params": {"chunk": HEAP_SNAPSHOT_FIXTURE},
+                }
+            )
         elif method == "Runtime.getProperties":
             result = {
                 "result": [
@@ -469,10 +492,49 @@ class DebuggerBridgeTests(unittest.TestCase):
                 self.assertTrue(search_command["params"]["silent"])
                 self.assertTrue(search_command["params"]["throwOnSideEffect"])
                 self.assertIn(
+                    "Object.getOwnPropertyNames",
+                    search_command["params"]["functionDeclaration"],
+                )
+                self.assertIn(
+                    "Object.getOwnPropertyDescriptor",
+                    search_command["params"]["functionDeclaration"],
+                )
+                self.assertNotIn(
                     "Object.getOwnPropertyDescriptors",
                     search_command["params"]["functionDeclaration"],
                 )
+                self.assertEqual(
+                    search_command["params"]["arguments"][0]["value"][
+                        "propertyScanLimit"
+                    ],
+                    256,
+                )
                 self.assertIn("Runtime.releaseObject", methods)
+                heap_snapshot = bridge.action(
+                    {
+                        "action": "search_heap_snapshot",
+                        "query": "secret-value",
+                        "case_sensitive": False,
+                    }
+                )
+                self.assertEqual(heap_snapshot["snapshot"]["total_nodes"], 3)
+                self.assertEqual(
+                    heap_snapshot["snapshot"]["results"][0]["name"],
+                    "secret-value",
+                )
+                self.assertEqual(
+                    [
+                        step["edge"]
+                        for step in heap_snapshot["snapshot"]["results"][0][
+                            "retaining_path"
+                        ]
+                    ],
+                    ["app", "token"],
+                )
+                self.assertIn(
+                    "HeapProfiler.takeHeapSnapshot",
+                    [command["method"] for command in web_socket.commands],
+                )
                 update = bridge.action(
                     {
                         "action": "update_breakpoint",
@@ -542,7 +604,7 @@ const criteria = overrides => ({{
   propertyQuery: '', valueQuery: '', classQuery: '', regex: false,
   caseSensitive: false, shape: null, includeShapeValues: false,
   similarityThreshold: 0.75, resultLimit: 50, scanLimit: 25000,
-  previewProperties: 16, timeoutMs: 750, ...overrides
+  previewProperties: 16, propertyScanLimit: 256, timeoutMs: 750, ...overrides
 }});
 let getterCalls = 0;
 const accessor = {{token: 'visible'}};
@@ -560,6 +622,12 @@ const boundedResult = search.call(
   Array.from({{length: 100}}, (_, index) => ({{match: index}})),
   criteria({{propertyQuery: 'match', resultLimit: 5, scanLimit: 10}})
 );
+const propertyBounded = Object.fromEntries(
+  Array.from({{length: 300}}, (_, index) => [`property${{index}}`, index])
+);
+const propertyBoundedResult = search.call(
+  [propertyBounded], criteria({{propertyQuery: 'property299'}})
+);
 process.stdout.write(JSON.stringify({{
   getterCalls,
   accessorPreview: propertyResult.results[0].preview.find(item => item.name === 'secret'),
@@ -569,7 +637,9 @@ process.stdout.write(JSON.stringify({{
   boundedMatches: boundedResult.results.length,
   boundedAnalyzed: boundedResult.analyzed,
   resultLimitReached: boundedResult.resultLimitReached,
-  boundedSearchIsPartial: boundedResult.scanLimitReached
+  boundedSearchIsPartial: boundedResult.scanLimitReached,
+  propertyBoundedMatches: propertyBoundedResult.results.length,
+  propertyLimitReached: propertyBoundedResult.propertyLimitReached
 }}));
 """
         completed = subprocess.run(
@@ -594,19 +664,22 @@ process.stdout.write(JSON.stringify({{
                 "boundedAnalyzed": 5,
                 "resultLimitReached": True,
                 "boundedSearchIsPartial": True,
+                "propertyBoundedMatches": 0,
+                "propertyLimitReached": True,
             },
         )
 
     def test_live_object_search_rejects_oversized_target_results(self) -> None:
         bridge = DebuggerBridge()
         valid = {
-            "protocolVersion": 1,
+            "protocolVersion": 2,
             "analyzed": 1,
             "totalObjects": 1,
             "results": [],
             "resultLimit": 50,
             "resultLimitReached": False,
             "scanLimitReached": False,
+            "propertyLimitReached": False,
             "timedOut": False,
             "durationMs": 1,
         }
@@ -631,6 +704,77 @@ process.stdout.write(JSON.stringify({{
         )
         with self.assertRaisesRegex(DebuggerBridgeError, "malformed"):
             bridge._normalize_live_object_search(oversized_preview)
+
+    def test_heap_snapshot_search_rejects_oversized_capture_and_native_output(
+        self,
+    ) -> None:
+        with tempfile.NamedTemporaryFile(mode="wb") as stream:
+            collector = HeapSnapshotCollector(Path(stream.name), stream)
+            collector.byte_count = MAX_HEAP_SNAPSHOT_BYTES - 1
+            collector.append("xx")
+            self.assertEqual(
+                collector.error,
+                "Heap snapshot exceeds the 256 MiB capture limit",
+            )
+
+        bridge = DebuggerBridge()
+        valid = {
+            "protocol_version": 1,
+            "file_bytes": 10,
+            "total_nodes": 1,
+            "analyzed_nodes": 1,
+            "total_edges": 0,
+            "indexed_edges": 0,
+            "total_strings": 1,
+            "duration_ms": 1,
+            "result_limit": 50,
+            "result_limit_reached": False,
+            "node_limit_reached": False,
+            "edge_limit_reached": False,
+            "string_limit_reached": False,
+            "retaining_paths_partial": False,
+            "results": [],
+        }
+        oversized_path = dict(
+            valid,
+            results=[
+                {
+                    "id": "1",
+                    "type": "string",
+                    "name": "value",
+                    "self_size": 10,
+                    "retaining_path_complete": False,
+                    "retaining_path": [
+                        {"edge": "x", "type": "object", "name": "x"}
+                    ]
+                    * 13,
+                }
+            ],
+        )
+        with self.assertRaisesRegex(DebuggerBridgeError, "malformed result"):
+            bridge._normalize_heap_snapshot_search(oversized_path)
+
+    def test_heap_snapshot_capture_failure_closes_debugger_connection(self) -> None:
+        class RecordingConnection:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        class FailingCaptureBridge(DebuggerBridge):
+            def _command(self, *_args, **_kwargs) -> dict:
+                raise DebuggerBridgeError("capture failed")
+
+        connection = RecordingConnection()
+        bridge = FailingCaptureBridge(heap_snapshot_binary=Path("/usr/bin/true"))
+        bridge._connection = connection
+
+        with self.assertRaisesRegex(DebuggerBridgeError, "capture failed"):
+            bridge._search_heap_snapshot({"query": "token"})
+
+        self.assertTrue(connection.closed)
+        self.assertIsNone(bridge._heap_snapshot_collector)
 
 
 if __name__ == "__main__":

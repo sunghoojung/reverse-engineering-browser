@@ -47,16 +47,19 @@ LIB_OBJECTS := \
 	$(BUILD_DIR)/src/origin_trace.o \
 	$(BUILD_DIR)/src/request_signal_profile.o \
 	$(BUILD_DIR)/src/vm_finding.o
+HEAP_SNAPSHOT_OBJECT := $(BUILD_DIR)/src/heap_snapshot.o
 DEMO_BINARY := $(BUILD_DIR)/reb-event-demo
 PRODUCER_BINARY := $(BUILD_DIR)/reb-event-producer
 BROKER_BINARY := $(BUILD_DIR)/reb-event-broker
 ARTIFACT_PRODUCER_BINARY := $(BUILD_DIR)/reb-artifact-producer
 ARTIFACT_RECEIVER_BINARY := $(BUILD_DIR)/reb-artifact-receiver
+HEAP_SNAPSHOT_BINARY := $(BUILD_DIR)/reb-heap-snapshot
 VM_ANALYZER := apps/research-ui/vm_analyzer.py
 TEST_BINARIES := \
 	$(BUILD_DIR)/tests/artifact_test \
 	$(BUILD_DIR)/tests/event_test \
 	$(BUILD_DIR)/tests/event_broker_test \
+	$(BUILD_DIR)/tests/heap_snapshot_test \
 	$(BUILD_DIR)/tests/local_ipc_test \
 	$(BUILD_DIR)/tests/native_probe_queue_test \
 	$(BUILD_DIR)/tests/origin_trace_test \
@@ -64,9 +67,9 @@ TEST_BINARIES := \
 	$(BUILD_DIR)/tests/spsc_ring_test \
 	$(BUILD_DIR)/tests/vm_finding_test
 
-.PHONY: all app app-build artifact-producer artifact-receiver artifact-socket-e2e bootstrap-brave bootstrap-test brave-doctor brave-probe-check browser-sync browser-sync-test broker check clean demo e2e format format-check lint live producer python-check repository-check sanitize shellcheck socket-e2e test ui ui-test workflow-check workspace-check
+.PHONY: all app app-build artifact-producer artifact-receiver artifact-socket-e2e bootstrap-brave bootstrap-test brave-doctor brave-probe-check browser-sync browser-sync-test broker check clean demo e2e format format-check heap-snapshot lint live producer python-check repository-check sanitize shellcheck socket-e2e test ui ui-test workflow-check workspace-check
 
-all: demo producer broker artifact-producer artifact-receiver
+all: demo producer broker artifact-producer artifact-receiver heap-snapshot
 
 check: workspace-check bootstrap-test browser-sync-test test ui-test
 
@@ -103,6 +106,8 @@ artifact-producer: $(ARTIFACT_PRODUCER_BINARY)
 
 artifact-receiver: $(ARTIFACT_RECEIVER_BINARY)
 
+heap-snapshot: $(HEAP_SNAPSHOT_BINARY)
+
 e2e: producer broker artifact-producer artifact-receiver
 	@mkdir -p $(BUILD_DIR)/sessions
 	$(PRODUCER_BINARY) | $(BROKER_BINARY) \
@@ -137,13 +142,13 @@ socket-e2e: producer broker
 artifact-socket-e2e: artifact-producer artifact-receiver
 	./tests/artifact_receiver_socket_test.sh $(ARTIFACT_RECEIVER_BINARY) $(ARTIFACT_PRODUCER_BINARY)
 
-ui: e2e
+ui: e2e heap-snapshot
 	python3 apps/research-ui/server.py \
 		--store $(BUILD_DIR)/sessions/demo.jsonl \
 		--trace-store $(BUILD_DIR)/sessions/origin-trace.jsonl \
 		--signal-store $(BUILD_DIR)/sessions/request-signals.jsonl
 
-app-build: e2e
+app-build: e2e heap-snapshot
 	./scripts/build-research-app.sh
 
 app: app-build
@@ -180,6 +185,14 @@ $(BROKER_BINARY): services/event-broker/main.cpp $(LIB_OBJECTS) $(NATIVE_HEADERS
 	@mkdir -p $(@D)
 	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cpp %.o,$^) $(LDFLAGS) -o $@
 
+$(HEAP_SNAPSHOT_BINARY): apps/reb-heap-snapshot/main.cpp $(HEAP_SNAPSHOT_OBJECT) $(NATIVE_HEADERS)
+	@mkdir -p $(@D)
+	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cpp %.o,$^) $(LDFLAGS) -o $@
+
+$(BUILD_DIR)/tests/heap_snapshot_test: tests/heap_snapshot_test.cpp $(HEAP_SNAPSHOT_OBJECT) $(NATIVE_HEADERS)
+	@mkdir -p $(@D)
+	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cpp %.o,$^) $(LDFLAGS) -o $@
+
 $(BUILD_DIR)/tests/%: tests/%.cpp $(LIB_OBJECTS) $(NATIVE_HEADERS) $(TRACKED_BROWSER_PROTOCOL_HEADERS) $(NATIVE_PROBE_QUEUE_SOURCE)
 	@mkdir -p $(@D)
 	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cc %.cpp %.o,$^) $(LDFLAGS) -o $@
@@ -190,7 +203,7 @@ test: $(TEST_BINARIES)
 		$$test_binary; \
 	done
 
-ui-test:
+ui-test: heap-snapshot
 	python3 -m unittest discover -s apps/research-ui -p 'test_*.py'
 
 sanitize:

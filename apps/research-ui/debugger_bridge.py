@@ -47,6 +47,7 @@ MAX_HEAP_SNAPSHOT_BYTES = 256 * 1024 * 1024
 MAX_HEAP_SNAPSHOT_CHUNK_BYTES = 8 * 1024 * 1024
 MAX_HEAP_SNAPSHOT_RESULTS = 50
 MAX_HEAP_RETAINING_PATH = 12
+MAX_HEAP_INCOMING_REFERENCES = 12
 HEAP_SNAPSHOT_CAPTURE_TIMEOUT_SECONDS = 60.0
 HEAP_SNAPSHOT_SEARCH_TIMEOUT_SECONDS = 20.0
 HEAP_SNAPSHOT_DIFF_TIMEOUT_SECONDS = 60.0
@@ -1012,10 +1013,17 @@ class DebuggerBridge:
     def _search_heap_snapshot(self, request: dict[str, Any]) -> dict[str, Any]:
         query = self._optional_search_text(request, "query").strip()
         case_sensitive = request.get("case_sensitive", False)
+        scope = request.get("scope", "all")
         if not query:
             raise DebuggerBridgeError("Heap snapshot search requires a value")
         if not isinstance(case_sensitive, bool):
             raise DebuggerBridgeError("Heap snapshot search options must be boolean")
+        if not isinstance(scope, str) or scope not in {
+            "all",
+            "reachable",
+            "unreachable",
+        }:
+            raise DebuggerBridgeError("Heap snapshot reference scope is invalid")
         binary = self._heap_snapshot_binary()
 
         capture = self._capture_heap_snapshot()
@@ -1026,6 +1034,8 @@ class DebuggerBridge:
                 str(capture.path),
                 "--query",
                 query,
+                "--scope",
+                scope,
                 "--limit",
                 str(MAX_HEAP_SNAPSHOT_RESULTS),
             ]
@@ -1240,17 +1250,20 @@ class DebuggerBridge:
             self._finish_heap_diff_operation()
 
     def _normalize_heap_snapshot_search(self, value: Any) -> dict[str, Any]:
-        if not isinstance(value, dict) or value.get("protocol_version") != 1:
+        if not isinstance(value, dict) or value.get("protocol_version") != 2:
             raise ProtocolError("Native heap snapshot search returned malformed output")
         integer_fields = (
             "file_bytes",
             "total_nodes",
             "analyzed_nodes",
+            "matched_nodes",
+            "reachable_nodes",
             "total_edges",
             "indexed_edges",
             "total_strings",
             "duration_ms",
             "result_limit",
+            "reference_limit",
         )
         if any(
             not isinstance(value.get(field), int)
@@ -1263,8 +1276,15 @@ class DebuggerBridge:
         if (
             value["file_bytes"] > MAX_HEAP_SNAPSHOT_BYTES
             or value["analyzed_nodes"] > value["total_nodes"]
+            or value["matched_nodes"] > value["analyzed_nodes"]
+            or value["reachable_nodes"] > value["analyzed_nodes"]
             or value["indexed_edges"] > value["total_edges"]
             or value["result_limit"] != MAX_HEAP_SNAPSHOT_RESULTS
+            or value["reference_limit"] != MAX_HEAP_INCOMING_REFERENCES
+            or not isinstance(value.get("scope"), str)
+            or value["scope"] not in {"all", "reachable", "unreachable"}
+            or value.get("result_limit_reached")
+            != (value["matched_nodes"] > value["result_limit"])
         ):
             raise ProtocolError("Native heap snapshot search returned invalid coverage")
         boolean_fields = (
@@ -1277,7 +1297,11 @@ class DebuggerBridge:
         if any(not isinstance(value.get(field), bool) for field in boolean_fields):
             raise ProtocolError("Native heap snapshot search returned invalid limits")
         raw_results = value.get("results")
-        if not isinstance(raw_results, list) or len(raw_results) > MAX_HEAP_SNAPSHOT_RESULTS:
+        if (
+            not isinstance(raw_results, list)
+            or len(raw_results) > MAX_HEAP_SNAPSHOT_RESULTS
+            or len(raw_results) != min(value["matched_nodes"], value["result_limit"])
+        ):
             raise ProtocolError("Native heap snapshot search returned too many results")
         results = []
         for raw_result in raw_results:
@@ -1287,11 +1311,19 @@ class DebuggerBridge:
             node_type = raw_result.get("type")
             node_name = raw_result.get("name")
             self_size = raw_result.get("self_size")
+            reachable = raw_result.get("reachable")
+            incoming_reference_count = raw_result.get("incoming_reference_count")
+            incoming_reference_limit_reached = raw_result.get(
+                "incoming_reference_limit_reached"
+            )
             path_complete = raw_result.get("retaining_path_complete")
             raw_path = raw_result.get("retaining_path")
+            raw_references = raw_result.get("incoming_references")
             if (
                 not isinstance(result_id, str)
-                or not result_id.isdecimal()
+                or not result_id.isascii()
+                or not result_id.isdigit()
+                or (len(result_id) > 1 and result_id.startswith("0"))
                 or len(result_id) > 20
                 or not isinstance(node_type, str)
                 or not isinstance(node_name, str)
@@ -1299,16 +1331,30 @@ class DebuggerBridge:
                 or isinstance(self_size, bool)
                 or self_size < 0
                 or self_size > 2**53 - 1
+                or not isinstance(reachable, bool)
+                or not isinstance(incoming_reference_count, int)
+                or isinstance(incoming_reference_count, bool)
+                or incoming_reference_count < 0
+                or incoming_reference_count > 2**53 - 1
+                or not isinstance(incoming_reference_limit_reached, bool)
                 or not isinstance(path_complete, bool)
                 or not isinstance(raw_path, list)
                 or len(raw_path) > MAX_HEAP_RETAINING_PATH
+                or not isinstance(raw_references, list)
+                or len(raw_references) > MAX_HEAP_INCOMING_REFERENCES
+                or incoming_reference_count < len(raw_references)
+                or incoming_reference_limit_reached
+                != (incoming_reference_count > len(raw_references))
+                or (not reachable and (path_complete or raw_path))
+                or (value["scope"] == "reachable" and not reachable)
+                or (value["scope"] == "unreachable" and reachable)
             ):
                 raise ProtocolError("Native heap snapshot search returned a malformed result")
             retaining_path = []
             for raw_step in raw_path:
                 if not isinstance(raw_step, dict) or any(
                     not isinstance(raw_step.get(field), str)
-                    for field in ("edge", "type", "name")
+                    for field in ("edge_type", "edge", "type", "name")
                 ):
                     raise ProtocolError(
                         "Native heap snapshot search returned a malformed retaining path"
@@ -1316,8 +1362,43 @@ class DebuggerBridge:
                 retaining_path.append(
                     {
                         "edge": self._truncate_text(raw_step["edge"], 128),
+                        "edge_type": self._truncate_text(raw_step["edge_type"], 32),
                         "type": self._truncate_text(raw_step["type"], 64),
                         "name": self._truncate_text(raw_step["name"], 256),
+                    }
+                )
+            incoming_references = []
+            for raw_reference in raw_references:
+                if not isinstance(raw_reference, dict) or any(
+                    not isinstance(raw_reference.get(field), str)
+                    for field in (
+                        "source_id",
+                        "edge_type",
+                        "edge",
+                        "source_type",
+                        "source_name",
+                    )
+                ):
+                    raise ProtocolError(
+                        "Native heap snapshot search returned a malformed incoming reference"
+                    )
+                source_id = raw_reference["source_id"]
+                if (
+                    not source_id.isascii()
+                    or not source_id.isdigit()
+                    or (len(source_id) > 1 and source_id.startswith("0"))
+                    or len(source_id) > 20
+                ):
+                    raise ProtocolError(
+                        "Native heap snapshot search returned a malformed incoming reference"
+                    )
+                incoming_references.append(
+                    {
+                        "source_id": source_id,
+                        "edge_type": self._truncate_text(raw_reference["edge_type"], 32),
+                        "edge": self._truncate_text(raw_reference["edge"], 128),
+                        "source_type": self._truncate_text(raw_reference["source_type"], 64),
+                        "source_name": self._truncate_text(raw_reference["source_name"], 256),
                     }
                 )
             results.append(
@@ -1326,8 +1407,12 @@ class DebuggerBridge:
                     "type": self._truncate_text(node_type, 64),
                     "name": self._truncate_text(node_name, 256),
                     "self_size": self_size,
+                    "reachable": reachable,
+                    "incoming_reference_count": incoming_reference_count,
+                    "incoming_reference_limit_reached": incoming_reference_limit_reached,
                     "retaining_path_complete": path_complete,
                     "retaining_path": retaining_path,
+                    "incoming_references": incoming_references,
                 }
             )
         return {
@@ -1338,6 +1423,7 @@ class DebuggerBridge:
                     "protocol_version",
                     *integer_fields,
                     *boolean_fields,
+                    "scope",
                 )
             }
             | {"results": results},

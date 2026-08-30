@@ -10,7 +10,7 @@
 
 namespace reb {
 
-inline constexpr std::uint32_t kHeapSnapshotSearchProtocolVersion = 1;
+inline constexpr std::uint32_t kHeapSnapshotSearchProtocolVersion = 2;
 inline constexpr std::uint32_t kHeapSnapshotDiffProtocolVersion = 1;
 inline constexpr std::size_t kHeapSnapshotMaxFileBytes = 256U * 1024U * 1024U;
 inline constexpr std::size_t kHeapSnapshotMaxNodes = 2'000'000;
@@ -20,12 +20,28 @@ inline constexpr std::size_t kHeapSnapshotMaxStringBytes = 64U * 1024U * 1024U;
 inline constexpr std::size_t kHeapSnapshotMaxStoredStringBytes = 4'096;
 inline constexpr std::size_t kHeapSnapshotMaxResults = 50;
 inline constexpr std::size_t kHeapSnapshotMaxRetainingDepth = 12;
+inline constexpr std::size_t kHeapSnapshotMaxIncomingReferences = 12;
 inline constexpr std::size_t kHeapSnapshotMaxDiffSignatures = 200'000;
 
+enum class HeapSnapshotSearchScope : std::uint8_t {
+  kAll,
+  kReachable,
+  kUnreachable,
+};
+
 struct HeapSnapshotRetainingStep final {
+  std::string edge_type;
   std::string edge_name;
   std::string node_type;
   std::string node_name;
+};
+
+struct HeapSnapshotIncomingReference final {
+  std::uint64_t source_node_id = 0;
+  std::string edge_type;
+  std::string edge_name;
+  std::string source_node_type;
+  std::string source_node_name;
 };
 
 struct HeapSnapshotMatch final {
@@ -33,8 +49,12 @@ struct HeapSnapshotMatch final {
   std::uint64_t self_size = 0;
   std::string node_type;
   std::string node_name;
+  std::uint64_t incoming_reference_count = 0;
   std::vector<HeapSnapshotRetainingStep> retaining_path;
+  std::vector<HeapSnapshotIncomingReference> incoming_references;
+  bool reachable = false;
   bool retaining_path_complete = false;
+  bool incoming_reference_limit_reached = false;
 };
 
 struct HeapSnapshotSearchResult final {
@@ -42,11 +62,15 @@ struct HeapSnapshotSearchResult final {
   std::uint64_t file_bytes = 0;
   std::uint64_t total_nodes = 0;
   std::uint64_t analyzed_nodes = 0;
+  std::uint64_t matched_nodes = 0;
+  std::uint64_t reachable_nodes = 0;
   std::uint64_t total_edges = 0;
   std::uint64_t indexed_edges = 0;
   std::uint64_t total_strings = 0;
   std::uint64_t duration_ms = 0;
   std::size_t result_limit = kHeapSnapshotMaxResults;
+  std::size_t reference_limit = kHeapSnapshotMaxIncomingReferences;
+  HeapSnapshotSearchScope scope = HeapSnapshotSearchScope::kAll;
   bool result_limit_reached = false;
   bool node_limit_reached = false;
   bool edge_limit_reached = false;
@@ -107,6 +131,7 @@ struct HeapSnapshotDiffResult final {
 [[nodiscard]] bool SearchV8HeapSnapshot(const std::filesystem::path& snapshot_path,
                                         std::string_view query,
                                         bool case_sensitive,
+                                        HeapSnapshotSearchScope scope,
                                         std::size_t result_limit,
                                         HeapSnapshotSearchResult& result,
                                         std::string& error);

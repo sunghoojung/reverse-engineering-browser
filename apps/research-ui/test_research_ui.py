@@ -1102,14 +1102,18 @@ const liveSearch = {
 const heapSearch = {
   ok: true, generation: 7,
   snapshot: {
-    protocol_version: 1, file_bytes: 4096, total_nodes: 3, analyzed_nodes: 3,
+    protocol_version: 2, file_bytes: 4096, total_nodes: 3, analyzed_nodes: 3,
+    matched_nodes: 1, reachable_nodes: 3, scope: 'all', reference_limit: 12,
     total_edges: 2, indexed_edges: 2, total_strings: 5, duration_ms: 1,
     result_limit: 50, result_limit_reached: false, node_limit_reached: false,
     edge_limit_reached: false, string_limit_reached: false,
     retaining_paths_partial: false, results: [{
       id: '5', type: 'string', name: 'secret-value', self_size: 24,
-      retaining_path_complete: true,
-      retaining_path: [{edge: 'token', type: 'string', name: 'secret-value'}]
+      reachable: true, incoming_reference_count: 1,
+      incoming_reference_limit_reached: false, retaining_path_complete: true,
+      retaining_path: [{edge_type: 'property', edge: 'token', type: 'string', name: 'secret-value'}],
+      incoming_references: [{source_id: '3', edge_type: 'internal', edge: 'token',
+        source_type: 'object', source_name: 'CheckoutState'}]
     }]
   }
 };
@@ -1166,7 +1170,12 @@ process.stdout.write(JSON.stringify({
     snapshot: {...heapSearch.snapshot, analyzed_nodes: 4}}),
   heapSearchPathBound: !isHeapSnapshotSearchResponse({...heapSearch,
     snapshot: {...heapSearch.snapshot, results: [{...heapSearch.snapshot.results[0],
-      retaining_path: Array(13).fill({edge: 'x', type: 'object', name: 'x'})}]}}),
+      retaining_path: Array(13).fill({edge_type: 'property', edge: 'x', type: 'object', name: 'x'})}]}}),
+  heapSearchReferenceBound: !isHeapSnapshotSearchResponse({...heapSearch,
+    snapshot: {...heapSearch.snapshot, results: [{...heapSearch.snapshot.results[0],
+      incoming_reference_count: 13, incoming_reference_limit_reached: true,
+      incoming_references: Array(13).fill({source_id: '3', edge_type: 'internal', edge: 'x',
+        source_type: 'object', source_name: 'x'})}]}}),
   heapDiffAccepted: isHeapSnapshotDiffResponse(heapDiff),
   heapDiffDeltaRequired: !isHeapSnapshotDiffResponse({...heapDiff, diff: {
     ...heapDiff.diff, self_size_delta: 41}}),
@@ -1203,6 +1212,7 @@ process.stdout.write(JSON.stringify({
                 "heapSearchAccepted": True,
                 "heapSearchNodeCoverageBound": True,
                 "heapSearchPathBound": True,
+                "heapSearchReferenceBound": True,
                 "heapDiffAccepted": True,
                 "heapDiffDeltaRequired": True,
                 "heapDiffDominatorBound": True,
@@ -1234,6 +1244,10 @@ process.stdout.write(JSON.stringify({
         self.assertIn("Capturing briefly pauses the target", html)
         self.assertIn("Accessors are reported without invoking getters", html)
         self.assertIn("Top retained-memory changes", html)
+        self.assertIn('id="memory-reference-scope"', html)
+        self.assertIn("Incoming references", html)
+        self.assertIn("incoming_reference_limit_reached", html)
+        self.assertIn("event.key !== 'Enter' || state.memoryMode !== 'snapshot'", html)
         self.assertNotIn("expose_live_object", html)
 
     def test_sources_model_rejects_malformed_artifact_catalogs(self) -> None:

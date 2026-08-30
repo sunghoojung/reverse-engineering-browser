@@ -18,6 +18,7 @@ from debugger_bridge import (
     DebuggerBridge,
     DebuggerBridgeError,
     HeapSnapshotCollector,
+    ProtocolError,
 )
 
 
@@ -518,6 +519,8 @@ class DebuggerBridgeTests(unittest.TestCase):
                     }
                 )
                 self.assertEqual(heap_snapshot["snapshot"]["total_nodes"], 3)
+                self.assertEqual(heap_snapshot["snapshot"]["protocol_version"], 2)
+                self.assertEqual(heap_snapshot["snapshot"]["scope"], "all")
                 self.assertEqual(
                     heap_snapshot["snapshot"]["results"][0]["name"],
                     "secret-value",
@@ -530,6 +533,21 @@ class DebuggerBridgeTests(unittest.TestCase):
                         ]
                     ],
                     ["app", "token"],
+                )
+                self.assertTrue(
+                    heap_snapshot["snapshot"]["results"][0]["reachable"]
+                )
+                self.assertEqual(
+                    heap_snapshot["snapshot"]["results"][0][
+                        "incoming_reference_count"
+                    ],
+                    1,
+                )
+                self.assertEqual(
+                    heap_snapshot["snapshot"]["results"][0][
+                        "incoming_references"
+                    ][0]["edge"],
+                    "token",
                 )
                 self.assertIn(
                     "HeapProfiler.takeHeapSnapshot",
@@ -730,15 +748,19 @@ process.stdout.write(JSON.stringify({{
 
         bridge = DebuggerBridge()
         valid = {
-            "protocol_version": 1,
+            "protocol_version": 2,
             "file_bytes": 10,
             "total_nodes": 1,
             "analyzed_nodes": 1,
+            "matched_nodes": 0,
+            "reachable_nodes": 1,
             "total_edges": 0,
             "indexed_edges": 0,
             "total_strings": 1,
             "duration_ms": 1,
             "result_limit": 50,
+            "reference_limit": 12,
+            "scope": "all",
             "result_limit_reached": False,
             "node_limit_reached": False,
             "edge_limit_reached": False,
@@ -748,22 +770,72 @@ process.stdout.write(JSON.stringify({{
         }
         oversized_path = dict(
             valid,
+            matched_nodes=1,
             results=[
                 {
                     "id": "1",
                     "type": "string",
                     "name": "value",
                     "self_size": 10,
+                    "reachable": True,
+                    "incoming_reference_count": 0,
+                    "incoming_reference_limit_reached": False,
                     "retaining_path_complete": False,
                     "retaining_path": [
-                        {"edge": "x", "type": "object", "name": "x"}
+                        {
+                            "edge_type": "property",
+                            "edge": "x",
+                            "type": "object",
+                            "name": "x",
+                        }
                     ]
                     * 13,
+                    "incoming_references": [],
                 }
             ],
         )
         with self.assertRaisesRegex(DebuggerBridgeError, "malformed result"):
             bridge._normalize_heap_snapshot_search(oversized_path)
+
+        with self.assertRaisesRegex(DebuggerBridgeError, "scope"):
+            bridge._search_heap_snapshot({"query": "token", "scope": []})
+
+        malformed_reference = dict(
+            valid,
+            matched_nodes=1,
+            results=[
+                {
+                    "id": "1",
+                    "type": "string",
+                    "name": "value",
+                    "self_size": 10,
+                    "reachable": False,
+                    "incoming_reference_count": 1,
+                    "incoming_reference_limit_reached": False,
+                    "retaining_path_complete": False,
+                    "retaining_path": [],
+                    "incoming_references": [
+                        {
+                            "source_id": "01",
+                            "edge_type": "weak",
+                            "edge": "value",
+                            "source_type": "hidden",
+                            "source_name": "owner",
+                        }
+                    ],
+                }
+            ],
+        )
+        with self.assertRaisesRegex(ProtocolError, "incoming reference"):
+            bridge._normalize_heap_snapshot_search(malformed_reference)
+
+        scope_mismatch = dict(malformed_reference, scope="reachable")
+        scope_mismatch["results"] = [
+            dict(malformed_reference["results"][0], incoming_references=[])
+        ]
+        scope_mismatch["results"][0]["incoming_reference_count"] = 0
+        with self.assertRaisesRegex(ProtocolError, "malformed result"):
+            bridge._normalize_heap_snapshot_search(scope_mismatch)
 
     def test_heap_snapshot_capture_failure_closes_debugger_connection(self) -> None:
         class RecordingConnection:

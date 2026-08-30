@@ -135,9 +135,10 @@ class, regular expression, and JSON-shape search over live JavaScript objects.
 The scan never invokes accessors, returns read-only previews, and enforces
 time, candidate, property, and result limits. Memory can also search an
 explicit temporary V8 heap snapshot through a bounded native C++ indexer,
-including unreachable values and retaining paths. Heap Diff keeps an explicit
-local baseline and compares a later capture by object signature, self size,
-and exact retained size over the reachable non-weak edge graph. Selected
+including scoped unreachable values, retaining paths, and prioritized hidden,
+internal, weak, and ordinary incoming references. Heap Diff keeps an explicit
+local baseline and compares a later capture by object signature, self size, and
+exact retained size over the reachable non-weak edge graph. Selected
 request values can pivot directly into a prefilled Memory search. Artifact success events are
 emitted only after the receiver has committed the manifest record; capture or
 transfer failures remain visible as normal evidence events. Session

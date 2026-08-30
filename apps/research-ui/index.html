@@ -1156,9 +1156,9 @@
       .memory-mode-switch { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
       .memory-mode-button { min-height: 30px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel-2); color: var(--muted); font: 8px var(--mono); }
       .memory-mode-button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
-      .memory-live-only[hidden], .memory-search-only[hidden], .memory-diff-only[hidden] { display: none; }
+      .memory-live-only[hidden], .memory-search-only[hidden], .memory-snapshot-only[hidden], .memory-diff-only[hidden] { display: none; }
       .memory-form label { display: grid; gap: 5px; color: var(--muted); font: 8px var(--mono); text-transform: uppercase; }
-      .memory-form input[type="text"], .memory-form input[type="number"], .memory-form textarea {
+      .memory-form input[type="text"], .memory-form input[type="number"], .memory-form textarea, .memory-form select {
         width: 100%;
         min-height: 30px;
         padding: 6px 8px;
@@ -1170,6 +1170,7 @@
         text-transform: none;
       }
       .memory-form textarea { min-height: 92px; resize: vertical; }
+      .memory-form select { appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 12px) 13px, calc(100% - 8px) 13px; background-repeat: no-repeat; background-size: 4px 4px; }
       .memory-options { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
       .memory-check { display: flex !important; grid-template-columns: none; align-items: center; gap: 7px !important; min-height: 26px; color: var(--muted) !important; font: 9px var(--sans) !important; text-transform: none !important; }
       .memory-check input { accent-color: var(--accent); }
@@ -1215,6 +1216,15 @@
       .memory-path-edge { padding-left: 14px; color: var(--accent); overflow-wrap: anywhere; }
       .memory-path-type { color: var(--faint); }
       .memory-path-name { overflow-wrap: anywhere; }
+      .memory-reference-list { display: grid; }
+      .memory-reference-row { min-width: 0; display: grid; grid-template-columns: 66px minmax(90px, .55fr) minmax(150px, 1.45fr); gap: 9px; align-items: start; padding: 9px 12px; border-bottom: 1px solid var(--line-soft); font: 9px/1.45 var(--mono); }
+      .memory-reference-row:last-child { border-bottom: 0; }
+      .memory-reference-kind { width: max-content; max-width: 66px; padding: 2px 5px; overflow: hidden; border: 1px solid var(--line); border-radius: 3px; color: var(--faint); font: 650 7px var(--mono); text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+      .memory-reference-kind[data-kind="internal"], .memory-reference-kind[data-kind="hidden"] { border-color: var(--amber); color: var(--amber); }
+      .memory-reference-kind[data-kind="weak"] { border-color: var(--blue); color: var(--blue); }
+      .memory-reference-edge { color: var(--accent); overflow-wrap: anywhere; }
+      .memory-reference-source { min-width: 0; display: grid; gap: 2px; color: var(--muted); overflow-wrap: anywhere; }
+      .memory-reference-source small { color: var(--faint); font: 7px var(--mono); }
       .memory-empty { min-height: 220px; display: grid; place-items: center; padding: 24px; color: var(--muted); text-align: center; }
 
       #screen-vm:not([hidden]) { display: grid; grid-template-rows: 60px auto minmax(0, 1fr); }
@@ -1370,10 +1380,11 @@
         .memory-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
         .memory-search-pane { max-height: min(420px, 48vh); border-right: 0; border-bottom: 1px solid var(--line); }
         .memory-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .memory-mode-switch, .memory-form[data-mode="snapshot"] .memory-value-field, .memory-shape-field, .memory-options, .memory-search-button, .memory-diff-controls, .memory-search-help { grid-column: 1 / -1; }
+        .memory-mode-switch, .memory-form[data-mode="snapshot"] .memory-value-field, .memory-snapshot-only, .memory-shape-field, .memory-options, .memory-search-button, .memory-diff-controls, .memory-search-help { grid-column: 1 / -1; }
         .memory-results-pane { grid-template-columns: 1fr; grid-template-rows: minmax(170px, .8fr) minmax(190px, 1fr); }
         .memory-results-list { border-right: 0; border-bottom: 1px solid var(--line); }
         .memory-property { grid-template-columns: minmax(90px, .7fr) 62px minmax(100px, 1.3fr); }
+        .memory-reference-row { grid-template-columns: 58px minmax(80px, .55fr) minmax(120px, 1.45fr); }
         .vm-list-pane { max-height: 210px; border-right: 0; border-bottom: 1px solid var(--line); }
         .vm-fields { grid-template-columns: 1fr; }
         .vm-detail { padding: 12px; }
@@ -1583,6 +1594,7 @@
                   </div>
                   <label class="memory-live-only">Property name<input id="memory-property-query" type="text" placeholder="token, config, fingerprint" maxlength="512" autocomplete="off" /></label>
                   <label class="memory-search-only memory-value-field"><span id="memory-value-caption">Primitive value</span><input id="memory-value-query" type="text" placeholder="exact text or pattern" maxlength="512" autocomplete="off" /></label>
+                  <label class="memory-snapshot-only" hidden>Reference scope<select id="memory-reference-scope"><option value="all">All matching nodes</option><option value="reachable">Root-reachable only</option><option value="unreachable">Unreachable only</option></select></label>
                   <label class="memory-live-only">Class name<input id="memory-class-query" type="text" placeholder="Object, Array, CartState" maxlength="512" autocomplete="off" /></label>
                   <label class="memory-live-only memory-shape-field">Structural shape<textarea id="memory-shape-query" placeholder='{"device":{"fingerprint":""}}' maxlength="4096" spellcheck="false"></textarea></label>
                   <label class="memory-live-only">Similarity threshold<input id="memory-similarity-threshold" type="number" min="0" max="1" step="0.05" value="0.75" /></label>
@@ -1931,6 +1943,7 @@ export async function checkout(cart, fingerprint) {
         memoryPropertyQuery: document.querySelector('#memory-property-query'),
         memoryValueQuery: document.querySelector('#memory-value-query'),
         memoryValueCaption: document.querySelector('#memory-value-caption'),
+        memoryReferenceScope: document.querySelector('#memory-reference-scope'),
         memoryClassQuery: document.querySelector('#memory-class-query'),
         memoryShapeQuery: document.querySelector('#memory-shape-query'),
         memorySimilarityThreshold: document.querySelector('#memory-similarity-threshold'),
@@ -2308,28 +2321,48 @@ export async function checkout(cart, fingerprint) {
             !isPlainObject(body.snapshot)) return false;
         const snapshot = body.snapshot;
         const integerFields = [
-          'file_bytes', 'total_nodes', 'analyzed_nodes', 'total_edges',
-          'indexed_edges', 'total_strings', 'duration_ms', 'result_limit'
+          'file_bytes', 'total_nodes', 'analyzed_nodes', 'matched_nodes', 'reachable_nodes',
+          'total_edges', 'indexed_edges', 'total_strings', 'duration_ms', 'result_limit',
+          'reference_limit'
         ];
         const booleanFields = [
           'result_limit_reached', 'node_limit_reached', 'edge_limit_reached',
           'string_limit_reached', 'retaining_paths_partial'
         ];
-        if (snapshot.protocol_version !== 1 ||
+        if (snapshot.protocol_version !== 2 ||
             !integerFields.every(field => isSafeIntegerInRange(snapshot[field], 0, Number.MAX_SAFE_INTEGER)) ||
-            snapshot.file_bytes > 256 * 1024 * 1024 || snapshot.result_limit !== 50 ||
-            snapshot.analyzed_nodes > snapshot.total_nodes || snapshot.indexed_edges > snapshot.total_edges ||
+            snapshot.file_bytes > 256 * 1024 * 1024 || snapshot.result_limit !== 50 || snapshot.reference_limit !== 12 ||
+            !['all', 'reachable', 'unreachable'].includes(snapshot.scope) ||
+            snapshot.analyzed_nodes > snapshot.total_nodes || snapshot.matched_nodes > snapshot.analyzed_nodes ||
+            snapshot.reachable_nodes > snapshot.analyzed_nodes || snapshot.indexed_edges > snapshot.total_edges ||
+            snapshot.result_limit_reached !== (snapshot.matched_nodes > snapshot.result_limit) ||
             !booleanFields.every(field => typeof snapshot[field] === 'boolean') ||
-            !Array.isArray(snapshot.results) || snapshot.results.length > snapshot.result_limit) return false;
+            !Array.isArray(snapshot.results) ||
+            snapshot.results.length !== Math.min(snapshot.matched_nodes, snapshot.result_limit)) return false;
         return snapshot.results.every(result => isPlainObject(result) &&
           typeof result.id === 'string' && /^(?:0|[1-9][0-9]*)$/.test(result.id) &&
           result.id.length <= 20 && typeof result.type === 'string' &&
           typeof result.name === 'string' &&
           isSafeIntegerInRange(result.self_size, 0, Number.MAX_SAFE_INTEGER) &&
+          typeof result.reachable === 'boolean' &&
+          isSafeIntegerInRange(result.incoming_reference_count, 0, Number.MAX_SAFE_INTEGER) &&
+          typeof result.incoming_reference_limit_reached === 'boolean' &&
           typeof result.retaining_path_complete === 'boolean' &&
           Array.isArray(result.retaining_path) && result.retaining_path.length <= 12 &&
+          (result.reachable || (!result.retaining_path_complete && result.retaining_path.length === 0)) &&
+          (snapshot.scope !== 'reachable' || result.reachable) &&
+          (snapshot.scope !== 'unreachable' || !result.reachable) &&
           result.retaining_path.every(step => isPlainObject(step) &&
-            ['edge', 'type', 'name'].every(field => typeof step[field] === 'string')));
+            ['edge_type', 'edge', 'type', 'name'].every(field => typeof step[field] === 'string')) &&
+          Array.isArray(result.incoming_references) && result.incoming_references.length <= snapshot.reference_limit &&
+          result.incoming_reference_count >= result.incoming_references.length &&
+          result.incoming_reference_limit_reached ===
+            (result.incoming_reference_count > result.incoming_references.length) &&
+          result.incoming_references.every(reference => isPlainObject(reference) &&
+            typeof reference.source_id === 'string' && /^(?:0|[1-9][0-9]*)$/.test(reference.source_id) &&
+            reference.source_id.length <= 20 &&
+            ['edge_type', 'edge', 'source_type', 'source_name']
+              .every(field => typeof reference[field] === 'string')));
       }
 
       function isHeapDiffBaselineResponse(body) {
@@ -4275,14 +4308,15 @@ export async function checkout(cart, fingerprint) {
         if (state.memoryMode === 'snapshot') {
           title.append(
             textElement('h2', '', result.name || `(${result.type})`),
-            textElement('p', '', `${result.type} · node ${result.id} · ${result.self_size.toLocaleString()} self bytes`)
+            textElement('p', '', `${result.type} · node ${result.id} · ${result.self_size.toLocaleString()} self bytes · ${result.reachable ? 'root-reachable' : 'unreachable'}`)
           );
-          head.append(title, textElement('span', 'memory-readonly', 'Native snapshot'));
+          head.append(title, textElement('span', 'memory-readonly', result.reachable ? 'Root reachable' : 'Unreachable'));
           const facts = document.createElement('div'); facts.className = 'memory-properties';
           [
             ['node id', 'uint64', result.id],
             ['type', 'V8 node', result.type],
-            ['self size', 'bytes', result.self_size.toLocaleString()]
+            ['self size', 'bytes', result.self_size.toLocaleString()],
+            ['incoming refs', result.incoming_reference_limit_reached ? 'capped' : 'full', result.incoming_reference_count.toLocaleString()]
           ].forEach(([name, type, value]) => {
             const row = document.createElement('div'); row.className = 'memory-property';
             row.append(
@@ -4293,16 +4327,18 @@ export async function checkout(cart, fingerprint) {
             facts.append(row);
           });
           const path = document.createElement('div'); path.className = 'memory-retaining-path';
-          path.append(textElement('div', 'memory-results-head', result.retaining_path_complete
-            ? 'Shortest retaining path from a V8 root'
-            : 'Partial retaining path'));
+          path.append(textElement('div', 'memory-results-head', !result.reachable
+            ? 'No strong retaining path from a V8 root'
+            : result.retaining_path_complete ? 'Shortest retaining path from a V8 root' : 'Partial retaining path'));
           if (result.retaining_path.length === 0) {
-            path.append(textElement('div', 'memory-empty', 'No retaining path was available inside the bounded native index.'));
+            path.append(textElement('div', 'memory-empty', result.reachable
+              ? 'No retaining path was available inside the bounded native index.'
+              : 'This node is not reachable from the V8 root through indexed non-weak edges. Inspect its incoming references below.'));
           } else {
             result.retaining_path.forEach(step => {
               const row = document.createElement('div'); row.className = 'memory-path-step';
               row.append(
-                textElement('span', 'memory-path-edge', step.edge),
+                textElement('span', 'memory-path-edge', `${step.edge_type} · ${step.edge}`),
                 textElement('span', 'memory-path-type', step.type),
                 textElement('span', 'memory-path-name', step.name || '(anonymous)')
               );
@@ -4310,7 +4346,35 @@ export async function checkout(cart, fingerprint) {
             });
           }
           card.append(head, facts, path);
-          elements.memoryDetail.replaceChildren(card);
+          const referencesCard = document.createElement('article'); referencesCard.className = 'memory-detail-card';
+          const referencesHead = document.createElement('header'); referencesHead.className = 'memory-detail-head';
+          const referencesTitle = document.createElement('div');
+          referencesTitle.append(
+            textElement('h2', '', 'Incoming references'),
+            textElement('p', '', result.incoming_reference_limit_reached
+              ? `Showing ${result.incoming_references.length} prioritized references of ${result.incoming_reference_count.toLocaleString()}`
+              : `${result.incoming_reference_count.toLocaleString()} indexed references`)
+          );
+          referencesHead.append(referencesTitle, textElement('span', 'memory-readonly', 'Internal first'));
+          const references = document.createElement('div'); references.className = 'memory-reference-list';
+          if (result.incoming_references.length === 0) {
+            references.append(textElement('div', 'memory-empty', 'No incoming references were present in the bounded snapshot index.'));
+          } else {
+            result.incoming_references.forEach(reference => {
+              const row = document.createElement('div'); row.className = 'memory-reference-row';
+              const kind = textElement('span', 'memory-reference-kind', reference.edge_type);
+              kind.dataset.kind = reference.edge_type;
+              const source = document.createElement('span'); source.className = 'memory-reference-source';
+              source.append(
+                textElement('span', '', `${reference.source_type} · ${reference.source_name || '(anonymous)'}`),
+                textElement('small', '', `source node ${reference.source_id}`)
+              );
+              row.append(kind, textElement('span', 'memory-reference-edge', reference.edge), source);
+              references.append(row);
+            });
+          }
+          referencesCard.append(referencesHead, references);
+          elements.memoryDetail.replaceChildren(card, referencesCard);
           return;
         }
         const similarity = result.similarity === null ? 'shape filter not used' : `${Math.round(result.similarity * 100)}% structural similarity`;
@@ -4376,6 +4440,9 @@ export async function checkout(cart, fingerprint) {
         elements.memorySearchForm.querySelectorAll('.memory-search-only').forEach(element => {
           element.hidden = diffMode;
         });
+        elements.memorySearchForm.querySelectorAll('.memory-snapshot-only').forEach(element => {
+          element.hidden = !snapshotMode;
+        });
         elements.memorySearchForm.querySelectorAll('.memory-diff-only').forEach(element => {
           element.hidden = !diffMode;
         });
@@ -4384,9 +4451,9 @@ export async function checkout(cart, fingerprint) {
         elements.memorySearchHelp.textContent = diffMode
           ? 'The baseline stays in local temporary storage until reset, target change, or shutdown. Current captures are deleted after native comparison.'
           : snapshotMode
-            ? 'Capturing briefly pauses the target. The snapshot is searched by native C++ and its temporary file is deleted immediately.'
+            ? 'Capturing briefly pauses the target. Native C++ classifies root reachability and prioritizes hidden, internal, and weak incoming references. The temporary file is deleted immediately.'
             : 'Accessors are reported without invoking getters. Results are ephemeral and are never added to the evidence store.';
-        const controls = elements.memorySearchForm.querySelectorAll('input, textarea');
+        const controls = elements.memorySearchForm.querySelectorAll('input, textarea, select');
         controls.forEach(control => { control.disabled = !attached || state.memorySearchPending; });
         elements.memorySearchButton.disabled = !attached || state.memorySearchPending;
         elements.memorySearchButton.setAttribute('aria-busy', String(state.memorySearchPending));
@@ -4419,7 +4486,7 @@ export async function checkout(cart, fingerprint) {
         } : snapshotMode ? {
           offline: 'Run a live session to attach an authorized browser target.',
           idle: state.memorySearchMessage || 'Enter a value to capture and search the full V8 heap, including unreachable nodes.',
-          searching: 'Capturing the target heap, then building a bounded native C++ retaining-path index.',
+          searching: 'Capturing the target heap, then building a bounded native C++ reachability and reference index.',
           empty: state.memorySearchMessage || 'No snapshot nodes matched the current value.',
           ready: state.memorySearchMessage || 'Native heap snapshot search completed.',
           partial: state.memorySearchMessage || 'Native heap snapshot search returned explicit partial coverage.',
@@ -4441,7 +4508,10 @@ export async function checkout(cart, fingerprint) {
 
         if (state.memoryResults.length === 0) {
           const empty = textElement('div', 'memory-empty', state.memorySearchStatus === 'empty'
-            ? 'No objects matched. Broaden one criterion or lower the similarity threshold.'
+            ? snapshotMode
+              ? 'No heap nodes matched this value and reference scope. Adjust the value or scope.'
+              : diffMode ? 'The compared heaps have no reported memory changes.'
+                : 'No objects matched. Broaden one criterion or lower the similarity threshold.'
             : state.memorySearchStatus === 'error'
               ? 'The last search did not replace any retained results.'
               : diffMode ? 'No heap comparison results yet.' : snapshotMode ? 'No heap snapshot search results yet.' : 'No live object search results yet.');
@@ -4463,13 +4533,13 @@ export async function checkout(cart, fingerprint) {
           const score = diffMode
             ? formatSignedByteSize(result.self_size_delta)
             : snapshotMode
-            ? result.type
+            ? result.reachable ? 'root' : 'unreachable'
             : result.similarity === null ? 'match' : `${Math.round(result.similarity * 100)}%`;
           const title = diffMode ? result.name || `(${result.type})` : snapshotMode ? result.name || `(${result.type})` : result.class_name || 'Object';
           const metadata = diffMode
             ? `${result.type} · ${result.baseline_count.toLocaleString()} → ${result.current_count.toLocaleString()} objects (${formatSignedCount(result.count_delta)})`
             : snapshotMode
-            ? `${result.self_size.toLocaleString()} self bytes · ${result.retaining_path.length} retaining steps`
+            ? `${result.type} · ${result.self_size.toLocaleString()} self bytes · ${result.incoming_reference_count.toLocaleString()} incoming references`
             : `${result.property_count} properties · ${result.preview.slice(0, 5).map(property => property.name).join(', ') || 'no own properties'}`;
           row.append(
             textElement('span', 'memory-result-class', title),
@@ -4553,7 +4623,8 @@ export async function checkout(cart, fingerprint) {
         state.memorySearchMessage = null;
         renderMemory();
         const body = await debuggerAction({
-          action: 'search_heap_snapshot', query, case_sensitive: false
+          action: 'search_heap_snapshot', query, case_sensitive: false,
+          scope: elements.memoryReferenceScope.value
         });
         state.memorySearchPending = false;
         if (!isHeapSnapshotSearchResponse(body)) {
@@ -4573,7 +4644,11 @@ export async function checkout(cart, fingerprint) {
         if (snapshot.edge_limit_reached) limits.push('edge limit reached');
         if (snapshot.string_limit_reached) limits.push('string budget reached');
         if (snapshot.retaining_paths_partial) limits.push('some retaining paths are partial');
-        const summary = `${snapshot.results.length} ${snapshot.results.length === 1 ? 'match' : 'matches'} across ${snapshot.analyzed_nodes.toLocaleString()} nodes in ${snapshot.duration_ms} ms`;
+        if (snapshot.results.some(result => result.incoming_reference_limit_reached)) {
+          limits.push(`${snapshot.reference_limit} incoming reference display limit reached`);
+        }
+        const scopeLabel = snapshot.scope === 'unreachable' ? 'unreachable' : snapshot.scope === 'reachable' ? 'root-reachable' : 'total';
+        const summary = `${snapshot.results.length} shown of ${snapshot.matched_nodes.toLocaleString()} ${scopeLabel} ${snapshot.matched_nodes === 1 ? 'match' : 'matches'} across ${snapshot.analyzed_nodes.toLocaleString()} nodes in ${snapshot.duration_ms} ms`;
         state.memorySearchMessage = limits.length > 0 ? `${summary} · ${limits.join(' · ')}` : summary;
         state.memorySearchStatus = limits.length > 0 ? 'partial' : snapshot.results.length > 0 ? 'ready' : 'empty';
         renderMemory();
@@ -5420,9 +5495,23 @@ export async function checkout(cart, fingerprint) {
         event.preventDefault();
         runLiveObjectSearch();
       });
+      elements.memoryValueQuery.addEventListener('keydown', event => {
+        if (event.key !== 'Enter' || state.memoryMode !== 'snapshot') return;
+        event.preventDefault();
+        runHeapSnapshotSearch();
+      });
       elements.memoryModeButtons.forEach(button => button.addEventListener('click', () => {
         setMemoryMode(button.dataset.memoryMode);
       }));
+      elements.memoryReferenceScope.addEventListener('change', () => {
+        if (state.memoryMode !== 'snapshot' || state.memorySearchPending) return;
+        state.memoryResults = [];
+        state.selectedMemoryResultId = null;
+        state.memorySearchMeta = null;
+        state.memorySearchStatus = memoryAttached() ? 'idle' : 'offline';
+        state.memorySearchMessage = 'Reference scope changed. Capture a new snapshot to apply it.';
+        renderMemory();
+      });
       elements.memoryCaptureBaseline.addEventListener('click', captureHeapDiffBaseline);
       elements.memoryClearBaseline.addEventListener('click', clearHeapDiffBaseline);
       elements.memoryCompareSnapshot.addEventListener('click', runHeapSnapshotDiff);

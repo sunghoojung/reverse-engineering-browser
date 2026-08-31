@@ -715,7 +715,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private func debuggerUnavailableResponse(
     ifNoneMatch: String?
   ) throws -> (Data, Int, [String: String]) {
-    let etag = "\"debugger-unavailable-v2\""
+    let etag = "\"debugger-unavailable-v3\""
     if ifNoneMatch == etag {
       return (Data(), 304, ["ETag": etag])
     }
@@ -815,6 +815,33 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
             "value_depth": 8,
             "value_entries": 256,
             "value_string_bytes": 4 * 1_024,
+          ],
+        ],
+        "runtime_hooks": [
+          "protocol_version": 1,
+          "session_id": 0,
+          "state": "idle",
+          "isolated": false,
+          "target_id": NSNull(),
+          "definitions": [],
+          "active_points": 0,
+          "total_hits": 0,
+          "hits": [],
+          "hit_evictions": 0,
+          "last_failure": NSNull(),
+          "message": "Create an isolated Experiment context to use Runtime Hooks.",
+          "limits": [
+            "definitions": 8,
+            "active_points": 64,
+            "return_points_per_definition": 32,
+            "total_hits": 512,
+            "retained_hits": 128,
+            "bindings_per_hit": 32,
+            "binding_preview_bytes": 512,
+            "condition_bytes": 1_024,
+            "logic_bytes": 8 * 1_024,
+            "return_bytes": 8 * 1_024,
+            "evaluation_timeout_ms": 100,
           ],
         ],
         "repeater": [
@@ -1766,6 +1793,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
               debuggerState: document.querySelector('#debug-state strong')?.textContent,
               debuggerContractValid: isDebuggerResponse(state.debuggerSession),
               objectExperimentAvailable: state.debuggerSession?.object_experiment?.protocol_version === 1,
+              runtimeHooksAvailable: state.debuggerSession?.runtime_hooks?.protocol_version === 1,
               repeaterAvailable: state.debuggerSession?.repeater?.protocol_version === 1,
               apiCollectionContractValid: isApiCollection(state.apiCollection),
               apiCollectionGeneration: state.apiCollection?.generation,

@@ -910,6 +910,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             "memory_origin_trace": DebuggerBridge._empty_memory_origin_trace(),
             "request_interception": DebuggerBridge._empty_request_interception(),
             "object_experiment": DebuggerBridge._empty_object_experiment(),
+            "runtime_hooks": DebuggerBridge._empty_runtime_hooks(),
             "repeater": DebuggerBridge._empty_repeater(),
             "settings": {
                 "breakpoints_active": True,

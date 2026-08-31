@@ -1161,6 +1161,39 @@ const objectReady = {
     value_bytes: 9, value_digest: 'a'.repeat(64)},
   audit: [objectAudit], mutation_attempts: 1, message: 'Property created.'
 };
+const hooksIdle = {
+  protocol_version: 1, session_id: 0, state: 'idle', isolated: false,
+  target_id: null, definitions: [], active_points: 0, total_hits: 0,
+  hits: [], hit_evictions: 0, last_failure: null,
+  message: 'Create an isolated Experiment context to use Runtime Hooks.',
+  limits: {definitions: 8, active_points: 64, return_points_per_definition: 32,
+    total_hits: 512, retained_hits: 128, bindings_per_hit: 32,
+    binding_preview_bytes: 512, condition_bytes: 1024, logic_bytes: 8192,
+    return_bytes: 8192, evaluation_timeout_ms: 100}
+};
+const hookRemote = {type: 'boolean', subtype: null, class_name: null,
+  description: 'true', value: true, unserializable_value: null,
+  value_truncated: false};
+const hookDefinition = {
+  id: 1, label: 'checkout guard', script_id: 'script-1', url: script.url,
+  line: 3, column: 0, entry_enabled: true, return_enabled: true,
+  condition: 'cart.total > 100', entry_logic: 'cart.reviewed = true;',
+  return_logic: '', return_mode: 'json', return_expression: '',
+  return_value: true, return_value_bytes: 4,
+  resolved: {entry_points: 1, return_points: 1}
+};
+const hookHit = {
+  id: 1, occurred_at_ms: 5, session_id: 4, hook_id: 1,
+  target_id: 'page-1', label: 'checkout guard', source: script.url,
+  function: 'checkout', category: 'return', operation: 'return_overridden',
+  line: 3, column: 8,
+  bindings: [{name: 'cart', value: hookRemote, accessor: false}],
+  bindings_truncated: false, original_return: hookRemote,
+  replacement_return: hookRemote, error: null
+};
+const hooksReady = {...hooksIdle, session_id: 4, state: 'armed', isolated: true,
+  target_id: 'page-1', definitions: [hookDefinition], active_points: 2,
+  total_hits: 1, hits: [hookHit], message: 'Runtime Hooks armed.'};
 const repeaterIdle = {
   protocol_version: 1, session_id: 0, state: 'idle', variables: [], history: [],
   history_bytes: 0, history_evictions: 0, active_execution: null, comparison: null,
@@ -1193,6 +1226,7 @@ const snapshot = {
   heap_diff_baseline: null, memory_origin_trace: originIdle,
   request_interception: interceptionIdle,
   object_experiment: objectIdle,
+  runtime_hooks: hooksIdle,
   repeater: repeaterIdle,
   target, targets: [target], scripts: [script],
   paused: {reason: 'breakpoint', description: null, call_frames: [frame],
@@ -1307,6 +1341,13 @@ process.stdout.write(JSON.stringify({
     url: 'https://checkout.test/cart?token=private'}),
   objectSearchPairRequired: !isObjectExperiment({...objectReady, search: null}),
   missingObjectExperimentRejected: !isDebuggerResponse({...snapshot, object_experiment: undefined}),
+  hooksReadyAccepted: isRuntimeHooks(hooksReady),
+  hooksPointBound: !isRuntimeHooks({...hooksReady, active_points: 65}),
+  hooksBindingBound: !isRuntimeHooks({...hooksReady, hits: [{...hookHit,
+    bindings: Array(33).fill(hookHit.bindings[0])}]}),
+  hooksPromiseOperationRejected: !isRuntimeHooks({...hooksReady, hits: [{...hookHit,
+    operation: 'async_override'}]}),
+  missingRuntimeHooksRejected: !isDebuggerResponse({...snapshot, runtime_hooks: undefined}),
   repeaterReadyAccepted: isRepeater(repeaterReady),
   repeaterHistoryBound: !isRepeater({...repeaterReady,
     history: Array(25).fill(repeaterEntry)}),
@@ -1380,6 +1421,11 @@ process.stdout.write(JSON.stringify({
                 "objectQueryRejected": True,
                 "objectSearchPairRequired": True,
                 "missingObjectExperimentRejected": True,
+                "hooksReadyAccepted": True,
+                "hooksPointBound": True,
+                "hooksBindingBound": True,
+                "hooksPromiseOperationRejected": True,
+                "missingRuntimeHooksRejected": True,
                 "repeaterReadyAccepted": True,
                 "repeaterHistoryBound": True,
                 "repeaterHistoryBytesRequired": True,
@@ -1474,6 +1520,29 @@ process.stdout.write(JSON.stringify({
         self.assertIn("25,000 objects / 750 ms", html)
         self.assertIn("The baseline page and evidence store are never modified", html)
         self.assertNotIn("expose_live_object", html)
+
+    def test_runtime_hooks_expose_bounded_isolated_synchronous_control(self) -> None:
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('data-experiment-mode="hooks"', html)
+        self.assertIn('id="hooks-workspace"', html)
+        self.assertIn('id="hooks-navigation-form"', html)
+        self.assertIn('id="hooks-definition-form"', html)
+        self.assertIn('id="hooks-confirm"', html)
+        self.assertIn('id="hooks-hits"', html)
+        self.assertIn('id="source-hook-pivot"', html)
+        self.assertIn("function isRuntimeHooks(hooks)", html)
+        self.assertIn("function renderRuntimeHooks()", html)
+        self.assertIn("function pivotSourceToRuntimeHooks()", html)
+        self.assertIn("#screen-experiments:not([hidden]) { grid-template-rows: auto auto", html)
+        self.assertIn("action: 'add_runtime_hook'", html)
+        self.assertIn("action: 'arm_runtime_hooks'", html)
+        self.assertIn("action: 'disarm_runtime_hooks'", html)
+        self.assertIn("action: 'clear_runtime_hook_hits'", html)
+        self.assertIn("Promise return replacement is rejected", html)
+        self.assertIn("512 / 128 retained", html)
+        self.assertIn("100 ms / 32 bindings", html)
+        self.assertIn("!url.startsWith('pptr:')", html)
 
     def test_repeater_exposes_bounded_edit_cancel_history_variables_and_comparison(self) -> None:
         html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
@@ -2103,10 +2172,12 @@ process.stdout.write(JSON.stringify({
         self.assertIn('"memory_origin_trace": [', application)
         self.assertIn('"request_interception": [', application)
         self.assertIn('"object_experiment": [', application)
+        self.assertIn('"runtime_hooks": [', application)
         self.assertIn('"repeater": [', application)
-        self.assertIn(r'let etag = "\"debugger-unavailable-v2\""', application)
+        self.assertIn(r'let etag = "\"debugger-unavailable-v3\""', application)
         self.assertIn("debuggerContractValid: isDebuggerResponse(state.debuggerSession)", application)
         self.assertIn("objectExperimentAvailable: state.debuggerSession?.object_experiment?.protocol_version === 1", application)
+        self.assertIn("runtimeHooksAvailable: state.debuggerSession?.runtime_hooks?.protocol_version === 1", application)
         self.assertIn("repeaterAvailable: state.debuggerSession?.repeater?.protocol_version === 1", application)
         self.assertIn("apiCollectionContractValid: isApiCollection(state.apiCollection)", application)
         self.assertIn("REB_APP_SMOKE_API_COLLECTION_WRITE", application)

@@ -72,6 +72,7 @@ Reverse Engineering Browser is a Brave-based research browser for authorized web
 ## Experiment Lab
 
 - Create a disposable experiment from a script, function, WASM module, or captured request.
+- Instrument bounded function entry and synchronous return points, capture local data properties without invoking accessors, and apply explicitly confirmed return replacements only in the disposable experiment.
 - Perform static analysis without execution.
 - Run selected code in a throwaway origin and profile with explicit DOM, storage, input, permission, and response fixtures.
 - Replay an authorized page scenario in an isolated profile with explicit dependency stubs.

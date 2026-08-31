@@ -93,6 +93,18 @@ MAX_OBJECT_EXPERIMENT_VALUE_DEPTH = 8
 MAX_OBJECT_EXPERIMENT_VALUE_ENTRIES = 256
 MAX_OBJECT_EXPERIMENT_STRING_BYTES = 4 * 1024
 OBJECT_EXPERIMENT_NAVIGATION_TIMEOUT_SECONDS = 15.0
+MAX_RUNTIME_HOOKS = 8
+MAX_RUNTIME_HOOK_BREAKPOINTS = 64
+MAX_RUNTIME_HOOK_RETURN_POINTS = 32
+MAX_RUNTIME_HOOK_HITS = 512
+MAX_RUNTIME_HOOK_RETAINED_HITS = 128
+MAX_RUNTIME_HOOK_BINDINGS = 32
+MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES = 512
+MAX_RUNTIME_HOOK_LABEL_BYTES = 128
+MAX_RUNTIME_HOOK_CONDITION_BYTES = 1024
+MAX_RUNTIME_HOOK_LOGIC_BYTES = 8 * 1024
+MAX_RUNTIME_HOOK_RETURN_BYTES = 8 * 1024
+RUNTIME_HOOK_EVALUATION_TIMEOUT_MS = 100
 
 REPEATER_VARIABLE_TOKEN = re.compile(r"\{\{(=)?([^{}]+)\}\}")
 REPEATER_VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
@@ -845,6 +857,14 @@ class DebuggerBridge:
         self._object_experiment_group: Optional[str] = None
         self._object_experiment_objects_id: Optional[str] = None
         self._object_experiment_result_indices: set[int] = set()
+        self._next_runtime_hook_id = 1
+        self._next_runtime_hook_hit_id = 1
+        self._runtime_hooks = self._empty_runtime_hooks()
+        self._runtime_hook_points: dict[str, dict[str, Any]] = {}
+        self._runtime_hook_processing = False
+        self._runtime_hook_stop_requested = False
+        self._runtime_hook_deferred_pause: Optional[dict[str, Any]] = None
+        self._runtime_hook_epoch = 0
         self._next_repeater_execution_id = 1
         self._repeater = self._empty_repeater()
         self._repeater_history_bytes = 0
@@ -921,6 +941,7 @@ class DebuggerBridge:
                 "memory_origin_trace": copy.deepcopy(self._memory_origin_trace),
                 "request_interception": copy.deepcopy(self._request_interception),
                 "object_experiment": copy.deepcopy(self._object_experiment),
+                "runtime_hooks": copy.deepcopy(self._runtime_hooks),
                 "repeater": copy.deepcopy(self._repeater),
                 "limits": {
                     "scripts": MAX_SCRIPTS,
@@ -946,6 +967,12 @@ class DebuggerBridge:
                 "searching",
                 "mutating",
             }
+            runtime_hooks_active = self._runtime_hooks["state"] in {
+                "arming",
+                "armed",
+                "handling",
+                "stopping",
+            }
         if origin_trace_active and action != "stop_memory_origin_trace":
             raise DebuggerBridgeError(
                 "Memory Origin Trace controls the debugger until it finishes or is stopped"
@@ -961,6 +988,10 @@ class DebuggerBridge:
         if object_experiment_running:
             raise DebuggerBridgeError(
                 "Object Lab controls the isolated debugger target until its action finishes"
+            )
+        if runtime_hooks_active and action != "disarm_runtime_hooks":
+            raise DebuggerBridgeError(
+                "Runtime Hooks controls the isolated debugger target until it is disarmed"
             )
         if action == "pause":
             self._command("Debugger.pause")
@@ -1133,6 +1164,16 @@ class DebuggerBridge:
             return self._search_object_experiment(request)
         elif action == "mutate_object_experiment":
             return self._mutate_object_experiment(request)
+        elif action == "add_runtime_hook":
+            return self._add_runtime_hook(request)
+        elif action == "remove_runtime_hook":
+            return self._remove_runtime_hook(request)
+        elif action == "arm_runtime_hooks":
+            return self._arm_runtime_hooks(request)
+        elif action == "disarm_runtime_hooks":
+            return self._disarm_runtime_hooks()
+        elif action == "clear_runtime_hook_hits":
+            return self._clear_runtime_hook_hits()
         elif action == "configure_request_interception":
             return self._configure_request_interception(request)
         elif action == "run_request_interception":
@@ -2114,6 +2155,1069 @@ class DebuggerBridge:
             self._object_experiment["audit_evictions"] += 1
         return entry
 
+    def _runtime_hook_target_ready_locked(self) -> None:
+        if (
+            self._request_interception_context_id is None
+            or not self._runtime_hooks["isolated"]
+            or self._runtime_hooks["target_id"] is None
+            or self._target is None
+            or self._target["id"] != self._runtime_hooks["target_id"]
+            or self._state not in {"running", "paused"}
+        ):
+            raise DebuggerBridgeError(
+                "Runtime Hooks requires its attached disposable Experiment page"
+            )
+        if self._request_interception_pending:
+            raise DebuggerBridgeError(
+                "Wait for paused Experiment requests before using Runtime Hooks"
+            )
+        if self._runtime_hook_processing:
+            raise DebuggerBridgeError("Runtime Hooks is handling a function call")
+
+    @staticmethod
+    def _runtime_hook_text(
+        request: dict[str, Any], field: str, limit: int
+    ) -> str:
+        value = request.get(field, "")
+        if not isinstance(value, str) or len(value.encode("utf-8")) > limit:
+            raise DebuggerBridgeError(
+                f"Runtime Hooks {field.replace('_', ' ')} is invalid or oversized"
+            )
+        return value
+
+    @classmethod
+    def _runtime_hook_source_label(cls, url: str) -> str:
+        if not url:
+            return "(anonymous script)"
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            return "(anonymous script)"
+        if parsed.scheme in {"http", "https"}:
+            return cls._redacted_request_url(url) or "(anonymous script)"
+        if parsed.scheme == "data":
+            return "data:(inline script)"
+        return cls._truncate_text(
+            urlunparse(parsed._replace(query="", fragment="")),
+            MAX_INTERCEPTION_URL_BYTES,
+        )
+
+    @staticmethod
+    def _normalize_runtime_hook_json(value: Any) -> tuple[Any, bytes]:
+        entries = 0
+
+        def validate(candidate: Any, depth: int) -> None:
+            nonlocal entries
+            if depth > MAX_OBJECT_EXPERIMENT_VALUE_DEPTH:
+                raise DebuggerBridgeError("Runtime Hooks JSON exceeds depth 8")
+            if candidate is None or isinstance(candidate, bool):
+                return
+            if isinstance(candidate, int):
+                if abs(candidate) > 2**53 - 1:
+                    raise DebuggerBridgeError(
+                        "Runtime Hooks integer exceeds JavaScript's exact range"
+                    )
+                return
+            if isinstance(candidate, float):
+                if not math.isfinite(candidate):
+                    raise DebuggerBridgeError("Runtime Hooks number must be finite")
+                return
+            if isinstance(candidate, str):
+                if len(candidate.encode("utf-8")) > MAX_RUNTIME_HOOK_RETURN_BYTES:
+                    raise DebuggerBridgeError("Runtime Hooks JSON string exceeds 8 KiB")
+                return
+            if isinstance(candidate, list):
+                entries += len(candidate)
+                if entries > MAX_OBJECT_EXPERIMENT_VALUE_ENTRIES:
+                    raise DebuggerBridgeError("Runtime Hooks JSON exceeds 256 entries")
+                for item in candidate:
+                    validate(item, depth + 1)
+                return
+            if isinstance(candidate, dict):
+                entries += len(candidate)
+                if entries > MAX_OBJECT_EXPERIMENT_VALUE_ENTRIES:
+                    raise DebuggerBridgeError("Runtime Hooks JSON exceeds 256 entries")
+                for key, item in candidate.items():
+                    if not isinstance(key, str) or len(key.encode("utf-8")) > 4096:
+                        raise DebuggerBridgeError("Runtime Hooks JSON key is invalid")
+                    validate(item, depth + 1)
+                return
+            raise DebuggerBridgeError("Runtime Hooks replacement must be JSON data")
+
+        validate(value, 0)
+        try:
+            canonical = json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exception:
+            raise DebuggerBridgeError(
+                "Runtime Hooks replacement must be valid JSON"
+            ) from exception
+        if len(canonical) > MAX_RUNTIME_HOOK_RETURN_BYTES:
+            raise DebuggerBridgeError("Runtime Hooks replacement exceeds 8 KiB")
+        return value, canonical
+
+    def _normalize_runtime_hook_definition(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        label = self._runtime_hook_text(
+            request, "label", MAX_RUNTIME_HOOK_LABEL_BYTES
+        ).strip()
+        if not label:
+            raise DebuggerBridgeError("Runtime Hooks label is required")
+        script_id = self._required_text(request, "script_id", MAX_TARGET_ID_BYTES)
+        line = request.get("line")
+        column = request.get("column", 0)
+        if not all(
+            isinstance(value, int) and not isinstance(value, bool)
+            for value in (line, column)
+        ) or not (0 <= line < 2**31 and 0 <= column < 2**31):
+            raise DebuggerBridgeError("Runtime Hooks source location is invalid")
+        entry_enabled = request.get("entry_enabled", True)
+        return_enabled = request.get("return_enabled", True)
+        if not isinstance(entry_enabled, bool) or not isinstance(return_enabled, bool):
+            raise DebuggerBridgeError("Runtime Hooks phases must be boolean")
+        if not entry_enabled and not return_enabled:
+            raise DebuggerBridgeError("Runtime Hooks requires an entry or return phase")
+        condition = self._runtime_hook_text(
+            request, "condition", MAX_RUNTIME_HOOK_CONDITION_BYTES
+        )
+        entry_logic = self._runtime_hook_text(
+            request, "entry_logic", MAX_RUNTIME_HOOK_LOGIC_BYTES
+        )
+        return_logic = self._runtime_hook_text(
+            request, "return_logic", MAX_RUNTIME_HOOK_LOGIC_BYTES
+        )
+        return_mode = request.get("return_mode", "none")
+        if return_mode not in {"none", "json", "expression"}:
+            raise DebuggerBridgeError("Runtime Hooks return mode is invalid")
+        return_expression = ""
+        return_value: Any = None
+        return_value_bytes = 0
+        if return_mode == "expression":
+            return_expression = self._runtime_hook_text(
+                request, "return_expression", MAX_RUNTIME_HOOK_RETURN_BYTES
+            ).strip()
+            if not return_expression:
+                raise DebuggerBridgeError(
+                    "Runtime Hooks return expression is required"
+                )
+        elif return_mode == "json":
+            if "return_value" not in request:
+                raise DebuggerBridgeError("Runtime Hooks JSON replacement is required")
+            return_value, canonical = self._normalize_runtime_hook_json(
+                request["return_value"]
+            )
+            return_value_bytes = len(canonical)
+        if return_mode != "none" and not return_enabled:
+            raise DebuggerBridgeError(
+                "Runtime Hooks return replacement requires the return phase"
+            )
+        with self._lock:
+            script = self._scripts.get(script_id)
+            if script is None or script["language"] != "JavaScript":
+                raise DebuggerBridgeError(
+                    "Runtime Hooks requires a live JavaScript source"
+                )
+            if line < script["start_line"] or line > script["end_line"]:
+                raise DebuggerBridgeError(
+                    "Runtime Hooks location is outside the selected script"
+                )
+            source_url = self._runtime_hook_source_label(script["url"])
+        return {
+            "id": 0,
+            "label": label,
+            "script_id": script_id,
+            "url": source_url,
+            "line": line,
+            "column": column,
+            "entry_enabled": entry_enabled,
+            "return_enabled": return_enabled,
+            "condition": condition,
+            "entry_logic": entry_logic,
+            "return_logic": return_logic,
+            "return_mode": return_mode,
+            "return_expression": return_expression,
+            "return_value": return_value,
+            "return_value_bytes": return_value_bytes,
+            "resolved": None,
+        }
+
+    def _add_runtime_hook(self, request: dict[str, Any]) -> dict[str, Any]:
+        definition = self._normalize_runtime_hook_definition(request)
+        with self._lock:
+            self._runtime_hook_target_ready_locked()
+            if self._runtime_hooks["state"] in {
+                "arming",
+                "armed",
+                "handling",
+                "stopping",
+            }:
+                raise DebuggerBridgeError(
+                    "Disarm Runtime Hooks before changing definitions"
+                )
+            definitions = self._runtime_hooks["definitions"]
+            if len(definitions) >= MAX_RUNTIME_HOOKS:
+                raise DebuggerBridgeError("Runtime Hooks reached the 8-definition limit")
+            if any(
+                item["script_id"] == definition["script_id"]
+                and item["line"] == definition["line"]
+                and item["column"] == definition["column"]
+                for item in definitions
+            ):
+                raise DebuggerBridgeError(
+                    "A Runtime Hook already uses this script location"
+                )
+            definition["id"] = self._next_runtime_hook_id
+            self._next_runtime_hook_id += 1
+            definitions.append(definition)
+            self._runtime_hooks["state"] = "ready"
+            self._runtime_hooks["last_failure"] = None
+            self._runtime_hooks["message"] = (
+                f"Added {definition['label']}. Confirm mutation permission to arm."
+            )
+            self._changed()
+            hooks = copy.deepcopy(self._runtime_hooks)
+        return {"ok": True, "runtime_hooks": hooks, "generation": self.generation()}
+
+    def _remove_runtime_hook(self, request: dict[str, Any]) -> dict[str, Any]:
+        hook_id = request.get("hook_id")
+        if (
+            not isinstance(hook_id, int)
+            or isinstance(hook_id, bool)
+            or hook_id <= 0
+        ):
+            raise DebuggerBridgeError("Runtime Hooks definition identifier is invalid")
+        with self._lock:
+            self._runtime_hook_target_ready_locked()
+            if self._runtime_hooks["state"] in {
+                "arming",
+                "armed",
+                "handling",
+                "stopping",
+            }:
+                raise DebuggerBridgeError(
+                    "Disarm Runtime Hooks before changing definitions"
+                )
+            before = len(self._runtime_hooks["definitions"])
+            self._runtime_hooks["definitions"] = [
+                item
+                for item in self._runtime_hooks["definitions"]
+                if item["id"] != hook_id
+            ]
+            if len(self._runtime_hooks["definitions"]) == before:
+                raise DebuggerBridgeError("Runtime Hooks definition is unavailable")
+            self._runtime_hooks["message"] = "Runtime Hook definition removed."
+            self._changed()
+            hooks = copy.deepcopy(self._runtime_hooks)
+        return {"ok": True, "runtime_hooks": hooks, "generation": self.generation()}
+
+    def _runtime_hook_possible_locations(
+        self, definition: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        result = self._command(
+            "Debugger.getPossibleBreakpoints",
+            {
+                "start": {
+                    "scriptId": definition["script_id"],
+                    "lineNumber": definition["line"],
+                    "columnNumber": definition["column"],
+                },
+                "restrictToFunction": True,
+            },
+            timeout=3.0,
+        )
+        raw_locations = result.get("locations")
+        if not isinstance(raw_locations, list):
+            raise ProtocolError("Debugger returned malformed hook locations")
+        first_location = None
+        return_locations = []
+        return_keys: set[tuple[str, int, int]] = set()
+        for raw in raw_locations:
+            location = self._parse_location(raw)
+            if location is None or location["script_id"] != definition["script_id"]:
+                continue
+            location["type"] = (
+                raw.get("type")
+                if isinstance(raw, dict)
+                and raw.get("type") in {"debuggerStatement", "call", "return"}
+                else "other"
+            )
+            if first_location is None:
+                first_location = location
+            if location["type"] != "return" or not definition["return_enabled"]:
+                continue
+            key = (location["script_id"], location["line"], location["column"])
+            if key in return_keys:
+                continue
+            if len(return_locations) >= MAX_RUNTIME_HOOK_RETURN_POINTS:
+                raise DebuggerBridgeError(
+                    f"{definition['label']} exceeds 32 synchronous return points"
+                )
+            return_keys.add(key)
+            return_locations.append(location)
+        if first_location is None:
+            raise DebuggerBridgeError(
+                f"No breakable function was found for {definition['label']}"
+            )
+        first_key = (
+            first_location["script_id"],
+            first_location["line"],
+            first_location["column"],
+        )
+        return [
+            first_location,
+            *(
+                location
+                for location in return_locations
+                if (
+                    location["script_id"],
+                    location["line"],
+                    location["column"],
+                )
+                != first_key
+            ),
+        ]
+
+    def _arm_runtime_hooks(self, request: dict[str, Any]) -> dict[str, Any]:
+        if request.get("confirmed") is not True:
+            raise DebuggerBridgeError(
+                "Runtime Hooks requires explicit isolated-page mutation confirmation"
+            )
+        with self._lock:
+            self._runtime_hook_target_ready_locked()
+            if not self._runtime_hooks["definitions"]:
+                raise DebuggerBridgeError("Add a Runtime Hook before arming")
+            if not self._breakpoints_active:
+                raise DebuggerBridgeError(
+                    "Activate debugger breakpoints before arming Runtime Hooks"
+                )
+            if self._runtime_hooks["state"] in {
+                "arming",
+                "armed",
+                "handling",
+                "stopping",
+            }:
+                raise DebuggerBridgeError("Runtime Hooks is already active")
+            self._runtime_hook_epoch += 1
+            epoch = self._runtime_hook_epoch
+            definitions = copy.deepcopy(self._runtime_hooks["definitions"])
+            self._runtime_hook_stop_requested = False
+            self._runtime_hook_deferred_pause = None
+            self._runtime_hooks["state"] = "arming"
+            self._runtime_hooks["last_failure"] = None
+            self._runtime_hooks["message"] = (
+                "Resolving bounded entry and synchronous return points."
+            )
+            self._changed()
+
+        point_specs: list[dict[str, Any]] = []
+        installed: dict[str, dict[str, Any]] = {}
+        try:
+            for definition in definitions:
+                locations = self._runtime_hook_possible_locations(definition)
+                returns = [item for item in locations if item["type"] == "return"]
+                if definition["return_enabled"] and not returns:
+                    raise DebuggerBridgeError(
+                        f"{definition['label']} has no synchronous return point"
+                    )
+                by_location: dict[tuple[str, int, int], dict[str, Any]] = {}
+                if definition["entry_enabled"]:
+                    entry = locations[0]
+                    key = (entry["script_id"], entry["line"], entry["column"])
+                    by_location[key] = {
+                        "hook_id": definition["id"],
+                        "location": entry,
+                        "phases": ["entry"],
+                    }
+                if definition["return_enabled"]:
+                    for location in returns:
+                        key = (
+                            location["script_id"],
+                            location["line"],
+                            location["column"],
+                        )
+                        spec = by_location.setdefault(
+                            key,
+                            {
+                                "hook_id": definition["id"],
+                                "location": location,
+                                "phases": [],
+                            },
+                        )
+                        if "return" not in spec["phases"]:
+                            spec["phases"].append("return")
+                definition["resolved"] = {
+                    "entry_points": 1 if definition["entry_enabled"] else 0,
+                    "return_points": len(returns)
+                    if definition["return_enabled"]
+                    else 0,
+                }
+                point_specs.extend(by_location.values())
+                with self._lock:
+                    if self._runtime_hook_stop_requested or epoch != self._runtime_hook_epoch:
+                        raise DebuggerBridgeError("Runtime Hooks arming was cancelled")
+            if len(point_specs) > MAX_RUNTIME_HOOK_BREAKPOINTS:
+                raise DebuggerBridgeError(
+                    "Runtime Hooks exceeds the 64 active-point limit"
+                )
+            for spec in point_specs:
+                location = spec["location"]
+                result = self._command(
+                    "Debugger.setBreakpoint",
+                    {
+                        "location": {
+                            "scriptId": location["script_id"],
+                            "lineNumber": location["line"],
+                            "columnNumber": location["column"],
+                        }
+                    },
+                )
+                breakpoint_id = self._required_protocol_identifier(
+                    result.get("breakpointId"), "runtime hook breakpoint"
+                )
+                installed[breakpoint_id] = spec
+                with self._lock:
+                    if self._runtime_hook_stop_requested or epoch != self._runtime_hook_epoch:
+                        raise DebuggerBridgeError("Runtime Hooks arming was cancelled")
+        except BaseException as exception:
+            for breakpoint_id in installed:
+                try:
+                    self._command(
+                        "Debugger.removeBreakpoint", {"breakpointId": breakpoint_id}
+                    )
+                except DebuggerBridgeError:
+                    pass
+            with self._lock:
+                if epoch == self._runtime_hook_epoch:
+                    self._runtime_hook_points.clear()
+                    self._runtime_hooks["active_points"] = 0
+                    self._runtime_hooks["state"] = "disarmed"
+                    self._runtime_hooks["last_failure"] = self._truncate_text(
+                        str(exception), 512
+                    )
+                    self._runtime_hooks["message"] = (
+                        "No hook points were left armed. Fix the definition and try again."
+                    )
+                    self._runtime_hook_stop_requested = False
+                    self._runtime_hook_deferred_pause = None
+                    self._changed()
+            raise
+
+        with self._lock:
+            if epoch != self._runtime_hook_epoch:
+                raise DebuggerBridgeError("Runtime Hooks arming became stale")
+            resolved_by_id = {item["id"]: item["resolved"] for item in definitions}
+            for definition in self._runtime_hooks["definitions"]:
+                definition["resolved"] = resolved_by_id.get(definition["id"])
+            self._runtime_hook_points = installed
+            self._runtime_hooks["active_points"] = len(installed)
+            self._runtime_hooks["state"] = "armed"
+            self._runtime_hooks["message"] = (
+                f"Armed {len(definitions)} hooks across {len(installed)} bounded points."
+            )
+            self._changed()
+            hooks = copy.deepcopy(self._runtime_hooks)
+        return {"ok": True, "runtime_hooks": hooks, "generation": self.generation()}
+
+    def _remove_runtime_hook_points(
+        self, reason: str, expected_epoch: Optional[int] = None
+    ) -> None:
+        with self._lock:
+            if expected_epoch is not None and expected_epoch != self._runtime_hook_epoch:
+                return
+            self._runtime_hook_epoch += 1
+            epoch = self._runtime_hook_epoch
+            breakpoint_ids = list(self._runtime_hook_points)
+            self._runtime_hook_stop_requested = True
+            self._runtime_hooks["state"] = "stopping"
+            self._runtime_hooks["message"] = "Removing Runtime Hooks breakpoints."
+            self._changed()
+        failures = 0
+        for breakpoint_id in breakpoint_ids:
+            try:
+                self._command(
+                    "Debugger.removeBreakpoint", {"breakpointId": breakpoint_id}
+                )
+            except DebuggerBridgeError:
+                failures += 1
+        with self._lock:
+            if epoch != self._runtime_hook_epoch:
+                return
+            self._runtime_hook_points.clear()
+            self._runtime_hooks["active_points"] = 0
+            self._runtime_hook_processing = False
+            self._runtime_hook_stop_requested = False
+            self._runtime_hook_deferred_pause = None
+            self._runtime_hooks["state"] = "disarmed"
+            self._runtime_hooks["message"] = reason
+            if failures:
+                self._runtime_hooks["last_failure"] = (
+                    f"{failures} stale breakpoint removals could not be confirmed."
+                )
+            self._changed()
+
+    def _disarm_runtime_hooks(self) -> dict[str, Any]:
+        with self._lock:
+            if self._runtime_hooks["state"] not in {
+                "arming",
+                "armed",
+                "handling",
+                "stopping",
+            }:
+                hooks = copy.deepcopy(self._runtime_hooks)
+                return {
+                    "ok": True,
+                    "runtime_hooks": hooks,
+                    "generation": self._generation,
+                }
+            if self._runtime_hook_processing or self._runtime_hooks["state"] == "arming":
+                self._runtime_hook_stop_requested = True
+                self._runtime_hooks["state"] = "stopping"
+                self._runtime_hooks["message"] = (
+                    "Stopping after the current bounded hook operation."
+                )
+                self._changed()
+                hooks = copy.deepcopy(self._runtime_hooks)
+                return {
+                    "ok": True,
+                    "runtime_hooks": hooks,
+                    "generation": self._generation,
+                }
+        self._remove_runtime_hook_points("Runtime Hooks disarmed. Definitions remain editable.")
+        with self._lock:
+            hooks = copy.deepcopy(self._runtime_hooks)
+        return {"ok": True, "runtime_hooks": hooks, "generation": self.generation()}
+
+    def _clear_runtime_hook_hits(self) -> dict[str, Any]:
+        with self._lock:
+            self._runtime_hook_target_ready_locked()
+            if self._runtime_hooks["state"] in {
+                "arming",
+                "armed",
+                "handling",
+                "stopping",
+            }:
+                raise DebuggerBridgeError("Disarm Runtime Hooks before clearing hits")
+            self._runtime_hooks["total_hits"] = 0
+            self._runtime_hooks["hits"] = []
+            self._runtime_hooks["hit_evictions"] = 0
+            self._runtime_hooks["last_failure"] = None
+            self._runtime_hooks["message"] = "Runtime Hooks hit records were cleared."
+            self._changed()
+            hooks = copy.deepcopy(self._runtime_hooks)
+        return {"ok": True, "runtime_hooks": hooks, "generation": self.generation()}
+
+    def _handle_runtime_hook_navigation(self) -> None:
+        with self._lock:
+            if (
+                not self._runtime_hooks["definitions"]
+                and not self._runtime_hook_points
+                and self._runtime_hooks["state"]
+                not in {"arming", "armed", "handling", "stopping"}
+            ):
+                return
+            self._runtime_hook_epoch += 1
+            self._runtime_hook_points.clear()
+            self._runtime_hook_processing = False
+            self._runtime_hook_stop_requested = False
+            self._runtime_hook_deferred_pause = None
+            self._runtime_hooks["definitions"] = []
+            self._runtime_hooks["active_points"] = 0
+            self._runtime_hooks["state"] = "ready"
+            self._runtime_hooks["last_failure"] = (
+                "The page navigated. Script identifiers changed, so all hooks were cleared."
+            )
+            self._runtime_hooks["message"] = (
+                "Navigation disarmed Runtime Hooks. Choose a live function and add it again."
+            )
+            self._changed()
+
+    def _handle_runtime_hook_pause_async(self, params: dict[str, Any]) -> bool:
+        raw_hits = params.get("hitBreakpoints")
+        if not isinstance(raw_hits, list):
+            return False
+        with self._lock:
+            matches = [
+                copy.deepcopy(self._runtime_hook_points[item])
+                for item in raw_hits
+                if isinstance(item, str) and item in self._runtime_hook_points
+            ]
+            if not matches:
+                return False
+            if self._runtime_hooks["state"] == "stopping":
+                self._command_without_wait("Debugger.resume")
+                return True
+            if self._runtime_hook_processing:
+                if self._runtime_hook_deferred_pause is not None:
+                    self._runtime_hooks["last_failure"] = (
+                        "Runtime Hooks received more than one deferred pause."
+                    )
+                    self._runtime_hook_stop_requested = True
+                    self._command_without_wait("Debugger.resume")
+                    self._changed()
+                    return True
+                self._runtime_hook_deferred_pause = {
+                    "epoch": self._runtime_hook_epoch,
+                    "matches": matches,
+                    "params": params,
+                }
+                self._runtime_hooks["message"] = (
+                    "Handing the synchronous return phase to the bounded hook worker."
+                )
+                self._changed()
+                return True
+            self._runtime_hook_processing = True
+            epoch = self._runtime_hook_epoch
+            self._runtime_hooks["state"] = "handling"
+            self._runtime_hooks["message"] = "Handling one bounded function hook."
+            self._changed()
+        thread = threading.Thread(
+            target=self._process_runtime_hook_pause,
+            args=(epoch, matches, params),
+            name="reb-runtime-hooks",
+            daemon=True,
+        )
+        thread.start()
+        return True
+
+    def _runtime_hook_evaluate(
+        self,
+        frame_id: str,
+        expression: str,
+        object_group: str,
+        *,
+        return_by_value: bool,
+        throw_on_side_effect: bool,
+    ) -> dict[str, Any]:
+        result = self._command(
+            "Debugger.evaluateOnCallFrame",
+            {
+                "callFrameId": frame_id,
+                "expression": expression,
+                "objectGroup": object_group,
+                "includeCommandLineAPI": False,
+                "silent": True,
+                "returnByValue": return_by_value,
+                "generatePreview": not return_by_value,
+                "throwOnSideEffect": throw_on_side_effect,
+                "timeout": RUNTIME_HOOK_EVALUATION_TIMEOUT_MS,
+            },
+            timeout=1.0,
+        )
+        if isinstance(result.get("exceptionDetails"), dict):
+            raise DebuggerBridgeError("Runtime Hooks evaluation threw an exception")
+        remote = result.get("result")
+        if not isinstance(remote, dict) or not isinstance(remote.get("type"), str):
+            raise ProtocolError("Debugger returned a malformed hook evaluation")
+        return remote
+
+    def _runtime_hook_bindings(
+        self, raw_frame: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], bool]:
+        raw_scopes = raw_frame.get("scopeChain")
+        if not isinstance(raw_scopes, list):
+            return [], False
+        local_id = None
+        for scope in raw_scopes[:MAX_SCOPES_PER_FRAME]:
+            if not isinstance(scope, dict) or scope.get("type") != "local":
+                continue
+            remote = scope.get("object")
+            if isinstance(remote, dict) and isinstance(remote.get("objectId"), str):
+                local_id = remote["objectId"]
+                break
+        if local_id is None or len(local_id.encode("utf-8")) > MAX_TARGET_ID_BYTES:
+            return [], False
+        result = self._command(
+            "Runtime.getProperties",
+            {
+                "objectId": local_id,
+                "ownProperties": True,
+                "accessorPropertiesOnly": False,
+                "generatePreview": True,
+            },
+            timeout=1.0,
+        )
+        raw_properties = result.get("result")
+        if not isinstance(raw_properties, list):
+            raise ProtocolError("Debugger returned malformed hook bindings")
+        bindings = []
+        for item in raw_properties[:MAX_RUNTIME_HOOK_BINDINGS]:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                continue
+            name = self._truncate_text(item["name"], 256)
+            if isinstance(item.get("value"), dict):
+                preview = self._runtime_hook_remote_preview(item["value"])
+                accessor = False
+            else:
+                accessor = isinstance(item.get("get"), dict) or isinstance(
+                    item.get("set"), dict
+                )
+                preview = {
+                    "type": "accessor" if accessor else "unavailable",
+                    "subtype": None,
+                    "class_name": None,
+                    "description": (
+                        "Accessor not invoked"
+                        if accessor
+                        else "Not initialized or unavailable"
+                    ),
+                    "value": None,
+                    "unserializable_value": None,
+                    "value_truncated": False,
+                }
+            bindings.append(
+                {"name": name, "value": preview, "accessor": accessor}
+            )
+        return bindings, len(raw_properties) > MAX_RUNTIME_HOOK_BINDINGS
+
+    def _runtime_hook_remote_preview(self, value: Any) -> Optional[dict[str, Any]]:
+        remote = self._remote_object(value)
+        if remote is None:
+            return None
+        remote.pop("object_id", None)
+        if isinstance(remote.get("value"), str):
+            original = remote["value"]
+            remote["value_truncated"] = (
+                remote["value_truncated"]
+                or len(original.encode("utf-8"))
+                > MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES
+            )
+            remote["value"] = self._truncate_text(
+                original, MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES
+            )
+        for field in ("description", "unserializable_value", "class_name"):
+            if isinstance(remote.get(field), str):
+                remote[field] = self._truncate_text(
+                    remote[field], MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES
+                )
+        return remote
+
+    @staticmethod
+    def _runtime_hook_call_argument(remote: dict[str, Any]) -> dict[str, Any]:
+        if "value" in remote:
+            return {"value": remote["value"]}
+        if isinstance(remote.get("unserializableValue"), str):
+            return {"unserializableValue": remote["unserializableValue"]}
+        if isinstance(remote.get("objectId"), str):
+            return {"objectId": remote["objectId"]}
+        raise DebuggerBridgeError("Runtime Hooks expression result cannot be returned")
+
+    def _append_runtime_hook_hit_locked(
+        self,
+        *,
+        hook: dict[str, Any],
+        phase: str,
+        raw_frame: dict[str, Any],
+        operation: str,
+        bindings: list[dict[str, Any]],
+        bindings_truncated: bool,
+        original_return: Optional[dict[str, Any]],
+        replacement_return: Optional[dict[str, Any]],
+        error: Optional[str],
+    ) -> None:
+        location = self._parse_location(raw_frame.get("location")) or {
+            "script_id": hook["script_id"],
+            "line": hook["line"],
+            "column": hook["column"],
+        }
+        function_name = raw_frame.get("functionName")
+        entry = {
+            "id": self._next_runtime_hook_hit_id,
+            "occurred_at_ms": int(time.time() * 1_000),
+            "session_id": self._runtime_hooks["session_id"],
+            "hook_id": hook["id"],
+            "target_id": self._runtime_hooks["target_id"],
+            "label": hook["label"],
+            "source": self._truncate_text(hook["url"], MAX_INTERCEPTION_URL_BYTES),
+            "function": self._truncate_text(function_name, 256)
+            if isinstance(function_name, str) and function_name
+            else "(anonymous)",
+            "category": phase,
+            "operation": operation,
+            "line": location["line"],
+            "column": location["column"],
+            "bindings": bindings,
+            "bindings_truncated": bindings_truncated,
+            "original_return": original_return,
+            "replacement_return": replacement_return,
+            "error": self._truncate_text(error, 512) if error else None,
+        }
+        self._next_runtime_hook_hit_id += 1
+        self._runtime_hooks["total_hits"] += 1
+        hits = self._runtime_hooks["hits"]
+        hits.append(entry)
+        if len(hits) > MAX_RUNTIME_HOOK_RETAINED_HITS:
+            del hits[: len(hits) - MAX_RUNTIME_HOOK_RETAINED_HITS]
+            self._runtime_hooks["hit_evictions"] += 1
+        if error:
+            self._runtime_hooks["last_failure"] = entry["error"]
+
+    def _process_runtime_hook_pause(
+        self,
+        epoch: int,
+        matches: list[dict[str, Any]],
+        params: dict[str, Any],
+    ) -> None:
+        raw_frames = params.get("callFrames")
+        raw_frame = raw_frames[0] if isinstance(raw_frames, list) and raw_frames else None
+        frame_id = raw_frame.get("callFrameId") if isinstance(raw_frame, dict) else None
+        with self._lock:
+            hooks_by_id = {
+                item["id"]: copy.deepcopy(item)
+                for item in self._runtime_hooks["definitions"]
+            }
+            session_id = self._runtime_hooks["session_id"]
+        object_group = f"reb-runtime-hook-{session_id}-{self._next_runtime_hook_hit_id}"
+        auto_disarm = False
+        fatal_error: Optional[str] = None
+        try:
+            if (
+                not isinstance(raw_frame, dict)
+                or not isinstance(frame_id, str)
+                or len(frame_id.encode("utf-8")) > MAX_TARGET_ID_BYTES
+            ):
+                raise ProtocolError("Debugger omitted the Runtime Hooks top frame")
+            for match in matches:
+                hook = hooks_by_id.get(match["hook_id"])
+                if hook is None:
+                    continue
+                for phase in match["phases"]:
+                    with self._lock:
+                        if (
+                            epoch != self._runtime_hook_epoch
+                            or self._runtime_hooks["total_hits"]
+                            >= MAX_RUNTIME_HOOK_HITS
+                        ):
+                            auto_disarm = True
+                            break
+                    bindings: list[dict[str, Any]] = []
+                    bindings_truncated = False
+                    original_return = (
+                        self._runtime_hook_remote_preview(raw_frame.get("returnValue"))
+                        if phase == "return"
+                        else None
+                    )
+                    replacement_return = None
+                    operation = "observed"
+                    error = None
+                    try:
+                        if hook["condition"]:
+                            condition_remote = self._runtime_hook_evaluate(
+                                frame_id,
+                                f"Boolean(({hook['condition']}))",
+                                object_group,
+                                return_by_value=True,
+                                throw_on_side_effect=True,
+                            )
+                            if condition_remote.get("value") is not True:
+                                operation = "skipped"
+                                with self._lock:
+                                    self._append_runtime_hook_hit_locked(
+                                        hook=hook,
+                                        phase=phase,
+                                        raw_frame=raw_frame,
+                                        operation=operation,
+                                        bindings=[],
+                                        bindings_truncated=False,
+                                        original_return=original_return,
+                                        replacement_return=None,
+                                        error=None,
+                                    )
+                                    self._changed()
+                                continue
+                        bindings, bindings_truncated = self._runtime_hook_bindings(
+                            raw_frame
+                        )
+                        logic = (
+                            hook["entry_logic"]
+                            if phase == "entry"
+                            else hook["return_logic"]
+                        )
+                        if logic:
+                            logic_remote = self._runtime_hook_evaluate(
+                                frame_id,
+                                f"(()=>{{\n{logic}\n}})()",
+                                object_group,
+                                return_by_value=False,
+                                throw_on_side_effect=False,
+                            )
+                            if logic_remote.get("subtype") == "promise":
+                                raise DebuggerBridgeError(
+                                    "Injected logic returned a Promise; only synchronous logic is supported"
+                                )
+                            operation = "logic_run"
+                        if phase == "return" and hook["return_mode"] != "none":
+                            raw_return = raw_frame.get("returnValue")
+                            if (
+                                isinstance(raw_return, dict)
+                                and raw_return.get("subtype") == "promise"
+                            ):
+                                raise DebuggerBridgeError(
+                                    "Promise return values cannot be synchronously replaced"
+                                )
+                            if hook["return_mode"] == "json":
+                                argument = {"value": hook["return_value"]}
+                                replacement_return = {
+                                    "type": (
+                                        "null"
+                                        if hook["return_value"] is None
+                                        else type(hook["return_value"]).__name__
+                                    ),
+                                    "subtype": None,
+                                    "class_name": None,
+                                    "description": self._truncate_text(
+                                        json.dumps(
+                                            hook["return_value"],
+                                            ensure_ascii=False,
+                                            separators=(",", ":"),
+                                        ),
+                                        MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES,
+                                    ),
+                                    "value": hook["return_value"]
+                                    if isinstance(
+                                        hook["return_value"],
+                                        (str, bool, int, float),
+                                    )
+                                    or hook["return_value"] is None
+                                    else None,
+                                    "unserializable_value": None,
+                                    "value_truncated": hook["return_value_bytes"]
+                                    > MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES,
+                                }
+                            else:
+                                replacement_remote = self._runtime_hook_evaluate(
+                                    frame_id,
+                                    hook["return_expression"],
+                                    object_group,
+                                    return_by_value=False,
+                                    throw_on_side_effect=False,
+                                )
+                                if replacement_remote.get("subtype") == "promise":
+                                    raise DebuggerBridgeError(
+                                        "A Promise expression cannot be used as a synchronous return value"
+                                    )
+                                argument = self._runtime_hook_call_argument(
+                                    replacement_remote
+                                )
+                                replacement_return = self._runtime_hook_remote_preview(
+                                    replacement_remote
+                                )
+                            self._command(
+                                "Debugger.setReturnValue", {"newValue": argument}
+                            )
+                            operation = "return_overridden"
+                    except DebuggerBridgeError as exception:
+                        operation = "failed"
+                        error = str(exception)
+                    with self._lock:
+                        if epoch != self._runtime_hook_epoch:
+                            auto_disarm = True
+                            break
+                        self._append_runtime_hook_hit_locked(
+                            hook=hook,
+                            phase=phase,
+                            raw_frame=raw_frame,
+                            operation=operation,
+                            bindings=bindings,
+                            bindings_truncated=bindings_truncated,
+                            original_return=original_return,
+                            replacement_return=replacement_return,
+                            error=error,
+                        )
+                        auto_disarm = (
+                            self._runtime_hooks["total_hits"]
+                            >= MAX_RUNTIME_HOOK_HITS
+                        )
+                        self._changed()
+                    if auto_disarm:
+                        break
+                if auto_disarm:
+                    break
+        except DebuggerBridgeError as exception:
+            fatal_error = self._truncate_text(str(exception), 512)
+            auto_disarm = True
+        finally:
+            try:
+                self._command("Runtime.releaseObjectGroup", {"objectGroup": object_group})
+            except DebuggerBridgeError:
+                pass
+            try:
+                self._command("Debugger.resume")
+            except DebuggerBridgeError as exception:
+                fatal_error = self._truncate_text(str(exception), 512)
+                auto_disarm = True
+            deferred: Optional[dict[str, Any]] = None
+            with self._lock:
+                stop_requested = self._runtime_hook_stop_requested
+                still_current = epoch == self._runtime_hook_epoch
+                if still_current and fatal_error:
+                    self._runtime_hooks["last_failure"] = fatal_error
+                    self._runtime_hooks["message"] = fatal_error
+                if still_current:
+                    candidate = self._runtime_hook_deferred_pause
+                    self._runtime_hook_deferred_pause = None
+                    if (
+                        isinstance(candidate, dict)
+                        and candidate.get("epoch") == epoch
+                    ):
+                        deferred = candidate
+                if (
+                    still_current
+                    and deferred is not None
+                    and not (auto_disarm or stop_requested)
+                ):
+                    self._runtime_hooks["state"] = "handling"
+                    self._runtime_hooks["message"] = (
+                        "Handling the queued synchronous return phase."
+                    )
+                    self._changed()
+                elif still_current and not (auto_disarm or stop_requested):
+                    self._runtime_hook_processing = False
+                    self._runtime_hooks["state"] = "armed"
+                    self._runtime_hooks["message"] = (
+                        f"Runtime Hooks armed. {self._runtime_hooks['total_hits']} hits observed."
+                    )
+                    self._changed()
+            if still_current and deferred is not None and not (
+                auto_disarm or stop_requested
+            ):
+                try:
+                    threading.Thread(
+                        target=self._process_runtime_hook_pause,
+                        args=(epoch, deferred["matches"], deferred["params"]),
+                        name="reb-runtime-hooks",
+                        daemon=True,
+                    ).start()
+                    return
+                except RuntimeError as exception:
+                    fatal_error = self._truncate_text(
+                        f"Runtime Hooks worker could not continue: {exception}", 512
+                    )
+                    auto_disarm = True
+                    with self._lock:
+                        if epoch == self._runtime_hook_epoch:
+                            self._runtime_hooks["last_failure"] = fatal_error
+                            self._changed()
+            if still_current and deferred is not None and (
+                auto_disarm or stop_requested
+            ):
+                try:
+                    self._command("Debugger.resume")
+                except DebuggerBridgeError:
+                    pass
+            if still_current and (auto_disarm or stop_requested):
+                reason = (
+                    "Runtime Hooks reached the 512-hit limit and disarmed automatically."
+                    if auto_disarm and not fatal_error
+                    else "Runtime Hooks disarmed after the current hook operation."
+                )
+                self._remove_runtime_hook_points(reason, expected_epoch=epoch)
+
     def _search_heap_snapshot(self, request: dict[str, Any]) -> dict[str, Any]:
         query = self._optional_search_text(request, "query").strip()
         case_sensitive = request.get("case_sensitive", False)
@@ -2737,6 +3841,36 @@ class DebuggerBridge:
         }
 
     @staticmethod
+    def _empty_runtime_hooks() -> dict[str, Any]:
+        return {
+            "protocol_version": 1,
+            "session_id": 0,
+            "state": "idle",
+            "isolated": False,
+            "target_id": None,
+            "definitions": [],
+            "active_points": 0,
+            "total_hits": 0,
+            "hits": [],
+            "hit_evictions": 0,
+            "last_failure": None,
+            "message": "Create an isolated Experiment context to use Runtime Hooks.",
+            "limits": {
+                "definitions": MAX_RUNTIME_HOOKS,
+                "active_points": MAX_RUNTIME_HOOK_BREAKPOINTS,
+                "return_points_per_definition": MAX_RUNTIME_HOOK_RETURN_POINTS,
+                "total_hits": MAX_RUNTIME_HOOK_HITS,
+                "retained_hits": MAX_RUNTIME_HOOK_RETAINED_HITS,
+                "bindings_per_hit": MAX_RUNTIME_HOOK_BINDINGS,
+                "binding_preview_bytes": MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES,
+                "condition_bytes": MAX_RUNTIME_HOOK_CONDITION_BYTES,
+                "logic_bytes": MAX_RUNTIME_HOOK_LOGIC_BYTES,
+                "return_bytes": MAX_RUNTIME_HOOK_RETURN_BYTES,
+                "evaluation_timeout_ms": RUNTIME_HOOK_EVALUATION_TIMEOUT_MS,
+            },
+        }
+
+    @staticmethod
     def _empty_repeater() -> dict[str, Any]:
         return {
             "protocol_version": 1,
@@ -2786,6 +3920,21 @@ class DebuggerBridge:
         self._object_experiment_objects_id = None
         self._object_experiment_result_indices.clear()
 
+    def _begin_runtime_hook_session_locked(self, session_id: int) -> None:
+        self._runtime_hooks = self._empty_runtime_hooks()
+        self._runtime_hooks.update(
+            {
+                "session_id": session_id,
+                "state": "attaching",
+                "message": "Waiting for the disposable Runtime Hooks page to attach.",
+            }
+        )
+        self._runtime_hook_points.clear()
+        self._runtime_hook_processing = False
+        self._runtime_hook_stop_requested = False
+        self._runtime_hook_deferred_pause = None
+        self._runtime_hook_epoch += 1
+
     def _dispose_object_experiment_locked(self, session_id: int) -> None:
         self._object_experiment = self._empty_object_experiment()
         self._object_experiment.update(
@@ -2801,6 +3950,24 @@ class DebuggerBridge:
         self._object_experiment_group = None
         self._object_experiment_objects_id = None
         self._object_experiment_result_indices.clear()
+
+    def _dispose_runtime_hooks_locked(self, session_id: int) -> None:
+        self._runtime_hooks = self._empty_runtime_hooks()
+        self._runtime_hooks.update(
+            {
+                "session_id": session_id,
+                "state": "disposed",
+                "message": (
+                    "Disposable context deleted. Hook code, captured bindings, "
+                    "return values, and hit records were cleared."
+                ),
+            }
+        )
+        self._runtime_hook_points.clear()
+        self._runtime_hook_processing = False
+        self._runtime_hook_stop_requested = False
+        self._runtime_hook_deferred_pause = None
+        self._runtime_hook_epoch += 1
 
     def _dispose_repeater_locked(self, session_id: int) -> None:
         self._repeater = self._empty_repeater()
@@ -3489,6 +4656,7 @@ class DebuggerBridge:
             self._request_interception_return_target_id = return_target_id
             self._begin_repeater_session_locked(experiment_id)
             self._begin_object_experiment_session_locked(experiment_id)
+            self._begin_runtime_hook_session_locked(experiment_id)
             self._changed()
 
         context_id: Optional[str] = None
@@ -3538,6 +4706,9 @@ class DebuggerBridge:
                 self._object_experiment["state"] = "error"
                 self._object_experiment["isolated"] = cleanup_error is not None
                 self._object_experiment["message"] = self._truncate_text(message, 512)
+                self._runtime_hooks["state"] = "error"
+                self._runtime_hooks["isolated"] = cleanup_error is not None
+                self._runtime_hooks["message"] = self._truncate_text(message, 512)
                 self._changed()
             raise
 
@@ -3553,6 +4724,11 @@ class DebuggerBridge:
             self._object_experiment["message"] = (
                 "Isolated context created. Attaching the Object Lab page."
             )
+            self._runtime_hooks["isolated"] = True
+            self._runtime_hooks["target_id"] = target_id
+            self._runtime_hooks["message"] = (
+                "Isolated context created. Attaching the Runtime Hooks page."
+            )
             self._preferred_target_id = target_id
             connection = self._connection
             self._changed()
@@ -3562,6 +4738,7 @@ class DebuggerBridge:
             "ok": True,
             "experiment": copy.deepcopy(self._request_interception),
             "object_experiment": copy.deepcopy(self._object_experiment),
+            "runtime_hooks": copy.deepcopy(self._runtime_hooks),
             "repeater": copy.deepcopy(self._repeater),
             "generation": self.generation(),
         }
@@ -3698,11 +4875,13 @@ class DebuggerBridge:
         with self._lock:
             experiment = copy.deepcopy(self._request_interception)
             object_experiment = copy.deepcopy(self._object_experiment)
+            runtime_hooks = copy.deepcopy(self._runtime_hooks)
             repeater = copy.deepcopy(self._repeater)
         return {
             "ok": True,
             "experiment": experiment,
             "object_experiment": object_experiment,
+            "runtime_hooks": runtime_hooks,
             "repeater": repeater,
             "generation": self.generation(),
         }
@@ -3728,18 +4907,26 @@ class DebuggerBridge:
                     self._object_experiment_group = None
                     self._object_experiment_objects_id = None
                     self._object_experiment_result_indices.clear()
+                    self._runtime_hooks = self._empty_runtime_hooks()
+                    self._runtime_hook_points.clear()
+                    self._runtime_hook_processing = False
+                    self._runtime_hook_stop_requested = False
+                    self._runtime_hook_deferred_pause = None
+                    self._runtime_hook_epoch += 1
                     self._changed()
                 return
             if not force and (
                 self._request_interception["state"] == "running"
                 or self._request_interception_pending
                 or self._repeater_active_execution_id is not None
+                or self._runtime_hook_processing
             ):
                 raise DebuggerBridgeError(
                     "Finish or cancel active request-lab work before disposing its context"
                 )
             repeater_session_id = self._repeater["session_id"]
             object_session_id = self._object_experiment["session_id"]
+            runtime_hook_session_id = self._runtime_hooks["session_id"]
             self._request_interception["state"] = "disposing"
             self._request_interception["message"] = (
                 "Disposing the isolated browser context and all of its storage."
@@ -3748,6 +4935,10 @@ class DebuggerBridge:
             self._object_experiment["state"] = "disposing"
             self._object_experiment["message"] = (
                 "Disposing Object Lab and releasing all live references."
+            )
+            self._runtime_hooks["state"] = "disposing"
+            self._runtime_hooks["message"] = (
+                "Disposing Runtime Hooks and erasing code and captured values."
             )
             connection = (
                 self._connection
@@ -3776,6 +4967,8 @@ class DebuggerBridge:
                 self._object_experiment["message"] = self._request_interception[
                     "message"
                 ]
+                self._runtime_hooks["state"] = "error"
+                self._runtime_hooks["message"] = self._request_interception["message"]
                 self._changed()
             if preserve_result:
                 raise
@@ -3797,10 +4990,17 @@ class DebuggerBridge:
                 )
                 self._dispose_repeater_locked(repeater_session_id)
                 self._dispose_object_experiment_locked(object_session_id)
+                self._dispose_runtime_hooks_locked(runtime_hook_session_id)
             else:
                 self._request_interception = self._empty_request_interception()
                 self._repeater = self._empty_repeater()
                 self._object_experiment = self._empty_object_experiment()
+                self._runtime_hooks = self._empty_runtime_hooks()
+                self._runtime_hook_points.clear()
+                self._runtime_hook_processing = False
+                self._runtime_hook_stop_requested = False
+                self._runtime_hook_deferred_pause = None
+                self._runtime_hook_epoch += 1
                 self._repeater_history_bytes = 0
                 self._repeater_active_execution_id = None
                 self._repeater_cancel_requested = False
@@ -3823,6 +5023,12 @@ class DebuggerBridge:
             self._object_experiment_group = None
             self._object_experiment_objects_id = None
             self._object_experiment_result_indices.clear()
+            self._runtime_hooks = self._empty_runtime_hooks()
+            self._runtime_hook_points.clear()
+            self._runtime_hook_processing = False
+            self._runtime_hook_stop_requested = False
+            self._runtime_hook_deferred_pause = None
+            self._runtime_hook_epoch += 1
             self._changed()
         return {"ok": True, "generation": self.generation()}
 
@@ -5246,6 +6452,7 @@ class DebuggerBridge:
         reader.start()
         try:
             self._command("Runtime.enable")
+            self._command("Page.enable")
             self._command(
                 "Debugger.enable", {"maxScriptsCacheSize": float(100 * 1024 * 1024)}
             )
@@ -5308,6 +6515,25 @@ class DebuggerBridge:
                         self._object_experiment["state"] = "error"
                         self._object_experiment["message"] = (
                             "Object Lab target disconnected. Reattach it and run the search again."
+                        )
+                if self._runtime_hooks.get("target_id") == target["id"]:
+                    self._runtime_hook_points.clear()
+                    self._runtime_hook_processing = False
+                    self._runtime_hook_stop_requested = False
+                    self._runtime_hook_deferred_pause = None
+                    self._runtime_hook_epoch += 1
+                    self._runtime_hooks["active_points"] = 0
+                    self._runtime_hooks["definitions"] = []
+                    if self._runtime_hooks["state"] not in {
+                        "disposing",
+                        "disposed",
+                    }:
+                        self._runtime_hooks["state"] = "error"
+                        self._runtime_hooks["last_failure"] = (
+                            "The isolated target disconnected. Hook definitions were cleared."
+                        )
+                        self._runtime_hooks["message"] = (
+                            "Runtime Hooks target disconnected. Reattach it and add hooks again."
                         )
                 if self._connection is connection:
                     self._connection = None
@@ -5376,7 +6602,14 @@ class DebuggerBridge:
                     self._scripts[script["script_id"]] = script
                     self._changed()
             return
+        if method == "Page.frameNavigated":
+            frame = params.get("frame")
+            if isinstance(frame, dict) and not isinstance(frame.get("parentId"), str):
+                self._handle_runtime_hook_navigation()
+            return
         if method == "Debugger.paused":
+            if self._handle_runtime_hook_pause_async(params):
+                return
             paused = self._parse_pause(params)
             with self._lock:
                 self._pause_serial += 1
@@ -5726,6 +6959,19 @@ class DebuggerBridge:
                 else "Object Lab page reattached. Run the bounded search again."
                 if self._object_experiment["url"]
                 else "Object Lab is isolated and ready for an explicit page URL."
+            )
+            self._runtime_hooks["isolated"] = True
+            self._runtime_hooks["target_id"] = target_id
+            self._runtime_hook_points.clear()
+            self._runtime_hook_processing = False
+            self._runtime_hook_stop_requested = False
+            self._runtime_hook_deferred_pause = None
+            self._runtime_hook_epoch += 1
+            self._runtime_hooks["active_points"] = 0
+            self._runtime_hooks["definitions"] = []
+            self._runtime_hooks["state"] = "ready"
+            self._runtime_hooks["message"] = (
+                "Runtime Hooks is isolated and ready for a live JavaScript function."
             )
             self._changed()
 

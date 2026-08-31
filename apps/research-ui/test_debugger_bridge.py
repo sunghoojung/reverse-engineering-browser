@@ -2144,6 +2144,414 @@ process.stdout.write(JSON.stringify({{
                 }
             )
 
+    def test_runtime_hooks_arm_capture_override_disarm_and_erase(self) -> None:
+        class RuntimeHookBridge(DebuggerBridge):
+            def __init__(self) -> None:
+                super().__init__()
+                self.commands = []
+                self.breakpoint_index = 0
+                self.pause_on_resume = None
+                self._state = "running"
+                self._target = {
+                    "id": "hook-page",
+                    "type": "page",
+                    "title": "Hook Lab",
+                    "url": "https://app.test/lab",
+                }
+                self._request_interception_context_id = "hook-context"
+                self._request_interception = self._empty_request_interception()
+                self._request_interception.update(
+                    {
+                        "experiment_id": 7,
+                        "state": "ready",
+                        "isolated": True,
+                        "target_id": "hook-page",
+                        "created_at_ms": 1,
+                    }
+                )
+                self._begin_runtime_hook_session_locked(7)
+                self._runtime_hooks.update(
+                    {"state": "ready", "isolated": True, "target_id": "hook-page"}
+                )
+                self._scripts["script-hook"] = {
+                    "script_id": "script-hook",
+                    "url": "https://app.test/lab.js?private=ephemeral",
+                    "start_line": 0,
+                    "start_column": 0,
+                    "end_line": 20,
+                    "end_column": 0,
+                    "execution_context_id": 1,
+                    "hash": "",
+                    "source_map_url": "",
+                    "has_source_url": False,
+                    "is_module": False,
+                    "length": 100,
+                    "language": "JavaScript",
+                }
+
+            def _command(self, method: str, params=None, timeout: float = 3.0) -> dict:
+                params = params or {}
+                self.commands.append((method, params, timeout))
+                if method == "Debugger.getPossibleBreakpoints":
+                    return {
+                        "locations": [
+                            {
+                                "scriptId": "script-hook",
+                                "lineNumber": 3,
+                                "columnNumber": 0,
+                                "type": "call",
+                            },
+                            {
+                                "scriptId": "script-hook",
+                                "lineNumber": 5,
+                                "columnNumber": 2,
+                                "type": "return",
+                            },
+                        ]
+                    }
+                if method == "Debugger.setBreakpoint":
+                    self.breakpoint_index += 1
+                    return {"breakpointId": f"hook-breakpoint-{self.breakpoint_index}"}
+                if method == "Debugger.evaluateOnCallFrame":
+                    expression = params.get("expression", "")
+                    if expression.startswith("Boolean(("):
+                        return {"result": {"type": "boolean", "value": True}}
+                    return {"result": {"type": "undefined", "description": "undefined"}}
+                if method == "Runtime.getProperties":
+                    properties = [
+                        {
+                            "name": "accessor",
+                            "get": {"type": "function", "description": "get accessor"},
+                        },
+                        {"name": "notInitialized"},
+                    ]
+                    properties.extend(
+                        {
+                            "name": f"argument{index}",
+                            "value": {
+                                "type": "string",
+                                "value": "value-" + str(index),
+                            },
+                        }
+                        for index in range(40)
+                    )
+                    return {"result": properties}
+                if method == "Debugger.resume" and self.pause_on_resume is not None:
+                    pause = self.pause_on_resume
+                    self.pause_on_resume = None
+                    self._handle_runtime_hook_pause_async(pause)
+                return {}
+
+        bridge = RuntimeHookBridge()
+        added = bridge.action(
+            {
+                "action": "add_runtime_hook",
+                "label": "checkout guard",
+                "script_id": "script-hook",
+                "line": 3,
+                "column": 0,
+                "entry_enabled": True,
+                "return_enabled": True,
+                "condition": "cart.total > 100",
+                "entry_logic": "cart.reviewed = true;",
+                "return_logic": "window.__hookHits = 1;",
+                "return_mode": "json",
+                "return_value": {"allowed": True},
+            }
+        )["runtime_hooks"]
+        self.assertEqual(len(added["definitions"]), 1)
+        self.assertNotIn("private=ephemeral", json.dumps(added))
+        with self.assertRaisesRegex(DebuggerBridgeError, "confirmation"):
+            bridge.action({"action": "arm_runtime_hooks"})
+
+        armed = bridge.action(
+            {"action": "arm_runtime_hooks", "confirmed": True}
+        )["runtime_hooks"]
+        self.assertEqual(armed["state"], "armed")
+        self.assertEqual(armed["active_points"], 2)
+        self.assertEqual(
+            armed["definitions"][0]["resolved"],
+            {"entry_points": 1, "return_points": 1},
+        )
+
+        return_breakpoint = next(
+            breakpoint_id
+            for breakpoint_id, point in bridge._runtime_hook_points.items()
+            if "return" in point["phases"]
+        )
+        bridge.pause_on_resume = {
+            "hitBreakpoints": [return_breakpoint],
+            "callFrames": [
+                {
+                    "callFrameId": "frame-return",
+                    "functionName": "checkout",
+                    "location": {
+                        "scriptId": "script-hook",
+                        "lineNumber": 5,
+                        "columnNumber": 2,
+                    },
+                    "scopeChain": [
+                        {"type": "local", "object": {"objectId": "locals-return"}}
+                    ],
+                    "returnValue": {"type": "boolean", "value": False},
+                }
+            ],
+        }
+
+        entry_breakpoint = next(
+            breakpoint_id
+            for breakpoint_id, point in bridge._runtime_hook_points.items()
+            if "entry" in point["phases"]
+        )
+        entry_pause = {
+            "hitBreakpoints": [entry_breakpoint],
+            "callFrames": [
+                {
+                    "callFrameId": "frame-entry",
+                    "functionName": "checkout",
+                    "location": {
+                        "scriptId": "script-hook",
+                        "lineNumber": 3,
+                        "columnNumber": 0,
+                    },
+                    "scopeChain": [
+                        {"type": "local", "object": {"objectId": "locals-entry"}}
+                    ],
+                }
+            ],
+        }
+        self.assertTrue(bridge._handle_runtime_hook_pause_async(entry_pause))
+        first_hit = self.wait_for(
+            lambda: bridge.snapshot()["runtime_hooks"]["state"] == "armed"
+            and bridge.snapshot()["runtime_hooks"]["total_hits"] == 2
+            and bridge.snapshot()["runtime_hooks"]
+        )
+        self.assertEqual(first_hit["hits"][0]["operation"], "logic_run")
+        self.assertEqual(len(first_hit["hits"][0]["bindings"]), 32)
+        self.assertTrue(first_hit["hits"][0]["bindings_truncated"])
+        self.assertTrue(first_hit["hits"][0]["bindings"][0]["accessor"])
+        self.assertFalse(first_hit["hits"][0]["bindings"][1]["accessor"])
+        self.assertEqual(
+            first_hit["hits"][0]["bindings"][1]["value"]["description"],
+            "Not initialized or unavailable",
+        )
+        self.assertNotIn("object_id", json.dumps(first_hit["hits"]))
+        self.assertEqual(first_hit["hits"][-1]["operation"], "return_overridden")
+        override = next(
+            params
+            for method, params, _ in bridge.commands
+            if method == "Debugger.setReturnValue"
+        )
+        self.assertEqual(override["newValue"], {"value": {"allowed": True}})
+        self.assertGreaterEqual(
+            sum(method == "Debugger.resume" for method, _, _ in bridge.commands), 2
+        )
+
+        disarmed = bridge.action({"action": "disarm_runtime_hooks"})[
+            "runtime_hooks"
+        ]
+        self.assertEqual(disarmed["state"], "disarmed")
+        self.assertEqual(disarmed["active_points"], 0)
+        self.assertEqual(len(disarmed["definitions"]), 1)
+        bridge._handle_runtime_hook_navigation()
+        self.assertEqual(bridge.snapshot()["runtime_hooks"]["definitions"], [])
+        bridge._dispose_runtime_hooks_locked(7)
+        erased = bridge.snapshot()["runtime_hooks"]
+        self.assertEqual(erased["state"], "disposed")
+        self.assertEqual(erased["hits"], [])
+        self.assertEqual(erased["definitions"], [])
+
+    def test_runtime_hooks_reject_promises_bounds_and_partial_arming(self) -> None:
+        bridge = DebuggerBridge()
+        with self.assertRaisesRegex(DebuggerBridgeError, "8 KiB"):
+            bridge._normalize_runtime_hook_json("x" * (8 * 1024 + 1))
+        with self.assertRaisesRegex(DebuggerBridgeError, "depth 8"):
+            bridge._normalize_runtime_hook_json([[[[[[[[[True]]]]]]]]])
+
+        class PartialArmBridge(DebuggerBridge):
+            def __init__(self) -> None:
+                super().__init__()
+                self.commands = []
+                self.set_count = 0
+                self._state = "running"
+                self._target = {"id": "hook-page"}
+                self._request_interception_context_id = "hook-context"
+                self._request_interception = self._empty_request_interception()
+                self._request_interception.update(
+                    {"state": "ready", "isolated": True, "target_id": "hook-page"}
+                )
+                self._begin_runtime_hook_session_locked(1)
+                self._runtime_hooks.update(
+                    {"state": "ready", "isolated": True, "target_id": "hook-page"}
+                )
+                self._scripts["script"] = {
+                    "script_id": "script",
+                    "url": "https://app.test/lab.js",
+                    "start_line": 0,
+                    "end_line": 10,
+                    "language": "JavaScript",
+                }
+
+            def _command(self, method: str, params=None, timeout: float = 3.0) -> dict:
+                self.commands.append((method, params or {}))
+                if method == "Debugger.getPossibleBreakpoints":
+                    return {"locations": [
+                        {"scriptId": "script", "lineNumber": 1, "columnNumber": 0, "type": "call"},
+                        {"scriptId": "script", "lineNumber": 2, "columnNumber": 0, "type": "return"},
+                    ]}
+                if method == "Debugger.setBreakpoint":
+                    self.set_count += 1
+                    if self.set_count == 2:
+                        raise DebuggerBridgeError("second point failed")
+                    return {"breakpointId": "partial-point"}
+                return {}
+
+        partial = PartialArmBridge()
+        partial.action(
+            {
+                "action": "add_runtime_hook",
+                "label": "partial",
+                "script_id": "script",
+                "line": 1,
+                "column": 0,
+                "entry_enabled": True,
+                "return_enabled": True,
+                "return_mode": "none",
+            }
+        )
+        with self.assertRaisesRegex(DebuggerBridgeError, "second point failed"):
+            partial.action({"action": "arm_runtime_hooks", "confirmed": True})
+        failed = partial.snapshot()["runtime_hooks"]
+        self.assertEqual(failed["state"], "disarmed")
+        self.assertEqual(failed["active_points"], 0)
+        self.assertEqual(partial._runtime_hook_points, {})
+        self.assertIn(
+            ("Debugger.removeBreakpoint", {"breakpointId": "partial-point"}),
+            partial.commands,
+        )
+
+        class ExcessReturnsBridge(PartialArmBridge):
+            def _command(self, method: str, params=None, timeout: float = 3.0) -> dict:
+                if method == "Debugger.getPossibleBreakpoints":
+                    return {
+                        "locations": [
+                            {
+                                "scriptId": "script",
+                                "lineNumber": index + 1,
+                                "columnNumber": 0,
+                                "type": "return" if index else "call",
+                            }
+                            for index in range(34)
+                        ]
+                    }
+                return super()._command(method, params, timeout)
+
+        excess = ExcessReturnsBridge()
+        excess.action(
+            {
+                "action": "add_runtime_hook",
+                "label": "too many returns",
+                "script_id": "script",
+                "line": 1,
+                "column": 0,
+                "entry_enabled": True,
+                "return_enabled": True,
+                "return_mode": "none",
+            }
+        )
+        with self.assertRaisesRegex(DebuggerBridgeError, "32 synchronous"):
+            excess.action({"action": "arm_runtime_hooks", "confirmed": True})
+        self.assertFalse(
+            any(method == "Debugger.setBreakpoint" for method, _ in excess.commands)
+        )
+
+        entry_only = ExcessReturnsBridge()
+        armed_entry_only = entry_only.action(
+            {
+                "action": "add_runtime_hook",
+                "label": "entry only",
+                "script_id": "script",
+                "line": 1,
+                "column": 0,
+                "entry_enabled": True,
+                "return_enabled": False,
+                "return_mode": "none",
+            }
+        )
+        self.assertEqual(len(armed_entry_only["runtime_hooks"]["definitions"]), 1)
+        armed_entry_only = entry_only.action(
+            {"action": "arm_runtime_hooks", "confirmed": True}
+        )["runtime_hooks"]
+        self.assertEqual(armed_entry_only["active_points"], 1)
+        self.assertEqual(
+            armed_entry_only["definitions"][0]["resolved"],
+            {"entry_points": 1, "return_points": 0},
+        )
+        entry_only.action({"action": "disarm_runtime_hooks"})
+
+        class PromiseBridge(PartialArmBridge):
+            def _command(self, method: str, params=None, timeout: float = 3.0) -> dict:
+                if method == "Debugger.setBreakpoint":
+                    self.commands.append((method, params or {}))
+                    return {"breakpointId": "promise-return"}
+                if method == "Runtime.getProperties":
+                    self.commands.append((method, params or {}))
+                    return {"result": []}
+                return super()._command(method, params, timeout)
+
+        promise = PromiseBridge()
+        promise.action(
+            {
+                "action": "add_runtime_hook",
+                "label": "promise guard",
+                "script_id": "script",
+                "line": 1,
+                "column": 0,
+                "entry_enabled": False,
+                "return_enabled": True,
+                "return_mode": "json",
+                "return_value": False,
+            }
+        )
+        promise.action({"action": "arm_runtime_hooks", "confirmed": True})
+        self.assertTrue(
+            promise._handle_runtime_hook_pause_async(
+                {
+                    "hitBreakpoints": ["promise-return"],
+                    "callFrames": [
+                        {
+                            "callFrameId": "promise-frame",
+                            "functionName": "load",
+                            "location": {
+                                "scriptId": "script",
+                                "lineNumber": 2,
+                                "columnNumber": 0,
+                            },
+                            "scopeChain": [],
+                            "returnValue": {
+                                "type": "object",
+                                "subtype": "promise",
+                                "className": "Promise",
+                                "description": "Promise",
+                                "objectId": "promise-object",
+                            },
+                        }
+                    ],
+                }
+            )
+        )
+        promise_hit = self.wait_for(
+            lambda: promise.snapshot()["runtime_hooks"]["state"] == "armed"
+            and promise.snapshot()["runtime_hooks"]["hits"]
+            and promise.snapshot()["runtime_hooks"]["hits"][-1]
+        )
+        self.assertEqual(promise_hit["operation"], "failed")
+        self.assertIn("Promise return values", promise_hit["error"])
+        self.assertFalse(
+            any(method == "Debugger.setReturnValue" for method, _ in promise.commands)
+        )
+        promise.action({"action": "disarm_runtime_hooks"})
+
     def test_object_experiment_mutator_never_invokes_accessors(self) -> None:
         node = shutil.which("node")
         if node is None:

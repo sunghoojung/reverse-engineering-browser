@@ -938,6 +938,7 @@
         white-space: pre;
       }
       .source-line.current { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+      .source-line.cursor:not(.current) { background: color-mix(in srgb, var(--blue) 10%, transparent); }
       .source-line.breakpoint .source-gutter { color: #f28b82; }
       .source-line.breakpoint .source-gutter::before {
         content: "";
@@ -1216,6 +1217,24 @@
       .object-result-title { min-width: 0; overflow: hidden; font: 9px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
       .object-result-count { color: var(--accent); font: 8px var(--mono); }
       .object-result-preview { grid-column: 1 / -1; color: var(--faint); font: 8px/1.45 var(--mono); overflow-wrap: anywhere; }
+      .hook-confirm { display: flex !important; grid-template-columns: none !important; align-items: flex-start; gap: 7px !important; color: var(--text) !important; line-height: 1.45 !important; text-transform: none !important; }
+      .hook-confirm input { width: auto; min-height: auto; margin-top: 1px; accent-color: var(--accent); }
+      .hook-control-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+      .hook-phase-options { display: flex; flex-wrap: wrap; gap: 12px; }
+      .hook-phase-options label { display: flex; grid-template-columns: none; align-items: center; gap: 6px; color: var(--text); text-transform: none; }
+      .hook-phase-options input { width: auto; min-height: auto; accent-color: var(--accent); }
+      .hook-definition-list, .hook-hit-list { display: grid; max-height: 430px; overflow: auto; }
+      .hook-definition-row, .hook-hit-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 9px; padding: 10px; border-bottom: 1px solid var(--line-soft); }
+      .hook-hit-row { content-visibility: auto; contain-intrinsic-size: auto 82px; }
+      .hook-definition-row:last-child, .hook-hit-row:last-child { border-bottom: 0; }
+      .hook-definition-title, .hook-hit-title { min-width: 0; overflow: hidden; color: var(--text); font: 9px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+      .hook-definition-phase, .hook-hit-operation { color: var(--accent); font: 8px var(--mono); text-transform: uppercase; }
+      .hook-definition-meta, .hook-hit-meta, .hook-hit-bindings, .hook-hit-error { grid-column: 1 / -1; color: var(--faint); font: 8px/1.45 var(--mono); overflow-wrap: anywhere; }
+      .hook-hit-bindings { color: var(--muted); }
+      .hook-hit-error { color: var(--red); }
+      .hook-remove { min-height: 24px; padding: 0 7px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); color: var(--muted); font: 8px var(--mono); }
+      .hook-remove:hover:not(:disabled) { color: var(--text); background: var(--panel-3); }
+      .hook-hits-card { min-height: 300px; }
       .object-property-preview { display: grid; max-height: 210px; margin-bottom: 9px; overflow: auto; border: 1px solid var(--line-soft); background: var(--panel); }
       .object-property-row { display: grid; grid-template-columns: minmax(90px, .8fr) 70px minmax(110px, 1.2fr); gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--line-soft); font: 8px/1.4 var(--mono); }
       .object-property-row:last-child { border-bottom: 0; }
@@ -1605,6 +1624,10 @@
         .confidence { justify-self: start; }
         .screen-head { padding: 9px 10px; }
         .screen-head-actions .secondary-button { display: none; }
+        #screen-experiments:not([hidden]) { grid-template-rows: auto auto minmax(0, 1fr); }
+        #screen-experiments > .screen-head { display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: start; gap: 8px 10px; }
+        #screen-experiments > .screen-head .screen-head-actions { width: 100%; grid-column: 1 / -1; margin-left: 0; }
+        #screen-experiments > .screen-head .experiment-mode-tabs { flex: 1 1 auto; }
         .experiment-workspace { grid-template-columns: 1fr; }
         .experiment-column:last-child { grid-column: auto; grid-template-columns: 1fr; }
         .experiment-form-row { grid-template-columns: 1fr; }
@@ -1777,6 +1800,7 @@
                 <button id="source-quick-open" class="source-tool" type="button" aria-label="Open file" title="Open file (⌘P)">⌘P</button>
                 <label><span class="sr-only" hidden>Find in source</span><input id="source-search" class="source-search" type="search" placeholder="Find" aria-label="Find in source" /></label>
                 <button id="source-pretty" class="source-tool" type="button" aria-label="Show readable representation" title="Show readable representation" disabled>{ }</button>
+                <button id="source-hook-pivot" class="source-tool" type="button" title="Add Runtime Hook at cursor" disabled>Hook</button>
                 <button id="console-toggle" class="source-tool" type="button" aria-label="Toggle console drawer" title="Toggle console drawer (Escape)">Console</button>
               </div>
               <div id="source-code-wrap" class="source-code-wrap" tabindex="0">
@@ -1951,6 +1975,7 @@
                   <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="interceptor" aria-selected="true">Interceptor</button>
                   <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="repeater" aria-selected="false" tabindex="-1">Repeater</button>
                   <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="object" aria-selected="false" tabindex="-1">Object Lab</button>
+                  <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="hooks" aria-selected="false" tabindex="-1">Runtime Hooks</button>
                 </div>
                 <span class="memory-readonly">Experiment only</span>
               </div>
@@ -2214,6 +2239,82 @@
                 </article>
               </div>
             </div>
+            <div id="hooks-workspace" class="experiment-workspace" hidden>
+              <div class="experiment-column">
+                <article class="experiment-card">
+                  <header>
+                    <div><h2>Isolated Hook Studio</h2><p id="hooks-context-message">No disposable Experiment context exists.</p></div>
+                    <span id="hooks-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span>
+                  </header>
+                  <div class="experiment-body">
+                    <div class="experiment-actions">
+                      <button id="hooks-create" class="trace-button experiment-primary" type="button">Create isolated context</button>
+                      <button id="hooks-dispose" class="secondary-button" type="button" disabled>Dispose and erase</button>
+                      <button id="hooks-clear" class="secondary-button" type="button" disabled>Clear hit records</button>
+                    </div>
+                  </div>
+                  <div class="experiment-context-facts">
+                    <div class="experiment-context-fact"><span>Storage</span><strong id="hooks-storage-state">Not allocated</strong></div>
+                    <div class="experiment-context-fact"><span>Active points</span><strong id="hooks-point-usage">0 / 64</strong></div>
+                  </div>
+                </article>
+                <article class="experiment-card">
+                  <header><div><h2>Disposable page</h2><p>Open one credential-free page, then choose one of its live functions.</p></div><span id="hooks-page-badge" class="experiment-card-badge" data-kind="offline">No page</span></header>
+                  <div class="experiment-body">
+                    <form id="hooks-navigation-form" class="experiment-form">
+                      <label>Page URL<input id="hooks-page-url" type="url" maxlength="8192" placeholder="https://app.example.test/lab" autocomplete="off" /></label>
+                      <button id="hooks-navigate" class="secondary-button" type="submit" disabled>Open isolated page</button>
+                      <p class="experiment-privacy">Navigation invalidates script identifiers and safely clears all hook definitions.</p>
+                    </form>
+                  </div>
+                </article>
+                <article class="experiment-card">
+                  <header><div><h2>Session controls</h2><p>Arming permits the configured code to mutate only this disposable page.</p></div><span id="hooks-state-badge" class="experiment-card-badge" data-kind="offline">Disarmed</span></header>
+                  <div class="experiment-body experiment-form">
+                    <label class="hook-confirm"><input id="hooks-confirm" type="checkbox" /> I confirm these hooks may mutate the isolated page</label>
+                    <div class="hook-control-actions">
+                      <button id="hooks-arm" class="trace-button" type="button" disabled>Arm all hooks</button>
+                      <button id="hooks-disarm" class="secondary-button" type="button" disabled>Disarm</button>
+                    </div>
+                    <p class="experiment-privacy">A hook pause is handled internally and always resumes. Promise return replacement is rejected.</p>
+                  </div>
+                </article>
+              </div>
+              <div class="experiment-column">
+                <article class="experiment-card">
+                  <header><div><h2>Function hook</h2><p>Start inside the selected function. V8 resolves its bounded entry and return points.</p></div><span id="hooks-definition-count" class="experiment-card-badge" data-kind="offline">0 / 8</span></header>
+                  <div class="experiment-body">
+                    <form id="hooks-definition-form" class="experiment-form">
+                      <label>Label<input id="hooks-label" type="text" maxlength="128" placeholder="checkout guard" autocomplete="off" /></label>
+                      <label>Live JavaScript source<select id="hooks-script"></select></label>
+                      <div class="experiment-form-row"><label>Line<input id="hooks-line" type="number" min="1" max="2147483647" step="1" value="1" /></label><label>Column<input id="hooks-column" type="number" min="1" max="2147483647" step="1" value="1" /></label></div>
+                      <div class="hook-phase-options"><label><input id="hooks-entry-enabled" type="checkbox" checked /> Entry</label><label><input id="hooks-return-enabled" type="checkbox" checked /> Synchronous return</label></div>
+                      <label>Side-effect-free condition<input id="hooks-condition" type="text" maxlength="1024" placeholder="cart.total &gt; 100" autocomplete="off" /></label>
+                      <label>Entry logic<textarea id="hooks-entry-logic" maxlength="8192" spellcheck="false" placeholder="cart.reviewed = true;"></textarea></label>
+                      <label>Return logic<textarea id="hooks-return-logic" maxlength="8192" spellcheck="false" placeholder="window.__labHits = (window.__labHits || 0) + 1;"></textarea></label>
+                      <label>Return replacement<select id="hooks-return-mode"><option value="none">Keep original</option><option value="json">Typed JSON value</option><option value="expression">Frame expression</option></select></label>
+                      <label id="hooks-return-value-field" hidden>Replacement JSON or expression<textarea id="hooks-return-value" maxlength="8192" spellcheck="false" placeholder='{"allowed":true}'></textarea></label>
+                      <button id="hooks-add" class="secondary-button" type="submit" disabled>Add hook definition</button>
+                    </form>
+                  </div>
+                </article>
+                <article class="experiment-card">
+                  <header><div><h2>Definitions</h2><p>Definitions remain editable after disarming and are erased on navigation.</p></div><span id="hooks-definition-badge" class="experiment-card-badge" data-kind="offline">Empty</span></header>
+                  <div id="hooks-definitions" class="hook-definition-list"><div class="experiment-empty">No function hooks configured.</div></div>
+                </article>
+              </div>
+              <div class="experiment-column">
+                <article class="experiment-card hook-hits-card">
+                  <header><div><h2>Function hits</h2><p id="hooks-hit-meta">Entry bindings and return outcomes stay in ephemeral session memory.</p></div><span id="hooks-hit-count" class="experiment-card-badge" data-kind="offline">0 / 512</span></header>
+                  <div id="hooks-hits" class="hook-hit-list" role="log" aria-live="polite"><div class="experiment-empty">Arm a hook, then exercise the isolated page.</div></div>
+                </article>
+                <article class="experiment-card">
+                  <header><div><h2>Hard limits</h2><p>Cold-path debugger control with deterministic cleanup.</p></div><span class="experiment-card-badge">Protocol v1</span></header>
+                  <div class="experiment-context-facts"><div class="experiment-context-fact"><span>Definitions</span><strong>8 / 64 points</strong></div><div class="experiment-context-fact"><span>Returns</span><strong>32 per function</strong></div></div>
+                  <div class="experiment-context-facts"><div class="experiment-context-fact"><span>Hits</span><strong>512 / 128 retained</strong></div><div class="experiment-context-fact"><span>Handler</span><strong>100 ms / 32 bindings</strong></div></div>
+                </article>
+              </div>
+            </div>
           </section>
 
           <section id="screen-api-collection" class="screen" aria-label="API Collection" hidden>
@@ -2399,6 +2500,7 @@ export async function checkout(cart, fingerprint) {
         selectedScriptId: null,
         liveScriptContent: new Map(),
         pendingSourceLine: null,
+        sourceCursor: null,
         sourcePretty: false,
         sourceTruncated: false,
         consoleOpen: false,
@@ -2522,6 +2624,7 @@ export async function checkout(cart, fingerprint) {
         interceptionWorkspace: document.querySelector('#interception-workspace'),
         repeaterWorkspace: document.querySelector('#repeater-workspace'),
         objectWorkspace: document.querySelector('#object-workspace'),
+        hooksWorkspace: document.querySelector('#hooks-workspace'),
         experimentSubtitle: document.querySelector('#experiment-subtitle'),
         experimentNotice: document.querySelector('#experiment-notice'),
         experimentContextMessage: document.querySelector('#experiment-context-message'),
@@ -2594,6 +2697,41 @@ export async function checkout(cart, fingerprint) {
         objectMutationResult: document.querySelector('#object-mutation-result'),
         objectAuditCount: document.querySelector('#object-audit-count'),
         objectAudit: document.querySelector('#object-audit'),
+        hooksContextMessage: document.querySelector('#hooks-context-message'),
+        hooksContextBadge: document.querySelector('#hooks-context-badge'),
+        hooksStorageState: document.querySelector('#hooks-storage-state'),
+        hooksPointUsage: document.querySelector('#hooks-point-usage'),
+        hooksCreate: document.querySelector('#hooks-create'),
+        hooksDispose: document.querySelector('#hooks-dispose'),
+        hooksClear: document.querySelector('#hooks-clear'),
+        hooksNavigationForm: document.querySelector('#hooks-navigation-form'),
+        hooksPageUrl: document.querySelector('#hooks-page-url'),
+        hooksNavigate: document.querySelector('#hooks-navigate'),
+        hooksPageBadge: document.querySelector('#hooks-page-badge'),
+        hooksStateBadge: document.querySelector('#hooks-state-badge'),
+        hooksConfirm: document.querySelector('#hooks-confirm'),
+        hooksArm: document.querySelector('#hooks-arm'),
+        hooksDisarm: document.querySelector('#hooks-disarm'),
+        hooksDefinitionCount: document.querySelector('#hooks-definition-count'),
+        hooksDefinitionForm: document.querySelector('#hooks-definition-form'),
+        hooksLabel: document.querySelector('#hooks-label'),
+        hooksScript: document.querySelector('#hooks-script'),
+        hooksLine: document.querySelector('#hooks-line'),
+        hooksColumn: document.querySelector('#hooks-column'),
+        hooksEntryEnabled: document.querySelector('#hooks-entry-enabled'),
+        hooksReturnEnabled: document.querySelector('#hooks-return-enabled'),
+        hooksCondition: document.querySelector('#hooks-condition'),
+        hooksEntryLogic: document.querySelector('#hooks-entry-logic'),
+        hooksReturnLogic: document.querySelector('#hooks-return-logic'),
+        hooksReturnMode: document.querySelector('#hooks-return-mode'),
+        hooksReturnValueField: document.querySelector('#hooks-return-value-field'),
+        hooksReturnValue: document.querySelector('#hooks-return-value'),
+        hooksAdd: document.querySelector('#hooks-add'),
+        hooksDefinitionBadge: document.querySelector('#hooks-definition-badge'),
+        hooksDefinitions: document.querySelector('#hooks-definitions'),
+        hooksHitMeta: document.querySelector('#hooks-hit-meta'),
+        hooksHitCount: document.querySelector('#hooks-hit-count'),
+        hooksHits: document.querySelector('#hooks-hits'),
         repeaterContextMessage: document.querySelector('#repeater-context-message'),
         repeaterContextBadge: document.querySelector('#repeater-context-badge'),
         repeaterStorageState: document.querySelector('#repeater-storage-state'),
@@ -2677,6 +2815,7 @@ export async function checkout(cart, fingerprint) {
         sourceLocation: document.querySelector('#source-location'),
         sourceSearch: document.querySelector('#source-search'),
         sourcePretty: document.querySelector('#source-pretty'),
+        sourceHookPivot: document.querySelector('#source-hook-pivot'),
         sourceCodeWrap: document.querySelector('#source-code-wrap'),
         sourceCode: document.querySelector('#source-code'),
         sourceCodeEmpty: document.querySelector('#source-code-empty'),
@@ -3265,6 +3404,91 @@ export async function checkout(cart, fingerprint) {
           (experiment.isolated && typeof experiment.target_id === 'string' && experiment.target_id.length > 0));
       }
 
+      function isRuntimeHookRemote(value) {
+        return value === null || (isPlainObject(value) && isBoundedText(value.type, 256) &&
+          (value.subtype === null || isBoundedText(value.subtype, 256)) &&
+          (value.class_name === null || isBoundedText(value.class_name, 512)) &&
+          (value.description === null || isBoundedText(value.description, 512)) &&
+          (value.unserializable_value === null || isBoundedText(value.unserializable_value, 512)) &&
+          (value.value === null || typeof value.value === 'string' || typeof value.value === 'boolean' ||
+            (typeof value.value === 'number' && Number.isFinite(value.value))) &&
+          typeof value.value_truncated === 'boolean');
+      }
+
+      function isRuntimeHookDefinition(definition) {
+        if (!isPlainObject(definition) || !isSafeIntegerInRange(definition.id, 1, Number.MAX_SAFE_INTEGER) ||
+            !isBoundedText(definition.label, 128) || !isBoundedText(definition.script_id, 4 * 1024) ||
+            !isBoundedText(definition.url, 64 * 1024) ||
+            !isSafeIntegerInRange(definition.line, 0, 0x7fffffff) ||
+            !isSafeIntegerInRange(definition.column, 0, 0x7fffffff) ||
+            typeof definition.entry_enabled !== 'boolean' || typeof definition.return_enabled !== 'boolean' ||
+            (!definition.entry_enabled && !definition.return_enabled) ||
+            !isBoundedText(definition.condition, 1024) || !isBoundedText(definition.entry_logic, 8 * 1024) ||
+            !isBoundedText(definition.return_logic, 8 * 1024) ||
+            !['none', 'json', 'expression'].includes(definition.return_mode) ||
+            !isBoundedText(definition.return_expression, 8 * 1024) ||
+            !isSafeIntegerInRange(definition.return_value_bytes, 0, 8 * 1024)) return false;
+        if (definition.return_mode === 'none' &&
+            (definition.return_expression !== '' || definition.return_value !== null || definition.return_value_bytes !== 0)) return false;
+        if (definition.return_mode === 'expression' &&
+            (!definition.return_expression || definition.return_value !== null || definition.return_value_bytes !== 0)) return false;
+        if (definition.return_mode === 'json') {
+          try {
+            if (utf8ByteLength(JSON.stringify(definition.return_value)) > 8 * 1024) return false;
+          } catch { return false; }
+        }
+        return definition.resolved === null || (isPlainObject(definition.resolved) &&
+          isSafeIntegerInRange(definition.resolved.entry_points, 0, 1) &&
+          isSafeIntegerInRange(definition.resolved.return_points, 0, 32));
+      }
+
+      function isRuntimeHooks(hooks) {
+        const states = ['idle', 'attaching', 'ready', 'arming', 'armed', 'handling', 'stopping',
+          'disarmed', 'disposing', 'disposed', 'error'];
+        if (!isPlainObject(hooks) || hooks.protocol_version !== 1 ||
+            !isSafeIntegerInRange(hooks.session_id, 0, Number.MAX_SAFE_INTEGER) || !states.includes(hooks.state) ||
+            typeof hooks.isolated !== 'boolean' ||
+            (hooks.target_id !== null && !isBoundedText(hooks.target_id, 4 * 1024)) ||
+            !Array.isArray(hooks.definitions) || hooks.definitions.length > 8 ||
+            !hooks.definitions.every(isRuntimeHookDefinition) ||
+            !isSafeIntegerInRange(hooks.active_points, 0, 64) ||
+            !isSafeIntegerInRange(hooks.total_hits, 0, 512) ||
+            !Array.isArray(hooks.hits) || hooks.hits.length > 128 || hooks.hits.length > hooks.total_hits ||
+            !isSafeIntegerInRange(hooks.hit_evictions, 0, Number.MAX_SAFE_INTEGER) ||
+            (hooks.last_failure !== null && !isBoundedText(hooks.last_failure, 512)) ||
+            !isBoundedText(hooks.message, 512) || !isPlainObject(hooks.limits)) return false;
+        const limits = {definitions: 8, active_points: 64, return_points_per_definition: 32,
+          total_hits: 512, retained_hits: 128, bindings_per_hit: 32, binding_preview_bytes: 512,
+          condition_bytes: 1024, logic_bytes: 8 * 1024, return_bytes: 8 * 1024,
+          evaluation_timeout_ms: 100};
+        if (Object.keys(limits).some(key => hooks.limits[key] !== limits[key])) return false;
+        const definitionIds = new Set(hooks.definitions.map(definition => definition.id));
+        if (definitionIds.size !== hooks.definitions.length) return false;
+        if (!hooks.hits.every(hit => isPlainObject(hit) &&
+            isSafeIntegerInRange(hit.id, 1, Number.MAX_SAFE_INTEGER) &&
+            isSafeIntegerInRange(hit.occurred_at_ms, 1, Number.MAX_SAFE_INTEGER) &&
+            isSafeIntegerInRange(hit.session_id, 1, Number.MAX_SAFE_INTEGER) &&
+            isSafeIntegerInRange(hit.hook_id, 1, Number.MAX_SAFE_INTEGER) &&
+            isBoundedText(hit.target_id, 4 * 1024) && isBoundedText(hit.label, 128) &&
+            isBoundedText(hit.source, 8 * 1024) && isBoundedText(hit.function, 256) &&
+            ['entry', 'return'].includes(hit.category) &&
+            ['observed', 'skipped', 'logic_run', 'return_overridden', 'failed'].includes(hit.operation) &&
+            isSafeIntegerInRange(hit.line, 0, 0x7fffffff) && isSafeIntegerInRange(hit.column, 0, 0x7fffffff) &&
+            Array.isArray(hit.bindings) && hit.bindings.length <= 32 &&
+            hit.bindings.every(binding => isPlainObject(binding) && isBoundedText(binding.name, 256) &&
+              typeof binding.accessor === 'boolean' && isRuntimeHookRemote(binding.value)) &&
+            typeof hit.bindings_truncated === 'boolean' && isRuntimeHookRemote(hit.original_return) &&
+            isRuntimeHookRemote(hit.replacement_return) &&
+            (hit.error === null || isBoundedText(hit.error, 512)))) return false;
+        if (hooks.hits.some((hit, index) => index > 0 && hooks.hits[index - 1].id >= hit.id)) return false;
+        if (hooks.state === 'idle') return hooks.session_id === 0 && !hooks.isolated && hooks.target_id === null &&
+          hooks.definitions.length === 0 && hooks.hits.length === 0;
+        if (hooks.state === 'disposed') return hooks.session_id > 0 && !hooks.isolated && hooks.target_id === null &&
+          hooks.definitions.length === 0 && hooks.hits.length === 0 && hooks.active_points === 0;
+        return hooks.session_id > 0 && (hooks.state === 'attaching' || hooks.state === 'error' ||
+          (hooks.isolated && typeof hooks.target_id === 'string' && hooks.target_id.length > 0));
+      }
+
       function isRepeaterRequest(request, resolved = false) {
         if (!isPlainObject(request) || !isBoundedText(request.url, 8 * 1024) ||
             !isBoundedText(request.method, resolved ? 32 : 256) ||
@@ -3485,6 +3709,7 @@ export async function checkout(cart, fingerprint) {
             !isMemoryOriginTrace(body.memory_origin_trace) ||
             !isRequestInterception(body.request_interception) ||
             !isObjectExperiment(body.object_experiment) ||
+            !isRuntimeHooks(body.runtime_hooks) ||
             !isRepeater(body.repeater) ||
             !isPlainObject(body.settings) || !isPlainObject(body.limits)) return false;
         if (body.heap_diff_baseline !== null && (!isPlainObject(body.heap_diff_baseline) ||
@@ -4817,12 +5042,17 @@ export async function checkout(cart, fingerprint) {
         return state.debuggerSession?.object_experiment ?? null;
       }
 
+      function runtimeHooksState() {
+        return state.debuggerSession?.runtime_hooks ?? null;
+      }
+
       function setExperimentMode(mode, focus = false) {
-        if (!['interceptor', 'repeater', 'object'].includes(mode)) return;
+        if (!['interceptor', 'repeater', 'object', 'hooks'].includes(mode)) return;
         state.experimentMode = mode;
         elements.interceptionWorkspace.hidden = mode !== 'interceptor';
         elements.repeaterWorkspace.hidden = mode !== 'repeater';
         elements.objectWorkspace.hidden = mode !== 'object';
+        elements.hooksWorkspace.hidden = mode !== 'hooks';
         elements.experimentModeButtons.forEach(button => {
           const selected = button.dataset.experimentMode === mode;
           button.setAttribute('aria-selected', String(selected));
@@ -5184,12 +5414,13 @@ export async function checkout(cart, fingerprint) {
         const repeater = repeaterState();
         const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
         const active = ['running', 'cancelling'].includes(repeater?.state);
-        const working = state.experimentPending || ['creating', 'disposing'].includes(experiment?.state);
+        const hookBusy = ['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state);
+        const working = state.experimentPending || ['creating', 'disposing'].includes(experiment?.state) || hookBusy;
         const contextReady = attached && experiment?.isolated &&
           experiment.target_id === state.debuggerSession?.target?.id && ['ready', 'error'].includes(experiment.state) &&
           ['ready', 'error'].includes(repeater?.state);
         const canDispose = experiment?.isolated && ['ready', 'error'].includes(experiment.state) &&
-          experiment.pending_requests === 0 && !active;
+          experiment.pending_requests === 0 && !active && !hookBusy;
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         elements.experimentTitle.textContent = 'Repeater';
         elements.experimentSubtitle.textContent = request
@@ -5357,8 +5588,9 @@ export async function checkout(cart, fingerprint) {
         const repeater = repeaterState();
         const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
         const objectBusy = ['navigating', 'searching', 'mutating'].includes(objectExperiment?.state);
+        const hookBusy = ['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state);
         const contextBusy = state.experimentPending || ['creating', 'running', 'disposing'].includes(experiment?.state) ||
-          ['running', 'cancelling'].includes(repeater?.state) || objectBusy;
+          ['running', 'cancelling'].includes(repeater?.state) || objectBusy || hookBusy;
         const contextReady = attached && experiment?.isolated && objectExperiment?.isolated &&
           experiment.target_id === state.debuggerSession?.target?.id &&
           objectExperiment.target_id === state.debuggerSession?.target?.id &&
@@ -5372,7 +5604,7 @@ export async function checkout(cart, fingerprint) {
         }
         const selected = selectedObjectExperimentResult(objectExperiment);
         const canDispose = experiment?.isolated && experiment.pending_requests === 0 &&
-          !['running', 'cancelling'].includes(repeater?.state) && !objectBusy;
+          !['running', 'cancelling'].includes(repeater?.state) && !objectBusy && !hookBusy;
         elements.experimentTitle.textContent = 'Live Object Lab';
         elements.experimentSubtitle.textContent = 'Disposable page · typed own-property patches · immutable baseline evidence';
 
@@ -5422,6 +5654,146 @@ export async function checkout(cart, fingerprint) {
         renderObjectAudit(objectExperiment);
       }
 
+      function renderRuntimeHookDefinitions(hooks, active) {
+        const definitions = hooks?.definitions ?? [];
+        elements.hooksDefinitionCount.textContent = `${definitions.length} / ${hooks?.limits?.definitions ?? 8}`;
+        elements.hooksDefinitionCount.dataset.kind = definitions.length ? '' : 'offline';
+        elements.hooksDefinitionBadge.textContent = definitions.length
+          ? `${definitions.length} ${definitions.length === 1 ? 'hook' : 'hooks'}` : 'Empty';
+        elements.hooksDefinitionBadge.dataset.kind = definitions.length ? '' : 'offline';
+        if (!definitions.length) {
+          elements.hooksDefinitions.replaceChildren(textElement('div', 'experiment-empty', 'No function hooks configured.'));
+          return;
+        }
+        elements.hooksDefinitions.replaceChildren(...definitions.map(definition => {
+          const row = document.createElement('div'); row.className = 'hook-definition-row';
+          const title = textElement('span', 'hook-definition-title', definition.label);
+          const phases = [definition.entry_enabled ? 'entry' : '', definition.return_enabled ? 'return' : ''].filter(Boolean).join(' + ');
+          const phase = textElement('span', 'hook-definition-phase', phases);
+          const resolved = definition.resolved
+            ? ` · ${definition.resolved.entry_points} entry / ${definition.resolved.return_points} return points`
+            : '';
+          const behavior = [definition.condition ? 'condition' : '', definition.entry_logic || definition.return_logic ? 'logic' : '',
+            definition.return_mode !== 'none' ? `${definition.return_mode} override` : ''].filter(Boolean).join(' · ') || 'observe only';
+          const meta = textElement('span', 'hook-definition-meta',
+            `${sourceName({url: definition.url, source_type: 'script', script_id: definition.script_id})}:${definition.line + 1}:${definition.column + 1}${resolved} · ${behavior}`);
+          const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'hook-remove';
+          remove.textContent = 'Remove'; remove.disabled = active || state.experimentPending || state.debuggerActionPending;
+          remove.setAttribute('aria-label', `Remove ${definition.label}`);
+          remove.addEventListener('click', () => runExperimentAction({action: 'remove_runtime_hook', hook_id: definition.id}));
+          row.append(title, remove, phase, meta);
+          return row;
+        }));
+      }
+
+      function renderRuntimeHookHits(hooks) {
+        const hits = hooks?.hits ?? [];
+        const total = hooks?.total_hits ?? 0;
+        elements.hooksHitCount.textContent = `${total} / ${hooks?.limits?.total_hits ?? 512}`;
+        elements.hooksHitCount.dataset.kind = hooks?.last_failure ? 'error' : hits.length ? '' : 'offline';
+        elements.hooksHitMeta.textContent = hits.length
+          ? `${hits.length} retained · ${hooks.hit_evictions} evicted · metadata never enters evidence storage`
+          : 'Entry bindings and return outcomes stay in ephemeral session memory.';
+        if (!hits.length) {
+          elements.hooksHits.replaceChildren(textElement('div', 'experiment-empty', 'Arm a hook, then exercise the isolated page.'));
+          return;
+        }
+        elements.hooksHits.replaceChildren(...[...hits].reverse().map(hit => {
+          const row = document.createElement('div'); row.className = 'hook-hit-row';
+          const title = textElement('span', 'hook-hit-title', `${hit.label} · ${hit.function}`);
+          const operation = textElement('span', 'hook-hit-operation', hit.operation.replaceAll('_', ' '));
+          const source = sourceName({url: hit.source, source_type: 'script', script_id: ''});
+          const meta = textElement('span', 'hook-hit-meta',
+            `${new Date(hit.occurred_at_ms).toLocaleTimeString()} · ${hit.category} · ${source}:${hit.line + 1}:${hit.column + 1} · session ${hit.session_id} / hook ${hit.hook_id} / hit ${hit.id}`);
+          const values = hit.bindings.map(binding => `${binding.name}=${debuggerValueText(binding.value)}`);
+          const returnText = hit.category === 'return'
+            ? `return ${debuggerValueText(hit.original_return)}${hit.replacement_return ? ` → ${debuggerValueText(hit.replacement_return)}` : ''}` : '';
+          const bindingText = [...values, returnText].filter(Boolean).join(' · ') || 'No local data properties captured';
+          const bindings = textElement('span', 'hook-hit-bindings', `${bindingText}${hit.bindings_truncated ? ' · binding limit reached' : ''}`);
+          row.append(title, operation, meta, bindings);
+          if (hit.error) row.append(textElement('span', 'hook-hit-error', hit.error));
+          return row;
+        }));
+      }
+
+      function renderRuntimeHooks() {
+        const experiment = requestInterception();
+        const objectExperiment = objectExperimentState();
+        const hooks = runtimeHooksState();
+        const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
+        const activeStates = ['arming', 'armed', 'handling', 'stopping'];
+        const active = activeStates.includes(hooks?.state);
+        const objectBusy = ['navigating', 'searching', 'mutating'].includes(objectExperiment?.state);
+        const requestBusy = ['running', 'cancelling'].includes(repeaterState()?.state);
+        const contextWorking = state.experimentPending || ['creating', 'disposing'].includes(experiment?.state) ||
+          objectBusy || requestBusy;
+        const contextReady = attached && experiment?.isolated && hooks?.isolated &&
+          experiment.target_id === state.debuggerSession?.target?.id && hooks.target_id === state.debuggerSession?.target?.id &&
+          ['ready', 'error'].includes(experiment.state) && !['attaching', 'disposing', 'disposed'].includes(hooks.state);
+        const pageReady = contextReady && objectExperiment?.navigation_id > 0 && objectExperiment.url;
+        const canDispose = experiment?.isolated && experiment.pending_requests === 0 && !active && !contextWorking;
+        const editable = contextReady && !active && !contextWorking;
+        const scripts = (state.debuggerSession?.scripts ?? []).filter(script => {
+          if (script.language !== 'JavaScript') return false;
+          const url = script.url ?? '';
+          return !url.startsWith('file:') && !url.startsWith('evaluate;') && !url.startsWith('pptr:');
+        }).slice(-256);
+        const selectedScript = elements.hooksScript.value;
+        const options = scripts.map(script => {
+          const option = document.createElement('option'); option.value = script.script_id;
+          option.textContent = `${sourceName({...script, source_type: 'script'})} · lines ${script.start_line + 1}-${script.end_line + 1}`;
+          return option;
+        });
+        if (!options.length) {
+          const option = document.createElement('option'); option.value = ''; option.textContent = 'No live JavaScript sources';
+          options.push(option);
+        }
+        elements.hooksScript.replaceChildren(...options);
+        if (scripts.some(script => script.script_id === selectedScript)) elements.hooksScript.value = selectedScript;
+
+        elements.experimentTitle.textContent = 'Runtime Hook Studio';
+        elements.experimentSubtitle.textContent = 'Disposable page · function entry and synchronous return control · automatic resume';
+        if (state.experimentError) setExperimentNotice('error', state.experimentError);
+        else if (!experiment || !hooks || !objectExperiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
+        else if (contextWorking || ['arming', 'handling', 'stopping'].includes(hooks.state)) setExperimentNotice('working', hooks.message);
+        else if (hooks.last_failure) setExperimentNotice('error', hooks.last_failure);
+        else if (hooks.state === 'armed' || contextReady || hooks.state === 'disposed') setExperimentNotice('ready', hooks.message);
+        else if (!attached) setExperimentNotice('idle', 'Attach an authorized browser target before creating Hook Studio.');
+        else setExperimentNotice('idle', hooks.message);
+
+        elements.hooksContextBadge.dataset.kind = hooks?.state === 'error' ? 'error' : hooks?.isolated ? '' : 'offline';
+        elements.hooksContextBadge.textContent = experiment?.state === 'creating' ? 'Creating'
+          : experiment?.state === 'disposing' ? 'Disposing' : hooks?.isolated ? 'Isolated'
+            : hooks?.state === 'disposed' ? 'Disposed' : 'Not created';
+        elements.hooksContextMessage.textContent = hooks?.message ?? 'No disposable Experiment context exists.';
+        elements.hooksStorageState.textContent = hooks?.isolated ? 'Ephemeral and isolated'
+          : hooks?.state === 'disposed' ? 'Deleted and erased' : 'Not allocated';
+        elements.hooksPointUsage.textContent = `${hooks?.active_points ?? 0} / ${hooks?.limits?.active_points ?? 64}`;
+        elements.hooksPageBadge.dataset.kind = pageReady ? '' : objectExperiment?.state === 'error' ? 'error' : 'offline';
+        elements.hooksPageBadge.textContent = objectExperiment?.state === 'navigating' ? 'Opening' : pageReady ? 'Loaded' : 'No page';
+        const stateLabels = {arming: 'Arming', armed: 'Armed', handling: 'Handling', stopping: 'Stopping',
+          disarmed: 'Disarmed', ready: 'Disarmed', error: 'Error'};
+        elements.hooksStateBadge.textContent = stateLabels[hooks?.state] ?? 'Disarmed';
+        elements.hooksStateBadge.dataset.kind = hooks?.last_failure ? 'error' : hooks?.state === 'armed' ? '' : 'offline';
+
+        elements.hooksCreate.disabled = !attached || Boolean(experiment?.isolated) || contextWorking || state.debuggerActionPending;
+        elements.hooksDispose.disabled = !canDispose || state.debuggerActionPending;
+        elements.hooksClear.disabled = !(hooks?.hits.length) || active || contextWorking || state.debuggerActionPending;
+        elements.hooksPageUrl.disabled = !editable;
+        elements.hooksNavigate.disabled = !editable || state.debuggerActionPending;
+        elements.hooksDefinitionForm.querySelectorAll('input, select, textarea').forEach(field => { field.disabled = !editable; });
+        elements.hooksReturnValueField.hidden = elements.hooksReturnMode.value === 'none';
+        elements.hooksReturnValueField.firstChild.textContent = elements.hooksReturnMode.value === 'json'
+          ? 'Replacement JSON' : 'Replacement frame expression';
+        elements.hooksAdd.disabled = !editable || !scripts.length || !elements.hooksLabel.value.trim() ||
+          (!elements.hooksEntryEnabled.checked && !elements.hooksReturnEnabled.checked) || state.debuggerActionPending;
+        elements.hooksConfirm.disabled = !contextReady || active || !hooks?.definitions.length || contextWorking;
+        elements.hooksArm.disabled = !editable || !hooks?.definitions.length || !elements.hooksConfirm.checked || state.debuggerActionPending;
+        elements.hooksDisarm.disabled = !active || state.debuggerActionPending;
+        renderRuntimeHookDefinitions(hooks, active);
+        renderRuntimeHookHits(hooks);
+      }
+
       function renderExperiment() {
         elements.experimentModeButtons.forEach(button => {
           const selected = button.dataset.experimentMode === state.experimentMode;
@@ -5431,6 +5803,7 @@ export async function checkout(cart, fingerprint) {
         elements.interceptionWorkspace.hidden = state.experimentMode !== 'interceptor';
         elements.repeaterWorkspace.hidden = state.experimentMode !== 'repeater';
         elements.objectWorkspace.hidden = state.experimentMode !== 'object';
+        elements.hooksWorkspace.hidden = state.experimentMode !== 'hooks';
         if (state.experimentMode === 'repeater') {
           renderRepeater();
           return;
@@ -5439,17 +5812,22 @@ export async function checkout(cart, fingerprint) {
           renderObjectExperiment();
           return;
         }
+        if (state.experimentMode === 'hooks') {
+          renderRuntimeHooks();
+          return;
+        }
         elements.experimentTitle.textContent = 'Request Interception Lab';
         prefillExperimentRequest();
         setExperimentRuleVisibility();
         const experiment = requestInterception();
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
-        const working = state.experimentPending || ['creating', 'running', 'disposing'].includes(experiment?.state);
+        const hookBusy = ['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state);
+        const working = state.experimentPending || ['creating', 'running', 'disposing'].includes(experiment?.state) || hookBusy;
         const hasPendingRequests = (experiment?.pending_requests ?? 0) > 0;
         const contextReady = attached && experiment?.isolated &&
           experiment.target_id === state.debuggerSession?.target?.id && ['ready', 'error'].includes(experiment.state);
-        const canDispose = experiment?.isolated && ['ready', 'error'].includes(experiment.state) && experiment.pending_requests === 0;
+        const canDispose = experiment?.isolated && ['ready', 'error'].includes(experiment.state) && experiment.pending_requests === 0 && !hookBusy;
         elements.experimentSubtitle.textContent = request && state.selectedField
           ? `request-${request.id} · ${state.selectedField.label} ${state.selectedField.path} · isolated replay only`
           : 'Disposable context · no baseline cookies, storage, or credentials';
@@ -5507,6 +5885,9 @@ export async function checkout(cart, fingerprint) {
         }
         if (response?.object_experiment && isObjectExperiment(response.object_experiment) && state.debuggerSession) {
           state.debuggerSession.object_experiment = response.object_experiment;
+        }
+        if (response?.runtime_hooks && isRuntimeHooks(response.runtime_hooks) && state.debuggerSession) {
+          state.debuggerSession.runtime_hooks = response.runtime_hooks;
         }
         if (response?.repeater && isRepeater(response.repeater) && state.debuggerSession) {
           state.debuggerSession.repeater = response.repeater;
@@ -5655,6 +6036,87 @@ export async function checkout(cart, fingerprint) {
           elements.objectMutationValue.value = '';
           renderObjectExperiment();
         }
+      }
+
+      async function navigateRuntimeHooks() {
+        const url = elements.hooksPageUrl.value.trim();
+        if (!url) {
+          state.experimentError = 'Enter one HTTP or HTTPS URL for the disposable page.';
+          renderExperiment();
+          elements.hooksPageUrl.focus();
+          return;
+        }
+        const response = await runExperimentAction({action: 'navigate_object_experiment', url});
+        if (response) {
+          elements.hooksConfirm.checked = false;
+          renderRuntimeHooks();
+        }
+      }
+
+      async function addRuntimeHook() {
+        try {
+          const line = Number(elements.hooksLine.value);
+          const column = Number(elements.hooksColumn.value);
+          if (!Number.isSafeInteger(line) || line < 1 || !Number.isSafeInteger(column) || column < 1) {
+            throw new TypeError('Hook line and column must be positive integers.');
+          }
+          const returnMode = elements.hooksReturnMode.value;
+          const request = {
+            action: 'add_runtime_hook',
+            label: elements.hooksLabel.value.trim(),
+            script_id: elements.hooksScript.value,
+            line: line - 1,
+            column: column - 1,
+            entry_enabled: elements.hooksEntryEnabled.checked,
+            return_enabled: elements.hooksReturnEnabled.checked,
+            condition: elements.hooksCondition.value,
+            entry_logic: elements.hooksEntryLogic.value,
+            return_logic: elements.hooksReturnLogic.value,
+            return_mode: returnMode
+          };
+          if (!request.label) throw new TypeError('Enter a short hook label.');
+          if (!request.script_id) throw new TypeError('Choose one live JavaScript source.');
+          if (!request.entry_enabled && !request.return_enabled) throw new TypeError('Enable entry, synchronous return, or both.');
+          if (returnMode === 'json') {
+            try { request.return_value = JSON.parse(elements.hooksReturnValue.value); }
+            catch { throw new TypeError('Return replacement must be valid JSON.'); }
+          }
+          if (returnMode === 'expression') {
+            request.return_expression = elements.hooksReturnValue.value.trim();
+            if (!request.return_expression) throw new TypeError('Enter one return-frame expression.');
+          }
+          const response = await runExperimentAction(request);
+          if (response) {
+            elements.hooksConfirm.checked = false;
+            elements.hooksLabel.value = '';
+            elements.hooksCondition.value = '';
+            elements.hooksEntryLogic.value = '';
+            elements.hooksReturnLogic.value = '';
+            elements.hooksReturnMode.value = 'none';
+            elements.hooksReturnValue.value = '';
+            renderRuntimeHooks();
+          }
+        } catch (error) {
+          state.experimentError = error.message;
+          renderExperiment();
+        }
+      }
+
+      function pivotSourceToRuntimeHooks() {
+        const source = selectedSource();
+        const hooks = runtimeHooksState();
+        if (source?.source_type !== 'script' || !hooks?.isolated ||
+            hooks.target_id !== state.debuggerSession?.target?.id) return;
+        const line = state.sourceCursor?.scriptId === source.script_id
+          ? state.sourceCursor.line : source.start_line;
+        state.experimentMode = 'hooks';
+        showScreen('experiments');
+        elements.hooksScript.value = source.script_id;
+        elements.hooksLine.value = String(line + 1);
+        elements.hooksColumn.value = String((state.sourceCursor?.column ?? sourceRuntimeColumn(source, 0)) + 1);
+        if (!elements.hooksLabel.value) elements.hooksLabel.value = `${sourceName(source)}:${line + 1}`;
+        renderRuntimeHooks();
+        requestAnimationFrame(() => elements.hooksLabel.focus());
       }
 
       async function applyRepeaterVariables() {
@@ -6710,6 +7172,9 @@ export async function checkout(cart, fingerprint) {
           if (source.source_type === 'script' && state.pendingSourceLine?.scriptId === source.script_id && state.pendingSourceLine.line === runtimeLine) {
             row.classList.add('current');
           }
+          if (source.source_type === 'script' && state.sourceCursor?.scriptId === source.script_id && state.sourceCursor.line === runtimeLine) {
+            row.classList.add('cursor');
+          }
           const gutter = document.createElement('button');
           gutter.type = 'button';
           gutter.className = 'source-gutter';
@@ -6783,6 +7248,10 @@ export async function checkout(cart, fingerprint) {
         elements.sourcePretty.disabled = source?.kind !== 'javascript' || !source.content;
         elements.sourcePretty.setAttribute('aria-pressed', String(state.sourcePretty));
         elements.sourcePretty.title = state.sourcePretty ? 'Show original evidence' : 'Show readable representation';
+        const hooks = runtimeHooksState();
+        elements.sourceHookPivot.disabled = source?.source_type !== 'script' || state.sourcePretty ||
+          !hooks?.isolated || hooks.target_id !== state.debuggerSession?.target?.id ||
+          ['arming', 'armed', 'handling', 'stopping'].includes(hooks?.state);
         renderSourceContent(source);
       }
 
@@ -8455,8 +8924,14 @@ export async function checkout(cart, fingerprint) {
       elements.sourceCode.addEventListener('click', event => {
         const line = event.target.closest('.source-line');
         if (!line) return;
+        const source = selectedSource();
+        if (source?.source_type === 'script') {
+          state.sourceCursor = {scriptId: source.script_id, line: Number(line.dataset.line ?? 1) - 1, column: 0};
+          elements.sourceCode.querySelectorAll('.source-line').forEach(row => row.classList.toggle('cursor', row === line));
+        }
         elements.sourcePosition.textContent = `Line ${line.dataset.line ?? 1}, Column 1`;
       });
+      elements.sourceHookPivot.addEventListener('click', pivotSourceToRuntimeHooks);
       const setConsoleOpen = open => {
         state.consoleOpen = open;
         elements.consoleDrawer.hidden = !open;
@@ -8562,6 +9037,53 @@ export async function checkout(cart, fingerprint) {
         const index = event.key === 'Home' ? 0 : event.key === 'End' ? results.length - 1
           : event.key === 'ArrowUp' ? Math.max(0, current - 1) : Math.min(results.length - 1, current + 1);
         selectObjectExperimentResult(results[index].id, true);
+      });
+      elements.hooksCreate.addEventListener('click', () => runExperimentAction({
+        action: 'create_request_interception_experiment'
+      }));
+      elements.hooksDispose.addEventListener('click', async () => {
+        const response = await runExperimentAction({action: 'dispose_request_interception_experiment'});
+        if (response) {
+          elements.hooksConfirm.checked = false;
+          elements.hooksDefinitionForm.reset();
+          elements.hooksEntryEnabled.checked = true;
+          elements.hooksReturnEnabled.checked = true;
+          elements.hooksReturnMode.value = 'none';
+          renderRuntimeHooks();
+        }
+      });
+      elements.hooksClear.addEventListener('click', () => runExperimentAction({action: 'clear_runtime_hook_hits'}));
+      elements.hooksNavigationForm.addEventListener('submit', event => {
+        event.preventDefault();
+        navigateRuntimeHooks();
+      });
+      elements.hooksDefinitionForm.addEventListener('submit', event => {
+        event.preventDefault();
+        addRuntimeHook();
+      });
+      elements.hooksScript.addEventListener('change', () => {
+        const script = (state.debuggerSession?.scripts ?? []).find(candidate => candidate.script_id === elements.hooksScript.value);
+        if (script) {
+          elements.hooksLine.value = String(script.start_line + 1);
+          elements.hooksColumn.value = String(script.start_column + 1);
+        }
+      });
+      elements.hooksReturnMode.addEventListener('change', () => {
+        state.experimentError = null;
+        renderRuntimeHooks();
+      });
+      elements.hooksDefinitionForm.addEventListener('input', () => {
+        state.experimentError = null;
+        renderRuntimeHooks();
+      });
+      elements.hooksConfirm.addEventListener('change', renderRuntimeHooks);
+      elements.hooksArm.addEventListener('click', async () => {
+        const response = await runExperimentAction({action: 'arm_runtime_hooks', confirmed: elements.hooksConfirm.checked});
+        if (response) elements.hooksConfirm.checked = false;
+      });
+      elements.hooksDisarm.addEventListener('click', async () => {
+        const response = await runExperimentAction({action: 'disarm_runtime_hooks'});
+        if (response) elements.hooksConfirm.checked = false;
       });
       elements.repeaterCreate.addEventListener('click', () => runExperimentAction({
         action: 'create_request_interception_experiment'

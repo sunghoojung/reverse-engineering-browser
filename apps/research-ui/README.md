@@ -177,6 +177,20 @@ after types, redacted URL, byte count, and value digest. Disposal erases object
 references, previews, submitted values, and the audit with the BrowserContext.
 See [Live Object Experiment v1](../../docs/product/live-object-experiment-v1.md).
 
+Runtime Hook Studio shares that disposable Experiment BrowserContext and can
+instrument only its isolated page. Select a live JavaScript source and function
+location, add up to eight entry or synchronous-return hooks, then explicitly
+confirm page mutation before arming. A hook can inspect at most 32 own local
+data properties without invoking accessors, run a bounded condition and phase
+action, and replace a synchronous return with typed JSON or a frame expression.
+V8 resolution is capped at 32 return points per definition and 64 active points
+per session. Every handled pause resumes automatically. Navigation, target
+detach, disposal, the 512-hit ceiling, or a processing failure removes the hook
+points; disposal also erases definitions and the 128-entry ephemeral hit log.
+Promise returns are reported and preserved rather than overridden. Hook data
+never enters the evidence store. See
+[Runtime Hooks v1](../../docs/product/runtime-hooks-v1.md).
+
 Repeater shares that disposable request-lab context and sends one editable,
 credential-free request at a time. It supports immediate cancellation, a
 100-millisecond to 30-second timeout, 32 session-scoped `{{name}}` variables,

@@ -225,7 +225,7 @@ DecoderResult UrlEncode(std::span<const std::uint8_t> input, const std::size_t o
   constexpr char kHex[] = "0123456789ABCDEF";
   std::size_t encoded_size = 0;
   for (const std::uint8_t byte : input) {
-    encoded_size += IsUrlUnreserved(byte) ? 1 : 3;
+    encoded_size += IsUrlUnreserved(byte) ? std::size_t{1} : std::size_t{3};
     if (encoded_size > output_limit) {
       return Failure(DecoderStatus::kOutputLimit,
                      "Encoded output exceeds the configured byte limit");
@@ -1351,7 +1351,10 @@ std::string_view JwtAlgorithmName(const JwtAlgorithm algorithm) noexcept {
 }
 
 JwtInspection JwtFailure(std::string message) {
-  return {.status = DecoderStatus::kInvalidInput, .error = std::move(message)};
+  JwtInspection inspection;
+  inspection.status = DecoderStatus::kInvalidInput;
+  inspection.error = std::move(message);
+  return inspection;
 }
 
 }  // namespace

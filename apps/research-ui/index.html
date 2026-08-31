@@ -1202,6 +1202,50 @@
       .experiment-audit-meta { grid-column: 1 / -1; color: var(--faint); font: 8px/1.4 var(--mono); overflow-wrap: anywhere; }
       .experiment-empty { min-height: 120px; display: grid; place-items: center; padding: 18px; color: var(--muted); text-align: center; }
       .experiment-privacy { margin: 0; color: var(--faint); font: 8px/1.5 var(--mono); }
+      .experiment-mode-tabs { display: flex; gap: 3px; padding: 3px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
+      .experiment-mode-tab { min-height: 25px; padding: 0 10px; border: 0; border-radius: 3px; background: transparent; color: var(--muted); font: 650 8px var(--mono); text-transform: uppercase; }
+      .experiment-mode-tab[aria-selected="true"] { background: var(--accent-soft); color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
+      .experiment-workspace[hidden], .repeater-workspace[hidden] { display: none; }
+      .repeater-workspace {
+        min-height: 0;
+        display: grid;
+        grid-template-columns: minmax(235px, .72fr) minmax(350px, 1.18fr) minmax(310px, 1fr);
+        gap: 12px;
+        padding: 12px;
+        overflow: auto;
+      }
+      .repeater-column { min-width: 0; display: grid; align-content: start; gap: 12px; }
+      .repeater-history-toolbar { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line-soft); }
+      .repeater-history-toolbar span { color: var(--faint); font: 8px var(--mono); }
+      .repeater-icon-button { min-width: 29px; min-height: 27px; padding: 0 7px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); color: var(--muted); }
+      .repeater-history { display: grid; max-height: 330px; overflow: auto; }
+      .repeater-history-row { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; padding: 9px 10px; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; color: var(--text); text-align: left; }
+      .repeater-history-row:hover, .repeater-history-row:focus, .repeater-history-row[aria-selected="true"] { background: var(--accent-soft); }
+      .repeater-history-title { min-width: 0; overflow: hidden; font: 9px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+      .repeater-history-state { color: var(--green); font: 650 7px var(--mono); text-transform: uppercase; }
+      .repeater-history-state[data-kind="error"] { color: var(--red); }
+      .repeater-history-meta { grid-column: 1 / -1; color: var(--faint); font: 8px var(--mono); }
+      .repeater-variable-status { display: flex; flex-wrap: wrap; gap: 5px; min-height: 22px; align-items: center; }
+      .repeater-variable-chip { padding: 3px 5px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); border-radius: 3px; color: var(--green); font: 7px var(--mono); }
+      .repeater-variable-chip[data-kind="missing"] { border-color: color-mix(in srgb, var(--red) 55%, var(--line)); color: var(--red); }
+      .repeater-request-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+      .repeater-request-actions button { min-height: 32px; }
+      .repeater-request-actions .repeater-send { grid-column: 1 / -1; }
+      .repeater-active-strip { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 9px 10px; border-top: 1px solid var(--line-soft); color: var(--muted); font: 8px var(--mono); }
+      .repeater-active-strip strong { color: var(--accent); overflow-wrap: anywhere; }
+      .repeater-response { min-height: 210px; }
+      .repeater-response-headers { display: grid; max-height: 150px; overflow: auto; border-bottom: 1px solid var(--line-soft); }
+      .repeater-response-header { display: grid; grid-template-columns: minmax(90px, .45fr) minmax(0, 1fr); gap: 8px; padding: 5px 10px; border-bottom: 1px solid var(--line-soft); font: 8px var(--mono); }
+      .repeater-response-header span:first-child { color: var(--accent); overflow-wrap: anywhere; }
+      .repeater-response-header span:last-child { color: var(--muted); overflow-wrap: anywhere; }
+      .repeater-compare-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+      .repeater-compare-controls button { grid-column: 1 / -1; }
+      .repeater-comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--line-soft); }
+      .repeater-comparison > div { min-width: 0; padding: 9px 10px; border-right: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
+      .repeater-comparison > div:nth-child(2n) { border-right: 0; }
+      .repeater-comparison span { display: block; color: var(--faint); font: 7px var(--mono); text-transform: uppercase; }
+      .repeater-comparison strong { display: block; margin-top: 4px; overflow-wrap: anywhere; font: 9px/1.4 var(--mono); }
+      .repeater-comparison-detail { grid-column: 1 / -1; color: var(--muted); }
 
       #screen-memory:not([hidden]) { display: grid; grid-template-rows: 60px auto minmax(0, 1fr); }
       #screen-memory > .screen-head { grid-row: 1; }
@@ -1407,6 +1451,8 @@
         .request-head > :nth-child(5), .request-row > :nth-child(5) { display: none; }
         .experiment-workspace { grid-template-columns: minmax(260px, .8fr) minmax(320px, 1.2fr); }
         .experiment-column:last-child { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
+        .repeater-workspace { grid-template-columns: minmax(235px, .7fr) minmax(360px, 1.3fr); }
+        .repeater-column:last-child { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
       }
       @media (max-width: 900px) {
         .traffic-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
@@ -1424,6 +1470,8 @@
         .memory-results-pane { grid-template-columns: minmax(210px, 42%) minmax(0, 1fr); }
         .experiment-workspace { grid-template-columns: minmax(260px, .8fr) minmax(320px, 1.2fr); }
         .experiment-column:last-child { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
+        .repeater-workspace { grid-template-columns: minmax(235px, .7fr) minmax(340px, 1.3fr); }
+        .repeater-column:last-child { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
       }
       @media (max-width: 880px) {
         .workspace { grid-template-columns: 178px minmax(0, 1fr); }
@@ -1459,6 +1507,10 @@
         .experiment-workspace { grid-template-columns: 1fr; }
         .experiment-column:last-child { grid-column: auto; grid-template-columns: 1fr; }
         .experiment-form-row { grid-template-columns: 1fr; }
+        .repeater-workspace { grid-template-columns: 1fr; }
+        .repeater-column:last-child { grid-column: auto; grid-template-columns: 1fr; }
+        .repeater-compare-controls { grid-template-columns: 1fr; }
+        .repeater-compare-controls button { grid-column: auto; }
         .vm-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
         .memory-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
         .memory-search-pane { max-height: min(420px, 48vh); border-right: 0; border-bottom: 1px solid var(--line); }
@@ -1589,6 +1641,7 @@
                   <div id="field-tree" class="field-tree" role="tabpanel" aria-labelledby="field-tab-body" tabindex="0"></div>
                   <div id="trace-dock" class="trace-dock">
                     <div><div class="trace-label">Selected request field</div><div id="trace-target" class="trace-target">request-81 · Body · $.device.fingerprint</div></div>
+                    <button id="request-repeater-pivot" class="secondary-button" type="button">Send to Repeater</button>
                     <button id="request-memory-pivot" class="secondary-button" type="button">Find in Memory</button>
                     <button id="request-vm-candidates" class="secondary-button" type="button">Related VM candidates</button>
                     <button id="trace-origin" class="trace-button" type="button">⌘ Trace origin</button>
@@ -1784,8 +1837,14 @@
           <section id="screen-experiments" class="screen" aria-label="Experiments" hidden>
             <header class="screen-head">
               <button class="back-button" type="button" data-screen="backtrace" aria-label="Back to trace">←</button>
-              <div><h1>Request Interception Lab</h1><div id="experiment-subtitle" class="screen-subtitle">Disposable context · no baseline cookies, storage, or credentials</div></div>
-              <div class="screen-head-actions"><span class="memory-readonly">Experiment only</span></div>
+              <div><h1 id="experiment-title">Request Interception Lab</h1><div id="experiment-subtitle" class="screen-subtitle">Disposable context · no baseline cookies, storage, or credentials</div></div>
+              <div class="screen-head-actions">
+                <div class="experiment-mode-tabs" role="tablist" aria-label="Request lab mode">
+                  <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="interceptor" aria-selected="true">Interceptor</button>
+                  <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="repeater" aria-selected="false" tabindex="-1">Repeater</button>
+                </div>
+                <span class="memory-readonly">Experiment only</span>
+              </div>
             </header>
             <div id="experiment-notice" class="experiment-notice" data-kind="idle" role="status" aria-live="polite">Create an isolated experiment to configure request interception.</div>
             <div class="experiment-workspace">
@@ -1865,6 +1924,97 @@
                   <div class="experiment-context-facts">
                     <div class="experiment-context-fact"><span>Headers</span><strong>64 / 16 KiB</strong></div>
                     <div class="experiment-context-fact"><span>Concurrent</span><strong>16 requests</strong></div>
+                  </div>
+                </article>
+              </div>
+            </div>
+            <div id="repeater-workspace" class="repeater-workspace" hidden>
+              <div class="repeater-column">
+                <article class="experiment-card">
+                  <header>
+                    <div><h2>Isolated session</h2><p id="repeater-context-message">No disposable request-lab context exists.</p></div>
+                    <span id="repeater-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span>
+                  </header>
+                  <div class="experiment-body">
+                    <div class="experiment-actions">
+                      <button id="repeater-create" class="trace-button experiment-primary" type="button">Create isolated context</button>
+                      <button id="repeater-dispose" class="secondary-button" type="button" disabled>Dispose and erase</button>
+                      <button id="repeater-clear-history" class="secondary-button" type="button" disabled>Clear history</button>
+                    </div>
+                  </div>
+                  <div class="experiment-context-facts">
+                    <div class="experiment-context-fact"><span>Storage</span><strong id="repeater-storage-state">Not allocated</strong></div>
+                    <div class="experiment-context-fact"><span>History</span><strong id="repeater-history-usage">0 / 24</strong></div>
+                  </div>
+                </article>
+                <article class="experiment-card">
+                  <header><div><h2>Request history</h2><p>Keyboard-selectable, bounded, and erased with the session.</p></div><span id="repeater-history-badge" class="experiment-card-badge" data-kind="offline">0 runs</span></header>
+                  <div class="repeater-history-toolbar">
+                    <span id="repeater-history-bytes">0 / 512 KiB</span>
+                    <button id="repeater-history-prev" class="repeater-icon-button" type="button" aria-label="Previous Repeater request" title="Previous request" disabled>←</button>
+                    <button id="repeater-history-next" class="repeater-icon-button" type="button" aria-label="Next Repeater request" title="Next request" disabled>→</button>
+                  </div>
+                  <div id="repeater-history" class="repeater-history" role="listbox" aria-label="Repeater request history"><div class="experiment-empty">No Repeater requests yet.</div></div>
+                </article>
+                <article class="experiment-card">
+                  <header><div><h2>Session variables</h2><p>Use {{name}} in URLs, methods, header values, or bodies. Use {{=name}} for a literal token.</p></div><span id="repeater-variable-badge" class="experiment-card-badge" data-kind="offline">0 variables</span></header>
+                  <div class="experiment-body">
+                    <form id="repeater-variable-form" class="experiment-form">
+                      <label>Variables (JSON)<textarea id="repeater-variables" maxlength="40000" spellcheck="false" placeholder='{"host":"api.example.test","id":"42"}'></textarea></label>
+                      <button id="repeater-apply-variables" class="secondary-button" type="submit" disabled>Apply session variables</button>
+                    </form>
+                  </div>
+                </article>
+              </div>
+              <div class="repeater-column">
+                <article class="experiment-card">
+                  <header><div><h2>Editable request</h2><p>Only explicit credential-free values are sent through the disposable page.</p></div><span id="repeater-request-badge" class="experiment-card-badge" data-kind="offline">Draft</span></header>
+                  <div class="experiment-body">
+                    <form id="repeater-request-form" class="experiment-form">
+                      <label>Request URL<input id="repeater-request-url" type="text" maxlength="8192" placeholder="https://{{host}}/path/{{id}}" autocomplete="off" /></label>
+                      <div class="experiment-form-row">
+                        <label>Method<input id="repeater-request-method" type="text" value="GET" maxlength="256" autocomplete="off" /></label>
+                        <label>Timeout (ms)<input id="repeater-request-timeout" type="number" value="15000" min="100" max="30000" step="100" /></label>
+                      </div>
+                      <label>Headers (JSON)<textarea id="repeater-request-headers" maxlength="20000" spellcheck="false" placeholder='{"accept":"application/json","x-run":"{{id}}"}'></textarea></label>
+                      <label>Body<textarea id="repeater-request-body" maxlength="65536" spellcheck="false" placeholder='{"id":"{{id}}"}'></textarea></label>
+                      <div id="repeater-variable-status" class="repeater-variable-status" role="status" aria-live="polite"><span class="repeater-variable-chip">No variables used</span></div>
+                      <div class="repeater-request-actions">
+                        <button id="repeater-send" class="trace-button repeater-send" type="submit" disabled>Send request</button>
+                        <button id="repeater-cancel" class="secondary-button" type="button" disabled>Cancel active</button>
+                        <button id="repeater-copy-resolved" class="secondary-button" type="button" disabled>Copy resolved</button>
+                      </div>
+                      <p class="experiment-privacy">Credentials are omitted and browser storage is isolated. Sensitive and transport-owned headers are rejected. History is ephemeral and never enters the evidence store.</p>
+                    </form>
+                  </div>
+                  <div class="repeater-active-strip"><span>Active execution</span><strong id="repeater-active-request">None</strong></div>
+                </article>
+              </div>
+              <div class="repeater-column">
+                <article class="experiment-card">
+                  <header><div><h2>Response</h2><p id="repeater-response-meta">Select a completed run to inspect its bounded response.</p></div><span id="repeater-response-badge" class="experiment-card-badge" data-kind="offline">No response</span></header>
+                  <div id="repeater-response" class="repeater-response experiment-empty">Send a request or choose one from history.</div>
+                </article>
+                <article class="experiment-card">
+                  <header><div><h2>Response comparison</h2><p>Status, latency, body digest, size, and response-header names.</p></div><span id="repeater-comparison-badge" class="experiment-card-badge" data-kind="offline">No comparison</span></header>
+                  <div class="experiment-body">
+                    <div class="repeater-compare-controls experiment-form">
+                      <label>Baseline<select id="repeater-compare-baseline"></select></label>
+                      <label>Current<select id="repeater-compare-current"></select></label>
+                      <button id="repeater-compare" class="secondary-button" type="button" disabled>Compare responses</button>
+                    </div>
+                  </div>
+                  <div id="repeater-comparison" class="experiment-empty">Complete two requests to compare their responses.</div>
+                </article>
+                <article class="experiment-card">
+                  <header><div><h2>Hard limits</h2><p>Bounded state keeps repeated testing predictable.</p></div><span class="experiment-card-badge">Protocol v1</span></header>
+                  <div class="experiment-context-facts">
+                    <div class="experiment-context-fact"><span>History</span><strong>24 runs / 512 KiB</strong></div>
+                    <div class="experiment-context-fact"><span>Variables</span><strong>32 / 32 KiB</strong></div>
+                  </div>
+                  <div class="experiment-context-facts">
+                    <div class="experiment-context-fact"><span>Bodies</span><strong>64 KiB each</strong></div>
+                    <div class="experiment-context-fact"><span>Runtime</span><strong>30 seconds</strong></div>
                   </div>
                 </article>
               </div>
@@ -2015,6 +2165,16 @@ export async function checkout(cart, fingerprint) {
         experimentPending: false,
         experimentError: null,
         experimentPrefillKey: null,
+        experimentMode: 'interceptor',
+        repeaterPrefillKey: null,
+        repeaterSelectedHistoryId: null,
+        repeaterExpectedHistoryId: null,
+        repeaterVariablesKey: null,
+        repeaterVariablesDirty: false,
+        repeaterDraftDirty: false,
+        repeaterCompareBaselineId: null,
+        repeaterCompareCurrentId: null,
+        repeaterComparisonKey: null,
         signalProfile: null,
         signalProfileStatus: 'idle',
         signalProfileError: null,
@@ -2054,6 +2214,11 @@ export async function checkout(cart, fingerprint) {
         coverageValue: document.querySelector('#coverage-value'),
         coverageBar: document.querySelector('#coverage-bar'),
         traceBranchExperiment: document.querySelector('#trace-branch-experiment'),
+        requestRepeaterPivot: document.querySelector('#request-repeater-pivot'),
+        experimentTitle: document.querySelector('#experiment-title'),
+        experimentModeButtons: [...document.querySelectorAll('[data-experiment-mode]')],
+        interceptionWorkspace: document.querySelector('.experiment-workspace'),
+        repeaterWorkspace: document.querySelector('#repeater-workspace'),
         experimentSubtitle: document.querySelector('#experiment-subtitle'),
         experimentNotice: document.querySelector('#experiment-notice'),
         experimentContextMessage: document.querySelector('#experiment-context-message'),
@@ -2089,6 +2254,42 @@ export async function checkout(cart, fingerprint) {
         experimentResult: document.querySelector('#experiment-result'),
         experimentAuditCount: document.querySelector('#experiment-audit-count'),
         experimentAudit: document.querySelector('#experiment-audit'),
+        repeaterContextMessage: document.querySelector('#repeater-context-message'),
+        repeaterContextBadge: document.querySelector('#repeater-context-badge'),
+        repeaterStorageState: document.querySelector('#repeater-storage-state'),
+        repeaterHistoryUsage: document.querySelector('#repeater-history-usage'),
+        repeaterCreate: document.querySelector('#repeater-create'),
+        repeaterDispose: document.querySelector('#repeater-dispose'),
+        repeaterClearHistory: document.querySelector('#repeater-clear-history'),
+        repeaterHistoryBadge: document.querySelector('#repeater-history-badge'),
+        repeaterHistoryBytes: document.querySelector('#repeater-history-bytes'),
+        repeaterHistoryPrev: document.querySelector('#repeater-history-prev'),
+        repeaterHistoryNext: document.querySelector('#repeater-history-next'),
+        repeaterHistory: document.querySelector('#repeater-history'),
+        repeaterVariableBadge: document.querySelector('#repeater-variable-badge'),
+        repeaterVariableForm: document.querySelector('#repeater-variable-form'),
+        repeaterVariables: document.querySelector('#repeater-variables'),
+        repeaterApplyVariables: document.querySelector('#repeater-apply-variables'),
+        repeaterRequestBadge: document.querySelector('#repeater-request-badge'),
+        repeaterRequestForm: document.querySelector('#repeater-request-form'),
+        repeaterRequestUrl: document.querySelector('#repeater-request-url'),
+        repeaterRequestMethod: document.querySelector('#repeater-request-method'),
+        repeaterRequestTimeout: document.querySelector('#repeater-request-timeout'),
+        repeaterRequestHeaders: document.querySelector('#repeater-request-headers'),
+        repeaterRequestBody: document.querySelector('#repeater-request-body'),
+        repeaterVariableStatus: document.querySelector('#repeater-variable-status'),
+        repeaterSend: document.querySelector('#repeater-send'),
+        repeaterCancel: document.querySelector('#repeater-cancel'),
+        repeaterCopyResolved: document.querySelector('#repeater-copy-resolved'),
+        repeaterActiveRequest: document.querySelector('#repeater-active-request'),
+        repeaterResponseMeta: document.querySelector('#repeater-response-meta'),
+        repeaterResponseBadge: document.querySelector('#repeater-response-badge'),
+        repeaterResponse: document.querySelector('#repeater-response'),
+        repeaterCompareBaseline: document.querySelector('#repeater-compare-baseline'),
+        repeaterCompareCurrent: document.querySelector('#repeater-compare-current'),
+        repeaterCompare: document.querySelector('#repeater-compare'),
+        repeaterComparisonBadge: document.querySelector('#repeater-comparison-badge'),
+        repeaterComparison: document.querySelector('#repeater-comparison'),
         workspace: document.querySelector('#workspace'),
         sourceTree: document.querySelector('#source-tree'),
         sourceEditorTabs: document.querySelector('#source-editor-tabs'),
@@ -2594,6 +2795,128 @@ export async function checkout(cart, fingerprint) {
             (experiment.isolated && typeof experiment.target_id === 'string' && experiment.target_id.length > 0));
       }
 
+      function isRepeaterRequest(request, resolved = false) {
+        if (!isPlainObject(request) || !isBoundedText(request.url, 8 * 1024) ||
+            !isBoundedText(request.method, resolved ? 32 : 256) ||
+            !Array.isArray(request.headers) || request.headers.length > 64 ||
+            !isBoundedText(request.body, 64 * 1024) ||
+            !isSafeIntegerInRange(request.timeout_ms, 100, 30000)) return false;
+        let headerBytes = 0;
+        const token = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+        const forbidden = new Set(['authorization', 'cookie', 'proxy-authorization', 'set-cookie',
+          'connection', 'content-length', 'host', 'transfer-encoding']);
+        if (!request.headers.every(header => {
+          if (!isPlainObject(header) || !isBoundedText(header.name, 128) ||
+              !isBoundedText(header.value, 2 * 1024) || !token.test(header.name) ||
+              forbidden.has(header.name.toLowerCase())) return false;
+          headerBytes += utf8ByteLength(header.name) + utf8ByteLength(header.value);
+          return headerBytes <= 16 * 1024;
+        })) return false;
+        if (!resolved) return request.url.length > 0 && request.method.length > 0;
+        if (!/^[A-Z][!#$%&'*+.^_`|~0-9A-Z-]{0,31}$/.test(request.method)) return false;
+        try {
+          const url = new URL(request.url);
+          return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.hash &&
+            (!['GET', 'HEAD'].includes(request.method) || request.body === '');
+        } catch { return false; }
+      }
+
+      function isRepeaterResult(result) {
+        return isRequestInterceptionResult(result) && result !== null &&
+          isSafeIntegerInRange(result.duration_ms, 0, 35000) &&
+          typeof result.cancelled === 'boolean' && typeof result.timed_out === 'boolean' &&
+          !(result.cancelled && result.timed_out) &&
+          (!result.ok || !result.cancelled && !result.timed_out) &&
+          typeof result.body_sha256 === 'string' && /^[0-9a-f]{64}$/.test(result.body_sha256);
+      }
+
+      function isRepeaterHistoryEntry(entry) {
+        return isPlainObject(entry) && isSafeIntegerInRange(entry.id, 1, Number.MAX_SAFE_INTEGER) &&
+          isSafeIntegerInRange(entry.started_at_ms, 1, Number.MAX_SAFE_INTEGER) &&
+          isSafeIntegerInRange(entry.completed_at_ms, entry.started_at_ms, Number.MAX_SAFE_INTEGER) &&
+          ['complete', 'error', 'cancelled', 'timed_out'].includes(entry.state) &&
+          Array.isArray(entry.variable_names) && entry.variable_names.length <= 32 &&
+          entry.variable_names.every(name => isBoundedText(name, 64) && /^[A-Za-z_][A-Za-z0-9_.-]*$/.test(name)) &&
+          new Set(entry.variable_names).size === entry.variable_names.length &&
+          isRepeaterRequest(entry.request) && isRepeaterRequest(entry.resolved_request, true) &&
+          isRepeaterResult(entry.response) &&
+          isSafeIntegerInRange(entry.stored_bytes, 1, 512 * 1024) &&
+          (entry.state === 'complete') === entry.response.ok &&
+          (entry.state === 'cancelled') === entry.response.cancelled &&
+          (entry.state === 'timed_out') === entry.response.timed_out;
+      }
+
+      function isRepeaterComparison(comparison, retainedIds) {
+        if (comparison === null) return true;
+        const headerList = value => Array.isArray(value) && value.length <= 64 &&
+          value.every(name => isBoundedText(name, 128) && name === name.toLowerCase());
+        return isPlainObject(comparison) && comparison.protocol_version === 1 &&
+          isSafeIntegerInRange(comparison.baseline_id, 1, Number.MAX_SAFE_INTEGER) &&
+          isSafeIntegerInRange(comparison.current_id, 1, Number.MAX_SAFE_INTEGER) &&
+          comparison.baseline_id !== comparison.current_id && retainedIds.has(comparison.baseline_id) &&
+          retainedIds.has(comparison.current_id) &&
+          isSafeIntegerInRange(comparison.baseline_status, 1, 599) &&
+          isSafeIntegerInRange(comparison.current_status, 1, 599) &&
+          typeof comparison.status_changed === 'boolean' &&
+          Number.isSafeInteger(comparison.duration_delta_ms) && Math.abs(comparison.duration_delta_ms) <= 35000 &&
+          isSafeIntegerInRange(comparison.baseline_body_bytes, 0, 64 * 1024) &&
+          isSafeIntegerInRange(comparison.current_body_bytes, 0, 64 * 1024) &&
+          Number.isSafeInteger(comparison.body_bytes_delta) && Math.abs(comparison.body_bytes_delta) <= 64 * 1024 &&
+          typeof comparison.baseline_body_sha256 === 'string' && /^[0-9a-f]{64}$/.test(comparison.baseline_body_sha256) &&
+          typeof comparison.current_body_sha256 === 'string' && /^[0-9a-f]{64}$/.test(comparison.current_body_sha256) &&
+          typeof comparison.body_changed === 'boolean' && headerList(comparison.headers_added) &&
+          headerList(comparison.headers_removed) && headerList(comparison.headers_changed) &&
+          typeof comparison.partial === 'boolean';
+      }
+
+      function isRepeater(repeater) {
+        const states = ['idle', 'attaching', 'ready', 'running', 'cancelling', 'error', 'disposed'];
+        if (!isPlainObject(repeater) || repeater.protocol_version !== 1 ||
+            !isSafeIntegerInRange(repeater.session_id, 0, Number.MAX_SAFE_INTEGER) ||
+            !states.includes(repeater.state) || !Array.isArray(repeater.variables) ||
+            repeater.variables.length > 32 || !Array.isArray(repeater.history) ||
+            repeater.history.length > 24 || !isSafeIntegerInRange(repeater.history_bytes, 0, 512 * 1024) ||
+            !isSafeIntegerInRange(repeater.history_evictions, 0, Number.MAX_SAFE_INTEGER) ||
+            !isBoundedText(repeater.message, 512) || !isPlainObject(repeater.limits) ||
+            repeater.limits.history_entries !== 24 || repeater.limits.history_bytes !== 512 * 1024 ||
+            repeater.limits.variables !== 32 || repeater.limits.variable_bytes !== 32 * 1024 ||
+            repeater.limits.request_bytes !== 64 * 1024 || repeater.limits.response_bytes !== 64 * 1024 ||
+            repeater.limits.timeout_ms !== 30000) return false;
+        let variableBytes = 0;
+        const variableNames = new Set();
+        if (!repeater.variables.every(variable => {
+          if (!isPlainObject(variable) || !isBoundedText(variable.name, 64) ||
+              !/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(variable.name) ||
+              !isBoundedText(variable.value, 4 * 1024) || variableNames.has(variable.name)) return false;
+          variableNames.add(variable.name);
+          variableBytes += utf8ByteLength(variable.name) + utf8ByteLength(variable.value);
+          return variableBytes <= 32 * 1024;
+        })) return false;
+        if (!repeater.history.every(isRepeaterHistoryEntry) ||
+            repeater.history.some((entry, index) => index > 0 && repeater.history[index - 1].id >= entry.id) ||
+            repeater.history_bytes !== repeater.history.reduce((sum, entry) => sum + entry.stored_bytes, 0)) return false;
+        const retainedIds = new Set(repeater.history.map(entry => entry.id));
+        if (!isRepeaterComparison(repeater.comparison, retainedIds)) return false;
+        const active = repeater.active_execution;
+        if (active !== null && (!isPlainObject(active) ||
+            !isSafeIntegerInRange(active.execution_id, 1, Number.MAX_SAFE_INTEGER) ||
+            !isSafeIntegerInRange(active.started_at_ms, 1, Number.MAX_SAFE_INTEGER) ||
+            !isRepeaterRequest(active.request) || !isBoundedText(active.resolved_url, 8 * 1024) ||
+            !isBoundedText(active.resolved_method, 32) || !Array.isArray(active.variable_names) ||
+            active.variable_names.length > 32 || !active.variable_names.every(name => variableNames.has(name)) ||
+            typeof active.cancel_requested !== 'boolean')) return false;
+        if (repeater.state === 'idle') {
+          return repeater.session_id === 0 && repeater.variables.length === 0 &&
+            repeater.history.length === 0 && active === null && repeater.comparison === null;
+        }
+        if (repeater.state === 'disposed') {
+          return repeater.session_id > 0 && repeater.variables.length === 0 &&
+            repeater.history.length === 0 && repeater.history_bytes === 0 && active === null && repeater.comparison === null;
+        }
+        if (repeater.session_id <= 0) return false;
+        return ['running', 'cancelling'].includes(repeater.state) ? active !== null : active === null;
+      }
+
       function isDebuggerResponse(body) {
         if (!isPlainObject(body) || body.protocol_version !== 1 ||
             !['unavailable', 'waiting', 'connecting', 'running', 'paused'].includes(body.state) ||
@@ -2606,6 +2929,7 @@ export async function checkout(cart, fingerprint) {
             !Array.isArray(body.console) || body.console.length > 500 || !body.console.every(isDebuggerConsoleEntry) ||
             !isMemoryOriginTrace(body.memory_origin_trace) ||
             !isRequestInterception(body.request_interception) ||
+            !isRepeater(body.repeater) ||
             !isPlainObject(body.settings) || !isPlainObject(body.limits)) return false;
         if (body.heap_diff_baseline !== null && (!isPlainObject(body.heap_diff_baseline) ||
             typeof body.heap_diff_baseline.target_id !== 'string' ||
@@ -3942,6 +4266,24 @@ export async function checkout(cart, fingerprint) {
         return state.debuggerSession?.request_interception ?? null;
       }
 
+      function repeaterState() {
+        return state.debuggerSession?.repeater ?? null;
+      }
+
+      function setExperimentMode(mode, focus = false) {
+        if (!['interceptor', 'repeater'].includes(mode)) return;
+        state.experimentMode = mode;
+        elements.interceptionWorkspace.hidden = mode !== 'interceptor';
+        elements.repeaterWorkspace.hidden = mode !== 'repeater';
+        elements.experimentModeButtons.forEach(button => {
+          const selected = button.dataset.experimentMode === mode;
+          button.setAttribute('aria-selected', String(selected));
+          button.tabIndex = selected ? 0 : -1;
+          if (selected && focus) button.focus();
+        });
+        renderExperiment();
+      }
+
       function setExperimentNotice(kind, message) {
         elements.experimentNotice.dataset.kind = kind;
         elements.experimentNotice.textContent = message;
@@ -4051,7 +4393,316 @@ export async function checkout(cart, fingerprint) {
         }));
       }
 
+      function parseRepeaterVariables(value) {
+        const source = value.trim();
+        if (!source) return {};
+        let variables;
+        try { variables = JSON.parse(source); }
+        catch { throw new TypeError('Session variables must be a JSON object.'); }
+        if (!isPlainObject(variables) || Object.values(variables).some(item => typeof item !== 'string')) {
+          throw new TypeError('Session variables must map names to text values.');
+        }
+        return variables;
+      }
+
+      function repeaterHeaderObject(headers) {
+        return Object.fromEntries(headers.map(header => [header.name, header.value]));
+      }
+
+      function prefillRepeaterVariables(repeater) {
+        const variables = Object.fromEntries((repeater?.variables ?? []).map(item => [item.name, item.value]));
+        const key = JSON.stringify(variables);
+        if (state.repeaterVariablesKey === key || state.repeaterVariablesDirty) return;
+        state.repeaterVariablesKey = key;
+        elements.repeaterVariables.value = Object.keys(variables).length
+          ? JSON.stringify(variables, null, 2) : '';
+      }
+
+      function prefillRepeaterRequest(force = false) {
+        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        if (!request || state.repeaterDraftDirty && !force) return;
+        const key = `${request.id}:${request.method}:${request.path}`;
+        if (!force && state.repeaterPrefillKey === key) return;
+        state.repeaterPrefillKey = key;
+        let requestUrl = request.path;
+        if (!/^https?:\/\//i.test(requestUrl)) {
+          requestUrl = `https://checkout.acme.test${requestUrl.startsWith('/') ? '' : '/'}${requestUrl}`;
+        }
+        try {
+          const parsed = new URL(requestUrl);
+          parsed.search = '';
+          parsed.hash = '';
+          elements.repeaterRequestUrl.value = parsed.toString();
+        } catch { elements.repeaterRequestUrl.value = ''; }
+        elements.repeaterRequestMethod.value = /^[A-Z][A-Z0-9!#$%&'*+.^_`|~-]{0,31}$/.test(request.method)
+          ? request.method : 'GET';
+        elements.repeaterRequestTimeout.value = '15000';
+        elements.repeaterRequestHeaders.value = '';
+        elements.repeaterRequestBody.value = '';
+        state.repeaterDraftDirty = false;
+        renderRepeaterVariableStatus();
+      }
+
+      function loadRepeaterHistoryEntry(entry, focus = false) {
+        if (!entry) return;
+        state.repeaterSelectedHistoryId = entry.id;
+        state.repeaterExpectedHistoryId = null;
+        elements.repeaterRequestUrl.value = entry.request.url;
+        elements.repeaterRequestMethod.value = entry.request.method;
+        elements.repeaterRequestTimeout.value = String(entry.request.timeout_ms);
+        elements.repeaterRequestHeaders.value = entry.request.headers.length
+          ? JSON.stringify(repeaterHeaderObject(entry.request.headers), null, 2) : '';
+        elements.repeaterRequestBody.value = entry.request.body;
+        state.repeaterDraftDirty = false;
+        renderRepeaterVariableStatus();
+        renderRepeater();
+        if (focus) {
+          [...elements.repeaterHistory.querySelectorAll('.repeater-history-row')]
+            .find(row => Number(row.dataset.historyId) === entry.id)?.focus({preventScroll: true});
+        }
+      }
+
+      function renderRepeaterVariableStatus() {
+        let variables = {};
+        let invalidVariables = false;
+        try { variables = parseRepeaterVariables(elements.repeaterVariables.value); }
+        catch { invalidVariables = true; }
+        const source = [
+          elements.repeaterRequestUrl.value,
+          elements.repeaterRequestMethod.value,
+          elements.repeaterRequestHeaders.value,
+          elements.repeaterRequestBody.value
+        ].join('\n');
+        const names = new Set();
+        for (const match of source.matchAll(/\{\{(=)?([^{}]+)\}\}/g)) {
+          if (!match[1]) names.add(match[2]);
+        }
+        const chips = [];
+        if (invalidVariables) {
+          const chip = textElement('span', 'repeater-variable-chip', 'Invalid variable JSON');
+          chip.dataset.kind = 'missing'; chips.push(chip);
+        }
+        [...names].sort().forEach(name => {
+          const resolved = Object.hasOwn(variables, name);
+          const chip = textElement('span', 'repeater-variable-chip', `${resolved ? 'Resolved' : 'Missing'} · {{${name}}}`);
+          if (!resolved) chip.dataset.kind = 'missing';
+          chips.push(chip);
+        });
+        if (!chips.length) chips.push(textElement('span', 'repeater-variable-chip', 'No variables used'));
+        elements.repeaterVariableStatus.replaceChildren(...chips);
+      }
+
+      function selectedRepeaterEntry(repeater = repeaterState()) {
+        return repeater?.history.find(entry => entry.id === state.repeaterSelectedHistoryId) ?? null;
+      }
+
+      function renderRepeaterHistory(repeater) {
+        const history = repeater?.history ?? [];
+        if (state.repeaterExpectedHistoryId !== null && history.some(entry => entry.id === state.repeaterExpectedHistoryId)) {
+          state.repeaterSelectedHistoryId = state.repeaterExpectedHistoryId;
+          state.repeaterExpectedHistoryId = null;
+        }
+        if (!history.some(entry => entry.id === state.repeaterSelectedHistoryId)) {
+          state.repeaterSelectedHistoryId = history.at(-1)?.id ?? null;
+        }
+        elements.repeaterHistoryBadge.textContent = `${history.length} ${history.length === 1 ? 'run' : 'runs'}${repeater?.history_evictions ? ` · ${repeater.history_evictions} evicted` : ''}`;
+        elements.repeaterHistoryBadge.dataset.kind = history.length ? '' : 'offline';
+        elements.repeaterHistoryBytes.textContent = `${Math.ceil((repeater?.history_bytes ?? 0) / 1024)} / 512 KiB`;
+        elements.repeaterHistoryUsage.textContent = `${history.length} / ${repeater?.limits?.history_entries ?? 24}`;
+        if (!history.length) {
+          elements.repeaterHistory.replaceChildren(textElement('div', 'experiment-empty', 'No Repeater requests yet.'));
+          elements.repeaterHistoryPrev.disabled = true;
+          elements.repeaterHistoryNext.disabled = true;
+          return;
+        }
+        const selectedIndex = history.findIndex(entry => entry.id === state.repeaterSelectedHistoryId);
+        elements.repeaterHistoryPrev.disabled = selectedIndex <= 0;
+        elements.repeaterHistoryNext.disabled = selectedIndex < 0 || selectedIndex >= history.length - 1;
+        elements.repeaterHistory.replaceChildren(...[...history].reverse().map(entry => {
+          const row = document.createElement('button'); row.type = 'button'; row.className = 'repeater-history-row';
+          row.dataset.historyId = String(entry.id); row.setAttribute('role', 'option');
+          row.setAttribute('aria-selected', String(entry.id === state.repeaterSelectedHistoryId));
+          row.tabIndex = entry.id === state.repeaterSelectedHistoryId ? 0 : -1;
+          const title = textElement('span', 'repeater-history-title', `${entry.resolved_request.method} ${entry.resolved_request.url}`);
+          const status = textElement('span', 'repeater-history-state', entry.response.ok ? String(entry.response.status) : entry.state.replaceAll('_', ' '));
+          if (!entry.response.ok) status.dataset.kind = 'error';
+          const occurred = new Date(entry.completed_at_ms).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+          const meta = textElement('span', 'repeater-history-meta', `run ${entry.id} · ${entry.response.duration_ms} ms · ${occurred}`);
+          row.append(title, status, meta);
+          row.addEventListener('click', () => loadRepeaterHistoryEntry(entry, true));
+          row.addEventListener('keydown', event => {
+            if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const rows = [...elements.repeaterHistory.querySelectorAll('.repeater-history-row')];
+            const index = rows.indexOf(row);
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
+              : Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
+            rows[next].click();
+          });
+          return row;
+        }));
+      }
+
+      function renderRepeaterResponse(repeater) {
+        const entry = selectedRepeaterEntry(repeater);
+        elements.repeaterCopyResolved.disabled = !entry || ['running', 'cancelling'].includes(repeater?.state) || state.experimentPending;
+        if (!entry) {
+          elements.repeaterResponse.className = 'repeater-response experiment-empty';
+          elements.repeaterResponse.textContent = 'Send a request or choose one from history.';
+          elements.repeaterResponseMeta.textContent = 'Select a completed run to inspect its bounded response.';
+          elements.repeaterResponseBadge.dataset.kind = 'offline';
+          elements.repeaterResponseBadge.textContent = 'No response';
+          return;
+        }
+        const response = entry.response;
+        elements.repeaterResponse.className = 'repeater-response';
+        const summary = document.createElement('div'); summary.className = 'experiment-result-summary';
+        summary.append(
+          experimentFact('Status', response.ok ? `${response.status} ${response.status_text}`.trim() : entry.state.replaceAll('_', ' ')),
+          experimentFact('Duration', `${response.duration_ms} ms`),
+          experimentFact('Body', `${utf8ByteLength(response.body)} bytes${response.body_truncated ? ' · truncated' : ''}`)
+        );
+        const headers = document.createElement('div'); headers.className = 'repeater-response-headers';
+        if (response.headers.length) {
+          headers.append(...response.headers.map(header => {
+            const row = document.createElement('div'); row.className = 'repeater-response-header';
+            row.append(textElement('span', '', header.name), textElement('span', '', header.value));
+            return row;
+          }));
+        } else headers.append(textElement('div', 'experiment-empty', 'No response headers.'));
+        const body = document.createElement('pre'); body.className = 'experiment-result-body';
+        body.textContent = response.ok ? response.body || '(empty response body)' : response.error;
+        elements.repeaterResponse.replaceChildren(summary, headers, body);
+        elements.repeaterResponseMeta.textContent = `run ${entry.id} · ${entry.resolved_request.method} ${entry.resolved_request.url} · ${response.headers.length} headers${response.headers_truncated ? ' · truncated' : ''}`;
+        elements.repeaterResponseBadge.dataset.kind = response.ok ? '' : 'error';
+        elements.repeaterResponseBadge.textContent = response.ok ? 'Complete' : entry.state.replaceAll('_', ' ');
+      }
+
+      function renderRepeaterComparison(repeater) {
+        const successful = (repeater?.history ?? []).filter(entry => entry.response.ok);
+        const retained = new Set(successful.map(entry => entry.id));
+        const comparison = repeater?.comparison ?? null;
+        const comparisonKey = comparison ? `${comparison.baseline_id}:${comparison.current_id}` : null;
+        if (comparison && comparisonKey !== state.repeaterComparisonKey) {
+          state.repeaterCompareBaselineId = comparison.baseline_id;
+          state.repeaterCompareCurrentId = comparison.current_id;
+        }
+        state.repeaterComparisonKey = comparisonKey;
+        if (!retained.has(state.repeaterCompareBaselineId)) state.repeaterCompareBaselineId = successful.at(-2)?.id ?? null;
+        if (!retained.has(state.repeaterCompareCurrentId)) state.repeaterCompareCurrentId = successful.at(-1)?.id ?? null;
+        const options = successful.map(entry => {
+          const option = document.createElement('option'); option.value = String(entry.id);
+          option.textContent = `Run ${entry.id} · ${entry.response.status} · ${entry.response.duration_ms} ms`;
+          return option;
+        });
+        elements.repeaterCompareBaseline.replaceChildren(...options.map(option => option.cloneNode(true)));
+        elements.repeaterCompareCurrent.replaceChildren(...options);
+        elements.repeaterCompareBaseline.value = state.repeaterCompareBaselineId === null ? '' : String(state.repeaterCompareBaselineId);
+        elements.repeaterCompareCurrent.value = state.repeaterCompareCurrentId === null ? '' : String(state.repeaterCompareCurrentId);
+        elements.repeaterCompare.disabled = successful.length < 2 ||
+          state.repeaterCompareBaselineId === state.repeaterCompareCurrentId ||
+          ['running', 'cancelling'].includes(repeater?.state) || state.experimentPending;
+        if (!comparison) {
+          elements.repeaterComparison.className = 'experiment-empty';
+          elements.repeaterComparison.textContent = 'Complete two requests to compare their responses.';
+          elements.repeaterComparisonBadge.dataset.kind = 'offline';
+          elements.repeaterComparisonBadge.textContent = 'No comparison';
+          return;
+        }
+        elements.repeaterComparison.className = 'repeater-comparison';
+        const signed = value => `${value > 0 ? '+' : ''}${value}`;
+        const headerDetail = [
+          comparison.headers_added.length ? `added ${comparison.headers_added.join(', ')}` : '',
+          comparison.headers_removed.length ? `removed ${comparison.headers_removed.join(', ')}` : '',
+          comparison.headers_changed.length ? `changed ${comparison.headers_changed.join(', ')}` : ''
+        ].filter(Boolean).join(' · ') || 'No response-header changes';
+        elements.repeaterComparison.replaceChildren(
+          experimentFact('Status', comparison.status_changed
+            ? `${comparison.baseline_status} → ${comparison.current_status}` : `${comparison.current_status} unchanged`),
+          experimentFact('Latency', `${signed(comparison.duration_delta_ms)} ms`),
+          experimentFact('Body', comparison.body_changed ? 'Digest changed' : 'Exact digest match'),
+          experimentFact('Body size', `${signed(comparison.body_bytes_delta)} bytes`),
+          experimentFact('Header names', headerDetail),
+          experimentFact('Coverage', comparison.partial ? 'Partial due to truncation' : 'Complete within limits')
+        );
+        elements.repeaterComparison.lastElementChild.classList.add('repeater-comparison-detail');
+        elements.repeaterComparisonBadge.dataset.kind = comparison.partial ? 'error' : '';
+        elements.repeaterComparisonBadge.textContent = `Run ${comparison.baseline_id} vs ${comparison.current_id}`;
+      }
+
+      function renderRepeater() {
+        prefillRepeaterRequest();
+        const experiment = requestInterception();
+        const repeater = repeaterState();
+        const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
+        const active = ['running', 'cancelling'].includes(repeater?.state);
+        const working = state.experimentPending || ['creating', 'disposing'].includes(experiment?.state);
+        const contextReady = attached && experiment?.isolated &&
+          experiment.target_id === state.debuggerSession?.target?.id && ['ready', 'error'].includes(experiment.state) &&
+          ['ready', 'error'].includes(repeater?.state);
+        const canDispose = experiment?.isolated && ['ready', 'error'].includes(experiment.state) &&
+          experiment.pending_requests === 0 && !active;
+        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        elements.experimentTitle.textContent = 'Repeater';
+        elements.experimentSubtitle.textContent = request
+          ? `request-${request.id} · editable credential-free replay · isolated session`
+          : 'Editable credential-free replay · isolated session';
+        if (state.experimentError) setExperimentNotice('error', state.experimentError);
+        else if (!repeater || !experiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
+        else if (active || working) setExperimentNotice('working', repeater.message);
+        else if (repeater.state === 'error') setExperimentNotice('error', repeater.message);
+        else if (contextReady || repeater.state === 'disposed') setExperimentNotice('ready', repeater.message);
+        else if (!attached) setExperimentNotice('idle', 'Attach an authorized browser target before creating a Repeater session.');
+        else setExperimentNotice('idle', repeater.message);
+
+        elements.repeaterContextBadge.dataset.kind = repeater?.state === 'error' ? 'error' : experiment?.isolated ? '' : 'offline';
+        elements.repeaterContextBadge.textContent = experiment?.state === 'creating' ? 'Creating'
+          : experiment?.state === 'disposing' ? 'Disposing'
+            : experiment?.isolated ? 'Isolated'
+              : repeater?.state === 'disposed' ? 'Disposed' : 'Not created';
+        elements.repeaterContextMessage.textContent = repeater?.state === 'error' ? repeater.message
+          : contextReady ? 'Disposable page attached. Repeater has no baseline cookies or storage.'
+            : repeater?.message ?? 'No disposable request-lab context exists.';
+        elements.repeaterStorageState.textContent = experiment?.isolated ? 'Ephemeral and isolated'
+          : repeater?.state === 'disposed' ? 'Deleted and erased' : 'Not allocated';
+        elements.repeaterCreate.disabled = !attached || Boolean(experiment?.isolated) || working || state.debuggerActionPending;
+        elements.repeaterDispose.disabled = !canDispose || working || state.debuggerActionPending;
+        elements.repeaterClearHistory.disabled = !repeater?.history.length || active || working || state.debuggerActionPending;
+
+        prefillRepeaterVariables(repeater);
+        const variableCount = repeater?.variables.length ?? 0;
+        elements.repeaterVariableBadge.textContent = `${variableCount} ${variableCount === 1 ? 'variable' : 'variables'}`;
+        elements.repeaterVariableBadge.dataset.kind = contextReady ? '' : 'offline';
+        elements.repeaterApplyVariables.disabled = !contextReady || active || working || state.debuggerActionPending;
+        elements.repeaterVariables.disabled = !contextReady || active || working;
+        elements.repeaterRequestForm.querySelectorAll('input, textarea').forEach(field => { field.disabled = !contextReady || active || working; });
+        elements.repeaterSend.disabled = !contextReady || active || working || state.debuggerActionPending;
+        elements.repeaterCancel.disabled = !active || state.debuggerActionPending || repeater?.state === 'cancelling';
+        elements.repeaterRequestBadge.dataset.kind = active ? '' : contextReady ? '' : 'offline';
+        elements.repeaterRequestBadge.textContent = repeater?.state === 'cancelling' ? 'Cancelling'
+          : repeater?.state === 'running' ? 'Running' : 'Draft';
+        elements.repeaterActiveRequest.textContent = repeater?.active_execution
+          ? `run ${repeater.active_execution.execution_id} · ${repeater.active_execution.resolved_method} ${repeater.active_execution.resolved_url}`
+          : 'None';
+        renderRepeaterVariableStatus();
+        renderRepeaterHistory(repeater);
+        renderRepeaterResponse(repeater);
+        renderRepeaterComparison(repeater);
+      }
+
       function renderExperiment() {
+        elements.experimentModeButtons.forEach(button => {
+          const selected = button.dataset.experimentMode === state.experimentMode;
+          button.setAttribute('aria-selected', String(selected));
+          button.tabIndex = selected ? 0 : -1;
+        });
+        elements.interceptionWorkspace.hidden = state.experimentMode !== 'interceptor';
+        elements.repeaterWorkspace.hidden = state.experimentMode !== 'repeater';
+        if (state.experimentMode === 'repeater') {
+          renderRepeater();
+          return;
+        }
+        elements.experimentTitle.textContent = 'Request Interception Lab';
         prefillExperimentRequest();
         setExperimentRuleVisibility();
         const experiment = requestInterception();
@@ -4117,6 +4768,9 @@ export async function checkout(cart, fingerprint) {
         if (response?.experiment && isRequestInterception(response.experiment) && state.debuggerSession) {
           state.debuggerSession.request_interception = response.experiment;
         }
+        if (response?.repeater && isRepeater(response.repeater) && state.debuggerSession) {
+          state.debuggerSession.repeater = response.repeater;
+        }
         if (!response) state.experimentError = state.debuggerError || 'The experiment action did not complete.';
         state.experimentPending = false;
         renderExperiment();
@@ -4164,6 +4818,89 @@ export async function checkout(cart, fingerprint) {
           });
         } catch (error) {
           state.experimentError = error.message;
+          renderExperiment();
+        }
+      }
+
+      async function applyRepeaterVariables() {
+        try {
+          const variables = parseRepeaterVariables(elements.repeaterVariables.value);
+          const response = await runExperimentAction({action: 'configure_repeater_variables', variables});
+          if (response) {
+            state.repeaterVariablesDirty = false;
+            state.repeaterVariablesKey = JSON.stringify(variables);
+            renderRepeaterVariableStatus();
+          }
+          return response;
+        } catch (error) {
+          state.experimentError = error.message;
+          renderExperiment();
+          return null;
+        }
+      }
+
+      async function runRepeaterRequest() {
+        try {
+          const applied = await applyRepeaterVariables();
+          if (!applied) return;
+          const previousHistoryId = repeaterState()?.history.at(-1)?.id ?? 0;
+          const method = elements.repeaterRequestMethod.value.trim();
+          const body = elements.repeaterRequestBody.value;
+          const resolvedMethod = method.toUpperCase();
+          if (['GET', 'HEAD'].includes(resolvedMethod) && body && !method.includes('{{')) {
+            throw new TypeError(`${resolvedMethod} requests cannot include a body.`);
+          }
+          const timeout = Number(elements.repeaterRequestTimeout.value);
+          if (!Number.isInteger(timeout) || timeout < 100 || timeout > 30000) {
+            throw new TypeError('Repeater timeout must be between 100 and 30000 ms.');
+          }
+          const response = await runExperimentAction({
+            action: 'run_repeater_request',
+            url: elements.repeaterRequestUrl.value.trim(),
+            method,
+            headers: parseExperimentHeaders(elements.repeaterRequestHeaders.value, 'Request headers'),
+            body,
+            timeout_ms: timeout
+          });
+          const executionId = response?.repeater?.active_execution?.execution_id ??
+            response?.repeater?.history.at(-1)?.id;
+          if (Number.isSafeInteger(executionId) && executionId > previousHistoryId) {
+            state.repeaterExpectedHistoryId = executionId;
+            renderExperiment();
+          }
+          state.repeaterDraftDirty = false;
+        } catch (error) {
+          state.experimentError = error.message;
+          renderExperiment();
+        }
+      }
+
+      async function compareRepeaterResponses() {
+        const baselineId = Number(elements.repeaterCompareBaseline.value);
+        const currentId = Number(elements.repeaterCompareCurrent.value);
+        if (!Number.isSafeInteger(baselineId) || !Number.isSafeInteger(currentId) || baselineId === currentId) return;
+        state.repeaterCompareBaselineId = baselineId;
+        state.repeaterCompareCurrentId = currentId;
+        await runExperimentAction({
+          action: 'compare_repeater_history', baseline_id: baselineId, current_id: currentId
+        });
+      }
+
+      async function copyResolvedRepeaterRequest() {
+        const entry = selectedRepeaterEntry();
+        if (!entry) return;
+        const request = {
+          url: entry.resolved_request.url,
+          method: entry.resolved_request.method,
+          headers: repeaterHeaderObject(entry.resolved_request.headers),
+          body: entry.resolved_request.body,
+          timeout_ms: entry.resolved_request.timeout_ms
+        };
+        try {
+          await navigator.clipboard.writeText(JSON.stringify(request, null, 2));
+          setExperimentNotice('ready', `Resolved request from run ${entry.id} copied to the clipboard.`);
+        } catch {
+          state.experimentError = 'The resolved request could not be copied to the clipboard.';
           renderExperiment();
         }
       }
@@ -5966,7 +6703,6 @@ export async function checkout(cart, fingerprint) {
       function showScreen(name, trigger = null) {
         const screenName = name === 'backtraces' ? 'backtrace' : name;
         if (screenName === 'backtrace' && !traceIsAvailable()) return;
-        if (screenName === 'experiments' && !state.selectedField) return;
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
         elements.workspace.classList.toggle('sources-active', screenName === 'sources');
         document.querySelectorAll('.nav-button').forEach(button => {
@@ -6158,6 +6894,14 @@ export async function checkout(cart, fingerprint) {
         showScreen('backtrace', elements.traceButton);
         await refreshOriginTrace();
       });
+      elements.requestRepeaterPivot.addEventListener('click', () => {
+        state.experimentMode = 'repeater';
+        state.repeaterDraftDirty = false;
+        state.repeaterPrefillKey = null;
+        prefillRepeaterRequest(true);
+        showScreen('experiments', elements.requestRepeaterPivot);
+        requestAnimationFrame(() => elements.repeaterRequestUrl.focus({preventScroll: true}));
+      });
       elements.requestMemoryPivot.addEventListener('click', () => {
         const selected = state.selectedField;
         if (!selected) return;
@@ -6279,6 +7023,70 @@ export async function checkout(cart, fingerprint) {
       elements.experimentRequestForm.addEventListener('submit', event => {
         event.preventDefault();
         runExperimentRequest();
+      });
+      elements.experimentModeButtons.forEach(button => button.addEventListener('click', () => {
+        setExperimentMode(button.dataset.experimentMode);
+      }));
+      enableTabKeyboardNavigation('.experiment-mode-tab');
+      elements.repeaterCreate.addEventListener('click', () => runExperimentAction({
+        action: 'create_request_interception_experiment'
+      }));
+      elements.repeaterDispose.addEventListener('click', async () => {
+        const response = await runExperimentAction({action: 'dispose_request_interception_experiment'});
+        if (response) {
+          state.repeaterSelectedHistoryId = null;
+          state.repeaterExpectedHistoryId = null;
+          state.repeaterVariablesKey = null;
+          state.repeaterVariablesDirty = false;
+          state.repeaterComparisonKey = null;
+        }
+      });
+      elements.repeaterClearHistory.addEventListener('click', async () => {
+        const response = await runExperimentAction({action: 'clear_repeater_history'});
+        if (response) {
+          state.repeaterSelectedHistoryId = null;
+          state.repeaterExpectedHistoryId = null;
+          state.repeaterComparisonKey = null;
+        }
+      });
+      elements.repeaterVariableForm.addEventListener('submit', event => {
+        event.preventDefault();
+        applyRepeaterVariables();
+      });
+      elements.repeaterVariables.addEventListener('input', () => {
+        state.repeaterVariablesDirty = true;
+        state.experimentError = null;
+        renderRepeaterVariableStatus();
+      });
+      elements.repeaterRequestForm.querySelectorAll('input, textarea').forEach(field => field.addEventListener('input', () => {
+        state.repeaterDraftDirty = true;
+        state.experimentError = null;
+        renderRepeaterVariableStatus();
+      }));
+      elements.repeaterRequestForm.addEventListener('submit', event => {
+        event.preventDefault();
+        runRepeaterRequest();
+      });
+      elements.repeaterCancel.addEventListener('click', () => runExperimentAction({action: 'cancel_repeater_request'}));
+      elements.repeaterCopyResolved.addEventListener('click', copyResolvedRepeaterRequest);
+      elements.repeaterCompareBaseline.addEventListener('change', () => {
+        state.repeaterCompareBaselineId = Number(elements.repeaterCompareBaseline.value);
+        renderRepeaterComparison(repeaterState());
+      });
+      elements.repeaterCompareCurrent.addEventListener('change', () => {
+        state.repeaterCompareCurrentId = Number(elements.repeaterCompareCurrent.value);
+        renderRepeaterComparison(repeaterState());
+      });
+      elements.repeaterCompare.addEventListener('click', compareRepeaterResponses);
+      elements.repeaterHistoryPrev.addEventListener('click', () => {
+        const history = repeaterState()?.history ?? [];
+        const index = history.findIndex(entry => entry.id === state.repeaterSelectedHistoryId);
+        if (index > 0) loadRepeaterHistoryEntry(history[index - 1]);
+      });
+      elements.repeaterHistoryNext.addEventListener('click', () => {
+        const history = repeaterState()?.history ?? [];
+        const index = history.findIndex(entry => entry.id === state.repeaterSelectedHistoryId);
+        if (index >= 0 && index < history.length - 1) loadRepeaterHistoryEntry(history[index + 1]);
       });
       elements.memorySearchForm.addEventListener('submit', event => {
         event.preventDefault();

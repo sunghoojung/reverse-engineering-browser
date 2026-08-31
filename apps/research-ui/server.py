@@ -862,6 +862,10 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             "breakpoints": [],
             "watches": [],
             "console": [],
+            "heap_diff_baseline": None,
+            "memory_origin_trace": DebuggerBridge._empty_memory_origin_trace(),
+            "request_interception": DebuggerBridge._empty_request_interception(),
+            "repeater": DebuggerBridge._empty_repeater(),
             "settings": {
                 "breakpoints_active": True,
                 "pause_on_exceptions": "none",

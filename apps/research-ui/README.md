@@ -83,7 +83,11 @@ Captured reads the artifact manifest and immutable blobs created by
 Brave debugger. Both use the DevTools origin, directory, and file organization.
 The center editor provides tabs, line numbers, `Command+P` or `Control+P`
 open-file navigation, `Command+F` or `Control+F` search, original and
-readable-derived views, and WASM display.
+readable-derived views, and WASM display. A dependency-free, stateful syntax
+layer applies VS Code-inspired dark and light palettes to JavaScript, JSON,
+HTML, CSS, and WebAssembly hex while preserving source as inert text. Coloring
+is capped at 50,000 token spans and visibly falls back to plain text after the
+limit without truncating source content.
 
 During `make live`, the debugger sidebar uses Chromium's Debugger, Runtime,
 Log, and DOMDebugger protocol domains. It supports line breakpoints, pause,

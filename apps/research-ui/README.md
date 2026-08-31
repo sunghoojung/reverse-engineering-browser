@@ -162,6 +162,21 @@ stores only redacted URLs and mutation metadata. Disposal deletes the complete
 BrowserContext before the ephemeral result can be cleared. See
 [Request Interception v1](../../docs/product/request-interception-v1.md).
 
+Object Lab shares the disposable Experiment BrowserContext but never the
+baseline target. It opens one explicit credential-free HTTP or HTTPS page,
+then applies the existing bounded live-object search without invoking accessors.
+Results retain references only for the current navigation and search. A
+researcher can explicitly confirm a typed JSON own-property set or a safe
+configurable own-property delete. The fixed operation rejects accessors,
+prototype-related names, inherited setters, non-writable properties, and
+non-extensible targets. It exposes no arbitrary evaluation, function calls, or
+prototype mutation. Values are capped at 16 KiB, depth eight, 256 JSON entries,
+and 4 KiB per string. Each session allows 256 attempts and keeps at most 128
+metadata-only audit records containing the operation, target class, before and
+after types, redacted URL, byte count, and value digest. Disposal erases object
+references, previews, submitted values, and the audit with the BrowserContext.
+See [Live Object Experiment v1](../../docs/product/live-object-experiment-v1.md).
+
 Repeater shares that disposable request-lab context and sends one editable,
 credential-free request at a time. It supports immediate cancellation, a
 100-millisecond to 30-second timeout, 32 session-scoped `{{name}}` variables,

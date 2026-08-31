@@ -1202,10 +1202,31 @@
       .experiment-audit-meta { grid-column: 1 / -1; color: var(--faint); font: 8px/1.4 var(--mono); overflow-wrap: anywhere; }
       .experiment-empty { min-height: 120px; display: grid; place-items: center; padding: 18px; color: var(--muted); text-align: center; }
       .experiment-privacy { margin: 0; color: var(--faint); font: 8px/1.5 var(--mono); }
-      .experiment-mode-tabs { display: flex; gap: 3px; padding: 3px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
+      .experiment-mode-tabs { display: flex; gap: 3px; max-width: 100%; padding: 3px; overflow-x: auto; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
       .experiment-mode-tab { min-height: 25px; padding: 0 10px; border: 0; border-radius: 3px; background: transparent; color: var(--muted); font: 650 8px var(--mono); text-transform: uppercase; }
       .experiment-mode-tab[aria-selected="true"] { background: var(--accent-soft); color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
       .experiment-workspace[hidden], .repeater-workspace[hidden] { display: none; }
+      .object-search-options { display: grid; align-content: center; gap: 5px; padding: 4px 0; }
+      .object-search-options .memory-check { display: flex; grid-template-columns: none; align-items: center; gap: 6px; color: var(--muted); font: 8px var(--mono); text-transform: none; }
+      .object-search-options input { width: auto; min-height: auto; }
+      .object-results-card { min-height: 250px; }
+      .object-result-list { display: grid; max-height: 430px; overflow: auto; }
+      .object-result-row { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; padding: 10px; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; color: var(--text); text-align: left; }
+      .object-result-row:hover, .object-result-row:focus, .object-result-row[aria-selected="true"] { background: var(--accent-soft); }
+      .object-result-title { min-width: 0; overflow: hidden; font: 9px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+      .object-result-count { color: var(--accent); font: 8px var(--mono); }
+      .object-result-preview { grid-column: 1 / -1; color: var(--faint); font: 8px/1.45 var(--mono); overflow-wrap: anywhere; }
+      .object-property-preview { display: grid; max-height: 210px; margin-bottom: 9px; overflow: auto; border: 1px solid var(--line-soft); background: var(--panel); }
+      .object-property-row { display: grid; grid-template-columns: minmax(90px, .8fr) 70px minmax(110px, 1.2fr); gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--line-soft); font: 8px/1.4 var(--mono); }
+      .object-property-row:last-child { border-bottom: 0; }
+      .object-property-row span:first-child { color: var(--accent); overflow-wrap: anywhere; }
+      .object-property-row span:nth-child(2) { color: var(--faint); }
+      .object-property-row span:last-child { color: var(--muted); overflow-wrap: anywhere; }
+      .object-confirm { display: flex !important; grid-template-columns: none !important; align-items: flex-start; gap: 7px !important; color: var(--muted) !important; font: 8px/1.45 var(--mono) !important; text-transform: none !important; }
+      .object-confirm input { width: auto; min-height: auto; margin-top: 2px; }
+      .object-mutation-summary { min-height: 38px; padding: 9px 10px; border-top: 1px solid var(--line-soft); color: var(--muted); font: 8px/1.45 var(--mono); overflow-wrap: anywhere; }
+      .object-mutation-summary[data-kind="ready"] { color: var(--green); }
+      .object-mutation-summary[data-kind="error"] { color: var(--red); }
       .repeater-workspace {
         min-height: 0;
         display: grid;
@@ -1926,15 +1947,16 @@
               <button class="back-button" type="button" data-screen="backtrace" aria-label="Back to trace">←</button>
               <div><h1 id="experiment-title">Request Interception Lab</h1><div id="experiment-subtitle" class="screen-subtitle">Disposable context · no baseline cookies, storage, or credentials</div></div>
               <div class="screen-head-actions">
-                <div class="experiment-mode-tabs" role="tablist" aria-label="Request lab mode">
+                <div class="experiment-mode-tabs" role="tablist" aria-label="Experiment mode">
                   <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="interceptor" aria-selected="true">Interceptor</button>
                   <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="repeater" aria-selected="false" tabindex="-1">Repeater</button>
+                  <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="object" aria-selected="false" tabindex="-1">Object Lab</button>
                 </div>
                 <span class="memory-readonly">Experiment only</span>
               </div>
             </header>
             <div id="experiment-notice" class="experiment-notice" data-kind="idle" role="status" aria-live="polite">Create an isolated experiment to configure request interception.</div>
-            <div class="experiment-workspace">
+            <div id="interception-workspace" class="experiment-workspace">
               <div class="experiment-column">
                 <article class="experiment-card">
                   <header>
@@ -2102,6 +2124,92 @@
                   <div class="experiment-context-facts">
                     <div class="experiment-context-fact"><span>Bodies</span><strong>64 KiB each</strong></div>
                     <div class="experiment-context-fact"><span>Runtime</span><strong>30 seconds</strong></div>
+                  </div>
+                </article>
+              </div>
+            </div>
+            <div id="object-workspace" class="experiment-workspace" hidden>
+              <div class="experiment-column">
+                <article class="experiment-card">
+                  <header>
+                    <div><h2>Isolated Object Lab</h2><p id="object-context-message">No disposable Experiment context exists.</p></div>
+                    <span id="object-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span>
+                  </header>
+                  <div class="experiment-body">
+                    <div class="experiment-actions">
+                      <button id="object-create" class="trace-button experiment-primary" type="button">Create isolated context</button>
+                      <button id="object-dispose" class="secondary-button" type="button" disabled>Dispose and erase</button>
+                    </div>
+                  </div>
+                  <div class="experiment-context-facts">
+                    <div class="experiment-context-fact"><span>Storage</span><strong id="object-storage-state">Not allocated</strong></div>
+                    <div class="experiment-context-fact"><span>Page</span><strong id="object-page-state">Not opened</strong></div>
+                  </div>
+                </article>
+                <article class="experiment-card">
+                  <header><div><h2>Disposable page</h2><p>Open one explicit URL with no baseline cookies or storage.</p></div><span id="object-page-badge" class="experiment-card-badge" data-kind="offline">No page</span></header>
+                  <div class="experiment-body">
+                    <form id="object-navigation-form" class="experiment-form">
+                      <label>Page URL<input id="object-page-url" type="url" maxlength="8192" placeholder="https://app.example.test/lab" autocomplete="off" /></label>
+                      <button id="object-navigate" class="secondary-button" type="submit" disabled>Open isolated page</button>
+                      <p class="experiment-privacy">HTTP and HTTPS only. URL credentials and fragments are rejected. Query text is never retained in the audit.</p>
+                    </form>
+                  </div>
+                </article>
+                <article class="experiment-card">
+                  <header><div><h2>Bounded live search</h2><p>Own properties are inspected without invoking getters.</p></div><span id="object-search-badge" class="experiment-card-badge" data-kind="offline">No search</span></header>
+                  <div class="experiment-body">
+                    <form id="object-search-form" class="experiment-form">
+                      <label>Property name<input id="object-property-query" type="text" maxlength="512" placeholder="ready, config, featureFlag" autocomplete="off" /></label>
+                      <label>Primitive value<input id="object-value-query" type="text" maxlength="512" placeholder="Optional exact text or pattern" autocomplete="off" /></label>
+                      <label>Class name<input id="object-class-query" type="text" maxlength="512" placeholder="Object, Array, CheckoutState" autocomplete="off" /></label>
+                      <label>Structural shape<textarea id="object-shape-query" maxlength="4096" spellcheck="false" placeholder='{"ready":false}'></textarea></label>
+                      <div class="experiment-form-row">
+                        <label>Similarity<input id="object-similarity-threshold" type="number" min="0" max="1" step="0.05" value="0.75" /></label>
+                        <div class="object-search-options"><label class="memory-check"><input id="object-regex" type="checkbox" /> Regular expression</label><label class="memory-check"><input id="object-case-sensitive" type="checkbox" /> Case sensitive</label><label class="memory-check"><input id="object-shape-values" type="checkbox" /> Match shape values</label></div>
+                      </div>
+                      <button id="object-search" class="trace-button" type="submit" disabled>Search isolated page</button>
+                    </form>
+                  </div>
+                </article>
+              </div>
+              <div class="experiment-column">
+                <article class="experiment-card object-results-card">
+                  <header><div><h2>Live object matches</h2><p id="object-search-meta">Open a page and run one bounded search.</p></div><span id="object-result-count" class="experiment-card-badge" data-kind="offline">0 matches</span></header>
+                  <div id="object-results" class="object-result-list" role="listbox" aria-label="Object Lab live matches"><div class="experiment-empty">No retained object references.</div></div>
+                </article>
+                <article class="experiment-card">
+                  <header><div><h2>Confirmed property patch</h2><p id="object-selection-meta">Select one retained object result.</p></div><span id="object-mutation-badge" class="experiment-card-badge" data-kind="offline">Locked</span></header>
+                  <div class="experiment-body">
+                    <div id="object-preview" class="object-property-preview"><div class="experiment-empty">No object selected.</div></div>
+                    <form id="object-mutation-form" class="experiment-form">
+                      <div class="experiment-form-row">
+                        <label>Operation<select id="object-operation"><option value="set">Set JSON value</option><option value="delete">Delete own property</option></select></label>
+                        <label>Own property<input id="object-mutation-property" type="text" maxlength="256" autocomplete="off" placeholder="ready" /></label>
+                      </div>
+                      <label id="object-value-field">JSON value<textarea id="object-mutation-value" maxlength="16384" spellcheck="false" placeholder='{"enabled":true}'></textarea></label>
+                      <label class="object-confirm"><input id="object-confirm" type="checkbox" /> I confirm this will mutate only the disposable Experiment page.</label>
+                      <button id="object-mutate" class="trace-button" type="submit" disabled>Apply confirmed patch</button>
+                      <p class="experiment-privacy">No arbitrary code, function calls, prototype changes, getters, or setters. The baseline page and evidence store are never modified.</p>
+                    </form>
+                  </div>
+                  <div id="object-mutation-result" class="object-mutation-summary">No mutation attempted.</div>
+                </article>
+              </div>
+              <div class="experiment-column">
+                <article class="experiment-card">
+                  <header><div><h2>Object mutation audit</h2><p>Metadata and value digest only. Set values and page content are not retained.</p></div><span id="object-audit-count" class="experiment-card-badge" data-kind="offline">0 entries</span></header>
+                  <div id="object-audit" class="experiment-audit"><div class="experiment-empty">No object mutations attempted.</div></div>
+                </article>
+                <article class="experiment-card">
+                  <header><div><h2>Hard limits</h2><p>Every reference and mutation stays session-scoped and bounded.</p></div><span class="experiment-card-badge">Protocol v1</span></header>
+                  <div class="experiment-context-facts">
+                    <div class="experiment-context-fact"><span>Search</span><strong>25,000 objects / 750 ms</strong></div>
+                    <div class="experiment-context-fact"><span>Matches</span><strong>50 / 16 properties</strong></div>
+                  </div>
+                  <div class="experiment-context-facts">
+                    <div class="experiment-context-fact"><span>Mutations</span><strong>256 attempts / 128 audit</strong></div>
+                    <div class="experiment-context-fact"><span>JSON value</span><strong>16 KiB / depth 8</strong></div>
                   </div>
                 </article>
               </div>
@@ -2340,6 +2448,8 @@ export async function checkout(cart, fingerprint) {
         experimentError: null,
         experimentPrefillKey: null,
         experimentMode: 'interceptor',
+        objectSelectedResultId: null,
+        objectSelectionSearchId: 0,
         repeaterPrefillKey: null,
         repeaterSelectedHistoryId: null,
         repeaterExpectedHistoryId: null,
@@ -2409,8 +2519,9 @@ export async function checkout(cart, fingerprint) {
         requestCollectionPivot: document.querySelector('#request-collection-pivot'),
         experimentTitle: document.querySelector('#experiment-title'),
         experimentModeButtons: [...document.querySelectorAll('[data-experiment-mode]')],
-        interceptionWorkspace: document.querySelector('.experiment-workspace'),
+        interceptionWorkspace: document.querySelector('#interception-workspace'),
         repeaterWorkspace: document.querySelector('#repeater-workspace'),
+        objectWorkspace: document.querySelector('#object-workspace'),
         experimentSubtitle: document.querySelector('#experiment-subtitle'),
         experimentNotice: document.querySelector('#experiment-notice'),
         experimentContextMessage: document.querySelector('#experiment-context-message'),
@@ -2446,6 +2557,43 @@ export async function checkout(cart, fingerprint) {
         experimentResult: document.querySelector('#experiment-result'),
         experimentAuditCount: document.querySelector('#experiment-audit-count'),
         experimentAudit: document.querySelector('#experiment-audit'),
+        objectContextMessage: document.querySelector('#object-context-message'),
+        objectContextBadge: document.querySelector('#object-context-badge'),
+        objectStorageState: document.querySelector('#object-storage-state'),
+        objectPageState: document.querySelector('#object-page-state'),
+        objectCreate: document.querySelector('#object-create'),
+        objectDispose: document.querySelector('#object-dispose'),
+        objectNavigationForm: document.querySelector('#object-navigation-form'),
+        objectPageUrl: document.querySelector('#object-page-url'),
+        objectNavigate: document.querySelector('#object-navigate'),
+        objectPageBadge: document.querySelector('#object-page-badge'),
+        objectSearchForm: document.querySelector('#object-search-form'),
+        objectPropertyQuery: document.querySelector('#object-property-query'),
+        objectValueQuery: document.querySelector('#object-value-query'),
+        objectClassQuery: document.querySelector('#object-class-query'),
+        objectShapeQuery: document.querySelector('#object-shape-query'),
+        objectSimilarityThreshold: document.querySelector('#object-similarity-threshold'),
+        objectRegex: document.querySelector('#object-regex'),
+        objectCaseSensitive: document.querySelector('#object-case-sensitive'),
+        objectShapeValues: document.querySelector('#object-shape-values'),
+        objectSearch: document.querySelector('#object-search'),
+        objectSearchBadge: document.querySelector('#object-search-badge'),
+        objectSearchMeta: document.querySelector('#object-search-meta'),
+        objectResultCount: document.querySelector('#object-result-count'),
+        objectResults: document.querySelector('#object-results'),
+        objectSelectionMeta: document.querySelector('#object-selection-meta'),
+        objectMutationBadge: document.querySelector('#object-mutation-badge'),
+        objectPreview: document.querySelector('#object-preview'),
+        objectMutationForm: document.querySelector('#object-mutation-form'),
+        objectOperation: document.querySelector('#object-operation'),
+        objectMutationProperty: document.querySelector('#object-mutation-property'),
+        objectValueField: document.querySelector('#object-value-field'),
+        objectMutationValue: document.querySelector('#object-mutation-value'),
+        objectConfirm: document.querySelector('#object-confirm'),
+        objectMutate: document.querySelector('#object-mutate'),
+        objectMutationResult: document.querySelector('#object-mutation-result'),
+        objectAuditCount: document.querySelector('#object-audit-count'),
+        objectAudit: document.querySelector('#object-audit'),
         repeaterContextMessage: document.querySelector('#repeater-context-message'),
         repeaterContextBadge: document.querySelector('#repeater-context-badge'),
         repeaterStorageState: document.querySelector('#repeater-storage-state'),
@@ -3028,6 +3176,95 @@ export async function checkout(cart, fingerprint) {
             (experiment.isolated && typeof experiment.target_id === 'string' && experiment.target_id.length > 0));
       }
 
+      function isLiveObjectResultRecord(result) {
+        return isPlainObject(result) && isBoundedText(result.id, 128) &&
+          isBoundedText(result.class_name, 256) &&
+          isSafeIntegerInRange(result.property_count, 0, 0x7fffffff) &&
+          typeof result.properties_truncated === 'boolean' &&
+          (result.similarity === null || (typeof result.similarity === 'number' &&
+            Number.isFinite(result.similarity) && result.similarity >= 0 && result.similarity <= 1)) &&
+          Array.isArray(result.preview) && result.preview.length <= 16 &&
+          result.preview.every(property => isPlainObject(property) &&
+            isBoundedText(property.name, 4096) && isBoundedText(property.type, 128) &&
+            isBoundedText(property.value, 4096));
+      }
+
+      function isLiveObjectSearchMetadata(search) {
+        return isPlainObject(search) && search.protocol_version === 2 &&
+          ['analyzed', 'total_objects', 'result_limit', 'duration_ms'].every(field =>
+            isSafeIntegerInRange(search[field], 0, Number.MAX_SAFE_INTEGER)) &&
+          search.result_limit === 50 &&
+          ['result_limit_reached', 'scan_limit_reached', 'property_limit_reached', 'timed_out'].every(field =>
+            typeof search[field] === 'boolean');
+      }
+
+      function isObjectExperimentDescriptor(descriptor) {
+        return isPlainObject(descriptor) && typeof descriptor.exists === 'boolean' &&
+          isBoundedText(descriptor.type, 128) && isBoundedText(descriptor.class_name, 256) &&
+          typeof descriptor.writable === 'boolean' && typeof descriptor.configurable === 'boolean' &&
+          (descriptor.preview === null || isBoundedText(descriptor.preview, 512));
+      }
+
+      function isObjectExperiment(experiment) {
+        const states = ['idle', 'attaching', 'ready', 'navigating', 'loaded', 'searching', 'mutating',
+          'disposing', 'disposed', 'error'];
+        const outcomes = ['created', 'updated', 'deleted', 'missing', 'non_configurable', 'rejected',
+          'accessor', 'non_writable', 'non_extensible', 'error'];
+        if (!isPlainObject(experiment) || experiment.protocol_version !== 1 ||
+            !isSafeIntegerInRange(experiment.session_id, 0, Number.MAX_SAFE_INTEGER) ||
+            !states.includes(experiment.state) || typeof experiment.isolated !== 'boolean' ||
+            (experiment.target_id !== null && !isBoundedText(experiment.target_id, 4 * 1024)) ||
+            !isBoundedText(experiment.url, 8 * 1024) || experiment.url.includes('?') || experiment.url.includes('#') ||
+            !isSafeIntegerInRange(experiment.navigation_id, 0, Number.MAX_SAFE_INTEGER) ||
+            !isSafeIntegerInRange(experiment.search_id, 0, Number.MAX_SAFE_INTEGER) ||
+            (experiment.search !== null && !isLiveObjectSearchMetadata(experiment.search)) ||
+            !Array.isArray(experiment.results) || experiment.results.length > 50 ||
+            !experiment.results.every(isLiveObjectResultRecord) ||
+            !Array.isArray(experiment.audit) || experiment.audit.length > 128 ||
+            !isSafeIntegerInRange(experiment.audit_evictions, 0, Number.MAX_SAFE_INTEGER) ||
+            !isSafeIntegerInRange(experiment.mutation_attempts, 0, 256) ||
+            !isBoundedText(experiment.message, 512) || !isPlainObject(experiment.limits)) return false;
+        const limits = {search_results: 50, search_candidates: 25000, search_timeout_ms: 750,
+          preview_properties: 16, mutation_attempts: 256, audit_entries: 128, property_bytes: 256,
+          value_bytes: 16 * 1024, value_depth: 8, value_entries: 256, value_string_bytes: 4 * 1024};
+        if (Object.keys(limits).some(key => experiment.limits[key] !== limits[key])) return false;
+        if ((experiment.search === null) !== (experiment.search_id === 0) ||
+            (experiment.search === null && experiment.results.length > 0)) return false;
+        const last = experiment.last_mutation;
+        if (last !== null && (!isPlainObject(last) ||
+            !isSafeIntegerInRange(last.audit_id, 1, Number.MAX_SAFE_INTEGER) || typeof last.ok !== 'boolean' ||
+            !['set', 'delete'].includes(last.operation) || !isBoundedText(last.property, 256) ||
+            !isBoundedText(last.result_id, 128) || !outcomes.includes(last.outcome) ||
+            (last.error !== null && !isBoundedText(last.error, 512)) ||
+            last.ok !== (last.error === null) || !isObjectExperimentDescriptor(last.before) ||
+            !isObjectExperimentDescriptor(last.after) || !isSafeIntegerInRange(last.value_bytes, 0, 16 * 1024) ||
+            (last.value_digest !== null && (typeof last.value_digest !== 'string' ||
+              !/^[0-9a-f]{64}$/.test(last.value_digest))))) return false;
+        if (!experiment.audit.every(entry => isPlainObject(entry) &&
+            isSafeIntegerInRange(entry.id, 1, Number.MAX_SAFE_INTEGER) &&
+            isSafeIntegerInRange(entry.occurred_at_ms, 1, Number.MAX_SAFE_INTEGER) &&
+            isSafeIntegerInRange(entry.session_id, 1, Number.MAX_SAFE_INTEGER) &&
+            isSafeIntegerInRange(entry.navigation_id, 1, Number.MAX_SAFE_INTEGER) &&
+            isSafeIntegerInRange(entry.search_id, 1, Number.MAX_SAFE_INTEGER) &&
+            isBoundedText(entry.result_id, 128) && ['set', 'delete'].includes(entry.operation) &&
+            isBoundedText(entry.property, 256) && isBoundedText(entry.target_class, 256) &&
+            outcomes.includes(entry.outcome) && typeof entry.success === 'boolean' &&
+            isBoundedText(entry.before_type, 128) && isBoundedText(entry.after_type, 128) &&
+            isSafeIntegerInRange(entry.value_bytes, 0, 16 * 1024) &&
+            (entry.value_digest === null || (typeof entry.value_digest === 'string' &&
+              /^[0-9a-f]{64}$/.test(entry.value_digest))) && isBoundedText(entry.url, 8 * 1024) &&
+            !entry.url.includes('?') && !entry.url.includes('#'))) return false;
+        if (experiment.audit.some((entry, index) => index > 0 && experiment.audit[index - 1].id >= entry.id)) return false;
+        if (experiment.state === 'idle') return experiment.session_id === 0 && !experiment.isolated &&
+          experiment.target_id === null && experiment.navigation_id === 0 && experiment.search_id === 0 &&
+          experiment.audit.length === 0 && experiment.mutation_attempts === 0;
+        if (experiment.state === 'disposed') return experiment.session_id > 0 && !experiment.isolated &&
+          experiment.target_id === null && experiment.url === '' && experiment.navigation_id === 0 &&
+          experiment.search_id === 0 && experiment.results.length === 0 && experiment.audit.length === 0;
+        return experiment.session_id > 0 && (experiment.state === 'attaching' || experiment.state === 'error' ||
+          (experiment.isolated && typeof experiment.target_id === 'string' && experiment.target_id.length > 0));
+      }
+
       function isRepeaterRequest(request, resolved = false) {
         if (!isPlainObject(request) || !isBoundedText(request.url, 8 * 1024) ||
             !isBoundedText(request.method, resolved ? 32 : 256) ||
@@ -3247,6 +3484,7 @@ export async function checkout(cart, fingerprint) {
             !Array.isArray(body.console) || body.console.length > 500 || !body.console.every(isDebuggerConsoleEntry) ||
             !isMemoryOriginTrace(body.memory_origin_trace) ||
             !isRequestInterception(body.request_interception) ||
+            !isObjectExperiment(body.object_experiment) ||
             !isRepeater(body.repeater) ||
             !isPlainObject(body.settings) || !isPlainObject(body.limits)) return false;
         if (body.heap_diff_baseline !== null && (!isPlainObject(body.heap_diff_baseline) ||
@@ -3282,22 +3520,9 @@ export async function checkout(cart, fingerprint) {
             !isSafeIntegerInRange(body.generation, 0, Number.MAX_SAFE_INTEGER) ||
             !isPlainObject(body.search)) return false;
         const search = body.search;
-        if (search.protocol_version !== 2 ||
-            !['analyzed', 'total_objects', 'result_limit', 'duration_ms'].every(field =>
-              isSafeIntegerInRange(search[field], 0, Number.MAX_SAFE_INTEGER)) ||
-            search.result_limit !== 50 ||
-            !['result_limit_reached', 'scan_limit_reached', 'property_limit_reached', 'timed_out'].every(field =>
-              typeof search[field] === 'boolean') ||
+        if (!isLiveObjectSearchMetadata(search) ||
             !Array.isArray(search.results) || search.results.length > search.result_limit) return false;
-        return search.results.every(result => isPlainObject(result) &&
-          typeof result.id === 'string' && typeof result.class_name === 'string' &&
-          isSafeIntegerInRange(result.property_count, 0, 0x7fffffff) &&
-          typeof result.properties_truncated === 'boolean' &&
-          (result.similarity === null || (typeof result.similarity === 'number' &&
-            Number.isFinite(result.similarity) && result.similarity >= 0 && result.similarity <= 1)) &&
-          Array.isArray(result.preview) && result.preview.length <= 16 &&
-          result.preview.every(property => isPlainObject(property) &&
-            ['name', 'type', 'value'].every(field => typeof property[field] === 'string')));
+        return search.results.every(isLiveObjectResultRecord);
       }
 
       function isHeapSnapshotSearchResponse(body) {
@@ -4588,11 +4813,16 @@ export async function checkout(cart, fingerprint) {
         return state.debuggerSession?.repeater ?? null;
       }
 
+      function objectExperimentState() {
+        return state.debuggerSession?.object_experiment ?? null;
+      }
+
       function setExperimentMode(mode, focus = false) {
-        if (!['interceptor', 'repeater'].includes(mode)) return;
+        if (!['interceptor', 'repeater', 'object'].includes(mode)) return;
         state.experimentMode = mode;
         elements.interceptionWorkspace.hidden = mode !== 'interceptor';
         elements.repeaterWorkspace.hidden = mode !== 'repeater';
+        elements.objectWorkspace.hidden = mode !== 'object';
         elements.experimentModeButtons.forEach(button => {
           const selected = button.dataset.experimentMode === mode;
           button.setAttribute('aria-selected', String(selected));
@@ -5008,6 +5238,190 @@ export async function checkout(cart, fingerprint) {
         renderRepeaterComparison(repeater);
       }
 
+      function selectedObjectExperimentResult(experiment = objectExperimentState()) {
+        return experiment?.results.find(result => result.id === state.objectSelectedResultId) ?? null;
+      }
+
+      function selectObjectExperimentResult(resultId, focus = false) {
+        const experiment = objectExperimentState();
+        if (!experiment?.results.some(result => result.id === resultId)) return;
+        state.objectSelectedResultId = resultId;
+        state.objectSelectionSearchId = experiment.search_id;
+        elements.objectConfirm.checked = false;
+        renderObjectExperiment();
+        if (focus) elements.objectResults.querySelector(`[data-object-result-id="${CSS.escape(resultId)}"]`)?.focus();
+      }
+
+      function renderObjectResults(experiment) {
+        if (state.objectSelectionSearchId !== (experiment?.search_id ?? 0) ||
+            !experiment?.results.some(result => result.id === state.objectSelectedResultId)) {
+          state.objectSelectionSearchId = experiment?.search_id ?? 0;
+          state.objectSelectedResultId = experiment?.results[0]?.id ?? null;
+          elements.objectConfirm.checked = false;
+        }
+        const results = experiment?.results ?? [];
+        elements.objectResultCount.textContent = `${results.length} ${results.length === 1 ? 'match' : 'matches'}`;
+        elements.objectResultCount.dataset.kind = results.length > 0 ? '' : 'offline';
+        if (results.length === 0) {
+          elements.objectResults.replaceChildren(textElement('div', 'experiment-empty',
+            experiment?.search ? 'No objects matched within the visible limits.' : 'No retained object references.'));
+        } else {
+          elements.objectResults.replaceChildren(...results.map(result => {
+            const row = document.createElement('button'); row.type = 'button'; row.className = 'object-result-row';
+            row.dataset.objectResultId = result.id;
+            row.setAttribute('role', 'option');
+            row.setAttribute('aria-selected', String(result.id === state.objectSelectedResultId));
+            const title = textElement('span', 'object-result-title', `${result.class_name} · object ${result.id}`);
+            const count = textElement('span', 'object-result-count', `${result.property_count} props`);
+            const preview = textElement('span', 'object-result-preview', result.preview.length > 0
+              ? result.preview.slice(0, 3).map(property => `${property.name}: ${property.value}`).join(' · ')
+              : 'No retained own-property preview');
+            row.append(title, count, preview);
+            row.addEventListener('click', () => selectObjectExperimentResult(result.id));
+            return row;
+          }));
+        }
+        const search = experiment?.search;
+        if (!search) elements.objectSearchMeta.textContent = 'Open a page and run one bounded search.';
+        else {
+          const limits = [];
+          if (search.timed_out) limits.push('time limit reached');
+          if (search.result_limit_reached) limits.push('result limit reached');
+          if (search.scan_limit_reached) limits.push('candidate limit reached');
+          if (search.property_limit_reached) limits.push('property limit reached');
+          elements.objectSearchMeta.textContent = `${results.length} shown from ${search.analyzed.toLocaleString()} inspected objects in ${search.duration_ms} ms${limits.length ? ` · ${limits.join(' · ')}` : ''}`;
+        }
+      }
+
+      function renderObjectSelection(experiment) {
+        const selected = selectedObjectExperimentResult(experiment);
+        elements.objectSelectionMeta.textContent = selected
+          ? `${selected.class_name} · retained result ${selected.id} · search ${experiment.search_id}`
+          : 'Select one retained object result.';
+        elements.objectMutationBadge.dataset.kind = selected ? '' : 'offline';
+        elements.objectMutationBadge.textContent = selected ? `Object ${selected.id}` : 'Locked';
+        if (!selected) {
+          elements.objectPreview.replaceChildren(textElement('div', 'experiment-empty', 'No object selected.'));
+          return;
+        }
+        const rows = selected.preview.map(property => {
+          const row = document.createElement('div'); row.className = 'object-property-row';
+          row.append(textElement('span', '', property.name), textElement('span', '', property.type),
+            textElement('span', '', property.value));
+          return row;
+        });
+        if (rows.length === 0) rows.push(textElement('div', 'experiment-empty', 'No own properties in the bounded preview.'));
+        elements.objectPreview.replaceChildren(...rows);
+      }
+
+      function renderObjectMutation(experiment) {
+        const mutation = experiment?.last_mutation;
+        if (!mutation) {
+          elements.objectMutationResult.dataset.kind = '';
+          elements.objectMutationResult.textContent = 'No mutation attempted.';
+          return;
+        }
+        elements.objectMutationResult.dataset.kind = mutation.ok ? 'ready' : 'error';
+        const before = mutation.before.preview ?? mutation.before.type;
+        const after = mutation.after.preview ?? mutation.after.type;
+        elements.objectMutationResult.textContent = mutation.ok
+          ? `Audit ${mutation.audit_id} · ${mutation.operation} ${mutation.property} · ${before} → ${after} · ${mutation.value_bytes} value bytes`
+          : `Audit ${mutation.audit_id} · ${mutation.outcome} · ${mutation.error}`;
+      }
+
+      function renderObjectAudit(experiment) {
+        const audit = experiment?.audit ?? [];
+        elements.objectAuditCount.textContent = `${audit.length} ${audit.length === 1 ? 'entry' : 'entries'}`;
+        elements.objectAuditCount.dataset.kind = audit.length > 0 ? '' : 'offline';
+        if (audit.length === 0) {
+          elements.objectAudit.replaceChildren(textElement('div', 'experiment-empty', 'No object mutations attempted.'));
+          return;
+        }
+        elements.objectAudit.replaceChildren(...audit.slice().reverse().map(entry => {
+          const row = document.createElement('div'); row.className = 'experiment-audit-row';
+          const title = textElement('span', 'experiment-audit-title',
+            `${entry.operation.toUpperCase()} ${entry.target_class}.${entry.property}`);
+          const outcome = textElement('span', 'experiment-audit-outcome', entry.outcome.replaceAll('_', ' '));
+          if (!entry.success) outcome.style.color = 'var(--red)';
+          const digest = entry.value_digest ? `${entry.value_digest.slice(0, 12)}…` : 'none';
+          const meta = textElement('span', 'experiment-audit-meta',
+            `audit ${entry.id} · nav ${entry.navigation_id} · search ${entry.search_id} · object ${entry.result_id} · ${entry.before_type} → ${entry.after_type} · ${entry.value_bytes} bytes · sha256 ${digest} · ${entry.url}`);
+          row.append(title, outcome, meta);
+          return row;
+        }));
+      }
+
+      function renderObjectExperiment() {
+        const experiment = requestInterception();
+        const objectExperiment = objectExperimentState();
+        const repeater = repeaterState();
+        const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
+        const objectBusy = ['navigating', 'searching', 'mutating'].includes(objectExperiment?.state);
+        const contextBusy = state.experimentPending || ['creating', 'running', 'disposing'].includes(experiment?.state) ||
+          ['running', 'cancelling'].includes(repeater?.state) || objectBusy;
+        const contextReady = attached && experiment?.isolated && objectExperiment?.isolated &&
+          experiment.target_id === state.debuggerSession?.target?.id &&
+          objectExperiment.target_id === state.debuggerSession?.target?.id &&
+          !['attaching', 'disposing', 'disposed'].includes(objectExperiment.state);
+        const pageReady = contextReady && objectExperiment.navigation_id > 0 && objectExperiment.url;
+        if (state.objectSelectionSearchId !== (objectExperiment?.search_id ?? 0) ||
+            !objectExperiment?.results.some(result => result.id === state.objectSelectedResultId)) {
+          state.objectSelectionSearchId = objectExperiment?.search_id ?? 0;
+          state.objectSelectedResultId = objectExperiment?.results[0]?.id ?? null;
+          elements.objectConfirm.checked = false;
+        }
+        const selected = selectedObjectExperimentResult(objectExperiment);
+        const canDispose = experiment?.isolated && experiment.pending_requests === 0 &&
+          !['running', 'cancelling'].includes(repeater?.state) && !objectBusy;
+        elements.experimentTitle.textContent = 'Live Object Lab';
+        elements.experimentSubtitle.textContent = 'Disposable page · typed own-property patches · immutable baseline evidence';
+
+        if (state.experimentError) setExperimentNotice('error', state.experimentError);
+        else if (!experiment || !objectExperiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
+        else if (contextBusy) setExperimentNotice('working', objectExperiment.message);
+        else if (objectExperiment.state === 'error' || objectExperiment.last_mutation?.ok === false) setExperimentNotice('error', objectExperiment.message);
+        else if (pageReady || objectExperiment.state === 'disposed') setExperimentNotice('ready', objectExperiment.message);
+        else if (!attached) setExperimentNotice('idle', 'Attach an authorized browser target before creating Object Lab.');
+        else setExperimentNotice('idle', objectExperiment.message);
+
+        elements.objectContextBadge.dataset.kind = objectExperiment?.state === 'error' ? 'error' : objectExperiment?.isolated ? '' : 'offline';
+        elements.objectContextBadge.textContent = experiment?.state === 'creating' ? 'Creating'
+          : experiment?.state === 'disposing' ? 'Disposing'
+            : objectExperiment?.isolated ? 'Isolated'
+              : objectExperiment?.state === 'disposed' ? 'Disposed' : 'Not created';
+        elements.objectContextMessage.textContent = objectExperiment?.message ?? 'No disposable Experiment context exists.';
+        elements.objectStorageState.textContent = objectExperiment?.isolated ? 'Ephemeral and isolated'
+          : objectExperiment?.state === 'disposed' ? 'Deleted and erased' : 'Not allocated';
+        elements.objectPageState.textContent = objectExperiment?.url || 'Not opened';
+        elements.objectPageBadge.dataset.kind = pageReady ? '' : objectExperiment?.state === 'error' ? 'error' : 'offline';
+        elements.objectPageBadge.textContent = objectExperiment?.state === 'navigating' ? 'Opening'
+          : pageReady ? 'Loaded' : 'No page';
+        const search = objectExperiment?.search;
+        const partial = search && (search.timed_out || search.result_limit_reached || search.scan_limit_reached || search.property_limit_reached);
+        elements.objectSearchBadge.dataset.kind = partial ? 'error' : search ? '' : 'offline';
+        elements.objectSearchBadge.textContent = objectExperiment?.state === 'searching' ? 'Searching'
+          : search ? partial ? 'Partial' : 'Complete' : 'No search';
+
+        elements.objectCreate.disabled = !attached || Boolean(experiment?.isolated) || contextBusy || state.debuggerActionPending;
+        elements.objectDispose.disabled = !canDispose || contextBusy || state.debuggerActionPending;
+        elements.objectNavigationForm.querySelectorAll('input').forEach(field => { field.disabled = !contextReady || contextBusy; });
+        elements.objectNavigate.disabled = !contextReady || contextBusy || state.debuggerActionPending;
+        elements.objectSearchForm.querySelectorAll('input, textarea').forEach(field => { field.disabled = !pageReady || contextBusy; });
+        elements.objectSearch.disabled = !pageReady || contextBusy || state.debuggerActionPending;
+        elements.objectValueField.hidden = elements.objectOperation.value === 'delete';
+        elements.objectMutationForm.querySelectorAll('input, select, textarea').forEach(field => {
+          field.disabled = !selected || contextBusy;
+        });
+        elements.objectMutationValue.disabled = !selected || contextBusy || elements.objectOperation.value === 'delete';
+        elements.objectMutate.disabled = !selected || contextBusy || !elements.objectConfirm.checked ||
+          !elements.objectMutationProperty.value || state.debuggerActionPending ||
+          (objectExperiment?.mutation_attempts ?? 0) >= (objectExperiment?.limits?.mutation_attempts ?? 256);
+        renderObjectResults(objectExperiment);
+        renderObjectSelection(objectExperiment);
+        renderObjectMutation(objectExperiment);
+        renderObjectAudit(objectExperiment);
+      }
+
       function renderExperiment() {
         elements.experimentModeButtons.forEach(button => {
           const selected = button.dataset.experimentMode === state.experimentMode;
@@ -5016,8 +5430,13 @@ export async function checkout(cart, fingerprint) {
         });
         elements.interceptionWorkspace.hidden = state.experimentMode !== 'interceptor';
         elements.repeaterWorkspace.hidden = state.experimentMode !== 'repeater';
+        elements.objectWorkspace.hidden = state.experimentMode !== 'object';
         if (state.experimentMode === 'repeater') {
           renderRepeater();
+          return;
+        }
+        if (state.experimentMode === 'object') {
+          renderObjectExperiment();
           return;
         }
         elements.experimentTitle.textContent = 'Request Interception Lab';
@@ -5086,6 +5505,9 @@ export async function checkout(cart, fingerprint) {
         if (response?.experiment && isRequestInterception(response.experiment) && state.debuggerSession) {
           state.debuggerSession.request_interception = response.experiment;
         }
+        if (response?.object_experiment && isObjectExperiment(response.object_experiment) && state.debuggerSession) {
+          state.debuggerSession.object_experiment = response.object_experiment;
+        }
         if (response?.repeater && isRepeater(response.repeater) && state.debuggerSession) {
           state.debuggerSession.repeater = response.repeater;
         }
@@ -5137,6 +5559,101 @@ export async function checkout(cart, fingerprint) {
         } catch (error) {
           state.experimentError = error.message;
           renderExperiment();
+        }
+      }
+
+      async function navigateObjectExperiment() {
+        const url = elements.objectPageUrl.value.trim();
+        if (!url) {
+          state.experimentError = 'Enter one HTTP or HTTPS URL for the disposable page.';
+          renderExperiment();
+          elements.objectPageUrl.focus();
+          return;
+        }
+        const response = await runExperimentAction({action: 'navigate_object_experiment', url});
+        if (response) {
+          state.objectSelectedResultId = null;
+          state.objectSelectionSearchId = 0;
+          elements.objectConfirm.checked = false;
+          elements.objectMutationValue.value = '';
+        }
+      }
+
+      async function searchObjectExperiment() {
+        const threshold = Number(elements.objectSimilarityThreshold.value);
+        if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+          state.experimentError = 'Similarity must be between 0 and 1.';
+          renderExperiment();
+          elements.objectSimilarityThreshold.focus();
+          return;
+        }
+        const request = {
+          action: 'search_object_experiment',
+          property_query: elements.objectPropertyQuery.value,
+          value_query: elements.objectValueQuery.value,
+          class_query: elements.objectClassQuery.value,
+          shape: elements.objectShapeQuery.value,
+          similarity_threshold: threshold,
+          regex: elements.objectRegex.checked,
+          case_sensitive: elements.objectCaseSensitive.checked,
+          include_shape_values: elements.objectShapeValues.checked
+        };
+        if (![request.property_query, request.value_query, request.class_query, request.shape].some(value => value.trim())) {
+          state.experimentError = 'Enter at least one bounded live-object search criterion.';
+          renderExperiment();
+          elements.objectPropertyQuery.focus();
+          return;
+        }
+        const response = await runExperimentAction(request);
+        if (response?.object_experiment) {
+          state.objectSelectionSearchId = response.object_experiment.search_id;
+          state.objectSelectedResultId = response.object_experiment.results[0]?.id ?? null;
+          elements.objectConfirm.checked = false;
+          elements.objectMutationValue.value = '';
+          renderObjectExperiment();
+        }
+      }
+
+      async function mutateObjectExperiment() {
+        const experiment = objectExperimentState();
+        const selected = selectedObjectExperimentResult(experiment);
+        if (!selected || !experiment) return;
+        const operation = elements.objectOperation.value;
+        const property = elements.objectMutationProperty.value;
+        if (!property) {
+          state.experimentError = 'Enter one explicit own-property name.';
+          renderExperiment();
+          elements.objectMutationProperty.focus();
+          return;
+        }
+        if (!elements.objectConfirm.checked) {
+          state.experimentError = 'Confirm the disposable-page mutation before applying it.';
+          renderExperiment();
+          elements.objectConfirm.focus();
+          return;
+        }
+        const request = {
+          action: 'mutate_object_experiment',
+          search_id: experiment.search_id,
+          result_id: selected.id,
+          operation,
+          property,
+          confirmed: true
+        };
+        if (operation === 'set') {
+          try { request.value = JSON.parse(elements.objectMutationValue.value); }
+          catch {
+            state.experimentError = 'Set value must be valid JSON.';
+            renderExperiment();
+            elements.objectMutationValue.focus();
+            return;
+          }
+        }
+        const response = await runExperimentAction(request);
+        if (response) {
+          elements.objectConfirm.checked = false;
+          elements.objectMutationValue.value = '';
+          renderObjectExperiment();
         }
       }
 
@@ -8001,6 +8518,51 @@ export async function checkout(cart, fingerprint) {
         setExperimentMode(button.dataset.experimentMode);
       }));
       enableTabKeyboardNavigation('.experiment-mode-tab');
+      elements.objectCreate.addEventListener('click', () => runExperimentAction({
+        action: 'create_request_interception_experiment'
+      }));
+      elements.objectDispose.addEventListener('click', async () => {
+        const response = await runExperimentAction({action: 'dispose_request_interception_experiment'});
+        if (response) {
+          state.objectSelectedResultId = null;
+          state.objectSelectionSearchId = 0;
+          elements.objectConfirm.checked = false;
+          elements.objectMutationValue.value = '';
+          elements.objectMutationProperty.value = '';
+        }
+      });
+      elements.objectNavigationForm.addEventListener('submit', event => {
+        event.preventDefault();
+        navigateObjectExperiment();
+      });
+      elements.objectSearchForm.addEventListener('submit', event => {
+        event.preventDefault();
+        searchObjectExperiment();
+      });
+      elements.objectMutationForm.addEventListener('submit', event => {
+        event.preventDefault();
+        mutateObjectExperiment();
+      });
+      elements.objectOperation.addEventListener('change', () => {
+        elements.objectConfirm.checked = false;
+        renderObjectExperiment();
+      });
+      elements.objectConfirm.addEventListener('change', renderObjectExperiment);
+      elements.objectMutationProperty.addEventListener('input', () => {
+        state.experimentError = null;
+        renderObjectExperiment();
+      });
+      elements.objectMutationValue.addEventListener('input', () => { state.experimentError = null; });
+      elements.objectResults.addEventListener('keydown', event => {
+        if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+        const results = objectExperimentState()?.results ?? [];
+        if (results.length === 0) return;
+        event.preventDefault();
+        const current = Math.max(0, results.findIndex(result => result.id === state.objectSelectedResultId));
+        const index = event.key === 'Home' ? 0 : event.key === 'End' ? results.length - 1
+          : event.key === 'ArrowUp' ? Math.max(0, current - 1) : Math.min(results.length - 1, current + 1);
+        selectObjectExperimentResult(results[index].id, true);
+      });
       elements.repeaterCreate.addEventListener('click', () => runExperimentAction({
         action: 'create_request_interception_experiment'
       }));

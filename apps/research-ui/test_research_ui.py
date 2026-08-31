@@ -1115,6 +1115,52 @@ const interceptionReady = {
     url: 'https://checkout.test/cart', resource_type: 'Fetch', rule_mode: 'fulfill',
     outcome: 'fulfilled', detail: 'Synthetic response 201 returned.'}]
 };
+const objectIdle = {
+  protocol_version: 1, session_id: 0, state: 'idle', isolated: false,
+  target_id: null, url: '', navigation_id: 0, search_id: 0, search: null,
+  results: [], last_mutation: null, audit: [], audit_evictions: 0,
+  mutation_attempts: 0,
+  message: 'Create an isolated Experiment context to use Object Lab.',
+  limits: {search_results: 50, search_candidates: 25000, search_timeout_ms: 750,
+    preview_properties: 16, mutation_attempts: 256, audit_entries: 128,
+    property_bytes: 256, value_bytes: 16384, value_depth: 8,
+    value_entries: 256, value_string_bytes: 4096}
+};
+const objectResult = {
+  id: '4', class_name: 'CheckoutState', property_count: 2,
+  properties_truncated: false, similarity: 0.875,
+  preview: [{name: 'ready', type: 'boolean', value: 'true'}]
+};
+const objectSearch = {
+  protocol_version: 2, analyzed: 17, total_objects: 17, result_limit: 50,
+  duration_ms: 3, result_limit_reached: false, scan_limit_reached: false,
+  property_limit_reached: false, timed_out: false
+};
+const objectDescriptorBefore = {
+  exists: false, type: 'undefined', class_name: '', writable: true,
+  configurable: true, preview: null
+};
+const objectDescriptorAfter = {
+  exists: true, type: 'string', class_name: 'String', writable: true,
+  configurable: true, preview: 'updated'
+};
+const objectAudit = {
+  id: 1, occurred_at_ms: 5, session_id: 4, navigation_id: 2, search_id: 3,
+  result_id: '4', operation: 'set', property: 'status',
+  target_class: 'CheckoutState', outcome: 'created', success: true,
+  before_type: 'undefined', after_type: 'string', value_bytes: 9,
+  value_digest: 'a'.repeat(64), url: 'https://checkout.test/cart'
+};
+const objectReady = {
+  ...objectIdle, session_id: 4, state: 'loaded', isolated: true,
+  target_id: 'page-1', url: 'https://checkout.test/cart', navigation_id: 2,
+  search_id: 3, search: objectSearch, results: [objectResult],
+  last_mutation: {audit_id: 1, ok: true, operation: 'set', property: 'status',
+    result_id: '4', outcome: 'created', error: null,
+    before: objectDescriptorBefore, after: objectDescriptorAfter,
+    value_bytes: 9, value_digest: 'a'.repeat(64)},
+  audit: [objectAudit], mutation_attempts: 1, message: 'Property created.'
+};
 const repeaterIdle = {
   protocol_version: 1, session_id: 0, state: 'idle', variables: [], history: [],
   history_bytes: 0, history_evictions: 0, active_execution: null, comparison: null,
@@ -1146,6 +1192,7 @@ const snapshot = {
   protocol_version: 1, state: 'paused', generation: 7, error: null,
   heap_diff_baseline: null, memory_origin_trace: originIdle,
   request_interception: interceptionIdle,
+  object_experiment: objectIdle,
   repeater: repeaterIdle,
   target, targets: [target], scripts: [script],
   paused: {reason: 'breakpoint', description: null, call_frames: [frame],
@@ -1250,6 +1297,16 @@ process.stdout.write(JSON.stringify({
     result: {...interceptionReady.result, body: 'é'.repeat(32769)}}),
   interceptionPendingBound: !isRequestInterception({...interceptionReady, pending_requests: 17}),
   missingInterceptionRejected: !isDebuggerResponse({...snapshot, request_interception: undefined}),
+  objectReadyAccepted: isObjectExperiment(objectReady),
+  objectAuditBound: !isObjectExperiment({...objectReady,
+    audit: Array(129).fill(objectAudit)}),
+  objectMutationBound: !isObjectExperiment({...objectReady, mutation_attempts: 257}),
+  objectDigestRequired: !isObjectExperiment({...objectReady, last_mutation: {
+    ...objectReady.last_mutation, value_digest: 'private-value'}}),
+  objectQueryRejected: !isObjectExperiment({...objectReady,
+    url: 'https://checkout.test/cart?token=private'}),
+  objectSearchPairRequired: !isObjectExperiment({...objectReady, search: null}),
+  missingObjectExperimentRejected: !isDebuggerResponse({...snapshot, object_experiment: undefined}),
   repeaterReadyAccepted: isRepeater(repeaterReady),
   repeaterHistoryBound: !isRepeater({...repeaterReady,
     history: Array(25).fill(repeaterEntry)}),
@@ -1316,6 +1373,13 @@ process.stdout.write(JSON.stringify({
                 "interceptionBodyByteBound": True,
                 "interceptionPendingBound": True,
                 "missingInterceptionRejected": True,
+                "objectReadyAccepted": True,
+                "objectAuditBound": True,
+                "objectMutationBound": True,
+                "objectDigestRequired": True,
+                "objectQueryRejected": True,
+                "objectSearchPairRequired": True,
+                "missingObjectExperimentRejected": True,
                 "repeaterReadyAccepted": True,
                 "repeaterHistoryBound": True,
                 "repeaterHistoryBytesRequired": True,
@@ -1389,6 +1453,27 @@ process.stdout.write(JSON.stringify({
         self.assertIn("Credentials are always omitted", html)
         self.assertIn("128 entries", html)
         self.assertIn("64 KiB", html)
+
+    def test_object_lab_exposes_bounded_confirmed_disposable_mutation(self) -> None:
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('data-experiment-mode="object"', html)
+        self.assertIn('id="object-workspace"', html)
+        self.assertIn('id="object-navigation-form"', html)
+        self.assertIn('id="object-search-form"', html)
+        self.assertIn('role="listbox" aria-label="Object Lab live matches"', html)
+        self.assertIn('id="object-mutation-form"', html)
+        self.assertIn('id="object-confirm"', html)
+        self.assertIn('id="object-audit"', html)
+        self.assertIn("function isObjectExperiment(experiment)", html)
+        self.assertIn("function renderObjectExperiment()", html)
+        self.assertIn("action: 'navigate_object_experiment'", html)
+        self.assertIn("action: 'search_object_experiment'", html)
+        self.assertIn("action: 'mutate_object_experiment'", html)
+        self.assertIn("confirmed: true", html)
+        self.assertIn("25,000 objects / 750 ms", html)
+        self.assertIn("The baseline page and evidence store are never modified", html)
+        self.assertNotIn("expose_live_object", html)
 
     def test_repeater_exposes_bounded_edit_cancel_history_variables_and_comparison(self) -> None:
         html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
@@ -2017,9 +2102,11 @@ process.stdout.write(JSON.stringify({
         self.assertIn('"heap_diff_baseline": NSNull()', application)
         self.assertIn('"memory_origin_trace": [', application)
         self.assertIn('"request_interception": [', application)
+        self.assertIn('"object_experiment": [', application)
         self.assertIn('"repeater": [', application)
         self.assertIn(r'let etag = "\"debugger-unavailable-v2\""', application)
         self.assertIn("debuggerContractValid: isDebuggerResponse(state.debuggerSession)", application)
+        self.assertIn("objectExperimentAvailable: state.debuggerSession?.object_experiment?.protocol_version === 1", application)
         self.assertIn("repeaterAvailable: state.debuggerSession?.repeater?.protocol_version === 1", application)
         self.assertIn("apiCollectionContractValid: isApiCollection(state.apiCollection)", application)
         self.assertIn("REB_APP_SMOKE_API_COLLECTION_WRITE", application)

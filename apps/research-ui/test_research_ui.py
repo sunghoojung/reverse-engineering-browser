@@ -961,6 +961,11 @@ process.stdout.write(JSON.stringify({
             self.assertIn(f">{pane}</summary>", html)
         self.assertIn("function renderSourceTree()", html)
         self.assertIn("function formatWasmHex(buffer)", html)
+        self.assertIn("function sourceSyntaxTokens(line, tokenizer)", html)
+        self.assertIn("function appendSourceSyntax(container, tokens)", html)
+        self.assertIn("SOURCE_HIGHLIGHT_TOKEN_LIMIT = 50000", html)
+        self.assertIn("span.textContent = token.text", html)
+        self.assertNotIn("span.innerHTML = token.text", html)
         self.assertIn("function openQuickOpen()", html)
         self.assertIn("Viewer preview limited to the first 2 MB", html)
         self.assertIn("Readable derived view", html)
@@ -981,6 +986,76 @@ process.stdout.write(JSON.stringify({
         self.assertIn(
             "function toggleLineBreakpoint(source, line, column, breakpoint)", html
         )
+
+    def test_source_syntax_highlighter_is_bounded_stateful_and_text_preserving(
+        self,
+    ) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        start = html.index("      const SOURCE_HIGHLIGHT_TOKEN_LIMIT")
+        end = html.index("      function appendSourceSyntax")
+        model = html[start:end]
+        exercise = r"""
+function sourceName(source) { return source.url?.split('/').at(-1) || ''; }
+const javascriptSource = {kind: 'javascript', mime_type: 'text/javascript', url: 'app.js'};
+const javascript = createSourceTokenizer(javascriptSource);
+const javascriptLines = [
+  'const message = "<img src=x onerror=alert(1)>"; /* open',
+  'comment */ if (/a+/.test(message)) return 42;'
+];
+const javascriptTokens = javascriptLines.map(line => sourceSyntaxTokens(line, javascript));
+const markupSource = {kind: 'response_body', mime_type: 'text/html', url: 'page.html'};
+const markup = createSourceTokenizer(markupSource);
+const markupLine = '<button data-action="run">Run</button><!-- safe -->';
+const markupTokens = sourceSyntaxTokens(markupLine, markup);
+const bounded = createSourceTokenizer(javascriptSource);
+bounded.coloredTokens = SOURCE_HIGHLIGHT_TOKEN_LIMIT;
+const boundedTokens = sourceSyntaxTokens('const value = 7;', bounded);
+const flatten = tokens => tokens.map(token => token.text).join('');
+process.stdout.write(JSON.stringify({
+  languages: [
+    sourceSyntaxLanguage(javascriptSource),
+    sourceSyntaxLanguage({kind: 'source_map', mime_type: 'application/json', url: 'app.js.map'}),
+    sourceSyntaxLanguage({kind: 'response_body', mime_type: 'text/css', url: 'app.css'}),
+    sourceSyntaxLanguage(markupSource),
+    sourceSyntaxLanguage({kind: 'wasm', mime_type: 'application/wasm', url: 'app.wasm'})
+  ],
+  javascriptPreserved: javascriptTokens.map(flatten).join('\n') === javascriptLines.join('\n'),
+  javascriptTypes: [...new Set(javascriptTokens.flat().map(token => token.type))].sort(),
+  blockCommentClosed: javascript.state === 'code',
+  markupPreserved: flatten(markupTokens) === markupLine,
+  markupTypes: [...new Set(markupTokens.map(token => token.type))].sort(),
+  maliciousTextPreserved: flatten(javascriptTokens[0]).includes('<img src=x onerror=alert(1)>'),
+  bounded: bounded.truncated && boundedTokens.every(token => token.type === 'plain')
+}));
+"""
+        completed = subprocess.run(
+            [node, "-e", model + exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        result = json.loads(completed.stdout)
+        self.assertEqual(
+            result["languages"],
+            ["javascript", "json", "css", "markup", "wasm"],
+        )
+        self.assertTrue(result["javascriptPreserved"])
+        self.assertTrue(result["blockCommentClosed"])
+        self.assertTrue(result["markupPreserved"])
+        self.assertTrue(result["maliciousTextPreserved"])
+        self.assertTrue(result["bounded"])
+        self.assertIn("comment", result["javascriptTypes"])
+        self.assertIn("keyword", result["javascriptTypes"])
+        self.assertIn("regexp", result["javascriptTypes"])
+        self.assertIn("string", result["javascriptTypes"])
+        self.assertIn("attribute", result["markupTypes"])
+        self.assertIn("comment", result["markupTypes"])
+        self.assertIn("tag", result["markupTypes"])
 
     def test_sources_map_inline_script_lines_to_runtime_locations(self) -> None:
         node = shutil.which("node")

@@ -77,7 +77,7 @@ int main() {
   CHECK(Text(Transform(reb::DecoderOperation::kBase36Encode, "-36")) == "-10");
 
   const std::string repeated(32U << 10U, 'A');
-  for (const auto pair : {
+  for (const auto& pair : {
            std::pair(reb::DecoderOperation::kGzipCompress, reb::DecoderOperation::kGzipDecompress),
            std::pair(reb::DecoderOperation::kZlibCompress, reb::DecoderOperation::kZlibDecompress),
            std::pair(reb::DecoderOperation::kDeflateCompress,

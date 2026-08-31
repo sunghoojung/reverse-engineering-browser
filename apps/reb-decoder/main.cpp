@@ -133,6 +133,20 @@ std::optional<std::uint64_t> ParseExpiration(const std::string_view value, bool&
   return expiration;
 }
 
+reb::JwtInspection JwtInspectionError(const std::string_view message) {
+  reb::JwtInspection inspection;
+  inspection.status = reb::DecoderStatus::kInvalidInput;
+  inspection.error = message;
+  return inspection;
+}
+
+reb::JwtCreation JwtCreationError(const std::string_view message) {
+  reb::JwtCreation creation;
+  creation.status = reb::DecoderStatus::kInvalidInput;
+  creation.error = message;
+  return creation;
+}
+
 int Transform(const std::string_view operation_name) {
   const std::optional<reb::DecoderOperation> operation =
       reb::DecoderOperationFromName(operation_name);
@@ -160,8 +174,7 @@ int Transform(const std::string_view operation_name) {
 int InspectJwt() {
   const auto input = ReadStandardInput(reb::kDecoderMaxJwtBytes);
   if (!input.has_value()) {
-    std::cout << reb::JwtInspectionToJson(
-        {.status = reb::DecoderStatus::kInvalidInput, .error = "JWT exceeds 64 KiB"});
+    std::cout << reb::JwtInspectionToJson(JwtInspectionError("JWT exceeds 64 KiB"));
     return 0;
   }
   const std::string_view token(reinterpret_cast<const char*>(input->data()), input->size());
@@ -172,8 +185,8 @@ int InspectJwt() {
 int VerifyJwt() {
   const auto input = ReadStandardInput(kMaximumFramedInput);
   if (!input.has_value()) {
-    std::cout << reb::JwtInspectionToJson({.status = reb::DecoderStatus::kInvalidInput,
-                                           .error = "JWT verification input is oversized"});
+    std::cout << reb::JwtInspectionToJson(
+        JwtInspectionError("JWT verification input is oversized"));
     return 0;
   }
   std::size_t position = 0;
@@ -182,8 +195,8 @@ int VerifyJwt() {
   if (!ReadFrame(*input, position, reb::kDecoderMaxJwtBytes, token) ||
       !ReadFrame(*input, position, reb::kDecoderMaxSecretBytes, secret) ||
       position != input->size()) {
-    std::cout << reb::JwtInspectionToJson({.status = reb::DecoderStatus::kInvalidInput,
-                                           .error = "JWT verification frame is malformed"});
+    std::cout << reb::JwtInspectionToJson(
+        JwtInspectionError("JWT verification frame is malformed"));
     return 0;
   }
   const std::string_view token_text(reinterpret_cast<const char*>(token.data()), token.size());
@@ -197,8 +210,7 @@ int CreateJwt(const std::string_view algorithm_name, const std::string_view expi
   const std::optional<std::uint64_t> expiration =
       ParseExpiration(expiration_text, expiration_valid);
   if (!algorithm.has_value() || !expiration_valid) {
-    std::cout << reb::JwtCreationToJson({.status = reb::DecoderStatus::kInvalidInput,
-                                         .error = "JWT creation arguments are invalid"});
+    std::cout << reb::JwtCreationToJson(JwtCreationError("JWT creation arguments are invalid"));
     return 0;
   }
   const auto input = ReadStandardInput(kMaximumFramedInput);
@@ -208,8 +220,7 @@ int CreateJwt(const std::string_view algorithm_name, const std::string_view expi
   if (!input.has_value() || !ReadFrame(*input, position, 56U << 10U, payload) ||
       !ReadFrame(*input, position, reb::kDecoderMaxSecretBytes, secret) ||
       position != input->size()) {
-    std::cout << reb::JwtCreationToJson(
-        {.status = reb::DecoderStatus::kInvalidInput, .error = "JWT creation frame is malformed"});
+    std::cout << reb::JwtCreationToJson(JwtCreationError("JWT creation frame is malformed"));
     return 0;
   }
   const std::string_view payload_text(reinterpret_cast<const char*>(payload.data()),

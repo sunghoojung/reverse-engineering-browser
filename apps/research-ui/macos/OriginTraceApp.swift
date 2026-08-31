@@ -16,8 +16,16 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let signalStoreURL: URL
   private let artifactStoreURL: URL
   private let apiCollectionStoreURL: URL
+  private let localAnalystStoreURL: URL
+  private let analystRunnerURL: URL
+  private let analystRunnerCoreURL: URL
   private let brokerSocketURL: URL?
   private let apiCollectionLock = NSLock()
+  private let localAnalystLock = NSLock()
+  private let analystRunnerLock = NSLock()
+  private var activeAnalystProcess: Process?
+  private var activeAnalystRunID: Int?
+  private var analystCancelRequested = false
 
   init(
     indexURL: URL,
@@ -26,6 +34,9 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     signalStoreURL: URL,
     artifactStoreURL: URL,
     apiCollectionStoreURL: URL,
+    localAnalystStoreURL: URL,
+    analystRunnerURL: URL,
+    analystRunnerCoreURL: URL,
     brokerSocketURL: URL?
   ) {
     self.indexURL = indexURL
@@ -34,7 +45,18 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     self.signalStoreURL = signalStoreURL
     self.artifactStoreURL = artifactStoreURL
     self.apiCollectionStoreURL = apiCollectionStoreURL
+    self.localAnalystStoreURL = localAnalystStoreURL
+    self.analystRunnerURL = analystRunnerURL
+    self.analystRunnerCoreURL = analystRunnerCoreURL
     self.brokerSocketURL = brokerSocketURL
+  }
+
+  deinit {
+    analystRunnerLock.lock()
+    activeAnalystProcess?.terminate()
+    activeAnalystProcess = nil
+    activeAnalystRunID = nil
+    analystRunnerLock.unlock()
   }
 
   func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
@@ -87,6 +109,32 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           collectionResponse.1,
           collectionResponse.2
         )
+      case "/api/local-analyst":
+        guard urlSchemeTask.request.httpMethod == nil || urlSchemeTask.request.httpMethod == "GET" else {
+          throw LocalHTTPError(status: 405, message: "Local Analyst Workspace only supports GET on this route")
+        }
+        let analystResponse = try localAnalystResponse(
+          ifNoneMatch: urlSchemeTask.request.value(forHTTPHeaderField: "If-None-Match")
+        )
+        response = (
+          analystResponse.0,
+          "application/json; charset=utf-8",
+          analystResponse.1,
+          analystResponse.2
+        )
+      case "/api/local-analyst/runner":
+        response = (
+          try localAnalystRunnerState(),
+          "application/json; charset=utf-8",
+          200,
+          [:]
+        )
+      case "/api/local-analyst/actions":
+        guard urlSchemeTask.request.httpMethod == "POST" else {
+          throw LocalHTTPError(status: 405, message: "Local Analyst actions require POST")
+        }
+        handleLocalAnalystAction(urlSchemeTask.request, to: urlSchemeTask)
+        return
       case "/api/events":
         response = (try eventsResponse(for: requestURL), "application/json; charset=utf-8", 200, [:])
       case "/api/origin-trace":
@@ -146,6 +194,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "api_collection_store": apiCollectionStoreURL.path,
         "api_collection_store_exists": FileManager.default.fileExists(
           atPath: apiCollectionStoreURL.path
+        ),
+        "local_analyst_store": localAnalystStoreURL.path,
+        "local_analyst_store_exists": FileManager.default.fileExists(
+          atPath: localAnalystStoreURL.path
+        ),
+        "local_analyst_runner_available": FileManager.default.isExecutableFile(
+          atPath: analystRunnerURL.path
         ),
         "broker_connected": brokerConnected(),
       ],
@@ -710,6 +765,798 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       200,
       ["ETag": "\"api-collection-\(generation)\""]
     )
+  }
+
+  private func localAnalystLimits() -> [String: Int] {
+    [
+      "folders": 32,
+      "files": 64,
+      "folder_depth": 4,
+      "file_bytes": 32 * 1_024,
+      "total_file_bytes": 512 * 1_024,
+      "document_bytes": 1_024 * 1_024,
+      "variables": 32,
+      "variable_value_bytes": 4 * 1_024,
+      "variable_bytes": 16 * 1_024,
+      "evidence_bytes": 768 * 1_024,
+      "selected_artifact_bytes": 64 * 1_024,
+      "execution_timeout_ms": 2_000,
+      "logs": 64,
+      "log_bytes": 1_024,
+      "result_bytes": 32 * 1_024,
+    ]
+  }
+
+  private func emptyLocalAnalystWorkspace() -> [String: Any] {
+    [
+      "contract_version": 1,
+      "document_kind": "local-analyst-workspace",
+      "generation": 0,
+      "updated_at_ms": 0,
+      "folders": [[
+        "id": 1,
+        "name": "Analyst Workspace",
+        "parent_id": NSNull(),
+      ]],
+      "files": [],
+      "limits": localAnalystLimits(),
+    ]
+  }
+
+  private func localAnalystContent(_ value: Any?) throws -> (String, Int) {
+    guard let content = value as? String else {
+      throw LocalHTTPError(status: 400, message: "Analyst file content must be text")
+    }
+    let controls = content.unicodeScalars.contains {
+      $0.value < 0x20 && ![0x09, 0x0a, 0x0d].contains($0.value)
+    }
+    guard content.utf8.count <= 32 * 1_024, !controls else {
+      throw LocalHTTPError(
+        status: 400,
+        message: "Analyst file content is oversized or contains controls"
+      )
+    }
+    return (content, content.utf8.count)
+  }
+
+  private func normalizeLocalAnalystFolder(_ value: Any?) throws -> [String: Any] {
+    guard let folder = value as? [String: Any],
+      apiCollectionExactKeys(folder, ["id", "name", "parent_id"])
+    else {
+      throw LocalHTTPError(status: 400, message: "Analyst folder shape is invalid")
+    }
+    let parent: Any
+    if folder["parent_id"] is NSNull {
+      parent = NSNull()
+    } else {
+      parent = try apiCollectionInteger(
+        folder["parent_id"],
+        label: "Analyst parent folder ID",
+        minimum: 1
+      )
+    }
+    let name = try apiCollectionText(
+      folder["name"],
+      label: "Analyst folder name",
+      maximumBytes: 128,
+      trim: true
+    )
+    guard !name.contains("/") else {
+      throw LocalHTTPError(status: 400, message: "Analyst folder names cannot contain slashes")
+    }
+    return [
+      "id": try apiCollectionInteger(folder["id"], label: "Analyst folder ID", minimum: 1),
+      "name": name,
+      "parent_id": parent,
+    ]
+  }
+
+  private func normalizeLocalAnalystFile(
+    _ value: Any?,
+    requireMetadata: Bool
+  ) throws -> [String: Any] {
+    guard let file = value as? [String: Any] else {
+      throw LocalHTTPError(status: 400, message: "Analyst file shape is invalid")
+    }
+    var keys: Set<String> = ["id", "folder_id", "name", "kind", "language", "content"]
+    if requireMetadata {
+      keys.formUnion(["content_bytes", "created_at_ms", "updated_at_ms"])
+    }
+    guard apiCollectionExactKeys(file, keys) else {
+      throw LocalHTTPError(status: 400, message: "Analyst file shape is invalid")
+    }
+    let kind = try apiCollectionText(
+      file["kind"], label: "Analyst file kind", maximumBytes: 32
+    )
+    let language = try apiCollectionText(
+      file["language"], label: "Analyst file language", maximumBytes: 32
+    )
+    guard ["analyst-script", "scratchpad"].contains(kind),
+      ["javascript", "json", "markdown", "text"].contains(language),
+      kind != "analyst-script" || language == "javascript"
+    else {
+      throw LocalHTTPError(status: 400, message: "Analyst file kind or language is invalid")
+    }
+    let name = try apiCollectionText(
+      file["name"], label: "Analyst file name", maximumBytes: 128, trim: true
+    )
+    guard !name.contains("/") else {
+      throw LocalHTTPError(status: 400, message: "Analyst file names cannot contain slashes")
+    }
+    let content = try localAnalystContent(file["content"])
+    var result: [String: Any] = [
+      "id": try apiCollectionInteger(file["id"], label: "Analyst file ID", minimum: 1),
+      "folder_id": try apiCollectionInteger(
+        file["folder_id"], label: "Analyst file folder ID", minimum: 1
+      ),
+      "name": name,
+      "kind": kind,
+      "language": language,
+      "content": content.0,
+      "content_bytes": content.1,
+    ]
+    if requireMetadata {
+      guard try apiCollectionInteger(
+        file["content_bytes"], label: "Analyst file byte count"
+      ) == content.1 else {
+        throw LocalHTTPError(status: 400, message: "Analyst file byte count is invalid")
+      }
+      let created = try apiCollectionInteger(
+        file["created_at_ms"], label: "Analyst file creation time"
+      )
+      let updated = try apiCollectionInteger(
+        file["updated_at_ms"], label: "Analyst file update time"
+      )
+      guard updated >= created else {
+        throw LocalHTTPError(status: 400, message: "Analyst file timestamps are invalid")
+      }
+      result["created_at_ms"] = created
+      result["updated_at_ms"] = updated
+    }
+    return result
+  }
+
+  private func normalizeLocalAnalystWorkspace(_ value: Any?) throws -> [String: Any] {
+    guard let document = value as? [String: Any],
+      apiCollectionExactKeys(
+        document,
+        ["contract_version", "document_kind", "generation", "updated_at_ms", "folders", "files", "limits"]
+      ),
+      try apiCollectionInteger(document["contract_version"], label: "Analyst contract version") == 1,
+      document["document_kind"] as? String == "local-analyst-workspace",
+      NSDictionary(dictionary: document["limits"] as? [String: Any] ?? [:]).isEqual(
+        to: localAnalystLimits()
+      ),
+      let rawFolders = document["folders"] as? [Any],
+      (1...32).contains(rawFolders.count),
+      let rawFiles = document["files"] as? [Any],
+      rawFiles.count <= 64
+    else {
+      throw LocalHTTPError(status: 400, message: "Analyst workspace document contract is invalid")
+    }
+    let generation = try apiCollectionInteger(
+      document["generation"], label: "Analyst workspace generation"
+    )
+    let updatedAt = try apiCollectionInteger(
+      document["updated_at_ms"], label: "Analyst workspace update time"
+    )
+    let folders = try rawFolders.map(normalizeLocalAnalystFolder)
+    let files = try rawFiles.map { try normalizeLocalAnalystFile($0, requireMetadata: true) }
+    var foldersByID: [Int: [String: Any]] = [:]
+    for folder in folders {
+      let identifier = folder["id"] as! Int
+      guard foldersByID[identifier] == nil else {
+        throw LocalHTTPError(status: 400, message: "Analyst folder IDs are duplicated")
+      }
+      foldersByID[identifier] = folder
+    }
+    guard let root = foldersByID[1], root["parent_id"] is NSNull,
+      root["name"] as? String == "Analyst Workspace",
+      !folders.contains(where: { ($0["id"] as! Int) != 1 && $0["parent_id"] is NSNull })
+    else {
+      throw LocalHTTPError(status: 400, message: "Analyst root folder is invalid")
+    }
+    for folder in folders {
+      var seen = Set([folder["id"] as! Int])
+      var current = folder
+      var depth = 0
+      while !(current["parent_id"] is NSNull) {
+        let parentID = current["parent_id"] as! Int
+        guard seen.insert(parentID).inserted, let parent = foldersByID[parentID] else {
+          throw LocalHTTPError(status: 400, message: "Analyst folder hierarchy is invalid")
+        }
+        current = parent
+        depth += 1
+        guard depth <= 4 else {
+          throw LocalHTTPError(status: 400, message: "Analyst folder depth exceeds four levels")
+        }
+      }
+    }
+    var siblingNames = Set<String>()
+    for folder in folders {
+      let parent = folder["parent_id"] is NSNull ? "root" : String(folder["parent_id"] as! Int)
+      let key = "\(parent)\u{0}\((folder["name"] as! String).lowercased())"
+      guard siblingNames.insert(key).inserted else {
+        throw LocalHTTPError(status: 400, message: "Analyst sibling name is duplicated")
+      }
+    }
+    var fileIDs = Set<Int>()
+    var totalContentBytes = 0
+    for file in files {
+      let identifier = file["id"] as! Int
+      let folderID = file["folder_id"] as! Int
+      let key = "\(folderID)\u{0}\((file["name"] as! String).lowercased())"
+      guard fileIDs.insert(identifier).inserted, foldersByID[folderID] != nil,
+        siblingNames.insert(key).inserted
+      else {
+        throw LocalHTTPError(status: 400, message: "Analyst file ID, folder, or name is invalid")
+      }
+      totalContentBytes += file["content_bytes"] as! Int
+    }
+    guard totalContentBytes <= 512 * 1_024 else {
+      throw LocalHTTPError(status: 400, message: "Analyst file content exceeds 512 KiB")
+    }
+    let normalized: [String: Any] = [
+      "contract_version": 1,
+      "document_kind": "local-analyst-workspace",
+      "generation": generation,
+      "updated_at_ms": updatedAt,
+      "folders": folders.sorted { ($0["id"] as! Int) < ($1["id"] as! Int) },
+      "files": files.sorted { ($0["id"] as! Int) < ($1["id"] as! Int) },
+      "limits": localAnalystLimits(),
+    ]
+    guard try JSONSerialization.data(withJSONObject: normalized).count <= 1_024 * 1_024 else {
+      throw LocalHTTPError(status: 400, message: "Analyst workspace document exceeds 1 MiB")
+    }
+    if generation == 0 {
+      guard updatedAt == 0, folders.count == 1, files.isEmpty else {
+        throw LocalHTTPError(status: 400, message: "Analyst workspace generation zero must be empty")
+      }
+    }
+    return normalized
+  }
+
+  private func loadLocalAnalystLocked() throws -> [String: Any] {
+    let descriptor = Darwin.open(localAnalystStoreURL.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    if descriptor < 0 {
+      if errno == ENOENT { return emptyLocalAnalystWorkspace() }
+      throw LocalHTTPError(status: 500, message: "Analyst workspace store could not be opened safely")
+    }
+    defer { Darwin.close(descriptor) }
+    var metadata = stat()
+    guard fstat(descriptor, &metadata) == 0,
+      (metadata.st_mode & S_IFMT) == S_IFREG,
+      metadata.st_size <= 1_024 * 1_024
+    else {
+      throw LocalHTTPError(status: 500, message: "Analyst workspace store must be a bounded regular file")
+    }
+    do {
+      let maximumBytes = 1_024 * 1_024
+      var data = Data()
+      var buffer = [UInt8](repeating: 0, count: 16 * 1_024)
+      while data.count <= maximumBytes {
+        let requested = min(buffer.count, maximumBytes + 1 - data.count)
+        let count = Darwin.read(descriptor, &buffer, requested)
+        if count < 0 {
+          throw LocalHTTPError(status: 500, message: "Analyst workspace store could not be read")
+        }
+        if count == 0 { break }
+        data.append(buffer, count: count)
+      }
+      guard data.count <= maximumBytes else {
+        throw LocalHTTPError(status: 500, message: "Analyst workspace store exceeds 1 MiB")
+      }
+      return try normalizeLocalAnalystWorkspace(JSONSerialization.jsonObject(with: data))
+    } catch let error as LocalHTTPError where error.status == 500 {
+      throw error
+    } catch {
+      throw LocalHTTPError(status: 500, message: "Analyst workspace store is malformed")
+    }
+  }
+
+  private func localAnalystResponse(ifNoneMatch: String?) throws -> (Data, Int, [String: String]) {
+    localAnalystLock.lock()
+    defer { localAnalystLock.unlock() }
+    let workspace = try loadLocalAnalystLocked()
+    let generation = workspace["generation"] as! Int
+    let etag = "\"local-analyst-\(generation)\""
+    if ifNoneMatch == etag { return (Data(), 304, ["ETag": etag]) }
+    return (
+      try JSONSerialization.data(withJSONObject: workspace),
+      200,
+      ["ETag": etag]
+    )
+  }
+
+  private func writeLocalAnalystLocked(_ workspace: [String: Any]) throws {
+    let directory = localAnalystStoreURL.deletingLastPathComponent()
+    try FileManager.default.createDirectory(
+      at: directory,
+      withIntermediateDirectories: true,
+      attributes: [.posixPermissions: 0o700]
+    )
+    var data = try JSONSerialization.data(withJSONObject: workspace)
+    data.append(0x0a)
+    guard data.count <= 1_024 * 1_024 else {
+      throw LocalHTTPError(status: 400, message: "Analyst workspace store exceeds 1 MiB")
+    }
+    try data.write(to: localAnalystStoreURL, options: [.atomic])
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o600],
+      ofItemAtPath: localAnalystStoreURL.path
+    )
+    let descriptor = Darwin.open(localAnalystStoreURL.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    guard descriptor >= 0 else {
+      throw LocalHTTPError(status: 500, message: "Analyst workspace store could not be synchronized")
+    }
+    defer { Darwin.close(descriptor) }
+    guard Darwin.fsync(descriptor) == 0 else {
+      throw LocalHTTPError(status: 500, message: "Analyst workspace store could not be synchronized")
+    }
+    let directoryDescriptor = Darwin.open(directory.path, O_RDONLY | O_CLOEXEC)
+    if directoryDescriptor >= 0 {
+      _ = Darwin.fsync(directoryDescriptor)
+      Darwin.close(directoryDescriptor)
+    }
+  }
+
+  private func localAnalystRequestBody(_ request: URLRequest) throws -> Data {
+    let data = try apiCollectionRequestBody(request)
+    guard data.count <= 1_024 * 1_024 + 64 * 1_024 else {
+      throw LocalHTTPError(status: 413, message: "Analyst workspace action is oversized")
+    }
+    return data
+  }
+
+  private func replaceLocalAnalyst(_ action: [String: Any]) throws -> (Data, Int, [String: String]) {
+    guard apiCollectionExactKeys(action, ["action", "expected_generation", "folders", "files"]),
+      action["action"] as? String == "replace_local_analyst_workspace",
+      let rawFolders = action["folders"] as? [Any],
+      let rawFiles = action["files"] as? [Any]
+    else {
+      throw LocalHTTPError(status: 400, message: "Analyst workspace action is invalid")
+    }
+    let expected = try apiCollectionInteger(
+      action["expected_generation"], label: "Expected analyst workspace generation"
+    )
+    localAnalystLock.lock()
+    defer { localAnalystLock.unlock() }
+    let current = try loadLocalAnalystLocked()
+    guard current["generation"] as? Int == expected else {
+      throw LocalHTTPError(
+        status: 409,
+        message: "Analyst workspace changed in another window; refresh before saving"
+      )
+    }
+    let folders = try rawFolders.map(normalizeLocalAnalystFolder)
+    let contents = try rawFiles.map { try normalizeLocalAnalystFile($0, requireMetadata: false) }
+    let existing = Dictionary(uniqueKeysWithValues:
+      (current["files"] as? [[String: Any]] ?? []).map { ($0["id"] as! Int, $0) }
+    )
+    let now = Int(Date().timeIntervalSince1970 * 1_000)
+    let files = contents.map { content -> [String: Any] in
+      var result = content
+      if let previous = existing[content["id"] as! Int] {
+        result["created_at_ms"] = previous["created_at_ms"]
+        let previousContent = previous.filter {
+          !["content_bytes", "created_at_ms", "updated_at_ms"].contains($0.key)
+        }
+        let currentContent = content.filter { $0.key != "content_bytes" }
+        result["updated_at_ms"] = NSDictionary(dictionary: previousContent).isEqual(to: currentContent)
+          ? previous["updated_at_ms"] : now
+      } else {
+        result["created_at_ms"] = now
+        result["updated_at_ms"] = now
+      }
+      return result
+    }
+    let candidate = try normalizeLocalAnalystWorkspace([
+      "contract_version": 1,
+      "document_kind": "local-analyst-workspace",
+      "generation": expected + 1,
+      "updated_at_ms": now,
+      "folders": folders,
+      "files": files,
+      "limits": localAnalystLimits(),
+    ])
+    let candidateContent = ["folders": candidate["folders"]!, "files": candidate["files"]!]
+    let currentContent = ["folders": current["folders"]!, "files": current["files"]!]
+    let result: [String: Any]
+    if NSDictionary(dictionary: candidateContent).isEqual(to: currentContent) {
+      result = current
+    } else {
+      try writeLocalAnalystLocked(candidate)
+      result = candidate
+    }
+    let generation = result["generation"] as! Int
+    return (
+      try JSONSerialization.data(withJSONObject: result),
+      200,
+      ["ETag": "\"local-analyst-\(generation)\""]
+    )
+  }
+
+  private func localAnalystRunnerState() throws -> Data {
+    analystRunnerLock.lock()
+    let activeRunID: Any = activeAnalystRunID ?? NSNull()
+    analystRunnerLock.unlock()
+    return try JSONSerialization.data(
+      withJSONObject: [
+        "protocol_version": 1,
+        "available": FileManager.default.isExecutableFile(atPath: analystRunnerURL.path)
+          && FileManager.default.isReadableFile(atPath: analystRunnerCoreURL.path),
+        "active_run_id": activeRunID,
+        "limits": localAnalystLimits(),
+      ]
+    )
+  }
+
+  private func normalizeLocalAnalystRun(_ action: [String: Any]) throws -> (Data, Int) {
+    guard apiCollectionExactKeys(
+      action,
+      [
+        "action", "protocol_version", "run_id", "script_id", "library_generation",
+        "source", "variables", "evidence", "confirmed", "confirmed_sensitive",
+      ]
+    ), action["action"] as? String == "run_local_analyst_script",
+      try apiCollectionInteger(action["protocol_version"], label: "Analyst protocol version") == 1,
+      action["confirmed"] as? Bool == true,
+      let source = action["source"] as? String,
+      !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      source.utf8.count <= 32 * 1_024,
+      let variables = action["variables"] as? [String: Any],
+      variables.count <= 32,
+      let evidence = action["evidence"] as? [String: Any],
+      apiCollectionExactKeys(
+        evidence,
+        [
+          "events", "artifacts", "trace_edges", "signal_profiles", "vm_analysis",
+          "selected_artifact", "summary",
+        ]
+      ),
+      let events = evidence["events"] as? [Any], events.count <= 500,
+      let artifacts = evidence["artifacts"] as? [Any], artifacts.count <= 500,
+      let traceEdges = evidence["trace_edges"] as? [Any], traceEdges.count <= 1_000,
+      let profiles = evidence["signal_profiles"] as? [Any], profiles.count <= 256,
+      evidence["vm_analysis"] is NSNull || evidence["vm_analysis"] is [String: Any],
+      evidence["selected_artifact"] is NSNull || evidence["selected_artifact"] is [String: Any],
+      evidence["summary"] is [String: Any]
+    else {
+      throw LocalHTTPError(status: 400, message: "Analyst run action is malformed or oversized")
+    }
+    let runID = try apiCollectionInteger(action["run_id"], label: "Analyst run ID", minimum: 1)
+    let scriptID = try apiCollectionInteger(
+      action["script_id"], label: "Analyst script ID", minimum: 1
+    )
+    let generation = try apiCollectionInteger(
+      action["library_generation"], label: "Analyst library generation"
+    )
+    var variableBytes = 0
+    for (name, rawValue) in variables {
+      guard name.utf8.count <= 128,
+        name.range(of: #"^[A-Za-z_][A-Za-z0-9_.-]*$"#, options: .regularExpression) != nil,
+        let value = rawValue as? String,
+        value.utf8.count <= 4 * 1_024
+      else {
+        throw LocalHTTPError(status: 400, message: "Analyst variable name or value is invalid")
+      }
+      variableBytes += name.utf8.count + value.utf8.count
+    }
+    guard variableBytes <= 16 * 1_024,
+      try JSONSerialization.data(withJSONObject: evidence).count <= 768 * 1_024
+    else {
+      throw LocalHTTPError(status: 400, message: "Analyst variables or evidence are oversized")
+    }
+    if let selected = evidence["selected_artifact"] as? [String: Any] {
+      guard let content = selected["content"] as? String,
+        content.utf8.count <= 64 * 1_024,
+        selected["sensitive"] as? Bool != true || action["confirmed_sensitive"] as? Bool == true
+      else {
+        throw LocalHTTPError(
+          status: 400,
+          message: "Confirm bounded sensitive selected artifact bytes before running"
+        )
+      }
+    }
+    localAnalystLock.lock()
+    let workspace: [String: Any]
+    do {
+      workspace = try loadLocalAnalystLocked()
+    } catch {
+      localAnalystLock.unlock()
+      throw error
+    }
+    localAnalystLock.unlock()
+    guard workspace["generation"] as? Int == generation,
+      let script = (workspace["files"] as? [[String: Any]])?.first(where: {
+        $0["id"] as? Int == scriptID
+      }),
+      script["kind"] as? String == "analyst-script",
+      script["language"] as? String == "javascript",
+      script["content"] as? String == source
+    else {
+      throw LocalHTTPError(
+        status: 409,
+        message: "Only the current saved JavaScript analyst script can execute"
+      )
+    }
+    let runnerInput: [String: Any] = [
+      "protocol_version": 1,
+      "run_id": runID,
+      "script_id": scriptID,
+      "library_generation": generation,
+      "source": source,
+      "variables": variables,
+      "evidence": evidence,
+    ]
+    let data = try JSONSerialization.data(withJSONObject: runnerInput)
+    guard data.count <= 800 * 1_024 else {
+      throw LocalHTTPError(status: 400, message: "Analyst runner input exceeds 800 KiB")
+    }
+    return (data, runID)
+  }
+
+  private func localAnalystFailure(
+    action: [String: Any],
+    outcome: String,
+    message: String,
+    duration: Int
+  ) throws -> Data {
+    try JSONSerialization.data(
+      withJSONObject: [
+        "protocol_version": 1,
+        "run_id": action["run_id"] ?? 0,
+        "script_id": action["script_id"] ?? 0,
+        "library_generation": action["library_generation"] ?? 0,
+        "ok": false,
+        "outcome": outcome,
+        "result_type": "error",
+        "result_text": "",
+        "result_truncated": false,
+        "logs": [],
+        "logs_truncated": false,
+        "duration_ms": min(max(duration, 0), 7_000),
+        "error": String(message.prefix(512)),
+      ]
+    )
+  }
+
+  private func validateLocalAnalystResult(
+    _ data: Data,
+    action: [String: Any]
+  ) throws -> Data {
+    guard data.count <= 128 * 1_024,
+      let result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+      apiCollectionExactKeys(
+        result,
+        [
+          "protocol_version", "run_id", "script_id", "library_generation", "ok", "outcome",
+          "result_type", "result_text", "result_truncated", "logs", "logs_truncated",
+          "duration_ms", "error",
+        ]
+      ),
+      try apiCollectionInteger(result["protocol_version"], label: "Analyst result protocol") == 1,
+      try apiCollectionInteger(result["run_id"], label: "Analyst result run ID")
+        == apiCollectionInteger(action["run_id"], label: "Analyst run ID"),
+      try apiCollectionInteger(result["script_id"], label: "Analyst result script ID")
+        == apiCollectionInteger(action["script_id"], label: "Analyst script ID"),
+      try apiCollectionInteger(result["library_generation"], label: "Analyst result generation")
+        == apiCollectionInteger(action["library_generation"], label: "Analyst generation"),
+      let ok = result["ok"] as? Bool,
+      let outcome = result["outcome"] as? String,
+      ["completed", "failed", "cancelled", "timed_out"].contains(outcome),
+      ok == (outcome == "completed"),
+      let resultType = result["result_type"] as? String, resultType.utf8.count <= 64,
+      let resultText = result["result_text"] as? String, resultText.utf8.count <= 32 * 1_024,
+      result["result_truncated"] is Bool,
+      let logs = result["logs"] as? [[String: Any]], logs.count <= 64,
+      result["logs_truncated"] is Bool,
+      let duration = try? apiCollectionInteger(result["duration_ms"], label: "Analyst duration"),
+      duration <= 7_000,
+      let error = result["error"] as? String, error.utf8.count <= 512,
+      ok ? error.isEmpty : !error.isEmpty
+    else {
+      throw LocalHTTPError(status: 422, message: "Analyst runner returned a malformed result")
+    }
+    for log in logs {
+      guard apiCollectionExactKeys(log, ["level", "text"]),
+        let level = log["level"] as? String,
+        ["log", "info", "warn", "error"].contains(level),
+        let text = log["text"] as? String,
+        text.utf8.count <= 1_024
+      else {
+        throw LocalHTTPError(status: 422, message: "Analyst runner returned a malformed log")
+      }
+    }
+    return data
+  }
+
+  private func runLocalAnalyst(
+    _ action: [String: Any]
+  ) throws -> Data {
+    guard FileManager.default.isExecutableFile(atPath: analystRunnerURL.path),
+      FileManager.default.isReadableFile(atPath: analystRunnerCoreURL.path)
+    else {
+      throw LocalHTTPError(status: 409, message: "Packaged local analyst runner is unavailable")
+    }
+    let normalized = try normalizeLocalAnalystRun(action)
+    let process = Process()
+    process.executableURL = analystRunnerURL
+    process.arguments = [analystRunnerCoreURL.path]
+    process.environment = ["LANG": "C", "LC_ALL": "C", "TZ": "UTC"]
+    let inputPipe = Pipe()
+    let outputPipe = Pipe()
+    let errorPipe = Pipe()
+    process.standardInput = inputPipe
+    process.standardOutput = outputPipe
+    process.standardError = errorPipe
+    let terminated = DispatchSemaphore(value: 0)
+    process.terminationHandler = { _ in terminated.signal() }
+    analystRunnerLock.lock()
+    guard activeAnalystProcess == nil else {
+      analystRunnerLock.unlock()
+      throw LocalHTTPError(status: 409, message: "Another local analyst script is already running")
+    }
+    do {
+      try process.run()
+      activeAnalystProcess = process
+      activeAnalystRunID = normalized.1
+      analystCancelRequested = false
+      analystRunnerLock.unlock()
+    } catch {
+      analystRunnerLock.unlock()
+      throw LocalHTTPError(status: 500, message: "Could not start the packaged analyst runner")
+    }
+
+    let outputGroup = DispatchGroup()
+    let outputLock = NSLock()
+    var output = Data()
+    var errorOutput = Data()
+    outputGroup.enter()
+    DispatchQueue.global(qos: .userInitiated).async {
+      let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+      outputLock.lock()
+      output = data
+      outputLock.unlock()
+      outputGroup.leave()
+    }
+    outputGroup.enter()
+    DispatchQueue.global(qos: .utility).async {
+      let data = errorPipe.fileHandleForReading.readDataToEndOfFile()
+      outputLock.lock()
+      errorOutput = data
+      outputLock.unlock()
+      outputGroup.leave()
+    }
+    let started = Date()
+    inputPipe.fileHandleForWriting.write(normalized.0)
+    try? inputPipe.fileHandleForWriting.close()
+    let timedOut = terminated.wait(timeout: .now() + 2.5) == .timedOut
+    if timedOut {
+      process.terminate()
+      if terminated.wait(timeout: .now() + 0.25) == .timedOut {
+        kill(process.processIdentifier, SIGKILL)
+        _ = terminated.wait(timeout: .now() + 0.25)
+      }
+    }
+    outputGroup.wait()
+    let duration = Int(Date().timeIntervalSince(started) * 1_000)
+    analystRunnerLock.lock()
+    let cancelled = analystCancelRequested && activeAnalystProcess === process
+    if activeAnalystProcess === process {
+      activeAnalystProcess = nil
+      activeAnalystRunID = nil
+      analystCancelRequested = false
+    }
+    analystRunnerLock.unlock()
+    if cancelled {
+      return try localAnalystFailure(
+        action: action,
+        outcome: "cancelled",
+        message: "Analyst script cancelled",
+        duration: duration
+      )
+    }
+    if timedOut {
+      return try localAnalystFailure(
+        action: action,
+        outcome: "timed_out",
+        message: "Analyst script exceeded the 2 second execution limit",
+        duration: duration
+      )
+    }
+    outputLock.lock()
+    let result = output
+    let diagnostic = String(data: errorOutput.prefix(512), encoding: .utf8) ?? ""
+    outputLock.unlock()
+    guard !result.isEmpty else {
+      throw LocalHTTPError(
+        status: 422,
+        message: diagnostic.isEmpty ? "Analyst runner returned no result" : diagnostic
+      )
+    }
+    return try validateLocalAnalystResult(result, action: action)
+  }
+
+  private func cancelLocalAnalyst(_ action: [String: Any]) throws -> Data {
+    guard apiCollectionExactKeys(action, ["action", "run_id"]),
+      action["action"] as? String == "cancel_local_analyst_script"
+    else {
+      throw LocalHTTPError(status: 400, message: "Analyst cancellation action is invalid")
+    }
+    let runID = try apiCollectionInteger(action["run_id"], label: "Analyst run ID", minimum: 1)
+    analystRunnerLock.lock()
+    guard let process = activeAnalystProcess, activeAnalystRunID == runID else {
+      analystRunnerLock.unlock()
+      throw LocalHTTPError(status: 409, message: "The selected analyst run is no longer active")
+    }
+    analystCancelRequested = true
+    process.terminate()
+    analystRunnerLock.unlock()
+    return try JSONSerialization.data(
+      withJSONObject: ["ok": true, "run_id": runID, "cancel_requested": true]
+    )
+  }
+
+  private func handleLocalAnalystAction(
+    _ request: URLRequest,
+    to task: WKURLSchemeTask
+  ) {
+    let action: [String: Any]
+    do {
+      let body = try localAnalystRequestBody(request)
+      guard let value = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+        let kind = value["action"] as? String
+      else {
+        throw LocalHTTPError(status: 400, message: "Analyst action body is malformed")
+      }
+      action = value
+      if kind == "replace_local_analyst_workspace" {
+        let response = try replaceLocalAnalyst(value)
+        send(
+          response.0,
+          contentType: "application/json; charset=utf-8",
+          status: response.1,
+          headers: response.2,
+          to: task
+        )
+        return
+      }
+      if kind == "cancel_local_analyst_script" {
+        send(
+          try cancelLocalAnalyst(value),
+          contentType: "application/json; charset=utf-8",
+          status: 200,
+          headers: [:],
+          to: task
+        )
+        return
+      }
+      guard kind == "run_local_analyst_script" else {
+        throw LocalHTTPError(status: 400, message: "Analyst workspace action is invalid")
+      }
+    } catch let error as LocalHTTPError {
+      sendError(error.message, status: error.status, to: task)
+      return
+    } catch {
+      sendError(error.localizedDescription, status: 500, to: task)
+      return
+    }
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        self.send(
+          try self.runLocalAnalyst(action),
+          contentType: "application/json; charset=utf-8",
+          status: 200,
+          headers: [:],
+          to: task
+        )
+      } catch let error as LocalHTTPError {
+        self.sendError(error.message, status: error.status, to: task)
+      } catch {
+        self.sendError(error.localizedDescription, status: 500, to: task)
+      }
+    }
   }
 
   private func debuggerUnavailableResponse(
@@ -1532,6 +2379,10 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     let signalStoreURL = configuredSignalStore(eventStoreURL: eventStoreURL)
     let artifactStoreURL = configuredArtifactStore(eventStoreURL: eventStoreURL)
     let apiCollectionStoreURL = configuredApiCollectionStore()
+    let localAnalystStoreURL = configuredLocalAnalystStore()
+    let analystRunnerURL = Bundle.main.bundleURL
+      .appendingPathComponent("Contents/MacOS/OriginTraceAnalystRunner")
+    let analystRunnerCoreURL = resourcesURL.appendingPathComponent("analyst_runner_core.js")
     let handler = LocalContentHandler(
       indexURL: indexURL,
       eventStoreURL: eventStoreURL,
@@ -1539,6 +2390,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       signalStoreURL: signalStoreURL,
       artifactStoreURL: artifactStoreURL,
       apiCollectionStoreURL: apiCollectionStoreURL,
+      localAnalystStoreURL: localAnalystStoreURL,
+      analystRunnerURL: analystRunnerURL,
+      analystRunnerCoreURL: analystRunnerCoreURL,
       brokerSocketURL: configuredBrokerSocket()
     )
     contentHandler = handler
@@ -1665,6 +2519,29 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     return base.appendingPathComponent("Origin Trace/api-collection-v1.json")
   }
 
+  private func configuredLocalAnalystStore() -> URL {
+    let arguments = CommandLine.arguments
+    if let storeFlag = arguments.firstIndex(of: "--local-analyst"),
+      storeFlag + 1 < arguments.count
+    {
+      return URL(fileURLWithPath: arguments[storeFlag + 1]).standardizedFileURL
+    }
+    if let configuredPath = ProcessInfo.processInfo.environment["REB_LOCAL_ANALYST_STORE"],
+      !configuredPath.isEmpty
+    {
+      return URL(fileURLWithPath: configuredPath).standardizedFileURL
+    }
+    let base = FileManager.default.urls(
+      for: .applicationSupportDirectory,
+      in: .userDomainMask
+    ).first ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
+      "Library/Application Support"
+    )
+    return base.appendingPathComponent(
+      "Origin Trace/local-analyst-workspace-v1.json"
+    )
+  }
+
   private func configuredBrokerSocket() -> URL? {
     let arguments = CommandLine.arguments
     if let socketFlag = arguments.firstIndex(of: "--broker-socket"),
@@ -1776,8 +2653,11 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
       let exerciseCollectionWrite =
         ProcessInfo.processInfo.environment["REB_APP_SMOKE_API_COLLECTION_WRITE"] == "1"
+      let exerciseAnalystWrite =
+        ProcessInfo.processInfo.environment["REB_APP_SMOKE_LOCAL_ANALYST_WRITE"] == "1"
       let exercise = """
         window.__rebSmokeExerciseError = null;
+        window.__rebSmokeAnalyst = null;
         void (async () => {
           if (\(exerciseCollectionWrite ? "true" : "false")) {
             const current = await fetch('/api/api-collection', {cache: 'no-store'}).then(response => {
@@ -1803,6 +2683,51 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
             state.apiCollectionEtag = `"api-collection-${updated.generation}"`;
             setCollectionNotice('ready', 'Native API Collection write verified.');
             renderApiCollection();
+          }
+          if (\(exerciseAnalystWrite ? "true" : "false")) {
+            const current = await fetch('/api/local-analyst', {cache: 'no-store'}).then(response => {
+              if (!response.ok) throw new Error(`Analyst GET returned ${response.status}`);
+              return response.json();
+            });
+            if (!isLocalAnalystWorkspace(current)) throw new Error('Analyst GET returned a malformed workspace');
+            const source = 'console.info("native smoke", WB.Node.Evidence.events().length); return {seed: Utils.getVar("seed")};';
+            const retained = current.files.filter(file => file.name !== '__native-smoke.js');
+            const scriptID = current.files.find(file => file.name === '__native-smoke.js')?.id
+              ?? current.files.reduce((maximum, file) => Math.max(maximum, file.id), 0) + 1;
+            const files = [...retained.map(({content_bytes, created_at_ms, updated_at_ms, ...file}) => file), {
+              id: scriptID, folder_id: 1, name: '__native-smoke.js', kind: 'analyst-script',
+              language: 'javascript', content: source
+            }];
+            const replacement = await fetch('/api/local-analyst/actions', {
+              method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({action: 'replace_local_analyst_workspace',
+                expected_generation: current.generation, folders: current.folders, files})
+            });
+            if (!replacement.ok) throw new Error(`Analyst POST returned ${replacement.status}`);
+            const updated = await replacement.json();
+            if (!isLocalAnalystWorkspace(updated)) throw new Error('Analyst POST returned a malformed workspace');
+            const run = {
+              action: 'run_local_analyst_script', protocol_version: 1, run_id: 1, script_id: scriptID,
+              library_generation: updated.generation, source, variables: {seed: 'native-verified'},
+              evidence: {events: [{sequence_number: '1'}], artifacts: [], trace_edges: [],
+                signal_profiles: [], vm_analysis: null, selected_artifact: null,
+                summary: {events: 1}},
+              confirmed: true, confirmed_sensitive: false
+            };
+            const runResponse = await fetch('/api/local-analyst/actions', {
+              method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify(run)
+            });
+            if (!runResponse.ok) throw new Error(`Analyst run returned ${runResponse.status}`);
+            const result = await runResponse.json();
+            if (!isLocalAnalystResult(result, run) || !result.ok) {
+              throw new Error('Analyst runner returned an invalid result');
+            }
+            state.localAnalyst = updated;
+            state.localAnalystLoaded = true;
+            state.localAnalystEtag = `"local-analyst-${updated.generation}"`;
+            window.__rebSmokeAnalyst = {workspace: updated, result};
+            renderLocalAnalyst();
           }
         [...document.querySelectorAll('.request-row')]
           .find(row => row.textContent.includes('live'))?.click();
@@ -1836,6 +2761,12 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
               apiCollectionGeneration: state.apiCollection?.generation,
               apiCollectionStoreVisible: document.querySelector('#collection-generation')?.textContent,
               apiCollectionWriteExercised: \(exerciseCollectionWrite ? "true" : "false"),
+              localAnalystContractValid: isLocalAnalystWorkspace(state.localAnalyst),
+              localAnalystGeneration: state.localAnalyst?.generation,
+              localAnalystRunnerAvailable: state.localAnalystRunner?.available === true,
+              localAnalystWriteExercised: \(exerciseAnalystWrite ? "true" : "false"),
+              localAnalystRunOutcome: window.__rebSmokeAnalyst?.result?.outcome ?? null,
+              localAnalystRunResult: window.__rebSmokeAnalyst?.result?.result_text ?? null,
               smokeExerciseError: window.__rebSmokeExerciseError,
               traceEnabled: !document.querySelector('#trace-origin')?.disabled,
               traceSteps: document.querySelectorAll('#backtrace-steps .trace-step').length,

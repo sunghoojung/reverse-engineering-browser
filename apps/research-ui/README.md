@@ -229,6 +229,20 @@ browser development server defaults to
 `--api-collection /path/to/api-collection-v1.json` to override either path. See
 [API Collection v1](../../docs/product/api-collection-v1.md).
 
+Local Analyst Workspace persists up to 64 reusable files in 32 folders with a
+four-level hierarchy. JavaScript analyst scripts run only after saving and
+explicit confirmation; JavaScript, JSON, Markdown, and plain-text scratchpads
+never execute. Each run receives a frozen, explicitly selected evidence
+snapshot and private variables through `WB.Node.Evidence` and `WB.Node.Utils`.
+It starts a fresh restricted helper process, caps execution at two seconds,
+supports cancellation, and retains only 64 bounded text results in ephemeral UI
+history. The development server defaults to
+`build/sessions/local-analyst-workspace-v1.json`; the native app defaults to
+`Application Support/Origin Trace/local-analyst-workspace-v1.json`. Pass
+`--local-analyst /path/to/local-analyst-workspace-v1.json` to override either
+path. See
+[Local Analyst Workspace v1](../../docs/product/local-analyst-workspace-v1.md).
+
 The Traffic workspace can pivot a selected request value into Memory. The pivot
 only prefills an ephemeral query. It does not persist the selected value or
 begin a heap capture without a separate user action.

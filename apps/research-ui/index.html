@@ -1381,6 +1381,79 @@
       .collection-history-row small { grid-column: 1 / -1; color: var(--faint); font: 7px var(--mono); }
       .collection-storage-note { padding: 10px; color: var(--faint); font: 8px/1.5 var(--mono); }
 
+      #screen-analyst:not([hidden]) { display: grid; grid-template-rows: 60px auto minmax(0, 1fr); }
+      .analyst-notice { min-height: 34px; display: flex; align-items: center; gap: 8px; padding: 6px 13px; border-bottom: 1px solid var(--line); background: var(--panel-2); color: var(--muted); font-size: 10px; }
+      .analyst-notice::before { content: ""; width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--green); }
+      .analyst-notice[data-kind="loading"]::before, .analyst-notice[data-kind="saving"]::before, .analyst-notice[data-kind="running"]::before { background: var(--accent); }
+      .analyst-notice[data-kind="empty"]::before { background: var(--faint); }
+      .analyst-notice[data-kind="error"], .analyst-notice[data-kind="conflict"] { color: var(--red); }
+      .analyst-notice[data-kind="error"]::before, .analyst-notice[data-kind="conflict"]::before { background: var(--red); }
+      .analyst-grid { min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(235px, .72fr) minmax(390px, 1.25fr) minmax(315px, 1fr); }
+      .analyst-pane { min-width: 0; min-height: 0; overflow: auto; border-right: 1px solid var(--line); background: var(--panel); }
+      .analyst-pane:last-child { border-right: 0; }
+      .analyst-pane-head { display: flex; align-items: flex-start; gap: 9px; padding: 11px 12px; border-bottom: 1px solid var(--line); background: var(--chrome); }
+      .analyst-pane-head > div:first-child { min-width: 0; flex: 1; }
+      .analyst-pane-head h2 { margin: 0; font-size: 11px; }
+      .analyst-pane-head p { margin: 4px 0 0; color: var(--muted); font: 8px/1.45 var(--mono); }
+      .analyst-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+      .analyst-actions button { min-height: 27px; padding: 5px 8px; }
+      .analyst-tree { display: grid; padding: 5px 0; }
+      .analyst-tree-row { width: 100%; min-height: 35px; display: grid; grid-template-columns: 17px minmax(0, 1fr) auto; gap: 5px; align-items: center; padding: 6px 9px 6px calc(8px + var(--analyst-depth, 0) * 13px); border: 0; background: transparent; color: var(--text); text-align: left; }
+      .analyst-tree-row:hover, .analyst-tree-row:focus { background: var(--panel-3); }
+      .analyst-tree-row[aria-selected="true"] { background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
+      .analyst-tree-glyph { color: var(--faint); font: 9px var(--mono); text-align: center; }
+      .analyst-tree-name { min-width: 0; overflow: hidden; font: 9px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+      .analyst-tree-meta { color: var(--faint); font: 7px var(--mono); text-transform: uppercase; }
+      .analyst-storage { margin: 10px; border: 1px solid var(--line); background: var(--panel-2); }
+      .analyst-storage-grid { display: grid; grid-template-columns: 1fr 1fr; }
+      .analyst-storage-grid div { padding: 9px 10px; border-right: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
+      .analyst-storage-grid div:nth-child(2n) { border-right: 0; }
+      .analyst-storage-grid span { display: block; color: var(--faint); font: 7px var(--mono); text-transform: uppercase; }
+      .analyst-storage-grid strong { display: block; margin-top: 4px; color: var(--text); font: 9px var(--mono); }
+      .analyst-form { display: grid; gap: 9px; padding: 11px; }
+      .analyst-form[hidden] { display: none; }
+      .analyst-form label { display: grid; gap: 5px; color: var(--faint); font: 7px var(--mono); text-transform: uppercase; }
+      .analyst-form input, .analyst-form textarea, .analyst-form select { width: 100%; min-height: 30px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); color: var(--text); font: 9px/1.45 var(--mono); text-transform: none; }
+      .analyst-form textarea { min-height: 78px; resize: vertical; }
+      .analyst-editor-form { min-height: calc(100% - 58px); grid-template-rows: auto auto minmax(280px, 1fr) auto auto; }
+      .analyst-editor-form #analyst-content { min-height: 280px; height: 100%; tab-size: 2; white-space: pre; }
+      .analyst-form-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(115px, .4fr); gap: 8px; }
+      .analyst-form-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+      .analyst-form-actions button { min-height: 31px; }
+      .analyst-form-actions .analyst-primary { grid-column: 1 / -1; }
+      .analyst-draft-status { color: var(--faint); font: 8px/1.45 var(--mono); }
+      .analyst-draft-status[data-kind="dirty"] { color: var(--amber); }
+      .analyst-empty { min-height: 180px; display: grid; place-items: center; padding: 24px; color: var(--muted); text-align: center; }
+      .analyst-run-pane { display: grid; align-content: start; gap: 10px; padding: 10px; }
+      .analyst-card { border: 1px solid var(--line); background: var(--panel-2); }
+      .analyst-card > header { display: flex; align-items: flex-start; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); }
+      .analyst-card > header > div { min-width: 0; flex: 1; }
+      .analyst-card h2 { margin: 0; font-size: 10px; }
+      .analyst-card p { margin: 4px 0 0; color: var(--muted); font: 8px/1.45 var(--mono); }
+      .analyst-options { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+      .analyst-check { display: flex !important; grid-template-columns: none !important; align-items: flex-start; gap: 7px !important; color: var(--muted) !important; font: 8px/1.45 var(--mono) !important; text-transform: none !important; }
+      .analyst-check input { width: auto; min-height: auto; margin-top: 2px; accent-color: var(--accent); }
+      .analyst-sensitive { padding: 8px; border: 1px solid color-mix(in srgb, var(--red) 45%, var(--line)); border-radius: 3px; }
+      .analyst-sensitive[hidden] { display: none !important; }
+      .analyst-history { display: grid; max-height: 220px; overflow: auto; }
+      .analyst-history-row { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; padding: 8px 10px; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; color: var(--text); text-align: left; }
+      .analyst-history-row:hover, .analyst-history-row:focus, .analyst-history-row[aria-selected="true"] { background: var(--accent-soft); }
+      .analyst-history-row span:first-child { overflow: hidden; font: 8px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+      .analyst-history-row strong { color: var(--green); font: 8px var(--mono); text-transform: uppercase; }
+      .analyst-history-row strong[data-kind="error"] { color: var(--red); }
+      .analyst-history-row small { grid-column: 1 / -1; color: var(--faint); font: 7px var(--mono); }
+      .analyst-result { display: grid; gap: 8px; min-height: 150px; padding: 10px; }
+      .analyst-result pre { max-height: 220px; margin: 0; padding: 9px; overflow: auto; border: 1px solid var(--line-soft); background: var(--panel); color: var(--muted); font: 8px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+      .analyst-log-list { display: grid; gap: 4px; }
+      .analyst-log-row { padding: 6px 8px; border-left: 2px solid var(--line); background: var(--panel); color: var(--muted); font: 8px/1.45 var(--mono); overflow-wrap: anywhere; }
+      .analyst-log-row[data-level="warn"], .analyst-log-row[data-level="error"] { border-left-color: var(--red); }
+      .analyst-snapshot { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--line-soft); }
+      .analyst-snapshot div { padding: 8px 10px; border-right: 1px solid var(--line-soft); }
+      .analyst-snapshot div:nth-child(2n) { border-right: 0; }
+      .analyst-snapshot span { display: block; color: var(--faint); font: 7px var(--mono); text-transform: uppercase; }
+      .analyst-snapshot strong { display: block; margin-top: 4px; font: 9px var(--mono); }
+
+
       #screen-memory:not([hidden]) { display: grid; grid-template-rows: 60px auto minmax(0, 1fr); }
       #screen-memory > .screen-head { grid-row: 1; }
       #screen-memory > .memory-notice { grid-row: 2; }
@@ -1679,6 +1752,17 @@
         .source-search { display: none; }
         .source-tree-row { padding-left: calc(6px + var(--source-depth, 0) * 9px); }
       }
+      @media (max-width: 1100px) {
+        .analyst-grid { grid-template-columns: minmax(220px, .65fr) minmax(390px, 1.35fr); overflow: auto; }
+        .analyst-run-pane { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--line); }
+      }
+      @media (max-width: 760px) {
+        #screen-analyst:not([hidden]) { overflow: auto; }
+        .analyst-grid { display: block; overflow: visible; }
+        .analyst-pane { min-height: auto; max-height: none; overflow: visible; border-right: 0; border-bottom: 1px solid var(--line); }
+        .analyst-run-pane { display: grid; grid-template-columns: 1fr; }
+        .analyst-editor-form { min-height: 560px; }
+      }
       @media (prefers-reduced-motion: no-preference) {
         .screen:not([hidden]) { animation: reveal .16s ease-out; }
         @keyframes reveal { from { opacity: .35; transform: translateY(2px); } }
@@ -1705,6 +1789,7 @@
           <button class="nav-button" data-screen="backtrace">Backtraces</button>
           <button class="nav-button" data-screen="experiments">Experiments</button>
           <button class="nav-button" data-screen="api-collection">Collection</button>
+          <button class="nav-button" data-screen="analyst">Analyst</button>
         </nav>
         <div class="toolbar-actions">
           <span class="authorization">◇ authorized baseline</span>
@@ -2487,6 +2572,88 @@
               </aside>
             </div>
           </section>
+
+          <section id="screen-analyst" class="screen" aria-label="Local Analyst Workspace" hidden>
+            <header class="screen-head">
+              <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
+              <div><h1>Local Analyst Workspace</h1><div class="screen-subtitle">Reusable evidence scripts and scratchpads in a bounded local sandbox</div></div>
+              <div class="screen-head-actions"><span id="analyst-generation" class="memory-readonly">Generation 0</span><span id="analyst-runner-badge" class="memory-readonly">Runner checking</span></div>
+            </header>
+            <div id="analyst-notice" class="analyst-notice" data-kind="loading" role="status" aria-live="polite">Loading the local analyst workspace…</div>
+            <div class="analyst-grid">
+              <aside class="analyst-pane" aria-label="Analyst library">
+                <div class="analyst-pane-head"><div><h2>Library</h2><p>Folders, scripts, and notes persist in one permission-restricted local document.</p></div><span id="analyst-file-count" class="experiment-card-badge">0 / 64</span></div>
+                <div class="analyst-actions">
+                  <button id="analyst-new-folder" class="secondary-button" type="button">New folder</button>
+                  <button id="analyst-new-script" class="secondary-button" type="button">New script</button>
+                  <button id="analyst-new-note" class="secondary-button" type="button">New note</button>
+                </div>
+                <div id="analyst-tree" class="analyst-tree" role="tree" aria-label="Analyst folders and files"></div>
+                <article class="analyst-storage">
+                  <header class="analyst-pane-head"><div><h2>Selected folder</h2><p>Rename or move an empty or populated folder without changing file IDs.</p></div></header>
+                  <form id="analyst-folder-form" class="analyst-form">
+                    <label>Name<input id="analyst-folder-name" type="text" maxlength="128" autocomplete="off" /></label>
+                    <label>Parent folder<select id="analyst-folder-parent"></select></label>
+                    <div class="analyst-form-actions"><button id="analyst-save-folder" class="trace-button analyst-primary" type="submit">Save folder</button><button id="analyst-delete-folder" class="secondary-button" type="button">Delete empty folder</button></div>
+                  </form>
+                </article>
+                <article class="analyst-storage">
+                  <header class="analyst-pane-head"><div><h2>Local storage</h2><p>No script, variable, result, or evidence is uploaded.</p></div></header>
+                  <div class="analyst-storage-grid">
+                    <div><span>Folders</span><strong id="analyst-folder-usage">1 / 32</strong></div>
+                    <div><span>Content</span><strong id="analyst-content-usage">0 B / 512 KiB</strong></div>
+                    <div><span>Per file</span><strong>32 KiB</strong></div>
+                    <div><span>Depth</span><strong>4 folders</strong></div>
+                  </div>
+                </article>
+              </aside>
+
+              <section class="analyst-pane" aria-label="Analyst file editor">
+                <div class="analyst-pane-head"><div><h2>Editor</h2><p>Save before running. Scratchpads are intentionally non-executable.</p></div><span id="analyst-editor-badge" class="experiment-card-badge" data-kind="offline">No file</span></div>
+                <div id="analyst-editor-empty" class="analyst-empty">Create or select a script or scratchpad.</div>
+                <form id="analyst-editor-form" class="analyst-form analyst-editor-form" hidden>
+                  <div class="analyst-form-row"><label>Name<input id="analyst-name" type="text" maxlength="128" autocomplete="off" /></label><label>Folder<select id="analyst-folder"></select></label></div>
+                  <div class="analyst-form-row"><label>Type<select id="analyst-kind"><option value="analyst-script">Analyst script</option><option value="scratchpad">Scratchpad</option></select></label><label>Language<select id="analyst-language"><option value="javascript">JavaScript</option><option value="json">JSON</option><option value="markdown">Markdown</option><option value="text">Plain text</option></select></label></div>
+                  <label>Content<textarea id="analyst-content" maxlength="32768" spellcheck="false" placeholder="const events = WB.Node.Evidence.events();&#10;console.info('events', events.length);&#10;return {count: events.length};"></textarea></label>
+                  <div id="analyst-draft-status" class="analyst-draft-status" role="status">Saved locally</div>
+                  <div class="analyst-form-actions"><button id="analyst-save" class="trace-button analyst-primary" type="submit">Save file</button><button id="analyst-revert" class="secondary-button" type="button">Revert</button><button id="analyst-delete" class="secondary-button" type="button">Delete</button></div>
+                </form>
+              </section>
+
+              <aside class="analyst-pane analyst-run-pane" aria-label="Analyst execution">
+                <article class="analyst-card">
+                  <header><div><h2>Evidence snapshot</h2><p>A frozen, bounded copy is passed to a fresh helper process for each run.</p></div><span id="analyst-snapshot-badge" class="experiment-card-badge">0 records</span></header>
+                  <form id="analyst-run-form" class="analyst-form">
+                    <label>Private variables (JSON object)<textarea id="analyst-variables" maxlength="16384" spellcheck="false" placeholder='{"seed":"verified"}'></textarea></label>
+                    <div class="analyst-options">
+                      <label class="analyst-check"><input id="analyst-include-events" type="checkbox" checked /> Events</label>
+                      <label class="analyst-check"><input id="analyst-include-artifacts" type="checkbox" checked /> Artifact metadata</label>
+                      <label class="analyst-check"><input id="analyst-include-trace" type="checkbox" checked /> Origin Trace edges</label>
+                      <label class="analyst-check"><input id="analyst-include-signals" type="checkbox" checked /> Signal profile</label>
+                      <label class="analyst-check"><input id="analyst-include-vm" type="checkbox" checked /> VM analysis</label>
+                      <label class="analyst-check"><input id="analyst-include-selected" type="checkbox" /> Selected artifact bytes</label>
+                    </div>
+                    <label id="analyst-sensitive-row" class="analyst-check analyst-sensitive" hidden><input id="analyst-confirm-sensitive" type="checkbox" /> I separately confirm including sensitive selected artifact bytes</label>
+                    <label class="analyst-check"><input id="analyst-confirm" type="checkbox" /> I confirm this saved script may read the selected evidence snapshot</label>
+                    <div class="analyst-form-actions"><button id="analyst-run" class="trace-button analyst-primary" type="submit" disabled>Run saved script</button><button id="analyst-cancel" class="secondary-button" type="button" disabled>Cancel active run</button><button id="analyst-clear-history" class="secondary-button" type="button">Clear history</button></div>
+                    <p class="experiment-privacy">No filesystem, network, process, imports, dynamic code generation, DOM, or timers. Runtime is capped at 2 seconds.</p>
+                  </form>
+                  <div class="analyst-snapshot">
+                    <div><span>Evidence</span><strong>768 KiB max</strong></div><div><span>Result</span><strong>32 KiB max</strong></div>
+                    <div><span>Logs</span><strong>64 × 1 KiB</strong></div><div><span>Memory</span><strong>64 MiB Node</strong></div>
+                  </div>
+                </article>
+                <article class="analyst-card">
+                  <header><div><h2>Run history</h2><p>Ephemeral results with source, outcome, time, and correlation IDs.</p></div><span id="analyst-history-badge" class="experiment-card-badge" data-kind="offline">0 / 64</span></header>
+                  <div id="analyst-history" class="analyst-history" role="listbox" aria-label="Analyst script runs"><div class="analyst-empty">Run a saved script to see results and logs.</div></div>
+                </article>
+                <article class="analyst-card">
+                  <header><div><h2>Selected result</h2><p id="analyst-result-meta">Select a completed run.</p></div><span id="analyst-result-badge" class="experiment-card-badge" data-kind="offline">No result</span></header>
+                  <div id="analyst-result" class="analyst-result"><div class="analyst-empty">No run selected.</div></div>
+                </article>
+              </aside>
+            </div>
+          </section>
         </main>
       </div>
 
@@ -2589,6 +2756,32 @@ export async function checkout(cart, fingerprint) {
         }
       });
 
+      const emptyLocalAnalystWorkspace = () => ({
+        contract_version: 1,
+        document_kind: 'local-analyst-workspace',
+        generation: 0,
+        updated_at_ms: 0,
+        folders: [{id: 1, name: 'Analyst Workspace', parent_id: null}],
+        files: [],
+        limits: {
+          folders: 32,
+          files: 64,
+          folder_depth: 4,
+          file_bytes: 32 * 1024,
+          total_file_bytes: 512 * 1024,
+          document_bytes: 1024 * 1024,
+          variables: 32,
+          variable_value_bytes: 4 * 1024,
+          variable_bytes: 16 * 1024,
+          evidence_bytes: 768 * 1024,
+          selected_artifact_bytes: 64 * 1024,
+          execution_timeout_ms: 2000,
+          logs: 64,
+          log_bytes: 1024,
+          result_bytes: 32 * 1024
+        }
+      });
+
       const state = {
         events: [],
         requests: [...sampleRequests],
@@ -2682,6 +2875,29 @@ export async function checkout(cart, fingerprint) {
         collectionSelectedHistoryId: null,
         collectionDeleteRequestId: null,
         collectionDeleteFolderId: null,
+        localAnalyst: emptyLocalAnalystWorkspace(),
+        localAnalystEtag: null,
+        localAnalystLoaded: false,
+        localAnalystRefreshing: false,
+        localAnalystSaving: false,
+        localAnalystStatus: 'loading',
+        localAnalystMessage: 'Loading the local analyst workspace…',
+        localAnalystRunner: null,
+        analystSelectedFolderId: 1,
+        analystSelectedFileId: null,
+        analystExpandedFolderIds: new Set([1]),
+        analystDraftDirty: false,
+        analystFolderDraftId: null,
+        analystFolderDirty: false,
+        analystDeleteFileId: null,
+        analystDeleteFolderId: null,
+        analystRunPending: false,
+        analystActiveRunId: null,
+        analystNextRunId: 1,
+        analystTotalRuns: 0,
+        analystHistoryEvictions: 0,
+        analystRuns: [],
+        analystSelectedRunId: null,
         signalProfile: null,
         signalProfileStatus: 'idle',
         signalProfileError: null,
@@ -3022,6 +3238,56 @@ export async function checkout(cart, fingerprint) {
         vmCount: document.querySelector('#vm-count'),
         vmList: document.querySelector('#vm-list'),
         vmDetail: document.querySelector('#vm-detail')
+      };
+
+      const analystElements = {
+        generation: document.querySelector('#analyst-generation'),
+        runnerBadge: document.querySelector('#analyst-runner-badge'),
+        notice: document.querySelector('#analyst-notice'),
+        fileCount: document.querySelector('#analyst-file-count'),
+        folderUsage: document.querySelector('#analyst-folder-usage'),
+        contentUsage: document.querySelector('#analyst-content-usage'),
+        newFolder: document.querySelector('#analyst-new-folder'),
+        newScript: document.querySelector('#analyst-new-script'),
+        newNote: document.querySelector('#analyst-new-note'),
+        tree: document.querySelector('#analyst-tree'),
+        folderForm: document.querySelector('#analyst-folder-form'),
+        folderName: document.querySelector('#analyst-folder-name'),
+        folderParent: document.querySelector('#analyst-folder-parent'),
+        saveFolder: document.querySelector('#analyst-save-folder'),
+        deleteFolder: document.querySelector('#analyst-delete-folder'),
+        editorBadge: document.querySelector('#analyst-editor-badge'),
+        editorEmpty: document.querySelector('#analyst-editor-empty'),
+        editorForm: document.querySelector('#analyst-editor-form'),
+        name: document.querySelector('#analyst-name'),
+        folder: document.querySelector('#analyst-folder'),
+        kind: document.querySelector('#analyst-kind'),
+        language: document.querySelector('#analyst-language'),
+        content: document.querySelector('#analyst-content'),
+        draftStatus: document.querySelector('#analyst-draft-status'),
+        save: document.querySelector('#analyst-save'),
+        revert: document.querySelector('#analyst-revert'),
+        deleteFile: document.querySelector('#analyst-delete'),
+        runForm: document.querySelector('#analyst-run-form'),
+        variables: document.querySelector('#analyst-variables'),
+        includeEvents: document.querySelector('#analyst-include-events'),
+        includeArtifacts: document.querySelector('#analyst-include-artifacts'),
+        includeTrace: document.querySelector('#analyst-include-trace'),
+        includeSignals: document.querySelector('#analyst-include-signals'),
+        includeVm: document.querySelector('#analyst-include-vm'),
+        includeSelected: document.querySelector('#analyst-include-selected'),
+        sensitiveRow: document.querySelector('#analyst-sensitive-row'),
+        confirmSensitive: document.querySelector('#analyst-confirm-sensitive'),
+        confirm: document.querySelector('#analyst-confirm'),
+        run: document.querySelector('#analyst-run'),
+        cancel: document.querySelector('#analyst-cancel'),
+        clearHistory: document.querySelector('#analyst-clear-history'),
+        snapshotBadge: document.querySelector('#analyst-snapshot-badge'),
+        historyBadge: document.querySelector('#analyst-history-badge'),
+        history: document.querySelector('#analyst-history'),
+        resultMeta: document.querySelector('#analyst-result-meta'),
+        resultBadge: document.querySelector('#analyst-result-badge'),
+        result: document.querySelector('#analyst-result')
       };
 
       const eventCategories = new Set([
@@ -7308,6 +7574,795 @@ export async function checkout(cart, fingerprint) {
         } catch (error) { setCollectionNotice('error', error.message); renderApiCollection(); }
       }
 
+      const analystExactKeys = (value, keys) => isPlainObject(value) &&
+        Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+
+      function isLocalAnalystWorkspace(workspace) {
+        const expectedLimits = emptyLocalAnalystWorkspace().limits;
+        if (!analystExactKeys(workspace, ['contract_version', 'document_kind', 'generation', 'updated_at_ms',
+          'folders', 'files', 'limits']) || workspace.contract_version !== 1 ||
+          workspace.document_kind !== 'local-analyst-workspace' ||
+          !isSafeIntegerInRange(workspace.generation, 0, Number.MAX_SAFE_INTEGER) ||
+          !isSafeIntegerInRange(workspace.updated_at_ms, 0, Number.MAX_SAFE_INTEGER) ||
+          !isPlainObject(workspace.limits) || Object.keys(workspace.limits).length !== Object.keys(expectedLimits).length ||
+          Object.keys(expectedLimits).some(key => workspace.limits[key] !== expectedLimits[key]) ||
+          !Array.isArray(workspace.folders) || workspace.folders.length < 1 || workspace.folders.length > 32 ||
+          !Array.isArray(workspace.files) || workspace.files.length > 64) return false;
+        const validName = name => isBoundedText(name, 128) && name.trim() === name && name.length > 0 &&
+          !name.includes('/') && !/[\x00-\x1f\x7f]/u.test(name);
+        const folders = new Map();
+        for (const folder of workspace.folders) {
+          if (!analystExactKeys(folder, ['id', 'name', 'parent_id']) ||
+            !isSafeIntegerInRange(folder.id, 1, Number.MAX_SAFE_INTEGER) || folders.has(folder.id) ||
+            !validName(folder.name) || (folder.parent_id !== null &&
+              !isSafeIntegerInRange(folder.parent_id, 1, Number.MAX_SAFE_INTEGER))) return false;
+          folders.set(folder.id, folder);
+        }
+        const root = folders.get(1);
+        if (!root || root.name !== 'Analyst Workspace' || root.parent_id !== null ||
+          [...folders.values()].some(folder => folder.id !== 1 && folder.parent_id === null)) return false;
+        for (const folder of folders.values()) {
+          const seen = new Set([folder.id]);
+          let current = folder;
+          let depth = 0;
+          while (current.parent_id !== null) {
+            if (seen.has(current.parent_id) || !folders.has(current.parent_id) || ++depth > 4) return false;
+            seen.add(current.parent_id);
+            current = folders.get(current.parent_id);
+          }
+        }
+        const siblingNames = new Set();
+        for (const folder of folders.values()) {
+          const key = `${folder.parent_id ?? 'root'}\u0000${folder.name.toLocaleLowerCase()}`;
+          if (siblingNames.has(key)) return false;
+          siblingNames.add(key);
+        }
+        const fileIds = new Set();
+        let totalBytes = 0;
+        for (const file of workspace.files) {
+          if (!analystExactKeys(file, ['id', 'folder_id', 'name', 'kind', 'language', 'content',
+            'content_bytes', 'created_at_ms', 'updated_at_ms']) ||
+            !isSafeIntegerInRange(file.id, 1, Number.MAX_SAFE_INTEGER) || fileIds.has(file.id) ||
+            !folders.has(file.folder_id) || !validName(file.name) ||
+            !['analyst-script', 'scratchpad'].includes(file.kind) ||
+            !['javascript', 'json', 'markdown', 'text'].includes(file.language) ||
+            (file.kind === 'analyst-script' && file.language !== 'javascript') ||
+            !isBoundedText(file.content, 32 * 1024) || /[\x00-\x08\x0b\x0c\x0e-\x1f]/u.test(file.content) ||
+            file.content_bytes !== utf8ByteLength(file.content) ||
+            !isSafeIntegerInRange(file.created_at_ms, 0, Number.MAX_SAFE_INTEGER) ||
+            !isSafeIntegerInRange(file.updated_at_ms, file.created_at_ms, Number.MAX_SAFE_INTEGER)) return false;
+          const key = `${file.folder_id}\u0000${file.name.toLocaleLowerCase()}`;
+          if (siblingNames.has(key)) return false;
+          siblingNames.add(key);
+          fileIds.add(file.id);
+          totalBytes += file.content_bytes;
+        }
+        if (totalBytes > 512 * 1024) return false;
+        return workspace.generation !== 0 || (workspace.updated_at_ms === 0 && workspace.files.length === 0 &&
+          workspace.folders.length === 1);
+      }
+
+      function isLocalAnalystRunner(runner) {
+        const limits = emptyLocalAnalystWorkspace().limits;
+        return analystExactKeys(runner, ['protocol_version', 'available', 'active_run_id', 'limits']) &&
+          runner.protocol_version === 1 && typeof runner.available === 'boolean' &&
+          (runner.active_run_id === null || isSafeIntegerInRange(runner.active_run_id, 1, Number.MAX_SAFE_INTEGER)) &&
+          isPlainObject(runner.limits) && Object.keys(runner.limits).length === Object.keys(limits).length &&
+          Object.keys(limits).every(key => runner.limits[key] === limits[key]);
+      }
+
+      function isLocalAnalystResult(result, run) {
+        if (!analystExactKeys(result, ['protocol_version', 'run_id', 'script_id', 'library_generation', 'ok',
+          'outcome', 'result_type', 'result_text', 'result_truncated', 'logs', 'logs_truncated',
+          'duration_ms', 'error']) || result.protocol_version !== 1 || result.run_id !== run.run_id ||
+          result.script_id !== run.script_id || result.library_generation !== run.library_generation ||
+          typeof result.ok !== 'boolean' || !['completed', 'failed', 'cancelled', 'timed_out'].includes(result.outcome) ||
+          result.ok !== (result.outcome === 'completed') || !isBoundedText(result.result_type, 64) ||
+          !isBoundedText(result.result_text, 32 * 1024) || typeof result.result_truncated !== 'boolean' ||
+          !Array.isArray(result.logs) || result.logs.length > 64 || typeof result.logs_truncated !== 'boolean' ||
+          !isSafeIntegerInRange(result.duration_ms, 0, 7000) || !isBoundedText(result.error, 512) ||
+          (result.ok ? result.error.length !== 0 : result.error.length === 0)) return false;
+        return result.logs.every(log => analystExactKeys(log, ['level', 'text']) &&
+          ['log', 'info', 'warn', 'error'].includes(log.level) && isBoundedText(log.text, 1024));
+      }
+
+      function analystFolder(folderId = state.analystSelectedFolderId) {
+        return state.localAnalyst.folders.find(folder => folder.id === folderId) ?? null;
+      }
+
+      function analystFile(fileId = state.analystSelectedFileId) {
+        return state.localAnalyst.files.find(file => file.id === fileId) ?? null;
+      }
+
+      function analystFolderLineage(folderId) {
+        const lineage = [];
+        const seen = new Set();
+        let folder = analystFolder(folderId);
+        while (folder && !seen.has(folder.id)) {
+          lineage.unshift(folder);
+          seen.add(folder.id);
+          folder = folder.parent_id === null ? null : analystFolder(folder.parent_id);
+        }
+        return lineage;
+      }
+
+      function analystFolderDepth(folderId) {
+        return Math.max(0, analystFolderLineage(folderId).length - 1);
+      }
+
+      function analystDescendantIds(folderId) {
+        const descendants = new Set();
+        const visit = parentId => state.localAnalyst.folders
+          .filter(folder => folder.parent_id === parentId)
+          .forEach(folder => { descendants.add(folder.id); visit(folder.id); });
+        visit(folderId);
+        return descendants;
+      }
+
+      function analystNextId(values) {
+        return values.reduce((maximum, value) => Math.max(maximum, value.id), 0) + 1;
+      }
+
+      function analystUniqueName(folderId, base) {
+        const names = new Set([
+          ...state.localAnalyst.folders.filter(folder => folder.parent_id === folderId).map(folder => folder.name.toLocaleLowerCase()),
+          ...state.localAnalyst.files.filter(file => file.folder_id === folderId).map(file => file.name.toLocaleLowerCase())
+        ]);
+        let name = base;
+        for (let suffix = 2; names.has(name.toLocaleLowerCase()); suffix += 1) name = `${base} ${suffix}`;
+        return name;
+      }
+
+      function setAnalystNotice(kind, message) {
+        state.localAnalystStatus = kind;
+        state.localAnalystMessage = message;
+        analystElements.notice.dataset.kind = kind;
+        analystElements.notice.textContent = message;
+      }
+
+      function analystReplacement(folders = state.localAnalyst.folders, files = state.localAnalyst.files) {
+        return {
+          action: 'replace_local_analyst_workspace',
+          expected_generation: state.localAnalyst.generation,
+          folders: folders.map(folder => ({id: folder.id, name: folder.name, parent_id: folder.parent_id})),
+          files: files.map(file => ({
+            id: file.id, folder_id: file.folder_id, name: file.name, kind: file.kind,
+            language: file.language, content: file.content
+          }))
+        };
+      }
+
+      async function refreshLocalAnalyst(force = false) {
+        if (state.localAnalystRefreshing || location.protocol === 'file:') return false;
+        state.localAnalystRefreshing = true;
+        if (!state.localAnalystLoaded) setAnalystNotice('loading', 'Loading the local analyst workspace…');
+        let loaded = false;
+        try {
+          const headers = !force && state.localAnalystEtag ? {'If-None-Match': state.localAnalystEtag} : {};
+          const response = await fetch('/api/local-analyst', {cache: 'no-store', headers});
+          if (response.status !== 304) {
+            if (!response.ok) throw new Error(`Analyst workspace store returned ${response.status}`);
+            const body = await response.json();
+            if (!isLocalAnalystWorkspace(body)) throw new TypeError('Malformed analyst workspace response');
+            state.localAnalyst = body;
+            state.localAnalystLoaded = true;
+            state.localAnalystEtag = response.headers.get('ETag');
+          }
+          if (!analystFolder()) state.analystSelectedFolderId = 1;
+          if (!analystFile()) state.analystSelectedFileId = null;
+          const count = state.localAnalyst.files.length;
+          setAnalystNotice(count ? 'ready' : 'empty', count
+            ? `${count} saved ${count === 1 ? 'file' : 'files'} loaded from the permission-restricted local workspace.`
+            : 'The workspace is empty. Create an analyst script or a non-executable scratchpad.');
+          loaded = true;
+        } catch (error) {
+          setAnalystNotice('error', `Analyst workspace unavailable: ${error.message}. The last valid generation remains visible.`);
+        }
+        try {
+          const response = await fetch('/api/local-analyst/runner', {cache: 'no-store'});
+          if (!response.ok) throw new Error(`runner returned ${response.status}`);
+          const runner = await response.json();
+          if (!isLocalAnalystRunner(runner)) throw new TypeError('malformed runner state');
+          state.localAnalystRunner = runner;
+        } catch (error) {
+          state.localAnalystRunner = {protocol_version: 1, available: false, active_run_id: null,
+            limits: emptyLocalAnalystWorkspace().limits, error: error.message};
+        } finally {
+          state.localAnalystRefreshing = false;
+          renderLocalAnalyst();
+        }
+        return loaded;
+      }
+
+      async function replaceLocalAnalyst(folders, files, successMessage) {
+        if (state.localAnalystSaving) return false;
+        state.localAnalystSaving = true;
+        setAnalystNotice('saving', 'Saving one atomic analyst workspace generation…');
+        renderLocalAnalyst();
+        try {
+          const response = await fetch('/api/local-analyst/actions', {
+            method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(analystReplacement(folders, files))
+          });
+          const body = await response.json();
+          if (response.status === 409) {
+            state.localAnalystEtag = null;
+            await refreshLocalAnalyst(true);
+            setAnalystNotice('conflict', body.error || 'The workspace changed in another window. The latest generation was reloaded.');
+            return false;
+          }
+          if (!response.ok) throw new Error(body.error || `Analyst workspace store returned ${response.status}`);
+          if (!isLocalAnalystWorkspace(body)) throw new TypeError('Malformed analyst workspace response');
+          state.localAnalyst = body;
+          state.localAnalystLoaded = true;
+          state.localAnalystEtag = `"local-analyst-${body.generation}"`;
+          setAnalystNotice('ready', successMessage);
+          return true;
+        } catch (error) {
+          setAnalystNotice('error', `Analyst workspace was not changed: ${error.message}`);
+          return false;
+        } finally {
+          state.localAnalystSaving = false;
+          renderLocalAnalyst();
+        }
+      }
+
+      function selectAnalystFolder(folderId, focus = false) {
+        if (!analystFolder(folderId)) return;
+        state.analystSelectedFolderId = folderId;
+        state.analystSelectedFileId = null;
+        state.analystFolderDraftId = null;
+        state.analystFolderDirty = false;
+        state.analystDeleteFolderId = null;
+        renderLocalAnalyst();
+        if (focus) analystElements.tree.querySelector(`[data-folder-id="${folderId}"]`)?.focus({preventScroll: true});
+      }
+
+      function selectAnalystFile(fileId, focus = false) {
+        const file = analystFile(fileId);
+        if (!file) return;
+        state.analystSelectedFileId = fileId;
+        state.analystSelectedFolderId = file.folder_id;
+        state.analystExpandedFolderIds.add(file.folder_id);
+        state.analystDraftDirty = false;
+        state.analystDeleteFileId = null;
+        renderLocalAnalyst();
+        if (focus) analystElements.tree.querySelector(`[data-file-id="${fileId}"]`)?.focus({preventScroll: true});
+      }
+
+      function moveAnalystTreeSelection(event) {
+        if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        const row = event.currentTarget;
+        const rows = [...analystElements.tree.querySelectorAll('.analyst-tree-row')];
+        const index = rows.indexOf(row);
+        if (index < 0) return;
+        event.preventDefault();
+        if (row.dataset.folderId && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
+          const folderId = Number(row.dataset.folderId);
+          const expanded = state.analystExpandedFolderIds.has(folderId);
+          if (event.key === 'ArrowRight' && !expanded) state.analystExpandedFolderIds.add(folderId);
+          else if (event.key === 'ArrowLeft' && expanded && folderId !== 1) state.analystExpandedFolderIds.delete(folderId);
+          else if (event.key === 'ArrowLeft') {
+            const parentId = analystFolder(folderId)?.parent_id;
+            if (parentId !== null && parentId !== undefined) selectAnalystFolder(parentId, true);
+          }
+          renderLocalAnalyst();
+          analystElements.tree.querySelector(`[data-folder-id="${folderId}"]`)?.focus({preventScroll: true});
+          return;
+        }
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
+          : Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
+        rows[next].click(); rows[next].focus({preventScroll: true});
+      }
+
+      function renderAnalystTree() {
+        const nodes = [];
+        const appendFolder = (folder, depth) => {
+          const children = state.localAnalyst.folders.filter(candidate => candidate.parent_id === folder.id)
+            .sort((left, right) => left.name.localeCompare(right.name));
+          const files = state.localAnalyst.files.filter(file => file.folder_id === folder.id)
+            .sort((left, right) => left.name.localeCompare(right.name));
+          const expanded = state.analystExpandedFolderIds.has(folder.id);
+          const row = document.createElement('button'); row.type = 'button'; row.className = 'analyst-tree-row';
+          row.dataset.folderId = String(folder.id); row.style.setProperty('--analyst-depth', String(depth));
+          row.setAttribute('role', 'treeitem'); row.setAttribute('aria-level', String(depth + 1));
+          row.setAttribute('aria-expanded', String(expanded));
+          row.setAttribute('aria-selected', String(state.analystSelectedFileId === null && state.analystSelectedFolderId === folder.id));
+          row.append(textElement('span', 'analyst-tree-glyph', expanded ? '▾' : '▸'),
+            textElement('span', 'analyst-tree-name', folder.name),
+            textElement('span', 'analyst-tree-meta', String(children.length + files.length)));
+          row.addEventListener('click', () => {
+            const alreadySelected = state.analystSelectedFileId === null && state.analystSelectedFolderId === folder.id;
+            selectAnalystFolder(folder.id);
+            if (alreadySelected && folder.id !== 1) {
+              if (expanded) state.analystExpandedFolderIds.delete(folder.id); else state.analystExpandedFolderIds.add(folder.id);
+            } else state.analystExpandedFolderIds.add(folder.id);
+            renderLocalAnalyst();
+          });
+          row.addEventListener('keydown', moveAnalystTreeSelection);
+          nodes.push(row);
+          if (!expanded) return;
+          children.forEach(child => appendFolder(child, depth + 1));
+          files.forEach(file => {
+            const fileRow = document.createElement('button'); fileRow.type = 'button'; fileRow.className = 'analyst-tree-row';
+            fileRow.dataset.fileId = String(file.id); fileRow.style.setProperty('--analyst-depth', String(depth + 1));
+            fileRow.setAttribute('role', 'treeitem'); fileRow.setAttribute('aria-level', String(depth + 2));
+            fileRow.setAttribute('aria-selected', String(state.analystSelectedFileId === file.id));
+            fileRow.append(textElement('span', 'analyst-tree-glyph', file.kind === 'analyst-script' ? 'JS' : '·'),
+              textElement('span', 'analyst-tree-name', file.name),
+              textElement('span', 'analyst-tree-meta', file.kind === 'analyst-script' ? 'script' : file.language));
+            fileRow.addEventListener('click', () => selectAnalystFile(file.id));
+            fileRow.addEventListener('keydown', moveAnalystTreeSelection);
+            nodes.push(fileRow);
+          });
+        };
+        const root = analystFolder(1);
+        if (root) appendFolder(root, 0);
+        analystElements.tree.replaceChildren(...nodes);
+      }
+
+      function analystFolderOptions(selectedId, excludedIds = new Set()) {
+        return state.localAnalyst.folders.filter(folder => !excludedIds.has(folder.id))
+          .sort((left, right) => analystFolderLineage(left.id).map(item => item.name).join('/').localeCompare(
+            analystFolderLineage(right.id).map(item => item.name).join('/')))
+          .map(folder => {
+            const option = document.createElement('option'); option.value = String(folder.id);
+            option.textContent = analystFolderLineage(folder.id).map(item => item.name).join(' / ');
+            option.selected = folder.id === selectedId;
+            return option;
+          });
+      }
+
+      function renderAnalystFolderForm() {
+        const folder = analystFolder();
+        if (!folder) return;
+        const draftParentId = state.analystFolderDirty ? Number(analystElements.folderParent.value) : folder.parent_id ?? 1;
+        if (state.analystFolderDraftId !== folder.id || !state.analystFolderDirty) {
+          state.analystFolderDraftId = folder.id;
+          analystElements.folderName.value = folder.name;
+        }
+        const excluded = folder.id === 1 ? new Set(state.localAnalyst.folders.map(item => item.id))
+          : new Set([folder.id, ...analystDescendantIds(folder.id)]);
+        analystElements.folderParent.replaceChildren(...analystFolderOptions(draftParentId, excluded));
+        if (folder.id !== 1) analystElements.folderParent.value = String(draftParentId);
+        analystElements.folderName.disabled = folder.id === 1 || state.localAnalystSaving;
+        analystElements.folderParent.disabled = folder.id === 1 || state.localAnalystSaving;
+        analystElements.saveFolder.disabled = folder.id === 1 || state.localAnalystSaving || !state.analystFolderDirty;
+        const hasContents = state.localAnalyst.folders.some(item => item.parent_id === folder.id) ||
+          state.localAnalyst.files.some(file => file.folder_id === folder.id);
+        analystElements.deleteFolder.disabled = folder.id === 1 || hasContents || state.localAnalystSaving;
+        analystElements.deleteFolder.textContent = state.analystDeleteFolderId === folder.id ? 'Confirm delete' : 'Delete empty folder';
+      }
+
+      function renderAnalystEditor() {
+        const file = analystFile();
+        analystElements.editorEmpty.hidden = Boolean(file);
+        analystElements.editorForm.hidden = !file;
+        analystElements.editorBadge.dataset.kind = file ? '' : 'offline';
+        analystElements.editorBadge.textContent = file ? file.kind === 'analyst-script' ? 'Runnable' : 'Note only' : 'No file';
+        if (!file) return;
+        if (!state.analystDraftDirty || analystElements.editorForm.dataset.fileId !== String(file.id)) {
+          analystElements.editorForm.dataset.fileId = String(file.id);
+          analystElements.name.value = file.name;
+          analystElements.kind.value = file.kind;
+          analystElements.language.value = file.language;
+          analystElements.content.value = file.content;
+        }
+        const draftFolderId = state.analystDraftDirty ? Number(analystElements.folder.value) : file.folder_id;
+        analystElements.folder.replaceChildren(...analystFolderOptions(draftFolderId));
+        analystElements.folder.value = String(draftFolderId);
+        const script = analystElements.kind.value === 'analyst-script';
+        if (script) analystElements.language.value = 'javascript';
+        analystElements.language.disabled = script || state.localAnalystSaving;
+        analystElements.editorForm.querySelectorAll('input, textarea, select').forEach(field => {
+          if (field !== analystElements.language) field.disabled = state.localAnalystSaving;
+        });
+        analystElements.save.disabled = state.localAnalystSaving || !state.analystDraftDirty;
+        analystElements.revert.disabled = state.localAnalystSaving || !state.analystDraftDirty;
+        analystElements.deleteFile.disabled = state.localAnalystSaving;
+        analystElements.deleteFile.textContent = state.analystDeleteFileId === file.id ? 'Confirm delete' : 'Delete';
+        analystElements.draftStatus.dataset.kind = state.analystDraftDirty ? 'dirty' : 'saved';
+        analystElements.draftStatus.textContent = state.analystDraftDirty
+          ? 'Unsaved changes cannot run. Save or revert this draft.'
+          : `${formatByteSize(file.content_bytes)} saved · file ${file.id} · ${new Date(file.updated_at_ms).toLocaleString()}`;
+      }
+
+      function selectedAnalystArtifact() {
+        const source = selectedSource();
+        if (source?.source_type !== 'artifact' || typeof source.content !== 'string') return null;
+        return source;
+      }
+
+      function analystVariables() {
+        const source = analystElements.variables.value.trim();
+        if (!source) return {};
+        let variables;
+        try { variables = JSON.parse(source); }
+        catch { throw new TypeError('Private variables must be a JSON object.'); }
+        if (!isPlainObject(variables) || Object.keys(variables).length > 32) {
+          throw new TypeError('Private variables must be an object with at most 32 entries.');
+        }
+        let bytes = 0;
+        for (const [name, value] of Object.entries(variables)) {
+          if (!/^[A-Za-z_][A-Za-z0-9_.-]*$/u.test(name) || utf8ByteLength(name) > 128 ||
+            typeof value !== 'string' || utf8ByteLength(value) > 4 * 1024) {
+            throw new TypeError('Variable names and text values exceed the local runner contract.');
+          }
+          bytes += utf8ByteLength(name) + utf8ByteLength(value);
+        }
+        if (bytes > 16 * 1024) throw new TypeError('Private variables exceed 16 KiB.');
+        return variables;
+      }
+
+      function analystArtifactMetadata(artifact) {
+        const metadata = {};
+        ['protocol_version', 'artifact_id', 'session_id', 'navigation_id', 'frame_id', 'parent_artifact_id',
+          'creator_event_id', 'kind', 'origin', 'url', 'mime_type', 'byte_size', 'sha256', 'sensitive']
+          .forEach(key => { if (artifact[key] !== undefined) metadata[key] = artifact[key]; });
+        return metadata;
+      }
+
+      function buildAnalystEvidence() {
+        const selected = analystElements.includeSelected.checked ? selectedAnalystArtifact() : null;
+        if (analystElements.includeSelected.checked && !selected) {
+          throw new TypeError('Load one captured artifact before including its bytes.');
+        }
+        if (selected?.sensitive && !analystElements.confirmSensitive.checked) {
+          throw new TypeError('Separately confirm inclusion of sensitive selected artifact bytes.');
+        }
+        const events = analystElements.includeEvents.checked ? state.events.slice(-500) : [];
+        const artifacts = analystElements.includeArtifacts.checked
+          ? state.artifacts.slice(-500).map(analystArtifactMetadata) : [];
+        const traceEdges = analystElements.includeTrace.checked ? (state.originTrace?.steps ?? []).slice(-1000) : [];
+        const signalProfiles = analystElements.includeSignals.checked && state.signalProfile ? [state.signalProfile] : [];
+        const vmAnalysis = analystElements.includeVm.checked ? {
+          status: state.vmAnalysisStatus,
+          request_id: state.vmAnalysisRequestId,
+          findings: state.vmFindings.slice(0, 256),
+          malformed_findings: state.malformedVmFindings
+        } : null;
+        const selectedArtifact = selected ? {...analystArtifactMetadata(selected), content: selected.content} : null;
+        const original = {events: events.length, artifacts: artifacts.length, trace_edges: traceEdges.length,
+          signal_profiles: signalProfiles.length};
+        const evidence = {
+          events, artifacts, trace_edges: traceEdges, signal_profiles: signalProfiles, vm_analysis: vmAnalysis,
+          selected_artifact: selectedArtifact,
+          summary: {
+            captured_at_ms: Date.now(),
+            workspace_generation: state.localAnalyst.generation,
+            selected_request_id: state.selectedRequestId,
+            original,
+            included: {...original},
+            dropped: {events: 0, artifacts: 0, trace_edges: 0, signal_profiles: 0}
+          }
+        };
+        const byteSize = () => utf8ByteLength(JSON.stringify(evidence));
+        const collections = [['events', evidence.events], ['artifacts', evidence.artifacts],
+          ['trace_edges', evidence.trace_edges], ['signal_profiles', evidence.signal_profiles]];
+        let guard = 0;
+        while (byteSize() > 768 * 1024 && ++guard < 128) {
+          const entry = collections.reduce((largest, candidate) => candidate[1].length > largest[1].length ? candidate : largest,
+            collections[0]);
+          if (!entry[1].length) break;
+          const remove = Math.max(1, Math.ceil(entry[1].length / 8));
+          entry[1].splice(0, remove);
+          evidence.summary.dropped[entry[0]] += remove;
+          evidence.summary.included[entry[0]] = entry[1].length;
+        }
+        if (byteSize() > 768 * 1024) throw new TypeError('The selected evidence exceeds the 768 KiB snapshot limit.');
+        return evidence;
+      }
+
+      function renderAnalystExecution() {
+        const file = analystFile();
+        const selected = selectedAnalystArtifact();
+        const runnerAvailable = state.localAnalystRunner?.available === true;
+        const runnerBusy = state.localAnalystRunner?.active_run_id !== null && state.localAnalystRunner?.active_run_id !== undefined &&
+          state.localAnalystRunner?.active_run_id !== state.analystActiveRunId;
+        analystElements.runnerBadge.textContent = runnerAvailable ? runnerBusy ? 'Runner busy' : 'Runner ready' : 'Runner unavailable';
+        analystElements.runnerBadge.style.color = runnerAvailable ? '' : 'var(--red)';
+        analystElements.includeSelected.disabled = !selected || state.analystRunPending;
+        if (!selected) analystElements.includeSelected.checked = false;
+        analystElements.sensitiveRow.hidden = !(selected?.sensitive && analystElements.includeSelected.checked);
+        if (analystElements.sensitiveRow.hidden) analystElements.confirmSensitive.checked = false;
+        const snapshotCount = (analystElements.includeEvents.checked ? Math.min(500, state.events.length) : 0) +
+          (analystElements.includeArtifacts.checked ? Math.min(500, state.artifacts.length) : 0) +
+          (analystElements.includeTrace.checked ? Math.min(1000, state.originTrace?.steps?.length ?? 0) : 0) +
+          (analystElements.includeSignals.checked && state.signalProfile ? 1 : 0) +
+          (analystElements.includeVm.checked && state.vmAnalysisStatus === 'ready' ? state.vmFindings.length : 0);
+        analystElements.snapshotBadge.textContent = `${snapshotCount} records`;
+        const runnable = file?.kind === 'analyst-script' && !state.analystDraftDirty && runnerAvailable && !runnerBusy &&
+          !state.analystRunPending && state.analystTotalRuns < 256;
+        analystElements.run.disabled = !runnable;
+        analystElements.cancel.disabled = !state.analystRunPending;
+        analystElements.clearHistory.disabled = state.analystRunPending || state.analystRuns.length === 0;
+        analystElements.variables.disabled = state.analystRunPending;
+        analystElements.includeEvents.disabled = state.analystRunPending;
+        analystElements.includeArtifacts.disabled = state.analystRunPending;
+        analystElements.includeTrace.disabled = state.analystRunPending;
+        analystElements.includeSignals.disabled = state.analystRunPending;
+        analystElements.includeVm.disabled = state.analystRunPending;
+        analystElements.includeSelected.disabled = !selected || state.analystRunPending;
+        analystElements.confirm.disabled = state.analystRunPending;
+        analystElements.confirmSensitive.disabled = state.analystRunPending;
+      }
+
+      function renderAnalystResult(run) {
+        if (!run || run.pending) {
+          analystElements.resultMeta.textContent = run ? `run ${run.run_id} is executing in a fresh helper process` : 'Select a completed run.';
+          analystElements.resultBadge.dataset.kind = 'offline';
+          analystElements.resultBadge.textContent = run ? 'Running' : 'No result';
+          analystElements.result.replaceChildren(textElement('div', 'analyst-empty', run ? 'Waiting for the bounded runner result…' : 'No run selected.'));
+          return;
+        }
+        const included = run.evidence_summary ? Object.values(run.evidence_summary.included).reduce((sum, value) => sum + value, 0) : 0;
+        const dropped = run.evidence_summary ? Object.values(run.evidence_summary.dropped).reduce((sum, value) => sum + value, 0) : 0;
+        analystElements.resultMeta.textContent = `run ${run.run_id} · script ${run.script_id} · generation ${run.library_generation} · ${run.duration_ms} ms · ${included} evidence records${dropped ? ` · ${dropped} dropped by snapshot limit` : ''}`;
+        analystElements.resultBadge.dataset.kind = run.ok ? '' : 'error';
+        analystElements.resultBadge.textContent = run.outcome.replaceAll('_', ' ');
+        const nodes = [];
+        const result = document.createElement('pre');
+        result.textContent = run.ok ? run.result_text || '(undefined)' : run.error;
+        nodes.push(result);
+        if (run.logs.length) {
+          const logs = document.createElement('div'); logs.className = 'analyst-log-list';
+          run.logs.forEach(log => {
+            const row = document.createElement('div'); row.className = 'analyst-log-row'; row.dataset.level = log.level;
+            row.textContent = `${log.level}: ${log.text}`; logs.append(row);
+          });
+          nodes.push(logs);
+        }
+        if (run.result_truncated || run.logs_truncated) nodes.push(textElement('p', 'experiment-privacy',
+          `${run.result_truncated ? 'Result' : 'Logs'} reached the visible retention limit.`));
+        analystElements.result.replaceChildren(...nodes);
+      }
+
+      function renderAnalystHistory() {
+        if (!state.analystRuns.some(run => run.run_id === state.analystSelectedRunId)) {
+          state.analystSelectedRunId = state.analystRuns[0]?.run_id ?? null;
+        }
+        analystElements.historyBadge.textContent = `${state.analystRuns.length} / 64`;
+        analystElements.historyBadge.dataset.kind = state.analystRuns.length ? '' : 'offline';
+        if (!state.analystRuns.length) analystElements.history.replaceChildren(
+          textElement('div', 'analyst-empty', state.analystHistoryEvictions
+            ? `${state.analystHistoryEvictions} older runs were evicted; history is now clear.`
+            : 'Run a saved script to see results and logs.')
+        );
+        else analystElements.history.replaceChildren(...state.analystRuns.map(run => {
+          const row = document.createElement('button'); row.type = 'button'; row.className = 'analyst-history-row';
+          row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(run.run_id === state.analystSelectedRunId));
+          row.tabIndex = run.run_id === state.analystSelectedRunId ? 0 : -1;
+          const outcome = textElement('strong', '', run.pending ? 'running' : run.outcome.replaceAll('_', ' '));
+          if (!run.pending && !run.ok) outcome.dataset.kind = 'error';
+          const included = run.evidence_summary ? Object.values(run.evidence_summary.included).reduce((sum, value) => sum + value, 0) : 0;
+          const dropped = run.evidence_summary ? Object.values(run.evidence_summary.dropped).reduce((sum, value) => sum + value, 0) : 0;
+          row.append(textElement('span', '', run.file_name), outcome,
+            textElement('small', '', `run ${run.run_id} · script ${run.script_id} · generation ${run.library_generation} · ${included} records${dropped ? ` · ${dropped} dropped` : ''}${run.completed_at_ms ? ` · ${new Date(run.completed_at_ms).toLocaleTimeString()}` : ''}`));
+          row.addEventListener('click', () => { state.analystSelectedRunId = run.run_id; renderAnalystHistory(); });
+          row.addEventListener('keydown', event => {
+            if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const rows = [...analystElements.history.querySelectorAll('.analyst-history-row')];
+            const index = rows.indexOf(row);
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
+              : Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
+            rows[next].click(); rows[next].focus();
+          });
+          return row;
+        }));
+        renderAnalystResult(state.analystRuns.find(run => run.run_id === state.analystSelectedRunId) ?? null);
+      }
+
+      function renderLocalAnalyst() {
+        if (!analystElements.tree) return;
+        analystElements.generation.textContent = `Generation ${state.localAnalyst.generation}`;
+        analystElements.fileCount.textContent = `${state.localAnalyst.files.length} / 64`;
+        analystElements.folderUsage.textContent = `${state.localAnalyst.folders.length} / 32`;
+        analystElements.contentUsage.textContent = `${formatByteSize(state.localAnalyst.files.reduce((sum, file) => sum + file.content_bytes, 0))} / 512 KiB`;
+        analystElements.notice.dataset.kind = state.localAnalystStatus;
+        analystElements.notice.textContent = state.localAnalystMessage;
+        analystElements.newFolder.disabled = state.localAnalystSaving || state.localAnalyst.folders.length >= 32 ||
+          analystFolderDepth(state.analystSelectedFolderId) >= 4;
+        analystElements.newScript.disabled = state.localAnalystSaving || state.localAnalyst.files.length >= 64;
+        analystElements.newNote.disabled = state.localAnalystSaving || state.localAnalyst.files.length >= 64;
+        renderAnalystTree();
+        renderAnalystFolderForm();
+        renderAnalystEditor();
+        renderAnalystExecution();
+        renderAnalystHistory();
+      }
+
+      async function createAnalystFolder() {
+        const parentId = state.analystSelectedFolderId;
+        const name = analystUniqueName(parentId, 'New folder');
+        const folder = {id: analystNextId(state.localAnalyst.folders), name, parent_id: parentId};
+        if (await replaceLocalAnalyst([...state.localAnalyst.folders, folder], state.localAnalyst.files, `Folder “${name}” created.`)) {
+          state.analystSelectedFolderId = folder.id;
+          state.analystSelectedFileId = null;
+          state.analystExpandedFolderIds.add(parentId);
+          state.analystExpandedFolderIds.add(folder.id);
+          state.analystFolderDraftId = null;
+          renderLocalAnalyst();
+          requestAnimationFrame(() => { analystElements.folderName.focus(); analystElements.folderName.select(); });
+        }
+      }
+
+      async function createAnalystFile(kind) {
+        const folderId = state.analystSelectedFolderId;
+        const script = kind === 'analyst-script';
+        const name = analystUniqueName(folderId, script ? 'inspect evidence.js' : 'research notes.md');
+        const file = {
+          id: analystNextId(state.localAnalyst.files), folder_id: folderId, name, kind,
+          language: script ? 'javascript' : 'markdown',
+          content: script ? "const events = WB.Node.Evidence.events();\nconsole.info('events', events.length);\nreturn {event_count: events.length};" : ''
+        };
+        if (await replaceLocalAnalyst(state.localAnalyst.folders, [...state.localAnalyst.files, file], `${script ? 'Script' : 'Scratchpad'} “${name}” created.`)) {
+          state.analystSelectedFileId = file.id;
+          state.analystExpandedFolderIds.add(folderId);
+          state.analystDraftDirty = false;
+          renderLocalAnalyst();
+          requestAnimationFrame(() => { analystElements.name.focus(); analystElements.name.select(); });
+        }
+      }
+
+      async function saveAnalystFolder() {
+        const folder = analystFolder();
+        if (!folder || folder.id === 1) return;
+        const replacement = {...folder, name: analystElements.folderName.value.trim(),
+          parent_id: Number(analystElements.folderParent.value)};
+        const folders = state.localAnalyst.folders.map(candidate => candidate.id === folder.id ? replacement : candidate);
+        if (await replaceLocalAnalyst(folders, state.localAnalyst.files, `Folder “${replacement.name}” saved.`)) {
+          state.analystFolderDirty = false;
+          state.analystFolderDraftId = null;
+          state.analystExpandedFolderIds.add(replacement.parent_id);
+          renderLocalAnalyst();
+        }
+      }
+
+      async function saveAnalystFile() {
+        const file = analystFile();
+        if (!file) return false;
+        const kind = analystElements.kind.value;
+        const replacement = {
+          ...file,
+          folder_id: Number(analystElements.folder.value),
+          name: analystElements.name.value.trim(),
+          kind,
+          language: kind === 'analyst-script' ? 'javascript' : analystElements.language.value,
+          content: analystElements.content.value
+        };
+        const files = state.localAnalyst.files.map(candidate => candidate.id === file.id ? replacement : candidate);
+        if (await replaceLocalAnalyst(state.localAnalyst.folders, files, `File “${replacement.name}” saved.`)) {
+          state.analystSelectedFolderId = replacement.folder_id;
+          state.analystExpandedFolderIds.add(replacement.folder_id);
+          state.analystDraftDirty = false;
+          renderLocalAnalyst();
+          return true;
+        }
+        return false;
+      }
+
+      async function deleteAnalystFile() {
+        const file = analystFile();
+        if (!file) return;
+        if (state.analystDeleteFileId !== file.id) {
+          state.analystDeleteFileId = file.id;
+          setAnalystNotice('ready', 'Select Delete again to remove this local file.');
+          renderLocalAnalyst();
+          return;
+        }
+        if (await replaceLocalAnalyst(state.localAnalyst.folders,
+          state.localAnalyst.files.filter(candidate => candidate.id !== file.id), `File “${file.name}” deleted.`)) {
+          state.analystSelectedFileId = null;
+          state.analystDeleteFileId = null;
+          state.analystDraftDirty = false;
+          renderLocalAnalyst();
+        }
+      }
+
+      async function deleteAnalystFolder() {
+        const folder = analystFolder();
+        if (!folder || folder.id === 1) return;
+        const hasContents = state.localAnalyst.folders.some(candidate => candidate.parent_id === folder.id) ||
+          state.localAnalyst.files.some(file => file.folder_id === folder.id);
+        if (hasContents) { setAnalystNotice('error', 'Move or delete this folder’s contents first.'); renderLocalAnalyst(); return; }
+        if (state.analystDeleteFolderId !== folder.id) {
+          state.analystDeleteFolderId = folder.id;
+          setAnalystNotice('ready', 'Select Delete empty folder again to confirm.');
+          renderLocalAnalyst();
+          return;
+        }
+        if (await replaceLocalAnalyst(state.localAnalyst.folders.filter(candidate => candidate.id !== folder.id),
+          state.localAnalyst.files, `Folder “${folder.name}” deleted.`)) {
+          state.analystSelectedFolderId = folder.parent_id ?? 1;
+          state.analystDeleteFolderId = null;
+          state.analystFolderDirty = false;
+          renderLocalAnalyst();
+        }
+      }
+
+      async function runLocalAnalystScript() {
+        const file = analystFile();
+        if (!file || file.kind !== 'analyst-script' || state.analystRunPending) return;
+        try {
+          if (state.analystDraftDirty) throw new TypeError('Save or revert the script before running it.');
+          if (!analystElements.confirm.checked) throw new TypeError('Confirm access to the selected evidence snapshot before running.');
+          if (state.analystTotalRuns >= 256) throw new TypeError('The 256-run session limit was reached. Clear history to begin a fresh session.');
+          const run = {
+            action: 'run_local_analyst_script', protocol_version: 1,
+            run_id: state.analystNextRunId++, script_id: file.id,
+            library_generation: state.localAnalyst.generation, source: file.content,
+            variables: analystVariables(), evidence: buildAnalystEvidence(), confirmed: true,
+            confirmed_sensitive: Boolean(selectedAnalystArtifact()?.sensitive && analystElements.includeSelected.checked &&
+              analystElements.confirmSensitive.checked)
+          };
+          state.analystTotalRuns += 1;
+          state.analystRunPending = true;
+          state.analystActiveRunId = run.run_id;
+          const pending = {
+            run_id: run.run_id,
+            script_id: run.script_id,
+            library_generation: run.library_generation,
+            evidence_summary: run.evidence.summary,
+            file_name: file.name,
+            pending: true
+          };
+          state.analystRuns.unshift(pending);
+          if (state.analystRuns.length > 64) {
+            state.analystRuns.length = 64;
+            state.analystHistoryEvictions += 1;
+          }
+          state.analystSelectedRunId = run.run_id;
+          setAnalystNotice('running', `Run ${run.run_id} is executing in a fresh isolated helper process.`);
+          renderLocalAnalyst();
+          const response = await fetch('/api/local-analyst/actions', {
+            method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(run)
+          });
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.error || `Analyst runner returned ${response.status}`);
+          if (!isLocalAnalystResult(body, run)) throw new TypeError('The analyst runner returned a malformed or mismatched result.');
+          Object.assign(pending, body, {pending: false, file_name: file.name, completed_at_ms: Date.now()});
+          setAnalystNotice(body.ok ? 'ready' : 'error', body.ok
+            ? `Run ${body.run_id} completed in ${body.duration_ms} ms without changing captured evidence.`
+            : `Run ${body.run_id} ${body.outcome.replaceAll('_', ' ')}: ${body.error}`);
+        } catch (error) {
+          const pending = state.analystRuns.find(run => run.run_id === state.analystActiveRunId);
+          if (pending) Object.assign(pending, {
+            pending: false, ok: false, outcome: 'failed', result_type: 'error', result_text: '',
+            result_truncated: false, logs: [], logs_truncated: false, duration_ms: 0,
+            error: error.message, completed_at_ms: Date.now()
+          });
+          setAnalystNotice('error', `Analyst run failed: ${error.message}`);
+        } finally {
+          state.analystRunPending = false;
+          state.analystActiveRunId = null;
+          analystElements.confirm.checked = false;
+          analystElements.confirmSensitive.checked = false;
+          await refreshLocalAnalyst();
+          renderLocalAnalyst();
+        }
+      }
+
+      async function cancelLocalAnalystScript() {
+        const runId = state.analystActiveRunId;
+        if (!runId) return;
+        analystElements.cancel.disabled = true;
+        setAnalystNotice('running', `Cancelling analyst run ${runId}…`);
+        try {
+          const response = await fetch('/api/local-analyst/actions', {
+            method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: 'cancel_local_analyst_script', run_id: runId})
+          });
+          const body = await response.json();
+          if (!response.ok || body.ok !== true || body.run_id !== runId || body.cancel_requested !== true) {
+            throw new Error(body.error || 'The runner rejected cancellation.');
+          }
+        } catch (error) {
+          setAnalystNotice('error', `Cancellation failed: ${error.message}`);
+          analystElements.cancel.disabled = false;
+        }
+      }
+
       function liveSources() {
         return (state.debuggerSession?.scripts ?? []).map(script => {
           const cached = state.liveScriptContent.get(script.script_id) ?? {};
@@ -9134,6 +10189,10 @@ export async function checkout(cart, fingerprint) {
           renderApiCollection();
           refreshApiCollection();
         }
+        if (screenName === 'analyst') {
+          renderLocalAnalyst();
+          refreshLocalAnalyst();
+        }
         if (screenName === 'sources') {
           renderDebugger();
           renderSources();
@@ -9259,6 +10318,12 @@ export async function checkout(cart, fingerprint) {
         state.apiCollectionLoaded = true;
         state.apiCollectionMessage = 'Standalone preview. Open the local app to save an API Collection.';
         renderApiCollection();
+        state.localAnalystStatus = 'empty';
+        state.localAnalystLoaded = true;
+        state.localAnalystMessage = 'Standalone preview. Open the local app to save and run analyst scripts.';
+        state.localAnalystRunner = {protocol_version: 1, available: false, active_run_id: null,
+          limits: emptyLocalAnalystWorkspace().limits};
+        renderLocalAnalyst();
       }
 
       function enableTabKeyboardNavigation(selector) {
@@ -9735,6 +10800,56 @@ export async function checkout(cart, fingerprint) {
         await runExperimentAction({action: 'cancel_repeater_request'});
         renderApiCollection();
       });
+      analystElements.newFolder.addEventListener('click', createAnalystFolder);
+      analystElements.newScript.addEventListener('click', () => createAnalystFile('analyst-script'));
+      analystElements.newNote.addEventListener('click', () => createAnalystFile('scratchpad'));
+      analystElements.folderForm.addEventListener('submit', event => {
+        event.preventDefault();
+        saveAnalystFolder();
+      });
+      analystElements.folderForm.querySelectorAll('input, select').forEach(field => field.addEventListener('input', () => {
+        state.analystFolderDirty = true;
+        state.analystDeleteFolderId = null;
+        analystElements.saveFolder.disabled = false;
+      }));
+      analystElements.deleteFolder.addEventListener('click', deleteAnalystFolder);
+      analystElements.editorForm.addEventListener('submit', event => {
+        event.preventDefault();
+        saveAnalystFile();
+      });
+      analystElements.editorForm.querySelectorAll('input, textarea, select').forEach(field => field.addEventListener('input', () => {
+        state.analystDraftDirty = true;
+        state.analystDeleteFileId = null;
+        if (field === analystElements.kind && field.value === 'analyst-script') analystElements.language.value = 'javascript';
+        renderAnalystEditor();
+        renderAnalystExecution();
+      }));
+      analystElements.revert.addEventListener('click', () => {
+        state.analystDraftDirty = false;
+        state.analystDeleteFileId = null;
+        renderLocalAnalyst();
+      });
+      analystElements.deleteFile.addEventListener('click', deleteAnalystFile);
+      analystElements.runForm.addEventListener('submit', event => {
+        event.preventDefault();
+        runLocalAnalystScript();
+      });
+      [analystElements.includeEvents, analystElements.includeArtifacts, analystElements.includeTrace,
+        analystElements.includeSignals, analystElements.includeVm, analystElements.includeSelected,
+        analystElements.confirm, analystElements.confirmSensitive].forEach(field => field.addEventListener('change', () => {
+          renderAnalystExecution();
+        }));
+      analystElements.cancel.addEventListener('click', cancelLocalAnalystScript);
+      analystElements.clearHistory.addEventListener('click', () => {
+        if (state.analystRunPending) return;
+        state.analystRuns = [];
+        state.analystSelectedRunId = null;
+        state.analystTotalRuns = 0;
+        state.analystHistoryEvictions = 0;
+        state.analystNextRunId = 1;
+        setAnalystNotice(state.localAnalyst.files.length ? 'ready' : 'empty', 'Ephemeral analyst run history was cleared. Saved files were not changed.');
+        renderLocalAnalyst();
+      });
       elements.memorySearchForm.addEventListener('submit', event => {
         event.preventDefault();
         runLiveObjectSearch();
@@ -9817,6 +10932,10 @@ export async function checkout(cart, fingerprint) {
           renderApiCollection();
           refreshApiCollection();
         }
+        if (!document.querySelector('#screen-analyst').hidden) {
+          renderLocalAnalyst();
+          refreshLocalAnalyst();
+        }
         if (!document.querySelector('#screen-sources').hidden) renderSources();
         scheduleDebuggerRefresh(0);
       });
@@ -9829,11 +10948,13 @@ export async function checkout(cart, fingerprint) {
       renderSources();
       renderVmLab();
       renderApiCollection();
+      renderLocalAnalyst();
       if (location.protocol === 'file:') {
         useStandalonePreview();
       } else {
         refresh();
         refreshApiCollection();
+        refreshLocalAnalyst();
         scheduleDebuggerRefresh();
         setInterval(refresh, 2000);
       }

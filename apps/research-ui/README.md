@@ -243,6 +243,15 @@ history. The development server defaults to
 path. See
 [Local Analyst Workspace v1](../../docs/product/local-analyst-workspace-v1.md).
 
+Decoder Lab runs explicit byte transforms in the same bounded C++20 helper in
+the development server and packaged application. Chains retain at most 16
+steps and 4 MiB, while every input and output is capped at 1 MiB. Binary output
+stays inspectable as UTF-8, a hex dump, or Base64. JWT inspection is separate
+from explicit HS256, HS384, or HS512 verification; successful signature checks
+do not hide expiration or not-before claim warnings. HMAC secrets are sent over
+standard input to the one-shot helper and cleared from password fields after
+each action. See [Decoder Tools v1](../../docs/product/decoder-tools-v1.md).
+
 The Traffic workspace can pivot a selected request value into Memory. The pivot
 only prefills an ephemeral query. It does not persist the selected value or
 begin a heap capture without a separate user action.

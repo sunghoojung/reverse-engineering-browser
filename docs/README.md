@@ -11,6 +11,7 @@
 - [Repeater v1](./product/repeater-v1.md)
 - [Automation Recipes v1](./product/automation-recipes-v1.md)
 - [Local Analyst Workspace v1](./product/local-analyst-workspace-v1.md)
+- [Decoder Tools v1](./product/decoder-tools-v1.md)
 - [Anti-bot VM detection v1](./product/anti-bot-vm-detection-v1.md)
 - [Request Origin Trace v1](./product/request-origin-trace-v1.md)
 - [Request Signal Profile v1](./product/request-signal-profile-v1.md)

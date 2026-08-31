@@ -69,6 +69,8 @@ The repository includes a dependency-free C++ vertical slice for the probe event
 - a persistent Local Analyst Workspace with reusable async scripts,
   non-executable scratchpads, private variables, frozen bounded evidence
   snapshots, isolated helper processes, cancellation, and visible limits;
+- a bounded native C++ Decoder Lab with branchable Base64, hex, URL,
+  compression, Base36, and JSON transforms plus explicit HMAC JWT verification;
 - a threaded producer and consumer demo;
 - unit tests and sanitizer support.
 
@@ -84,6 +86,7 @@ delivered to the page.
 Requirements:
 
 - a C++20 compiler;
+- zlib development headers and library;
 - GNU Make or a compatible `make` implementation.
 
 ```sh

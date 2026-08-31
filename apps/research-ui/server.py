@@ -21,6 +21,14 @@ from api_collection import (
     ApiCollectionStore,
 )
 from debugger_bridge import DebuggerBridge, DebuggerBridgeError, ProtocolError
+from decoder_service import (
+    MAX_DECODER_ACTION_BYTES,
+    DecoderError,
+    DecoderProtocolError,
+    DecoderService,
+    DecoderTimeout,
+    DecoderUnavailable,
+)
 from local_analyst import (
     MAX_ANALYST_DOCUMENT_BYTES,
     MAX_ANALYST_INPUT_BYTES,
@@ -109,6 +117,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         Path("build/sessions/local-analyst-workspace-v1.json").resolve()
     )
     local_analyst_runner = LocalAnalystRunner(Path(__file__).resolve().parent)
+    decoder_service = DecoderService(Path("build/reb-decoder").resolve())
     broker_socket: Optional[Path] = None
     debugger: Optional[DebuggerBridge] = None
     analysis_lock = threading.Lock()
@@ -141,10 +150,14 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     "local_analyst_store": str(self.local_analyst_store.path),
                     "local_analyst_store_exists": self.local_analyst_store.path.exists(),
                     "local_analyst_runner_available": self.local_analyst_runner.available(),
+                    "decoder_available": self.decoder_service.available(),
                     "broker_connected": self.broker_connected(),
                     "debugger_state": self.debugger_state(),
                 }
             )
+            return
+        if parsed.path == "/api/decoder":
+            self.send_json(self.decoder_service.state())
             return
         if parsed.path == "/api/api-collection":
             try:
@@ -519,6 +532,23 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             self.send_json(
                 {"error": "Local request origin rejected"}, HTTPStatus.FORBIDDEN
             )
+            return
+        if parsed.path == "/api/decoder/actions":
+            try:
+                request = self.read_json_body(MAX_DECODER_ACTION_BYTES)
+                self.send_json(self.decoder_service.action(request))
+            except DecoderUnavailable as exception:
+                self.send_json(
+                    {"error": str(exception)}, HTTPStatus.SERVICE_UNAVAILABLE
+                )
+            except DecoderTimeout as exception:
+                self.send_json({"error": str(exception)}, HTTPStatus.REQUEST_TIMEOUT)
+            except DecoderProtocolError as exception:
+                self.send_json(
+                    {"error": str(exception)}, HTTPStatus.UNPROCESSABLE_ENTITY
+                )
+            except DecoderError as exception:
+                self.send_json({"error": str(exception)}, HTTPStatus.BAD_REQUEST)
             return
         if parsed.path == "/api/api-collection/actions":
             try:
@@ -1160,6 +1190,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("build/sessions/local-analyst-workspace-v1.json"),
     )
+    parser.add_argument("--decoder", type=Path, default=Path("build/reb-decoder"))
     parser.add_argument("--socket", type=Path)
     parser.add_argument("--devtools-active-port", type=Path)
     parser.add_argument("--endpoint-file", type=Path)
@@ -1182,6 +1213,7 @@ def main() -> int:
     ResearchHandler.local_analyst_runner = LocalAnalystRunner(
         Path(__file__).resolve().parent
     )
+    ResearchHandler.decoder_service = DecoderService(args.decoder.resolve())
     ResearchHandler.broker_socket = args.socket.resolve() if args.socket else None
     debugger = DebuggerBridge(
         args.devtools_active_port.resolve() if args.devtools_active_port else None

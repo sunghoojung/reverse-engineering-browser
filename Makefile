@@ -38,6 +38,7 @@ COMMON_CXXFLAGS := \
 
 CPPFLAGS := -I$(INCLUDE_DIR)
 LDFLAGS := -pthread $(EXTRA_LDFLAGS)
+ZLIB_LIBS ?= -lz
 
 LIB_OBJECTS := \
 	$(BUILD_DIR)/src/artifact.o \
@@ -48,15 +49,18 @@ LIB_OBJECTS := \
 	$(BUILD_DIR)/src/request_signal_profile.o \
 	$(BUILD_DIR)/src/vm_finding.o
 HEAP_SNAPSHOT_OBJECT := $(BUILD_DIR)/src/heap_snapshot.o
+DECODER_OBJECT := $(BUILD_DIR)/src/decoder.o
 DEMO_BINARY := $(BUILD_DIR)/reb-event-demo
 PRODUCER_BINARY := $(BUILD_DIR)/reb-event-producer
 BROKER_BINARY := $(BUILD_DIR)/reb-event-broker
 ARTIFACT_PRODUCER_BINARY := $(BUILD_DIR)/reb-artifact-producer
 ARTIFACT_RECEIVER_BINARY := $(BUILD_DIR)/reb-artifact-receiver
 HEAP_SNAPSHOT_BINARY := $(BUILD_DIR)/reb-heap-snapshot
+DECODER_BINARY := $(BUILD_DIR)/reb-decoder
 VM_ANALYZER := apps/research-ui/vm_analyzer.py
 TEST_BINARIES := \
 	$(BUILD_DIR)/tests/artifact_test \
+	$(BUILD_DIR)/tests/decoder_test \
 	$(BUILD_DIR)/tests/event_test \
 	$(BUILD_DIR)/tests/event_broker_test \
 	$(BUILD_DIR)/tests/heap_snapshot_test \
@@ -67,9 +71,9 @@ TEST_BINARIES := \
 	$(BUILD_DIR)/tests/spsc_ring_test \
 	$(BUILD_DIR)/tests/vm_finding_test
 
-.PHONY: all app app-build artifact-producer artifact-receiver artifact-socket-e2e bootstrap-brave bootstrap-test brave-doctor brave-probe-check browser-sync browser-sync-test broker check clean demo e2e format format-check heap-snapshot lint live producer python-check repository-check sanitize shellcheck socket-e2e test ui ui-test workflow-check workspace-check
+.PHONY: all app app-build artifact-producer artifact-receiver artifact-socket-e2e bootstrap-brave bootstrap-test brave-doctor brave-probe-check browser-sync browser-sync-test broker check clean decoder demo e2e format format-check heap-snapshot lint live producer python-check repository-check sanitize shellcheck socket-e2e test ui ui-test workflow-check workspace-check
 
-all: demo producer broker artifact-producer artifact-receiver heap-snapshot
+all: demo producer broker artifact-producer artifact-receiver heap-snapshot decoder
 
 check: workspace-check bootstrap-test browser-sync-test test ui-test
 
@@ -108,6 +112,8 @@ artifact-receiver: $(ARTIFACT_RECEIVER_BINARY)
 
 heap-snapshot: $(HEAP_SNAPSHOT_BINARY)
 
+decoder: $(DECODER_BINARY)
+
 e2e: producer broker artifact-producer artifact-receiver
 	@mkdir -p $(BUILD_DIR)/sessions
 	$(PRODUCER_BINARY) | $(BROKER_BINARY) \
@@ -142,13 +148,13 @@ socket-e2e: producer broker
 artifact-socket-e2e: artifact-producer artifact-receiver
 	./tests/artifact_receiver_socket_test.sh $(ARTIFACT_RECEIVER_BINARY) $(ARTIFACT_PRODUCER_BINARY)
 
-ui: e2e heap-snapshot
+ui: e2e heap-snapshot decoder
 	python3 apps/research-ui/server.py \
 		--store $(BUILD_DIR)/sessions/demo.jsonl \
 		--trace-store $(BUILD_DIR)/sessions/origin-trace.jsonl \
 		--signal-store $(BUILD_DIR)/sessions/request-signals.jsonl
 
-app-build: e2e heap-snapshot
+app-build: e2e heap-snapshot decoder
 	./scripts/build-research-app.sh
 
 app: app-build
@@ -189,9 +195,17 @@ $(HEAP_SNAPSHOT_BINARY): apps/reb-heap-snapshot/main.cpp $(HEAP_SNAPSHOT_OBJECT)
 	@mkdir -p $(@D)
 	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cpp %.o,$^) $(LDFLAGS) -o $@
 
+$(DECODER_BINARY): apps/reb-decoder/main.cpp $(DECODER_OBJECT) $(NATIVE_HEADERS)
+	@mkdir -p $(@D)
+	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cpp %.o,$^) $(LDFLAGS) $(ZLIB_LIBS) -o $@
+
 $(BUILD_DIR)/tests/heap_snapshot_test: tests/heap_snapshot_test.cpp $(HEAP_SNAPSHOT_OBJECT) $(NATIVE_HEADERS)
 	@mkdir -p $(@D)
 	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cpp %.o,$^) $(LDFLAGS) -o $@
+
+$(BUILD_DIR)/tests/decoder_test: tests/decoder_test.cpp $(DECODER_OBJECT) $(NATIVE_HEADERS)
+	@mkdir -p $(@D)
+	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cpp %.o,$^) $(LDFLAGS) $(ZLIB_LIBS) -o $@
 
 $(BUILD_DIR)/tests/%: tests/%.cpp $(LIB_OBJECTS) $(NATIVE_HEADERS) $(TRACKED_BROWSER_PROTOCOL_HEADERS) $(NATIVE_PROBE_QUEUE_SOURCE)
 	@mkdir -p $(@D)
@@ -203,7 +217,7 @@ test: $(TEST_BINARIES)
 		$$test_binary; \
 	done
 
-ui-test: heap-snapshot
+ui-test: heap-snapshot decoder
 	python3 -m unittest discover -s apps/research-ui -p 'test_*.py'
 
 sanitize:

@@ -57,6 +57,12 @@ Reverse Engineering Browser is a Brave-based research browser for authorized web
 
 ## Research workspace
 
+- Build explicit local decoder chains over byte-safe Base64, hex, URL,
+  compression, Base36, HTML entity, and JSON transforms, then inspect any step
+  without changing the captured source value.
+- Decode compact JWTs with visible trust boundaries, explicitly verify only
+  supported HMAC signatures, and evaluate claim times separately from
+  signature validity.
 - Organize reusable local analyst scripts and non-executable scratchpads in a
   permission-restricted folder library, then run saved scripts against a
   frozen, bounded evidence snapshot with explicit confirmation.

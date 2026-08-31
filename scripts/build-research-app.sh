@@ -16,6 +16,8 @@ swift_source="${repo_root}/apps/research-ui/macos/OriginTraceApp.swift"
 trace_document_source="${repo_root}/apps/research-ui/macos/OriginTraceDocument.swift"
 analyst_runner_source="${repo_root}/apps/research-ui/macos/AnalystRunner.swift"
 analyst_runner_core="${repo_root}/apps/research-ui/analyst_runner_core.js"
+decoder_service_source="${repo_root}/apps/research-ui/macos/DecoderService.swift"
+decoder_binary="${repo_root}/build/reb-decoder"
 icon_source="${repo_root}/apps/research-ui/macos/assets/origin-trace-icon.png"
 event_store="${repo_root}/build/sessions/demo.jsonl"
 trace_store="${repo_root}/build/sessions/origin-trace.jsonl"
@@ -31,6 +33,8 @@ mkdir -p "${macos_path}" "${resources_path}"
 cp "${repo_root}/apps/research-ui/macos/Info.plist" "${contents_path}/Info.plist"
 cp "${repo_root}/apps/research-ui/index.html" "${resources_path}/index.html"
 cp "${analyst_runner_core}" "${resources_path}/analyst_runner_core.js"
+cp "${decoder_binary}" "${macos_path}/OriginTraceDecoder"
+chmod 755 "${macos_path}/OriginTraceDecoder"
 cp "${event_store}" "${resources_path}/demo.jsonl"
 cp "${trace_store}" "${resources_path}/origin-trace.jsonl"
 cp "${signal_store}" "${resources_path}/request-signals.jsonl"
@@ -62,7 +66,7 @@ xcrun swiftc \
   -parse-as-library \
   -framework Cocoa \
   -framework WebKit \
-  "${swift_source}" "${trace_document_source}" \
+  "${swift_source}" "${trace_document_source}" "${decoder_service_source}" \
   -o "${macos_path}/OriginTrace"
 
 xcrun swiftc \

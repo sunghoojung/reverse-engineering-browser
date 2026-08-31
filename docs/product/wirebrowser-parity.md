@@ -42,13 +42,13 @@ bounded evidence architecture. Matching a panel name is not sufficient.
 | --- | --- | --- |
 | Browser-context scripts | Implemented | [Automation Recipes v1](./automation-recipes-v1.md) adds a bounded recipe library, private variables, manual execution, and explicitly armed created, before-load, and after-load triggers inside the disposable Experiment BrowserContext. |
 | Local Node-style analyst scripts | Implemented | [Local Analyst Workspace v1](./local-analyst-workspace-v1.md) adds reusable async scripts over frozen, bounded evidence snapshots, private variables, text-only logs and results, isolated helper processes, cancellation, timeout recovery, and visible limits. MCP remains deferred by project policy. |
-| Decoder chains | Missing | Add local byte, text, URL, Base64, hex, compression, and structured-data transforms without automatic execution. |
-| JWT inspection | Missing | Add bounded local decoding and claim inspection without signature or trust claims unless explicitly verified. |
+| Decoder chains | Implemented | [Decoder Tools v1](./decoder-tools-v1.md) adds explicit, branchable byte transformations for Base64, Base64URL, hex, URL components, HTML entities, Base36, gzip, zlib, raw deflate, and JSON, with binary-safe views and strict per-step and retained-byte caps. |
+| JWT inspection | Implemented | Decoder Tools v1 adds bounded compact-token inspection, separately initiated HS256, HS384, and HS512 verification, explicit unsigned-token creation, claim-time warnings, and clear trust labels. |
 | Scratchpad and reusable files | Implemented | Local Analyst Workspace adds a permission-restricted, atomically replaced folder and file library with stable IDs, generation conflicts, four scratchpad languages, and non-executable notes. |
 
 ## Delivery order
 
-Local Analyst Workspace is the current completed parity increment. The next
-implementation sequence is local decoding tools and JWT inspection.
+Decoder Tools is the current completed parity increment. The next parity work
+is a shared global-versus-target action-scope policy for mutable browser tools.
 Each increment must preserve immutable baseline evidence, make mutation
 visible, and pass the repository's full native and UI gates.

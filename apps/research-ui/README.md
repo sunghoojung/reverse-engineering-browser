@@ -173,6 +173,22 @@ and comparisons. Traffic prefills only the selected method and URL without query
 headers, cookies, or body content. See
 [Repeater v1](../../docs/product/repeater-v1.md).
 
+API Collection persists up to 128 credential-free request templates in 32
+folders with four bounded hierarchy levels. Root, ancestor-folder,
+selected-folder, and request variables resolve in that order before the
+existing Repeater validator runs the request inside the disposable Request Lab
+context. Traffic import copies only method and URL with query and fragment
+removed. It never copies captured headers, cookies, request bodies, or
+credentials. The versioned document is capped at 2 MiB, uses generation-based
+conflict rejection, and is atomically replaced with user-only permissions.
+Saved templates persist, while the associated 24-entry and 512-KiB Repeater
+history remains ephemeral and is erased with the Request Lab context. The
+browser development server defaults to
+`build/sessions/api-collection-v1.json`; the native app defaults to
+`Application Support/Origin Trace/api-collection-v1.json`. Pass
+`--api-collection /path/to/api-collection-v1.json` to override either path. See
+[API Collection v1](../../docs/product/api-collection-v1.md).
+
 The Traffic workspace can pivot a selected request value into Memory. The pivot
 only prefills an ephemeral query. It does not persist the selected value or
 begin a heap capture without a separate user action.

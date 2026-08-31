@@ -34,7 +34,7 @@ bounded evidence architecture. Matching a panel name is not sufficient.
 | Request inspection and filtering | Implemented | Traffic provides normalized request lifecycle, headers, payload metadata, timing, initiator, response, and signal inspection. |
 | Request interception | Implemented | [Request Interception v1](./request-interception-v1.md) provides continue, block, drop, bounded request rewrite, and bounded synthetic-response rules only inside a disposable credential-free BrowserContext, with a metadata-only mutation audit. |
 | Repeater | Implemented | [Repeater v1](./repeater-v1.md) adds editable credential-free requests, immediate cancellation, bounded session history, scoped variables, resolved-request copying, and response comparison inside the disposable request-lab BrowserContext. |
-| API Collection | Missing | Folders, scoped variables, saved requests, and execution history remain. |
+| API Collection | Implemented | [API Collection v1](./api-collection-v1.md) adds atomic local persistence, a bounded folder tree, inherited root/folder/request variables, safe Traffic import, editable saved requests, and execution history scoped through the isolated Repeater context. |
 
 ## Automation and tools
 
@@ -48,8 +48,8 @@ bounded evidence architecture. Matching a panel name is not sufficient.
 
 ## Delivery order
 
-Repeater is the current completed parity increment. The next implementation
-sequence is API Collection, Experiment-only live object mutation, runtime hooks,
+API Collection is the current completed parity increment. The next implementation
+sequence is Experiment-only live object mutation, runtime hooks,
 automation recipes, and local decoding tools.
 Each increment must preserve immutable baseline evidence, make mutation
 visible, and pass the repository's full native and UI gates.

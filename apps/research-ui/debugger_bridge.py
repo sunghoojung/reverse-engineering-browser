@@ -2001,12 +2001,21 @@ class DebuggerBridge:
             or timeout_ms > MAX_REPEATER_TIMEOUT_MS
         ):
             raise DebuggerBridgeError("Repeater timeout must be between 100 and 30000 ms")
+        collection_request_id = request.get("collection_request_id")
+        if collection_request_id is not None and (
+            not isinstance(collection_request_id, int)
+            or isinstance(collection_request_id, bool)
+            or collection_request_id <= 0
+            or collection_request_id > 2**53 - 1
+        ):
+            raise DebuggerBridgeError("Repeater collection request ID is invalid")
         return {
             "url": url,
             "method": method.strip(),
             "headers": headers,
             "body": body,
             "timeout_ms": timeout_ms,
+            "collection_request_id": collection_request_id,
         }
 
     def _resolve_repeater_request(
@@ -2110,6 +2119,7 @@ class DebuggerBridge:
                 "resolved_url": self._redacted_request_url(resolved["url"]),
                 "resolved_method": resolved["method"],
                 "variable_names": variable_names,
+                "collection_request_id": template["collection_request_id"],
                 "cancel_requested": False,
             }
             self._repeater["message"] = (
@@ -2306,6 +2316,7 @@ class DebuggerBridge:
                 "started_at_ms": started_at_ms,
                 "completed_at_ms": completed_at_ms,
                 "state": entry_state,
+                "collection_request_id": template["collection_request_id"],
                 "variable_names": variable_names,
                 "request": copy.deepcopy(template),
                 "resolved_request": {

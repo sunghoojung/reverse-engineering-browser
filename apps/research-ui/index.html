@@ -1247,6 +1247,80 @@
       .repeater-comparison strong { display: block; margin-top: 4px; overflow-wrap: anywhere; font: 9px/1.4 var(--mono); }
       .repeater-comparison-detail { grid-column: 1 / -1; color: var(--muted); }
 
+      #screen-api-collection:not([hidden]) { display: grid; grid-template-rows: 60px auto minmax(0, 1fr); }
+      .collection-notice {
+        min-height: 34px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 13px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel-2);
+        color: var(--muted);
+        font-size: 10px;
+      }
+      .collection-notice::before { content: ""; width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--green); }
+      .collection-notice[data-kind="loading"]::before, .collection-notice[data-kind="saving"]::before { background: var(--accent); }
+      .collection-notice[data-kind="empty"]::before { background: var(--faint); }
+      .collection-notice[data-kind="error"], .collection-notice[data-kind="conflict"] { color: var(--red); }
+      .collection-notice[data-kind="error"]::before, .collection-notice[data-kind="conflict"]::before { background: var(--red); }
+      .collection-grid { min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(230px, .72fr) minmax(370px, 1.2fr) minmax(300px, 1fr); }
+      .collection-pane { min-width: 0; min-height: 0; overflow: auto; border-right: 1px solid var(--line); background: var(--panel); }
+      .collection-pane:last-child { border-right: 0; }
+      .collection-pane-head { display: flex; align-items: flex-start; gap: 9px; padding: 11px 12px; border-bottom: 1px solid var(--line); background: var(--chrome); }
+      .collection-pane-head > div:first-child { min-width: 0; flex: 1; }
+      .collection-pane-head h2 { margin: 0; font-size: 11px; }
+      .collection-pane-head p { margin: 4px 0 0; color: var(--muted); font: 8px/1.45 var(--mono); }
+      .collection-pane-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+      .collection-pane-actions button { min-height: 27px; padding: 5px 8px; }
+      .collection-tree { display: grid; padding: 5px 0; }
+      .collection-tree-row { width: 100%; min-height: 35px; display: grid; grid-template-columns: 17px minmax(0, 1fr) auto; gap: 5px; align-items: center; padding: 6px 9px 6px calc(8px + var(--collection-depth, 0) * 13px); border: 0; background: transparent; color: var(--text); text-align: left; }
+      .collection-tree-row:hover, .collection-tree-row:focus { background: var(--panel-3); }
+      .collection-tree-row[aria-selected="true"] { background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
+      .collection-tree-glyph { color: var(--faint); font: 9px var(--mono); text-align: center; }
+      .collection-tree-name { min-width: 0; overflow: hidden; font: 9px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+      .collection-tree-meta { color: var(--faint); font: 7px var(--mono); text-transform: uppercase; }
+      .collection-scope-card { margin: 10px; border: 1px solid var(--line); background: var(--panel-2); }
+      .collection-form { display: grid; gap: 9px; padding: 11px; }
+      .collection-form[hidden] { display: none; }
+      .collection-form label { display: grid; gap: 5px; color: var(--faint); font: 7px var(--mono); text-transform: uppercase; }
+      .collection-form input, .collection-form textarea, .collection-form select {
+        width: 100%;
+        min-height: 30px;
+        padding: 6px 8px;
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        background: var(--panel);
+        color: var(--text);
+        font: 9px/1.45 var(--mono);
+        text-transform: none;
+      }
+      .collection-form textarea { min-height: 78px; resize: vertical; }
+      .collection-form-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(90px, .45fr); gap: 8px; }
+      .collection-form-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+      .collection-form-actions button { min-height: 31px; }
+      .collection-form-actions .collection-primary { grid-column: 1 / -1; }
+      .collection-editor-empty { min-height: 100%; display: grid; place-items: center; padding: 24px; color: var(--muted); text-align: center; }
+      .collection-variable-status { display: flex; flex-wrap: wrap; gap: 5px; min-height: 22px; align-items: center; }
+      .collection-variable-chip { padding: 3px 5px; border: 1px solid var(--line); border-radius: 3px; color: var(--muted); font: 7px var(--mono); }
+      .collection-variable-chip[data-scope="request"] { border-color: var(--green); color: var(--green); }
+      .collection-variable-chip[data-scope="folder"] { border-color: var(--accent); color: var(--accent); }
+      .collection-variable-chip[data-kind="missing"] { border-color: var(--red); color: var(--red); }
+      .collection-run-pane { display: grid; align-content: start; gap: 10px; padding: 10px; }
+      .collection-run-card { border: 1px solid var(--line); background: var(--panel-2); }
+      .collection-run-card header { display: flex; align-items: flex-start; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); }
+      .collection-run-card header > div { min-width: 0; flex: 1; }
+      .collection-run-card h2 { margin: 0; font-size: 10px; }
+      .collection-run-card p { margin: 4px 0 0; color: var(--muted); font: 8px/1.45 var(--mono); }
+      .collection-run-card .repeater-response { min-height: 150px; }
+      .collection-run-history { display: grid; max-height: 220px; overflow: auto; }
+      .collection-history-row { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; padding: 8px 10px; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; color: var(--text); text-align: left; }
+      .collection-history-row:hover, .collection-history-row:focus, .collection-history-row[aria-selected="true"] { background: var(--accent-soft); }
+      .collection-history-row span:first-child { overflow: hidden; font: 8px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+      .collection-history-row strong { color: var(--green); font: 8px var(--mono); }
+      .collection-history-row small { grid-column: 1 / -1; color: var(--faint); font: 7px var(--mono); }
+      .collection-storage-note { padding: 10px; color: var(--faint); font: 8px/1.5 var(--mono); }
+
       #screen-memory:not([hidden]) { display: grid; grid-template-rows: 60px auto minmax(0, 1fr); }
       #screen-memory > .screen-head { grid-row: 1; }
       #screen-memory > .memory-notice { grid-row: 2; }
@@ -1453,6 +1527,9 @@
         .experiment-column:last-child { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
         .repeater-workspace { grid-template-columns: minmax(235px, .7fr) minmax(360px, 1.3fr); }
         .repeater-column:last-child { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
+        .collection-grid { grid-template-columns: minmax(220px, .65fr) minmax(390px, 1.35fr); }
+        .collection-pane:last-child { grid-column: 1 / -1; border-top: 1px solid var(--line); }
+        .collection-run-pane { grid-template-columns: 1fr 1fr; }
       }
       @media (max-width: 900px) {
         .traffic-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
@@ -1472,6 +1549,9 @@
         .experiment-column:last-child { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
         .repeater-workspace { grid-template-columns: minmax(235px, .7fr) minmax(340px, 1.3fr); }
         .repeater-column:last-child { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
+        .collection-grid { grid-template-columns: minmax(210px, .65fr) minmax(360px, 1.35fr); }
+        .collection-pane:last-child { grid-column: 1 / -1; border-top: 1px solid var(--line); }
+        .collection-run-pane { grid-template-columns: 1fr 1fr; }
       }
       @media (max-width: 880px) {
         .workspace { grid-template-columns: 178px minmax(0, 1fr); }
@@ -1511,6 +1591,11 @@
         .repeater-column:last-child { grid-column: auto; grid-template-columns: 1fr; }
         .repeater-compare-controls { grid-template-columns: 1fr; }
         .repeater-compare-controls button { grid-column: auto; }
+        .collection-grid { grid-template-columns: 1fr; align-content: start; overflow: auto; }
+        .collection-pane { min-height: auto; max-height: none; overflow: visible; border-right: 0; border-bottom: 1px solid var(--line); }
+        .collection-tree { max-height: 260px; overflow: auto; }
+        .collection-run-pane { grid-template-columns: 1fr; }
+        .collection-form-row { grid-template-columns: 1fr; }
         .vm-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
         .memory-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
         .memory-search-pane { max-height: min(420px, 48vh); border-right: 0; border-bottom: 1px solid var(--line); }
@@ -1555,6 +1640,7 @@
           <button id="nav-vm" class="nav-button" data-screen="vm">VM Lab</button>
           <button class="nav-button" data-screen="backtrace">Backtraces</button>
           <button class="nav-button" data-screen="experiments">Experiments</button>
+          <button class="nav-button" data-screen="api-collection">Collection</button>
         </nav>
         <div class="toolbar-actions">
           <span class="authorization">◇ authorized baseline</span>
@@ -1619,6 +1705,7 @@
                   <span id="selected-method" class="method-pill">POST</span>
                   <span id="selected-status" class="status-pill">201</span>
                   <span id="selected-url" class="selection-url">https://checkout.acme.test/cart</span>
+                  <button id="request-collection-pivot" class="secondary-button" type="button">Save to Collection</button>
                   <span class="selection-more" aria-hidden="true">•••</span>
                 </div>
                 <div class="inspector-tabs" role="tablist" aria-label="Request inspector">
@@ -2020,6 +2107,75 @@
               </div>
             </div>
           </section>
+
+          <section id="screen-api-collection" class="screen" aria-label="API Collection" hidden>
+            <header class="screen-head">
+              <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
+              <div><h1>API Collection</h1><div class="screen-subtitle">Saved credential-free request templates with scoped variables</div></div>
+              <div class="screen-head-actions"><span id="collection-generation" class="memory-readonly">Generation 0</span><span class="memory-readonly">Local only</span></div>
+            </header>
+            <div id="collection-notice" class="collection-notice" data-kind="loading" role="status" aria-live="polite">Loading the local API Collection…</div>
+            <div class="collection-grid">
+              <aside class="collection-pane" aria-label="Collection tree">
+                <div class="collection-pane-head"><div><h2>Saved requests</h2><p>Folders and requests stay in one bounded, atomic local document.</p></div><span id="collection-count" class="experiment-card-badge">0</span></div>
+                <div class="collection-pane-actions">
+                  <button id="collection-new-folder" class="secondary-button" type="button">New folder</button>
+                  <button id="collection-new-request" class="secondary-button" type="button">New request</button>
+                </div>
+                <div id="collection-new-folder-form" class="collection-form" hidden>
+                  <label>Folder name<input id="collection-new-folder-name" type="text" maxlength="128" autocomplete="off" /></label>
+                  <div class="collection-form-actions"><button id="collection-confirm-folder" class="trace-button collection-primary" type="button">Create folder</button><button id="collection-cancel-folder" class="secondary-button" type="button">Cancel</button></div>
+                </div>
+                <div id="collection-tree" class="collection-tree" role="tree" aria-label="API Collection folders and requests"></div>
+                <article class="collection-scope-card">
+                  <header class="collection-pane-head"><div><h2>Folder scope</h2><p>Variables inherit from root through the selected folder.</p></div></header>
+                  <form id="collection-folder-form" class="collection-form">
+                    <label>Name<input id="collection-folder-name" type="text" maxlength="128" autocomplete="off" /></label>
+                    <label>Parent folder<select id="collection-folder-parent"></select></label>
+                    <label>Variables (JSON)<textarea id="collection-folder-variables" maxlength="40000" spellcheck="false" placeholder='{"host":"api.example.test"}'></textarea></label>
+                    <div class="collection-form-actions"><button id="collection-save-folder" class="trace-button collection-primary" type="submit">Save folder</button><button id="collection-delete-folder" class="secondary-button" type="button">Delete folder</button></div>
+                  </form>
+                </article>
+              </aside>
+
+              <section class="collection-pane" aria-label="Saved request editor">
+                <div class="collection-pane-head"><div><h2>Request editor</h2><p>Templates are validated again when saved and resolved only inside the disposable Request Lab.</p></div><span id="collection-request-badge" class="experiment-card-badge" data-kind="offline">No request</span></div>
+                <div id="collection-editor-empty" class="collection-editor-empty">Create or select a saved request to edit it.</div>
+                <form id="collection-request-form" class="collection-form" hidden>
+                  <div class="collection-form-row"><label>Name<input id="collection-request-name" type="text" maxlength="128" autocomplete="off" /></label><label>Folder<select id="collection-request-folder"></select></label></div>
+                  <label>Request URL<input id="collection-request-url" type="text" maxlength="8192" placeholder="https://{{host}}/path/{{id}}" autocomplete="off" /></label>
+                  <div class="collection-form-row"><label>Method<input id="collection-request-method" type="text" maxlength="256" value="GET" autocomplete="off" /></label><label>Timeout (ms)<input id="collection-request-timeout" type="number" min="100" max="30000" step="100" value="15000" /></label></div>
+                  <label>Headers (JSON)<textarea id="collection-request-headers" maxlength="20000" spellcheck="false" placeholder='{"accept":"application/json"}'></textarea></label>
+                  <label>Body<textarea id="collection-request-body" maxlength="65536" spellcheck="false" placeholder='{"id":"{{id}}"}'></textarea></label>
+                  <label>Request variables (JSON)<textarea id="collection-request-variables" maxlength="40000" spellcheck="false" placeholder='{"id":"42"}'></textarea></label>
+                  <div id="collection-variable-status" class="collection-variable-status" role="status" aria-live="polite"><span class="collection-variable-chip">No variables used</span></div>
+                  <div class="collection-form-actions"><button id="collection-save-request" class="trace-button collection-primary" type="submit">Save request</button><button id="collection-duplicate-request" class="secondary-button" type="button">Duplicate</button><button id="collection-delete-request" class="secondary-button" type="button">Delete</button></div>
+                  <p class="experiment-privacy">Traffic import copies only method and URL without query or fragment. Captured headers, cookies, bodies, and credentials are never imported.</p>
+                </form>
+              </section>
+
+              <aside class="collection-pane collection-run-pane" aria-label="Collection execution">
+                <article class="collection-run-card">
+                  <header><div><h2>Isolated execution</h2><p id="collection-context-message">No disposable request-lab context exists.</p></div><span id="collection-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span></header>
+                  <div class="collection-form-actions collection-form"><button id="collection-create-context" class="trace-button collection-primary" type="button">Create isolated context</button><button id="collection-run" class="secondary-button" type="button" disabled>Run selected</button><button id="collection-cancel" class="secondary-button" type="button" disabled>Cancel active</button></div>
+                </article>
+                <article class="collection-run-card">
+                  <header><div><h2>Execution history</h2><p>Ephemeral, bounded, and erased with the isolated context.</p></div><span id="collection-history-badge" class="experiment-card-badge" data-kind="offline">0 runs</span></header>
+                  <div id="collection-history" class="collection-run-history" role="listbox" aria-label="Selected request execution history"><div class="experiment-empty">No executions for this request.</div></div>
+                </article>
+                <article class="collection-run-card">
+                  <header><div><h2>Response</h2><p id="collection-response-meta">Select a completed execution.</p></div><span id="collection-response-badge" class="experiment-card-badge" data-kind="offline">No response</span></header>
+                  <div id="collection-response" class="repeater-response experiment-empty">Run the selected request to inspect its bounded response.</div>
+                </article>
+                <article class="collection-run-card">
+                  <header><div><h2>Storage and limits</h2><p>Predictable local persistence without evidence-store mutation.</p></div><span class="experiment-card-badge">Contract v1</span></header>
+                  <div class="experiment-context-facts"><div class="experiment-context-fact"><span>Collection</span><strong>32 folders / 128 requests</strong></div><div class="experiment-context-fact"><span>Document</span><strong>2 MiB atomic file</strong></div></div>
+                  <div class="experiment-context-facts"><div class="experiment-context-fact"><span>Variables</span><strong>32 / 32 KiB per scope</strong></div><div class="experiment-context-fact"><span>Bodies</span><strong>64 KiB</strong></div></div>
+                  <p class="collection-storage-note">The store is user-owned and permission-restricted. Runs stay in ephemeral Repeater memory and never enter captured evidence.</p>
+                </article>
+              </aside>
+            </div>
+          </section>
         </main>
       </div>
 
@@ -2104,6 +2260,24 @@ export async function checkout(cart, fingerprint) {
         ]
       };
 
+      const emptyApiCollection = () => ({
+        contract_version: 1,
+        document_kind: 'api-collection',
+        generation: 0,
+        updated_at_ms: 0,
+        folders: [{id: 1, name: 'API Collection', parent_id: null, variables: []}],
+        requests: [],
+        limits: {
+          folders: 32,
+          requests: 128,
+          folder_depth: 4,
+          variables_per_scope: 32,
+          variable_bytes_per_scope: 32 * 1024,
+          request_body_bytes: 64 * 1024,
+          document_bytes: 2 * 1024 * 1024
+        }
+      });
+
       const state = {
         events: [],
         requests: [...sampleRequests],
@@ -2175,6 +2349,23 @@ export async function checkout(cart, fingerprint) {
         repeaterCompareBaselineId: null,
         repeaterCompareCurrentId: null,
         repeaterComparisonKey: null,
+        apiCollection: emptyApiCollection(),
+        apiCollectionEtag: null,
+        apiCollectionLoaded: false,
+        apiCollectionRefreshing: false,
+        apiCollectionSaving: false,
+        apiCollectionStatus: 'loading',
+        apiCollectionMessage: 'Loading the local API Collection…',
+        collectionSelectedFolderId: 1,
+        collectionSelectedRequestId: null,
+        collectionExpandedFolderIds: new Set([1]),
+        collectionRequestDraftId: null,
+        collectionDraftDirty: false,
+        collectionFolderDraftId: null,
+        collectionFolderDirty: false,
+        collectionSelectedHistoryId: null,
+        collectionDeleteRequestId: null,
+        collectionDeleteFolderId: null,
         signalProfile: null,
         signalProfileStatus: 'idle',
         signalProfileError: null,
@@ -2215,6 +2406,7 @@ export async function checkout(cart, fingerprint) {
         coverageBar: document.querySelector('#coverage-bar'),
         traceBranchExperiment: document.querySelector('#trace-branch-experiment'),
         requestRepeaterPivot: document.querySelector('#request-repeater-pivot'),
+        requestCollectionPivot: document.querySelector('#request-collection-pivot'),
         experimentTitle: document.querySelector('#experiment-title'),
         experimentModeButtons: [...document.querySelectorAll('[data-experiment-mode]')],
         interceptionWorkspace: document.querySelector('.experiment-workspace'),
@@ -2290,6 +2482,47 @@ export async function checkout(cart, fingerprint) {
         repeaterCompare: document.querySelector('#repeater-compare'),
         repeaterComparisonBadge: document.querySelector('#repeater-comparison-badge'),
         repeaterComparison: document.querySelector('#repeater-comparison'),
+        collectionGeneration: document.querySelector('#collection-generation'),
+        collectionNotice: document.querySelector('#collection-notice'),
+        collectionCount: document.querySelector('#collection-count'),
+        collectionNewFolder: document.querySelector('#collection-new-folder'),
+        collectionNewRequest: document.querySelector('#collection-new-request'),
+        collectionNewFolderForm: document.querySelector('#collection-new-folder-form'),
+        collectionNewFolderName: document.querySelector('#collection-new-folder-name'),
+        collectionConfirmFolder: document.querySelector('#collection-confirm-folder'),
+        collectionCancelFolder: document.querySelector('#collection-cancel-folder'),
+        collectionTree: document.querySelector('#collection-tree'),
+        collectionFolderForm: document.querySelector('#collection-folder-form'),
+        collectionFolderName: document.querySelector('#collection-folder-name'),
+        collectionFolderParent: document.querySelector('#collection-folder-parent'),
+        collectionFolderVariables: document.querySelector('#collection-folder-variables'),
+        collectionSaveFolder: document.querySelector('#collection-save-folder'),
+        collectionDeleteFolder: document.querySelector('#collection-delete-folder'),
+        collectionEditorEmpty: document.querySelector('#collection-editor-empty'),
+        collectionRequestBadge: document.querySelector('#collection-request-badge'),
+        collectionRequestForm: document.querySelector('#collection-request-form'),
+        collectionRequestName: document.querySelector('#collection-request-name'),
+        collectionRequestFolder: document.querySelector('#collection-request-folder'),
+        collectionRequestUrl: document.querySelector('#collection-request-url'),
+        collectionRequestMethod: document.querySelector('#collection-request-method'),
+        collectionRequestTimeout: document.querySelector('#collection-request-timeout'),
+        collectionRequestHeaders: document.querySelector('#collection-request-headers'),
+        collectionRequestBody: document.querySelector('#collection-request-body'),
+        collectionRequestVariables: document.querySelector('#collection-request-variables'),
+        collectionVariableStatus: document.querySelector('#collection-variable-status'),
+        collectionSaveRequest: document.querySelector('#collection-save-request'),
+        collectionDuplicateRequest: document.querySelector('#collection-duplicate-request'),
+        collectionDeleteRequest: document.querySelector('#collection-delete-request'),
+        collectionContextMessage: document.querySelector('#collection-context-message'),
+        collectionContextBadge: document.querySelector('#collection-context-badge'),
+        collectionCreateContext: document.querySelector('#collection-create-context'),
+        collectionRun: document.querySelector('#collection-run'),
+        collectionCancel: document.querySelector('#collection-cancel'),
+        collectionHistoryBadge: document.querySelector('#collection-history-badge'),
+        collectionHistory: document.querySelector('#collection-history'),
+        collectionResponseMeta: document.querySelector('#collection-response-meta'),
+        collectionResponseBadge: document.querySelector('#collection-response-badge'),
+        collectionResponse: document.querySelector('#collection-response'),
         workspace: document.querySelector('#workspace'),
         sourceTree: document.querySelector('#source-tree'),
         sourceEditorTabs: document.querySelector('#source-editor-tabs'),
@@ -2821,6 +3054,87 @@ export async function checkout(cart, fingerprint) {
         } catch { return false; }
       }
 
+      function isApiCollection(collection) {
+        const exactKeys = (value, keys) => isPlainObject(value) &&
+          Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+        const validName = value => isBoundedText(value, 128) && value.trim() === value &&
+          value.length > 0 && !value.includes('/') && !/[\x00-\x1f\x7f]/u.test(value);
+        const validVariables = value => {
+          if (!Array.isArray(value) || value.length > 32) return false;
+          let bytes = 0;
+          const names = new Set();
+          return value.every(variable => {
+            if (!exactKeys(variable, ['name', 'value']) || !isBoundedText(variable.name, 64) ||
+                !/^[A-Za-z_][A-Za-z0-9_.-]*$/u.test(variable.name) || names.has(variable.name) ||
+                !isBoundedText(variable.value, 4 * 1024) || /[\x00-\x1f\x7f]/u.test(variable.value)) return false;
+            names.add(variable.name);
+            bytes += utf8ByteLength(variable.name) + utf8ByteLength(variable.value);
+            return bytes <= 32 * 1024;
+          });
+        };
+        const limits = {
+          folders: 32, requests: 128, folder_depth: 4, variables_per_scope: 32,
+          variable_bytes_per_scope: 32 * 1024, request_body_bytes: 64 * 1024,
+          document_bytes: 2 * 1024 * 1024
+        };
+        if (!exactKeys(collection, ['contract_version', 'document_kind', 'generation', 'updated_at_ms',
+          'folders', 'requests', 'limits']) || collection.contract_version !== 1 ||
+          collection.document_kind !== 'api-collection' ||
+          !isSafeIntegerInRange(collection.generation, 0, Number.MAX_SAFE_INTEGER) ||
+          !isSafeIntegerInRange(collection.updated_at_ms, 0, Number.MAX_SAFE_INTEGER) ||
+          !isPlainObject(collection.limits) || Object.keys(collection.limits).length !== Object.keys(limits).length ||
+          Object.entries(limits).some(([name, limit]) => collection.limits[name] !== limit) ||
+          !Array.isArray(collection.folders) || collection.folders.length < 1 || collection.folders.length > 32 ||
+          !Array.isArray(collection.requests) || collection.requests.length > 128 ||
+          utf8ByteLength(JSON.stringify(collection)) > 2 * 1024 * 1024) return false;
+        const folderIds = new Set();
+        const folderNames = new Set();
+        const folders = new Map();
+        for (const folder of collection.folders) {
+          if (!exactKeys(folder, ['id', 'name', 'parent_id', 'variables']) ||
+              !isSafeIntegerInRange(folder.id, 1, Number.MAX_SAFE_INTEGER) || folderIds.has(folder.id) ||
+              !validName(folder.name) || (folder.parent_id !== null &&
+                !isSafeIntegerInRange(folder.parent_id, 1, Number.MAX_SAFE_INTEGER)) ||
+              !validVariables(folder.variables)) return false;
+          folderIds.add(folder.id); folders.set(folder.id, folder);
+        }
+        const root = folders.get(1);
+        if (!root || root.name !== 'API Collection' || root.parent_id !== null ||
+            collection.folders.some(folder => folder.id !== 1 && folder.parent_id === null)) return false;
+        for (const folder of collection.folders) {
+          const siblingKey = `${folder.parent_id ?? 'root'}\u0000${folder.name.toLocaleLowerCase()}`;
+          if (folderNames.has(siblingKey)) return false;
+          folderNames.add(siblingKey);
+          let current = folder;
+          const seen = new Set([current.id]);
+          let depth = 0;
+          while (current.parent_id !== null) {
+            if (seen.has(current.parent_id) || !folders.has(current.parent_id) || ++depth > 4) return false;
+            seen.add(current.parent_id); current = folders.get(current.parent_id);
+          }
+        }
+        const requestIds = new Set();
+        const requestNames = new Set();
+        for (const request of collection.requests) {
+          if (!exactKeys(request, ['id', 'folder_id', 'name', 'url', 'method', 'headers', 'body',
+            'timeout_ms', 'variables', 'created_at_ms', 'updated_at_ms']) ||
+              !isSafeIntegerInRange(request.id, 1, Number.MAX_SAFE_INTEGER) || requestIds.has(request.id) ||
+              !folderIds.has(request.folder_id) || !validName(request.name) || !isRepeaterRequest(request) ||
+              /[\x00-\x1f\x7f]/u.test(request.url) || /[\x00-\x1f\x7f]/u.test(request.method) ||
+              !validVariables(request.variables) ||
+              !isSafeIntegerInRange(request.created_at_ms, 0, Number.MAX_SAFE_INTEGER) ||
+              !isSafeIntegerInRange(request.updated_at_ms, request.created_at_ms, Number.MAX_SAFE_INTEGER)) return false;
+          const nameKey = `${request.folder_id}\u0000${request.name.toLocaleLowerCase()}`;
+          if (requestNames.has(nameKey)) return false;
+          requestNames.add(nameKey); requestIds.add(request.id);
+        }
+        if (collection.generation === 0) {
+          return collection.updated_at_ms === 0 && collection.folders.length === 1 &&
+            root.variables.length === 0 && collection.requests.length === 0;
+        }
+        return collection.updated_at_ms > 0;
+      }
+
       function isRepeaterResult(result) {
         return isRequestInterceptionResult(result) && result !== null &&
           isSafeIntegerInRange(result.duration_ms, 0, 35000) &&
@@ -2832,6 +3146,8 @@ export async function checkout(cart, fingerprint) {
 
       function isRepeaterHistoryEntry(entry) {
         return isPlainObject(entry) && isSafeIntegerInRange(entry.id, 1, Number.MAX_SAFE_INTEGER) &&
+          (entry.collection_request_id === null ||
+            isSafeIntegerInRange(entry.collection_request_id, 1, Number.MAX_SAFE_INTEGER)) &&
           isSafeIntegerInRange(entry.started_at_ms, 1, Number.MAX_SAFE_INTEGER) &&
           isSafeIntegerInRange(entry.completed_at_ms, entry.started_at_ms, Number.MAX_SAFE_INTEGER) &&
           ['complete', 'error', 'cancelled', 'timed_out'].includes(entry.state) &&
@@ -2904,6 +3220,8 @@ export async function checkout(cart, fingerprint) {
             !isRepeaterRequest(active.request) || !isBoundedText(active.resolved_url, 8 * 1024) ||
             !isBoundedText(active.resolved_method, 32) || !Array.isArray(active.variable_names) ||
             active.variable_names.length > 32 || !active.variable_names.every(name => variableNames.has(name)) ||
+            (active.collection_request_id !== null &&
+              !isSafeIntegerInRange(active.collection_request_id, 1, Number.MAX_SAFE_INTEGER)) ||
             typeof active.cancel_requested !== 'boolean')) return false;
         if (repeater.state === 'idle') {
           return repeater.session_id === 0 && repeater.variables.length === 0 &&
@@ -4905,6 +5223,627 @@ export async function checkout(cart, fingerprint) {
         }
       }
 
+      function collectionFolder(folderId) {
+        return state.apiCollection.folders.find(folder => folder.id === folderId) ?? null;
+      }
+
+      function collectionRequest(requestId = state.collectionSelectedRequestId) {
+        return state.apiCollection.requests.find(request => request.id === requestId) ?? null;
+      }
+
+      function collectionFolderLineage(folderId) {
+        const lineage = [];
+        const seen = new Set();
+        let folder = collectionFolder(folderId);
+        while (folder && !seen.has(folder.id)) {
+          lineage.unshift(folder);
+          seen.add(folder.id);
+          folder = folder.parent_id === null ? null : collectionFolder(folder.parent_id);
+        }
+        return lineage;
+      }
+
+      function collectionFolderDepth(folderId) {
+        return Math.max(0, collectionFolderLineage(folderId).length - 1);
+      }
+
+      function collectionDescendantIds(folderId) {
+        const descendants = new Set();
+        const visit = parentId => state.apiCollection.folders
+          .filter(folder => folder.parent_id === parentId)
+          .forEach(folder => { descendants.add(folder.id); visit(folder.id); });
+        visit(folderId);
+        return descendants;
+      }
+
+      function collectionNextId(values) {
+        return values.reduce((maximum, value) => Math.max(maximum, value.id), 0) + 1;
+      }
+
+      function collectionVariablesFromText(value, label) {
+        const source = value.trim();
+        if (!source) return [];
+        let variables;
+        try { variables = JSON.parse(source); }
+        catch { throw new TypeError(`${label} must be a JSON object.`); }
+        if (!isPlainObject(variables) || Object.values(variables).some(item => typeof item !== 'string')) {
+          throw new TypeError(`${label} must map variable names to text values.`);
+        }
+        const entries = Object.entries(variables).sort(([left], [right]) => left.localeCompare(right));
+        let bytes = 0;
+        if (entries.length > 32 || entries.some(([name, value]) => {
+          bytes += utf8ByteLength(name) + utf8ByteLength(value);
+          return !/^[A-Za-z_][A-Za-z0-9_.-]*$/u.test(name) || utf8ByteLength(name) > 64 ||
+            utf8ByteLength(value) > 4 * 1024 || /[\x00-\x1f\x7f]/u.test(value) || bytes > 32 * 1024;
+        })) throw new TypeError(`${label} exceeds the 32-variable or 32 KiB scope limit.`);
+        return entries.map(([name, value]) => ({name, value}));
+      }
+
+      function collectionVariablesText(variables) {
+        return variables.length ? JSON.stringify(Object.fromEntries(
+          variables.map(variable => [variable.name, variable.value])
+        ), null, 2) : '';
+      }
+
+      function collectionHeadersFromText(value) {
+        const headers = parseExperimentHeaders(value, 'Request headers');
+        const forbidden = new Set(['authorization', 'connection', 'content-length', 'cookie', 'host',
+          'proxy-authorization', 'set-cookie', 'transfer-encoding']);
+        const entries = Object.entries(headers);
+        let bytes = 0;
+        if (entries.length > 64 || entries.some(([name, headerValue]) => {
+          bytes += utf8ByteLength(name) + utf8ByteLength(headerValue);
+          return !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(name) || forbidden.has(name.toLowerCase()) ||
+            utf8ByteLength(name) > 128 || utf8ByteLength(headerValue) > 2 * 1024 ||
+            /[\x00-\x1f\x7f]/u.test(headerValue) || bytes > 16 * 1024;
+        })) throw new TypeError('Request headers are forbidden, invalid, or exceed 16 KiB.');
+        return entries.map(([name, headerValue]) => ({name, value: headerValue}));
+      }
+
+      function collectionRequestDraft() {
+        const request = collectionRequest();
+        if (!request) throw new TypeError('Select a saved request first.');
+        const timeout = Number(elements.collectionRequestTimeout.value);
+        if (!Number.isInteger(timeout) || timeout < 100 || timeout > 30000) {
+          throw new TypeError('Timeout must be between 100 and 30000 ms.');
+        }
+        return {
+          id: request.id,
+          folder_id: Number(elements.collectionRequestFolder.value),
+          name: elements.collectionRequestName.value.trim(),
+          url: elements.collectionRequestUrl.value.trim(),
+          method: elements.collectionRequestMethod.value.trim(),
+          headers: collectionHeadersFromText(elements.collectionRequestHeaders.value),
+          body: elements.collectionRequestBody.value,
+          timeout_ms: timeout,
+          variables: collectionVariablesFromText(elements.collectionRequestVariables.value, 'Request variables')
+        };
+      }
+
+      function collectionReplacement(folders = state.apiCollection.folders, requests = state.apiCollection.requests) {
+        return {
+          action: 'replace_api_collection',
+          expected_generation: state.apiCollection.generation,
+          folders: folders.map(folder => ({
+            id: folder.id, name: folder.name, parent_id: folder.parent_id, variables: folder.variables
+          })),
+          requests: requests.map(request => ({
+            id: request.id, folder_id: request.folder_id, name: request.name, url: request.url,
+            method: request.method, headers: request.headers, body: request.body,
+            timeout_ms: request.timeout_ms, variables: request.variables
+          }))
+        };
+      }
+
+      function setCollectionNotice(kind, message) {
+        state.apiCollectionStatus = kind;
+        state.apiCollectionMessage = message;
+        elements.collectionNotice.dataset.kind = kind;
+        elements.collectionNotice.textContent = message;
+      }
+
+      async function refreshApiCollection(force = false) {
+        if (state.apiCollectionRefreshing || location.protocol === 'file:') return false;
+        state.apiCollectionRefreshing = true;
+        if (!state.apiCollectionLoaded) setCollectionNotice('loading', 'Loading the local API Collection…');
+        try {
+          const headers = !force && state.apiCollectionEtag ? {'If-None-Match': state.apiCollectionEtag} : {};
+          const response = await fetch('/api/api-collection', {cache: 'no-store', headers});
+          if (response.status === 304) return true;
+          if (!response.ok) throw new Error(`API Collection store returned ${response.status}`);
+          const body = await response.json();
+          if (!isApiCollection(body)) throw new TypeError('Malformed API Collection response');
+          state.apiCollection = body;
+          state.apiCollectionLoaded = true;
+          state.apiCollectionEtag = response.headers.get('ETag');
+          if (!collectionFolder(state.collectionSelectedFolderId)) state.collectionSelectedFolderId = 1;
+          if (!collectionRequest()) state.collectionSelectedRequestId = null;
+          setCollectionNotice(body.requests.length ? 'ready' : 'empty', body.requests.length
+            ? `${body.requests.length} saved ${body.requests.length === 1 ? 'request' : 'requests'} loaded from the permission-restricted local store.`
+            : 'The local collection is empty. Create a request or import only method and URL from Traffic.');
+          renderApiCollection();
+          return true;
+        } catch (error) {
+          setCollectionNotice('error', `API Collection unavailable: ${error.message}. The last valid collection remains visible.`);
+          renderApiCollection();
+          return false;
+        } finally {
+          state.apiCollectionRefreshing = false;
+        }
+      }
+
+      async function replaceApiCollection(folders, requests, successMessage) {
+        if (state.apiCollectionSaving) return false;
+        state.apiCollectionSaving = true;
+        setCollectionNotice('saving', 'Saving one atomic API Collection generation…');
+        renderApiCollection();
+        try {
+          const response = await fetch('/api/api-collection/actions', {
+            method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(collectionReplacement(folders, requests))
+          });
+          const body = await response.json();
+          if (response.status === 409) {
+            state.apiCollectionEtag = null;
+            await refreshApiCollection(true);
+            setCollectionNotice('conflict', body.error || 'The collection changed in another window. The current generation was reloaded.');
+            return false;
+          }
+          if (!response.ok) throw new Error(body.error || `API Collection store returned ${response.status}`);
+          if (!isApiCollection(body)) throw new TypeError('Malformed API Collection response');
+          state.apiCollection = body;
+          state.apiCollectionLoaded = true;
+          state.apiCollectionEtag = `"api-collection-${body.generation}"`;
+          setCollectionNotice('ready', successMessage);
+          return true;
+        } catch (error) {
+          setCollectionNotice('error', `API Collection was not changed: ${error.message}`);
+          return false;
+        } finally {
+          state.apiCollectionSaving = false;
+          renderApiCollection();
+        }
+      }
+
+      function collectionFolderOptions(selectedId, excludedIds = new Set()) {
+        return state.apiCollection.folders
+          .filter(folder => !excludedIds.has(folder.id))
+          .sort((left, right) => collectionFolderLineage(left.id).map(item => item.name).join('/').localeCompare(
+            collectionFolderLineage(right.id).map(item => item.name).join('/')
+          ))
+          .map(folder => {
+            const option = document.createElement('option'); option.value = String(folder.id);
+            option.textContent = collectionFolderLineage(folder.id).map(item => item.name).join(' / ');
+            option.selected = folder.id === selectedId;
+            return option;
+          });
+      }
+
+      function selectCollectionFolder(folderId, focus = false) {
+        if (!collectionFolder(folderId)) return;
+        state.collectionSelectedFolderId = folderId;
+        state.collectionSelectedRequestId = null;
+        state.collectionFolderDraftId = null;
+        state.collectionFolderDirty = false;
+        state.collectionDeleteFolderId = null;
+        renderApiCollection();
+        if (focus) elements.collectionTree.querySelector(`[data-folder-id="${folderId}"]`)?.focus({preventScroll: true});
+      }
+
+      function selectCollectionRequest(requestId, focus = false) {
+        const request = collectionRequest(requestId);
+        if (!request) return;
+        state.collectionSelectedRequestId = requestId;
+        state.collectionSelectedFolderId = request.folder_id;
+        state.collectionExpandedFolderIds.add(request.folder_id);
+        state.collectionRequestDraftId = null;
+        state.collectionDraftDirty = false;
+        state.collectionDeleteRequestId = null;
+        state.collectionSelectedHistoryId = null;
+        renderApiCollection();
+        if (focus) elements.collectionTree.querySelector(`[data-request-id="${requestId}"]`)?.focus({preventScroll: true});
+      }
+
+      function moveCollectionTreeSelection(event) {
+        if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        const row = event.currentTarget;
+        const rows = [...elements.collectionTree.querySelectorAll('.collection-tree-row')];
+        const index = rows.indexOf(row);
+        if (index < 0) return;
+        event.preventDefault();
+        if (row.dataset.folderId && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
+          const folderId = Number(row.dataset.folderId);
+          const expanded = state.collectionExpandedFolderIds.has(folderId);
+          if (event.key === 'ArrowRight' && !expanded) state.collectionExpandedFolderIds.add(folderId);
+          else if (event.key === 'ArrowLeft' && expanded && folderId !== 1) state.collectionExpandedFolderIds.delete(folderId);
+          else if (event.key === 'ArrowLeft') {
+            const parentId = collectionFolder(folderId)?.parent_id;
+            if (parentId !== null && parentId !== undefined) selectCollectionFolder(parentId, true);
+            return;
+          } else return;
+          renderApiCollection();
+          elements.collectionTree.querySelector(`[data-folder-id="${folderId}"]`)?.focus();
+          return;
+        }
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
+          : Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
+        rows[next].click(); rows[next].focus();
+      }
+
+      function renderCollectionTree() {
+        const rows = [];
+        const appendFolder = (folder, level) => {
+          const children = state.apiCollection.folders.filter(candidate => candidate.parent_id === folder.id)
+            .sort((left, right) => left.name.localeCompare(right.name));
+          const requests = state.apiCollection.requests.filter(request => request.folder_id === folder.id)
+            .sort((left, right) => left.name.localeCompare(right.name));
+          const hasChildren = children.length > 0 || requests.length > 0;
+          const expanded = folder.id === 1 || state.collectionExpandedFolderIds.has(folder.id);
+          const row = document.createElement('button'); row.type = 'button'; row.className = 'collection-tree-row';
+          row.dataset.folderId = String(folder.id); row.style.setProperty('--collection-depth', String(level - 1));
+          row.setAttribute('role', 'treeitem'); row.setAttribute('aria-level', String(level));
+          row.setAttribute('aria-selected', String(!state.collectionSelectedRequestId && state.collectionSelectedFolderId === folder.id));
+          if (hasChildren) row.setAttribute('aria-expanded', String(expanded));
+          row.tabIndex = !state.collectionSelectedRequestId && state.collectionSelectedFolderId === folder.id ? 0 : -1;
+          row.append(textElement('span', 'collection-tree-glyph', hasChildren ? expanded ? '▾' : '▸' : '·'),
+            textElement('span', 'collection-tree-name', folder.name),
+            textElement('span', 'collection-tree-meta', `${requests.length}`));
+          row.addEventListener('click', () => selectCollectionFolder(folder.id));
+          row.addEventListener('dblclick', () => { if (hasChildren && folder.id !== 1) {
+            if (expanded) state.collectionExpandedFolderIds.delete(folder.id); else state.collectionExpandedFolderIds.add(folder.id);
+            renderApiCollection();
+          }});
+          row.addEventListener('keydown', moveCollectionTreeSelection);
+          rows.push(row);
+          if (!expanded) return;
+          children.forEach(child => appendFolder(child, level + 1));
+          requests.forEach(request => {
+            const requestRow = document.createElement('button'); requestRow.type = 'button'; requestRow.className = 'collection-tree-row';
+            requestRow.dataset.requestId = String(request.id); requestRow.style.setProperty('--collection-depth', String(level));
+            requestRow.setAttribute('role', 'treeitem'); requestRow.setAttribute('aria-level', String(level + 1));
+            requestRow.setAttribute('aria-selected', String(state.collectionSelectedRequestId === request.id));
+            requestRow.tabIndex = state.collectionSelectedRequestId === request.id ? 0 : -1;
+            requestRow.append(textElement('span', 'collection-tree-glyph', '↗'),
+              textElement('span', 'collection-tree-name', request.name),
+              textElement('span', 'collection-tree-meta', request.method));
+            requestRow.addEventListener('click', () => selectCollectionRequest(request.id));
+            requestRow.addEventListener('keydown', moveCollectionTreeSelection);
+            rows.push(requestRow);
+          });
+        };
+        appendFolder(collectionFolder(1), 1);
+        elements.collectionTree.replaceChildren(...rows);
+      }
+
+      function renderCollectionFolderForm() {
+        const folder = collectionFolder(state.collectionSelectedFolderId) ?? collectionFolder(1);
+        if (state.collectionFolderDraftId !== folder.id || !state.collectionFolderDirty) {
+          state.collectionFolderDraftId = folder.id;
+          elements.collectionFolderName.value = folder.name;
+          elements.collectionFolderVariables.value = collectionVariablesText(folder.variables);
+        }
+        const excluded = collectionDescendantIds(folder.id); excluded.add(folder.id);
+        elements.collectionFolderParent.replaceChildren(...collectionFolderOptions(folder.parent_id ?? 1, excluded));
+        elements.collectionFolderParent.value = String(folder.parent_id ?? 1);
+        const root = folder.id === 1;
+        elements.collectionFolderName.disabled = root || state.apiCollectionSaving;
+        elements.collectionFolderParent.disabled = root || state.apiCollectionSaving;
+        elements.collectionFolderVariables.disabled = state.apiCollectionSaving;
+        elements.collectionSaveFolder.disabled = state.apiCollectionSaving;
+        elements.collectionDeleteFolder.disabled = root || state.apiCollectionSaving;
+        elements.collectionDeleteFolder.textContent = state.collectionDeleteFolderId === folder.id ? 'Confirm delete' : 'Delete folder';
+      }
+
+      function renderCollectionVariableStatus() {
+        const request = collectionRequest();
+        if (!request) return;
+        const scopes = new Map();
+        let invalid = false;
+        collectionFolderLineage(Number(elements.collectionRequestFolder.value) || request.folder_id).forEach(folder =>
+          folder.variables.forEach(variable => scopes.set(variable.name, {value: variable.value, scope: 'folder'})));
+        try {
+          collectionVariablesFromText(elements.collectionRequestVariables.value, 'Request variables')
+            .forEach(variable => scopes.set(variable.name, {value: variable.value, scope: 'request'}));
+        } catch { invalid = true; }
+        const source = [elements.collectionRequestUrl.value, elements.collectionRequestMethod.value,
+          elements.collectionRequestHeaders.value, elements.collectionRequestBody.value].join('\n');
+        const names = new Set();
+        for (const match of source.matchAll(/\{\{(=)?([^{}]+)\}\}/g)) if (!match[1]) names.add(match[2]);
+        const chips = [];
+        if (invalid) {
+          const chip = textElement('span', 'collection-variable-chip', 'Invalid request variable JSON');
+          chip.dataset.kind = 'missing'; chips.push(chip);
+        }
+        [...names].sort().forEach(name => {
+          const resolution = scopes.get(name);
+          const chip = textElement('span', 'collection-variable-chip', resolution
+            ? `${resolution.scope} · {{${name}}}` : `missing · {{${name}}}`);
+          if (resolution) chip.dataset.scope = resolution.scope; else chip.dataset.kind = 'missing';
+          chips.push(chip);
+        });
+        if (!chips.length) chips.push(textElement('span', 'collection-variable-chip', 'No variables used'));
+        elements.collectionVariableStatus.replaceChildren(...chips);
+      }
+
+      function renderCollectionRequestForm() {
+        const request = collectionRequest();
+        elements.collectionEditorEmpty.hidden = Boolean(request);
+        elements.collectionRequestForm.hidden = !request;
+        elements.collectionRequestBadge.dataset.kind = request ? '' : 'offline';
+        elements.collectionRequestBadge.textContent = request ? request.method : 'No request';
+        if (!request) return;
+        if (state.collectionRequestDraftId !== request.id || !state.collectionDraftDirty) {
+          state.collectionRequestDraftId = request.id;
+          elements.collectionRequestName.value = request.name;
+          elements.collectionRequestFolder.value = String(request.folder_id);
+          elements.collectionRequestUrl.value = request.url;
+          elements.collectionRequestMethod.value = request.method;
+          elements.collectionRequestTimeout.value = String(request.timeout_ms);
+          elements.collectionRequestHeaders.value = request.headers.length
+            ? JSON.stringify(repeaterHeaderObject(request.headers), null, 2) : '';
+          elements.collectionRequestBody.value = request.body;
+          elements.collectionRequestVariables.value = collectionVariablesText(request.variables);
+        }
+        elements.collectionRequestFolder.replaceChildren(...collectionFolderOptions(request.folder_id));
+        elements.collectionRequestFolder.value = String(request.folder_id);
+        elements.collectionRequestForm.querySelectorAll('input, textarea, select').forEach(field => {
+          field.disabled = state.apiCollectionSaving;
+        });
+        elements.collectionSaveRequest.disabled = state.apiCollectionSaving;
+        elements.collectionDuplicateRequest.disabled = state.apiCollectionSaving || state.apiCollection.requests.length >= 128;
+        elements.collectionDeleteRequest.disabled = state.apiCollectionSaving;
+        elements.collectionDeleteRequest.textContent = state.collectionDeleteRequestId === request.id ? 'Confirm delete' : 'Delete';
+        renderCollectionVariableStatus();
+      }
+
+      function collectionHistoryEntries() {
+        const requestId = state.collectionSelectedRequestId;
+        return (repeaterState()?.history ?? []).filter(entry => entry.collection_request_id === requestId);
+      }
+
+      function renderCollectionResponse(entry) {
+        if (!entry) {
+          elements.collectionResponse.className = 'repeater-response experiment-empty';
+          elements.collectionResponse.textContent = 'Run the selected request to inspect its bounded response.';
+          elements.collectionResponseMeta.textContent = 'Select a completed execution.';
+          elements.collectionResponseBadge.dataset.kind = 'offline';
+          elements.collectionResponseBadge.textContent = 'No response';
+          return;
+        }
+        const response = entry.response;
+        const summary = document.createElement('div'); summary.className = 'experiment-result-summary';
+        summary.append(experimentFact('Status', response.ok ? `${response.status} ${response.status_text}`.trim() : entry.state.replaceAll('_', ' ')),
+          experimentFact('Duration', `${response.duration_ms} ms`),
+          experimentFact('Body', `${utf8ByteLength(response.body)} bytes${response.body_truncated ? ' · truncated' : ''}`));
+        const headers = document.createElement('div'); headers.className = 'repeater-response-headers';
+        if (response.headers.length) headers.append(...response.headers.map(header => {
+          const row = document.createElement('div'); row.className = 'repeater-response-header';
+          row.append(textElement('span', '', header.name), textElement('span', '', header.value)); return row;
+        }));
+        else headers.append(textElement('div', 'experiment-empty', 'No response headers.'));
+        const body = document.createElement('pre'); body.className = 'experiment-result-body';
+        body.textContent = response.ok ? response.body || '(empty response body)' : response.error;
+        elements.collectionResponse.className = 'repeater-response';
+        elements.collectionResponse.replaceChildren(summary, headers, body);
+        elements.collectionResponseMeta.textContent = `run ${entry.id} · ${entry.resolved_request.method} ${entry.resolved_request.url}`;
+        elements.collectionResponseBadge.dataset.kind = response.ok ? '' : 'error';
+        elements.collectionResponseBadge.textContent = response.ok ? 'Complete' : entry.state.replaceAll('_', ' ');
+      }
+
+      function renderCollectionExecution() {
+        const experiment = requestInterception();
+        const repeater = repeaterState();
+        const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
+        const active = ['running', 'cancelling'].includes(repeater?.state);
+        const contextReady = attached && experiment?.isolated && experiment.target_id === state.debuggerSession?.target?.id &&
+          ['ready', 'error'].includes(experiment.state) && ['ready', 'error'].includes(repeater?.state);
+        elements.collectionContextBadge.dataset.kind = repeater?.state === 'error' ? 'error' : contextReady ? '' : 'offline';
+        elements.collectionContextBadge.textContent = active ? repeater.state === 'cancelling' ? 'Cancelling' : 'Running'
+          : contextReady ? 'Isolated' : experiment?.state === 'creating' ? 'Creating' : 'Not created';
+        elements.collectionContextMessage.textContent = contextReady
+          ? 'Disposable page attached with no baseline cookies or storage.'
+          : attached ? repeater?.message ?? 'Create the shared isolated Request Lab context.'
+            : 'Attach an authorized browser target before creating a context.';
+        elements.collectionCreateContext.disabled = !attached || Boolean(experiment?.isolated) ||
+          state.experimentPending || state.debuggerActionPending;
+        elements.collectionRun.disabled = !collectionRequest() || !contextReady || active || state.experimentPending || state.apiCollectionSaving;
+        elements.collectionCancel.disabled = !active || state.debuggerActionPending || repeater?.state === 'cancelling';
+        const history = collectionHistoryEntries();
+        if (!history.some(entry => entry.id === state.collectionSelectedHistoryId)) {
+          state.collectionSelectedHistoryId = history.at(-1)?.id ?? null;
+        }
+        elements.collectionHistoryBadge.textContent = `${history.length} ${history.length === 1 ? 'run' : 'runs'}`;
+        elements.collectionHistoryBadge.dataset.kind = history.length ? '' : 'offline';
+        if (!history.length) elements.collectionHistory.replaceChildren(
+          textElement('div', 'experiment-empty', collectionRequest() ? 'No executions for this request.' : 'Select a saved request.')
+        );
+        else elements.collectionHistory.replaceChildren(...[...history].reverse().map(entry => {
+          const row = document.createElement('button'); row.type = 'button'; row.className = 'collection-history-row';
+          row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(entry.id === state.collectionSelectedHistoryId));
+          row.tabIndex = entry.id === state.collectionSelectedHistoryId ? 0 : -1;
+          row.append(textElement('span', '', `${entry.resolved_request.method} ${entry.resolved_request.url}`),
+            textElement('strong', '', entry.response.ok ? String(entry.response.status) : entry.state.replaceAll('_', ' ')),
+            textElement('small', '', `run ${entry.id} · ${entry.response.duration_ms} ms · ${new Date(entry.completed_at_ms).toLocaleTimeString()}`));
+          row.addEventListener('click', () => { state.collectionSelectedHistoryId = entry.id; renderCollectionExecution(); });
+          row.addEventListener('keydown', event => {
+            if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const rows = [...elements.collectionHistory.querySelectorAll('.collection-history-row')];
+            const index = rows.indexOf(row);
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
+              : Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
+            rows[next].click(); rows[next].focus();
+          });
+          return row;
+        }));
+        renderCollectionResponse(history.find(entry => entry.id === state.collectionSelectedHistoryId) ?? null);
+      }
+
+      function renderApiCollection() {
+        if (!elements.collectionTree) return;
+        if (state.apiCollectionLoaded && state.apiCollectionStatus === 'loading') {
+          state.apiCollectionStatus = state.apiCollection.requests.length ? 'ready' : 'empty';
+          state.apiCollectionMessage = state.apiCollection.requests.length
+            ? `${state.apiCollection.requests.length} saved ${state.apiCollection.requests.length === 1 ? 'request' : 'requests'} loaded from the permission-restricted local store.`
+            : 'The local collection is empty. Create a request or import only method and URL from Traffic.';
+        }
+        elements.collectionGeneration.textContent = `Generation ${state.apiCollection.generation}`;
+        elements.collectionCount.textContent = `${state.apiCollection.requests.length} / 128`;
+        elements.collectionNewFolder.disabled = state.apiCollectionSaving || state.apiCollection.folders.length >= 32 ||
+          collectionFolderDepth(state.collectionSelectedFolderId) >= 4;
+        elements.collectionNewRequest.disabled = state.apiCollectionSaving || state.apiCollection.requests.length >= 128;
+        elements.collectionNotice.dataset.kind = state.apiCollectionStatus;
+        elements.collectionNotice.textContent = state.apiCollectionMessage;
+        renderCollectionTree();
+        renderCollectionFolderForm();
+        renderCollectionRequestForm();
+        renderCollectionExecution();
+      }
+
+      async function createCollectionFolder() {
+        const name = elements.collectionNewFolderName.value.trim();
+        if (!name) { setCollectionNotice('error', 'Enter a folder name.'); return; }
+        const parentId = state.collectionSelectedFolderId;
+        const folder = {id: collectionNextId(state.apiCollection.folders), name, parent_id: parentId, variables: []};
+        if (await replaceApiCollection([...state.apiCollection.folders, folder], state.apiCollection.requests, `Folder “${name}” created.`)) {
+          state.collectionSelectedFolderId = folder.id;
+          state.collectionExpandedFolderIds.add(parentId);
+          elements.collectionNewFolderForm.hidden = true;
+          elements.collectionNewFolderName.value = '';
+          renderApiCollection();
+        }
+      }
+
+      async function saveCollectionFolder() {
+        const folder = collectionFolder(state.collectionSelectedFolderId);
+        if (!folder) return;
+        try {
+          const replacement = {
+            ...folder,
+            name: folder.id === 1 ? folder.name : elements.collectionFolderName.value.trim(),
+            parent_id: folder.id === 1 ? null : Number(elements.collectionFolderParent.value),
+            variables: collectionVariablesFromText(elements.collectionFolderVariables.value, 'Folder variables')
+          };
+          const folders = state.apiCollection.folders.map(candidate => candidate.id === folder.id ? replacement : candidate);
+          if (await replaceApiCollection(folders, state.apiCollection.requests, `Folder “${replacement.name}” saved.`)) {
+            state.collectionFolderDirty = false;
+            state.collectionExpandedFolderIds.add(replacement.parent_id ?? 1);
+            renderApiCollection();
+          }
+        } catch (error) { setCollectionNotice('error', error.message); renderApiCollection(); }
+      }
+
+      async function saveCollectionRequest() {
+        try {
+          const request = collectionRequest();
+          const draft = collectionRequestDraft();
+          const requests = state.apiCollection.requests.map(candidate => candidate.id === request.id ? draft : candidate);
+          if (await replaceApiCollection(state.apiCollection.folders, requests, `Request “${draft.name}” saved.`)) {
+            state.collectionSelectedFolderId = draft.folder_id;
+            state.collectionDraftDirty = false;
+            state.collectionRequestDraftId = null;
+            state.collectionExpandedFolderIds.add(draft.folder_id);
+            renderApiCollection();
+            return true;
+          }
+        } catch (error) { setCollectionNotice('error', error.message); renderApiCollection(); }
+        return false;
+      }
+
+      async function createCollectionRequest(template = null) {
+        const folderId = state.collectionSelectedFolderId;
+        const base = template?.name || 'New request';
+        const siblingNames = new Set(state.apiCollection.requests.filter(request => request.folder_id === folderId)
+          .map(request => request.name.toLocaleLowerCase()));
+        let name = base;
+        for (let suffix = 2; siblingNames.has(name.toLocaleLowerCase()); suffix += 1) name = `${base} ${suffix}`;
+        const request = {
+          id: collectionNextId(state.apiCollection.requests), folder_id: folderId, name,
+          url: template?.url || 'https://example.test/', method: template?.method || 'GET', headers: [], body: '',
+          timeout_ms: 15000, variables: []
+        };
+        if (await replaceApiCollection(state.apiCollection.folders, [...state.apiCollection.requests, request], `Request “${name}” created.`)) {
+          state.collectionSelectedRequestId = request.id;
+          state.collectionExpandedFolderIds.add(folderId);
+          state.collectionRequestDraftId = null;
+          state.collectionDraftDirty = false;
+          renderApiCollection();
+          requestAnimationFrame(() => elements.collectionRequestName.focus({preventScroll: true}));
+        }
+      }
+
+      async function duplicateCollectionRequest() {
+        const source = collectionRequest();
+        if (!source) return;
+        const id = collectionNextId(state.apiCollection.requests);
+        const siblingNames = new Set(state.apiCollection.requests.filter(request => request.folder_id === source.folder_id)
+          .map(request => request.name.toLocaleLowerCase()));
+        let name = `${source.name} copy`;
+        for (let suffix = 2; siblingNames.has(name.toLocaleLowerCase()); suffix += 1) name = `${source.name} copy ${suffix}`;
+        const duplicate = {...source, id, name};
+        delete duplicate.created_at_ms; delete duplicate.updated_at_ms;
+        if (await replaceApiCollection(state.apiCollection.folders, [...state.apiCollection.requests, duplicate], `Request “${name}” duplicated.`)) {
+          state.collectionSelectedRequestId = id; state.collectionRequestDraftId = null; state.collectionDraftDirty = false;
+          renderApiCollection();
+        }
+      }
+
+      async function deleteCollectionRequest() {
+        const request = collectionRequest();
+        if (!request) return;
+        if (state.collectionDeleteRequestId !== request.id) {
+          state.collectionDeleteRequestId = request.id; setCollectionNotice('ready', 'Select Delete again to remove this saved request.');
+          renderApiCollection(); return;
+        }
+        if (await replaceApiCollection(state.apiCollection.folders,
+          state.apiCollection.requests.filter(candidate => candidate.id !== request.id), `Request “${request.name}” deleted.`)) {
+          state.collectionSelectedRequestId = null; state.collectionDeleteRequestId = null;
+          state.collectionRequestDraftId = null; state.collectionDraftDirty = false;
+          renderApiCollection();
+        }
+      }
+
+      async function deleteCollectionFolder() {
+        const folder = collectionFolder(state.collectionSelectedFolderId);
+        if (!folder || folder.id === 1) return;
+        const hasContents = state.apiCollection.folders.some(candidate => candidate.parent_id === folder.id) ||
+          state.apiCollection.requests.some(request => request.folder_id === folder.id);
+        if (hasContents) { setCollectionNotice('error', 'Move or delete this folder’s contents first.'); renderApiCollection(); return; }
+        if (state.collectionDeleteFolderId !== folder.id) {
+          state.collectionDeleteFolderId = folder.id; setCollectionNotice('ready', 'Select Delete folder again to confirm.');
+          renderApiCollection(); return;
+        }
+        if (await replaceApiCollection(state.apiCollection.folders.filter(candidate => candidate.id !== folder.id),
+          state.apiCollection.requests, `Folder “${folder.name}” deleted.`)) {
+          state.collectionSelectedFolderId = folder.parent_id ?? 1; state.collectionDeleteFolderId = null;
+          state.collectionFolderDraftId = null; state.collectionFolderDirty = false; renderApiCollection();
+        }
+      }
+
+      async function runCollectionRequest() {
+        const request = collectionRequest();
+        if (!request) return;
+        if (state.collectionDraftDirty && !(await saveCollectionRequest())) return;
+        try {
+          const saved = collectionRequest(request.id);
+          const variables = {};
+          collectionFolderLineage(saved.folder_id).forEach(folder => folder.variables.forEach(variable => {
+            variables[variable.name] = variable.value;
+          }));
+          saved.variables.forEach(variable => { variables[variable.name] = variable.value; });
+          if (!await runExperimentAction({action: 'configure_repeater_variables', variables})) return;
+          const previousId = repeaterState()?.history.at(-1)?.id ?? 0;
+          const response = await runExperimentAction({
+            action: 'run_repeater_request', url: saved.url, method: saved.method,
+            headers: repeaterHeaderObject(saved.headers), body: saved.body, timeout_ms: saved.timeout_ms,
+            collection_request_id: saved.id
+          });
+          const executionId = response?.repeater?.active_execution?.execution_id ?? response?.repeater?.history.at(-1)?.id;
+          if (Number.isSafeInteger(executionId) && executionId > previousId) state.collectionSelectedHistoryId = executionId;
+          renderApiCollection();
+        } catch (error) { setCollectionNotice('error', error.message); renderApiCollection(); }
+      }
+
       function liveSources() {
         return (state.debuggerSession?.scripts ?? []).map(script => {
           const cached = state.liveScriptContent.get(script.script_id) ?? {};
@@ -6633,6 +7572,7 @@ export async function checkout(cart, fingerprint) {
           renderDebugger();
           renderMemory();
           if (!document.querySelector('#screen-experiments').hidden) renderExperiment();
+          if (!document.querySelector('#screen-api-collection').hidden) renderApiCollection();
           const sourcesVisible = !document.querySelector('#screen-sources').hidden;
           if (sourcesVisible && !sourceRendered) {
             const catalogChanged = previousCatalog !== debuggerScriptCatalogSignature(body);
@@ -6653,6 +7593,7 @@ export async function checkout(cart, fingerprint) {
           renderDebugger();
           renderMemory();
           if (!document.querySelector('#screen-experiments').hidden) renderExperiment();
+          if (!document.querySelector('#screen-api-collection').hidden) renderApiCollection();
         } finally {
           state.debuggerRefreshing = false;
           const quiet = document.hidden || state.debuggerSession?.state === 'unavailable' || state.debuggerError;
@@ -6717,6 +7658,10 @@ export async function checkout(cart, fingerprint) {
           renderBacktrace();
         }
         if (screenName === 'experiments') renderExperiment();
+        if (screenName === 'api-collection') {
+          renderApiCollection();
+          refreshApiCollection();
+        }
         if (screenName === 'sources') {
           renderDebugger();
           renderSources();
@@ -6838,6 +7783,10 @@ export async function checkout(cart, fingerprint) {
         renderDebugger();
         renderSources();
         renderVmLab();
+        state.apiCollectionStatus = 'empty';
+        state.apiCollectionLoaded = true;
+        state.apiCollectionMessage = 'Standalone preview. Open the local app to save an API Collection.';
+        renderApiCollection();
       }
 
       function enableTabKeyboardNavigation(selector) {
@@ -6901,6 +7850,30 @@ export async function checkout(cart, fingerprint) {
         prefillRepeaterRequest(true);
         showScreen('experiments', elements.requestRepeaterPivot);
         requestAnimationFrame(() => elements.repeaterRequestUrl.focus({preventScroll: true}));
+      });
+      elements.requestCollectionPivot.addEventListener('click', async () => {
+        await refreshApiCollection();
+        const selected = state.requests.find(request => request.id === state.selectedRequestId);
+        if (!selected) return;
+        let requestUrl = selected.path;
+        if (!/^https?:\/\//iu.test(requestUrl)) {
+          requestUrl = `https://checkout.acme.test${requestUrl.startsWith('/') ? '' : '/'}${requestUrl}`;
+        }
+        try {
+          const parsed = new URL(requestUrl);
+          parsed.search = '';
+          parsed.hash = '';
+          const pathName = parsed.pathname.split('/').filter(Boolean).at(-1) || parsed.hostname;
+          await createCollectionRequest({
+            name: `${selected.method} ${pathName}`,
+            url: parsed.toString(),
+            method: /^[A-Z][A-Z0-9!#$%&'*+.^_`|~-]{0,31}$/u.test(selected.method) ? selected.method : 'GET'
+          });
+          showScreen('api-collection', elements.requestCollectionPivot);
+        } catch {
+          setCollectionNotice('error', 'The selected request URL cannot be imported safely.');
+          showScreen('api-collection', elements.requestCollectionPivot);
+        }
       });
       elements.requestMemoryPivot.addEventListener('click', () => {
         const selected = state.selectedField;
@@ -7088,6 +8061,48 @@ export async function checkout(cart, fingerprint) {
         const index = history.findIndex(entry => entry.id === state.repeaterSelectedHistoryId);
         if (index >= 0 && index < history.length - 1) loadRepeaterHistoryEntry(history[index + 1]);
       });
+      elements.collectionNewFolder.addEventListener('click', () => {
+        elements.collectionNewFolderForm.hidden = false;
+        elements.collectionNewFolderName.value = '';
+        requestAnimationFrame(() => elements.collectionNewFolderName.focus());
+      });
+      elements.collectionCancelFolder.addEventListener('click', () => {
+        elements.collectionNewFolderForm.hidden = true;
+        elements.collectionNewFolderName.value = '';
+      });
+      elements.collectionConfirmFolder.addEventListener('click', createCollectionFolder);
+      elements.collectionNewFolderName.addEventListener('keydown', event => {
+        if (event.key === 'Enter') { event.preventDefault(); createCollectionFolder(); }
+        if (event.key === 'Escape') elements.collectionCancelFolder.click();
+      });
+      elements.collectionNewRequest.addEventListener('click', () => createCollectionRequest());
+      elements.collectionFolderForm.addEventListener('submit', event => {
+        event.preventDefault(); saveCollectionFolder();
+      });
+      elements.collectionFolderForm.querySelectorAll('input, textarea, select').forEach(field => field.addEventListener('input', () => {
+        state.collectionFolderDirty = true;
+        state.collectionDeleteFolderId = null;
+      }));
+      elements.collectionDeleteFolder.addEventListener('click', deleteCollectionFolder);
+      elements.collectionRequestForm.addEventListener('submit', event => {
+        event.preventDefault(); saveCollectionRequest();
+      });
+      elements.collectionRequestForm.querySelectorAll('input, textarea, select').forEach(field => field.addEventListener('input', () => {
+        state.collectionDraftDirty = true;
+        state.collectionDeleteRequestId = null;
+        renderCollectionVariableStatus();
+      }));
+      elements.collectionDuplicateRequest.addEventListener('click', duplicateCollectionRequest);
+      elements.collectionDeleteRequest.addEventListener('click', deleteCollectionRequest);
+      elements.collectionCreateContext.addEventListener('click', async () => {
+        await runExperimentAction({action: 'create_request_interception_experiment'});
+        renderApiCollection();
+      });
+      elements.collectionRun.addEventListener('click', runCollectionRequest);
+      elements.collectionCancel.addEventListener('click', async () => {
+        await runExperimentAction({action: 'cancel_repeater_request'});
+        renderApiCollection();
+      });
       elements.memorySearchForm.addEventListener('submit', event => {
         event.preventDefault();
         runLiveObjectSearch();
@@ -7166,6 +8181,10 @@ export async function checkout(cart, fingerprint) {
         state.renderedConsoleSignature = null;
         renderDebugger();
         if (!document.querySelector('#screen-experiments').hidden) renderExperiment();
+        if (!document.querySelector('#screen-api-collection').hidden) {
+          renderApiCollection();
+          refreshApiCollection();
+        }
         if (!document.querySelector('#screen-sources').hidden) renderSources();
         scheduleDebuggerRefresh(0);
       });
@@ -7177,10 +8196,12 @@ export async function checkout(cart, fingerprint) {
       renderMemory();
       renderSources();
       renderVmLab();
+      renderApiCollection();
       if (location.protocol === 'file:') {
         useStandalonePreview();
       } else {
         refresh();
+        refreshApiCollection();
         scheduleDebuggerRefresh();
         setInterval(refresh, 2000);
       }

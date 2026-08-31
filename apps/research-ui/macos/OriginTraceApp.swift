@@ -715,7 +715,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private func debuggerUnavailableResponse(
     ifNoneMatch: String?
   ) throws -> (Data, Int, [String: String]) {
-    let etag = "\"debugger-unavailable-v3\""
+    let etag = "\"debugger-unavailable-v4\""
     if ifNoneMatch == etag {
       return (Data(), 304, ["ETag": etag])
     }
@@ -842,6 +842,42 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
             "logic_bytes": 8 * 1_024,
             "return_bytes": 8 * 1_024,
             "evaluation_timeout_ms": 100,
+          ],
+        ],
+        "automation_recipes": [
+          "protocol_version": 1,
+          "session_id": 0,
+          "state": "idle",
+          "isolated": false,
+          "target_id": NSNull(),
+          "recipes": [],
+          "source_bytes": 0,
+          "auto_armed": false,
+          "active_run": NSNull(),
+          "total_runs": 0,
+          "automatic_runs": 0,
+          "runs": [],
+          "run_evictions": 0,
+          "dropped_triggers": 0,
+          "variable_count": 0,
+          "variable_bytes": 0,
+          "last_failure": NSNull(),
+          "message": "Create recipes now, then open an isolated Experiment context to run them.",
+          "limits": [
+            "recipes": 16,
+            "automatic_recipes": 8,
+            "recipe_source_bytes": 16 * 1_024,
+            "total_source_bytes": 64 * 1_024,
+            "variables": 32,
+            "variable_value_bytes": 4 * 1_024,
+            "variable_bytes": 16 * 1_024,
+            "total_runs": 256,
+            "automatic_runs": 64,
+            "retained_runs": 64,
+            "logs_per_run": 32,
+            "log_bytes": 1_024,
+            "result_bytes": 16 * 1_024,
+            "execution_timeout_ms": 2_000,
           ],
         ],
         "repeater": [
@@ -1794,6 +1830,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
               debuggerContractValid: isDebuggerResponse(state.debuggerSession),
               objectExperimentAvailable: state.debuggerSession?.object_experiment?.protocol_version === 1,
               runtimeHooksAvailable: state.debuggerSession?.runtime_hooks?.protocol_version === 1,
+              automationRecipesAvailable: state.debuggerSession?.automation_recipes?.protocol_version === 1,
               repeaterAvailable: state.debuggerSession?.repeater?.protocol_version === 1,
               apiCollectionContractValid: isApiCollection(state.apiCollection),
               apiCollectionGeneration: state.apiCollection?.generation,

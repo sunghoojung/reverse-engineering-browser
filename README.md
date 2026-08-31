@@ -63,6 +63,9 @@ The repository includes a dependency-free C++ vertical slice for the probe event
 - a native macOS Origin Trace application that reads the broker evidence store;
 - bounded read-only live JavaScript object search plus native C++ V8
   heap-snapshot search, comparison, retaining paths, and dominator analysis;
+- bounded browser-context automation recipes with confirmed manual runs and
+  explicitly armed created, before-load, and after-load triggers inside a
+  disposable Experiment BrowserContext;
 - a threaded producer and consumer demo;
 - unit tests and sanitizer support.
 

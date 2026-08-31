@@ -1194,6 +1194,32 @@ const hookHit = {
 const hooksReady = {...hooksIdle, session_id: 4, state: 'armed', isolated: true,
   target_id: 'page-1', definitions: [hookDefinition], active_points: 2,
   total_hits: 1, hits: [hookHit], message: 'Runtime Hooks armed.'};
+const automationIdle = {
+  protocol_version: 1, session_id: 0, state: 'idle', isolated: false,
+  target_id: null, recipes: [], source_bytes: 0, auto_armed: false,
+  active_run: null, total_runs: 0, automatic_runs: 0, runs: [],
+  run_evictions: 0, dropped_triggers: 0, variable_count: 0,
+  variable_bytes: 0, last_failure: null,
+  message: 'Create recipes now, then open an isolated Experiment context to run them.',
+  limits: {recipes: 16, automatic_recipes: 8, recipe_source_bytes: 16384,
+    total_source_bytes: 65536, variables: 32, variable_value_bytes: 4096,
+    variable_bytes: 16384, total_runs: 256, automatic_runs: 64,
+    retained_runs: 64, logs_per_run: 32, log_bytes: 1024,
+    result_bytes: 16384, execution_timeout_ms: 2000}
+};
+const automationSource = 'return document.title;';
+const automationRecipe = {id: 1, label: 'Read title', trigger: 'after-load',
+  enabled: true, source: automationSource, source_bytes: utf8ByteLength(automationSource)};
+const automationRun = {id: 1, session_id: 4, recipe_id: 1, label: 'Read title',
+  occurred_at_ms: 5, source: 'https://checkout.test/cart', category: 'after-load',
+  operation: 'completed', duration_ms: 3, target_id: 'page-1',
+  result_type: 'string', result_text: '"Checkout"', result_truncated: false,
+  logs: [{level: 'info', text: '"ran"'}], logs_truncated: false, error: ''};
+const automationReady = {...automationIdle, session_id: 4, state: 'armed',
+  isolated: true, target_id: 'page-1', recipes: [automationRecipe],
+  source_bytes: automationRecipe.source_bytes, auto_armed: true, total_runs: 1,
+  automatic_runs: 1, runs: [automationRun], variable_count: 1,
+  variable_bytes: 12, message: 'Automatic recipes armed.'};
 const repeaterIdle = {
   protocol_version: 1, session_id: 0, state: 'idle', variables: [], history: [],
   history_bytes: 0, history_evictions: 0, active_execution: null, comparison: null,
@@ -1227,6 +1253,7 @@ const snapshot = {
   request_interception: interceptionIdle,
   object_experiment: objectIdle,
   runtime_hooks: hooksIdle,
+  automation_recipes: automationIdle,
   repeater: repeaterIdle,
   target, targets: [target], scripts: [script],
   paused: {reason: 'breakpoint', description: null, call_frames: [frame],
@@ -1348,6 +1375,14 @@ process.stdout.write(JSON.stringify({
   hooksPromiseOperationRejected: !isRuntimeHooks({...hooksReady, hits: [{...hookHit,
     operation: 'async_override'}]}),
   missingRuntimeHooksRejected: !isDebuggerResponse({...snapshot, runtime_hooks: undefined}),
+  automationReadyAccepted: isAutomationRecipes(automationReady),
+  automationSourceBytesRequired: !isAutomationRecipes({...automationReady,
+    source_bytes: automationReady.source_bytes + 1}),
+  automationResultByteBound: !isAutomationRecipes({...automationReady, runs: [{...automationRun,
+    result_text: 'é'.repeat(8193)}]}),
+  automationVariablesPrivate: !isAutomationRecipes({...automationReady,
+    variables: {secret: 'must-not-be-public'}}),
+  missingAutomationRejected: !isDebuggerResponse({...snapshot, automation_recipes: undefined}),
   repeaterReadyAccepted: isRepeater(repeaterReady),
   repeaterHistoryBound: !isRepeater({...repeaterReady,
     history: Array(25).fill(repeaterEntry)}),
@@ -1426,6 +1461,11 @@ process.stdout.write(JSON.stringify({
                 "hooksBindingBound": True,
                 "hooksPromiseOperationRejected": True,
                 "missingRuntimeHooksRejected": True,
+                "automationReadyAccepted": True,
+                "automationSourceBytesRequired": True,
+                "automationResultByteBound": True,
+                "automationVariablesPrivate": True,
+                "missingAutomationRejected": True,
                 "repeaterReadyAccepted": True,
                 "repeaterHistoryBound": True,
                 "repeaterHistoryBytesRequired": True,
@@ -1543,6 +1583,28 @@ process.stdout.write(JSON.stringify({
         self.assertIn("512 / 128 retained", html)
         self.assertIn("100 ms / 32 bindings", html)
         self.assertIn("!url.startsWith('pptr:')", html)
+
+    def test_automation_recipes_expose_bounded_wirebrowser_page_scripts(self) -> None:
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('data-experiment-mode="automation"', html)
+        self.assertIn('id="automation-workspace"', html)
+        self.assertIn('id="automation-navigation-form"', html)
+        self.assertIn('id="automation-recipe-form"', html)
+        self.assertIn('id="automation-confirm"', html)
+        self.assertIn('id="automation-cancel"', html)
+        self.assertIn('role="listbox" aria-label="Automation recipe runs"', html)
+        self.assertIn("function isAutomationRecipes(automation)", html)
+        self.assertIn("function renderAutomationRecipes()", html)
+        self.assertIn("function parseAutomationVariables()", html)
+        self.assertIn("action: 'arm_automation_recipes'", html)
+        self.assertIn("action: 'disarm_automation_recipes'", html)
+        self.assertIn("action: 'cancel_automation_recipe'", html)
+        self.assertIn("action: 'clear_automation_runs'", html)
+        self.assertIn("WB.Browser.Utils and Utils", html)
+        self.assertIn("16 / 64 KiB total", html)
+        self.assertIn("2 seconds each", html)
+        self.assertIn("Variable values are never returned in public session state", html)
 
     def test_repeater_exposes_bounded_edit_cancel_history_variables_and_comparison(self) -> None:
         html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
@@ -2173,11 +2235,13 @@ process.stdout.write(JSON.stringify({
         self.assertIn('"request_interception": [', application)
         self.assertIn('"object_experiment": [', application)
         self.assertIn('"runtime_hooks": [', application)
+        self.assertIn('"automation_recipes": [', application)
         self.assertIn('"repeater": [', application)
-        self.assertIn(r'let etag = "\"debugger-unavailable-v3\""', application)
+        self.assertIn(r'let etag = "\"debugger-unavailable-v4\""', application)
         self.assertIn("debuggerContractValid: isDebuggerResponse(state.debuggerSession)", application)
         self.assertIn("objectExperimentAvailable: state.debuggerSession?.object_experiment?.protocol_version === 1", application)
         self.assertIn("runtimeHooksAvailable: state.debuggerSession?.runtime_hooks?.protocol_version === 1", application)
+        self.assertIn("automationRecipesAvailable: state.debuggerSession?.automation_recipes?.protocol_version === 1", application)
         self.assertIn("repeaterAvailable: state.debuggerSession?.repeater?.protocol_version === 1", application)
         self.assertIn("apiCollectionContractValid: isApiCollection(state.apiCollection)", application)
         self.assertIn("REB_APP_SMOKE_API_COLLECTION_WRITE", application)

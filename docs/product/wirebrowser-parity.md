@@ -40,7 +40,7 @@ bounded evidence architecture. Matching a panel name is not sufficient.
 
 | WireBrowser capability | REB status | Evidence or remaining work |
 | --- | --- | --- |
-| Browser-context scripts | Missing | Requires a permission-controlled Experiment recipe runner with explicit target and lifetime scope. |
+| Browser-context scripts | Implemented | [Automation Recipes v1](./automation-recipes-v1.md) adds a bounded recipe library, private variables, manual execution, and explicitly armed created, before-load, and after-load triggers inside the disposable Experiment BrowserContext. |
 | Local Node-style analyst scripts | Missing | Requires a local capability API over captured evidence. MCP remains deferred by project policy. |
 | Decoder chains | Missing | Add local byte, text, URL, Base64, hex, compression, and structured-data transforms without automatic execution. |
 | JWT inspection | Missing | Add bounded local decoding and claim inspection without signature or trust claims unless explicitly verified. |
@@ -48,7 +48,7 @@ bounded evidence architecture. Matching a panel name is not sufficient.
 
 ## Delivery order
 
-Runtime Hooks is the current completed parity increment. The next implementation
-sequence is permission-scoped automation recipes and local decoding tools.
+Automation Recipes is the current completed parity increment. The next
+implementation sequence is local analyst scripts and local decoding tools.
 Each increment must preserve immutable baseline evidence, make mutation
 visible, and pass the repository's full native and UI gates.

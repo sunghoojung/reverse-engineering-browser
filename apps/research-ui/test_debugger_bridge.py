@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from debugger_bridge import (
+    AUTOMATION_RECIPE_FUNCTION,
     LIVE_OBJECT_SEARCH_FUNCTION,
     MAX_HEAP_SNAPSHOT_BYTES,
     OBJECT_EXPERIMENT_MUTATE_FUNCTION,
@@ -2610,6 +2611,475 @@ process.stdout.write(JSON.stringify({{
                 "setterCalls": 0,
             },
         )
+
+    def test_automation_recipes_manual_library_and_private_variables(self) -> None:
+        class AutomationBridge(DebuggerBridge):
+            def __init__(self) -> None:
+                super().__init__()
+                self.commands = []
+
+            def _command(self, method: str, params=None, timeout: float = 3.0) -> dict:
+                self.commands.append((method, params or {}))
+                if method == "Runtime.evaluate":
+                    return {
+                        "result": {
+                            "value": {
+                                "protocolVersion": 1,
+                                "ok": True,
+                                "resultType": "object",
+                                "resultText": '{"seed":"verified"}',
+                                "resultTruncated": False,
+                                "logs": [{"level": "info", "text": '"ran"'}],
+                                "logsTruncated": False,
+                                "elapsedMs": 3,
+                                "timedOut": False,
+                            }
+                        }
+                    }
+                return {}
+
+        bridge = AutomationBridge()
+        added = bridge.action(
+            {
+                "action": "add_automation_recipe",
+                "label": "Inspect state",
+                "trigger": "manual",
+                "enabled": True,
+                "source": 'console.info("ran"); return {seed: Utils.getVar("seed")};',
+            }
+        )["recipe"]
+        self.assertEqual(added["id"], 1)
+        bridge._state = "running"
+        bridge._target = {
+            "id": "automation-page",
+            "type": "page",
+            "title": "Fixture",
+            "url": "https://fixture.test/page?secret=hidden",
+        }
+        bridge._request_interception_context_id = "context-1"
+        bridge._begin_automation_session_locked(7)
+        bridge._automation_recipes_state.update(
+            {"state": "ready", "isolated": True, "target_id": "automation-page"}
+        )
+        bridge._object_experiment["url"] = (
+            "https://fixture.test/page?secret=hidden"
+        )
+        completed = bridge.action(
+            {
+                "action": "run_automation_recipe",
+                "recipe_id": added["id"],
+                "confirmed": True,
+                "variables": {"seed": "verified", "private": "do-not-expose"},
+            }
+        )["automation_recipes"]
+        self.assertEqual(completed["state"], "ready")
+        self.assertEqual(completed["variable_count"], 2)
+        self.assertEqual(completed["runs"][0]["operation"], "completed")
+        self.assertEqual(completed["runs"][0]["category"], "manual")
+        self.assertEqual(completed["runs"][0]["source"], "https://fixture.test/page")
+        self.assertNotIn("do-not-expose", json.dumps(bridge.snapshot()))
+        evaluated = next(
+            params
+            for method, params in bridge.commands
+            if method == "Runtime.evaluate"
+        )
+        self.assertTrue(evaluated["awaitPromise"])
+        self.assertTrue(evaluated["allowUnsafeEvalBlockedByCSP"])
+        self.assertEqual(evaluated["timeout"], 2_000)
+        self.assertIn("sourceURL=reb-automation-runner.js", evaluated["expression"])
+        self.assertIsNone(
+            bridge._parse_script(
+                {
+                    "scriptId": "internal-1",
+                    "url": "reb-automation-recipe.js",
+                }
+            )
+        )
+
+        updated = bridge.action(
+            {
+                "action": "update_automation_recipe",
+                "recipe_id": added["id"],
+                "label": "Inspect updated state",
+                "trigger": "after-load",
+                "enabled": False,
+                "source": "return document.title;",
+            }
+        )["recipe"]
+        self.assertEqual(updated["trigger"], "after-load")
+        bridge.action(
+            {"action": "remove_automation_recipe", "recipe_id": added["id"]}
+        )
+        self.assertEqual(bridge.snapshot()["automation_recipes"]["recipes"], [])
+        with self.assertRaisesRegex(DebuggerBridgeError, "4 KiB"):
+            bridge._normalize_automation_variables(
+                {"variables": {"oversized": "x" * (4 * 1024 + 1)}}
+            )
+        with self.assertRaisesRegex(DebuggerBridgeError, "source limit"):
+            for index in range(5):
+                bridge.action(
+                    {
+                        "action": "add_automation_recipe",
+                        "label": f"Bound {index}",
+                        "source": "x" * (16 * 1024),
+                    }
+                )
+
+    def test_automation_recipes_automatic_triggers_timeout_and_disarm(self) -> None:
+        class AutomationBridge(DebuggerBridge):
+            def __init__(self) -> None:
+                super().__init__()
+                self.commands = []
+
+            def _command(self, method: str, params=None, timeout: float = 3.0) -> dict:
+                params = params or {}
+                self.commands.append((method, params))
+                if method == "Page.addScriptToEvaluateOnNewDocument":
+                    return {"identifier": "automation-script-1"}
+                if method == "Runtime.evaluate":
+                    return {
+                        "result": {
+                            "value": {
+                                "protocolVersion": 1,
+                                "ok": True,
+                                "resultType": "string",
+                                "resultText": '"created"',
+                                "resultTruncated": False,
+                                "logs": [],
+                                "logsTruncated": False,
+                                "elapsedMs": 1,
+                                "timedOut": False,
+                            }
+                        }
+                    }
+                return {}
+
+        bridge = AutomationBridge()
+        recipes = []
+        for label, trigger in (
+            ("On create", "created"),
+            ("Before load", "before-load"),
+            ("After load", "after-load"),
+        ):
+            recipes.append(
+                bridge.action(
+                    {
+                        "action": "add_automation_recipe",
+                        "label": label,
+                        "trigger": trigger,
+                        "source": f'return "{trigger}";',
+                    }
+                )["recipe"]
+            )
+        bridge._state = "running"
+        bridge._target = {
+            "id": "automation-page",
+            "type": "page",
+            "title": "Fixture",
+            "url": "about:blank",
+        }
+        bridge._request_interception_context_id = "context-1"
+        bridge._begin_automation_session_locked(9)
+        bridge._automation_recipes_state.update(
+            {"state": "ready", "isolated": True, "target_id": "automation-page"}
+        )
+        armed = bridge.action(
+            {
+                "action": "arm_automation_recipes",
+                "confirmed": True,
+                "variables": {"seed": "verified"},
+            }
+        )["automation_recipes"]
+        self.assertTrue(armed["auto_armed"])
+        self.wait_for(
+            lambda: bridge.snapshot()["automation_recipes"]["automatic_runs"] == 1
+            and not bridge._automation_processing
+        )
+        before_source = next(
+            params["source"]
+            for method, params in bridge.commands
+            if method == "Page.addScriptToEvaluateOnNewDocument"
+        )
+        self.assertIn("globalThis !== globalThis.top", before_source)
+        self.assertIn("reb-automation-before-load.js", before_source)
+        self.assertIn("resultText: \"\"", before_source)
+        self.assertIn("length > 8192", before_source)
+        self.assertNotIn("do-not-expose", json.dumps(bridge.snapshot()))
+
+        nonce = bridge._automation_binding_nonce
+        before = recipes[1]
+        bridge._handle_event(
+            "Runtime.bindingCalled",
+            {
+                "name": bridge._automation_binding_name,
+                "payload": json.dumps(
+                    {
+                        "protocolVersion": 1,
+                        "nonce": "wrong",
+                        "kind": "start",
+                        "recipeId": before["id"],
+                        "documentId": "document-1",
+                    }
+                ),
+            },
+        )
+        self.assertIsNone(bridge.snapshot()["automation_recipes"]["active_run"])
+        bridge._handle_event(
+            "Runtime.bindingCalled",
+            {
+                "name": bridge._automation_binding_name,
+                "payload": json.dumps(
+                    {
+                        "protocolVersion": 1,
+                        "nonce": nonce,
+                        "kind": "start",
+                        "recipeId": before["id"],
+                        "documentId": "document-1",
+                    }
+                ),
+            },
+        )
+        active = bridge.snapshot()["automation_recipes"]["active_run"]
+        self.assertEqual(active["category"] if "category" in active else active["trigger"], "before-load")
+        bridge._handle_event(
+            "Runtime.bindingCalled",
+            {
+                "name": bridge._automation_binding_name,
+                "payload": json.dumps(
+                    {
+                        "protocolVersion": 1,
+                        "nonce": nonce,
+                        "kind": "done",
+                        "recipeId": before["id"],
+                        "documentId": "document-1",
+                        "result": {
+                            "protocolVersion": 1,
+                            "ok": True,
+                            "resultType": "string",
+                            "resultText": '"before-load"',
+                            "resultTruncated": False,
+                            "logs": [],
+                            "logsTruncated": False,
+                            "elapsedMs": 2,
+                            "timedOut": False,
+                        },
+                    }
+                ),
+            },
+        )
+        bridge._handle_event("Page.loadEventFired", {"timestamp": 1.0})
+        self.wait_for(
+            lambda: bridge.snapshot()["automation_recipes"]["automatic_runs"] == 3
+            and not bridge._automation_processing
+        )
+        bridge._handle_event(
+            "Runtime.bindingCalled",
+            {
+                "name": bridge._automation_binding_name,
+                "payload": json.dumps(
+                    {
+                        "protocolVersion": 1,
+                        "nonce": nonce,
+                        "kind": "start",
+                        "recipeId": before["id"],
+                        "documentId": "document-malformed",
+                    }
+                ),
+            },
+        )
+        bridge._handle_event(
+            "Runtime.bindingCalled",
+            {
+                "name": bridge._automation_binding_name,
+                "payload": json.dumps(
+                    {
+                        "protocolVersion": 1,
+                        "nonce": nonce,
+                        "kind": "done",
+                        "recipeId": before["id"],
+                        "documentId": "document-malformed",
+                        "result": {"protocolVersion": 99},
+                    }
+                ),
+            },
+        )
+        self.wait_for(
+            lambda: not bridge.snapshot()["automation_recipes"]["auto_armed"]
+            and bridge.snapshot()["automation_recipes"]["variable_count"] == 0
+            and bridge.snapshot()["automation_recipes"]["state"] == "ready"
+        )
+        state = bridge.snapshot()["automation_recipes"]
+        self.assertFalse(state["auto_armed"])
+        self.assertEqual(state["variable_count"], 0)
+        self.assertIn("malformed", state["last_failure"])
+        self.assertIn(
+            ("Page.removeScriptToEvaluateOnNewDocument", {"identifier": "automation-script-1"}),
+            bridge.commands,
+        )
+        self.assertIn(
+            ("Runtime.removeBinding", {"name": bridge._automation_binding_name}),
+            bridge.commands,
+        )
+        bridge._dispose_automation_locked(9)
+        disposed = bridge.snapshot()["automation_recipes"]
+        self.assertEqual(disposed["state"], "disposed")
+        self.assertEqual(len(disposed["recipes"]), 3)
+        self.assertEqual(disposed["runs"], [])
+
+    def test_automation_recipe_runner_is_bounded_and_skips_accessors(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+        exercise = f"""
+const run = ({AUTOMATION_RECIPE_FUNCTION});
+let getterCalls = 0;
+const value = {{visible: 'ok'}};
+Object.defineProperty(value, 'secret', {{enumerable: true, get() {{ getterCalls += 1; return 'bad'; }}}});
+value.circular = value;
+globalThis.__value = value;
+const result = await run({{
+  source: 'console.info("start", Utils.getVar("seed")); return globalThis.__value;',
+  variables: {{seed: 'verified'}}, resultLimit: 16384, logLimit: 32, logBytes: 1024,
+  timeoutMs: 2000
+}});
+const timed = await run({{
+  source: 'await new Promise(() => {{}});', variables: {{}}, resultLimit: 16384,
+  logLimit: 32, logBytes: 1024, timeoutMs: 25
+}});
+process.stdout.write(JSON.stringify({{result, timed, getterCalls}}));
+"""
+        completed = subprocess.run(
+            [node, "--input-type=module", "-e", exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        document = json.loads(completed.stdout)
+        self.assertEqual(document["getterCalls"], 0)
+        self.assertTrue(document["result"]["ok"])
+        self.assertFalse(document["result"]["timedOut"])
+        self.assertIn("[Accessor not invoked]", document["result"]["resultText"])
+        self.assertIn("[Circular]", document["result"]["resultText"])
+        self.assertLessEqual(len(document["result"]["logs"]), 32)
+        self.assertFalse(document["timed"]["ok"])
+        self.assertTrue(document["timed"]["timedOut"])
+        self.assertIn("execution limit", document["timed"]["error"])
+
+    def test_automation_recipe_cancel_reloads_the_disposable_page(self) -> None:
+        class AutomationBridge(DebuggerBridge):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = threading.Event()
+                self.reloaded = threading.Event()
+                self.commands = []
+
+            def _command(self, method: str, params=None, timeout: float = 3.0) -> dict:
+                self.commands.append((method, params or {}))
+                if method == "Runtime.evaluate":
+                    self.started.set()
+                    self.reloaded.wait(timeout=2.0)
+                    raise DebuggerBridgeError("Execution context was destroyed")
+                if method == "Page.reload":
+                    self.reloaded.set()
+                return {}
+
+        bridge = AutomationBridge()
+        recipe = bridge.action(
+            {
+                "action": "add_automation_recipe",
+                "label": "Wait forever",
+                "source": "await new Promise(() => {});",
+            }
+        )["recipe"]
+        bridge._state = "running"
+        bridge._target = {
+            "id": "automation-page",
+            "type": "page",
+            "title": "Fixture",
+            "url": "https://fixture.test/",
+        }
+        bridge._request_interception_context_id = "context-1"
+        bridge._begin_automation_session_locked(11)
+        bridge._automation_recipes_state.update(
+            {"state": "ready", "isolated": True, "target_id": "automation-page"}
+        )
+        completed = []
+
+        def run_recipe() -> None:
+            completed.append(
+                bridge.action(
+                    {
+                        "action": "run_automation_recipe",
+                        "recipe_id": recipe["id"],
+                        "confirmed": True,
+                        "variables": {},
+                    }
+                )
+            )
+
+        thread = threading.Thread(target=run_recipe)
+        thread.start()
+        self.assertTrue(bridge.started.wait(timeout=1.0))
+        bridge.action({"action": "cancel_automation_recipe"})
+        thread.join(timeout=2.0)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(completed[0]["run"]["operation"], "cancelled")
+        self.assertIn(("Runtime.terminateExecution", {}), bridge.commands)
+        self.assertIn(("Page.reload", {"ignoreCache": True}), bridge.commands)
+
+    def test_automation_protocol_timeout_recovers_and_disarms_atomically(self) -> None:
+        class TimeoutAutomationBridge(DebuggerBridge):
+            def __init__(self) -> None:
+                super().__init__()
+                self.commands = []
+
+            def _command(self, method: str, params=None, timeout: float = 3.0) -> dict:
+                self.commands.append((method, params or {}))
+                if method == "Runtime.evaluate":
+                    raise DebuggerBridgeError("CDP command timed out")
+                return {}
+
+        bridge = TimeoutAutomationBridge()
+        recipe = bridge.action(
+            {
+                "action": "add_automation_recipe",
+                "label": "Timed automatic run",
+                "trigger": "after-load",
+                "source": "return true;",
+            }
+        )["recipe"]
+        bridge._state = "running"
+        bridge._target = {
+            "id": "automation-page",
+            "type": "page",
+            "title": "Fixture",
+            "url": "https://fixture.test/",
+        }
+        bridge._request_interception_context_id = "context-1"
+        bridge._begin_automation_session_locked(12)
+        bridge._automation_recipes_state.update(
+            {
+                "state": "armed",
+                "isolated": True,
+                "target_id": "automation-page",
+                "auto_armed": True,
+            }
+        )
+        bridge._automation_processing = True
+        original_epoch = bridge._automation_epoch
+
+        run = bridge._execute_automation_recipe(
+            recipe, "after-load", automatic=True
+        )
+
+        state = bridge.snapshot()["automation_recipes"]
+        self.assertEqual(run["operation"], "timed_out")
+        self.assertFalse(state["auto_armed"])
+        self.assertFalse(bridge._automation_processing)
+        self.assertGreater(bridge._automation_epoch, original_epoch)
+        self.assertIn(("Runtime.terminateExecution", {}), bridge.commands)
+        self.assertIn(("Page.reload", {"ignoreCache": True}), bridge.commands)
 
 
 if __name__ == "__main__":

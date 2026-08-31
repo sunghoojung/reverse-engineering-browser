@@ -191,6 +191,17 @@ Promise returns are reported and preserved rather than overridden. Hook data
 never enters the evidence store. See
 [Runtime Hooks v1](../../docs/product/runtime-hooks-v1.md).
 
+Automation Studio also shares the disposable Experiment BrowserContext. Its
+process-local library holds up to 16 bounded browser-context recipes. Manual
+runs require confirmation, while created, before-load, and after-load triggers
+remain inert until explicitly armed for the current isolated page. An automatic
+run ceiling, a two-second timeout, one pending trigger batch, cancellation,
+visible drops, and deterministic page reload recovery bound execution. Variables
+remain private to the bridge, and logs and results are text-only previews.
+Recipe definitions survive disposable-context recreation, while variables,
+runs, and active target state are erased on disposal. See
+[Automation Recipes v1](../../docs/product/automation-recipes-v1.md).
+
 Repeater shares that disposable request-lab context and sends one editable,
 credential-free request at a time. It supports immediate cancellation, a
 100-millisecond to 30-second timeout, 32 session-scoped `{{name}}` variables,

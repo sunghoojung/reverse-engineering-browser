@@ -911,6 +911,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             "request_interception": DebuggerBridge._empty_request_interception(),
             "object_experiment": DebuggerBridge._empty_object_experiment(),
             "runtime_hooks": DebuggerBridge._empty_runtime_hooks(),
+            "automation_recipes": DebuggerBridge._empty_automation_recipes(),
             "repeater": DebuggerBridge._empty_repeater(),
             "settings": {
                 "breakpoints_active": True,

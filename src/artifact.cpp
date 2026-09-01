@@ -338,6 +338,8 @@ bool ParseManifestRecord(const std::string_view line,
                          std::uint64_t& session_id) {
   std::size_t position = 0;
   std::uint64_t ignored = 0;
+  std::uint64_t execution_context_id = 0;
+  std::string_view capture_origin;
   if (!ConsumePrefix(line, position, "{\"protocol_version\":1,\"artifact_id\":\"") ||
       !ParseUnsignedField(line, position, "\",\"session_id\":\"", artifact_id) ||
       artifact_id == 0 ||
@@ -345,7 +347,26 @@ bool ParseManifestRecord(const std::string_view line,
       session_id == 0 || !ParseUnsignedField(line, position, "\",\"frame_id\":\"", ignored) ||
       !ParseUnsignedField(line, position, "\",\"parent_artifact_id\":\"", ignored) ||
       !ParseUnsignedField(line, position, "\",\"creator_event_id\":\"", ignored) ||
-      !ParseUnsignedField(line, position, "\",\"kind\":\"", ignored)) {
+      !ParseUnsignedField(line, position, "\"", ignored)) {
+    return false;
+  }
+
+  if (ConsumePrefix(line, position, ",\"execution_context_id\":\"")) {
+    if (!ParseUnsignedField(line, position, "\",\"capture_origin\":\"", execution_context_id)) {
+      return false;
+    }
+    const std::size_t origin_end = line.find("\",\"kind\":\"", position);
+    if (origin_end == std::string_view::npos) {
+      return false;
+    }
+    capture_origin = line.substr(position, origin_end - position);
+    if (capture_origin != "unknown" && capture_origin != "network_response" &&
+        capture_origin != "dynamic_javascript" && capture_origin != "webassembly_compile" &&
+        capture_origin != "webassembly_module" && capture_origin != "webassembly_instantiate") {
+      return false;
+    }
+    position = origin_end + std::string_view("\",\"kind\":\"").size();
+  } else if (!ConsumePrefix(line, position, ",\"kind\":\"")) {
     return false;
   }
 
@@ -355,6 +376,12 @@ bool ParseManifestRecord(const std::string_view line,
   }
   const std::string_view kind = line.substr(position, kind_end - position);
   if (kind != "javascript" && kind != "wasm" && kind != "source_map" && kind != "response_body") {
+    return false;
+  }
+  if ((!capture_origin.empty() && capture_origin != "unknown" &&
+       capture_origin != "network_response" && execution_context_id == 0) ||
+      (capture_origin == "dynamic_javascript" && kind != "javascript") ||
+      (capture_origin.starts_with("webassembly_") && kind != "wasm")) {
     return false;
   }
   position = kind_end + std::string_view("\",\"url\":\"").size();
@@ -414,16 +441,36 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
       header.artifact_id == 0 || header.url_size == 0 || header.url_size > kMaxArtifactUrlBytes ||
       header.mime_type_size == 0 || header.mime_type_size > kMaxArtifactMimeTypeBytes ||
       (header.flags & ~kArtifactFlagSensitive) != 0 || header.reserved0 != 0 ||
-      !std::all_of(header.reserved1.begin(), header.reserved1.end(),
-                   [](const std::uint8_t byte) { return byte == 0; })) {
+      header.reserved1 != 0 || header.reserved2 != 0) {
     return false;
   }
   const bool sensitive = (header.flags & kArtifactFlagSensitive) != 0;
   if ((header.kind == ArtifactKind::kResponseBody) != sensitive) {
     return false;
   }
-  return header.kind == ArtifactKind::kJavaScript || header.kind == ArtifactKind::kWasm ||
-         header.kind == ArtifactKind::kSourceMap || header.kind == ArtifactKind::kResponseBody;
+  const bool valid_kind =
+      header.kind == ArtifactKind::kJavaScript || header.kind == ArtifactKind::kWasm ||
+      header.kind == ArtifactKind::kSourceMap || header.kind == ArtifactKind::kResponseBody;
+  const bool valid_origin = header.capture_origin == ArtifactCaptureOrigin::kUnknown ||
+                            header.capture_origin == ArtifactCaptureOrigin::kNetworkResponse ||
+                            header.capture_origin == ArtifactCaptureOrigin::kDynamicJavaScript ||
+                            header.capture_origin == ArtifactCaptureOrigin::kWebAssemblyCompile ||
+                            header.capture_origin == ArtifactCaptureOrigin::kWebAssemblyModule ||
+                            header.capture_origin == ArtifactCaptureOrigin::kWebAssemblyInstantiate;
+  const bool compatible_origin =
+      header.capture_origin == ArtifactCaptureOrigin::kUnknown ||
+      header.capture_origin == ArtifactCaptureOrigin::kNetworkResponse ||
+      (header.kind == ArtifactKind::kJavaScript &&
+       header.capture_origin == ArtifactCaptureOrigin::kDynamicJavaScript) ||
+      (header.kind == ArtifactKind::kWasm &&
+       (header.capture_origin == ArtifactCaptureOrigin::kWebAssemblyCompile ||
+        header.capture_origin == ArtifactCaptureOrigin::kWebAssemblyModule ||
+        header.capture_origin == ArtifactCaptureOrigin::kWebAssemblyInstantiate));
+  const bool runtime_has_context =
+      header.capture_origin == ArtifactCaptureOrigin::kUnknown ||
+      header.capture_origin == ArtifactCaptureOrigin::kNetworkResponse ||
+      header.execution_context_id != 0;
+  return valid_kind && valid_origin && compatible_origin && runtime_has_context;
 }
 
 const char* ArtifactKindName(const ArtifactKind kind) noexcept {
@@ -437,6 +484,24 @@ const char* ArtifactKindName(const ArtifactKind kind) noexcept {
     case ArtifactKind::kResponseBody:
       return "response_body";
     case ArtifactKind::kUnknown:
+      return "unknown";
+  }
+  return "unknown";
+}
+
+const char* ArtifactCaptureOriginName(const ArtifactCaptureOrigin origin) noexcept {
+  switch (origin) {
+    case ArtifactCaptureOrigin::kNetworkResponse:
+      return "network_response";
+    case ArtifactCaptureOrigin::kDynamicJavaScript:
+      return "dynamic_javascript";
+    case ArtifactCaptureOrigin::kWebAssemblyCompile:
+      return "webassembly_compile";
+    case ArtifactCaptureOrigin::kWebAssemblyModule:
+      return "webassembly_module";
+    case ArtifactCaptureOrigin::kWebAssemblyInstantiate:
+      return "webassembly_instantiate";
+    case ArtifactCaptureOrigin::kUnknown:
       return "unknown";
   }
   return "unknown";
@@ -663,9 +728,11 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
                  << "\",\"session_id\":\"" << header.session_id << "\",\"navigation_id\":\""
                  << header.navigation_id << "\",\"frame_id\":\"" << header.frame_id
                  << "\",\"parent_artifact_id\":\"" << header.parent_artifact_id
-                 << "\",\"creator_event_id\":\"" << header.creator_event_id << "\",\"kind\":\""
-                 << ArtifactKindName(header.kind) << "\",\"url\":\"" << JsonEscape(url)
-                 << "\",\"mime_type\":\"" << JsonEscape(mime_type)
+                 << "\",\"creator_event_id\":\"" << header.creator_event_id
+                 << "\",\"execution_context_id\":\"" << header.execution_context_id
+                 << "\",\"capture_origin\":\"" << ArtifactCaptureOriginName(header.capture_origin)
+                 << "\",\"kind\":\"" << ArtifactKindName(header.kind) << "\",\"url\":\""
+                 << JsonEscape(url) << "\",\"mime_type\":\"" << JsonEscape(mime_type)
                  << "\",\"byte_size\":" << header.content_size << ",\"sha256\":\"" << digest_hex
                  << "\",\"sensitive\":"
                  << (header.kind == ArtifactKind::kResponseBody ? "true" : "false")

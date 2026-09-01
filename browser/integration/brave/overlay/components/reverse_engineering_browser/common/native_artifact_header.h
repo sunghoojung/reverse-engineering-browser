@@ -9,6 +9,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
+#include <string_view>
 #include <type_traits>
 
 namespace reb {
@@ -20,6 +22,7 @@ inline constexpr std::uint32_t kNativeArtifactAckMagic = 0x4b414252U;
 inline constexpr std::size_t kNativeArtifactAckSize = 32;
 inline constexpr std::uint32_t kNativeArtifactMaxUrlBytes = 8'192;
 inline constexpr std::uint32_t kNativeArtifactMaxMimeTypeBytes = 255;
+inline constexpr std::size_t kNativeArtifactMaxContentBytes = 16U * 1024U * 1024U;
 inline constexpr std::uint16_t kNativeArtifactFlagSensitive = 1U << 0U;
 
 enum class NativeArtifactKind : std::uint16_t {
@@ -29,6 +32,22 @@ enum class NativeArtifactKind : std::uint16_t {
   kSourceMap = 3,
   kResponseBody = 4,
 };
+
+enum class NativeArtifactCaptureOrigin : std::uint16_t {
+  kUnknown = 0,
+  kNetworkResponse = 1,
+  kDynamicJavaScript = 2,
+  kWebAssemblyCompile = 3,
+  kWebAssemblyModule = 4,
+  kWebAssemblyInstantiate = 5,
+};
+
+using NativeGeneratedArtifactEmitter = void (*)(NativeArtifactKind kind,
+                                                NativeArtifactCaptureOrigin capture_origin,
+                                                std::uint64_t execution_context_id,
+                                                std::uint64_t frame_id,
+                                                std::string_view source_url,
+                                                std::span<const std::uint8_t> content) noexcept;
 
 enum class NativeArtifactReceiveStatus : std::uint32_t {
   kAccepted = 0,
@@ -73,7 +92,10 @@ struct NativeArtifactHeader final {
   std::uint32_t url_size = 0;
   std::uint32_t mime_type_size = 0;
   std::array<std::uint8_t, 32> expected_sha256{};
-  std::array<std::uint8_t, 16> reserved1{};
+  std::uint64_t execution_context_id = 0;
+  NativeArtifactCaptureOrigin capture_origin = NativeArtifactCaptureOrigin::kUnknown;
+  std::uint16_t reserved1 = 0;
+  std::uint32_t reserved2 = 0;
 };
 
 static_assert(sizeof(NativeArtifactHeader) == kNativeArtifactHeaderSize);
@@ -98,12 +120,15 @@ REB_ASSERT_NATIVE_ARTIFACT_HEADER_OFFSET(content_size, 64);
 REB_ASSERT_NATIVE_ARTIFACT_HEADER_OFFSET(url_size, 72);
 REB_ASSERT_NATIVE_ARTIFACT_HEADER_OFFSET(mime_type_size, 76);
 REB_ASSERT_NATIVE_ARTIFACT_HEADER_OFFSET(expected_sha256, 80);
-REB_ASSERT_NATIVE_ARTIFACT_HEADER_OFFSET(reserved1, 112);
+REB_ASSERT_NATIVE_ARTIFACT_HEADER_OFFSET(execution_context_id, 112);
+REB_ASSERT_NATIVE_ARTIFACT_HEADER_OFFSET(capture_origin, 120);
+REB_ASSERT_NATIVE_ARTIFACT_HEADER_OFFSET(reserved1, 122);
+REB_ASSERT_NATIVE_ARTIFACT_HEADER_OFFSET(reserved2, 124);
 #undef REB_ASSERT_NATIVE_ARTIFACT_HEADER_OFFSET
 
-// Only the browser-process bridge owns this channel. Renderer probes must use
-// the fixed event transport and must never stream bytes, write files, or open
-// the receiver connection.
+// Only the browser-process bridge owns the authenticated receiver connection.
+// Renderer probes may submit bounded generated-source bytes to that bridge,
+// but must never write files or open the receiver connection themselves.
 
 }  // namespace reb
 

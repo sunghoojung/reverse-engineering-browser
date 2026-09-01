@@ -84,6 +84,8 @@ PUBLIC_ARTIFACT_FIELDS = (
     "frame_id",
     "parent_artifact_id",
     "creator_event_id",
+    "execution_context_id",
+    "capture_origin",
     "kind",
     "url",
     "mime_type",
@@ -91,6 +93,14 @@ PUBLIC_ARTIFACT_FIELDS = (
     "sha256",
     "sensitive",
 )
+ARTIFACT_CAPTURE_ORIGINS = {
+    "unknown",
+    "network_response",
+    "dynamic_javascript",
+    "webassembly_compile",
+    "webassembly_module",
+    "webassembly_instantiate",
+}
 
 
 class LoopbackThreadingHTTPServer(ThreadingHTTPServer):
@@ -940,6 +950,28 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             for field in identifier_fields
         ):
             return False
+        runtime_fields = ("execution_context_id", "capture_origin")
+        if any(field in artifact for field in runtime_fields):
+            if not all(field in artifact for field in runtime_fields):
+                return False
+            if (
+                not isinstance(artifact["execution_context_id"], str)
+                or not CANONICAL_UINT64.fullmatch(artifact["execution_context_id"])
+                or int(artifact["execution_context_id"]) >= 2**64
+                or artifact["capture_origin"] not in ARTIFACT_CAPTURE_ORIGINS
+            ):
+                return False
+            origin = artifact["capture_origin"]
+            if origin == "dynamic_javascript" and (
+                artifact.get("kind") != "javascript"
+                or artifact["execution_context_id"] == "0"
+            ):
+                return False
+            if origin.startswith("webassembly_") and (
+                artifact.get("kind") != "wasm"
+                or artifact["execution_context_id"] == "0"
+            ):
+                return False
         if artifact.get("kind") not in ARTIFACT_KINDS:
             return False
         if not isinstance(artifact.get("url"), str) or not artifact["url"]:

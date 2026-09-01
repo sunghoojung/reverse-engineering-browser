@@ -26,6 +26,17 @@
         --amber: #fdd663;
         --red: #f28b82;
         --blue: #8ab4f8;
+        --syntax-keyword: #569cd6;
+        --syntax-control: #c586c0;
+        --syntax-string: #ce9178;
+        --syntax-number: #b5cea8;
+        --syntax-comment: #6a9955;
+        --syntax-function: #dcdcaa;
+        --syntax-property: #9cdcfe;
+        --syntax-type: #4ec9b0;
+        --syntax-regexp: #d16969;
+        --syntax-tag: #569cd6;
+        --syntax-attribute: #9cdcfe;
         --shadow: rgba(0, 0, 0, 0.34);
         --mono: "SFMono-Regular", "Cascadia Code", "Roboto Mono", Consolas, monospace;
         --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -50,6 +61,17 @@
         --amber: #b06000;
         --red: #d93025;
         --blue: #1a73e8;
+        --syntax-keyword: #0000ff;
+        --syntax-control: #af00db;
+        --syntax-string: #a31515;
+        --syntax-number: #098658;
+        --syntax-comment: #008000;
+        --syntax-function: #795e26;
+        --syntax-property: #001080;
+        --syntax-type: #267f99;
+        --syntax-regexp: #811f3f;
+        --syntax-tag: #800000;
+        --syntax-attribute: #e50000;
         --shadow: rgba(24, 31, 42, 0.15);
       }
 
@@ -970,6 +992,17 @@
       .source-gutter:disabled { cursor: default; }
       .source-gutter:not(:disabled):hover { color: var(--text); }
       .source-text { padding-left: 7px; }
+      .syntax-keyword { color: var(--syntax-keyword); }
+      .syntax-control { color: var(--syntax-control); }
+      .syntax-string { color: var(--syntax-string); }
+      .syntax-number { color: var(--syntax-number); }
+      .syntax-comment { color: var(--syntax-comment); }
+      .syntax-function { color: var(--syntax-function); }
+      .syntax-property { color: var(--syntax-property); }
+      .syntax-type { color: var(--syntax-type); }
+      .syntax-regexp { color: var(--syntax-regexp); }
+      .syntax-tag { color: var(--syntax-tag); }
+      .syntax-attribute { color: var(--syntax-attribute); }
       .source-line.search-match { background: color-mix(in srgb, var(--amber) 13%, transparent); }
       .source-empty {
         min-height: 100%;
@@ -2036,6 +2069,7 @@
                 <span id="source-position">Line 1, Column 1</span>
                 <span id="source-size">0 bytes</span>
                 <span id="source-view-kind">Original evidence</span>
+                <span id="source-language">Plain text</span>
                 <span id="source-hash" class="source-hash"></span>
               </div>
               <section id="console-drawer" class="console-drawer" aria-label="Console drawer" hidden>
@@ -3453,6 +3487,7 @@ export async function checkout(cart, fingerprint) {
         sourcePosition: document.querySelector('#source-position'),
         sourceSize: document.querySelector('#source-size'),
         sourceViewKind: document.querySelector('#source-view-kind'),
+        sourceLanguage: document.querySelector('#source-language'),
         sourceHash: document.querySelector('#source-hash'),
         artifactFacts: document.querySelector('#artifact-facts'),
         sourcesEditor: document.querySelector('.sources-editor'),
@@ -3656,6 +3691,10 @@ export async function checkout(cart, fingerprint) {
       ]);
       const networkLifecycleTypes = new Set(lifecycleRanks.keys());
       const artifactKinds = new Set(['javascript', 'wasm', 'source_map', 'response_body']);
+      const artifactCaptureOrigins = new Set([
+        'unknown', 'network_response', 'dynamic_javascript', 'webassembly_compile',
+        'webassembly_module', 'webassembly_instantiate'
+      ]);
       const artifactIdentifierFields = [
         'artifact_id', 'session_id', 'navigation_id', 'frame_id', 'parent_artifact_id', 'creator_event_id'
       ];
@@ -3803,8 +3842,19 @@ export async function checkout(cart, fingerprint) {
       }
 
       function isArtifact(artifact) {
-        return isPlainObject(artifact) &&
-          artifact.protocol_version === 1 &&
+        if (!isPlainObject(artifact) ||
+          (Object.hasOwn(artifact, 'execution_context_id') !== Object.hasOwn(artifact, 'capture_origin'))) {
+          return false;
+        }
+        if (Object.hasOwn(artifact, 'execution_context_id')) {
+          if (!isCanonicalInteger(artifact.execution_context_id, 0n, uint64Max) ||
+            !artifactCaptureOrigins.has(artifact.capture_origin) ||
+            (artifact.capture_origin === 'dynamic_javascript' &&
+              (artifact.kind !== 'javascript' || artifact.execution_context_id === '0')) ||
+            (artifact.capture_origin.startsWith('webassembly_') &&
+              (artifact.kind !== 'wasm' || artifact.execution_context_id === '0'))) return false;
+        }
+        return artifact.protocol_version === 1 &&
           artifactIdentifierFields.every(field => isCanonicalInteger(artifact[field], 0n, uint64Max)) &&
           artifactKinds.has(artifact.kind) &&
           typeof artifact.url === 'string' && artifact.url.length > 0 &&
@@ -8441,7 +8491,8 @@ export async function checkout(cart, fingerprint) {
       function analystArtifactMetadata(artifact) {
         const metadata = {};
         ['protocol_version', 'artifact_id', 'session_id', 'navigation_id', 'frame_id', 'parent_artifact_id',
-          'creator_event_id', 'kind', 'origin', 'url', 'mime_type', 'byte_size', 'sha256', 'sensitive']
+          'creator_event_id', 'execution_context_id', 'capture_origin', 'kind', 'origin', 'url',
+          'mime_type', 'byte_size', 'sha256', 'sensitive']
           .forEach(key => { if (artifact[key] !== undefined) metadata[key] = artifact[key]; });
         return metadata;
       }
@@ -9475,6 +9526,8 @@ export async function checkout(cart, fingerprint) {
           : [
               ['Artifact', source.artifact_id], ['Kind', source.kind], ['Session', source.session_id],
               ['Navigation', source.navigation_id], ['Frame', source.frame_id], ['Creator', source.creator_event_id],
+              ['Context', source.execution_context_id ?? 'unreported'],
+              ['Origin', source.capture_origin?.replaceAll('_', ' ') ?? 'legacy capture'],
               ['Parent', source.parent_artifact_id], ['MIME', source.mime_type], ['SHA-256', source.sha256],
               ['Sensitive', source.sensitive ? 'approved' : 'no']
             ];
@@ -9550,6 +9603,394 @@ export async function checkout(cart, fingerprint) {
         return output.trim();
       }
 
+      const SOURCE_HIGHLIGHT_TOKEN_LIMIT = 50000;
+      const SOURCE_CONTROL_WORDS = new Set([
+        'break', 'case', 'catch', 'continue', 'debugger', 'default', 'do', 'else',
+        'finally', 'for', 'if', 'return', 'switch', 'throw', 'try', 'while', 'with',
+        'yield', 'await'
+      ]);
+      const SOURCE_KEYWORDS = new Set([
+        'as', 'async', 'class', 'const', 'delete', 'enum', 'export', 'extends',
+        'from', 'function', 'get', 'implements', 'import', 'in', 'instanceof',
+        'interface', 'let', 'new', 'of', 'package', 'private', 'protected', 'public',
+        'set', 'static', 'super', 'this', 'typeof', 'var', 'void'
+      ]);
+      const SOURCE_LITERALS = new Set([
+        'false', 'Infinity', 'NaN', 'null', 'true', 'undefined'
+      ]);
+      const SOURCE_NUMBER_PATTERN = /(?:0[xX][\da-fA-F]+|0[bB][01]+|0[oO][0-7]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?n?)/y;
+      const SOURCE_IDENTIFIER_PATTERN = /[A-Za-z_$][\w$]*/y;
+      const SOURCE_CSS_COLOR_PATTERN = /#[\da-fA-F]{3,8}\b/y;
+      const SOURCE_CSS_NUMBER_PATTERN = /(?:\d+\.?\d*|\.\d+)(?:[a-z%]+)?/iy;
+      const SOURCE_CSS_IDENTIFIER_PATTERN = /@?-{0,2}[A-Za-z_][\w-]*/y;
+      const SOURCE_MARKUP_IDENTIFIER_PATTERN = /[A-Za-z_:][\w:.-]*/y;
+      const SOURCE_WASM_VALUE_PATTERN = /(?:[\da-fA-F]{8}|[\da-fA-F]{2})(?=\s|$)/y;
+      const SOURCE_WASM_IDENTIFIER_PATTERN = /\$?[A-Za-z_][\w.$-]*/y;
+
+      function sourceMatchAt(pattern, value, index) {
+        pattern.lastIndex = index;
+        return pattern.exec(value)?.[0] ?? null;
+      }
+
+      function sourceNextSignificant(value, index) {
+        while (/\s/.test(value[index] ?? '')) index += 1;
+        return value[index] ?? '';
+      }
+
+      function sourcePreviousSignificant(value, index) {
+        for (let previous = index - 1; previous >= 0; previous -= 1) {
+          if (!/\s/.test(value[previous])) return value[previous];
+        }
+        return '';
+      }
+
+      function sourceIdentifierStart(character) {
+        const code = character.charCodeAt(0);
+        return character === '$' || character === '_' ||
+          (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+      }
+
+      function sourceDigit(character) {
+        const code = character.charCodeAt(0);
+        return code >= 48 && code <= 57;
+      }
+
+      function sourceCodeTokenStart(value, index, json) {
+        const character = value[index] ?? '';
+        const next = value[index + 1] ?? '';
+        return sourceIdentifierStart(character) || sourceDigit(character) ||
+          (character === '.' && sourceDigit(next)) || character === '/' ||
+          character === '"' || character === "'" || (!json && character === '`');
+      }
+
+      function sourceCssTokenStart(value, index) {
+        const character = value[index] ?? '';
+        const next = value[index + 1] ?? '';
+        return sourceIdentifierStart(character) || sourceDigit(character) ||
+          (character === '.' && sourceDigit(next)) ||
+          ['#', '/', '"', "'", '@', '-'].includes(character);
+      }
+
+      function sourceSyntaxLanguage(source) {
+        if (!source) return 'text';
+        const mime = String(source.mime_type ?? '').toLowerCase().split(';', 1)[0];
+        const name = sourceName(source).toLowerCase();
+        if (source.kind === 'wasm' || mime === 'application/wasm') return 'wasm';
+        if (source.kind === 'javascript' || /(?:java|ecma)script/.test(mime) || /\.[cm]?jsx?$/.test(name)) return 'javascript';
+        if (source.kind === 'source_map' || /json/.test(mime) || /\.(?:json|map)$/.test(name)) return 'json';
+        if (/css/.test(mime) || /\.css$/.test(name)) return 'css';
+        if (/(?:html|xml|svg)/.test(mime) || /\.(?:html?|xml|svg)$/.test(name)) return 'markup';
+        return 'text';
+      }
+
+      function sourceSyntaxLabel(language) {
+        return {javascript: 'JavaScript', json: 'JSON', css: 'CSS', markup: 'HTML', wasm: 'WebAssembly hex', text: 'Plain text'}[language];
+      }
+
+      function createSourceTokenizer(source) {
+        return {
+          language: sourceSyntaxLanguage(source),
+          state: 'code',
+          coloredTokens: 0,
+          truncated: false
+        };
+      }
+
+      function pushSourceToken(tokens, tokenizer, type, text) {
+        if (!text) return;
+        let boundedType = type;
+        if (type !== 'plain') {
+          if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
+            boundedType = 'plain';
+            tokenizer.truncated = true;
+          } else {
+            tokenizer.coloredTokens += 1;
+          }
+        }
+        const previous = tokens.at(-1);
+        if (previous?.type === boundedType) previous.text += text;
+        else tokens.push({type: boundedType, text});
+      }
+
+      function quotedSourceEnd(line, start, quote) {
+        let escaped = false;
+        for (let index = start + 1; index < line.length; index += 1) {
+          const character = line[index];
+          if (escaped) escaped = false;
+          else if (character === '\\') escaped = true;
+          else if (character === quote) return index + 1;
+        }
+        return line.length;
+      }
+
+      function regexpSourceEnd(line, start) {
+        let escaped = false;
+        let characterClass = false;
+        for (let index = start + 1; index < line.length; index += 1) {
+          const character = line[index];
+          if (escaped) { escaped = false; continue; }
+          if (character === '\\') { escaped = true; continue; }
+          if (character === '[') { characterClass = true; continue; }
+          if (character === ']') { characterClass = false; continue; }
+          if (character === '/' && !characterClass) {
+            let end = index + 1;
+            while (/[a-z]/i.test(line[end] ?? '')) end += 1;
+            return end;
+          }
+        }
+        return start + 1;
+      }
+
+      function tokenizeCodeSourceLine(line, tokenizer) {
+        const tokens = [];
+        const json = tokenizer.language === 'json';
+        let index = 0;
+        while (index < line.length) {
+          if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
+            tokenizer.truncated = true;
+            pushSourceToken(tokens, tokenizer, 'plain', line.slice(index));
+            break;
+          }
+          if (tokenizer.state === 'block-comment') {
+            const end = line.indexOf('*/', index);
+            if (end === -1) { pushSourceToken(tokens, tokenizer, 'comment', line.slice(index)); break; }
+            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 2));
+            tokenizer.state = 'code'; index = end + 2; continue;
+          }
+          if (tokenizer.state === 'template') {
+            const end = quotedSourceEnd(line, index - 1, '`');
+            pushSourceToken(tokens, tokenizer, 'string', line.slice(index, end));
+            if (end < line.length || line[end - 1] === '`') tokenizer.state = 'code';
+            index = end; continue;
+          }
+          const character = line[index];
+          const next = line[index + 1] ?? '';
+          if (character === '/' && next === '/') {
+            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index)); break;
+          }
+          if (character === '/' && next === '*') {
+            const end = line.indexOf('*/', index + 2);
+            if (end === -1) {
+              pushSourceToken(tokens, tokenizer, 'comment', line.slice(index));
+              tokenizer.state = 'block-comment'; break;
+            }
+            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 2));
+            index = end + 2; continue;
+          }
+          if (character === '"' || character === "'" || (!json && character === '`')) {
+            const end = quotedSourceEnd(line, index, character);
+            const nextSignificant = sourceNextSignificant(line, end);
+            const type = json && nextSignificant === ':' ? 'property' : 'string';
+            pushSourceToken(tokens, tokenizer, type, line.slice(index, end));
+            if (character === '`' && line[end - 1] !== '`') tokenizer.state = 'template';
+            index = end; continue;
+          }
+          if (!sourceCodeTokenStart(line, index, json)) {
+            const start = index;
+            do { index += 1; } while (index < line.length && !sourceCodeTokenStart(line, index, json));
+            pushSourceToken(tokens, tokenizer, 'plain', line.slice(start, index));
+            continue;
+          }
+          const number = sourceMatchAt(SOURCE_NUMBER_PATTERN, line, index);
+          if (number) {
+            pushSourceToken(tokens, tokenizer, 'number', number); index += number.length; continue;
+          }
+          const identifier = sourceMatchAt(SOURCE_IDENTIFIER_PATTERN, line, index);
+          if (identifier) {
+            const following = sourceNextSignificant(line, index + identifier.length);
+            const type = SOURCE_CONTROL_WORDS.has(identifier) ? 'control'
+              : SOURCE_KEYWORDS.has(identifier) ? 'keyword'
+                : SOURCE_LITERALS.has(identifier) ? 'number'
+                    : following === '(' ? 'function'
+                      : /^[A-Z]/.test(identifier) ? 'type'
+                        : 'property';
+            pushSourceToken(tokens, tokenizer, type, identifier);
+            index += identifier.length; continue;
+          }
+          const previous = sourcePreviousSignificant(line, index);
+          if (!json && character === '/' && next && !/[/\s]/.test(next) &&
+              (!previous || /[([{=,:;!&|?+\-*%^~<>]/.test(previous))) {
+            const end = regexpSourceEnd(line, index);
+            if (end > index + 1) {
+              pushSourceToken(tokens, tokenizer, 'regexp', line.slice(index, end));
+              index = end; continue;
+            }
+          }
+          pushSourceToken(tokens, tokenizer, 'plain', character);
+          index += 1;
+        }
+        return tokens;
+      }
+
+      function tokenizeCssSourceLine(line, tokenizer) {
+        const tokens = [];
+        let index = 0;
+        while (index < line.length) {
+          if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
+            tokenizer.truncated = true;
+            pushSourceToken(tokens, tokenizer, 'plain', line.slice(index));
+            break;
+          }
+          if (tokenizer.state === 'block-comment') {
+            const end = line.indexOf('*/', index);
+            if (end === -1) { pushSourceToken(tokens, tokenizer, 'comment', line.slice(index)); break; }
+            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 2));
+            tokenizer.state = 'code'; index = end + 2; continue;
+          }
+          if (line.startsWith('/*', index)) {
+            const end = line.indexOf('*/', index + 2);
+            if (end === -1) {
+              pushSourceToken(tokens, tokenizer, 'comment', line.slice(index));
+              tokenizer.state = 'block-comment'; break;
+            }
+            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 2));
+            index = end + 2; continue;
+          }
+          const character = line[index];
+          if (character === '"' || character === "'") {
+            const end = quotedSourceEnd(line, index, character);
+            pushSourceToken(tokens, tokenizer, 'string', line.slice(index, end));
+            index = end; continue;
+          }
+          if (!sourceCssTokenStart(line, index)) {
+            const start = index;
+            do { index += 1; } while (index < line.length && !sourceCssTokenStart(line, index));
+            pushSourceToken(tokens, tokenizer, 'plain', line.slice(start, index));
+            continue;
+          }
+          const color = sourceMatchAt(SOURCE_CSS_COLOR_PATTERN, line, index);
+          const number = sourceMatchAt(SOURCE_CSS_NUMBER_PATTERN, line, index);
+          if (color || number) {
+            const value = color || number;
+            pushSourceToken(tokens, tokenizer, 'number', value); index += value.length; continue;
+          }
+          const identifier = sourceMatchAt(SOURCE_CSS_IDENTIFIER_PATTERN, line, index);
+          if (identifier) {
+            const following = sourceNextSignificant(line, index + identifier.length);
+            pushSourceToken(tokens, tokenizer, identifier.startsWith('@') ? 'keyword' : following === ':' ? 'property' : 'type', identifier);
+            index += identifier.length; continue;
+          }
+          pushSourceToken(tokens, tokenizer, 'plain', character); index += 1;
+        }
+        return tokens;
+      }
+
+      function tokenizeMarkupTag(text, tokenizer, tokens) {
+        let index = 0;
+        let tagSeen = false;
+        while (index < text.length) {
+          if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
+            tokenizer.truncated = true;
+            pushSourceToken(tokens, tokenizer, 'plain', text.slice(index));
+            break;
+          }
+          const character = text[index];
+          if (character === '"' || character === "'") {
+            const end = quotedSourceEnd(text, index, character);
+            pushSourceToken(tokens, tokenizer, 'string', text.slice(index, end));
+            index = end; continue;
+          }
+          const identifier = sourceMatchAt(SOURCE_MARKUP_IDENTIFIER_PATTERN, text, index);
+          if (identifier) {
+            pushSourceToken(tokens, tokenizer, tagSeen ? 'attribute' : 'tag', identifier);
+            tagSeen = true; index += identifier.length; continue;
+          }
+          pushSourceToken(tokens, tokenizer, 'plain', character); index += 1;
+        }
+      }
+
+      function tokenizeMarkupSourceLine(line, tokenizer) {
+        const tokens = [];
+        let index = 0;
+        while (index < line.length) {
+          if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
+            tokenizer.truncated = true;
+            pushSourceToken(tokens, tokenizer, 'plain', line.slice(index));
+            break;
+          }
+          if (tokenizer.state === 'markup-comment') {
+            const end = line.indexOf('-->', index);
+            if (end === -1) { pushSourceToken(tokens, tokenizer, 'comment', line.slice(index)); break; }
+            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 3));
+            tokenizer.state = 'code'; index = end + 3; continue;
+          }
+          const tag = line.indexOf('<', index);
+          if (tag === -1) {
+            pushSourceToken(tokens, tokenizer, 'plain', line.slice(index)); break;
+          }
+          pushSourceToken(tokens, tokenizer, 'plain', line.slice(index, tag));
+          if (line.startsWith('<!--', tag)) {
+            const end = line.indexOf('-->', tag + 4);
+            if (end === -1) {
+              pushSourceToken(tokens, tokenizer, 'comment', line.slice(tag));
+              tokenizer.state = 'markup-comment'; break;
+            }
+            pushSourceToken(tokens, tokenizer, 'comment', line.slice(tag, end + 3));
+            index = end + 3; continue;
+          }
+          const end = line.indexOf('>', tag + 1);
+          if (end === -1) {
+            tokenizeMarkupTag(line.slice(tag), tokenizer, tokens); break;
+          }
+          tokenizeMarkupTag(line.slice(tag, end + 1), tokenizer, tokens);
+          index = end + 1;
+        }
+        return tokens;
+      }
+
+      function tokenizeWasmSourceLine(line, tokenizer) {
+        const tokens = [];
+        let index = 0;
+        while (index < line.length) {
+          if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
+            tokenizer.truncated = true;
+            pushSourceToken(tokens, tokenizer, 'plain', line.slice(index));
+            break;
+          }
+          if (line.startsWith(';;', index)) {
+            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index)); break;
+          }
+          if (line[index] === '|') {
+            pushSourceToken(tokens, tokenizer, 'string', line.slice(index)); break;
+          }
+          const value = sourceMatchAt(SOURCE_WASM_VALUE_PATTERN, line, index);
+          const identifier = sourceMatchAt(SOURCE_WASM_IDENTIFIER_PATTERN, line, index);
+          if (value) {
+            pushSourceToken(tokens, tokenizer, 'number', value); index += value.length; continue;
+          }
+          if (identifier) {
+            pushSourceToken(tokens, tokenizer, /^(?:i32|i64|f32|f64|v128|funcref|externref)$/.test(identifier) ? 'type' : 'keyword', identifier);
+            index += identifier.length; continue;
+          }
+          pushSourceToken(tokens, tokenizer, 'plain', line[index]); index += 1;
+        }
+        return tokens;
+      }
+
+      function sourceSyntaxTokens(line, tokenizer) {
+        if (!line) return [{type: 'plain', text: ' '}];
+        if (tokenizer.truncated) return [{type: 'plain', text: line}];
+        if (tokenizer.language === 'javascript' || tokenizer.language === 'json') return tokenizeCodeSourceLine(line, tokenizer);
+        if (tokenizer.language === 'css') return tokenizeCssSourceLine(line, tokenizer);
+        if (tokenizer.language === 'markup') return tokenizeMarkupSourceLine(line, tokenizer);
+        if (tokenizer.language === 'wasm') return tokenizeWasmSourceLine(line, tokenizer);
+        return [{type: 'plain', text: line}];
+      }
+
+      function appendSourceSyntax(container, tokens) {
+        const fragment = document.createDocumentFragment();
+        tokens.forEach(token => {
+          if (token.type === 'plain') fragment.append(document.createTextNode(token.text));
+          else {
+            const span = document.createElement('span');
+            span.className = `syntax-${token.type}`;
+            span.textContent = token.text;
+            fragment.append(span);
+          }
+        });
+        container.replaceChildren(fragment);
+      }
+
       function applySourceSearch() {
         const needle = elements.sourceSearch.value.toLowerCase();
         let matches = 0;
@@ -9597,18 +10038,21 @@ export async function checkout(cart, fingerprint) {
 
       function renderSourceContent(source) {
         if (!source) {
+          elements.sourceLanguage.textContent = 'Plain text';
           elements.sourceCode.hidden = true;
           elements.sourceCodeEmpty.hidden = false;
           elements.sourceCodeEmpty.textContent = 'Select a JavaScript file, WASM module, source map, or approved response body.';
           return;
         }
         if (source.loading) {
+          elements.sourceLanguage.textContent = 'Detecting syntax';
           elements.sourceCode.hidden = true;
           elements.sourceCodeEmpty.hidden = false;
           elements.sourceCodeEmpty.textContent = source.source_type === 'script' ? 'Loading live script source…' : 'Loading immutable artifact bytes…';
           return;
         }
         if (source.loadError) {
+          elements.sourceLanguage.textContent = 'Unavailable';
           elements.sourceCode.hidden = true;
           elements.sourceCodeEmpty.hidden = false;
           elements.sourceCodeEmpty.textContent = source.loadError;
@@ -9621,6 +10065,7 @@ export async function checkout(cart, fingerprint) {
         const lines = content.split('\n');
         const renderedLines = lines.slice(0, 20000);
         const breakpointsByLine = breakpointLinesForSource(source);
+        const tokenizer = createSourceTokenizer(source);
         const nodes = renderedLines.map((line, index) => {
           const runtimeLine = sourceRuntimeLine(source, index);
           const row = document.createElement('span');
@@ -9647,7 +10092,7 @@ export async function checkout(cart, fingerprint) {
           });
           const text = document.createElement('span');
           text.className = 'source-text';
-          text.textContent = line || ' ';
+          appendSourceSyntax(text, sourceSyntaxTokens(line, tokenizer));
           row.append(gutter, text);
           return row;
         });
@@ -9661,6 +10106,7 @@ export async function checkout(cart, fingerprint) {
           nodes.push(notice);
         }
         elements.sourceCode.replaceChildren(...nodes);
+        elements.sourceLanguage.textContent = `${sourceSyntaxLabel(tokenizer.language)}${tokenizer.truncated ? ' · color limit reached' : ''}`;
         elements.sourceCode.hidden = false;
         elements.sourceCodeEmpty.hidden = true;
         elements.sourceCodeWrap.scrollTop = 0;

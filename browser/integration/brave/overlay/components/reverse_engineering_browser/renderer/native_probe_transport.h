@@ -8,6 +8,8 @@
 
 #include <atomic>
 #include <cstdint>
+#include <span>
+#include <string_view>
 #include <vector>
 
 #include "base/memory/shared_memory_mapping.h"
@@ -47,7 +49,20 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
   ~NativeProbeTransport() override;
 
   static void Emit(const NativeProbeEvent& event) noexcept;
+  static void EmitArtifact(NativeArtifactKind kind,
+                           NativeArtifactCaptureOrigin capture_origin,
+                           std::uint64_t execution_context_id,
+                           std::uint64_t frame_id,
+                           std::string_view source_url,
+                           std::span<const std::uint8_t> content) noexcept;
   void EmitEvent(const NativeProbeEvent& event) noexcept;
+  void EmitGeneratedArtifact(NativeArtifactKind kind,
+                             NativeArtifactCaptureOrigin capture_origin,
+                             std::uint64_t execution_context_id,
+                             std::uint64_t frame_id,
+                             std::string_view source_url,
+                             std::span<const std::uint8_t> content) noexcept;
+  mojo::SharedRemote<mojom::NativeProbeHost>* HostForCurrentSequence();
 
   mojo::SharedRemote<mojom::NativeProbeHost> host_;
   base::ThreadLocalOwnedPointer<mojo::SharedRemote<mojom::NativeProbeHost>> thread_hosts_;

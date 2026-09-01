@@ -6,6 +6,7 @@
 module reb.mojom;
 
 import "mojo/public/mojom/base/shared_memory.mojom";
+import "mojo/public/mojom/base/big_buffer.mojom";
 
 interface NativeProbeClient {
   Configure(uint64 session_id,
@@ -20,4 +21,10 @@ interface NativeProbeClient {
 interface NativeProbeHost {
   BindClient(pending_remote<NativeProbeClient> client);
   EventsAvailable();
+  CaptureGeneratedArtifact(uint16 kind,
+                           uint16 capture_origin,
+                           uint64 execution_context_id,
+                           uint64 frame_id,
+                           string source_url,
+                           mojo_base.mojom.BigBuffer content);
 };

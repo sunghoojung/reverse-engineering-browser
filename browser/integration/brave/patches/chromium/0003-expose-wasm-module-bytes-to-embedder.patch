@@ -1,0 +1,107 @@
+diff --git a/v8/include/v8-callbacks.h b/v8/include/v8-callbacks.h
+--- a/v8/include/v8-callbacks.h
++++ b/v8/include/v8-callbacks.h
+@@ -317,6 +317,19 @@ using ExtensionCallback = bool (*)(const FunctionCallbackInfo<Value>&);
+ using AllowWasmCodeGenerationCallback = bool (*)(Local<Context> context,
+                                                  Local<String> source);
+ 
++enum class WasmModuleBytesOrigin {
++  kCompile,
++  kModule,
++  kInstantiate,
++};
++
++// Called synchronously after WebAssembly code generation is authorized and
++// V8 has copied the caller-owned module bytes.
++using WasmModuleBytesCallback = void (*)(Local<Context> context,
++                                         WasmModuleBytesOrigin origin,
++                                         const uint8_t* bytes,
++                                         size_t size);
++
+ // --- Callback for APIs defined on v8-supported objects, but implemented
+ // by the embedder. Example: WebAssembly.{compile|instantiate}Streaming ---
+ using ApiImplementationCallback = void (*)(const FunctionCallbackInfo<Value>&);
+diff --git a/v8/include/v8-isolate.h b/v8/include/v8-isolate.h
+--- a/v8/include/v8-isolate.h
++++ b/v8/include/v8-isolate.h
+@@ -1733,6 +1733,8 @@ class V8_EXPORT Isolate {
+   void SetWasmModuleCallback(ExtensionCallback callback);
+   void SetWasmInstanceCallback(ExtensionCallback callback);
+ 
++  void SetWasmModuleBytesCallback(WasmModuleBytesCallback callback);
++
+   void SetWasmStreamingCallback(WasmStreamingCallback callback);
+ 
+   void SetWasmAsyncResolvePromiseCallback(
+diff --git a/v8/src/api/api.cc b/v8/src/api/api.cc
+--- a/v8/src/api/api.cc
++++ b/v8/src/api/api.cc
+@@ -11006,6 +11006,9 @@ CALLBACK_SETTER(AllowWasmCodeGenerationCallback,
+ CALLBACK_SETTER(WasmModuleCallback, ExtensionCallback, wasm_module_callback)
+ CALLBACK_SETTER(WasmInstanceCallback, ExtensionCallback, wasm_instance_callback)
+ 
++CALLBACK_SETTER(WasmModuleBytesCallback, WasmModuleBytesCallback,
++                wasm_module_bytes_callback)
++
+ CALLBACK_SETTER(WasmStreamingCallback, WasmStreamingCallback,
+                 wasm_streaming_callback)
+ 
+diff --git a/v8/src/execution/isolate.h b/v8/src/execution/isolate.h
+--- a/v8/src/execution/isolate.h
++++ b/v8/src/execution/isolate.h
+@@ -505,6 +505,7 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
+   V(AllowWasmCodeGenerationCallback, allow_wasm_code_gen_callback, nullptr) \
+   V(ExtensionCallback, wasm_module_callback, &NoExtension)                  \
+   V(ExtensionCallback, wasm_instance_callback, &NoExtension)                \
++  V(WasmModuleBytesCallback, wasm_module_bytes_callback, nullptr)           \
+   V(SharedArrayBufferConstructorEnabledCallback,                            \
+     sharedarraybuffer_constructor_enabled_callback, nullptr)                \
+   V(WasmStreamingCallback, wasm_streaming_callback, nullptr)                \
+diff --git a/v8/src/wasm/wasm-js.cc b/v8/src/wasm/wasm-js.cc
+--- a/v8/src/wasm/wasm-js.cc
++++ b/v8/src/wasm/wasm-js.cc
+@@ -722,6 +722,17 @@ class WasmJSApiScope {
+   ErrorThrower thrower_;
+ };
+ 
++void NotifyWasmModuleBytes(i::Isolate* isolate,
++                           Local<Context> context,
++                           const WasmModuleBytesOrigin origin,
++                           const base::span<const uint8_t> bytes) {
++  WasmModuleBytesCallback callback = isolate->wasm_module_bytes_callback();
++  if (!callback) {
++    return;
++  }
++  callback(context, origin, bytes.data(), bytes.size());
++}
++
+ }  // namespace
+ 
+ // WebAssembly.compile(bytes, options) -> Promise
+@@ -754,6 +765,8 @@ void WebAssemblyCompileImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
+     resolver->OnCompilationFailed(thrower.Reify());
+     return;
+   }
++  NotifyWasmModuleBytes(i_isolate, context, WasmModuleBytesOrigin::kCompile,
++                        bytes.as_vector());
+   auto enabled_features = WasmEnabledFeatures::FromIsolate(i_isolate);
+   CompileTimeImports compile_imports =
+       i::WasmJs::CompileTimeImportsFromArgument(
+@@ -989,6 +1002,8 @@ void WebAssemblyModuleImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
+ 
+   if (bytes.empty()) return js_api_scope.AssertException();
+ 
++  NotifyWasmModuleBytes(i_isolate, isolate->GetCurrentContext(),
++                        WasmModuleBytesOrigin::kModule, bytes.as_vector());
+   auto enabled_features = WasmEnabledFeatures::FromIsolate(i_isolate);
+   CompileTimeImports compile_imports =
+       i::WasmJs::CompileTimeImportsFromArgument(
+@@ -1330,6 +1345,8 @@ void WebAssemblyInstantiateImpl(
+     compilation_resolver->OnCompilationFailed(thrower.Reify());
+     return;
+   }
++  NotifyWasmModuleBytes(i_isolate, context, WasmModuleBytesOrigin::kInstantiate,
++                        bytes.as_vector());
+ 
+   auto enabled_features = WasmEnabledFeatures::FromIsolate(i_isolate);
+   CompileTimeImports compile_imports =

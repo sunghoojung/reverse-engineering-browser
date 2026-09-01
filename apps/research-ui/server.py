@@ -1031,6 +1031,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             "console": [],
             "heap_diff_baseline": None,
             "memory_origin_trace": DebuggerBridge._empty_memory_origin_trace(),
+            "action_scope": DebuggerBridge._empty_action_scope(),
             "request_interception": DebuggerBridge._empty_request_interception(),
             "object_experiment": DebuggerBridge._empty_object_experiment(),
             "runtime_hooks": DebuggerBridge._empty_runtime_hooks(),

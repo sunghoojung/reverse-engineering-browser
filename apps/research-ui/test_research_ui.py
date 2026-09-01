@@ -1090,6 +1090,15 @@ const originFound = {
     match: {id: '5', type: 'string', name: 'secret-value', self_size: 24}
   }]
 };
+const actionScopeIdle = {
+  protocol_version: 1, state: 'idle', mode: 'global', target_id: null,
+  revision: 0, targets: [], matched_target_count: 0,
+  connected_target_count: 0, target_overflow: 0,
+  message: 'Create an isolated Experiment context to choose mutable-rule scope.',
+  rule_families: ['request_interception', 'automation_recipes'],
+  target_only_families: ['object_experiment', 'runtime_hooks', 'repeater'],
+  limits: {targets: 8, pending_triggers: 16}
+};
 const interceptionIdle = {
   protocol_version: 1, experiment_id: 0, state: 'idle', isolated: false,
   target_id: null, created_at_ms: 0, disposed_at_ms: 0,
@@ -1250,6 +1259,7 @@ const repeaterReady = {
 const snapshot = {
   protocol_version: 1, state: 'paused', generation: 7, error: null,
   heap_diff_baseline: null, memory_origin_trace: originIdle,
+  action_scope: actionScopeIdle,
   request_interception: interceptionIdle,
   object_experiment: objectIdle,
   runtime_hooks: hooksIdle,
@@ -1348,6 +1358,9 @@ process.stdout.write(JSON.stringify({
     ...originFound.steps[0], match: {...originFound.steps[0].match, id: '05'}}]}),
   originFirstMatchRequired: !isMemoryOriginTrace({...originFound, first_match_step: null}),
   missingOriginRejected: !isDebuggerResponse({...snapshot, memory_origin_trace: undefined}),
+  actionScopeIdleAccepted: isActionScope(actionScopeIdle),
+  actionScopeCountRequired: !isActionScope({...actionScopeIdle, matched_target_count: 1}),
+  missingActionScopeRejected: !isDebuggerResponse({...snapshot, action_scope: undefined}),
   interceptionReadyAccepted: isRequestInterception(interceptionReady),
   interceptionAuditBound: !isRequestInterception({...interceptionReady,
     audit: Array(129).fill(interceptionReady.audit[0])}),
@@ -1443,6 +1456,9 @@ process.stdout.write(JSON.stringify({
                 "originCanonicalIdRequired": True,
                 "originFirstMatchRequired": True,
                 "missingOriginRejected": True,
+                "actionScopeIdleAccepted": True,
+                "actionScopeCountRequired": True,
+                "missingActionScopeRejected": True,
                 "interceptionReadyAccepted": True,
                 "interceptionAuditBound": True,
                 "interceptionCredentialRejected": True,
@@ -1539,6 +1555,24 @@ process.stdout.write(JSON.stringify({
         self.assertIn("Credentials are always omitted", html)
         self.assertIn("128 entries", html)
         self.assertIn("64 KiB", html)
+
+    def test_experiment_action_scope_is_bounded_responsive_and_target_aware(self) -> None:
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('aria-label="Mutable action scope"', html)
+        self.assertIn('id="action-scope-global"', html)
+        self.assertIn('id="action-scope-target"', html)
+        self.assertIn("function isActionScope(scope)", html)
+        self.assertIn("function renderActionScope()", html)
+        self.assertIn("action: 'set_action_scope'", html)
+        self.assertIn("action: 'create_experiment_page'", html)
+        self.assertIn("action: 'close_experiment_page'", html)
+        self.assertIn("16-trigger queue", html)
+        self.assertIn(".workspace.experiments-active > .sidebar { display: none; }", html)
+        self.assertIn(
+            "elements.workspace.classList.toggle('experiments-active', screenName === 'experiments')",
+            html,
+        )
 
     def test_object_lab_exposes_bounded_confirmed_disposable_mutation(self) -> None:
         html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
@@ -1775,6 +1809,8 @@ process.stdout.write(JSON.stringify({
         self.assertIn("button.disabled = !traceIsAvailable()", html)
         self.assertNotIn("screenName === 'experiments' && !state.selectedField", html)
         self.assertIn("enableTabKeyboardNavigation('.experiment-mode-tab')", html)
+        self.assertIn("select.id = 'debugger-target-select'", html)
+        self.assertIn("input.name = 'event_breakpoint'", html)
         self.assertIn("requestAnimationFrame", html)
         self.assertIn("selectedRow ?? elements.requestFilter", html)
 

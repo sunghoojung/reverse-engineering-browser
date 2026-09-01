@@ -12,7 +12,7 @@ bounded evidence architecture. Matching a panel name is not sufficient.
 | WireBrowser capability | REB status | Evidence or remaining work |
 | --- | --- | --- |
 | Managed browser and page selection | Implemented | `make live` launches an isolated Brave profile, and the debugger target selector supports page and webview targets. |
-| Global or page-specific action scope | Partial | Capture sessions and debugger actions are scoped, but mutable rules do not yet have a shared global-versus-target policy model. |
+| Global or page-specific action scope | Implemented | [Action Scope Policy v1](./action-scope-policy-v1.md) applies Request Interception and Automation Recipes to every bounded page or one exact page in the disposable Experiment BrowserContext, with atomic coverage checks and no access to baseline tabs. |
 | Parsed-script catalog and source viewer | Implemented | Sources provides page, frame, and captured-artifact trees, quick open, search, line navigation, source maps, and bounded source loading. |
 | Debug console and breakpoint controls | Implemented | Pause, resume, step, line, conditional, log, XHR/fetch, event, watch, scope, and async stack workflows are live. |
 
@@ -48,7 +48,8 @@ bounded evidence architecture. Matching a panel name is not sufficient.
 
 ## Delivery order
 
-Decoder Tools is the current completed parity increment. The next parity work
-is a shared global-versus-target action-scope policy for mutable browser tools.
-Each increment must preserve immutable baseline evidence, make mutation
-visible, and pass the repository's full native and UI gates.
+Action Scope Policy is the completed final increment in this pinned parity
+inventory. Every listed WireBrowser workflow now has an implemented REB path,
+with REB-specific isolation, bounds, evidence ownership, and privacy rules.
+Future comparisons must pin a new upstream revision before adding gaps to this
+inventory.

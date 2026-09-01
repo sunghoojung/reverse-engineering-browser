@@ -9,12 +9,13 @@ the response and mutation audit, then deletes the complete experiment context.
 
 - `Target.createBrowserContext` creates a new context with no baseline cookies
   or storage.
-- `Target.createTarget` creates the only page on which the bridge enables the
-  DevTools Fetch domain.
+- `Target.createTarget` creates the primary page. Action Scope may add up to
+  seven more credential-free pages in the same context and enables the DevTools
+  Fetch domain only on the exact matched sessions.
 - The bridge closes its baseline page connection and selects the disposable
   page before a rule can be armed.
-- A rule cannot be configured or run unless the currently attached target is
-  the exact experiment target.
+- A rule cannot be configured or run unless the primary experiment target and
+  every page matched by Action Scope are connected. Overflow is rejected.
 - Disposal uses `Target.disposeBrowserContext`, restores the previous target
   preference, and retains only the bounded public result until the researcher
   clears it.

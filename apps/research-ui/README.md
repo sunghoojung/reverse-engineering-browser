@@ -150,7 +150,10 @@ coverage, and can open the candidate source. See
 [Memory Origin Trace v1](../../docs/product/memory-origin-trace-v1.md).
 
 The Request Interception Lab creates a new disposable DevTools BrowserContext
-and page for each experiment. It never arms Fetch interception on the baseline
+and page for each experiment. Action Scope can add up to eight credential-free
+pages and apply interception to all connected pages or one exact page. It
+refuses overflow and disconnected matches instead of silently applying a
+partial global rule. It never arms Fetch interception on the baseline
 target and never shares that target's cookies or storage. One URL-pattern rule
 can continue, block, drop, rewrite, or fulfill a request. Requests always use
 `credentials: omit`, and credential, cookie, connection, host, and framing
@@ -161,6 +164,8 @@ visible audit record. Results are capped at 64 KiB, while the 128-entry audit
 stores only redacted URLs and mutation metadata. Disposal deletes the complete
 BrowserContext before the ephemeral result can be cleared. See
 [Request Interception v1](../../docs/product/request-interception-v1.md).
+The shared target policy is specified by
+[Action Scope Policy v1](../../docs/product/action-scope-policy-v1.md).
 
 Object Lab shares the disposable Experiment BrowserContext but never the
 baseline target. It opens one explicit credential-free HTTP or HTTPS page,
@@ -194,9 +199,9 @@ never enters the evidence store. See
 Automation Studio also shares the disposable Experiment BrowserContext. Its
 process-local library holds up to 16 bounded browser-context recipes. Manual
 runs require confirmation, while created, before-load, and after-load triggers
-remain inert until explicitly armed for the current isolated page. An automatic
-run ceiling, a two-second timeout, one pending trigger batch, cancellation,
-visible drops, and deterministic page reload recovery bound execution. Variables
+remain inert until explicitly armed for all matched pages. An automatic run
+ceiling, a two-second timeout, a sixteen-entry cross-page trigger queue,
+cancellation, visible drops, and deterministic page reload recovery bound execution. Variables
 remain private to the bridge, and logs and results are text-only previews.
 Recipe definitions survive disposable-context recreation, while variables,
 runs, and active target state are erased on disposal. See

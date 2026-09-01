@@ -12,6 +12,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
+from unittest import mock
 
 from debugger_bridge import (
     AUTOMATION_RECIPE_FUNCTION,
@@ -3027,6 +3028,249 @@ process.stdout.write(JSON.stringify({{result, timed, getterCalls}}));
         self.assertEqual(completed[0]["run"]["operation"], "cancelled")
         self.assertIn(("Runtime.terminateExecution", {}), bridge.commands)
         self.assertIn(("Page.reload", {"ignoreCache": True}), bridge.commands)
+
+    def test_action_scope_routes_mutable_rules_without_partial_coverage(self) -> None:
+        class ScopeSession:
+            def __init__(self, target_id: str) -> None:
+                self.target_id = target_id
+                self.commands = []
+
+            def ready(self) -> bool:
+                return True
+
+            def command(
+                self, method: str, params=None, timeout: float = 3.0
+            ) -> dict:
+                self.commands.append((method, params or {}, timeout))
+                if method == "Runtime.evaluate":
+                    return {
+                        "result": {
+                            "value": {
+                                "protocolVersion": 1,
+                                "ok": True,
+                                "resultType": "string",
+                                "resultText": json.dumps(self.target_id),
+                                "resultTruncated": False,
+                                "logs": [],
+                                "logsTruncated": False,
+                                "elapsedMs": 1,
+                                "timedOut": False,
+                            }
+                        }
+                    }
+                return {}
+
+            def command_without_wait(self, method: str, params=None) -> bool:
+                self.commands.append((method, params or {}, 0.0))
+                return True
+
+        bridge = DebuggerBridge()
+        bridge._state = "running"
+        bridge._target = {
+            "id": "page-a",
+            "type": "page",
+            "title": "Alpha",
+            "url": "https://alpha.test/",
+        }
+        bridge._request_interception_context_id = "context-1"
+        bridge._request_interception = bridge._empty_request_interception()
+        bridge._request_interception.update(
+            {
+                "experiment_id": 15,
+                "state": "ready",
+                "isolated": True,
+                "target_id": "page-a",
+            }
+        )
+        bridge._begin_automation_session_locked(15)
+        bridge._automation_recipes_state.update(
+            {"state": "ready", "isolated": True, "target_id": "page-a"}
+        )
+        sessions = {
+            target_id: ScopeSession(target_id)
+            for target_id in ("page-a", "page-b")
+        }
+        bridge._action_scope_targets = {
+            "page-a": {
+                "id": "page-a",
+                "type": "page",
+                "title": "Alpha",
+                "url": "https://alpha.test/",
+                "web_socket_url": "ws://alpha",
+            },
+            "page-b": {
+                "id": "page-b",
+                "type": "page",
+                "title": "Beta",
+                "url": "https://beta.test/",
+                "web_socket_url": "ws://beta",
+            },
+        }
+        bridge._action_scope_sessions = sessions
+
+        targeted = bridge.action(
+            {"action": "set_action_scope", "mode": "target", "target_id": "page-b"}
+        )["action_scope"]
+        self.assertEqual(targeted["matched_target_count"], 1)
+        bridge.action(
+            {
+                "action": "configure_request_interception",
+                "mode": "block",
+                "url_pattern": "https://api.test/*",
+            }
+        )
+        self.assertEqual(sessions["page-a"].commands[-1][0], "Fetch.disable")
+        self.assertEqual(sessions["page-b"].commands[-1][0], "Fetch.enable")
+
+        bridge._handle_request_interception_pause_async(
+            {
+                "requestId": "request-beta",
+                "resourceType": "Fetch",
+                "request": {"url": "https://api.test/a?secret=1", "method": "GET"},
+            },
+            sessions["page-b"],
+        )
+        self.wait_for(
+            lambda: bridge.snapshot()["request_interception"]["pending_requests"]
+            == 0
+            and bridge.snapshot()["request_interception"]["audit"]
+        )
+        audit = bridge.snapshot()["request_interception"]["audit"][-1]
+        self.assertEqual(audit["target_id"], "page-b")
+        self.assertEqual(audit["url"], "https://api.test/a")
+
+        recipe = bridge.action(
+            {
+                "action": "add_automation_recipe",
+                "label": "Scoped title",
+                "trigger": "manual",
+                "source": "return document.title;",
+            }
+        )["recipe"]
+        targeted_runs = bridge.action(
+            {
+                "action": "run_automation_recipe",
+                "recipe_id": recipe["id"],
+                "confirmed": True,
+            }
+        )["runs"]
+        self.assertEqual([run["target_id"] for run in targeted_runs], ["page-b"])
+
+        bridge.action({"action": "set_action_scope", "mode": "global"})
+        global_runs = bridge.action(
+            {
+                "action": "run_automation_recipe",
+                "recipe_id": recipe["id"],
+                "confirmed": True,
+            }
+        )["runs"]
+        self.assertEqual(
+            [run["target_id"] for run in global_runs], ["page-a", "page-b"]
+        )
+
+    def test_action_scope_rejects_overflow_and_missing_targets(self) -> None:
+        bridge = DebuggerBridge()
+        bridge._request_interception_context_id = "context-1"
+        bridge._action_scope_targets = {
+            "page-a": {
+                "id": "page-a",
+                "type": "page",
+                "title": "Alpha",
+                "url": "about:blank",
+                "web_socket_url": "ws://alpha",
+            }
+        }
+        bridge._action_scope_target_overflow = 1
+        with self.assertRaisesRegex(DebuggerBridgeError, "every matched"):
+            bridge._require_action_scope_sessions_locked("Mutable rules")
+        with self.assertRaisesRegex(DebuggerBridgeError, "unavailable"):
+            bridge.action(
+                {
+                    "action": "set_action_scope",
+                    "mode": "target",
+                    "target_id": "missing-page",
+                }
+            )
+
+    def test_concurrent_action_scope_refresh_closes_duplicate_sessions(self) -> None:
+        browser_barrier = threading.Barrier(2)
+        session_barrier = threading.Barrier(2)
+        target = {
+            "id": "page-a",
+            "type": "page",
+            "title": "Alpha",
+            "url": "about:blank",
+            "web_socket_url": "ws://alpha",
+        }
+
+        class RefreshBridge(DebuggerBridge):
+            def _browser_command(self, method: str, params=None) -> dict:
+                if method != "Target.getTargets":
+                    raise AssertionError(f"unexpected browser command: {method}")
+                browser_barrier.wait(timeout=2.0)
+                return {
+                    "targetInfos": [
+                        {
+                            "targetId": target["id"],
+                            "type": target["type"],
+                            "browserContextId": "context-1",
+                        }
+                    ]
+                }
+
+            def _discover_targets(self) -> list[dict]:
+                return [dict(target)]
+
+        class RaceSession:
+            instances = []
+
+            def __init__(self, session_target, event_handler, close_handler) -> None:
+                del event_handler, close_handler
+                self.target_id = session_target["id"]
+                self.closed = False
+                self.ready_state = False
+                self.__class__.instances.append(self)
+
+            def start(self) -> None:
+                session_barrier.wait(timeout=2.0)
+                self.ready_state = True
+
+            def ready(self) -> bool:
+                return self.ready_state and not self.closed
+
+            def command(self, method: str, params=None, timeout: float = 3.0) -> dict:
+                del method, params, timeout
+                return {}
+
+            def close(self) -> None:
+                self.closed = True
+                self.ready_state = False
+
+        bridge = RefreshBridge()
+        bridge._request_interception_context_id = "context-1"
+        errors = []
+
+        def refresh() -> None:
+            try:
+                bridge._refresh_action_scope_targets()
+            except BaseException as exception:
+                errors.append(exception)
+
+        with mock.patch("debugger_bridge.ActionScopeTargetSession", RaceSession):
+            threads = [threading.Thread(target=refresh) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=3.0)
+
+        self.assertFalse(errors)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(len(RaceSession.instances), 2)
+        self.assertEqual(sum(session.closed for session in RaceSession.instances), 1)
+        retained = bridge._action_scope_sessions["page-a"]
+        self.assertFalse(retained.closed)
+        bridge._close_action_scope_sessions()
+        self.assertTrue(all(session.closed for session in RaceSession.instances))
 
     def test_automation_protocol_timeout_recovers_and_disarms_atomically(self) -> None:
         class TimeoutAutomationBridge(DebuggerBridge):

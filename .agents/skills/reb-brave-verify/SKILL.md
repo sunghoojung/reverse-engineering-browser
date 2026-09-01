@@ -1,70 +1,66 @@
 ---
 name: reb-brave-verify
-description: Verify Reverse Engineering Browser changes to the tracked Brave integration, bootstrap flow, overlays, or patches. Use for browser integration work that must reproduce against pinned upstream checkouts and compile with the available Brave toolchain.
+description: Verify Reverse Engineering Browser bootstrap, pins, Brave overlays, patches, synchronization, and browser compilation. Use when project-owned browser integration must reproduce against the pinned upstream checkout and strongest available Brave toolchain.
 ---
 
 # Verify the Brave Integration
 
-Prove that project-owned browser changes remain reproducible from the pinned
-upstream revisions and work in the strongest locally available toolchain.
+Prove that project-owned browser changes reproduce from the pinned Brave and
+Chromium revisions and compile at the strongest locally available layer.
 
-## Establish ownership and state
+## Establish ownership and upstream state
 
-1. Read `Source ownership` and the Brave portion of `Validation` in
+1. Read the browser-specific rules and validation steps in
    [AGENTS.md](../../../AGENTS.md).
 2. Read [browser/README.md](../../../browser/README.md) and
-   [browser/integration/brave/README.md](../../../browser/integration/brave/README.md)
-   for the current setup and synchronization contract.
-3. Inspect the project diff and both pinned revision files. Confirm each authored
-   file is in the mirrored overlay and each minimal upstream edit is in an
-   ordered patch.
-4. Treat `browser/worktree/` as external generated state. Never stage or commit
-   it. Before applying integration changes, check the relevant upstream
-   checkouts for local modifications and stop rather than overwrite unrelated
-   work.
+   [browser/integration/brave/README.md](../../../browser/integration/brave/README.md).
+3. Inspect the project diff and both revision pins. Complete authored files must
+   live in the mirrored overlay; minimal upstream edits must live in ordered
+   patches.
+4. Inspect the relevant upstream checkout for local modifications before
+   synchronizing. `browser/worktree/` is generated external state and must never
+   be staged, committed, cleaned, or repaired implicitly.
 
-## Validate in layers
+A revision mismatch or dirty upstream checkout is a stop condition for any
+operation that would overwrite it. Report the exact state and leave it intact.
 
-Start with repository-owned deterministic checks:
+## Prove reproducibility in layers
 
-- run the bootstrap fixture test when bootstrap behavior or revision handling
-  changed;
-- run the browser synchronization fixture test for overlays, patches, pins, or
-  sync behavior;
-- verify overlay destinations correspond to real paths in the pinned checkout;
-- verify every patch preflights and applies cleanly at its pinned revision.
+1. Run the relevant bootstrap fixture test when revision handling or bootstrap
+   behavior changed.
+2. Run the synchronization fixture test for pins, overlays, patches, or sync
+   behavior.
+3. Confirm every overlay destination is a real path at the pinned revision and
+   every patch preflights and applies cleanly in order.
+4. Run `make brave-doctor`. Do not change the system-wide Xcode selection.
+5. When the initialized checkout is at the expected revisions and safe to use,
+   apply changes only through `./scripts/sync-browser-integration.sh`.
+6. Run `make brave-probe-check` for the exact native probe target. For changed
+   GN files, run `gn format --dry-run` with the bundled browser toolchain. Build
+   each affected target when full Xcode and Chromium tooling are installed.
 
-Then run `make brave-doctor`. Use its result to decide which deeper checks are
-actually available. Do not change the system-wide Xcode selection to make the
-check pass.
+Never copy or patch files into the checkout by hand. Repository fixtures prove
+tracked synchronization behavior but do not substitute for a real pinned
+checkout or browser compile.
 
-When the initialized pinned checkout is clean enough to use, apply the tracked
-integration through the repository synchronization script. Never copy or patch
-files into the checkout by hand. Run `make brave-probe-check` for the exact
-native probe target. If GN files changed, run `gn format --dry-run` with the
-browser toolchain. Compile the affected target when the complete Xcode and
-Chromium toolchain are installed.
+## Review browser invariants
 
-Preserve the hot-path invariants while reviewing results: capture is disabled
-by default, inactive work is allocation-free, active work is bounded and
-non-blocking, drops are visible, and observation does not mutate page behavior.
-Verify failure, disabled, capacity, expiration, and sequence-gap behavior when
-the change can affect them.
-
-## Stop safely
-
-- A revision mismatch, dirty upstream checkout, failed patch preflight, or
-  missing toolchain component is a concrete stop condition for the affected
-  layer.
-- Do not repair or discard upstream checkout changes unless the user explicitly
-  asks.
-- Do not claim a browser build passed when only repository fixtures or the
-  native probe unit target passed.
+Confirm capture remains disabled by default, inactive paths are allocation-free,
+active work is bounded and non-blocking, drops are visible, and observational
+capture does not mutate page behavior. Test failure, disabled, capacity,
+expiration, and sequence-gap behavior when the change reaches those concerns.
 
 ## Report evidence
 
-Report the pinned Brave and Chromium revisions, upstream dirty-state result,
-overlay and patch reproducibility, probe-target result, GN formatting result,
-and affected compile result. Mark each layer passed, failed, unavailable, or
-skipped, with the exact reason for anything other than passed. Use
-`reb-validation` for the remaining repository gate.
+Report:
+
+- pinned Brave and Chromium revisions;
+- upstream revision and dirty-state results;
+- overlay and patch reproducibility;
+- doctor and native probe target results;
+- GN formatting and affected compile results.
+
+Mark each layer passed, failed, unavailable, or skipped, with the exact reason
+for anything other than passed. Do not report a browser build as passing when
+only fixtures or the native probe target passed. Use `reb-validation` for the
+remaining repository gate.

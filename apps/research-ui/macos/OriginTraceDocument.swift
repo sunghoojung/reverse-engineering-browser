@@ -15,7 +15,7 @@ enum OriginTraceDocumentBuilder {
   ])
   private static let publicArtifactFields = Set([
     "artifact_id", "kind", "url", "sha256", "byte_size", "creator_event_id",
-    "parent_artifact_id",
+    "parent_artifact_id", "execution_context_id", "capture_origin",
   ])
 
   static func build(

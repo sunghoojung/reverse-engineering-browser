@@ -1300,6 +1300,32 @@ def _validate_artifact(artifact: Any) -> str | None:
     ):
         if not _canonical_uint64(artifact.get(field)):
             return f"{field} is not a canonical uint64"
+    runtime_fields = ("execution_context_id", "capture_origin")
+    if any(field in artifact for field in runtime_fields):
+        if not all(field in artifact for field in runtime_fields):
+            return "runtime provenance fields are incomplete"
+        if not _canonical_uint64(artifact["execution_context_id"]):
+            return "execution_context_id is not a canonical uint64"
+        origin = artifact["capture_origin"]
+        if origin not in {
+            "unknown",
+            "network_response",
+            "dynamic_javascript",
+            "webassembly_compile",
+            "webassembly_module",
+            "webassembly_instantiate",
+        }:
+            return "capture_origin is unsupported"
+        if origin == "dynamic_javascript" and (
+            artifact.get("kind") != "javascript"
+            or artifact["execution_context_id"] == "0"
+        ):
+            return "dynamic JavaScript provenance is inconsistent"
+        if origin.startswith("webassembly_") and (
+            artifact.get("kind") != "wasm"
+            or artifact["execution_context_id"] == "0"
+        ):
+            return "WebAssembly provenance is inconsistent"
     if artifact.get("kind") not in {
         "javascript",
         "wasm",

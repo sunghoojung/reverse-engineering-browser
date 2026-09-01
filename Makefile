@@ -136,6 +136,7 @@ e2e: producer broker artifact-producer artifact-receiver
 	test "$$(grep -c '\"category\":\"vm\"' $(BUILD_DIR)/sessions/demo.jsonl)" = "6"
 	test "$$(wc -l < $(BUILD_DIR)/sessions/artifacts/manifest.jsonl | tr -d ' ')" = "3"
 	test "$$(grep -c 'vm-sample.js' $(BUILD_DIR)/sessions/artifacts/manifest.jsonl)" = "1"
+	test "$$(grep -c '\"execution_context_id\":\"2200\",\"capture_origin\":\"dynamic_javascript\".*vm-sample.js' $(BUILD_DIR)/sessions/artifacts/manifest.jsonl)" = "1"
 	test "$$(python3 -c 'import json; print(json.load(open("$(BUILD_DIR)/sessions/artifacts/analysis/vm-analysis-v1.json"))["summary"]["likely_vm_count"])')" = "1"
 	python3 tools/validate-evidence-store.py $(BUILD_DIR)/sessions/demo.jsonl
 	./tests/event_broker_socket_test.sh $(BROKER_BINARY) $(PRODUCER_BINARY) $(DEMO_NETWORK_PAYLOAD_HEX)

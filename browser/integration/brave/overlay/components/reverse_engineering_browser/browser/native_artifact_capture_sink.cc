@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -27,7 +28,7 @@
 namespace reb {
 namespace {
 
-constexpr std::size_t kMaxArtifactBytes = 16U * 1024U * 1024U;
+constexpr std::size_t kMaxArtifactBytes = kNativeArtifactMaxContentBytes;
 constexpr std::size_t kMaxActiveCaptureBytes = 32U * 1024U * 1024U;
 // Synced with blink.mojom.ResourceType.kScript. MIME classification below also
 // covers module and worker script requests that use another resource type.
@@ -161,6 +162,7 @@ mojo::ScopedDataPipeConsumerHandle NativeArtifactCaptureSink::MaybeCaptureRespon
   context->header.frame_id = frame_id;
   context->header.artifact_id = artifact_id;
   context->header.creator_event_id = creator_event_id;
+  context->header.capture_origin = NativeArtifactCaptureOrigin::kNetworkResponse;
   context->url = SanitizedUrl(request.url);
   context->mime_type = response_head.mime_type;
   context->reservation_bytes = reservation;
@@ -185,6 +187,65 @@ mojo::ScopedDataPipeConsumerHandle NativeArtifactCaptureSink::MaybeCaptureRespon
                "tee_unavailable");
   }
   return body;
+}
+
+void NativeArtifactCaptureSink::CaptureGeneratedArtifact(
+    const NativeArtifactKind kind,
+    const NativeArtifactCaptureOrigin capture_origin,
+    const std::uint64_t execution_context_id,
+    const std::uint64_t frame_id,
+    const std::string_view source_url,
+    mojo_base::BigBuffer content) {
+  if (!IsEnabled()) {
+    return;
+  }
+  const std::uint64_t artifact_id = next_artifact_id_.fetch_add(1, std::memory_order_relaxed);
+  const bool valid_kind_and_origin =
+      (kind == NativeArtifactKind::kJavaScript &&
+       capture_origin == NativeArtifactCaptureOrigin::kDynamicJavaScript) ||
+      (kind == NativeArtifactKind::kWasm &&
+       (capture_origin == NativeArtifactCaptureOrigin::kWebAssemblyCompile ||
+        capture_origin == NativeArtifactCaptureOrigin::kWebAssemblyModule ||
+        capture_origin == NativeArtifactCaptureOrigin::kWebAssemblyInstantiate));
+  if (!valid_kind_and_origin || execution_context_id == 0 || content.size() == 0 ||
+      content.size() > kMaxArtifactBytes || source_url.empty() ||
+      source_url.size() > kNativeArtifactMaxUrlBytes) {
+    EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, 0, frame_id,
+               "generated_metadata_or_size_limit");
+    return;
+  }
+
+  const std::string sanitized_url = SanitizedUrl(GURL(source_url));
+  const std::string mime_type =
+      kind == NativeArtifactKind::kJavaScript ? "text/javascript" : "application/wasm";
+  if (sanitized_url.empty() || sanitized_url.size() > kNativeArtifactMaxUrlBytes) {
+    EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, 0, frame_id,
+               "generated_url_invalid");
+    return;
+  }
+
+  // BigBuffer may be shared writable memory owned by the renderer. Copy once
+  // in the browser before validation and transfer to avoid a TOCTOU race.
+  const std::span<const std::uint8_t> received(content);
+  auto transfer = std::make_unique<NativeArtifactTransfer>();
+  transfer->header.kind = kind;
+  transfer->header.session_id = session_id_.load(std::memory_order_relaxed);
+  transfer->header.frame_id = frame_id;
+  transfer->header.artifact_id = artifact_id;
+  transfer->header.content_size = received.size();
+  transfer->header.url_size = static_cast<std::uint32_t>(sanitized_url.size());
+  transfer->header.mime_type_size = static_cast<std::uint32_t>(mime_type.size());
+  transfer->header.execution_context_id = execution_context_id;
+  transfer->header.capture_origin = capture_origin;
+  transfer->url = sanitized_url;
+  transfer->mime_type = mime_type;
+  transfer->content.assign(received.begin(), received.end());
+  if (!NativeArtifactSocketClient::Get().Enqueue(std::move(transfer))) {
+    EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, 0, frame_id,
+               "transfer_queue_full_or_disconnected");
+    return;
+  }
+  pending_.emplace(artifact_id, PendingContext{0, frame_id});
 }
 
 void NativeArtifactCaptureSink::OnBodyComplete(std::unique_ptr<CaptureContext> context,

@@ -1916,7 +1916,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     else {
       return false
     }
-    return [
+    let identifiersValid = [
       "artifact_id", "session_id", "navigation_id", "frame_id", "parent_artifact_id",
       "creator_event_id",
     ].allSatisfy { field in
@@ -1927,6 +1927,27 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       }
       return UInt64(value) != nil
     }
+    guard identifiersValid else { return false }
+    let hasExecutionContext = artifact["execution_context_id"] != nil
+    let hasCaptureOrigin = artifact["capture_origin"] != nil
+    guard hasExecutionContext == hasCaptureOrigin else { return false }
+    if hasExecutionContext {
+      guard let executionContextID = artifact["execution_context_id"] as? String,
+        executionContextID.range(
+          of: #"^(?:0|[1-9][0-9]*)$"#, options: .regularExpression) != nil,
+        UInt64(executionContextID) != nil,
+        let captureOrigin = artifact["capture_origin"] as? String,
+        Set([
+          "unknown", "network_response", "dynamic_javascript", "webassembly_compile",
+          "webassembly_module", "webassembly_instantiate",
+        ]).contains(captureOrigin),
+        captureOrigin != "dynamic_javascript" || (kind == "javascript" && executionContextID != "0"),
+        !captureOrigin.hasPrefix("webassembly_") || (kind == "wasm" && executionContextID != "0")
+      else {
+        return false
+      }
+    }
+    return true
   }
 
   private func artifactError(_ message: String) -> NSError {

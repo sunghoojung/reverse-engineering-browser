@@ -256,6 +256,31 @@ while (ip < program.length) {
                 result["observations"][0]["function_region"]["byte_offset"], 0
             )
 
+    def test_runtime_generated_source_is_analyzed_with_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(
+                Path(directory),
+                [
+                    (
+                        "javascript",
+                        "dynamic-vm.js",
+                        (FIXTURES / "pure-js-vm.js").read_bytes(),
+                        "0",
+                    )
+                ],
+            )
+            manifest_path = store / "manifest.jsonl"
+            artifact = json.loads(manifest_path.read_text(encoding="utf-8"))
+            artifact["execution_context_id"] = "9001"
+            artifact["capture_origin"] = "dynamic_javascript"
+            manifest_path.write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+
+            result = analyze_store(store)["results"][0]
+
+            self.assertEqual(result["artifact_id"], "1")
+            self.assertEqual(result["runtime"], "javascript")
+            self.assertNotEqual(result["status"], "failed")
+
     def test_javascript_match_and_region_work_are_strictly_bounded(self) -> None:
         class CountingPattern:
             def __init__(self) -> None:

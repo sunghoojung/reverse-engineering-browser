@@ -64,8 +64,10 @@ Large JavaScript files, WASM modules, source maps, and explicitly approved
 response bodies never use `EventRecord`, the renderer ring, or the broker event
 queue. They use the separate version 1 artifact stream defined by
 `include/reb/artifact.hpp`. Its fixed 128-byte header carries kind, byte count,
-correlation identifiers, metadata lengths, and an optional expected SHA-256,
-followed by bounded URL, MIME, and original-content byte ranges.
+correlation identifiers, execution-context and capture-origin provenance,
+metadata lengths, and an optional expected SHA-256, followed by bounded URL,
+MIME, and original-content byte ranges. Version 1 readers accept legacy
+manifests that predate the runtime provenance fields.
 
 Authenticated socket mode adds a fixed 32-byte acknowledgment after each
 frame. The receiver identifies the artifact and reports an accepted, invalid,

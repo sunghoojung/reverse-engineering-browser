@@ -27,7 +27,11 @@ readonly probe_objects=(
   "obj/brave/browser/core/brave_content_browser_client.o"
   "obj/chrome/renderer/renderer/brave_content_renderer_client.o"
   "obj/third_party/blink/renderer/core/core/html_canvas_element.o"
+  "obj/third_party/blink/renderer/core/core/v8_initializer.o"
   "obj/third_party/blink/renderer/platform/loader/loader/resource_request_sender.o"
+  "obj/v8/v8_base_without_compiler/api.o"
+  "obj/v8/v8_base_without_compiler/isolate.o"
+  "obj/v8/v8_base_without_compiler/wasm-js.o"
 )
 readonly web_audio_objects=(
   "obj/third_party/blink/renderer/modules/webaudio/webaudio/audio_buffer.o"

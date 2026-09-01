@@ -1,0 +1,128 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -26,13 +26,19 @@
+ #include "third_party/blink/renderer/bindings/core/v8/v8_initializer.h"
+ 
+ #include <algorithm>
++#include <bit>
++#include <cstdint>
+ #include <limits>
+ #include <memory>
++#include <string_view>
+ #include <utility>
++#include <vector>
+ 
++#include "base/containers/span.h"
+ #include "base/debug/crash_logging.h"
+ #include "base/memory/scoped_refptr.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/system/sys_info.h"
+ #include "base/time/time.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "build/build_config.h"
+@@ -170,6 +176,78 @@ String ToBlinkString(v8::Local<v8::Context> context,
+   return result;
+ }
+ 
++std::uint64_t StableExecutionContextId(const ExecutionContext& context) {
++  return context.GetExecutionContextToken().Visit([](const auto& typed_token) {
++    const base::UnguessableToken& token = typed_token.value();
++    return std::rotl(token.GetHighForSerialization(), 17) ^
++           token.GetLowForSerialization();
++  });
++}
++
++std::uint64_t StableFrameId(const ExecutionContext& context) {
++  const ExecutionContextToken token = context.GetExecutionContextToken();
++  return token.Is<LocalFrameToken>() ? StableExecutionContextId(context) : 0;
++}
++
++void CaptureGeneratedSource(v8::Local<v8::Context> context,
++                            const reb::NativeArtifactKind kind,
++                            const reb::NativeArtifactCaptureOrigin capture_origin,
++                            const base::span<const std::uint8_t> content) {
++  reb::NativeProbeSink& sink = reb::NativeProbeSink::Get();
++  if (!sink.IsArtifactCaptureEnabled()) {
++    return;
++  }
++  ExecutionContext* execution_context = ToExecutionContext(context);
++  if (!execution_context) {
++    return;
++  }
++  const CString source_url = execution_context->Url().GetString().Utf8();
++  if (source_url.empty()) {
++    return;
++  }
++  sink.CaptureGeneratedArtifact(
++      kind, capture_origin, StableExecutionContextId(*execution_context),
++      StableFrameId(*execution_context),
++      std::string_view(source_url.data(), source_url.length()), content);
++}
++
++void CaptureDynamicJavaScript(v8::Local<v8::Context> context,
++                              v8::Local<v8::String> source) {
++  reb::NativeProbeSink& sink = reb::NativeProbeSink::Get();
++  if (!sink.IsArtifactCaptureEnabled()) {
++    return;
++  }
++  v8::Isolate* isolate = context->GetIsolate();
++  const std::size_t utf8_size = source->Utf8Length(isolate);
++  if (utf8_size == 0 || utf8_size > reb::kNativeArtifactMaxContentBytes) {
++    return;
++  }
++  std::vector<std::uint8_t> content(utf8_size);
++  const std::size_t written = source->WriteUtf8(
++      isolate, reinterpret_cast<char*>(content.data()), content.size(),
++      v8::String::WriteFlags::kReplaceInvalidUtf8);
++  if (written != content.size()) {
++    return;
++  }
++  CaptureGeneratedSource(context, reb::NativeArtifactKind::kJavaScript,
++                         reb::NativeArtifactCaptureOrigin::kDynamicJavaScript,
++                         content);
++}
++
++void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
++                            const v8::WasmModuleBytesOrigin origin,
++                            const std::uint8_t* bytes,
++                            const std::size_t size) {
++  const auto capture_origin =
++      origin == v8::WasmModuleBytesOrigin::kCompile
++          ? reb::NativeArtifactCaptureOrigin::kWebAssemblyCompile
++      : origin == v8::WasmModuleBytesOrigin::kModule
++          ? reb::NativeArtifactCaptureOrigin::kWebAssemblyModule
++          : reb::NativeArtifactCaptureOrigin::kWebAssemblyInstantiate;
++  CaptureGeneratedSource(context, reb::NativeArtifactKind::kWasm, capture_origin,
++                         UNSAFE_BUFFERS(base::span(bytes, size)));
++}
++
+ // NOTE: when editing this, please also edit the error messages we throw when
+ // the size is exceeded (see uses of the constant), which use the human-friendly
+ // "8MB" text.
+@@ -597,13 +675,17 @@ V8Initializer::CodeGenerationCheckCallbackInMainThread(
+   }
+ 
+   if (stringified_source.IsEmpty()) {
++    if (source->IsString()) {
++      CaptureDynamicJavaScript(context, source.As<v8::String>());
++    }
+     return {true, v8::MaybeLocal<v8::String>()};
+   }
+ 
+-  if (!ContentSecurityPolicyCodeGenerationCheck(
+-          context, stringified_source.ToLocalChecked())) {
++  v8::Local<v8::String> checked_source = stringified_source.ToLocalChecked();
++  if (!ContentSecurityPolicyCodeGenerationCheck(context, checked_source)) {
+     return {false, v8::MaybeLocal<v8::String>()};
+   }
+ 
++  CaptureDynamicJavaScript(context, checked_source);
+   return {true, std::move(stringified_source)};
+ }
+@@ -913,4 +995,5 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+   isolate->SetWasmModuleCallback(WasmModuleOverride);
+   isolate->SetWasmInstanceCallback(WasmInstanceOverride);
++  isolate->SetWasmModuleBytesCallback(CaptureWasmModuleBytes);
+   isolate->SetWasmCustomDescriptorsEnabledCallback(
+       WasmCustomDescriptorsEnabledCallback);

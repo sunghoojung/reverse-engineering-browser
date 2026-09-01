@@ -9,6 +9,11 @@ readonly repository_root
 
 readonly required_paths=(
   "AGENTS.md"
+  "CONTRIBUTING.md"
+  "README.md"
+  ".agents/skills/reb-brave-verify/SKILL.md"
+  ".agents/skills/reb-ui-e2e/SKILL.md"
+  ".agents/skills/reb-validation/SKILL.md"
   "workspace.json"
   "docs/README.md"
   "docs/architecture/technical-architecture.md"

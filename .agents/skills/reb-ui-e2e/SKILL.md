@@ -1,63 +1,62 @@
 ---
 name: reb-ui-e2e
-description: Reproduce and verify Origin Trace through its user-facing UI. Use for UI bugs or features, visual regressions, keyboard and narrow-layout behavior, native macOS packaging, application assets, and user-visible evidence states. Do not use for backend-only testing.
+description: Reproduce and verify Origin Trace through its user-facing interface. Use for UI behavior, visual regressions, keyboard or narrow-layout work, native macOS packaging, and application assets. Do not use for backend-only changes.
 ---
 
 # Verify Origin Trace End to End
 
-Prove behavior through the interface a researcher actually uses. Unit and API
-tests support this workflow but do not replace visual and interaction evidence.
+Prove the changed behavior through the interface a researcher uses. Automated
+tests support this workflow but do not replace interaction and visual evidence.
 
-## Prepare the user path
+## Prepare the product path
 
-1. Read the `UI standards` and `Validation` sections in
-   [AGENTS.md](../../../AGENTS.md), then read the run instructions in
+1. Read `Origin Trace UI` and `Validation` in
+   [AGENTS.md](../../../AGENTS.md), then read
    [apps/research-ui/README.md](../../../apps/research-ui/README.md).
-2. Inspect the relevant UI tests and implementation before changing anything.
-3. For a bug, reproduce it before editing through the closest user-facing path.
-   Record the exact state, action, and visible failure.
-4. Use `make app` for the normal macOS product path. Use `make ui` only for
-   browser-based development or when the native path is genuinely unavailable.
-5. Use deterministic demo evidence or a bounded temporary fixture. Do not point
-   the app at sensitive captures unless the user explicitly placed them in
-   scope.
+2. Inspect the relevant implementation and UI tests. For a bug, record the
+   exact starting state, action, and visible failure before editing.
+3. Use `make app` for the normal macOS product path. Use `make ui` only for
+   browser development or when native app control is unavailable.
+4. Use deterministic demo evidence or a bounded temporary fixture. Do not open
+   sensitive captures unless the user explicitly placed them in scope.
 
-## Exercise behavior
+## Exercise the interface
 
-Use available app or browser UI control to interact with the rendered product.
-Verify the changed workflow from launch to visible outcome, then inspect a
-fresh screenshot. State explicitly when UI control or screenshot capability is
-unavailable.
+Use available UI control to complete the changed workflow from launch to the
+visible outcome. For the browser development path, prefer
+`npx -y chrome-devtools-axi` when available. After each state-changing action,
+verify the result with a fresh snapshot or screenshot.
 
-Cover the states relevant to the change, including failure and boundary states.
-For shared timeline or shell work, check loading, empty, disconnected,
-malformed-event, and sequence-gap behavior. Confirm that the last known-good
-evidence remains understandable when a refresh fails.
+Cover the states the change can affect. Shared shell and timeline work normally
+requires loading, empty, disconnected, malformed-event, sequence-gap, and
+refresh-failure states. Confirm that refresh failures preserve the last
+understandable evidence.
 
-Check interaction quality:
+Check interaction quality at the same time:
 
-- complete the primary flow with the keyboard;
-- inspect the narrowest supported practical window or viewport;
-- verify focus visibility, scrolling, truncation, overlays, and selected state;
-- confirm captured values render as text and cannot become executable markup;
-- reject clipped controls, overlapping content, unexplained blank space, or
-  unreadable evidence relationships.
+- complete the primary flow with the keyboard and inspect focus visibility;
+- test the narrowest practical supported window or viewport;
+- inspect scrolling, truncation, overlays, selected state, and long content;
+- confirm captured values remain inert text rather than executable markup;
+- reject clipped controls, overlaps, unexplained blank space, and unreadable
+  evidence relationships.
 
-For native shell, bundle, icon, or packaging changes, run the additional app
-build and code-signing checks required by `AGENTS.md`. Verify the packaged app
-loads its bundled assets at runtime rather than relying on source-tree paths.
+For native shell, bundle, icon, or packaging work, verify that the packaged app
+loads bundled assets at runtime rather than source-tree paths. Run the app build
+and strict code-signature checks from `AGENTS.md`.
 
-## Test and compare
+## Compare and test
 
-Run the directly related UI unittest module while iterating, then `make ui-test`
-for the complete UI suite. Use `reb-validation` for the final repository gate.
-After a fix, repeat the original reproduction steps and compare the same state
-before and after. Do not accept a passing HTTP response or DOM assertion as the
-sole proof of a visual change.
+Run the directly related UI unittest while iterating, then `make ui-test`. After
+the change, repeat the original reproduction steps in the same state and compare
+the visible result. A successful HTTP response, process launch, DOM assertion,
+or screenshot alone is not sufficient evidence of an interactive fix.
+
+Use `reb-validation` for the final repository gate.
 
 ## Report evidence
 
-State which product path was tested, which states and interactions were
-covered, and what the user now sees. List the commands that passed and identify
-screenshots or other visual evidence when available. Report untested states and
-missing platform capabilities plainly.
+State which product path, viewport or window size, states, pointer actions, and
+keyboard interactions were tested. Describe what the user now sees and identify
+the fresh visual evidence. Mark untested states and unavailable UI-control or
+platform capabilities explicitly.

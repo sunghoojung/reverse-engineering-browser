@@ -1,62 +1,66 @@
 ---
 name: reb-validation
-description: Select and run evidence-backed validation for Reverse Engineering Browser changes. Use when testing, verifying, preparing a handoff, or investigating a local check failure. Route interactive Origin Trace acceptance and Brave toolchain verification to their dedicated skills.
+description: Validate Reverse Engineering Browser changes and report evidence for handoff. Use for focused test selection, full local gates, or failure triage. Route user-visible Origin Trace work and Brave integration work to their dedicated skills.
 ---
 
 # Validate Reverse Engineering Browser
 
-Produce a trustworthy validation result with the smallest useful feedback loop
-during development and the complete required gate before handoff.
+Select the smallest useful feedback loop while developing, then produce a
+complete and auditable handoff result.
 
 ## Establish scope
 
-1. Read the `Validation` and `Definition of done` sections in
-   [AGENTS.md](../../../AGENTS.md). They are authoritative if commands change.
-2. Inspect the working tree and relevant diff before choosing checks. Treat
-   pre-existing modifications as user work and do not clean, reset, format, or
-   overwrite them.
-3. Exclude `browser/worktree/` from repository searches and Git operations. It
-   is an ignored upstream checkout, not project source.
-4. Do not use the `no-mistakes` skill, a remote gate, or an alternate pipeline.
+1. Read `Validation` and `Definition of done and handoff` in
+   [AGENTS.md](../../../AGENTS.md). That file owns the current gate.
+2. Inspect `git status --short` and the relevant diff. Preserve pre-existing
+   changes and exclude the generated `browser/worktree/` checkout.
+3. Identify every affected boundary, not only the edited filenames. Shared
+   contracts require checks for each producer and consumer.
+4. Add `reb-ui-e2e` for user-visible Origin Trace behavior. Add
+   `reb-brave-verify` for browser pins, bootstrap, synchronization, overlays,
+   patches, or compilation.
 
-## Choose the validation depth
+Do not use `no-mistakes`, a remote gate, or a substitute validation pipeline.
 
-For a development check, start with the smallest command that exercises the
-changed behavior. Follow dependencies rather than matching filenames only:
+## Choose focused checks
 
-- Shared C++ headers or implementations can affect every native test. Run the
-  directly related test binary first, then `make test` when shared behavior is
-  involved.
-- Broker, artifact receiver, IPC, producer, or evidence-store changes usually
-  need the related socket test or `make e2e` in addition to unit tests.
-- Research UI Python changes should start with the directly related unittest
-  module. HTML, JavaScript, Swift, packaging, or user-visible behavior also
-  needs the `reb-ui-e2e` workflow.
-- Shell, Python, workflow, and repository-hygiene changes should use the
-  matching Makefile lint target. Do not substitute syntax checks for the
-  repository's configured linters.
-- Browser bootstrap or integration-sync script changes need their fixture-based
-  tests. Changes under `browser/integration/brave/` also need the
-  `reb-brave-verify` workflow.
+| Changed surface | First useful evidence |
+| --- | --- |
+| One C++ component | Its directly related test binary, then `make test` if shared code is involved |
+| Broker, IPC, producer, artifact transfer, or evidence store | Related native test plus the matching socket test or `make e2e` |
+| Research UI Python | The directly related unittest module, then `make ui-test` |
+| Origin Trace HTML, JavaScript, Swift, packaging, or assets | `reb-ui-e2e` plus the directly related automated tests |
+| Shell, Python, workflow, or repository tooling | The matching Makefile lint target and fixture test |
+| Documentation or repository skills | Workspace and repository hygiene checks, link inspection, skill validation, and `git diff --check` |
+| Brave integration or setup | Relevant fixture tests plus `reb-brave-verify` |
 
-When handing off an implementation, run the complete local gate from
-`AGENTS.md`, even if focused checks already passed. Add the documented macOS or
-Brave checks when those surfaces changed. Do not silently reduce the gate based
-on elapsed time.
+Prefer behavior and contract checks over tests that only match implementation
+wording. A syntax check does not replace the configured linter or an
+end-to-end path.
+
+## Run the handoff gate
+
+Before handing off a repository change, run the complete command block from
+`AGENTS.md`, even when focused checks passed. Add its documented macOS or Brave
+checks when those surfaces changed. Do not silently narrow the gate because of
+elapsed time.
+
+Review the final diff after testing. Confirm it contains no generated checkout,
+build output, captured evidence, secrets, or unrelated user changes.
 
 ## Handle failures
 
 - Preserve the first actionable failure and its command output.
-- Continue with independent checks only when they can reveal additional useful
-  information without masking the first failure.
-- If the request is validation-only, do not edit source to repair failures.
-- Distinguish a product failure from a missing platform tool, unavailable
-  toolchain, or pre-existing dirty-worktree issue.
-- Never report a skipped or unavailable check as passing.
+- Continue only with independent checks that can add useful evidence without
+  obscuring the first failure.
+- In a validation-only request, do not edit product code to repair a failure.
+- Distinguish product failures from missing tools, unavailable platform
+  toolchains, dirty upstream state, and pre-existing worktree failures.
+- Never label a skipped or unavailable check as passing.
 
 ## Report evidence
 
-Give each required command one status: passed, failed, unavailable, or skipped.
-For anything other than passed, state the exact reason. End with the overall
-result and any remaining validation gap. Include a focused reproduction command
-when a failure remains.
+Give every required check one status: passed, failed, unavailable, or skipped.
+For anything other than passed, state the exact reason and a focused reproduction
+command when one exists. End with the overall result and the remaining risk or
+validation gap.

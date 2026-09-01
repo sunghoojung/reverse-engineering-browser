@@ -5,6 +5,7 @@
 - [Feature roadmap](./product/feature-list.md)
 - [Feature catalog](./product/feature-catalog.md)
 - [WireBrowser parity inventory](./product/wirebrowser-parity.md)
+- [Action Scope Policy v1](./product/action-scope-policy-v1.md)
 - [Heap Reference Inspection v2](./product/heap-reference-inspection-v2.md)
 - [Memory Origin Trace v1](./product/memory-origin-trace-v1.md)
 - [Request Interception v1](./product/request-interception-v1.md)

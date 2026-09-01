@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark light" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%23292a2d'/%3E%3Crect x='4' y='6' width='24' height='20' rx='2' fill='none' stroke='%238ab4f8' stroke-width='2'/%3E%3Cpath d='M9 12h4l-2 3 2 3H9m7-6v6m3-6h4l-2 3 2 3h-4' fill='none' stroke='%23e8eaed' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'/%3E%3C/svg%3E" />
     <title>Origin Trace - Reverse Engineering Browser</title>
     <style>
       :root {
@@ -77,6 +78,7 @@
         min-height: 0;
         margin: 0;
         display: grid;
+        grid-template-columns: minmax(0, 1fr);
         grid-template-rows: 41px 45px minmax(0, 1fr) 34px;
         overflow: hidden;
         background: var(--panel);
@@ -194,6 +196,7 @@
       .workspace {
         display: grid;
         grid-template-columns: 218px minmax(0, 1fr);
+        min-width: 0;
         min-height: 0;
         overflow: hidden;
       }
@@ -1125,7 +1128,7 @@
       .experiment-card h2 { margin: 0; font-size: 11px; }
       .experiment-card p { margin: 5px 0 0; color: var(--muted); font-size: 9px; }
       .experiment-body { padding: 13px; }
-      #screen-experiments:not([hidden]) { display: grid; grid-template-rows: 60px auto minmax(0, 1fr); }
+      #screen-experiments:not([hidden]) { display: grid; grid-template-rows: 60px auto auto minmax(0, 1fr); }
       .experiment-notice {
         min-height: 34px;
         display: flex;
@@ -1141,6 +1144,39 @@
       .experiment-notice[data-kind="ready"]::before { background: var(--green); }
       .experiment-notice[data-kind="working"]::before { background: var(--accent); }
       .experiment-notice[data-kind="error"]::before { background: var(--red); }
+      .action-scope-panel {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: minmax(190px, .8fr) minmax(310px, 1.2fr) minmax(250px, 1fr);
+        gap: 10px;
+        align-items: center;
+        padding: 9px 12px;
+        border-bottom: 1px solid var(--line);
+        background: color-mix(in srgb, var(--accent) 5%, var(--panel));
+      }
+      .action-scope-summary { min-width: 0; display: grid; grid-template-columns: auto 1fr; gap: 3px 8px; align-items: center; }
+      .action-scope-summary h2 { margin: 0; font-size: 10px; }
+      .action-scope-summary p { grid-column: 1 / -1; margin: 0; color: var(--muted); font: 8px/1.4 var(--mono); }
+      .action-scope-badge { min-width: 54px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 999px; color: var(--green); font: 650 7px var(--mono); text-align: center; text-transform: uppercase; }
+      .action-scope-badge[data-kind="error"] { color: var(--red); }
+      .action-scope-badge[data-kind="offline"] { color: var(--faint); }
+      .action-scope-controls { min-width: 0; display: grid; grid-template-columns: auto minmax(120px, 1fr) auto; gap: 7px; }
+      .action-scope-toggle { display: flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+      .action-scope-toggle button { min-height: 29px; padding: 0 8px; border: 0; border-right: 1px solid var(--line); background: var(--panel-2); color: var(--muted); font: 8px var(--mono); }
+      .action-scope-toggle button:last-child { border-right: 0; }
+      .action-scope-toggle button[aria-pressed="true"] { background: var(--accent-soft); color: var(--text); box-shadow: inset 0 -2px var(--accent); }
+      .action-scope-controls select, .action-scope-add input { min-width: 0; min-height: 31px; padding: 0 8px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); color: var(--text); font: 8px var(--mono); }
+      .action-scope-controls > button, .action-scope-add button { min-height: 31px; white-space: nowrap; }
+      .action-scope-pages { min-width: 0; display: grid; gap: 6px; }
+      .action-scope-add { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
+      .action-scope-targets { display: flex; gap: 5px; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
+      .action-scope-target { flex: 0 0 auto; max-width: 190px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 6px; align-items: center; padding: 5px 7px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); }
+      .action-scope-target[data-matched="true"] { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); background: var(--accent-soft); }
+      .action-scope-target strong, .action-scope-target small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .action-scope-target strong { font: 8px var(--mono); }
+      .action-scope-target small { color: var(--faint); font: 7px var(--mono); }
+      .action-scope-target button { grid-column: 2; grid-row: 1 / span 2; width: 22px; height: 22px; padding: 0; border: 0; background: transparent; color: var(--faint); }
+      .action-scope-target button:hover { color: var(--red); }
       .experiment-workspace {
         min-height: 0;
         display: grid;
@@ -1730,6 +1766,9 @@
         .collection-run-pane { grid-template-columns: 1fr 1fr; }
       }
       @media (max-width: 900px) {
+        .toolbar { overflow-x: auto; }
+        .workspace.experiments-active { grid-template-columns: minmax(0, 1fr); }
+        .workspace.experiments-active > .sidebar { display: none; }
         .traffic-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
         .request-pane { border-right: 0; border-bottom: 1px solid var(--line); }
         .request-pane { grid-template-rows: auto auto auto; }
@@ -1744,6 +1783,8 @@
         .memory-grid { grid-template-columns: 245px minmax(0, 1fr); }
         .memory-results-pane { grid-template-columns: minmax(210px, 42%) minmax(0, 1fr); }
         .experiment-workspace { grid-template-columns: minmax(260px, .8fr) minmax(320px, 1.2fr); }
+        .action-scope-panel { grid-template-columns: minmax(170px, .7fr) minmax(300px, 1.3fr); }
+        .action-scope-pages { grid-column: 1 / -1; grid-template-columns: minmax(260px, .8fr) minmax(0, 1.2fr); }
         .experiment-column:last-child { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
         .repeater-workspace { grid-template-columns: minmax(235px, .7fr) minmax(340px, 1.3fr); }
         .repeater-column:last-child { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
@@ -1782,10 +1823,15 @@
         .confidence { justify-self: start; }
         .screen-head { padding: 9px 10px; }
         .screen-head-actions .secondary-button { display: none; }
-        #screen-experiments:not([hidden]) { grid-template-rows: auto auto minmax(0, 1fr); }
+        #screen-experiments:not([hidden]) { grid-template-rows: auto auto auto minmax(0, 1fr); }
         #screen-experiments > .screen-head { display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: start; gap: 8px 10px; }
         #screen-experiments > .screen-head .screen-head-actions { width: 100%; grid-column: 1 / -1; margin-left: 0; }
         #screen-experiments > .screen-head .experiment-mode-tabs { flex: 1 1 auto; }
+        .action-scope-panel { grid-template-columns: 1fr; align-items: stretch; }
+        .action-scope-controls { grid-template-columns: 1fr; }
+        .action-scope-toggle { width: 100%; }
+        .action-scope-toggle button { flex: 1; }
+        .action-scope-pages { grid-column: auto; grid-template-columns: 1fr; }
         .experiment-workspace { grid-template-columns: 1fr; }
         .experiment-column:last-child { grid-column: auto; grid-template-columns: 1fr; }
         .experiment-form-row { grid-template-columns: 1fr; }
@@ -2161,6 +2207,28 @@
               </div>
             </header>
             <div id="experiment-notice" class="experiment-notice" data-kind="idle" role="status" aria-live="polite">Create an isolated experiment to configure request interception.</div>
+            <section id="action-scope-panel" class="action-scope-panel" aria-label="Mutable action scope">
+              <div class="action-scope-summary">
+                <span id="action-scope-badge" class="action-scope-badge" data-kind="offline">No scope</span>
+                <h2>Action scope</h2>
+                <p id="action-scope-message">Create an isolated context to choose all pages or one exact page.</p>
+              </div>
+              <div class="action-scope-controls">
+                <div class="action-scope-toggle" role="group" aria-label="Action scope mode">
+                  <button id="action-scope-global" type="button" aria-pressed="true">All pages</button>
+                  <button id="action-scope-targeted" type="button" aria-pressed="false">One page</button>
+                </div>
+                <select id="action-scope-target" aria-label="Target disposable page" disabled><option value="">No disposable pages</option></select>
+                <button id="action-scope-apply" class="secondary-button" type="button" disabled>Apply scope</button>
+              </div>
+              <div class="action-scope-pages">
+                <form id="action-scope-add-form" class="action-scope-add">
+                  <input id="action-scope-new-url" type="url" maxlength="8192" placeholder="https://app.example.test/page" autocomplete="off" aria-label="New disposable page URL" />
+                  <button id="action-scope-add" class="secondary-button" type="submit" disabled>Add page</button>
+                </form>
+                <div id="action-scope-targets" class="action-scope-targets" aria-label="Disposable pages"><span class="experiment-empty">No disposable pages.</span></div>
+              </div>
+            </section>
             <div id="interception-workspace" class="experiment-workspace">
               <div class="experiment-column">
                 <article class="experiment-card">
@@ -2524,7 +2592,7 @@
                   </div>
                 </article>
                 <article class="experiment-card">
-                  <header><div><h2>Automatic execution</h2><p>Created, before-load, and after-load recipes run sequentially with one pending trigger batch.</p></div><span id="automation-state-badge" class="experiment-card-badge" data-kind="offline">Disarmed</span></header>
+                  <header><div><h2>Automatic execution</h2><p>Created, before-load, and after-load recipes run sequentially with a bounded 16-trigger queue.</p></div><span id="automation-state-badge" class="experiment-card-badge" data-kind="offline">Disarmed</span></header>
                   <div class="experiment-body experiment-form">
                     <label>Variables (JSON object)<textarea id="automation-variables" maxlength="16384" spellcheck="false" placeholder='{"seed":"verified"}'></textarea></label>
                     <label class="hook-confirm"><input id="automation-confirm" type="checkbox" /> I confirm these recipes may execute and mutate only the disposable page</label>
@@ -3027,6 +3095,8 @@ export async function checkout(cart, fingerprint) {
         experimentError: null,
         experimentPrefillKey: null,
         experimentMode: 'interceptor',
+        actionScopeDraftMode: null,
+        actionScopeDraftRevision: -1,
         objectSelectedResultId: null,
         objectSelectionSearchId: 0,
         automationEditingRecipeId: null,
@@ -3144,6 +3214,17 @@ export async function checkout(cart, fingerprint) {
         automationWorkspace: document.querySelector('#automation-workspace'),
         experimentSubtitle: document.querySelector('#experiment-subtitle'),
         experimentNotice: document.querySelector('#experiment-notice'),
+        actionScopePanel: document.querySelector('#action-scope-panel'),
+        actionScopeBadge: document.querySelector('#action-scope-badge'),
+        actionScopeMessage: document.querySelector('#action-scope-message'),
+        actionScopeGlobal: document.querySelector('#action-scope-global'),
+        actionScopeTargeted: document.querySelector('#action-scope-targeted'),
+        actionScopeTarget: document.querySelector('#action-scope-target'),
+        actionScopeApply: document.querySelector('#action-scope-apply'),
+        actionScopeAddForm: document.querySelector('#action-scope-add-form'),
+        actionScopeNewUrl: document.querySelector('#action-scope-new-url'),
+        actionScopeAdd: document.querySelector('#action-scope-add'),
+        actionScopeTargets: document.querySelector('#action-scope-targets'),
         experimentContextMessage: document.querySelector('#experiment-context-message'),
         experimentContextBadge: document.querySelector('#experiment-context-badge'),
         experimentStorageState: document.querySelector('#experiment-storage-state'),
@@ -3889,6 +3970,39 @@ export async function checkout(cart, fingerprint) {
           (!activeStates.includes(trace.state) || trace.limit_reason === null || trace.partial);
       }
 
+      function isActionScope(scope) {
+        const states = ['idle', 'discovering', 'ready', 'partial', 'disposed', 'error'];
+        if (!isPlainObject(scope) || scope.protocol_version !== 1 || !states.includes(scope.state) ||
+            !['global', 'target'].includes(scope.mode) ||
+            (scope.target_id !== null && !isBoundedText(scope.target_id, 4 * 1024)) ||
+            !isSafeIntegerInRange(scope.revision, 0, Number.MAX_SAFE_INTEGER) ||
+            !Array.isArray(scope.targets) || scope.targets.length > 8 ||
+            !isSafeIntegerInRange(scope.matched_target_count, 0, 8) ||
+            !isSafeIntegerInRange(scope.connected_target_count, 0, 8) ||
+            scope.connected_target_count > scope.matched_target_count ||
+            !isSafeIntegerInRange(scope.target_overflow, 0, Number.MAX_SAFE_INTEGER) ||
+            !isBoundedText(scope.message, 512) ||
+            !Array.isArray(scope.rule_families) ||
+            scope.rule_families.join(',') !== 'request_interception,automation_recipes' ||
+            !Array.isArray(scope.target_only_families) ||
+            scope.target_only_families.join(',') !== 'object_experiment,runtime_hooks,repeater' ||
+            !isPlainObject(scope.limits) || scope.limits.targets !== 8 ||
+            scope.limits.pending_triggers !== 16) return false;
+        const ids = new Set();
+        if (!scope.targets.every(target => {
+          if (!isPlainObject(target) || !isBoundedText(target.id, 4 * 1024) ||
+              !['page', 'webview'].includes(target.type) || !isBoundedText(target.title, 512) ||
+              !isBoundedText(target.url, 8 * 1024) || typeof target.connected !== 'boolean' ||
+              typeof target.matched !== 'boolean' || ids.has(target.id)) return false;
+          ids.add(target.id);
+          return target.matched === (scope.mode === 'global' || target.id === scope.target_id);
+        })) return false;
+        if (scope.targets.filter(target => target.matched).length !== scope.matched_target_count ||
+            scope.targets.filter(target => target.matched && target.connected).length !== scope.connected_target_count) return false;
+        if (scope.mode === 'global') return scope.target_id === null;
+        return typeof scope.target_id === 'string' && scope.target_id.length > 0;
+      }
+
       function isRequestInterceptionRule(rule) {
         return isPlainObject(rule) && ['continue', 'block', 'drop', 'rewrite', 'fulfill'].includes(rule.mode) &&
           isBoundedText(rule.url_pattern, 2 * 1024) && isBoundedText(rule.method_filter, 32) &&
@@ -3929,6 +4043,7 @@ export async function checkout(cart, fingerprint) {
             !isSafeIntegerInRange(experiment.disposed_at_ms, 0, Number.MAX_SAFE_INTEGER) ||
             !isRequestInterceptionRule(experiment.rule) ||
             (experiment.last_request !== null && (!isPlainObject(experiment.last_request) ||
+              (experiment.last_request.target_id !== undefined && !isBoundedText(experiment.last_request.target_id, 4 * 1024)) ||
               !isBoundedText(experiment.last_request.url, 8 * 1024) || !isBoundedText(experiment.last_request.method, 32) ||
               !isSafeIntegerInRange(experiment.last_request.header_count, 0, 64) ||
               !isSafeIntegerInRange(experiment.last_request.body_bytes, 0, 64 * 1024))) ||
@@ -3941,7 +4056,8 @@ export async function checkout(cart, fingerprint) {
         if (!experiment.audit.every(entry => isPlainObject(entry) &&
             isSafeIntegerInRange(entry.id, 1, Number.MAX_SAFE_INTEGER) &&
             isSafeIntegerInRange(entry.occurred_at_ms, 1, Number.MAX_SAFE_INTEGER) &&
-            isBoundedText(entry.request_id, 256) && isBoundedText(entry.method, 32) &&
+            isBoundedText(entry.request_id, 256) &&
+            (entry.target_id === undefined || isBoundedText(entry.target_id, 4 * 1024)) && isBoundedText(entry.method, 32) &&
             isBoundedText(entry.url, 8 * 1024) && isBoundedText(entry.resource_type, 128) &&
             isBoundedText(entry.detail, 512) &&
             ['continue', 'block', 'drop', 'rewrite', 'fulfill'].includes(entry.rule_mode) &&
@@ -4431,6 +4547,7 @@ export async function checkout(cart, fingerprint) {
             !Array.isArray(body.watches) || body.watches.length > 100 || !body.watches.every(isDebuggerWatch) ||
             !Array.isArray(body.console) || body.console.length > 500 || !body.console.every(isDebuggerConsoleEntry) ||
             !isMemoryOriginTrace(body.memory_origin_trace) ||
+            !isActionScope(body.action_scope) ||
             !isRequestInterception(body.request_interception) ||
             !isObjectExperiment(body.object_experiment) ||
             !isRuntimeHooks(body.runtime_hooks) ||
@@ -5761,6 +5878,10 @@ export async function checkout(cart, fingerprint) {
         return state.debuggerSession?.request_interception ?? null;
       }
 
+      function actionScopeState() {
+        return state.debuggerSession?.action_scope ?? null;
+      }
+
       function repeaterState() {
         return state.debuggerSession?.repeater ?? null;
       }
@@ -5797,6 +5918,79 @@ export async function checkout(cart, fingerprint) {
       function setExperimentNotice(kind, message) {
         elements.experimentNotice.dataset.kind = kind;
         elements.experimentNotice.textContent = message;
+      }
+
+      function renderActionScope() {
+        const scope = actionScopeState();
+        const experiment = requestInterception();
+        const sharedMode = ['interceptor', 'automation'].includes(state.experimentMode);
+        const busy = state.experimentPending || state.debuggerActionPending ||
+          (experiment?.pending_requests ?? 0) > 0 || experiment?.state === 'running' ||
+          automationRecipesState()?.auto_armed ||
+          ['arming', 'running', 'stopping'].includes(automationRecipesState()?.state);
+        const contextExists = Boolean(experiment?.isolated);
+        if (scope && state.actionScopeDraftRevision !== scope.revision) {
+          state.actionScopeDraftMode = scope.mode;
+          state.actionScopeDraftRevision = scope.revision;
+        }
+        const draftMode = state.actionScopeDraftMode ?? scope?.mode ?? 'global';
+        const targets = scope?.targets ?? [];
+        const previousTarget = elements.actionScopeTarget.value;
+        const selectedTarget = targets.some(target => target.id === previousTarget)
+          ? previousTarget
+          : scope?.target_id && targets.some(target => target.id === scope.target_id)
+            ? scope.target_id : targets[0]?.id ?? '';
+        const options = targets.map(target => {
+          const option = document.createElement('option'); option.value = target.id;
+          option.textContent = `${target.title || 'Untitled page'} · ${target.url || 'about:blank'}`;
+          return option;
+        });
+        if (!options.length) {
+          const option = document.createElement('option'); option.value = ''; option.textContent = 'No disposable pages';
+          options.push(option);
+        }
+        elements.actionScopeTarget.replaceChildren(...options);
+        elements.actionScopeTarget.value = selectedTarget;
+        elements.actionScopeGlobal.setAttribute('aria-pressed', String(draftMode === 'global'));
+        elements.actionScopeTargeted.setAttribute('aria-pressed', String(draftMode === 'target'));
+        elements.actionScopeGlobal.disabled = !sharedMode || !contextExists || busy;
+        elements.actionScopeTargeted.disabled = !sharedMode || !contextExists || busy || targets.length === 0;
+        elements.actionScopeTarget.disabled = !sharedMode || !contextExists || busy || draftMode !== 'target' || targets.length === 0;
+        const unchanged = scope && draftMode === scope.mode &&
+          (draftMode === 'global' || selectedTarget === scope.target_id);
+        elements.actionScopeApply.disabled = !sharedMode || !contextExists || busy || !scope || unchanged ||
+          (draftMode === 'target' && !selectedTarget);
+        elements.actionScopeNewUrl.disabled = !contextExists || busy || targets.length >= (scope?.limits.targets ?? 8);
+        elements.actionScopeAdd.disabled = elements.actionScopeNewUrl.disabled;
+        if (!sharedMode) {
+          elements.actionScopeBadge.dataset.kind = contextExists ? '' : 'offline';
+          elements.actionScopeBadge.textContent = 'Target only';
+          const labels = {repeater: 'Repeater', object: 'Object Lab', hooks: 'Runtime Hooks'};
+          elements.actionScopeMessage.textContent = `${labels[state.experimentMode]} stays on the primary disposable page. Shared scope applies to Interceptor and Automation.`;
+        } else {
+          elements.actionScopeBadge.dataset.kind = ['error', 'partial'].includes(scope?.state) ? 'error'
+            : scope?.state === 'ready' ? '' : 'offline';
+          elements.actionScopeBadge.textContent = scope?.state === 'ready'
+            ? `${scope.matched_target_count} ${scope.matched_target_count === 1 ? 'page' : 'pages'}`
+            : scope?.state ?? 'No scope';
+          elements.actionScopeMessage.textContent = scope?.message ?? 'Create an isolated context to choose action scope.';
+        }
+        elements.actionScopeTargets.replaceChildren(...(targets.length ? targets.map(target => {
+          const row = document.createElement('div'); row.className = 'action-scope-target';
+          row.dataset.matched = String(target.matched);
+          const title = textElement('strong', '', target.title || 'Untitled page');
+          const meta = textElement('small', '', `${target.connected ? 'connected' : 'disconnected'} · ${target.url || 'about:blank'}`);
+          row.append(title, meta);
+          if (target.id !== experiment?.target_id) {
+            const close = document.createElement('button'); close.type = 'button'; close.textContent = '×';
+            close.title = `Close ${target.title || 'disposable page'}`;
+            close.setAttribute('aria-label', close.title);
+            close.disabled = busy;
+            close.addEventListener('click', () => runExperimentAction({action: 'close_experiment_page', target_id: target.id}));
+            row.append(close);
+          }
+          return row;
+        }) : [textElement('span', 'experiment-empty', 'No disposable pages.') ]));
       }
 
       function parseExperimentHeaders(value, label) {
@@ -5897,7 +6091,8 @@ export async function checkout(cart, fingerprint) {
           const title = textElement('div', 'experiment-audit-title', `${entry.method || 'REQUEST'} ${entry.url || '(invalid URL)'}`);
           const outcome = textElement('div', 'experiment-audit-outcome', entry.outcome.replaceAll('_', ' '));
           const occurred = new Date(entry.occurred_at_ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-          const meta = textElement('div', 'experiment-audit-meta', `${occurred} · ${entry.resource_type} · ${entry.rule_mode} · ${entry.request_id} · ${entry.detail}`);
+          const target = entry.target_id ? ` · page ${entry.target_id.slice(0, 12)}` : '';
+          const meta = textElement('div', 'experiment-audit-meta', `${occurred} · ${entry.resource_type} · ${entry.rule_mode} · ${entry.request_id}${target} · ${entry.detail}`);
           row.append(title, outcome, meta);
           return row;
         }));
@@ -6741,6 +6936,7 @@ export async function checkout(cart, fingerprint) {
         elements.objectWorkspace.hidden = state.experimentMode !== 'object';
         elements.hooksWorkspace.hidden = state.experimentMode !== 'hooks';
         elements.automationWorkspace.hidden = state.experimentMode !== 'automation';
+        renderActionScope();
         if (state.experimentMode === 'repeater') {
           renderRepeater();
           return;
@@ -6825,6 +7021,9 @@ export async function checkout(cart, fingerprint) {
         const response = await debuggerAction(request);
         if (response?.experiment && isRequestInterception(response.experiment) && state.debuggerSession) {
           state.debuggerSession.request_interception = response.experiment;
+        }
+        if (response?.action_scope && isActionScope(response.action_scope) && state.debuggerSession) {
+          state.debuggerSession.action_scope = response.action_scope;
         }
         if (response?.object_experiment && isObjectExperiment(response.object_experiment) && state.debuggerSession) {
           state.debuggerSession.object_experiment = response.object_experiment;
@@ -10453,7 +10652,8 @@ export async function checkout(cart, fingerprint) {
         line.append(label, target);
         const nodes = [line];
         if ((session?.targets.length ?? 0) > 1) {
-          const select = document.createElement('select'); select.className = 'debug-select'; select.setAttribute('aria-label', 'Debugger target');
+          const select = document.createElement('select'); select.id = 'debugger-target-select'; select.name = 'debugger_target';
+          select.className = 'debug-select'; select.setAttribute('aria-label', 'Debugger target');
           session.targets.filter(candidate => ['page', 'webview'].includes(candidate.type)).forEach(candidate => {
             const option = document.createElement('option'); option.value = candidate.id; option.textContent = candidate.title || candidate.url || candidate.id;
             option.selected = candidate.id === session.target?.id; select.append(option);
@@ -10663,7 +10863,9 @@ export async function checkout(cart, fingerprint) {
         ];
         const eventRows = events.map(([eventName, label]) => {
           const row = document.createElement('label'); row.className = 'debug-checkbox';
-          const input = document.createElement('input'); input.type = 'checkbox'; input.checked = settings?.event_breakpoints.includes(eventName) ?? false;
+          const input = document.createElement('input'); input.type = 'checkbox'; input.name = 'event_breakpoint';
+          input.id = `event-breakpoint-${eventName.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+          input.checked = settings?.event_breakpoints.includes(eventName) ?? false;
           input.disabled = !attached || originTraceActive;
           input.addEventListener('change', () => debuggerAction({ action: input.checked ? 'set_event_breakpoint' : 'remove_event_breakpoint', event_name: eventName }));
           const text = document.createElement('span'); text.textContent = label; row.append(input, text); return row;
@@ -10893,6 +11095,7 @@ export async function checkout(cart, fingerprint) {
         if (screenName === 'backtrace' && !traceIsAvailable()) return;
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
         elements.workspace.classList.toggle('sources-active', screenName === 'sources');
+        elements.workspace.classList.toggle('experiments-active', screenName === 'experiments');
         document.querySelectorAll('.nav-button').forEach(button => {
           const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence');
           if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
@@ -11242,6 +11445,39 @@ export async function checkout(cart, fingerprint) {
         const pattern = elements.xhrBreakpointPattern.value.trim();
         elements.xhrBreakpointPattern.value = '';
         debuggerAction({ action: 'set_xhr_breakpoint', pattern });
+      });
+      elements.actionScopeGlobal.addEventListener('click', () => {
+        state.actionScopeDraftMode = 'global';
+        renderExperiment();
+      });
+      elements.actionScopeTargeted.addEventListener('click', () => {
+        state.actionScopeDraftMode = 'target';
+        renderExperiment();
+      });
+      elements.actionScopeTarget.addEventListener('change', renderExperiment);
+      elements.actionScopeApply.addEventListener('click', () => {
+        const mode = state.actionScopeDraftMode ?? actionScopeState()?.mode ?? 'global';
+        const request = {action: 'set_action_scope', mode};
+        if (mode === 'target') request.target_id = elements.actionScopeTarget.value;
+        runExperimentAction(request);
+      });
+      elements.actionScopeAddForm.addEventListener('submit', async event => {
+        event.preventDefault();
+        const value = elements.actionScopeNewUrl.value.trim();
+        let url = 'about:blank';
+        if (value) {
+          try {
+            const parsed = new URL(value);
+            if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.hash) throw new Error();
+            url = value;
+          } catch {
+            state.experimentError = 'Disposable page URL must be credential-free HTTP or HTTPS with no fragment.';
+            renderExperiment();
+            return;
+          }
+        }
+        const response = await runExperimentAction({action: 'create_experiment_page', url});
+        if (response) elements.actionScopeNewUrl.value = '';
       });
       elements.experimentCreate.addEventListener('click', () => runExperimentAction({
         action: 'create_request_interception_experiment'

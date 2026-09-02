@@ -27,6 +27,12 @@ readonly profile_path="${REB_BRAVE_PROFILE:-${session_directory}/brave-profile}"
 readonly category_mask="${REB_CAPTURE_CATEGORY_MASK:-1285}"
 readonly duration_seconds="${REB_CAPTURE_DURATION_SECONDS:-3600}"
 readonly open_command="${REB_OPEN_COMMAND:-open}"
+readonly native_quiet_mode="${REB_NATIVE_QUIET_MODE:-0}"
+
+if [[ "${native_quiet_mode}" != 0 && "${native_quiet_mode}" != 1 ]]; then
+  echo "REB_NATIVE_QUIET_MODE must be 0 or 1." >&2
+  exit 2
+fi
 
 mkdir -p "${session_directory}" "${artifact_store_path}" "${profile_path}"
 chmod 700 "${session_directory}" "${artifact_store_path}" "${profile_path}"
@@ -182,11 +188,17 @@ analyze_captured_artifacts() {
 analyze_captured_artifacts &
 analyzer_pid=$!
 
-python3 -u "${repository_root}/apps/research-ui/server.py" \
+ui_arguments=(
   --host 127.0.0.1 --port 0 --endpoint-file "${ui_endpoint_path}" \
   --store "${store_path}" --trace-store "${trace_store_path}" \
   --signal-store "${signal_store_path}" --artifacts "${artifact_store_path}" \
-  --socket "${socket_path}" --devtools-active-port "${devtools_active_port}" \
+  --socket "${socket_path}"
+)
+if [[ "${native_quiet_mode}" == 0 ]]; then
+  ui_arguments+=(--devtools-active-port "${devtools_active_port}")
+fi
+python3 -u "${repository_root}/apps/research-ui/server.py" \
+  "${ui_arguments[@]}" \
   >"${ui_log}" 2>&1 &
 ui_pid=$!
 # App-build CI can be CPU constrained immediately after compilation. Give the
@@ -219,18 +231,28 @@ echo "Origin trace store: ${trace_store_path}"
 echo "Request signal profile store: ${signal_store_path}"
 echo "Artifact store: ${artifact_store_path}"
 echo "Category mask: ${category_mask}; expires after ${duration_seconds} seconds"
-echo "Live debugger: ${ui_endpoint}"
+if [[ "${native_quiet_mode}" == 1 ]]; then
+  echo "Live debugger: disabled (native quiet mode)"
+else
+  echo "Live debugger: ${ui_endpoint}"
+fi
 echo "Close Brave to stop this capture session."
 
-"${brave_binary}" \
+brave_arguments=(
   --user-data-dir="${profile_path}" \
-  --remote-debugging-port=0 \
   --reb-broker-socket="${socket_path}" \
   --reb-artifact-socket="${artifact_socket_path}" \
   --reb-broker-token-file="${token_path}" \
   --reb-session-id="${session_id}" \
   --reb-category-mask="${category_mask}" \
   --reb-duration-seconds="${duration_seconds}"
+)
+if [[ "${native_quiet_mode}" == 1 ]]; then
+  brave_arguments+=(--js-flags=--reb-ignore-debugger-statements)
+else
+  brave_arguments+=(--remote-debugging-port=0)
+fi
+"${brave_binary}" "${brave_arguments[@]}"
 
 wait "${broker_pid}"
 broker_pid=""

@@ -24,6 +24,7 @@ readonly required_paths=(
   "browser/integration/brave/patches/0001-register-native-probe-component.patch"
   "browser/integration/brave/patches/0002-observe-native-network-lifecycle.patch"
   "browser/integration/brave/patches/chromium/0001-record-renderer-network-initiators.patch"
+  "browser/integration/brave/patches/chromium/0003-ignore-page-debugger-statements.patch"
   "browser/integration/brave/overlay/components/reverse_engineering_browser/browser/native_network_capture_sink.cc"
   "scripts/sync-browser-integration.sh"
   "scripts/brave-toolchain.sh"

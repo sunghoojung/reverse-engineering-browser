@@ -1,0 +1,89 @@
+diff --git a/v8/src/flags/flag-definitions.h b/v8/src/flags/flag-definitions.h
+--- a/v8/src/flags/flag-definitions.h
++++ b/v8/src/flags/flag-definitions.h
+@@ -3204,6 +3204,9 @@ DEFINE_INT(cpu_profiler_sampling_interval, 1000,
+            "CPU profiler sampling interval in microseconds")
+ 
+ // debugger
++DEFINE_BOOL(reb_ignore_debugger_statements, false,
++            "treat JavaScript debugger statements as no-ops before Inspector "
++            "handling")
+ DEFINE_BOOL(simulator_debugger, false,
+             "Start a debugger when a simulator hits a breakpoint")
+ DEFINE_NEG_IMPLICATION(fuzzing, simulator_debugger)
+diff --git a/v8/src/runtime/runtime-debug.cc b/v8/src/runtime/runtime-debug.cc
+--- a/v8/src/runtime/runtime-debug.cc
++++ b/v8/src/runtime/runtime-debug.cc
+@@ -178,6 +178,9 @@ RUNTIME_FUNCTION(Runtime_DebugBreakAtEntry) {
+ RUNTIME_FUNCTION(Runtime_HandleDebuggerStatement) {
+   SealHandleScope shs(isolate);
+   DCHECK_EQ(0, args.length());
++  if (v8_flags.reb_ignore_debugger_statements) {
++    return isolate->stack_guard()->HandleInterrupts();
++  }
+   if (isolate->debug()->break_points_active()) {
+     isolate->debug()->HandleDebugBreak(
+         kIgnoreIfTopFrameBlackboxed,
+diff --git a/v8/test/inspector/debugger/reb-ignore-debugger-statements-expected.txt b/v8/test/inspector/debugger/reb-ignore-debugger-statements-expected.txt
+new file mode 100644
+--- /dev/null
++++ b/v8/test/inspector/debugger/reb-ignore-debugger-statements-expected.txt
+@@ -0,0 +1,5 @@
++Native debugger-statement suppression leaves explicit breakpoints active
++
++Running test: testNativeDebuggerStatementSuppression
++Debugger statement continued: true
++Explicit breakpoint paused with reason other and 1 hit breakpoint.
+diff --git a/v8/test/inspector/debugger/reb-ignore-debugger-statements.js b/v8/test/inspector/debugger/reb-ignore-debugger-statements.js
+new file mode 100644
+--- /dev/null
++++ b/v8/test/inspector/debugger/reb-ignore-debugger-statements.js
+@@ -0,0 +1,43 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++// Flags: --reb-ignore-debugger-statements
++
++const {session, contextGroup, Protocol} = InspectorTest.start(
++    'Native debugger-statement suppression leaves explicit breakpoints active');
++
++InspectorTest.runAsyncTestSuite([
++  async function testNativeDebuggerStatementSuppression() {
++    await Protocol.Debugger.enable();
++    await Protocol.Runtime.enable();
++
++    const evaluation = await Protocol.Runtime.evaluate({
++      expression: 'debugger; globalThis.rebDebuggerStatementContinued = true;',
++    });
++    InspectorTest.log(
++        `Debugger statement continued: ${evaluation.result.result.value}`);
++
++    const sourceURL = 'reb-explicit-breakpoint.js';
++    const {result: {scriptId}} = await Protocol.Runtime.compileScript({
++      expression: [
++        'function target() {',
++        '  return 7;',
++        '}',
++        'target();',
++      ].join('\n'),
++      sourceURL,
++      persistScript: true,
++    });
++    await Protocol.Debugger.setBreakpointByUrl({
++      lineNumber: 1,
++      url: sourceURL,
++    });
++
++    const runPromise = Protocol.Runtime.runScript({scriptId});
++    const {params: {reason, hitBreakpoints}} =
++        await Protocol.Debugger.oncePaused();
++    InspectorTest.log(
++        `Explicit breakpoint paused with reason ${reason} and ` +
++        `${hitBreakpoints.length} hit breakpoint.`);
++    await Protocol.Debugger.resume();
++    await runPromise;
++
++    await Protocol.Debugger.disable();
++    await Protocol.Runtime.disable();
++  },
++]);

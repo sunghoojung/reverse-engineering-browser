@@ -1621,6 +1621,247 @@ process.stdout.write(JSON.stringify({{
             },
         )
 
+    def test_repeater_resolves_cancels_compares_and_bounds_history(self) -> None:
+        class RecordingConnection:
+            def close(self) -> None:
+                return
+
+        class RepeaterBridge(DebuggerBridge):
+            def __init__(self) -> None:
+                super().__init__()
+                self._state = "running"
+                self._target = {
+                    "id": "baseline-page",
+                    "type": "page",
+                    "title": "Baseline",
+                    "url": "https://baseline.test/",
+                }
+                self._connection = RecordingConnection()
+                self.browser_commands = []
+                self.response_index = 0
+                self.block_next = False
+                self.request_started = threading.Event()
+                self.cancelled = threading.Event()
+
+            def _browser_command(self, method: str, params=None) -> dict:
+                self.browser_commands.append((method, params or {}))
+                if method == "Target.createBrowserContext":
+                    return {"browserContextId": "repeater-context"}
+                if method == "Target.createTarget":
+                    return {"targetId": "repeater-page"}
+                return {}
+
+            def _command(self, method: str, params=None, timeout: float = 3.0) -> dict:
+                if method != "Runtime.evaluate":
+                    return {}
+                expression = (params or {}).get("expression", "")
+                if "registry.set(id, new AbortController())" in expression:
+                    return {"result": {"value": True}}
+                if not expression.startswith("(async function(config)"):
+                    if "const controller = registry instanceof Map" in expression:
+                        self.cancelled.set()
+                        return {"result": {"value": True}}
+                    return {}
+                if self.block_next:
+                    self.block_next = False
+                    self.request_started.set()
+                    self.cancelled.wait(timeout=2.0)
+                    return {
+                        "result": {
+                            "value": {
+                                "protocolVersion": 1,
+                                "ok": False,
+                                "error": "Request cancelled",
+                                "durationMs": 4,
+                                "cancelled": True,
+                                "timedOut": False,
+                            }
+                        }
+                    }
+                self.response_index += 1
+                status = 200 if self.response_index == 1 else 201
+                body = "alpha" if self.response_index == 1 else "beta"
+                headers = [{"name": "x-version", "value": str(self.response_index)}]
+                if self.response_index > 1:
+                    headers.append({"name": "x-added", "value": "yes"})
+                return {
+                    "result": {
+                        "value": {
+                            "protocolVersion": 1,
+                            "ok": True,
+                            "status": status,
+                            "statusText": "OK",
+                            "url": "https://api.test/orders/42?private=1",
+                            "headers": headers,
+                            "headersTruncated": False,
+                            "body": body,
+                            "bodyTruncated": False,
+                            "durationMs": self.response_index + 2,
+                            "cancelled": False,
+                            "timedOut": False,
+                        }
+                    }
+                }
+
+        bridge = RepeaterBridge()
+        bridge.action({"action": "create_request_interception_experiment"})
+        bridge._target = {
+            "id": "repeater-page",
+            "type": "page",
+            "title": "about:blank",
+            "url": "about:blank",
+        }
+        bridge._connection = RecordingConnection()
+        bridge._restore_request_interception("repeater-page")
+        configured = bridge.action(
+            {
+                "action": "configure_repeater_variables",
+                "variables": {"host": "api.test", "order": "42"},
+            }
+        )["repeater"]
+        self.assertEqual(
+            configured["variables"],
+            [{"name": "host", "value": "api.test"}, {"name": "order", "value": "42"}],
+        )
+
+        def send(body: str = '{"id":"{{order}}"}') -> dict:
+            before_history = bridge.snapshot()["repeater"]["history"]
+            before_id = before_history[-1]["id"] if before_history else 0
+            started = bridge.action(
+                {
+                    "action": "run_repeater_request",
+                    "url": "https://{{host}}/orders/{{order}}?private=1",
+                    "method": "POST",
+                    "headers": {"x-order": "{{order}}"},
+                    "body": body,
+                    "timeout_ms": 500,
+                }
+            )
+            self.assertTrue(started["ok"])
+
+            def completed_entry():
+                history = bridge.snapshot()["repeater"]["history"]
+                return history[-1] if history and history[-1]["id"] > before_id else None
+
+            return self.wait_for(completed_entry)
+
+        first = send()
+        second = send()
+        self.assertEqual(first["request"]["url"], "https://{{host}}/orders/{{order}}?private=1")
+        self.assertEqual(second["resolved_request"]["url"], "https://api.test/orders/42?private=1")
+        self.assertEqual(second["variable_names"], ["host", "order"])
+        comparison = bridge.snapshot()["repeater"]["comparison"]
+        self.assertEqual((comparison["baseline_status"], comparison["current_status"]), (200, 201))
+        self.assertTrue(comparison["body_changed"])
+        self.assertEqual(comparison["headers_added"], ["x-added"])
+        self.assertEqual(comparison["headers_changed"], ["x-version"])
+
+        bridge.block_next = True
+        bridge.request_started.clear()
+        bridge.cancelled.clear()
+        bridge.action(
+            {
+                "action": "run_repeater_request",
+                "url": "https://{{host}}/slow",
+                "method": "GET",
+                "headers": {},
+                "body": "",
+                "timeout_ms": 500,
+            }
+        )
+        self.assertTrue(bridge.request_started.wait(timeout=1.0))
+        cancelling = bridge.action({"action": "cancel_repeater_request"})["repeater"]
+        self.assertIn(cancelling["state"], {"cancelling", "ready"})
+        cancelled_entry = self.wait_for(
+            lambda: next(
+                (
+                    entry
+                    for entry in bridge.snapshot()["repeater"]["history"]
+                    if entry["state"] == "cancelled"
+                ),
+                None,
+            )
+        )
+        self.assertTrue(cancelled_entry["response"]["cancelled"])
+
+        for _ in range(26):
+            send()
+        bounded = bridge.snapshot()["repeater"]
+        self.assertEqual(len(bounded["history"]), 24)
+        self.assertGreaterEqual(bounded["history_evictions"], 5)
+        self.assertLessEqual(bounded["history_bytes"], 512 * 1024)
+        self.assertEqual(
+            bounded["history_bytes"],
+            sum(entry["stored_bytes"] for entry in bounded["history"]),
+        )
+
+        disposed = bridge.action(
+            {"action": "dispose_request_interception_experiment"}
+        )["repeater"]
+        self.assertEqual(disposed["state"], "disposed")
+        self.assertEqual(disposed["variables"], [])
+        self.assertEqual(disposed["history"], [])
+
+    def test_repeater_rejects_unresolved_sensitive_and_expanded_inputs(self) -> None:
+        bridge = DebuggerBridge()
+        variables = bridge._normalize_repeater_variables({"large": "x" * 4096})
+        template = bridge._normalize_repeater_template(
+            {
+                "url": "https://example.test/{{missing}}",
+                "method": "GET",
+                "headers": {},
+                "body": "",
+                "timeout_ms": 100,
+            }
+        )
+        with self.assertRaisesRegex(DebuggerBridgeError, "Unresolved"):
+            bridge._resolve_repeater_request(template, variables)
+        literal_template = bridge._normalize_repeater_template(
+            {
+                "url": "https://example.test/",
+                "method": "POST",
+                "headers": {},
+                "body": "{{=large}}",
+                "timeout_ms": 100,
+            }
+        )
+        literal, literal_variables = bridge._resolve_repeater_request(
+            literal_template, variables
+        )
+        self.assertEqual(literal["body"], "{{large}}")
+        self.assertEqual(literal_variables, [])
+        with self.assertRaisesRegex(DebuggerBridgeError, "forbidden"):
+            bridge._normalize_repeater_template(
+                {
+                    "url": "https://example.test/",
+                    "method": "GET",
+                    "headers": {"Authorization": "{{large}}"},
+                    "body": "",
+                    "timeout_ms": 100,
+                }
+            )
+        expanded = bridge._normalize_repeater_template(
+            {
+                "url": "https://example.test/",
+                "method": "POST",
+                "headers": {},
+                "body": "{{large}}" * 17,
+                "timeout_ms": 100,
+            }
+        )
+        with self.assertRaisesRegex(DebuggerBridgeError, "64 KiB"):
+            bridge._resolve_repeater_request(expanded, variables)
+        with self.assertRaisesRegex(DebuggerBridgeError, "100 and 30000"):
+            bridge._normalize_repeater_template(
+                {
+                    "url": "https://example.test/",
+                    "method": "GET",
+                    "headers": {},
+                    "body": "",
+                    "timeout_ms": 30_001,
+                }
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

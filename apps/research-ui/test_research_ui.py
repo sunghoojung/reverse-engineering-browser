@@ -1115,10 +1115,37 @@ const interceptionReady = {
     url: 'https://checkout.test/cart', resource_type: 'Fetch', rule_mode: 'fulfill',
     outcome: 'fulfilled', detail: 'Synthetic response 201 returned.'}]
 };
+const repeaterIdle = {
+  protocol_version: 1, session_id: 0, state: 'idle', variables: [], history: [],
+  history_bytes: 0, history_evictions: 0, active_execution: null, comparison: null,
+  message: 'Create an isolated request-lab context to use Repeater.',
+  limits: {history_entries: 24, history_bytes: 524288, variables: 32,
+    variable_bytes: 32768, request_bytes: 65536, response_bytes: 65536,
+    timeout_ms: 30000}
+};
+const repeaterEntry = {
+  id: 1, started_at_ms: 2, completed_at_ms: 5, state: 'complete',
+  variable_names: ['host'],
+  request: {url: 'https://{{host}}/cart', method: 'POST',
+    headers: [{name: 'x-run', value: '{{host}}'}], body: '{}', timeout_ms: 15000},
+  resolved_request: {url: 'https://checkout.test/cart', method: 'POST',
+    headers: [{name: 'x-run', value: 'checkout.test'}], body: '{}', timeout_ms: 15000},
+  response: {protocol_version: 1, ok: true, status: 201, status_text: 'Created',
+    url: 'https://checkout.test/cart', headers: [{name: 'content-type', value: 'application/json'}],
+    headers_truncated: false, body: '{"ok":true}', body_truncated: false, error: null,
+    duration_ms: 3, cancelled: false, timed_out: false, body_sha256: 'a'.repeat(64)},
+  stored_bytes: 512
+};
+const repeaterReady = {
+  ...repeaterIdle, session_id: 4, state: 'ready',
+  variables: [{name: 'host', value: 'checkout.test'}], history: [repeaterEntry],
+  history_bytes: 512, message: 'Repeater is ready.'
+};
 const snapshot = {
   protocol_version: 1, state: 'paused', generation: 7, error: null,
   heap_diff_baseline: null, memory_origin_trace: originIdle,
   request_interception: interceptionIdle,
+  repeater: repeaterIdle,
   target, targets: [target], scripts: [script],
   paused: {reason: 'breakpoint', description: null, call_frames: [frame],
     async_stack: [{description: 'Promise.then', call_frames: [{
@@ -1222,6 +1249,13 @@ process.stdout.write(JSON.stringify({
     result: {...interceptionReady.result, body: 'é'.repeat(32769)}}),
   interceptionPendingBound: !isRequestInterception({...interceptionReady, pending_requests: 17}),
   missingInterceptionRejected: !isDebuggerResponse({...snapshot, request_interception: undefined}),
+  repeaterReadyAccepted: isRepeater(repeaterReady),
+  repeaterHistoryBound: !isRepeater({...repeaterReady,
+    history: Array(25).fill(repeaterEntry)}),
+  repeaterHistoryBytesRequired: !isRepeater({...repeaterReady, history_bytes: 511}),
+  repeaterCredentialRejected: !isRepeater({...repeaterReady, history: [{...repeaterEntry,
+    request: {...repeaterEntry.request, headers: [{name: 'Authorization', value: 'secret'}]}}]}),
+  missingRepeaterRejected: !isDebuggerResponse({...snapshot, repeater: undefined}),
   liveSearchAccepted: isLiveObjectSearchResponse(liveSearch),
   liveSearchResultLimitRequired: !isLiveObjectSearchResponse({...liveSearch,
     search: {...liveSearch.search, result_limit: 51}}),
@@ -1281,6 +1315,11 @@ process.stdout.write(JSON.stringify({
                 "interceptionBodyByteBound": True,
                 "interceptionPendingBound": True,
                 "missingInterceptionRejected": True,
+                "repeaterReadyAccepted": True,
+                "repeaterHistoryBound": True,
+                "repeaterHistoryBytesRequired": True,
+                "repeaterCredentialRejected": True,
+                "missingRepeaterRejected": True,
                 "liveSearchAccepted": True,
                 "liveSearchResultLimitRequired": True,
                 "liveSearchSimilarityBound": True,
@@ -1349,6 +1388,27 @@ process.stdout.write(JSON.stringify({
         self.assertIn("Credentials are always omitted", html)
         self.assertIn("128 entries", html)
         self.assertIn("64 KiB", html)
+
+    def test_repeater_exposes_bounded_edit_cancel_history_variables_and_comparison(self) -> None:
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('data-experiment-mode="repeater"', html)
+        self.assertIn('id="request-repeater-pivot"', html)
+        self.assertIn('id="repeater-request-form"', html)
+        self.assertIn('id="repeater-cancel"', html)
+        self.assertIn('id="repeater-history"', html)
+        self.assertIn('id="repeater-variable-form"', html)
+        self.assertIn('id="repeater-comparison"', html)
+        self.assertIn("function isRepeater(repeater)", html)
+        self.assertIn("function renderRepeater()", html)
+        self.assertIn("function renderRepeaterVariableStatus()", html)
+        self.assertIn("action: 'configure_repeater_variables'", html)
+        self.assertIn("action: 'run_repeater_request'", html)
+        self.assertIn("action: 'cancel_repeater_request'", html)
+        self.assertIn("action: 'compare_repeater_history'", html)
+        self.assertIn("action: 'clear_repeater_history'", html)
+        self.assertIn("24 runs / 512 KiB", html)
+        self.assertIn("History is ephemeral and never enters the evidence store", html)
 
     def test_sources_model_rejects_malformed_artifact_catalogs(self) -> None:
         node = shutil.which("node")
@@ -1426,7 +1486,8 @@ process.stdout.write(JSON.stringify({
         self.assertIn("row.setAttribute('aria-pressed'", html)
         self.assertIn('aria-label="Filter requests"', html)
         self.assertIn("button.disabled = !traceIsAvailable()", html)
-        self.assertIn("&& !state.selectedField) return", html)
+        self.assertNotIn("screenName === 'experiments' && !state.selectedField", html)
+        self.assertIn("enableTabKeyboardNavigation('.experiment-mode-tab')", html)
         self.assertIn("requestAnimationFrame", html)
         self.assertIn("selectedRow ?? elements.requestFilter", html)
 
@@ -1880,6 +1941,13 @@ process.stdout.write(JSON.stringify({
         self.assertIn('case "/api/request-signal-profile":', application)
         self.assertIn('case "/api/debugger":', application)
         self.assertIn("debuggerUnavailableResponse(", application)
+        self.assertIn('"heap_diff_baseline": NSNull()', application)
+        self.assertIn('"memory_origin_trace": [', application)
+        self.assertIn('"request_interception": [', application)
+        self.assertIn('"repeater": [', application)
+        self.assertIn(r'let etag = "\"debugger-unavailable-v2\""', application)
+        self.assertIn("debuggerContractValid: isDebuggerResponse(state.debuggerSession)", application)
+        self.assertIn("repeaterAvailable: state.debuggerSession?.repeater?.protocol_version === 1", application)
         self.assertIn("originTraceResponse(for: requestURL)", application)
         self.assertIn("requestSignalProfileResponse(", application)
         self.assertIn('value(forHTTPHeaderField: "If-None-Match")', application)

@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import select
 import socket
 import struct
@@ -75,6 +76,18 @@ MAX_INTERCEPTION_RESPONSE_BYTES = 64 * 1024
 MAX_INTERCEPTION_AUDIT_ENTRIES = 128
 MAX_INTERCEPTION_PENDING_REQUESTS = 16
 INTERCEPTION_RUN_TIMEOUT_SECONDS = 15.0
+MAX_REPEATER_HISTORY_ENTRIES = 24
+MAX_REPEATER_HISTORY_BYTES = 512 * 1024
+MAX_REPEATER_VARIABLES = 32
+MAX_REPEATER_VARIABLE_NAME_BYTES = 64
+MAX_REPEATER_VARIABLE_VALUE_BYTES = 4 * 1024
+MAX_REPEATER_VARIABLE_BYTES = 32 * 1024
+MAX_REPEATER_TEMPLATE_METHOD_BYTES = 256
+MIN_REPEATER_TIMEOUT_MS = 100
+MAX_REPEATER_TIMEOUT_MS = 30_000
+
+REPEATER_VARIABLE_TOKEN = re.compile(r"\{\{(=)?([^{}]+)\}\}")
+REPEATER_VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
 
 SENSITIVE_INTERCEPTION_HEADERS = {
     "authorization",
@@ -268,8 +281,28 @@ LIVE_OBJECT_SEARCH_FUNCTION = r"""function(criteria) {
 }"""
 
 REQUEST_INTERCEPTION_FUNCTION = r"""async function(config) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
+  const started = performance.now();
+  const registry = config.controllerRegistryKey
+    ? globalThis[config.controllerRegistryKey]
+    : null;
+  const controller = registry instanceof Map
+    ? registry.get(config.executionId)
+    : new AbortController();
+  if (!(controller instanceof AbortController)) {
+    return {
+      protocolVersion: 1,
+      ok: false,
+      error: "Request controller is unavailable",
+      durationMs: 0,
+      cancelled: false,
+      timedOut: false
+    };
+  }
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, config.timeoutMs);
   try {
     const options = {
       method: config.method,
@@ -346,18 +379,31 @@ REQUEST_INTERCEPTION_FUNCTION = r"""async function(config) {
       headers,
       headersTruncated,
       body: bodyParts.join(""),
-      bodyTruncated
+      bodyTruncated,
+      durationMs: Math.max(0, Math.round(performance.now() - started)),
+      cancelled: false,
+      timedOut: false
     };
   } catch (error) {
     let message = "Request failed";
     try { message = String(error && error.message ? error.message : error); } catch {}
+    const cancelled = controller.signal.aborted && !timedOut;
     return {
       protocolVersion: 1,
       ok: false,
-      error: message.slice(0, 512)
+      error: (timedOut ? "Request timed out" : cancelled ? "Request cancelled" : message).slice(0, 512),
+      durationMs: Math.max(0, Math.round(performance.now() - started)),
+      cancelled,
+      timedOut
     };
   } finally {
     clearTimeout(timer);
+    if (registry instanceof Map) {
+      registry.delete(config.executionId);
+      if (registry.size === 0) {
+        try { delete globalThis[config.controllerRegistryKey]; } catch {}
+      }
+    }
   }
 }"""
 
@@ -663,6 +709,14 @@ class DebuggerBridge:
         self._request_interception_context_id: Optional[str] = None
         self._request_interception_return_target_id: Optional[str] = None
         self._request_interception_pending: set[str] = set()
+        self._next_repeater_execution_id = 1
+        self._repeater = self._empty_repeater()
+        self._repeater_history_bytes = 0
+        self._repeater_active_execution_id: Optional[int] = None
+        self._repeater_cancel_requested = False
+        self._repeater_controller_key = (
+            f"__reb_repeater_controllers_{os.urandom(16).hex()}"
+        )
 
     def start(self) -> None:
         if self.active_port_path is None or self._thread is not None:
@@ -730,6 +784,7 @@ class DebuggerBridge:
                 "heap_diff_baseline": self._heap_diff_baseline_metadata(),
                 "memory_origin_trace": copy.deepcopy(self._memory_origin_trace),
                 "request_interception": copy.deepcopy(self._request_interception),
+                "repeater": copy.deepcopy(self._repeater),
                 "limits": {
                     "scripts": MAX_SCRIPTS,
                     "call_frames": MAX_CALL_FRAMES,
@@ -748,6 +803,7 @@ class DebuggerBridge:
             request_interception_running = (
                 self._request_interception["state"] == "running"
             )
+            repeater_running = self._repeater_active_execution_id is not None
         if origin_trace_active and action != "stop_memory_origin_trace":
             raise DebuggerBridgeError(
                 "Memory Origin Trace controls the debugger until it finishes or is stopped"
@@ -755,6 +811,10 @@ class DebuggerBridge:
         if request_interception_running:
             raise DebuggerBridgeError(
                 "The isolated experiment controls the debugger until its request finishes"
+            )
+        if repeater_running and action != "cancel_repeater_request":
+            raise DebuggerBridgeError(
+                "Repeater controls the isolated debugger target until its request finishes or is cancelled"
             )
         if action == "pause":
             self._command("Debugger.pause")
@@ -929,6 +989,16 @@ class DebuggerBridge:
             return self._dispose_request_interception_experiment()
         elif action == "clear_request_interception_result":
             return self._clear_request_interception_result()
+        elif action == "configure_repeater_variables":
+            return self._configure_repeater_variables(request)
+        elif action == "run_repeater_request":
+            return self._run_repeater_request(request)
+        elif action == "cancel_repeater_request":
+            return self._cancel_repeater_request()
+        elif action == "compare_repeater_history":
+            return self._compare_repeater_history(request)
+        elif action == "clear_repeater_history":
+            return self._clear_repeater_history()
         elif action == "capture_heap_diff_baseline":
             return self._capture_heap_diff_baseline()
         elif action == "compare_heap_diff":
@@ -1787,6 +1857,689 @@ class DebuggerBridge:
             },
         }
 
+    @staticmethod
+    def _empty_repeater() -> dict[str, Any]:
+        return {
+            "protocol_version": 1,
+            "session_id": 0,
+            "state": "idle",
+            "variables": [],
+            "history": [],
+            "history_bytes": 0,
+            "history_evictions": 0,
+            "active_execution": None,
+            "comparison": None,
+            "message": "Create an isolated request-lab context to use Repeater.",
+            "limits": {
+                "history_entries": MAX_REPEATER_HISTORY_ENTRIES,
+                "history_bytes": MAX_REPEATER_HISTORY_BYTES,
+                "variables": MAX_REPEATER_VARIABLES,
+                "variable_bytes": MAX_REPEATER_VARIABLE_BYTES,
+                "request_bytes": MAX_INTERCEPTION_BODY_BYTES,
+                "response_bytes": MAX_INTERCEPTION_RESPONSE_BYTES,
+                "timeout_ms": MAX_REPEATER_TIMEOUT_MS,
+            },
+        }
+
+    def _begin_repeater_session_locked(self, session_id: int) -> None:
+        self._repeater = self._empty_repeater()
+        self._repeater.update(
+            {
+                "session_id": session_id,
+                "state": "attaching",
+                "message": "Waiting for the disposable page debugger to attach.",
+            }
+        )
+        self._repeater_history_bytes = 0
+        self._repeater_active_execution_id = None
+        self._repeater_cancel_requested = False
+
+    def _dispose_repeater_locked(self, session_id: int) -> None:
+        self._repeater = self._empty_repeater()
+        self._repeater.update(
+            {
+                "session_id": session_id,
+                "state": "disposed",
+                "message": (
+                    "Disposable context deleted. Repeater variables, request bodies, "
+                    "responses, and history were cleared."
+                ),
+            }
+        )
+        self._repeater_history_bytes = 0
+        self._repeater_active_execution_id = None
+        self._repeater_cancel_requested = False
+
+    def _repeater_context_ready_locked(self) -> bool:
+        return (
+            self._request_interception_context_id is not None
+            and self._request_interception["target_id"] is not None
+            and self._target is not None
+            and self._target["id"] == self._request_interception["target_id"]
+            and self._request_interception["state"] in {"ready", "error"}
+            and self._repeater["state"] in {"ready", "error"}
+        )
+
+    @staticmethod
+    def _normalize_repeater_variables(value: Any) -> list[dict[str, str]]:
+        if not isinstance(value, dict) or len(value) > MAX_REPEATER_VARIABLES:
+            raise DebuggerBridgeError("Repeater variables must be a bounded object")
+        total_bytes = 0
+        variables = []
+        for name, variable_value in sorted(value.items()):
+            if not isinstance(name, str) or not isinstance(variable_value, str):
+                raise DebuggerBridgeError("Repeater variable names and values must be text")
+            name_bytes = len(name.encode("utf-8"))
+            value_bytes = len(variable_value.encode("utf-8"))
+            if (
+                not REPEATER_VARIABLE_NAME.fullmatch(name)
+                or name_bytes > MAX_REPEATER_VARIABLE_NAME_BYTES
+                or value_bytes > MAX_REPEATER_VARIABLE_VALUE_BYTES
+            ):
+                raise DebuggerBridgeError("Repeater variable is invalid or oversized")
+            total_bytes += name_bytes + value_bytes
+            if total_bytes > MAX_REPEATER_VARIABLE_BYTES:
+                raise DebuggerBridgeError("Repeater variables exceed 32 KiB")
+            variables.append({"name": name, "value": variable_value})
+        return variables
+
+    @classmethod
+    def _resolve_repeater_text(
+        cls, value: str, variables: dict[str, str]
+    ) -> tuple[str, set[str]]:
+        used: set[str] = set()
+        missing: set[str] = set()
+
+        def replace(match: re.Match[str]) -> str:
+            escaped = match.group(1) == "="
+            name = match.group(2)
+            if (
+                not REPEATER_VARIABLE_NAME.fullmatch(name)
+                or len(name.encode("utf-8")) > MAX_REPEATER_VARIABLE_NAME_BYTES
+            ):
+                raise DebuggerBridgeError("Repeater request contains an invalid variable")
+            if escaped:
+                return "{{" + name + "}}"
+            used.add(name)
+            if name not in variables:
+                missing.add(name)
+                return match.group(0)
+            return variables[name]
+
+        resolved = REPEATER_VARIABLE_TOKEN.sub(replace, value)
+        if missing:
+            names = ", ".join(sorted(missing)[:8])
+            raise DebuggerBridgeError(f"Unresolved Repeater variables: {names}")
+        return resolved, used
+
+    def _normalize_repeater_template(self, request: dict[str, Any]) -> dict[str, Any]:
+        url = self._required_text(request, "url", MAX_INTERCEPTION_URL_BYTES).strip()
+        if any(ord(character) < 0x20 or ord(character) == 0x7F for character in url):
+            raise DebuggerBridgeError("Repeater request URL is invalid")
+        method = request.get("method", "GET")
+        if (
+            not isinstance(method, str)
+            or not method.strip()
+            or len(method.strip().encode("utf-8")) > MAX_REPEATER_TEMPLATE_METHOD_BYTES
+            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in method)
+        ):
+            raise DebuggerBridgeError("Repeater request method template is invalid")
+        headers = self._normalize_request_interception_headers(
+            request.get("headers", {}), "Repeater request"
+        )
+        body = request.get("body", "")
+        if (
+            not isinstance(body, str)
+            or len(body.encode("utf-8")) > MAX_INTERCEPTION_BODY_BYTES
+        ):
+            raise DebuggerBridgeError("Repeater request body exceeds 64 KiB")
+        timeout_ms = request.get("timeout_ms", MAX_REPEATER_TIMEOUT_MS)
+        if (
+            not isinstance(timeout_ms, int)
+            or isinstance(timeout_ms, bool)
+            or timeout_ms < MIN_REPEATER_TIMEOUT_MS
+            or timeout_ms > MAX_REPEATER_TIMEOUT_MS
+        ):
+            raise DebuggerBridgeError("Repeater timeout must be between 100 and 30000 ms")
+        return {
+            "url": url,
+            "method": method.strip(),
+            "headers": headers,
+            "body": body,
+            "timeout_ms": timeout_ms,
+        }
+
+    def _resolve_repeater_request(
+        self, template: dict[str, Any], variables: list[dict[str, str]]
+    ) -> tuple[dict[str, Any], list[str]]:
+        variable_map = {entry["name"]: entry["value"] for entry in variables}
+        url, used = self._resolve_repeater_text(template["url"], variable_map)
+        method, method_used = self._resolve_repeater_text(
+            template["method"], variable_map
+        )
+        used.update(method_used)
+        body, body_used = self._resolve_repeater_text(template["body"], variable_map)
+        used.update(body_used)
+        resolved_headers: dict[str, str] = {}
+        for header in template["headers"]:
+            header_value, header_used = self._resolve_repeater_text(
+                header["value"], variable_map
+            )
+            used.update(header_used)
+            resolved_headers[header["name"]] = header_value
+        resolved = self._normalize_request_interception_request(
+            {
+                "url": url,
+                "method": method,
+                "headers": resolved_headers,
+                "body": body,
+            }
+        )
+        resolved["timeout_ms"] = template["timeout_ms"]
+        return resolved, sorted(used)
+
+    def _configure_repeater_variables(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        variables = self._normalize_repeater_variables(request.get("variables", {}))
+        with self._lock:
+            if not self._repeater_context_ready_locked():
+                raise DebuggerBridgeError("The isolated Repeater target is not ready")
+            self._repeater["variables"] = variables
+            self._repeater["state"] = "ready"
+            self._repeater["message"] = (
+                f"{len(variables)} session-scoped Repeater "
+                f"{'variable is' if len(variables) == 1 else 'variables are'} ready."
+            )
+            self._changed()
+            repeater = copy.deepcopy(self._repeater)
+        return {"ok": True, "repeater": repeater, "generation": self.generation()}
+
+    def _install_repeater_controller(self, execution_id: int) -> None:
+        key = json.dumps(self._repeater_controller_key)
+        identifier = json.dumps(str(execution_id))
+        expression = f"""(() => {{
+          const key = {key};
+          const id = {identifier};
+          let registry = globalThis[key];
+          if (!(registry instanceof Map)) {{
+            registry = new Map();
+            Object.defineProperty(globalThis, key, {{value: registry, configurable: true}});
+          }}
+          if (registry.size >= 1 || registry.has(id)) return false;
+          registry.set(id, new AbortController());
+          return true;
+        }})()"""
+        evaluated = self._command(
+            "Runtime.evaluate",
+            {
+                "expression": expression,
+                "returnByValue": True,
+                "awaitPromise": False,
+                "silent": True,
+                "userGesture": False,
+            },
+            timeout=3.0,
+        )
+        remote = evaluated.get("result")
+        installed = remote.get("value") if isinstance(remote, dict) else None
+        if installed is not True:
+            raise DebuggerBridgeError("Repeater could not reserve a request controller")
+
+    def _run_repeater_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        template = self._normalize_repeater_template(request)
+        with self._lock:
+            variables = copy.deepcopy(self._repeater["variables"])
+        resolved, variable_names = self._resolve_repeater_request(template, variables)
+        with self._lock:
+            if not self._repeater_context_ready_locked():
+                raise DebuggerBridgeError("The isolated Repeater target is not ready")
+            if self._repeater_active_execution_id is not None:
+                raise DebuggerBridgeError("A Repeater request is already running")
+            execution_id = self._next_repeater_execution_id
+            self._next_repeater_execution_id += 1
+            session_id = self._repeater["session_id"]
+            started_at_ms = int(time.time() * 1_000)
+            self._repeater_active_execution_id = execution_id
+            self._repeater_cancel_requested = False
+            self._repeater["state"] = "running"
+            self._repeater["active_execution"] = {
+                "execution_id": execution_id,
+                "started_at_ms": started_at_ms,
+                "request": copy.deepcopy(template),
+                "resolved_url": self._redacted_request_url(resolved["url"]),
+                "resolved_method": resolved["method"],
+                "variable_names": variable_names,
+                "cancel_requested": False,
+            }
+            self._repeater["message"] = (
+                "Sending one credential-free Repeater request through the disposable page."
+            )
+            self._changed()
+        try:
+            self._install_repeater_controller(execution_id)
+        except BaseException as exception:
+            with self._lock:
+                if self._repeater_active_execution_id == execution_id:
+                    self._repeater_active_execution_id = None
+                    self._repeater["active_execution"] = None
+                    self._repeater["state"] = "error"
+                    self._repeater["message"] = self._truncate_text(str(exception), 512)
+                    self._changed()
+            raise
+
+        worker = threading.Thread(
+            target=self._execute_repeater_request,
+            args=(
+                session_id,
+                execution_id,
+                started_at_ms,
+                template,
+                resolved,
+                variable_names,
+            ),
+            name="reb-repeater-request",
+            daemon=True,
+        )
+        try:
+            worker.start()
+        except RuntimeError as exception:
+            try:
+                self._abort_repeater_controller(execution_id)
+            except DebuggerBridgeError:
+                pass
+            with self._lock:
+                if self._repeater_active_execution_id == execution_id:
+                    self._repeater_active_execution_id = None
+                    self._repeater["active_execution"] = None
+                    self._repeater["state"] = "error"
+                    self._repeater["message"] = self._truncate_text(
+                        f"Repeater worker could not start: {exception}", 512
+                    )
+                    self._changed()
+            raise DebuggerBridgeError("Repeater worker could not start") from exception
+        with self._lock:
+            repeater = copy.deepcopy(self._repeater)
+        return {"ok": True, "repeater": repeater, "generation": self.generation()}
+
+    def _execute_repeater_request(
+        self,
+        session_id: int,
+        execution_id: int,
+        started_at_ms: int,
+        template: dict[str, Any],
+        resolved: dict[str, Any],
+        variable_names: list[str],
+    ) -> None:
+        configuration = {
+            "url": resolved["url"],
+            "method": resolved["method"],
+            "headers": {
+                header["name"]: header["value"] for header in resolved["headers"]
+            },
+            "body": resolved["body"],
+            "timeoutMs": resolved["timeout_ms"],
+            "headerLimit": MAX_INTERCEPTION_HEADERS,
+            "headerValueLimit": MAX_INTERCEPTION_HEADER_VALUE_BYTES,
+            "headerTotalLimit": MAX_INTERCEPTION_HEADER_BYTES,
+            "responseByteLimit": MAX_INTERCEPTION_RESPONSE_BYTES,
+            "controllerRegistryKey": self._repeater_controller_key,
+            "executionId": str(execution_id),
+        }
+        expression = (
+            f"({REQUEST_INTERCEPTION_FUNCTION})"
+            f"({json.dumps(configuration, separators=(',', ':'))})"
+        )
+        try:
+            evaluated = self._command(
+                "Runtime.evaluate",
+                {
+                    "expression": expression,
+                    "returnByValue": True,
+                    "awaitPromise": True,
+                    "silent": True,
+                    "userGesture": False,
+                    "timeout": resolved["timeout_ms"],
+                },
+                timeout=resolved["timeout_ms"] / 1_000.0 + 2.0,
+            )
+            if isinstance(evaluated.get("exceptionDetails"), dict):
+                raise DebuggerBridgeError(
+                    "The isolated Repeater runner failed before returning a result"
+                )
+            remote = evaluated.get("result")
+            document = remote.get("value") if isinstance(remote, dict) else None
+            result = self._normalize_repeater_result(document)
+        except BaseException as exception:
+            with self._lock:
+                cancelled = (
+                    self._repeater_active_execution_id == execution_id
+                    and self._repeater_cancel_requested
+                )
+            duration_ms = max(0, int(time.time() * 1_000) - started_at_ms)
+            result = {
+                "protocol_version": 1,
+                "ok": False,
+                "status": 0,
+                "status_text": "",
+                "url": "",
+                "headers": [],
+                "headers_truncated": False,
+                "body": "",
+                "body_truncated": False,
+                "error": self._truncate_text(
+                    "Request cancelled" if cancelled else str(exception), 512
+                ),
+                "duration_ms": duration_ms,
+                "cancelled": cancelled,
+                "timed_out": False,
+                "body_sha256": hashlib.sha256(b"").hexdigest(),
+            }
+        self._complete_repeater_execution(
+            session_id,
+            execution_id,
+            started_at_ms,
+            template,
+            resolved,
+            variable_names,
+            result,
+        )
+
+    def _normalize_repeater_result(self, value: Any) -> dict[str, Any]:
+        result = self._normalize_request_interception_result(value)
+        duration_ms = value.get("durationMs") if isinstance(value, dict) else None
+        cancelled = value.get("cancelled") if isinstance(value, dict) else None
+        timed_out = value.get("timedOut") if isinstance(value, dict) else None
+        if (
+            not isinstance(duration_ms, int)
+            or isinstance(duration_ms, bool)
+            or duration_ms < 0
+            or duration_ms > MAX_REPEATER_TIMEOUT_MS + 5_000
+            or not isinstance(cancelled, bool)
+            or not isinstance(timed_out, bool)
+            or (cancelled and timed_out)
+            or (result["ok"] and (cancelled or timed_out))
+        ):
+            raise ProtocolError("Debugger returned a malformed Repeater result")
+        result.update(
+            {
+                "duration_ms": duration_ms,
+                "cancelled": cancelled,
+                "timed_out": timed_out,
+                "body_sha256": hashlib.sha256(
+                    result["body"].encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+        return result
+
+    def _complete_repeater_execution(
+        self,
+        session_id: int,
+        execution_id: int,
+        started_at_ms: int,
+        template: dict[str, Any],
+        resolved: dict[str, Any],
+        variable_names: list[str],
+        result: dict[str, Any],
+    ) -> None:
+        with self._lock:
+            if (
+                self._repeater["session_id"] != session_id
+                or self._repeater_active_execution_id != execution_id
+            ):
+                return
+            completed_at_ms = max(
+                started_at_ms, int(time.time() * 1_000)
+            )
+            entry_state = (
+                "complete"
+                if result["ok"]
+                else "cancelled"
+                if result["cancelled"]
+                else "timed_out"
+                if result["timed_out"]
+                else "error"
+            )
+            entry = {
+                "id": execution_id,
+                "started_at_ms": started_at_ms,
+                "completed_at_ms": completed_at_ms,
+                "state": entry_state,
+                "variable_names": variable_names,
+                "request": copy.deepcopy(template),
+                "resolved_request": {
+                    "url": resolved["url"],
+                    "method": resolved["method"],
+                    "headers": copy.deepcopy(resolved["headers"]),
+                    "body": resolved["body"],
+                    "timeout_ms": resolved["timeout_ms"],
+                },
+                "response": copy.deepcopy(result),
+            }
+            self._append_repeater_history_locked(entry)
+            self._repeater_active_execution_id = None
+            self._repeater_cancel_requested = False
+            self._repeater["active_execution"] = None
+            self._repeater["state"] = "ready"
+            self._repeater["message"] = (
+                f"Repeater request completed with status {result['status']}."
+                if result["ok"]
+                else "Repeater request was cancelled."
+                if result["cancelled"]
+                else "Repeater request reached its timeout."
+                if result["timed_out"]
+                else f"Repeater request failed: {result['error']}"
+            )
+            successful = [
+                item for item in self._repeater["history"] if item["response"]["ok"]
+            ]
+            if len(successful) >= 2:
+                self._repeater["comparison"] = self._compare_repeater_entries(
+                    successful[-2], successful[-1]
+                )
+            self._changed()
+
+    def _append_repeater_history_locked(self, entry: dict[str, Any]) -> None:
+        stored_bytes = len(
+            json.dumps(entry, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        )
+        entry["stored_bytes"] = stored_bytes
+        history = self._repeater["history"]
+        while history and (
+            len(history) >= MAX_REPEATER_HISTORY_ENTRIES
+            or self._repeater_history_bytes + stored_bytes
+            > MAX_REPEATER_HISTORY_BYTES
+        ):
+            evicted = history.pop(0)
+            self._repeater_history_bytes -= evicted["stored_bytes"]
+            self._repeater["history_evictions"] += 1
+        history.append(entry)
+        self._repeater_history_bytes += stored_bytes
+        self._repeater["history_bytes"] = self._repeater_history_bytes
+        comparison = self._repeater.get("comparison")
+        retained_ids = {item["id"] for item in history}
+        if comparison is not None and (
+            comparison["baseline_id"] not in retained_ids
+            or comparison["current_id"] not in retained_ids
+        ):
+            self._repeater["comparison"] = None
+
+    def _abort_repeater_controller(self, execution_id: int) -> bool:
+        key = json.dumps(self._repeater_controller_key)
+        identifier = json.dumps(str(execution_id))
+        expression = f"""(() => {{
+          const registry = globalThis[{key}];
+          const controller = registry instanceof Map ? registry.get({identifier}) : null;
+          if (!(controller instanceof AbortController)) return false;
+          controller.abort();
+          return true;
+        }})()"""
+        evaluated = self._command(
+            "Runtime.evaluate",
+            {
+                "expression": expression,
+                "returnByValue": True,
+                "awaitPromise": False,
+                "silent": True,
+                "userGesture": False,
+            },
+            timeout=3.0,
+        )
+        remote = evaluated.get("result")
+        value = remote.get("value") if isinstance(remote, dict) else None
+        if not isinstance(value, bool):
+            raise ProtocolError("Debugger returned a malformed cancellation result")
+        return value
+
+    def _cancel_repeater_request(self) -> dict[str, Any]:
+        with self._lock:
+            execution_id = self._repeater_active_execution_id
+            if execution_id is None:
+                raise DebuggerBridgeError("No Repeater request is running")
+            self._repeater_cancel_requested = True
+            self._repeater["state"] = "cancelling"
+            if self._repeater["active_execution"] is not None:
+                self._repeater["active_execution"]["cancel_requested"] = True
+            self._repeater["message"] = "Cancelling the active Repeater request."
+            self._changed()
+        try:
+            delivered = self._abort_repeater_controller(execution_id)
+        except BaseException:
+            with self._lock:
+                if self._repeater_active_execution_id == execution_id:
+                    self._repeater_cancel_requested = False
+                    self._repeater["state"] = "running"
+                    if self._repeater["active_execution"] is not None:
+                        self._repeater["active_execution"]["cancel_requested"] = False
+                    self._repeater["message"] = (
+                        "Cancellation could not be delivered; the request is still running."
+                    )
+                    self._changed()
+            raise
+        with self._lock:
+            if self._repeater_active_execution_id == execution_id and not delivered:
+                self._repeater_cancel_requested = False
+                self._repeater["state"] = "running"
+                if self._repeater["active_execution"] is not None:
+                    self._repeater["active_execution"]["cancel_requested"] = False
+                self._repeater["message"] = (
+                    "The request completed before cancellation was delivered."
+                )
+                self._changed()
+            repeater = copy.deepcopy(self._repeater)
+        return {"ok": True, "repeater": repeater, "generation": self.generation()}
+
+    @staticmethod
+    def _compare_repeater_entries(
+        baseline: dict[str, Any], current: dict[str, Any]
+    ) -> dict[str, Any]:
+        baseline_response = baseline["response"]
+        current_response = current["response"]
+
+        def header_map(response: dict[str, Any]) -> dict[str, str]:
+            return {
+                header["name"].lower(): header["value"]
+                for header in response["headers"]
+            }
+
+        before_headers = header_map(baseline_response)
+        after_headers = header_map(current_response)
+        before_names = set(before_headers)
+        after_names = set(after_headers)
+        changed = sorted(
+            name
+            for name in before_names & after_names
+            if before_headers[name] != after_headers[name]
+        )
+        baseline_body_bytes = len(baseline_response["body"].encode("utf-8"))
+        current_body_bytes = len(current_response["body"].encode("utf-8"))
+        return {
+            "protocol_version": 1,
+            "baseline_id": baseline["id"],
+            "current_id": current["id"],
+            "baseline_status": baseline_response["status"],
+            "current_status": current_response["status"],
+            "status_changed": baseline_response["status"]
+            != current_response["status"],
+            "duration_delta_ms": current_response["duration_ms"]
+            - baseline_response["duration_ms"],
+            "baseline_body_bytes": baseline_body_bytes,
+            "current_body_bytes": current_body_bytes,
+            "body_bytes_delta": current_body_bytes - baseline_body_bytes,
+            "baseline_body_sha256": baseline_response["body_sha256"],
+            "current_body_sha256": current_response["body_sha256"],
+            "body_changed": baseline_response["body_sha256"]
+            != current_response["body_sha256"],
+            "headers_added": sorted(after_names - before_names),
+            "headers_removed": sorted(before_names - after_names),
+            "headers_changed": changed,
+            "partial": any(
+                (
+                    baseline_response["headers_truncated"],
+                    baseline_response["body_truncated"],
+                    current_response["headers_truncated"],
+                    current_response["body_truncated"],
+                )
+            ),
+        }
+
+    def _compare_repeater_history(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        baseline_id = request.get("baseline_id")
+        current_id = request.get("current_id")
+        if (
+            not isinstance(baseline_id, int)
+            or isinstance(baseline_id, bool)
+            or baseline_id <= 0
+            or not isinstance(current_id, int)
+            or isinstance(current_id, bool)
+            or current_id <= 0
+            or baseline_id == current_id
+        ):
+            raise DebuggerBridgeError("Repeater comparison identifiers are invalid")
+        with self._lock:
+            entries = {entry["id"]: entry for entry in self._repeater["history"]}
+            baseline = entries.get(baseline_id)
+            current = entries.get(current_id)
+            if (
+                baseline is None
+                or current is None
+                or not baseline["response"]["ok"]
+                or not current["response"]["ok"]
+            ):
+                raise DebuggerBridgeError(
+                    "Repeater comparison requires two retained successful responses"
+                )
+            self._repeater["comparison"] = self._compare_repeater_entries(
+                baseline, current
+            )
+            self._repeater["message"] = (
+                f"Compared Repeater runs {baseline_id} and {current_id}."
+            )
+            self._changed()
+            repeater = copy.deepcopy(self._repeater)
+        return {"ok": True, "repeater": repeater, "generation": self.generation()}
+
+    def _clear_repeater_history(self) -> dict[str, Any]:
+        with self._lock:
+            if self._repeater_active_execution_id is not None:
+                raise DebuggerBridgeError(
+                    "Cancel or finish the active Repeater request before clearing history"
+                )
+            self._repeater["history"] = []
+            self._repeater["history_bytes"] = 0
+            self._repeater["history_evictions"] = 0
+            self._repeater["comparison"] = None
+            self._repeater_history_bytes = 0
+            self._repeater["message"] = "Repeater history and comparisons were cleared."
+            self._changed()
+            repeater = copy.deepcopy(self._repeater)
+        return {"ok": True, "repeater": repeater, "generation": self.generation()}
+
     def _create_request_interception_experiment(self) -> dict[str, Any]:
         with self._lock:
             if self._state not in {"running", "paused"} or self._target is None:
@@ -1815,6 +2568,7 @@ class DebuggerBridge:
             )
             self._request_interception_rule = self._default_request_interception_rule()
             self._request_interception_return_target_id = return_target_id
+            self._begin_repeater_session_locked(experiment_id)
             self._changed()
 
         context_id: Optional[str] = None
@@ -1859,6 +2613,8 @@ class DebuggerBridge:
                 self._request_interception["message"] = self._truncate_text(
                     message, 512
                 )
+                self._repeater["state"] = "error"
+                self._repeater["message"] = self._truncate_text(message, 512)
                 self._changed()
             raise
 
@@ -1877,6 +2633,7 @@ class DebuggerBridge:
         return {
             "ok": True,
             "experiment": copy.deepcopy(self._request_interception),
+            "repeater": copy.deepcopy(self._repeater),
             "generation": self.generation(),
         }
 
@@ -2011,7 +2768,13 @@ class DebuggerBridge:
         self._dispose_request_interception_context(preserve_result=True)
         with self._lock:
             experiment = copy.deepcopy(self._request_interception)
-        return {"ok": True, "experiment": experiment, "generation": self.generation()}
+            repeater = copy.deepcopy(self._repeater)
+        return {
+            "ok": True,
+            "experiment": experiment,
+            "repeater": repeater,
+            "generation": self.generation(),
+        }
 
     def _dispose_request_interception_context(
         self, preserve_result: bool, force: bool = False
@@ -2025,15 +2788,21 @@ class DebuggerBridge:
                         self._default_request_interception_rule()
                     )
                     self._request_interception_pending.clear()
+                    self._repeater = self._empty_repeater()
+                    self._repeater_history_bytes = 0
+                    self._repeater_active_execution_id = None
+                    self._repeater_cancel_requested = False
                     self._changed()
                 return
             if not force and (
                 self._request_interception["state"] == "running"
                 or self._request_interception_pending
+                or self._repeater_active_execution_id is not None
             ):
                 raise DebuggerBridgeError(
-                    "Wait for the active experiment request before disposing its context"
+                    "Finish or cancel active request-lab work before disposing its context"
                 )
+            repeater_session_id = self._repeater["session_id"]
             self._request_interception["state"] = "disposing"
             self._request_interception["message"] = (
                 "Disposing the isolated browser context and all of its storage."
@@ -2060,6 +2829,8 @@ class DebuggerBridge:
                     f"The disposable context could not be confirmed as deleted: {exception}",
                     512,
                 )
+                self._repeater["state"] = "error"
+                self._repeater["message"] = self._request_interception["message"]
                 self._changed()
             if preserve_result:
                 raise
@@ -2079,8 +2850,13 @@ class DebuggerBridge:
                 self._request_interception["message"] = (
                     "Disposable context deleted. The ephemeral result and audit remain visible."
                 )
+                self._dispose_repeater_locked(repeater_session_id)
             else:
                 self._request_interception = self._empty_request_interception()
+                self._repeater = self._empty_repeater()
+                self._repeater_history_bytes = 0
+                self._repeater_active_execution_id = None
+                self._repeater_cancel_requested = False
             self._changed()
 
     def _clear_request_interception_result(self) -> dict[str, Any]:
@@ -2092,6 +2868,10 @@ class DebuggerBridge:
             self._request_interception = self._empty_request_interception()
             self._request_interception_rule = self._default_request_interception_rule()
             self._request_interception_pending.clear()
+            self._repeater = self._empty_repeater()
+            self._repeater_history_bytes = 0
+            self._repeater_active_execution_id = None
+            self._repeater_cancel_requested = False
             self._changed()
         return {"ok": True, "generation": self.generation()}
 
@@ -3954,6 +4734,11 @@ class DebuggerBridge:
                 if was_running
                 else "Disposable context ready. Configure a bounded interception rule."
             )
+            if self._repeater_active_execution_id is None:
+                self._repeater["state"] = "ready"
+                self._repeater["message"] = (
+                    "Repeater is ready inside the disposable credential-free context."
+                )
             self._changed()
 
     def _parse_script(self, params: dict[str, Any]) -> Optional[dict[str, Any]]:

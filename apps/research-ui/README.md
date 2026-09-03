@@ -162,6 +162,17 @@ stores only redacted URLs and mutation metadata. Disposal deletes the complete
 BrowserContext before the ephemeral result can be cleared. See
 [Request Interception v1](../../docs/product/request-interception-v1.md).
 
+Repeater shares that disposable request-lab context and sends one editable,
+credential-free request at a time. It supports immediate cancellation, a
+100-millisecond to 30-second timeout, 32 session-scoped `{{name}}` variables,
+copying the fully resolved explicit request, a 24-entry and 512-KiB history, and
+response comparison across status, duration, retained-body digest and size, and
+changed header names. Expanded requests are validated after variable
+substitution, and disposal erases variables, request bodies, responses, history,
+and comparisons. Traffic prefills only the selected method and URL without query,
+headers, cookies, or body content. See
+[Repeater v1](../../docs/product/repeater-v1.md).
+
 The Traffic workspace can pivot a selected request value into Memory. The pivot
 only prefills an ephemeral query. It does not persist the selected value or
 begin a heap capture without a separate user action.

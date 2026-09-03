@@ -85,6 +85,14 @@ MAX_REPEATER_VARIABLE_BYTES = 32 * 1024
 MAX_REPEATER_TEMPLATE_METHOD_BYTES = 256
 MIN_REPEATER_TIMEOUT_MS = 100
 MAX_REPEATER_TIMEOUT_MS = 30_000
+MAX_OBJECT_EXPERIMENT_AUDIT_ENTRIES = 128
+MAX_OBJECT_EXPERIMENT_MUTATIONS = 256
+MAX_OBJECT_EXPERIMENT_PROPERTY_BYTES = 256
+MAX_OBJECT_EXPERIMENT_VALUE_BYTES = 16 * 1024
+MAX_OBJECT_EXPERIMENT_VALUE_DEPTH = 8
+MAX_OBJECT_EXPERIMENT_VALUE_ENTRIES = 256
+MAX_OBJECT_EXPERIMENT_STRING_BYTES = 4 * 1024
+OBJECT_EXPERIMENT_NAVIGATION_TIMEOUT_SECONDS = 15.0
 
 REPEATER_VARIABLE_TOKEN = re.compile(r"\{\{(=)?([^{}]+)\}\}")
 REPEATER_VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
@@ -94,6 +102,12 @@ SENSITIVE_INTERCEPTION_HEADERS = {
     "cookie",
     "proxy-authorization",
     "set-cookie",
+}
+
+FORBIDDEN_OBJECT_EXPERIMENT_PROPERTIES = {
+    "__proto__",
+    "constructor",
+    "prototype",
 }
 
 MEMORY_ORIGIN_TRACE_FRAMEWORK_PATTERNS = (
@@ -117,6 +131,9 @@ MEMORY_ORIGIN_TRACE_FRAMEWORK_PATTERNS = (
 )
 
 
+# V8's side-effect checker rejects this inspector's local arrays and counters.
+# Safety instead comes from fixed source that reads own descriptors, never values
+# behind accessors, and returns only bounded by-value metadata.
 LIVE_OBJECT_SEARCH_FUNCTION = r"""function(criteria) {
   const started = Date.now();
   const deadline = started + criteria.timeoutMs;
@@ -278,6 +295,118 @@ LIVE_OBJECT_SEARCH_FUNCTION = r"""function(criteria) {
     timedOut,
     durationMs: Math.max(0, Date.now() - started)
   };
+}"""
+
+OBJECT_EXPERIMENT_MUTATE_FUNCTION = r"""function(config) {
+  const boundedText = value => {
+    let text;
+    try { text = String(value); } catch { return "<unavailable>"; }
+    return text.length > 160 ? `${text.slice(0, 160)}...` : text;
+  };
+  const valueType = value => value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+  const className = value => {
+    if (Array.isArray(value)) return "Array";
+    try {
+      const prototype = Object.getPrototypeOf(value);
+      const descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, "constructor");
+      const name = descriptor && "value" in descriptor && descriptor.value && descriptor.value.name;
+      return typeof name === "string" && name ? name.slice(0, 160) : "Object";
+    } catch { return "Object"; }
+  };
+  const descriptorSummary = descriptor => {
+    if (!descriptor) return {exists: false, type: "missing", className: "", writable: false, configurable: false};
+    if (!("value" in descriptor)) {
+      return {exists: true, type: "accessor", className: "", writable: false, configurable: descriptor.configurable === true};
+    }
+    const value = descriptor.value;
+    const type = valueType(value);
+    return {
+      exists: true,
+      type,
+      className: (type === "object" || type === "array" || type === "function") && value !== null ? className(value) : "",
+      writable: descriptor.writable === true,
+      configurable: descriptor.configurable === true,
+      preview: (type === "object" || type === "array" || type === "function") && value !== null
+        ? `[${className(value)}]`
+        : boundedText(value)
+    };
+  };
+  const inspect = candidate => {
+    let names;
+    try { names = Object.getOwnPropertyNames(candidate).sort(); }
+    catch { names = []; }
+    const preview = [];
+    for (const name of names.slice(0, config.previewProperties)) {
+      let descriptor;
+      try { descriptor = Object.getOwnPropertyDescriptor(candidate, name); } catch {}
+      if (!descriptor || !("value" in descriptor)) {
+        preview.push({name: name.slice(0, 256), type: "accessor", value: "<getter not invoked>"});
+        continue;
+      }
+      const value = descriptor.value;
+      const type = value === null ? "null" : typeof value;
+      preview.push({
+        name: name.slice(0, 256),
+        type,
+        value: ((typeof value === "object" && value !== null) || typeof value === "function")
+          ? `[${className(value)}]`
+          : boundedText(value)
+      });
+    }
+    return {
+      id: config.resultId,
+      className: className(candidate),
+      propertyCount: names.length,
+      propertiesTruncated: names.length > config.previewProperties,
+      similarity: config.similarity,
+      preview
+    };
+  };
+
+  try {
+    const beforeDescriptor = Object.getOwnPropertyDescriptor(this, config.property);
+    const before = descriptorSummary(beforeDescriptor);
+    let outcome;
+    if (beforeDescriptor && !("value" in beforeDescriptor)) {
+      return {protocolVersion: 1, ok: false, error: "Accessor properties cannot be patched", outcome: "accessor", before, after: before, object: inspect(this)};
+    }
+    if (config.operation === "delete") {
+      if (!beforeDescriptor) {
+        return {protocolVersion: 1, ok: false, error: "The selected own property does not exist", outcome: "missing", before, after: before, object: inspect(this)};
+      }
+      if (!beforeDescriptor.configurable) {
+        return {protocolVersion: 1, ok: false, error: "The selected own property is not configurable", outcome: "non_configurable", before, after: before, object: inspect(this)};
+      }
+      if (!Reflect.deleteProperty(this, config.property)) {
+        return {protocolVersion: 1, ok: false, error: "The selected own property could not be deleted", outcome: "rejected", before, after: before, object: inspect(this)};
+      }
+      outcome = "deleted";
+    } else {
+      if (beforeDescriptor && !beforeDescriptor.writable) {
+        return {protocolVersion: 1, ok: false, error: "The selected own property is not writable", outcome: "non_writable", before, after: before, object: inspect(this)};
+      }
+      if (!beforeDescriptor && !Object.isExtensible(this)) {
+        return {protocolVersion: 1, ok: false, error: "The selected object is not extensible", outcome: "non_extensible", before, after: before, object: inspect(this)};
+      }
+      const descriptor = beforeDescriptor
+        ? {...beforeDescriptor, value: config.value}
+        : {value: config.value, writable: true, enumerable: true, configurable: true};
+      Object.defineProperty(this, config.property, descriptor);
+      outcome = beforeDescriptor ? "updated" : "created";
+    }
+    const after = descriptorSummary(Object.getOwnPropertyDescriptor(this, config.property));
+    return {protocolVersion: 1, ok: true, error: null, outcome, before, after, object: inspect(this)};
+  } catch (error) {
+    return {
+      protocolVersion: 1,
+      ok: false,
+      error: boundedText(error && error.message ? error.message : error),
+      outcome: "error",
+      before: {exists: false, type: "unknown", className: "", writable: false, configurable: false},
+      after: {exists: false, type: "unknown", className: "", writable: false, configurable: false},
+      object: null
+    };
+  }
 }"""
 
 REQUEST_INTERCEPTION_FUNCTION = r"""async function(config) {
@@ -709,6 +838,13 @@ class DebuggerBridge:
         self._request_interception_context_id: Optional[str] = None
         self._request_interception_return_target_id: Optional[str] = None
         self._request_interception_pending: set[str] = set()
+        self._next_object_experiment_navigation_id = 1
+        self._next_object_experiment_search_id = 1
+        self._next_object_experiment_audit_id = 1
+        self._object_experiment = self._empty_object_experiment()
+        self._object_experiment_group: Optional[str] = None
+        self._object_experiment_objects_id: Optional[str] = None
+        self._object_experiment_result_indices: set[int] = set()
         self._next_repeater_execution_id = 1
         self._repeater = self._empty_repeater()
         self._repeater_history_bytes = 0
@@ -784,6 +920,7 @@ class DebuggerBridge:
                 "heap_diff_baseline": self._heap_diff_baseline_metadata(),
                 "memory_origin_trace": copy.deepcopy(self._memory_origin_trace),
                 "request_interception": copy.deepcopy(self._request_interception),
+                "object_experiment": copy.deepcopy(self._object_experiment),
                 "repeater": copy.deepcopy(self._repeater),
                 "limits": {
                     "scripts": MAX_SCRIPTS,
@@ -804,6 +941,11 @@ class DebuggerBridge:
                 self._request_interception["state"] == "running"
             )
             repeater_running = self._repeater_active_execution_id is not None
+            object_experiment_running = self._object_experiment["state"] in {
+                "navigating",
+                "searching",
+                "mutating",
+            }
         if origin_trace_active and action != "stop_memory_origin_trace":
             raise DebuggerBridgeError(
                 "Memory Origin Trace controls the debugger until it finishes or is stopped"
@@ -815,6 +957,10 @@ class DebuggerBridge:
         if repeater_running and action != "cancel_repeater_request":
             raise DebuggerBridgeError(
                 "Repeater controls the isolated debugger target until its request finishes or is cancelled"
+            )
+        if object_experiment_running:
+            raise DebuggerBridgeError(
+                "Object Lab controls the isolated debugger target until its action finishes"
             )
         if action == "pause":
             self._command("Debugger.pause")
@@ -981,6 +1127,12 @@ class DebuggerBridge:
                 self._changed()
         elif action == "create_request_interception_experiment":
             return self._create_request_interception_experiment()
+        elif action == "navigate_object_experiment":
+            return self._navigate_object_experiment(request)
+        elif action == "search_object_experiment":
+            return self._search_object_experiment(request)
+        elif action == "mutate_object_experiment":
+            return self._mutate_object_experiment(request)
         elif action == "configure_request_interception":
             return self._configure_request_interception(request)
         elif action == "run_request_interception":
@@ -1044,6 +1196,57 @@ class DebuggerBridge:
         }
 
     def _search_live_objects(self, request: dict[str, Any]) -> dict[str, Any]:
+        criteria = self._live_object_search_criteria(request)
+        prototype_id: Optional[str] = None
+        objects_id: Optional[str] = None
+        try:
+            prototype = self._command(
+                "Runtime.evaluate",
+                {
+                    "expression": "Object.prototype",
+                    "objectGroup": "reb-live-object-search",
+                    "silent": True,
+                },
+            )
+            prototype_id = self._runtime_result_object_id(prototype, "prototype")
+            objects = self._command(
+                "Runtime.queryObjects", {"prototypeObjectId": prototype_id}, timeout=5.0
+            )
+            objects_id = self._runtime_result_object_id(
+                objects, "object collection", field="objects"
+            )
+            evaluated = self._command(
+                "Runtime.callFunctionOn",
+                {
+                    "objectId": objects_id,
+                    "functionDeclaration": LIVE_OBJECT_SEARCH_FUNCTION,
+                    "arguments": [{"value": criteria}],
+                    "returnByValue": True,
+                    "silent": True,
+                    "awaitPromise": False,
+                    "userGesture": False,
+                    "timeout": LIVE_OBJECT_SEARCH_TIMEOUT_MS,
+                },
+                timeout=3.0,
+            )
+        finally:
+            for object_id in (objects_id, prototype_id):
+                if object_id is None:
+                    continue
+                try:
+                    self._command("Runtime.releaseObject", {"objectId": object_id})
+                except DebuggerBridgeError:
+                    pass
+
+        if isinstance(evaluated.get("exceptionDetails"), dict):
+            raise DebuggerBridgeError("Live object search failed in the target")
+        remote = evaluated.get("result")
+        document = remote.get("value") if isinstance(remote, dict) else None
+        return self._normalize_live_object_search(document)
+
+    def _live_object_search_criteria(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
         property_query = self._optional_search_text(request, "property_query")
         value_query = self._optional_search_text(request, "value_query")
         class_query = self._optional_search_text(request, "class_query")
@@ -1085,7 +1288,7 @@ class DebuggerBridge:
         if not any((property_query, value_query, class_query, shape is not None)):
             raise DebuggerBridgeError("Live object search requires at least one criterion")
 
-        criteria = {
+        return {
             "propertyQuery": property_query,
             "valueQuery": value_query,
             "classQuery": class_query,
@@ -1100,51 +1303,6 @@ class DebuggerBridge:
             "propertyScanLimit": MAX_LIVE_OBJECT_SEARCH_PROPERTIES,
             "timeoutMs": LIVE_OBJECT_SEARCH_TIMEOUT_MS,
         }
-        prototype_id: Optional[str] = None
-        objects_id: Optional[str] = None
-        try:
-            prototype = self._command(
-                "Runtime.evaluate",
-                {
-                    "expression": "Object.prototype",
-                    "objectGroup": "reb-live-object-search",
-                    "silent": True,
-                },
-            )
-            prototype_id = self._runtime_result_object_id(prototype, "prototype")
-            objects = self._command(
-                "Runtime.queryObjects", {"prototypeObjectId": prototype_id}, timeout=5.0
-            )
-            objects_id = self._runtime_result_object_id(objects, "object collection")
-            evaluated = self._command(
-                "Runtime.callFunctionOn",
-                {
-                    "objectId": objects_id,
-                    "functionDeclaration": LIVE_OBJECT_SEARCH_FUNCTION,
-                    "arguments": [{"value": criteria}],
-                    "returnByValue": True,
-                    "silent": True,
-                    "awaitPromise": False,
-                    "userGesture": False,
-                    "throwOnSideEffect": True,
-                    "timeout": LIVE_OBJECT_SEARCH_TIMEOUT_MS,
-                },
-                timeout=3.0,
-            )
-        finally:
-            for object_id in (objects_id, prototype_id):
-                if object_id is None:
-                    continue
-                try:
-                    self._command("Runtime.releaseObject", {"objectId": object_id})
-                except DebuggerBridgeError:
-                    pass
-
-        if isinstance(evaluated.get("exceptionDetails"), dict):
-            raise DebuggerBridgeError("Live object search failed in the target")
-        remote = evaluated.get("result")
-        document = remote.get("value") if isinstance(remote, dict) else None
-        return self._normalize_live_object_search(document)
 
     def _optional_search_text(self, request: dict[str, Any], field: str) -> str:
         value = request.get(field, "")
@@ -1155,8 +1313,10 @@ class DebuggerBridge:
         return value
 
     @staticmethod
-    def _runtime_result_object_id(result: dict[str, Any], label: str) -> str:
-        remote = result.get("result")
+    def _runtime_result_object_id(
+        result: dict[str, Any], label: str, *, field: str = "result"
+    ) -> str:
+        remote = result.get(field)
         object_id = remote.get("objectId") if isinstance(remote, dict) else None
         if not isinstance(object_id, str) or not object_id:
             raise ProtocolError(f"Debugger returned a malformed {label}")
@@ -1267,6 +1427,692 @@ class DebuggerBridge:
             },
             "generation": self.generation(),
         }
+
+    def _clear_object_experiment_search_locked(self) -> Optional[str]:
+        group = self._object_experiment_group
+        releasable_group = (
+            group
+            if group is not None
+            and self._connection is not None
+            and self._target is not None
+            and self._target["id"] == self._object_experiment.get("target_id")
+            else None
+        )
+        self._object_experiment_group = None
+        self._object_experiment_objects_id = None
+        self._object_experiment_result_indices.clear()
+        self._object_experiment["search_id"] = 0
+        self._object_experiment["search"] = None
+        self._object_experiment["results"] = []
+        self._object_experiment["last_mutation"] = None
+        return releasable_group
+
+    def _release_object_experiment_group(self, group: Optional[str]) -> None:
+        if group is not None:
+            try:
+                self._command("Runtime.releaseObjectGroup", {"objectGroup": group})
+            except DebuggerBridgeError:
+                pass
+
+    def _release_object_experiment_search(self) -> None:
+        with self._lock:
+            group = self._clear_object_experiment_search_locked()
+        self._release_object_experiment_group(group)
+
+    def _require_object_experiment_target_locked(
+        self, require_navigation: bool
+    ) -> None:
+        if self._object_experiment["state"] in {
+            "navigating",
+            "searching",
+            "mutating",
+        }:
+            raise DebuggerBridgeError(
+                "Object Lab is already running an isolated-page action"
+            )
+        if (
+            self._request_interception_context_id is None
+            or not self._object_experiment["isolated"]
+            or self._object_experiment["target_id"] is None
+            or self._target is None
+            or self._target["id"] != self._object_experiment["target_id"]
+            or self._state not in {"running", "paused"}
+        ):
+            raise DebuggerBridgeError(
+                "Object Lab requires its attached disposable Experiment page"
+            )
+        if self._request_interception_pending:
+            raise DebuggerBridgeError(
+                "Wait for paused Experiment requests before using Object Lab"
+            )
+        if require_navigation and (
+            self._object_experiment["navigation_id"] <= 0
+            or not self._object_experiment["url"]
+        ):
+            raise DebuggerBridgeError(
+                "Open an HTTP or HTTPS page in Object Lab before searching"
+            )
+
+    def _navigate_object_experiment(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        url = self._required_text(
+            request, "url", MAX_INTERCEPTION_URL_BYTES
+        ).strip()
+        self._validate_request_interception_url(url)
+        with self._lock:
+            self._require_object_experiment_target_locked(require_navigation=False)
+            stale_group = self._clear_object_experiment_search_locked()
+            navigation_id = self._next_object_experiment_navigation_id
+            self._next_object_experiment_navigation_id += 1
+            self._object_experiment["state"] = "navigating"
+            self._object_experiment["navigation_id"] = navigation_id
+            self._object_experiment["url"] = self._redacted_request_url(url)
+            self._object_experiment["message"] = (
+                "Opening one credential-free page inside the disposable context."
+            )
+            self._changed()
+        self._release_object_experiment_group(stale_group)
+
+        try:
+            navigation = self._command(
+                "Page.navigate", {"url": url}, timeout=5.0
+            )
+            error_text = navigation.get("errorText")
+            if isinstance(error_text, str) and error_text:
+                raise DebuggerBridgeError(
+                    self._truncate_text(f"Object Lab navigation failed: {error_text}", 512)
+                )
+            deadline = time.monotonic() + OBJECT_EXPERIMENT_NAVIGATION_TIMEOUT_SECONDS
+            loaded_url = url
+            while True:
+                if time.monotonic() >= deadline:
+                    raise DebuggerBridgeError(
+                        "Object Lab page did not become interactive within 15 seconds"
+                    )
+                try:
+                    evaluated = self._command(
+                        "Runtime.evaluate",
+                        {
+                            "expression": (
+                                "({protocolVersion:1,readyState:document.readyState,"
+                                "url:location.href})"
+                            ),
+                            "returnByValue": True,
+                            "silent": True,
+                            "throwOnSideEffect": True,
+                        },
+                        timeout=2.0,
+                    )
+                    if isinstance(evaluated.get("exceptionDetails"), dict):
+                        raise DebuggerBridgeError("Navigation is still replacing the page")
+                    remote = evaluated.get("result")
+                    status = remote.get("value") if isinstance(remote, dict) else None
+                    if (
+                        isinstance(status, dict)
+                        and status.get("protocolVersion") == 1
+                        and status.get("readyState") in {"interactive", "complete"}
+                        and isinstance(status.get("url"), str)
+                    ):
+                        loaded_url = status["url"]
+                        break
+                except DebuggerBridgeError:
+                    pass
+                time.sleep(0.05)
+            final_url = urlunparse(urlparse(loaded_url)._replace(fragment=""))
+            self._validate_request_interception_url(final_url)
+        except DebuggerBridgeError as exception:
+            with self._lock:
+                if self._object_experiment["navigation_id"] == navigation_id:
+                    self._object_experiment["state"] = "error"
+                    self._object_experiment["message"] = self._truncate_text(
+                        str(exception), 512
+                    )
+                    self._changed()
+            raise
+
+        with self._lock:
+            if self._object_experiment["navigation_id"] != navigation_id:
+                raise DebuggerBridgeError("Object Lab navigation became stale")
+            self._object_experiment["state"] = "loaded"
+            self._object_experiment["url"] = self._redacted_request_url(loaded_url)
+            self._object_experiment["message"] = (
+                "Isolated page loaded. Run a bounded live-object search."
+            )
+            self._changed()
+            experiment = copy.deepcopy(self._object_experiment)
+        return {
+            "ok": True,
+            "object_experiment": experiment,
+            "generation": self.generation(),
+        }
+
+    def _search_object_experiment(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        criteria = self._live_object_search_criteria(request)
+        with self._lock:
+            self._require_object_experiment_target_locked(require_navigation=True)
+            stale_group = self._clear_object_experiment_search_locked()
+            search_id = self._next_object_experiment_search_id
+            self._next_object_experiment_search_id += 1
+            session_id = self._object_experiment["session_id"]
+            navigation_id = self._object_experiment["navigation_id"]
+            target_id = self._object_experiment["target_id"]
+            group = f"reb-object-experiment-{session_id}-{navigation_id}-{search_id}"
+            self._object_experiment["state"] = "searching"
+            self._object_experiment["message"] = (
+                "Searching the isolated page without invoking property getters."
+            )
+            self._changed()
+        self._release_object_experiment_group(stale_group)
+
+        prototype_id: Optional[str] = None
+        objects_id: Optional[str] = None
+        try:
+            prototype = self._command(
+                "Runtime.evaluate",
+                {
+                    "expression": "Object.prototype",
+                    "objectGroup": group,
+                    "silent": True,
+                },
+            )
+            prototype_id = self._runtime_result_object_id(prototype, "prototype")
+            objects = self._command(
+                "Runtime.queryObjects",
+                {"prototypeObjectId": prototype_id, "objectGroup": group},
+                timeout=5.0,
+            )
+            objects_id = self._runtime_result_object_id(
+                objects, "object collection", field="objects"
+            )
+            evaluated = self._command(
+                "Runtime.callFunctionOn",
+                {
+                    "objectId": objects_id,
+                    "functionDeclaration": LIVE_OBJECT_SEARCH_FUNCTION,
+                    "arguments": [{"value": criteria}],
+                    "returnByValue": True,
+                    "silent": True,
+                    "awaitPromise": False,
+                    "userGesture": False,
+                    "timeout": LIVE_OBJECT_SEARCH_TIMEOUT_MS,
+                },
+                timeout=3.0,
+            )
+            if isinstance(evaluated.get("exceptionDetails"), dict):
+                raise DebuggerBridgeError("Live object search failed in Object Lab")
+            remote = evaluated.get("result")
+            document = remote.get("value") if isinstance(remote, dict) else None
+            normalized = self._normalize_live_object_search(document)["search"]
+            indices: set[int] = set()
+            for result in normalized["results"]:
+                if not result["id"].isdigit():
+                    raise ProtocolError("Object Lab returned an invalid result identifier")
+                index = int(result["id"])
+                if index >= normalized["total_objects"] or index in indices:
+                    raise ProtocolError("Object Lab returned a stale result identifier")
+                indices.add(index)
+        except DebuggerBridgeError as exception:
+            try:
+                self._command("Runtime.releaseObjectGroup", {"objectGroup": group})
+            except DebuggerBridgeError:
+                pass
+            with self._lock:
+                if (
+                    self._object_experiment["session_id"] == session_id
+                    and self._object_experiment["navigation_id"] == navigation_id
+                ):
+                    self._object_experiment["state"] = "error"
+                    self._object_experiment["message"] = self._truncate_text(
+                        str(exception), 512
+                    )
+                    self._changed()
+            raise
+        finally:
+            if prototype_id is not None:
+                try:
+                    self._command("Runtime.releaseObject", {"objectId": prototype_id})
+                except DebuggerBridgeError:
+                    pass
+
+        stale = False
+        with self._lock:
+            stale = (
+                self._object_experiment["session_id"] != session_id
+                or self._object_experiment["navigation_id"] != navigation_id
+                or self._object_experiment["target_id"] != target_id
+            )
+            if not stale:
+                self._object_experiment_group = group
+                self._object_experiment_objects_id = objects_id
+                self._object_experiment_result_indices = indices
+                self._object_experiment["state"] = "loaded"
+                self._object_experiment["search_id"] = search_id
+                self._object_experiment["search"] = {
+                    key: value for key, value in normalized.items() if key != "results"
+                }
+                self._object_experiment["results"] = normalized["results"]
+                self._object_experiment["message"] = (
+                    f"Found {len(normalized['results'])} matching live objects in the isolated page."
+                )
+                self._changed()
+                experiment = copy.deepcopy(self._object_experiment)
+        if stale:
+            try:
+                self._command("Runtime.releaseObjectGroup", {"objectGroup": group})
+            except DebuggerBridgeError:
+                pass
+            raise DebuggerBridgeError("Object Lab search became stale")
+        return {
+            "ok": True,
+            "object_experiment": experiment,
+            "generation": self.generation(),
+        }
+
+    def _mutate_object_experiment(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        operation = request.get("operation")
+        if operation not in {"set", "delete"}:
+            raise DebuggerBridgeError("Object Lab mutation operation is invalid")
+        if request.get("confirmed") is not True:
+            raise DebuggerBridgeError("Object Lab mutation requires explicit confirmation")
+        search_id = request.get("search_id")
+        if (
+            not isinstance(search_id, int)
+            or isinstance(search_id, bool)
+            or search_id <= 0
+            or search_id > 2**53 - 1
+        ):
+            raise DebuggerBridgeError("Object Lab search identifier is invalid")
+        result_id = self._required_text(request, "result_id", 128)
+        if not result_id.isdigit():
+            raise DebuggerBridgeError("Object Lab result identifier is invalid")
+        result_index = int(result_id)
+        property_name = self._required_text(
+            request, "property", MAX_OBJECT_EXPERIMENT_PROPERTY_BYTES
+        )
+        if (
+            property_name in FORBIDDEN_OBJECT_EXPERIMENT_PROPERTIES
+            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in property_name)
+        ):
+            raise DebuggerBridgeError("Object Lab property name is not allowed")
+
+        value: Any = None
+        value_bytes = 0
+        value_digest: Optional[str] = None
+        if operation == "set":
+            if "value" not in request:
+                raise DebuggerBridgeError("Object Lab set requires a JSON value")
+            value, canonical = self._normalize_object_experiment_value(request["value"])
+            value_bytes = len(canonical)
+            value_digest = hashlib.sha256(canonical).hexdigest()
+        elif "value" in request:
+            raise DebuggerBridgeError("Object Lab delete does not accept a value")
+
+        with self._lock:
+            self._require_object_experiment_target_locked(require_navigation=True)
+            if (
+                self._object_experiment["search_id"] != search_id
+                or self._object_experiment_objects_id is None
+                or self._object_experiment_group is None
+                or result_index not in self._object_experiment_result_indices
+            ):
+                raise DebuggerBridgeError(
+                    "Object Lab result is stale; run the live-object search again"
+                )
+            if (
+                self._object_experiment["mutation_attempts"]
+                >= MAX_OBJECT_EXPERIMENT_MUTATIONS
+            ):
+                raise DebuggerBridgeError(
+                    "Object Lab reached the 256-attempt session limit"
+                )
+            selected = next(
+                (
+                    result
+                    for result in self._object_experiment["results"]
+                    if result["id"] == result_id
+                ),
+                None,
+            )
+            if selected is None:
+                raise DebuggerBridgeError("Object Lab result is unavailable")
+            objects_id = self._object_experiment_objects_id
+            group = self._object_experiment_group
+            session_id = self._object_experiment["session_id"]
+            navigation_id = self._object_experiment["navigation_id"]
+            target_class = selected["class_name"]
+            similarity = selected["similarity"]
+            self._object_experiment["mutation_attempts"] += 1
+            self._object_experiment["state"] = "mutating"
+            self._object_experiment["message"] = (
+                f"Applying one confirmed {operation} operation inside Object Lab."
+            )
+            self._changed()
+
+        candidate_id: Optional[str] = None
+        try:
+            candidate = self._command(
+                "Runtime.callFunctionOn",
+                {
+                    "objectId": objects_id,
+                    "functionDeclaration": (
+                        "function(index){const value=this[index];"
+                        "if((typeof value!==\"object\"&&typeof value!==\"function\")||value===null)"
+                        "throw new TypeError(\"Object Lab result is unavailable\");return value;}"
+                    ),
+                    "arguments": [{"value": result_index}],
+                    "returnByValue": False,
+                    "objectGroup": group,
+                    "silent": True,
+                },
+            )
+            if isinstance(candidate.get("exceptionDetails"), dict):
+                raise DebuggerBridgeError("Object Lab result is no longer available")
+            candidate_id = self._runtime_result_object_id(candidate, "object result")
+            config: dict[str, Any] = {
+                "operation": operation,
+                "property": property_name,
+                "previewProperties": MAX_LIVE_OBJECT_PREVIEW_PROPERTIES,
+                "resultId": result_id,
+                "similarity": similarity,
+            }
+            if operation == "set":
+                config["value"] = value
+            evaluated = self._command(
+                "Runtime.callFunctionOn",
+                {
+                    "objectId": candidate_id,
+                    "functionDeclaration": OBJECT_EXPERIMENT_MUTATE_FUNCTION,
+                    "arguments": [{"value": config}],
+                    "returnByValue": True,
+                    "silent": True,
+                    "awaitPromise": False,
+                    "userGesture": False,
+                    "timeout": 1_000,
+                },
+                timeout=3.0,
+            )
+            if isinstance(evaluated.get("exceptionDetails"), dict):
+                raise DebuggerBridgeError("Object Lab mutation failed in the target")
+            remote = evaluated.get("result")
+            document = remote.get("value") if isinstance(remote, dict) else None
+            mutation = self._normalize_object_experiment_mutation(document)
+        except DebuggerBridgeError as exception:
+            mutation = {
+                "ok": False,
+                "outcome": "error",
+                "error": self._truncate_text(str(exception), 512),
+                "before": self._empty_object_experiment_descriptor("unknown"),
+                "after": self._empty_object_experiment_descriptor("unknown"),
+                "object": None,
+            }
+        finally:
+            if candidate_id is not None:
+                try:
+                    self._command("Runtime.releaseObject", {"objectId": candidate_id})
+                except DebuggerBridgeError:
+                    pass
+
+        with self._lock:
+            if (
+                self._object_experiment["session_id"] != session_id
+                or self._object_experiment["navigation_id"] != navigation_id
+            ):
+                raise DebuggerBridgeError("Object Lab mutation became stale")
+            search_invalidated = self._object_experiment["search_id"] != search_id
+            audit = self._append_object_experiment_audit_locked(
+                operation=operation,
+                property_name=property_name,
+                result_id=result_id,
+                search_id=search_id,
+                target_class=target_class,
+                mutation=mutation,
+                value_bytes=value_bytes,
+                value_digest=value_digest,
+            )
+            if mutation["object"] is not None and not search_invalidated:
+                self._object_experiment["results"] = [
+                    mutation["object"] if result["id"] == result_id else result
+                    for result in self._object_experiment["results"]
+                ]
+            if not search_invalidated:
+                self._object_experiment["state"] = "loaded"
+            self._object_experiment["last_mutation"] = {
+                "audit_id": audit["id"],
+                "ok": mutation["ok"],
+                "operation": operation,
+                "property": property_name,
+                "result_id": result_id,
+                "outcome": mutation["outcome"],
+                "error": mutation["error"],
+                "before": mutation["before"],
+                "after": mutation["after"],
+                "value_bytes": value_bytes,
+                "value_digest": value_digest,
+            }
+            self._object_experiment["message"] = (
+                f"Object Lab {operation} completed and audit entry {audit['id']} was recorded."
+                if mutation["ok"]
+                else f"Object Lab rejected the mutation: {mutation['error']}"
+            )
+            if search_invalidated:
+                self._object_experiment["message"] += (
+                    " The target disconnected, so run the search again."
+                )
+            self._changed()
+            experiment = copy.deepcopy(self._object_experiment)
+        return {
+            "ok": True,
+            "object_experiment": experiment,
+            "generation": self.generation(),
+        }
+
+    def _normalize_object_experiment_value(
+        self, value: Any
+    ) -> tuple[Any, bytes]:
+        entries = 0
+
+        def validate(candidate: Any, depth: int) -> None:
+            nonlocal entries
+            if depth > MAX_OBJECT_EXPERIMENT_VALUE_DEPTH:
+                raise DebuggerBridgeError("Object Lab JSON value exceeds depth 8")
+            if candidate is None or isinstance(candidate, bool):
+                return
+            if isinstance(candidate, int):
+                if abs(candidate) > 2**53 - 1:
+                    raise DebuggerBridgeError(
+                        "Object Lab integer exceeds JavaScript's exact range"
+                    )
+                return
+            if isinstance(candidate, float):
+                if not math.isfinite(candidate):
+                    raise DebuggerBridgeError("Object Lab number must be finite")
+                return
+            if isinstance(candidate, str):
+                if len(candidate.encode("utf-8")) > MAX_OBJECT_EXPERIMENT_STRING_BYTES:
+                    raise DebuggerBridgeError("Object Lab JSON string exceeds 4 KiB")
+                return
+            if isinstance(candidate, list):
+                entries += len(candidate)
+                if entries > MAX_OBJECT_EXPERIMENT_VALUE_ENTRIES:
+                    raise DebuggerBridgeError("Object Lab JSON value exceeds 256 entries")
+                for item in candidate:
+                    validate(item, depth + 1)
+                return
+            if isinstance(candidate, dict):
+                entries += len(candidate)
+                if entries > MAX_OBJECT_EXPERIMENT_VALUE_ENTRIES:
+                    raise DebuggerBridgeError("Object Lab JSON value exceeds 256 entries")
+                for key, item in candidate.items():
+                    if (
+                        not isinstance(key, str)
+                        or len(key.encode("utf-8"))
+                        > MAX_OBJECT_EXPERIMENT_STRING_BYTES
+                    ):
+                        raise DebuggerBridgeError(
+                            "Object Lab JSON object key exceeds 4 KiB"
+                        )
+                    validate(item, depth + 1)
+                return
+            raise DebuggerBridgeError("Object Lab set value must be JSON data")
+
+        validate(value, 0)
+        try:
+            canonical = json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exception:
+            raise DebuggerBridgeError("Object Lab set value must be valid JSON") from exception
+        if len(canonical) > MAX_OBJECT_EXPERIMENT_VALUE_BYTES:
+            raise DebuggerBridgeError("Object Lab JSON value exceeds 16 KiB")
+        return value, canonical
+
+    @staticmethod
+    def _empty_object_experiment_descriptor(value_type: str) -> dict[str, Any]:
+        return {
+            "exists": False,
+            "type": value_type,
+            "class_name": "",
+            "writable": False,
+            "configurable": False,
+            "preview": None,
+        }
+
+    def _normalize_object_experiment_descriptor(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise ProtocolError("Object Lab returned a malformed property descriptor")
+        exists = value.get("exists")
+        value_type = value.get("type")
+        class_name = value.get("className", "")
+        writable = value.get("writable")
+        configurable = value.get("configurable")
+        preview = value.get("preview")
+        if (
+            not isinstance(exists, bool)
+            or not isinstance(value_type, str)
+            or not value_type
+            or len(value_type.encode("utf-8")) > 128
+            or not isinstance(class_name, str)
+            or len(class_name.encode("utf-8")) > 256
+            or not isinstance(writable, bool)
+            or not isinstance(configurable, bool)
+            or (preview is not None and not isinstance(preview, str))
+        ):
+            raise ProtocolError("Object Lab returned an invalid property descriptor")
+        return {
+            "exists": exists,
+            "type": value_type,
+            "class_name": class_name,
+            "writable": writable,
+            "configurable": configurable,
+            "preview": self._truncate_text(preview, 512)
+            if isinstance(preview, str)
+            else None,
+        }
+
+    def _normalize_object_experiment_mutation(self, value: Any) -> dict[str, Any]:
+        outcomes = {
+            "created",
+            "updated",
+            "deleted",
+            "missing",
+            "non_configurable",
+            "rejected",
+            "accessor",
+            "non_writable",
+            "non_extensible",
+            "error",
+        }
+        if (
+            not isinstance(value, dict)
+            or value.get("protocolVersion") != 1
+            or not isinstance(value.get("ok"), bool)
+            or value.get("outcome") not in outcomes
+        ):
+            raise ProtocolError("Object Lab returned a malformed mutation result")
+        error = value.get("error")
+        if error is not None and (
+            not isinstance(error, str) or len(error.encode("utf-8")) > 512
+        ):
+            raise ProtocolError("Object Lab returned an invalid mutation error")
+        if value["ok"] != (error is None):
+            raise ProtocolError("Object Lab returned an inconsistent mutation result")
+        before = self._normalize_object_experiment_descriptor(value.get("before"))
+        after = self._normalize_object_experiment_descriptor(value.get("after"))
+        raw_object = value.get("object")
+        normalized_object = None
+        if raw_object is not None:
+            synthetic = {
+                "protocolVersion": 2,
+                "analyzed": 1,
+                "totalObjects": 1,
+                "resultLimit": MAX_LIVE_OBJECT_RESULTS,
+                "resultLimitReached": False,
+                "scanLimitReached": False,
+                "propertyLimitReached": False,
+                "timedOut": False,
+                "durationMs": 0,
+                "results": [raw_object],
+            }
+            normalized_object = self._normalize_live_object_search(synthetic)["search"][
+                "results"
+            ][0]
+        if value["ok"] and normalized_object is None:
+            raise ProtocolError("Object Lab omitted the patched object preview")
+        return {
+            "ok": value["ok"],
+            "outcome": value["outcome"],
+            "error": error,
+            "before": before,
+            "after": after,
+            "object": normalized_object,
+        }
+
+    def _append_object_experiment_audit_locked(
+        self,
+        *,
+        operation: str,
+        property_name: str,
+        result_id: str,
+        search_id: int,
+        target_class: str,
+        mutation: dict[str, Any],
+        value_bytes: int,
+        value_digest: Optional[str],
+    ) -> dict[str, Any]:
+        entry = {
+            "id": self._next_object_experiment_audit_id,
+            "occurred_at_ms": int(time.time() * 1_000),
+            "session_id": self._object_experiment["session_id"],
+            "navigation_id": self._object_experiment["navigation_id"],
+            "search_id": search_id,
+            "result_id": result_id,
+            "operation": operation,
+            "property": property_name,
+            "target_class": self._truncate_text(target_class, 256),
+            "outcome": mutation["outcome"],
+            "success": mutation["ok"],
+            "before_type": mutation["before"]["type"],
+            "after_type": mutation["after"]["type"],
+            "value_bytes": value_bytes,
+            "value_digest": value_digest,
+            "url": self._object_experiment["url"],
+        }
+        self._next_object_experiment_audit_id += 1
+        audit = self._object_experiment["audit"]
+        audit.append(entry)
+        if len(audit) > MAX_OBJECT_EXPERIMENT_AUDIT_ENTRIES:
+            del audit[: len(audit) - MAX_OBJECT_EXPERIMENT_AUDIT_ENTRIES]
+            self._object_experiment["audit_evictions"] += 1
+        return entry
 
     def _search_heap_snapshot(self, request: dict[str, Any]) -> dict[str, Any]:
         query = self._optional_search_text(request, "query").strip()
@@ -1858,6 +2704,39 @@ class DebuggerBridge:
         }
 
     @staticmethod
+    def _empty_object_experiment() -> dict[str, Any]:
+        return {
+            "protocol_version": 1,
+            "session_id": 0,
+            "state": "idle",
+            "isolated": False,
+            "target_id": None,
+            "url": "",
+            "navigation_id": 0,
+            "search_id": 0,
+            "search": None,
+            "results": [],
+            "last_mutation": None,
+            "audit": [],
+            "audit_evictions": 0,
+            "mutation_attempts": 0,
+            "message": "Create an isolated Experiment context to use Object Lab.",
+            "limits": {
+                "search_results": MAX_LIVE_OBJECT_RESULTS,
+                "search_candidates": MAX_LIVE_OBJECT_SCAN,
+                "search_timeout_ms": LIVE_OBJECT_SEARCH_TIMEOUT_MS,
+                "preview_properties": MAX_LIVE_OBJECT_PREVIEW_PROPERTIES,
+                "mutation_attempts": MAX_OBJECT_EXPERIMENT_MUTATIONS,
+                "audit_entries": MAX_OBJECT_EXPERIMENT_AUDIT_ENTRIES,
+                "property_bytes": MAX_OBJECT_EXPERIMENT_PROPERTY_BYTES,
+                "value_bytes": MAX_OBJECT_EXPERIMENT_VALUE_BYTES,
+                "value_depth": MAX_OBJECT_EXPERIMENT_VALUE_DEPTH,
+                "value_entries": MAX_OBJECT_EXPERIMENT_VALUE_ENTRIES,
+                "value_string_bytes": MAX_OBJECT_EXPERIMENT_STRING_BYTES,
+            },
+        }
+
+    @staticmethod
     def _empty_repeater() -> dict[str, Any]:
         return {
             "protocol_version": 1,
@@ -1893,6 +2772,35 @@ class DebuggerBridge:
         self._repeater_history_bytes = 0
         self._repeater_active_execution_id = None
         self._repeater_cancel_requested = False
+
+    def _begin_object_experiment_session_locked(self, session_id: int) -> None:
+        self._object_experiment = self._empty_object_experiment()
+        self._object_experiment.update(
+            {
+                "session_id": session_id,
+                "state": "attaching",
+                "message": "Waiting for the disposable Object Lab page to attach.",
+            }
+        )
+        self._object_experiment_group = None
+        self._object_experiment_objects_id = None
+        self._object_experiment_result_indices.clear()
+
+    def _dispose_object_experiment_locked(self, session_id: int) -> None:
+        self._object_experiment = self._empty_object_experiment()
+        self._object_experiment.update(
+            {
+                "session_id": session_id,
+                "state": "disposed",
+                "message": (
+                    "Disposable context deleted. Object references, mutation values, "
+                    "previews, and audit records were cleared."
+                ),
+            }
+        )
+        self._object_experiment_group = None
+        self._object_experiment_objects_id = None
+        self._object_experiment_result_indices.clear()
 
     def _dispose_repeater_locked(self, session_id: int) -> None:
         self._repeater = self._empty_repeater()
@@ -2580,6 +3488,7 @@ class DebuggerBridge:
             self._request_interception_rule = self._default_request_interception_rule()
             self._request_interception_return_target_id = return_target_id
             self._begin_repeater_session_locked(experiment_id)
+            self._begin_object_experiment_session_locked(experiment_id)
             self._changed()
 
         context_id: Optional[str] = None
@@ -2626,6 +3535,9 @@ class DebuggerBridge:
                 )
                 self._repeater["state"] = "error"
                 self._repeater["message"] = self._truncate_text(message, 512)
+                self._object_experiment["state"] = "error"
+                self._object_experiment["isolated"] = cleanup_error is not None
+                self._object_experiment["message"] = self._truncate_text(message, 512)
                 self._changed()
             raise
 
@@ -2636,6 +3548,11 @@ class DebuggerBridge:
             self._request_interception["message"] = (
                 "Isolated context created. Attaching its disposable page."
             )
+            self._object_experiment["isolated"] = True
+            self._object_experiment["target_id"] = target_id
+            self._object_experiment["message"] = (
+                "Isolated context created. Attaching the Object Lab page."
+            )
             self._preferred_target_id = target_id
             connection = self._connection
             self._changed()
@@ -2644,6 +3561,7 @@ class DebuggerBridge:
         return {
             "ok": True,
             "experiment": copy.deepcopy(self._request_interception),
+            "object_experiment": copy.deepcopy(self._object_experiment),
             "repeater": copy.deepcopy(self._repeater),
             "generation": self.generation(),
         }
@@ -2779,10 +3697,12 @@ class DebuggerBridge:
         self._dispose_request_interception_context(preserve_result=True)
         with self._lock:
             experiment = copy.deepcopy(self._request_interception)
+            object_experiment = copy.deepcopy(self._object_experiment)
             repeater = copy.deepcopy(self._repeater)
         return {
             "ok": True,
             "experiment": experiment,
+            "object_experiment": object_experiment,
             "repeater": repeater,
             "generation": self.generation(),
         }
@@ -2790,6 +3710,7 @@ class DebuggerBridge:
     def _dispose_request_interception_context(
         self, preserve_result: bool, force: bool = False
     ) -> None:
+        self._release_object_experiment_search()
         with self._lock:
             context_id = self._request_interception_context_id
             if context_id is None:
@@ -2803,6 +3724,10 @@ class DebuggerBridge:
                     self._repeater_history_bytes = 0
                     self._repeater_active_execution_id = None
                     self._repeater_cancel_requested = False
+                    self._object_experiment = self._empty_object_experiment()
+                    self._object_experiment_group = None
+                    self._object_experiment_objects_id = None
+                    self._object_experiment_result_indices.clear()
                     self._changed()
                 return
             if not force and (
@@ -2814,11 +3739,16 @@ class DebuggerBridge:
                     "Finish or cancel active request-lab work before disposing its context"
                 )
             repeater_session_id = self._repeater["session_id"]
+            object_session_id = self._object_experiment["session_id"]
             self._request_interception["state"] = "disposing"
             self._request_interception["message"] = (
                 "Disposing the isolated browser context and all of its storage."
             )
             target_id = self._request_interception["target_id"]
+            self._object_experiment["state"] = "disposing"
+            self._object_experiment["message"] = (
+                "Disposing Object Lab and releasing all live references."
+            )
             connection = (
                 self._connection
                 if self._target is not None and self._target["id"] == target_id
@@ -2842,6 +3772,10 @@ class DebuggerBridge:
                 )
                 self._repeater["state"] = "error"
                 self._repeater["message"] = self._request_interception["message"]
+                self._object_experiment["state"] = "error"
+                self._object_experiment["message"] = self._request_interception[
+                    "message"
+                ]
                 self._changed()
             if preserve_result:
                 raise
@@ -2862,9 +3796,11 @@ class DebuggerBridge:
                     "Disposable context deleted. The ephemeral result and audit remain visible."
                 )
                 self._dispose_repeater_locked(repeater_session_id)
+                self._dispose_object_experiment_locked(object_session_id)
             else:
                 self._request_interception = self._empty_request_interception()
                 self._repeater = self._empty_repeater()
+                self._object_experiment = self._empty_object_experiment()
                 self._repeater_history_bytes = 0
                 self._repeater_active_execution_id = None
                 self._repeater_cancel_requested = False
@@ -2883,6 +3819,10 @@ class DebuggerBridge:
             self._repeater_history_bytes = 0
             self._repeater_active_execution_id = None
             self._repeater_cancel_requested = False
+            self._object_experiment = self._empty_object_experiment()
+            self._object_experiment_group = None
+            self._object_experiment_objects_id = None
+            self._object_experiment_result_indices.clear()
             self._changed()
         return {"ok": True, "generation": self.generation()}
 
@@ -4353,6 +5293,22 @@ class DebuggerBridge:
                 clear_heap_baseline = (
                     self._connection is connection and not self._heap_diff_busy
                 )
+                if self._object_experiment.get("target_id") == target["id"]:
+                    self._object_experiment_group = None
+                    self._object_experiment_objects_id = None
+                    self._object_experiment_result_indices.clear()
+                    self._object_experiment["search_id"] = 0
+                    self._object_experiment["search"] = None
+                    self._object_experiment["results"] = []
+                    self._object_experiment["last_mutation"] = None
+                    if self._object_experiment["state"] not in {
+                        "disposing",
+                        "disposed",
+                    }:
+                        self._object_experiment["state"] = "error"
+                        self._object_experiment["message"] = (
+                            "Object Lab target disconnected. Reattach it and run the search again."
+                        )
                 if self._connection is connection:
                     self._connection = None
                     self._target = None
@@ -4729,6 +5685,11 @@ class DebuggerBridge:
                 return
             pattern = self._request_interception_rule["url_pattern"]
             was_running = self._request_interception["state"] == "running"
+            object_was_running = self._object_experiment["state"] in {
+                "navigating",
+                "searching",
+                "mutating",
+            }
         self._command(
             "Fetch.enable",
             {
@@ -4750,6 +5711,22 @@ class DebuggerBridge:
                 self._repeater["message"] = (
                     "Repeater is ready inside the disposable credential-free context."
                 )
+            self._object_experiment["isolated"] = True
+            self._object_experiment["target_id"] = target_id
+            self._object_experiment["state"] = (
+                "error"
+                if object_was_running
+                else "loaded"
+                if self._object_experiment["url"]
+                else "ready"
+            )
+            self._object_experiment["message"] = (
+                "The Object Lab target reattached during an action; run that action again."
+                if object_was_running
+                else "Object Lab page reattached. Run the bounded search again."
+                if self._object_experiment["url"]
+                else "Object Lab is isolated and ready for an explicit page URL."
+            )
             self._changed()
 
     def _parse_script(self, params: dict[str, Any]) -> Optional[dict[str, Any]]:

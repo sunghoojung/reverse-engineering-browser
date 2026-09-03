@@ -24,7 +24,7 @@ bounded evidence architecture. Matching a panel name is not sufficient.
 | Heap snapshot search | Implemented | Native C++ search covers root-reachable and unreachable nodes, retaining paths, hidden references, and weak references. |
 | Heap comparison | REB extension | Exact dominators and retained-size change comparison go beyond the pinned WireBrowser workflow. |
 | Breakpoint-driven origin trace | Implemented | [Memory Origin Trace v1](./memory-origin-trace-v1.md) adds bounded click-driven temporal heap probing and source-function mapping. |
-| Expose or patch a live object | Missing | Must be restricted to a visibly isolated Experiment session with explicit mutation audit records. |
+| Expose or patch a live object | Implemented | [Live Object Experiment v1](./live-object-experiment-v1.md) adds bounded live-object search and confirmed typed own-property set/delete operations inside the disposable Experiment BrowserContext, with metadata-only audit records and no arbitrary code execution. |
 | Runtime hooks and return overrides | Partial | REB has breakpoints and logpoints. Function-call hooks, argument capture, injected logic, and synchronous return overrides remain. |
 
 ## Network workflow
@@ -48,8 +48,8 @@ bounded evidence architecture. Matching a panel name is not sufficient.
 
 ## Delivery order
 
-API Collection is the current completed parity increment. The next implementation
-sequence is Experiment-only live object mutation, runtime hooks,
-automation recipes, and local decoding tools.
+Live Object Experiment is the current completed parity increment. The next
+implementation sequence is permission-scoped runtime hooks, automation recipes,
+and local decoding tools.
 Each increment must preserve immutable baseline evidence, make mutation
 visible, and pass the repository's full native and UI gates.

@@ -16,6 +16,7 @@ from typing import Optional
 from debugger_bridge import (
     LIVE_OBJECT_SEARCH_FUNCTION,
     MAX_HEAP_SNAPSHOT_BYTES,
+    OBJECT_EXPERIMENT_MUTATE_FUNCTION,
     REQUEST_INTERCEPTION_FUNCTION,
     DebuggerBridge,
     DebuggerBridgeError,
@@ -192,7 +193,7 @@ class FakeDebuggerWebSocket:
                 }
         elif method == "Runtime.queryObjects":
             result = {
-                "result": {
+                "objects": {
                     "type": "object",
                     "subtype": "array",
                     "objectId": "objects-1",
@@ -559,7 +560,11 @@ class DebuggerBridgeTests(unittest.TestCase):
                 )
                 self.assertTrue(search_command["params"]["returnByValue"])
                 self.assertTrue(search_command["params"]["silent"])
-                self.assertTrue(search_command["params"]["throwOnSideEffect"])
+                self.assertNotIn("throwOnSideEffect", search_command["params"])
+                self.assertEqual(
+                    search_command["params"]["functionDeclaration"],
+                    LIVE_OBJECT_SEARCH_FUNCTION,
+                )
                 self.assertIn(
                     "Object.getOwnPropertyNames",
                     search_command["params"]["functionDeclaration"],
@@ -1867,6 +1872,336 @@ process.stdout.write(JSON.stringify({{
                     "timeout_ms": 30_001,
                 }
             )
+
+    def test_object_experiment_navigates_searches_mutates_and_erases(self) -> None:
+        class RecordingConnection:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        class ObjectExperimentBridge(DebuggerBridge):
+            def __init__(self) -> None:
+                super().__init__()
+                self._state = "running"
+                self._target = {
+                    "id": "baseline-page",
+                    "type": "page",
+                    "title": "Baseline",
+                    "url": "https://baseline.test/",
+                }
+                self._connection = RecordingConnection()
+                self.browser_commands = []
+                self.commands = []
+                self.mutation_outcome = "updated"
+
+            def _browser_command(self, method: str, params=None) -> dict:
+                self.browser_commands.append((method, params or {}))
+                if method == "Target.createBrowserContext":
+                    return {"browserContextId": "object-context"}
+                if method == "Target.createTarget":
+                    return {"targetId": "object-page"}
+                return {}
+
+            def _command(self, method: str, params=None, timeout: float = 3.0) -> dict:
+                params = params or {}
+                self.commands.append((method, params, timeout))
+                if method == "Page.navigate":
+                    return {"frameId": "object-frame"}
+                if method == "Runtime.evaluate":
+                    if "readyState:document.readyState" in params.get("expression", ""):
+                        return {
+                            "result": {
+                                "value": {
+                                    "protocolVersion": 1,
+                                    "readyState": "complete",
+                                    "url": "https://app.test/lab?private=hidden",
+                                }
+                            }
+                        }
+                    return {"result": {"objectId": "object-prototype"}}
+                if method == "Runtime.queryObjects":
+                    return {"objects": {"objectId": "object-results"}}
+                if method == "Runtime.callFunctionOn":
+                    declaration = params.get("functionDeclaration")
+                    if declaration == LIVE_OBJECT_SEARCH_FUNCTION:
+                        return {
+                            "result": {
+                                "value": {
+                                    "protocolVersion": 2,
+                                    "analyzed": 12,
+                                    "totalObjects": 12,
+                                    "results": [
+                                        {
+                                            "id": "4",
+                                            "className": "CheckoutState",
+                                            "propertyCount": 2,
+                                            "propertiesTruncated": False,
+                                            "similarity": None,
+                                            "preview": [
+                                                {
+                                                    "name": "ready",
+                                                    "type": "boolean",
+                                                    "value": "false",
+                                                }
+                                            ],
+                                        }
+                                    ],
+                                    "resultLimit": 50,
+                                    "resultLimitReached": False,
+                                    "scanLimitReached": False,
+                                    "propertyLimitReached": False,
+                                    "timedOut": False,
+                                    "durationMs": 2,
+                                }
+                            }
+                        }
+                    if declaration == OBJECT_EXPERIMENT_MUTATE_FUNCTION:
+                        config = params["arguments"][0]["value"]
+                        success = self.mutation_outcome == "updated"
+                        return {
+                            "result": {
+                                "value": {
+                                    "protocolVersion": 1,
+                                    "ok": success,
+                                    "error": None if success else "Accessor properties cannot be patched",
+                                    "outcome": self.mutation_outcome,
+                                    "before": {
+                                        "exists": True,
+                                        "type": "boolean" if success else "accessor",
+                                        "className": "",
+                                        "writable": success,
+                                        "configurable": True,
+                                        "preview": "false" if success else None,
+                                    },
+                                    "after": {
+                                        "exists": True,
+                                        "type": "object" if success else "accessor",
+                                        "className": "Object" if success else "",
+                                        "writable": success,
+                                        "configurable": True,
+                                        "preview": "[Object]" if success else None,
+                                    },
+                                    "object": {
+                                        "id": config["resultId"],
+                                        "className": "CheckoutState",
+                                        "propertyCount": 2,
+                                        "propertiesTruncated": False,
+                                        "similarity": config["similarity"],
+                                        "preview": [
+                                            {
+                                                "name": config["property"],
+                                                "type": "object" if success else "accessor",
+                                                "value": "[Object]" if success else "<getter not invoked>",
+                                            }
+                                        ],
+                                    },
+                                }
+                            }
+                        }
+                    return {"result": {"objectId": "candidate-4"}}
+                return {}
+
+        bridge = ObjectExperimentBridge()
+        created = bridge.action({"action": "create_request_interception_experiment"})
+        self.assertTrue(created["object_experiment"]["isolated"])
+        bridge._target = {
+            "id": "object-page",
+            "type": "page",
+            "title": "about:blank",
+            "url": "about:blank",
+        }
+        bridge._connection = RecordingConnection()
+        bridge._restore_request_interception("object-page")
+        self.assertEqual(bridge.snapshot()["object_experiment"]["state"], "ready")
+
+        navigated = bridge.action(
+            {
+                "action": "navigate_object_experiment",
+                "url": "https://app.test/lab?private=hidden",
+            }
+        )["object_experiment"]
+        self.assertEqual(navigated["state"], "loaded")
+        self.assertEqual(navigated["url"], "https://app.test/lab")
+        self.assertEqual(navigated["navigation_id"], 1)
+
+        searched = bridge.action(
+            {"action": "search_object_experiment", "property_query": "ready"}
+        )["object_experiment"]
+        self.assertEqual(searched["search_id"], 1)
+        self.assertEqual(searched["results"][0]["class_name"], "CheckoutState")
+        self.assertEqual(bridge._object_experiment_result_indices, {4})
+
+        secret_value = {"enabled": True, "label": "do-not-retain"}
+        mutated = bridge.action(
+            {
+                "action": "mutate_object_experiment",
+                "search_id": searched["search_id"],
+                "result_id": "4",
+                "operation": "set",
+                "property": "ready",
+                "value": secret_value,
+                "confirmed": True,
+            }
+        )["object_experiment"]
+        self.assertTrue(mutated["last_mutation"]["ok"])
+        self.assertEqual(mutated["results"][0]["preview"][0]["value"], "[Object]")
+        self.assertEqual(len(mutated["audit"]), 1)
+        audit = mutated["audit"][0]
+        canonical = b'{"enabled":true,"label":"do-not-retain"}'
+        self.assertEqual(audit["value_bytes"], len(canonical))
+        self.assertEqual(audit["value_digest"], hashlib.sha256(canonical).hexdigest())
+        self.assertNotIn("do-not-retain", json.dumps(audit))
+        self.assertNotIn("private", audit["url"])
+        mutation_command = next(
+            command
+            for command in bridge.commands
+            if command[0] == "Runtime.callFunctionOn"
+            and command[1].get("functionDeclaration") == OBJECT_EXPERIMENT_MUTATE_FUNCTION
+        )
+        self.assertNotIn("do-not-retain", mutation_command[1]["functionDeclaration"])
+
+        bridge.mutation_outcome = "accessor"
+        rejected = bridge.action(
+            {
+                "action": "mutate_object_experiment",
+                "search_id": searched["search_id"],
+                "result_id": "4",
+                "operation": "set",
+                "property": "accessor",
+                "value": False,
+                "confirmed": True,
+            }
+        )["object_experiment"]
+        self.assertFalse(rejected["last_mutation"]["ok"])
+        self.assertEqual(rejected["audit"][-1]["outcome"], "accessor")
+
+        disposed = bridge.action(
+            {"action": "dispose_request_interception_experiment"}
+        )["object_experiment"]
+        self.assertEqual(disposed["state"], "disposed")
+        self.assertEqual(disposed["results"], [])
+        self.assertEqual(disposed["audit"], [])
+        self.assertFalse(disposed["isolated"])
+
+    def test_object_experiment_rejects_unsafe_or_unbounded_mutations(self) -> None:
+        bridge = DebuggerBridge()
+        for invalid in (
+            "x" * (4 * 1024 + 1),
+            {"nested": [[[[[[[[[True]]]]]]]]]},
+            list(range(257)),
+            2**53,
+            float("inf"),
+        ):
+            with self.assertRaises(DebuggerBridgeError):
+                bridge._normalize_object_experiment_value(invalid)
+        with self.assertRaisesRegex(DebuggerBridgeError, "credential-free"):
+            bridge._validate_request_interception_url(
+                "https://user:secret@example.test/"
+            )
+
+        bridge._state = "running"
+        bridge._target = {
+            "id": "baseline-page",
+            "type": "page",
+            "title": "Baseline",
+            "url": "https://baseline.test/",
+        }
+        with self.assertRaisesRegex(DebuggerBridgeError, "disposable"):
+            bridge.action(
+                {
+                    "action": "mutate_object_experiment",
+                    "search_id": 1,
+                    "result_id": "0",
+                    "operation": "set",
+                    "property": "safe",
+                    "value": True,
+                    "confirmed": True,
+                }
+            )
+        with self.assertRaisesRegex(DebuggerBridgeError, "confirmation"):
+            bridge.action(
+                {
+                    "action": "mutate_object_experiment",
+                    "search_id": 1,
+                    "result_id": "0",
+                    "operation": "set",
+                    "property": "safe",
+                    "value": True,
+                }
+            )
+        with self.assertRaisesRegex(DebuggerBridgeError, "not allowed"):
+            bridge.action(
+                {
+                    "action": "mutate_object_experiment",
+                    "search_id": 1,
+                    "result_id": "0",
+                    "operation": "set",
+                    "property": "__proto__",
+                    "value": {},
+                    "confirmed": True,
+                }
+            )
+
+    def test_object_experiment_mutator_never_invokes_accessors(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+        exercise = f"""
+const mutate = ({OBJECT_EXPERIMENT_MUTATE_FUNCTION});
+let getterCalls = 0;
+let setterCalls = 0;
+const prototype = {{set inherited(value) {{ setterCalls += 1; }}}};
+const candidate = Object.create(prototype);
+Object.defineProperty(candidate, 'accessor', {{
+  get() {{ getterCalls += 1; return 'secret'; }},
+  set(value) {{ setterCalls += 1; }},
+  configurable: true
+}});
+Object.defineProperty(candidate, 'fixed', {{value: 1, writable: false, configurable: false}});
+Object.defineProperty(candidate, 'softFixed', {{value: 1, writable: false, configurable: true}});
+candidate.removable = true;
+const config = {{previewProperties: 16, resultId: '1', similarity: null}};
+const inherited = mutate.call(candidate, {{...config, operation: 'set', property: 'inherited', value: 7}});
+const accessor = mutate.call(candidate, {{...config, operation: 'set', property: 'accessor', value: 8}});
+const fixed = mutate.call(candidate, {{...config, operation: 'set', property: 'fixed', value: 9}});
+const softFixed = mutate.call(candidate, {{...config, operation: 'set', property: 'softFixed', value: 9}});
+const accessorDelete = mutate.call(candidate, {{...config, operation: 'delete', property: 'accessor'}});
+const removed = mutate.call(candidate, {{...config, operation: 'delete', property: 'removable'}});
+process.stdout.write(JSON.stringify({{
+  inherited: inherited.outcome,
+  inheritedOwn: Object.hasOwn(candidate, 'inherited'),
+  accessor: accessor.outcome,
+  accessorDelete: accessorDelete.outcome,
+  fixed: fixed.outcome,
+  softFixed: softFixed.outcome,
+  removed: removed.outcome,
+  getterCalls,
+  setterCalls
+}}));
+"""
+        completed = subprocess.run(
+            [node, "-e", exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "inherited": "created",
+                "inheritedOwn": True,
+                "accessor": "accessor",
+                "accessorDelete": "accessor",
+                "fixed": "non_writable",
+                "softFixed": "non_writable",
+                "removed": "deleted",
+                "getterCalls": 0,
+                "setterCalls": 0,
+            },
+        )
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Optional
 
 from debugger_bridge import (
     LIVE_OBJECT_SEARCH_FUNCTION,
@@ -1724,7 +1725,10 @@ process.stdout.write(JSON.stringify({{
             [{"name": "host", "value": "api.test"}, {"name": "order", "value": "42"}],
         )
 
-        def send(body: str = '{"id":"{{order}}"}') -> dict:
+        def send(
+            body: str = '{"id":"{{order}}"}',
+            collection_request_id: Optional[int] = None,
+        ) -> dict:
             before_history = bridge.snapshot()["repeater"]["history"]
             before_id = before_history[-1]["id"] if before_history else 0
             started = bridge.action(
@@ -1735,6 +1739,7 @@ process.stdout.write(JSON.stringify({{
                     "headers": {"x-order": "{{order}}"},
                     "body": body,
                     "timeout_ms": 500,
+                    "collection_request_id": collection_request_id,
                 }
             )
             self.assertTrue(started["ok"])
@@ -1745,8 +1750,9 @@ process.stdout.write(JSON.stringify({{
 
             return self.wait_for(completed_entry)
 
-        first = send()
+        first = send(collection_request_id=41)
         second = send()
+        self.assertEqual(first["collection_request_id"], 41)
         self.assertEqual(first["request"]["url"], "https://{{host}}/orders/{{order}}?private=1")
         self.assertEqual(second["resolved_request"]["url"], "https://api.test/orders/42?private=1")
         self.assertEqual(second["variable_names"], ["host", "order"])

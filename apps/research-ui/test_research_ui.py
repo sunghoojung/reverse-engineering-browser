@@ -1125,6 +1125,7 @@ const repeaterIdle = {
 };
 const repeaterEntry = {
   id: 1, started_at_ms: 2, completed_at_ms: 5, state: 'complete',
+  collection_request_id: null,
   variable_names: ['host'],
   request: {url: 'https://{{host}}/cart', method: 'POST',
     headers: [{name: 'x-run', value: '{{host}}'}], body: '{}', timeout_ms: 15000},
@@ -1409,6 +1410,76 @@ process.stdout.write(JSON.stringify({
         self.assertIn("action: 'clear_repeater_history'", html)
         self.assertIn("24 runs / 512 KiB", html)
         self.assertIn("History is ephemeral and never enters the evidence store", html)
+
+    def test_api_collection_exposes_atomic_hierarchy_scopes_import_and_execution(self) -> None:
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('data-screen="api-collection"', html)
+        self.assertIn('id="request-collection-pivot"', html)
+        self.assertIn('id="collection-tree"', html)
+        self.assertIn('id="collection-folder-form"', html)
+        self.assertIn('id="collection-request-form"', html)
+        self.assertIn('id="collection-run"', html)
+        self.assertIn('id="collection-history"', html)
+        self.assertIn("function isApiCollection(collection)", html)
+        self.assertIn("function renderApiCollection()", html)
+        self.assertIn("function refreshApiCollection", html)
+        self.assertIn("if (!state.apiCollectionLoaded) setCollectionNotice('loading'", html)
+        self.assertIn("action: 'replace_api_collection'", html)
+        self.assertIn("collection_request_id: saved.id", html)
+        self.assertIn("32 folders / 128 requests", html)
+        self.assertIn("2 MiB atomic file", html)
+        self.assertIn("Captured headers, cookies, bodies, and credentials are never imported", html)
+
+    def test_api_collection_browser_contract_accepts_native_key_order_and_rejects_malformed_state(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        start = html.index("      function isPlainObject")
+        end = html.index("      function isRepeaterResult")
+        model = html[start:end]
+        exercise = r"""
+const limits = {
+  document_bytes: 2097152, request_body_bytes: 65536, folder_depth: 4,
+  requests: 128, variables_per_scope: 32, variable_bytes_per_scope: 32768,
+  folders: 32
+};
+const root = {id: 1, name: 'API Collection', parent_id: null, variables: []};
+const empty = {contract_version: 1, document_kind: 'api-collection', generation: 0,
+  updated_at_ms: 0, folders: [root], requests: [], limits};
+const cycle = {...empty, generation: 1, updated_at_ms: 1, folders: [root,
+  {id: 2, name: 'A', parent_id: 3, variables: []},
+  {id: 3, name: 'B', parent_id: 2, variables: []}]};
+const sensitive = {...empty, generation: 1, updated_at_ms: 1, requests: [{
+  id: 1, folder_id: 1, name: 'unsafe', url: 'https://example.test/', method: 'GET',
+  headers: [{name: 'authorization', value: 'secret'}], body: '', timeout_ms: 100,
+  variables: [], created_at_ms: 1, updated_at_ms: 1
+}]};
+process.stdout.write(JSON.stringify({
+  reorderedLimitsAccepted: isApiCollection(empty),
+  cycleRejected: !isApiCollection(cycle),
+  sensitiveHeaderRejected: !isApiCollection(sensitive),
+  unexpectedFieldRejected: !isApiCollection({...empty, extra: true}),
+  generationZeroMutationRejected: !isApiCollection({...empty, updated_at_ms: 1})
+}));
+"""
+        completed = subprocess.run(
+            [node, "-e", model + exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "reorderedLimitsAccepted": True,
+                "cycleRejected": True,
+                "sensitiveHeaderRejected": True,
+                "unexpectedFieldRejected": True,
+                "generationZeroMutationRejected": True,
+            },
+        )
 
     def test_sources_model_rejects_malformed_artifact_catalogs(self) -> None:
         node = shutil.which("node")
@@ -1940,6 +2011,8 @@ process.stdout.write(JSON.stringify({
         self.assertIn('case "/api/origin-trace":', application)
         self.assertIn('case "/api/request-signal-profile":', application)
         self.assertIn('case "/api/debugger":', application)
+        self.assertIn('case "/api/api-collection":', application)
+        self.assertIn('case "/api/api-collection/actions":', application)
         self.assertIn("debuggerUnavailableResponse(", application)
         self.assertIn('"heap_diff_baseline": NSNull()', application)
         self.assertIn('"memory_origin_trace": [', application)
@@ -1948,6 +2021,13 @@ process.stdout.write(JSON.stringify({
         self.assertIn(r'let etag = "\"debugger-unavailable-v2\""', application)
         self.assertIn("debuggerContractValid: isDebuggerResponse(state.debuggerSession)", application)
         self.assertIn("repeaterAvailable: state.debuggerSession?.repeater?.protocol_version === 1", application)
+        self.assertIn("apiCollectionContractValid: isApiCollection(state.apiCollection)", application)
+        self.assertIn("REB_APP_SMOKE_API_COLLECTION_WRITE", application)
+        self.assertIn("apiCollectionWriteExercised", application)
+        self.assertIn('firstIndex(of: "--api-collection")', application)
+        self.assertIn('appendingPathComponent("Origin Trace/api-collection-v1.json")', application)
+        self.assertIn("writeApiCollectionLocked", application)
+        self.assertIn("[.posixPermissions: 0o600]", application)
         self.assertIn("originTraceResponse(for: requestURL)", application)
         self.assertIn("requestSignalProfileResponse(", application)
         self.assertIn('value(forHTTPHeaderField: "If-None-Match")', application)

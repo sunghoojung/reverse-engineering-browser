@@ -15,6 +15,7 @@ from pathlib import Path
 from debugger_bridge import (
     LIVE_OBJECT_SEARCH_FUNCTION,
     MAX_HEAP_SNAPSHOT_BYTES,
+    REQUEST_INTERCEPTION_FUNCTION,
     DebuggerBridge,
     DebuggerBridgeError,
     HeapSnapshotCapture,
@@ -147,13 +148,47 @@ class FakeDebuggerWebSocket:
         elif method == "Debugger.getScriptSource":
             result = {"scriptSource": "function checkout(cart) { return cart; }"}
         elif method == "Runtime.evaluate":
-            result = {
-                "result": {
-                    "type": "object",
-                    "className": "Object",
-                    "objectId": "prototype-1",
+            if 'credentials: "omit"' in command["params"].get("expression", ""):
+                self.send_json(
+                    {
+                        "method": "Fetch.requestPaused",
+                        "params": {
+                            "requestId": "protocol-intercept-1",
+                            "resourceType": "Fetch",
+                            "request": {
+                                "url": "https://api.test/checkout?secret=hidden",
+                                "method": "POST",
+                                "headers": {"x-experiment": "1"},
+                            },
+                        },
+                    }
+                )
+                result = {
+                    "result": {
+                        "type": "object",
+                        "value": {
+                            "protocolVersion": 1,
+                            "ok": True,
+                            "status": 202,
+                            "statusText": "Accepted",
+                            "url": "https://api.test/checkout?secret=hidden",
+                            "headers": [
+                                {"name": "content-type", "value": "application/json"}
+                            ],
+                            "headersTruncated": False,
+                            "body": '{"accepted":true}',
+                            "bodyTruncated": False,
+                        },
+                    }
                 }
-            }
+            else:
+                result = {
+                    "result": {
+                        "type": "object",
+                        "className": "Object",
+                        "objectId": "prototype-1",
+                    }
+                }
         elif method == "Runtime.queryObjects":
             result = {
                 "result": {
@@ -653,6 +688,63 @@ class DebuggerBridgeTests(unittest.TestCase):
                 self.assertIn("DOMDebugger.setEventListenerBreakpoint", methods)
                 self.assertIn("DOMDebugger.removeEventListenerBreakpoint", methods)
                 self.wait_for(lambda: bridge.snapshot()["state"] == "running")
+
+                with bridge._lock:
+                    bridge._request_interception_context_id = "context-protocol"
+                    bridge._request_interception_return_target_id = "page-1"
+                    bridge._request_interception = bridge._empty_request_interception()
+                    bridge._request_interception.update(
+                        {
+                            "experiment_id": 1,
+                            "state": "ready",
+                            "isolated": True,
+                            "target_id": "page-1",
+                            "created_at_ms": 1,
+                            "message": "Protocol fixture ready.",
+                        }
+                    )
+                bridge._restore_request_interception("page-1")
+                bridge.action(
+                    {
+                        "action": "configure_request_interception",
+                        "mode": "fulfill",
+                        "url_pattern": "https://api.test/*",
+                        "method_filter": "POST",
+                        "response_code": 202,
+                        "response_headers": {"content-type": "application/json"},
+                        "response_body": '{"accepted":true}',
+                    }
+                )
+                experiment_result = bridge.action(
+                    {
+                        "action": "run_request_interception",
+                        "url": "https://api.test/checkout?secret=hidden",
+                        "method": "POST",
+                        "headers": {"x-experiment": "1"},
+                        "body": "{}",
+                    }
+                )["experiment"]
+                self.assertEqual(experiment_result["result"]["status"], 202)
+                self.assertEqual(
+                    experiment_result["result"]["url"],
+                    "https://api.test/checkout",
+                )
+                protocol_audit = self.wait_for(
+                    lambda: (
+                        (value := bridge.snapshot()["request_interception"])["audit"]
+                        and value
+                    )
+                )["audit"][-1]
+                self.assertEqual(protocol_audit["outcome"], "fulfilled")
+                self.assertNotIn("secret", protocol_audit["url"])
+                methods = [command["method"] for command in web_socket.commands]
+                self.assertIn("Fetch.enable", methods)
+                self.assertIn("Fetch.fulfillRequest", methods)
+                with bridge._lock:
+                    bridge._request_interception_context_id = None
+                    bridge._request_interception_return_target_id = None
+                    bridge._request_interception_pending.clear()
+                    bridge._request_interception = bridge._empty_request_interception()
             finally:
                 bridge.stop()
 
@@ -1126,6 +1218,408 @@ process.stdout.write(JSON.stringify({{
         self.assertTrue(all(not path.exists() for path in bridge.capture_paths))
         self.assertEqual(bridge.documents, [])
         self.assertIn("DOMDebugger.removeEventListenerBreakpoint", bridge.commands)
+
+    def test_request_interception_is_isolated_bounded_and_audited(self) -> None:
+        class RecordingConnection:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        class InterceptionBridge(DebuggerBridge):
+            def __init__(self) -> None:
+                super().__init__()
+                self.browser_commands = []
+                self.commands = []
+                self._state = "running"
+                self._target = {
+                    "id": "baseline-page",
+                    "type": "page",
+                    "title": "Baseline",
+                    "url": "https://baseline.test/",
+                }
+                self.recording_connection = RecordingConnection()
+                self._connection = self.recording_connection
+
+            def _browser_command(self, method: str, params=None) -> dict:
+                self.browser_commands.append((method, params or {}))
+                if method == "Target.createBrowserContext":
+                    return {"browserContextId": "context-1"}
+                if method == "Target.createTarget":
+                    return {"targetId": "experiment-page"}
+                return {}
+
+            def _command(self, method: str, params=None, timeout: float = 3.0) -> dict:
+                self.commands.append((method, params or {}, timeout))
+                if method == "Runtime.evaluate":
+                    self._handle_request_interception_pause_async(
+                        {
+                            "requestId": "intercept-run",
+                            "resourceType": "Fetch",
+                            "request": {
+                                "url": "https://api.test/private?token=secret",
+                                "method": "POST",
+                                "headers": {"x-visible": "yes"},
+                            },
+                        }
+                    )
+                    return {
+                        "result": {
+                            "value": {
+                                "protocolVersion": 1,
+                                "ok": True,
+                                "status": 202,
+                                "statusText": "Accepted",
+                                "url": "https://api.test/private?token=secret",
+                                "headers": [
+                                    {"name": "content-type", "value": "text/plain"}
+                                ],
+                                "headersTruncated": False,
+                                "body": "synthetic",
+                                "bodyTruncated": False,
+                            }
+                        }
+                    }
+                return {}
+
+        bridge = InterceptionBridge()
+        created = bridge.action({"action": "create_request_interception_experiment"})
+        self.assertTrue(created["experiment"]["isolated"])
+        self.assertEqual(created["experiment"]["state"], "creating")
+        self.assertTrue(bridge.recording_connection.closed)
+        self.assertEqual(
+            [method for method, _ in bridge.browser_commands[:2]],
+            ["Target.createBrowserContext", "Target.createTarget"],
+        )
+
+        bridge._target = {
+            "id": "experiment-page",
+            "type": "page",
+            "title": "about:blank",
+            "url": "about:blank",
+        }
+        bridge._connection = RecordingConnection()
+        bridge._restore_request_interception("experiment-page")
+        self.assertEqual(bridge.snapshot()["request_interception"]["state"], "ready")
+
+        cases = [
+            ({"mode": "continue"}, "Fetch.continueRequest", None),
+            ({"mode": "block"}, "Fetch.failRequest", "BlockedByClient"),
+            ({"mode": "drop"}, "Fetch.failRequest", "Aborted"),
+            (
+                {
+                    "mode": "rewrite",
+                    "rewrite_method": "PUT",
+                    "rewrite_headers": {"x-experiment": "1"},
+                    "rewrite_body": "changed",
+                },
+                "Fetch.continueRequest",
+                None,
+            ),
+            (
+                {
+                    "mode": "fulfill",
+                    "response_code": 202,
+                    "response_headers": {"content-type": "text/plain"},
+                    "response_body": "synthetic",
+                },
+                "Fetch.fulfillRequest",
+                None,
+            ),
+        ]
+        for index, (rule, expected_method, expected_reason) in enumerate(cases, 1):
+            bridge.action(
+                {
+                    "action": "configure_request_interception",
+                    "url_pattern": "https://api.test/*",
+                    "method_filter": "POST",
+                    **rule,
+                }
+            )
+            request_id = f"intercept-{index}"
+            bridge._handle_request_interception_pause_async(
+                {
+                    "requestId": request_id,
+                    "resourceType": "Fetch",
+                    "request": {
+                        "url": "https://api.test/private?token=secret",
+                        "method": "POST",
+                        "headers": {"authorization": "must-not-copy"},
+                    },
+                }
+            )
+            self.wait_for(
+                lambda: bridge.snapshot()["request_interception"]["pending_requests"]
+                == 0
+                and bridge.snapshot()["request_interception"]["audit"][-1]["request_id"]
+                == request_id
+            )
+            command = next(
+                entry
+                for entry in reversed(bridge.commands)
+                if entry[1].get("requestId") == request_id
+            )
+            self.assertEqual(command[0], expected_method)
+            self.assertEqual(command[1].get("errorReason"), expected_reason)
+        rewrite_command = next(
+            entry
+            for entry in bridge.commands
+            if entry[1].get("requestId") == "intercept-4"
+        )
+        self.assertEqual(rewrite_command[1]["method"], "PUT")
+        self.assertEqual(base64.b64decode(rewrite_command[1]["postData"]), b"changed")
+
+        bridge._handle_request_interception_pause_async(
+            {
+                "requestId": "intercept-preflight",
+                "resourceType": "Fetch",
+                "request": {
+                    "url": "https://api.test/private?token=secret",
+                    "method": "OPTIONS",
+                    "headers": {
+                        "access-control-request-method": "POST",
+                        "access-control-request-headers": "content-type, x-test",
+                    },
+                },
+            }
+        )
+        self.wait_for(
+            lambda: bridge.snapshot()["request_interception"]["audit"][-1][
+                "request_id"
+            ]
+            == "intercept-preflight"
+        )
+        preflight_command = next(
+            entry
+            for entry in bridge.commands
+            if entry[1].get("requestId") == "intercept-preflight"
+        )
+        self.assertEqual(preflight_command[0], "Fetch.fulfillRequest")
+        self.assertEqual(preflight_command[1]["responseCode"], 204)
+        self.assertIn(
+            {
+                "name": "access-control-allow-headers",
+                "value": "content-type, x-test",
+            },
+            preflight_command[1]["responseHeaders"],
+        )
+
+        completed = bridge.action(
+            {
+                "action": "run_request_interception",
+                "url": "https://api.test/private?token=secret",
+                "method": "POST",
+                "headers": {"x-test": "1"},
+                "body": "request",
+            }
+        )
+        experiment = completed["experiment"]
+        self.assertEqual(experiment["result"]["status"], 202)
+        self.assertEqual(experiment["result"]["url"], "https://api.test/private")
+        self.assertEqual(experiment["last_request"]["url"], "https://api.test/private")
+        self.wait_for(
+            lambda: bridge.snapshot()["request_interception"]["pending_requests"] == 0
+        )
+        self.assertTrue(
+            all(
+                "token" not in entry["url"]
+                for entry in bridge.snapshot()["request_interception"]["audit"]
+            )
+        )
+
+        disposed = bridge.action({"action": "dispose_request_interception_experiment"})
+        self.assertEqual(disposed["experiment"]["state"], "disposed")
+        self.assertFalse(disposed["experiment"]["isolated"])
+        self.assertIsNone(disposed["experiment"]["target_id"])
+        self.assertEqual(
+            bridge.browser_commands[-1],
+            (
+                "Target.disposeBrowserContext",
+                {"browserContextId": "context-1"},
+            ),
+        )
+        bridge.action({"action": "clear_request_interception_result"})
+        self.assertEqual(bridge.snapshot()["request_interception"]["state"], "idle")
+
+    def test_request_interception_rejects_credentials_and_unbounded_rules(self) -> None:
+        bridge = DebuggerBridge()
+        self.assertEqual(
+            bridge._redacted_request_url(
+                "https://user:password@[2001:db8::1]:8443/private?token=secret"
+            ),
+            "https://[2001:db8::1]:8443/private",
+        )
+        self.assertEqual(
+            bridge._normalize_request_interception_request(
+                {"url": "https://example.test/", "method": "CUSTOM_METHOD"}
+            )["method"],
+            "CUSTOM_METHOD",
+        )
+        bridge._handle_request_interception_pause_async(
+            {
+                "requestId": "inactive-request",
+                "resourceType": "Fetch",
+                "request": {"url": "https://example.test/", "method": "GET"},
+            }
+        )
+        self.assertEqual(bridge.snapshot()["request_interception"]["audit"], [])
+        fulfill_rule = bridge._normalize_request_interception_rule(
+            {
+                "mode": "fulfill",
+                "url_pattern": "*",
+                "response_headers": {"content-type": "application/json"},
+                "response_body": "{}",
+            }
+        )
+        self.assertIn(
+            {"name": "access-control-allow-origin", "value": "*"},
+            fulfill_rule["response_headers"],
+        )
+        with self.assertRaisesRegex(DebuggerBridgeError, "credential-free"):
+            bridge._normalize_request_interception_request(
+                {
+                    "url": "https://user:password@example.test/",
+                    "method": "GET",
+                }
+            )
+        with self.assertRaisesRegex(DebuggerBridgeError, "forbidden"):
+            bridge._normalize_request_interception_request(
+                {
+                    "url": "https://example.test/",
+                    "method": "GET",
+                    "headers": {"Authorization": "secret"},
+                }
+            )
+        with self.assertRaisesRegex(DebuggerBridgeError, "64 KiB"):
+            bridge._normalize_request_interception_rule(
+                {
+                    "mode": "fulfill",
+                    "url_pattern": "*",
+                    "response_body": "x" * (64 * 1024 + 1),
+                }
+            )
+        with self.assertRaisesRegex(DebuggerBridgeError, "at least one"):
+            bridge._normalize_request_interception_rule(
+                {"mode": "rewrite", "url_pattern": "*"}
+            )
+        with self.assertRaisesRegex(ProtocolError, "malformed"):
+            bridge._normalize_request_interception_result(
+                {
+                    "protocolVersion": 1,
+                    "ok": True,
+                    "status": 200,
+                    "statusText": "OK",
+                    "url": "https://example.test/",
+                    "headers": [{"name": "set-cookie", "value": "secret=1"}],
+                    "headersTruncated": False,
+                    "body": "ok",
+                    "bodyTruncated": False,
+                }
+            )
+
+    def test_partial_request_interception_context_remains_disposable(self) -> None:
+        class PartialContextBridge(DebuggerBridge):
+            def __init__(self) -> None:
+                super().__init__()
+                self._state = "running"
+                self._target = {
+                    "id": "baseline-page",
+                    "type": "page",
+                    "title": "Baseline",
+                    "url": "https://baseline.test/",
+                }
+                self.cleanup_fails = True
+
+            def _browser_command(self, method: str, params=None) -> dict:
+                if method == "Target.createBrowserContext":
+                    return {"browserContextId": "partial-context"}
+                if method == "Target.createTarget":
+                    raise DebuggerBridgeError("Target creation failed")
+                if method == "Target.disposeBrowserContext" and self.cleanup_fails:
+                    raise DebuggerBridgeError("Context disposal failed")
+                return {}
+
+        bridge = PartialContextBridge()
+        with self.assertRaisesRegex(DebuggerBridgeError, "Target creation failed"):
+            bridge.action({"action": "create_request_interception_experiment"})
+        failed = bridge.snapshot()["request_interception"]
+        self.assertEqual(failed["state"], "error")
+        self.assertTrue(failed["isolated"])
+        self.assertIsNone(failed["target_id"])
+        self.assertIn("could not be confirmed as deleted", failed["message"])
+
+        bridge.cleanup_fails = False
+        disposed = bridge.action({"action": "dispose_request_interception_experiment"})[
+            "experiment"
+        ]
+        self.assertEqual(disposed["state"], "disposed")
+        self.assertFalse(disposed["isolated"])
+
+    def test_request_interception_runner_streams_only_the_bounded_response(
+        self,
+    ) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+        exercise = f"""
+const run = ({REQUEST_INTERCEPTION_FUNCTION});
+let reads = 0;
+let cancellations = 0;
+let capturedOptions = null;
+globalThis.fetch = async (_url, options) => {{
+  capturedOptions = options;
+  const oversized = new Uint8Array(80 * 1024);
+  oversized.fill(97);
+  return {{
+    status: 202,
+    statusText: 'Accepted',
+    url: 'https://api.test/result?private=1',
+    headers: new Map([['content-type', 'text/plain']]),
+    body: {{getReader() {{ return {{
+      async read() {{ reads += 1; return {{done: false, value: oversized}}; }},
+      async cancel() {{ cancellations += 1; }}
+    }}; }}}}
+  }};
+}};
+const result = await run({{
+  url: 'https://api.test/result', method: 'POST', headers: {{'x-test': '1'}},
+  body: 'request', timeoutMs: 1000, headerLimit: 64,
+  headerValueLimit: 2048, headerTotalLimit: 16384, responseByteLimit: 65536
+}});
+process.stdout.write(JSON.stringify({{
+  ok: result.ok,
+  bodyBytes: new TextEncoder().encode(result.body).byteLength,
+  truncated: result.bodyTruncated,
+  headersTruncated: result.headersTruncated,
+  reads,
+  cancellations,
+  credentials: capturedOptions.credentials,
+  cache: capturedOptions.cache,
+  referrerPolicy: capturedOptions.referrerPolicy
+}}));
+"""
+        completed = subprocess.run(
+            [node, "-e", exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "ok": True,
+                "bodyBytes": 65_536,
+                "truncated": True,
+                "headersTruncated": False,
+                "reads": 1,
+                "cancellations": 1,
+                "credentials": "omit",
+                "cache": "no-store",
+                "referrerPolicy": "no-referrer",
+            },
+        )
 
 
 if __name__ == "__main__":

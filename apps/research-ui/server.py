@@ -32,7 +32,7 @@ MAX_EVENT_JSON_BYTES = 4 * 1024
 MAX_TRACE_EDGE_JSON_BYTES = 2 * 1024
 MAX_SIGNAL_PROFILE_JSON_BYTES = 8 * 1024
 MAX_ARTIFACT_JSON_BYTES = 8 * 1024
-MAX_DEBUGGER_ACTION_BYTES = 16 * 1024
+MAX_DEBUGGER_ACTION_BYTES = 128 * 1024
 MAX_DEBUGGER_WAIT_MS = 25_000
 MAX_TRACE_EVENT_WINDOW = 10_000
 MAX_TRACE_EDGE_WINDOW = 30_000
@@ -958,7 +958,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         if etag is not None:
             self.send_header("ETag", etag)
         self.end_headers()
-        self.wfile.write(body)
+        self.write_response_body(body)
 
     def send_artifact_bytes(self, body: bytes, total_size: int, offset: int) -> None:
         self.send_response(HTTPStatus.OK)
@@ -974,7 +974,15 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             "X-Artifact-Truncated", "1" if offset + len(body) < total_size else "0"
         )
         self.end_headers()
-        self.wfile.write(body)
+        self.write_response_body(body)
+
+    def write_response_body(self, body: bytes) -> None:
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # Conditional debugger requests are intentionally long-lived. A tab
+            # close or refresh may end the loopback connection before a change.
+            return
 
     def log_message(self, format: str, *args) -> None:
         return

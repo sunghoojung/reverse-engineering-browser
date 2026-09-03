@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 MAX_TARGETS = 128
@@ -63,6 +63,25 @@ MAX_TARGET_ID_BYTES = 4_096
 MAX_TARGET_TYPE_BYTES = 128
 MAX_TARGET_URL_BYTES = 64 * 1024
 MAX_REMOTE_TEXT_BYTES = 4_096
+MAX_INTERCEPTION_URL_BYTES = 8 * 1024
+MAX_INTERCEPTION_PATTERN_BYTES = 2 * 1024
+MAX_INTERCEPTION_METHOD_BYTES = 32
+MAX_INTERCEPTION_HEADERS = 64
+MAX_INTERCEPTION_HEADER_NAME_BYTES = 128
+MAX_INTERCEPTION_HEADER_VALUE_BYTES = 2 * 1024
+MAX_INTERCEPTION_HEADER_BYTES = 16 * 1024
+MAX_INTERCEPTION_BODY_BYTES = 64 * 1024
+MAX_INTERCEPTION_RESPONSE_BYTES = 64 * 1024
+MAX_INTERCEPTION_AUDIT_ENTRIES = 128
+MAX_INTERCEPTION_PENDING_REQUESTS = 16
+INTERCEPTION_RUN_TIMEOUT_SECONDS = 15.0
+
+SENSITIVE_INTERCEPTION_HEADERS = {
+    "authorization",
+    "cookie",
+    "proxy-authorization",
+    "set-cookie",
+}
 
 MEMORY_ORIGIN_TRACE_FRAMEWORK_PATTERNS = (
     "/node_modules/",
@@ -246,6 +265,100 @@ LIVE_OBJECT_SEARCH_FUNCTION = r"""function(criteria) {
     timedOut,
     durationMs: Math.max(0, Date.now() - started)
   };
+}"""
+
+REQUEST_INTERCEPTION_FUNCTION = r"""async function(config) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
+  try {
+    const options = {
+      method: config.method,
+      headers: config.headers,
+      credentials: "omit",
+      cache: "no-store",
+      redirect: "follow",
+      referrerPolicy: "no-referrer",
+      signal: controller.signal
+    };
+    if (config.body !== "") options.body = config.body;
+    const response = await fetch(config.url, options);
+    const decoder = new TextDecoder();
+    const bodyParts = [];
+    let bodyBytes = 0;
+    let bodyTruncated = false;
+    if (response.body) {
+      const reader = response.body.getReader();
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        const remaining = Math.max(0, config.responseByteLimit - bodyBytes);
+        if (value.byteLength > remaining) {
+          if (remaining > 0) {
+            bodyParts.push(decoder.decode(value.subarray(0, remaining), {stream: true}));
+            bodyBytes += remaining;
+          }
+          bodyTruncated = true;
+          try { await reader.cancel(); } catch {}
+          break;
+        }
+        bodyParts.push(decoder.decode(value, {stream: true}));
+        bodyBytes += value.byteLength;
+        if (bodyBytes === config.responseByteLimit) {
+          const next = await reader.read();
+          if (!next.done) {
+            bodyTruncated = true;
+            try { await reader.cancel(); } catch {}
+          }
+          break;
+        }
+      }
+      bodyParts.push(decoder.decode());
+    }
+    const headers = [];
+    const headerEncoder = new TextEncoder();
+    let headerBytes = 0;
+    let headersTruncated = false;
+    for (const [name, value] of response.headers.entries()) {
+      if (["set-cookie", "set-cookie2"].includes(name.toLowerCase())) continue;
+      if (headers.length >= config.headerLimit) {
+        headersTruncated = true;
+        break;
+      }
+      const encodedValue = headerEncoder.encode(value);
+      const boundedValue = encodedValue.byteLength <= config.headerValueLimit
+        ? value
+        : new TextDecoder().decode(encodedValue.subarray(0, config.headerValueLimit));
+      const entryBytes = headerEncoder.encode(name).byteLength + headerEncoder.encode(boundedValue).byteLength;
+      if (headerBytes + entryBytes > config.headerTotalLimit) {
+        headersTruncated = true;
+        break;
+      }
+      headerBytes += entryBytes;
+      headers.push({name, value: boundedValue});
+      if (encodedValue.byteLength > config.headerValueLimit) headersTruncated = true;
+    }
+    return {
+      protocolVersion: 1,
+      ok: true,
+      status: response.status,
+      statusText: response.statusText.slice(0, 256),
+      url: response.url,
+      headers,
+      headersTruncated,
+      body: bodyParts.join(""),
+      bodyTruncated
+    };
+  } catch (error) {
+    let message = "Request failed";
+    try { message = String(error && error.message ? error.message : error); } catch {}
+    return {
+      protocolVersion: 1,
+      ok: false,
+      error: message.slice(0, 512)
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }"""
 
 
@@ -543,6 +656,13 @@ class DebuggerBridge:
         self._memory_origin_trace_stop_requested = False
         self._memory_origin_trace_added_click_breakpoint = False
         self._memory_origin_trace_timer: Optional[threading.Timer] = None
+        self._next_request_interception_id = 1
+        self._next_request_interception_audit_id = 1
+        self._request_interception = self._empty_request_interception()
+        self._request_interception_rule = self._default_request_interception_rule()
+        self._request_interception_context_id: Optional[str] = None
+        self._request_interception_return_target_id: Optional[str] = None
+        self._request_interception_pending: set[str] = set()
 
     def start(self) -> None:
         if self.active_port_path is None or self._thread is not None:
@@ -564,6 +684,7 @@ class DebuggerBridge:
             self._thread.join(timeout=3.0)
         self._fail_pending(DebuggerBridgeError("Debugger bridge stopped"))
         self._clear_heap_diff_baseline(force=True)
+        self._dispose_request_interception_context(preserve_result=False, force=True)
 
     def generation(self) -> int:
         with self._lock:
@@ -608,6 +729,7 @@ class DebuggerBridge:
                 },
                 "heap_diff_baseline": self._heap_diff_baseline_metadata(),
                 "memory_origin_trace": copy.deepcopy(self._memory_origin_trace),
+                "request_interception": copy.deepcopy(self._request_interception),
                 "limits": {
                     "scripts": MAX_SCRIPTS,
                     "call_frames": MAX_CALL_FRAMES,
@@ -623,9 +745,16 @@ class DebuggerBridge:
             raise DebuggerBridgeError("Debugger action is required")
         with self._lock:
             origin_trace_active = self._memory_origin_trace_active_locked()
+            request_interception_running = (
+                self._request_interception["state"] == "running"
+            )
         if origin_trace_active and action != "stop_memory_origin_trace":
             raise DebuggerBridgeError(
                 "Memory Origin Trace controls the debugger until it finishes or is stopped"
+            )
+        if request_interception_running:
+            raise DebuggerBridgeError(
+                "The isolated experiment controls the debugger until its request finishes"
             )
         if action == "pause":
             self._command("Debugger.pause")
@@ -790,6 +919,16 @@ class DebuggerBridge:
             with self._lock:
                 self._memory_origin_trace = self._empty_memory_origin_trace()
                 self._changed()
+        elif action == "create_request_interception_experiment":
+            return self._create_request_interception_experiment()
+        elif action == "configure_request_interception":
+            return self._configure_request_interception(request)
+        elif action == "run_request_interception":
+            return self._run_request_interception(request)
+        elif action == "dispose_request_interception_experiment":
+            return self._dispose_request_interception_experiment()
+        elif action == "clear_request_interception_result":
+            return self._clear_request_interception_result()
         elif action == "capture_heap_diff_baseline":
             return self._capture_heap_diff_baseline()
         elif action == "compare_heap_diff":
@@ -1588,6 +1727,977 @@ class DebuggerBridge:
             "framework_filtered": filtered,
         }
 
+    @staticmethod
+    def _default_request_interception_rule() -> dict[str, Any]:
+        return {
+            "mode": "continue",
+            "url_pattern": "*",
+            "method_filter": "",
+            "rewrite_url": "",
+            "rewrite_method": "",
+            "rewrite_headers": [],
+            "rewrite_body": "",
+            "response_code": 200,
+            "response_headers": [],
+            "response_body": "",
+        }
+
+    @classmethod
+    def _public_request_interception_rule(cls, rule: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "mode": rule["mode"],
+            "url_pattern": rule["url_pattern"],
+            "method_filter": rule["method_filter"],
+            "rewrite_url": cls._redacted_request_url(rule["rewrite_url"])
+            if rule["rewrite_url"]
+            else "",
+            "rewrite_method": rule["rewrite_method"],
+            "rewrite_header_count": len(rule["rewrite_headers"]),
+            "rewrite_body_bytes": len(rule["rewrite_body"].encode("utf-8")),
+            "response_code": rule["response_code"],
+            "response_header_count": len(rule["response_headers"]),
+            "response_body_bytes": len(rule["response_body"].encode("utf-8")),
+        }
+
+    @classmethod
+    def _empty_request_interception(cls) -> dict[str, Any]:
+        return {
+            "protocol_version": 1,
+            "experiment_id": 0,
+            "state": "idle",
+            "isolated": False,
+            "target_id": None,
+            "created_at_ms": 0,
+            "disposed_at_ms": 0,
+            "rule": cls._public_request_interception_rule(
+                cls._default_request_interception_rule()
+            ),
+            "last_request": None,
+            "result": None,
+            "audit": [],
+            "audit_evictions": 0,
+            "pending_requests": 0,
+            "message": "Create an isolated experiment to intercept a request.",
+            "limits": {
+                "audit_entries": MAX_INTERCEPTION_AUDIT_ENTRIES,
+                "pending_requests": MAX_INTERCEPTION_PENDING_REQUESTS,
+                "headers": MAX_INTERCEPTION_HEADERS,
+                "body_bytes": MAX_INTERCEPTION_BODY_BYTES,
+                "response_bytes": MAX_INTERCEPTION_RESPONSE_BYTES,
+            },
+        }
+
+    def _create_request_interception_experiment(self) -> dict[str, Any]:
+        with self._lock:
+            if self._state not in {"running", "paused"} or self._target is None:
+                raise DebuggerBridgeError(
+                    "Request interception requires a running debugger target"
+                )
+            if self._request_interception_context_id is not None:
+                raise DebuggerBridgeError(
+                    "An isolated request interception experiment already exists"
+                )
+            if self._heap_diff_busy or self._heap_snapshot_collector is not None:
+                raise DebuggerBridgeError(
+                    "A heap snapshot operation is already running"
+                )
+            experiment_id = self._next_request_interception_id
+            self._next_request_interception_id += 1
+            return_target_id = self._target["id"]
+            self._request_interception = self._empty_request_interception()
+            self._request_interception.update(
+                {
+                    "experiment_id": experiment_id,
+                    "state": "creating",
+                    "created_at_ms": int(time.time() * 1_000),
+                    "message": "Creating a disposable browser context with no shared cookies or storage.",
+                }
+            )
+            self._request_interception_rule = self._default_request_interception_rule()
+            self._request_interception_return_target_id = return_target_id
+            self._changed()
+
+        context_id: Optional[str] = None
+        try:
+            context_result = self._browser_command("Target.createBrowserContext")
+            context_id = self._required_protocol_identifier(
+                context_result.get("browserContextId"), "browser context"
+            )
+            target_result = self._browser_command(
+                "Target.createTarget",
+                {
+                    "url": "about:blank",
+                    "browserContextId": context_id,
+                    "background": True,
+                },
+            )
+            target_id = self._required_protocol_identifier(
+                target_result.get("targetId"), "experiment target"
+            )
+        except BaseException as exception:
+            cleanup_error: Optional[BaseException] = None
+            if context_id is not None:
+                try:
+                    self._browser_command(
+                        "Target.disposeBrowserContext",
+                        {"browserContextId": context_id},
+                    )
+                except DebuggerBridgeError as cleanup_exception:
+                    cleanup_error = cleanup_exception
+            with self._lock:
+                self._request_interception_return_target_id = None
+                self._request_interception["state"] = "error"
+                if cleanup_error is not None:
+                    self._request_interception_context_id = context_id
+                    self._request_interception["isolated"] = True
+                    message = (
+                        f"{exception}. The partial disposable context could not be "
+                        f"confirmed as deleted: {cleanup_error}"
+                    )
+                else:
+                    message = str(exception)
+                self._request_interception["message"] = self._truncate_text(
+                    message, 512
+                )
+                self._changed()
+            raise
+
+        with self._lock:
+            self._request_interception_context_id = context_id
+            self._request_interception["isolated"] = True
+            self._request_interception["target_id"] = target_id
+            self._request_interception["message"] = (
+                "Isolated context created. Attaching its disposable page."
+            )
+            self._preferred_target_id = target_id
+            connection = self._connection
+            self._changed()
+        if connection is not None:
+            connection.close()
+        return {
+            "ok": True,
+            "experiment": copy.deepcopy(self._request_interception),
+            "generation": self.generation(),
+        }
+
+    def _configure_request_interception(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        rule = self._normalize_request_interception_rule(request)
+        with self._lock:
+            if (
+                self._request_interception_context_id is None
+                or self._request_interception["target_id"] is None
+                or self._target is None
+                or self._target["id"] != self._request_interception["target_id"]
+                or self._request_interception["state"] not in {"ready", "error"}
+                or self._request_interception_pending
+            ):
+                raise DebuggerBridgeError(
+                    "The isolated request interception target is not ready"
+                )
+        self._command(
+            "Fetch.enable",
+            {
+                "patterns": [
+                    {
+                        "urlPattern": rule["url_pattern"],
+                        "requestStage": "Request",
+                    }
+                ],
+                "handleAuthRequests": False,
+            },
+        )
+        with self._lock:
+            self._request_interception_rule = rule
+            self._request_interception["rule"] = self._public_request_interception_rule(
+                rule
+            )
+            self._request_interception["state"] = "ready"
+            self._request_interception["result"] = None
+            self._request_interception["message"] = (
+                "Interception rule armed inside the disposable context."
+            )
+            self._changed()
+            experiment = copy.deepcopy(self._request_interception)
+        return {"ok": True, "experiment": experiment, "generation": self.generation()}
+
+    def _run_request_interception(self, request: dict[str, Any]) -> dict[str, Any]:
+        replay = self._normalize_request_interception_request(request)
+        with self._lock:
+            if (
+                self._request_interception_context_id is None
+                or self._request_interception["target_id"] is None
+                or self._target is None
+                or self._target["id"] != self._request_interception["target_id"]
+                or self._request_interception["state"] not in {"ready", "error"}
+                or self._request_interception_pending
+            ):
+                raise DebuggerBridgeError(
+                    "The isolated request interception target is not ready"
+                )
+            self._request_interception["state"] = "running"
+            self._request_interception["result"] = None
+            self._request_interception["last_request"] = {
+                "url": self._redacted_request_url(replay["url"]),
+                "method": replay["method"],
+                "header_count": len(replay["headers"]),
+                "body_bytes": len(replay["body"].encode("utf-8")),
+            }
+            self._request_interception["message"] = (
+                "Sending one credential-free request through the armed rule."
+            )
+            self._changed()
+
+        configuration = {
+            "url": replay["url"],
+            "method": replay["method"],
+            "headers": {
+                header["name"]: header["value"] for header in replay["headers"]
+            },
+            "body": replay["body"],
+            "timeoutMs": int(INTERCEPTION_RUN_TIMEOUT_SECONDS * 1_000),
+            "headerLimit": MAX_INTERCEPTION_HEADERS,
+            "headerValueLimit": MAX_INTERCEPTION_HEADER_VALUE_BYTES,
+            "headerTotalLimit": MAX_INTERCEPTION_HEADER_BYTES,
+            "responseByteLimit": MAX_INTERCEPTION_RESPONSE_BYTES,
+        }
+        expression = (
+            f"({REQUEST_INTERCEPTION_FUNCTION})"
+            f"({json.dumps(configuration, separators=(',', ':'))})"
+        )
+        try:
+            evaluated = self._command(
+                "Runtime.evaluate",
+                {
+                    "expression": expression,
+                    "returnByValue": True,
+                    "awaitPromise": True,
+                    "silent": True,
+                    "userGesture": False,
+                    "timeout": int(INTERCEPTION_RUN_TIMEOUT_SECONDS * 1_000),
+                },
+                timeout=INTERCEPTION_RUN_TIMEOUT_SECONDS + 2.0,
+            )
+            if isinstance(evaluated.get("exceptionDetails"), dict):
+                raise DebuggerBridgeError(
+                    "The isolated request runner failed before returning a result"
+                )
+            remote = evaluated.get("result")
+            document = remote.get("value") if isinstance(remote, dict) else None
+            result = self._normalize_request_interception_result(document)
+        except BaseException as exception:
+            with self._lock:
+                self._request_interception["state"] = "error"
+                self._request_interception["message"] = self._truncate_text(
+                    str(exception), 512
+                )
+                self._changed()
+            raise
+
+        with self._lock:
+            self._request_interception["state"] = "ready"
+            self._request_interception["result"] = result
+            self._request_interception["message"] = (
+                f"Experiment request completed with status {result['status']}."
+                if result["ok"]
+                else f"Experiment request finished with an error: {result['error']}"
+            )
+            self._changed()
+            experiment = copy.deepcopy(self._request_interception)
+        return {"ok": True, "experiment": experiment, "generation": self.generation()}
+
+    def _dispose_request_interception_experiment(self) -> dict[str, Any]:
+        self._dispose_request_interception_context(preserve_result=True)
+        with self._lock:
+            experiment = copy.deepcopy(self._request_interception)
+        return {"ok": True, "experiment": experiment, "generation": self.generation()}
+
+    def _dispose_request_interception_context(
+        self, preserve_result: bool, force: bool = False
+    ) -> None:
+        with self._lock:
+            context_id = self._request_interception_context_id
+            if context_id is None:
+                if not preserve_result:
+                    self._request_interception = self._empty_request_interception()
+                    self._request_interception_rule = (
+                        self._default_request_interception_rule()
+                    )
+                    self._request_interception_pending.clear()
+                    self._changed()
+                return
+            if not force and (
+                self._request_interception["state"] == "running"
+                or self._request_interception_pending
+            ):
+                raise DebuggerBridgeError(
+                    "Wait for the active experiment request before disposing its context"
+                )
+            self._request_interception["state"] = "disposing"
+            self._request_interception["message"] = (
+                "Disposing the isolated browser context and all of its storage."
+            )
+            target_id = self._request_interception["target_id"]
+            connection = (
+                self._connection
+                if self._target is not None and self._target["id"] == target_id
+                else None
+            )
+            return_target_id = self._request_interception_return_target_id
+            self._changed()
+        if connection is not None:
+            connection.close()
+        try:
+            self._browser_command(
+                "Target.disposeBrowserContext",
+                {"browserContextId": context_id},
+            )
+        except DebuggerBridgeError as exception:
+            with self._lock:
+                self._request_interception["state"] = "error"
+                self._request_interception["message"] = self._truncate_text(
+                    f"The disposable context could not be confirmed as deleted: {exception}",
+                    512,
+                )
+                self._changed()
+            if preserve_result:
+                raise
+            return
+        with self._lock:
+            self._request_interception_context_id = None
+            self._request_interception_return_target_id = None
+            self._request_interception_pending.clear()
+            self._preferred_target_id = return_target_id
+            self._request_interception_rule = self._default_request_interception_rule()
+            if preserve_result:
+                self._request_interception["state"] = "disposed"
+                self._request_interception["isolated"] = False
+                self._request_interception["target_id"] = None
+                self._request_interception["disposed_at_ms"] = int(time.time() * 1_000)
+                self._request_interception["pending_requests"] = 0
+                self._request_interception["message"] = (
+                    "Disposable context deleted. The ephemeral result and audit remain visible."
+                )
+            else:
+                self._request_interception = self._empty_request_interception()
+            self._changed()
+
+    def _clear_request_interception_result(self) -> dict[str, Any]:
+        with self._lock:
+            if self._request_interception_context_id is not None:
+                raise DebuggerBridgeError(
+                    "Dispose the isolated context before clearing its result"
+                )
+            self._request_interception = self._empty_request_interception()
+            self._request_interception_rule = self._default_request_interception_rule()
+            self._request_interception_pending.clear()
+            self._changed()
+        return {"ok": True, "generation": self.generation()}
+
+    def _normalize_request_interception_rule(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        mode = request.get("mode")
+        if mode not in {"continue", "block", "drop", "rewrite", "fulfill"}:
+            raise DebuggerBridgeError("Request interception mode is invalid")
+        pattern = self._required_text(
+            request, "url_pattern", MAX_INTERCEPTION_PATTERN_BYTES
+        )
+        if any(ord(character) < 0x20 or ord(character) > 0x7E for character in pattern):
+            raise DebuggerBridgeError("Request interception URL pattern is invalid")
+        if pattern != "*" and not pattern.startswith(("http://", "https://")):
+            raise DebuggerBridgeError(
+                "Request interception URL pattern must use HTTP, HTTPS, or *"
+            )
+        method_filter = request.get("method_filter", "")
+        if not isinstance(method_filter, str):
+            raise DebuggerBridgeError("Request interception method filter is invalid")
+        method_filter = method_filter.strip().upper()
+        if method_filter:
+            self._validate_request_interception_method(method_filter)
+
+        rule = self._default_request_interception_rule()
+        rule.update(
+            {"mode": mode, "url_pattern": pattern, "method_filter": method_filter}
+        )
+        if mode == "rewrite":
+            rewrite_url = request.get("rewrite_url", "")
+            if not isinstance(rewrite_url, str):
+                raise DebuggerBridgeError("Request rewrite URL is invalid")
+            rewrite_url = rewrite_url.strip()
+            if rewrite_url:
+                self._validate_request_interception_url(rewrite_url)
+            rewrite_method = request.get("rewrite_method", "")
+            if not isinstance(rewrite_method, str):
+                raise DebuggerBridgeError("Request rewrite method is invalid")
+            rewrite_method = rewrite_method.strip().upper()
+            if rewrite_method:
+                self._validate_request_interception_method(rewrite_method)
+            rewrite_headers = self._normalize_request_interception_headers(
+                request.get("rewrite_headers", {}), "rewrite"
+            )
+            rewrite_body = request.get("rewrite_body", "")
+            if (
+                not isinstance(rewrite_body, str)
+                or len(rewrite_body.encode("utf-8")) > MAX_INTERCEPTION_BODY_BYTES
+            ):
+                raise DebuggerBridgeError("Request rewrite body exceeds 64 KiB")
+            if not any((rewrite_url, rewrite_method, rewrite_headers, rewrite_body)):
+                raise DebuggerBridgeError(
+                    "Request rewrite requires at least one bounded override"
+                )
+            rule.update(
+                {
+                    "rewrite_url": rewrite_url,
+                    "rewrite_method": rewrite_method,
+                    "rewrite_headers": rewrite_headers,
+                    "rewrite_body": rewrite_body,
+                }
+            )
+        elif mode == "fulfill":
+            response_code = request.get("response_code", 200)
+            if (
+                not isinstance(response_code, int)
+                or isinstance(response_code, bool)
+                or response_code < 100
+                or response_code > 599
+            ):
+                raise DebuggerBridgeError("Synthetic response status is invalid")
+            response_headers = self._normalize_request_interception_headers(
+                request.get("response_headers", {}), "response"
+            )
+            response_body = request.get("response_body", "")
+            if (
+                not isinstance(response_body, str)
+                or len(response_body.encode("utf-8")) > MAX_INTERCEPTION_RESPONSE_BYTES
+            ):
+                raise DebuggerBridgeError("Synthetic response body exceeds 64 KiB")
+            if not response_headers:
+                response_headers = [
+                    {"name": "content-type", "value": "text/plain; charset=utf-8"},
+                ]
+            if not any(
+                header["name"].lower() == "access-control-allow-origin"
+                for header in response_headers
+            ):
+                if len(response_headers) >= MAX_INTERCEPTION_HEADERS:
+                    raise DebuggerBridgeError(
+                        "Synthetic response headers must include access-control-allow-origin at the 64-header limit"
+                    )
+                response_headers.append(
+                    {"name": "access-control-allow-origin", "value": "*"}
+                )
+            rule.update(
+                {
+                    "response_code": response_code,
+                    "response_headers": response_headers,
+                    "response_body": response_body,
+                }
+            )
+        return rule
+
+    def _normalize_request_interception_request(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        url = self._required_text(request, "url", MAX_INTERCEPTION_URL_BYTES).strip()
+        self._validate_request_interception_url(url)
+        method = request.get("method", "GET")
+        if not isinstance(method, str):
+            raise DebuggerBridgeError("Experiment request method is invalid")
+        method = method.strip().upper()
+        self._validate_request_interception_method(method)
+        headers = self._normalize_request_interception_headers(
+            request.get("headers", {}), "request"
+        )
+        body = request.get("body", "")
+        if (
+            not isinstance(body, str)
+            or len(body.encode("utf-8")) > MAX_INTERCEPTION_BODY_BYTES
+        ):
+            raise DebuggerBridgeError("Experiment request body exceeds 64 KiB")
+        if method in {"GET", "HEAD"} and body:
+            raise DebuggerBridgeError(
+                "GET and HEAD experiment requests cannot include a body"
+            )
+        return {"url": url, "method": method, "headers": headers, "body": body}
+
+    @staticmethod
+    def _validate_request_interception_url(url: str) -> None:
+        try:
+            parsed = urlparse(url)
+            _ = parsed.port
+        except ValueError as exception:
+            raise DebuggerBridgeError(
+                "Experiment request URL is invalid"
+            ) from exception
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            raise DebuggerBridgeError(
+                "Experiment request URL must be credential-free HTTP or HTTPS"
+            )
+
+    @staticmethod
+    def _validate_request_interception_method(method: str) -> None:
+        allowed = frozenset(
+            "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        )
+        if (
+            not method
+            or len(method.encode("ascii", errors="ignore"))
+            != len(method.encode("utf-8"))
+            or len(method) > MAX_INTERCEPTION_METHOD_BYTES
+            or method[0] not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            or any(character not in allowed for character in method)
+        ):
+            raise DebuggerBridgeError("Experiment request method is invalid")
+
+    @staticmethod
+    def _normalize_request_interception_headers(
+        value: Any, label: str
+    ) -> list[dict[str, str]]:
+        if not isinstance(value, dict) or len(value) > MAX_INTERCEPTION_HEADERS:
+            raise DebuggerBridgeError(
+                f"Request interception {label} headers are invalid"
+            )
+        token_characters = frozenset(
+            "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        )
+        forbidden = SENSITIVE_INTERCEPTION_HEADERS | {
+            "connection",
+            "content-length",
+            "host",
+            "transfer-encoding",
+        }
+        total_bytes = 0
+        headers = []
+        for name, header_value in value.items():
+            if not isinstance(name, str) or not isinstance(header_value, str):
+                raise DebuggerBridgeError(
+                    f"Request interception {label} headers must be text"
+                )
+            name_bytes = len(name.encode("utf-8"))
+            value_bytes = len(header_value.encode("utf-8"))
+            if (
+                not name
+                or name_bytes > MAX_INTERCEPTION_HEADER_NAME_BYTES
+                or value_bytes > MAX_INTERCEPTION_HEADER_VALUE_BYTES
+                or any(character not in token_characters for character in name)
+                or any(
+                    ord(character) < 0x20 or ord(character) == 0x7F
+                    for character in header_value
+                )
+                or name.lower() in forbidden
+            ):
+                raise DebuggerBridgeError(
+                    f"Request interception {label} header is forbidden or invalid"
+                )
+            total_bytes += name_bytes + value_bytes
+            if total_bytes > MAX_INTERCEPTION_HEADER_BYTES:
+                raise DebuggerBridgeError(
+                    f"Request interception {label} headers exceed 16 KiB"
+                )
+            headers.append({"name": name, "value": header_value})
+        return headers
+
+    def _normalize_request_interception_result(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict) or value.get("protocolVersion") != 1:
+            raise ProtocolError("Debugger returned a malformed experiment result")
+        ok = value.get("ok")
+        if not isinstance(ok, bool):
+            raise ProtocolError("Debugger returned a malformed experiment result")
+        if not ok:
+            error = value.get("error")
+            if not isinstance(error, str):
+                raise ProtocolError("Debugger returned a malformed experiment error")
+            return {
+                "protocol_version": 1,
+                "ok": False,
+                "status": 0,
+                "status_text": "",
+                "url": "",
+                "headers": [],
+                "headers_truncated": False,
+                "body": "",
+                "body_truncated": False,
+                "error": self._truncate_text(error, 512),
+            }
+        status = value.get("status")
+        status_text = value.get("statusText")
+        response_url = value.get("url")
+        raw_headers = value.get("headers")
+        headers_truncated = value.get("headersTruncated")
+        body = value.get("body")
+        body_truncated = value.get("bodyTruncated")
+        if (
+            not isinstance(status, int)
+            or isinstance(status, bool)
+            or status < 0
+            or status > 599
+            or not isinstance(status_text, str)
+            or not isinstance(response_url, str)
+            or not isinstance(raw_headers, list)
+            or len(raw_headers) > MAX_INTERCEPTION_HEADERS
+            or not isinstance(headers_truncated, bool)
+            or not isinstance(body, str)
+            or not isinstance(body_truncated, bool)
+        ):
+            raise ProtocolError("Debugger returned a malformed experiment result")
+        headers = []
+        header_bytes = 0
+        for header in raw_headers:
+            if (
+                not isinstance(header, dict)
+                or not isinstance(header.get("name"), str)
+                or not isinstance(header.get("value"), str)
+                or header["name"].lower() in SENSITIVE_INTERCEPTION_HEADERS
+            ):
+                raise ProtocolError("Debugger returned malformed experiment headers")
+            headers_truncated = headers_truncated or (
+                len(header["name"].encode("utf-8"))
+                > MAX_INTERCEPTION_HEADER_NAME_BYTES
+                or len(header["value"].encode("utf-8"))
+                > MAX_INTERCEPTION_HEADER_VALUE_BYTES
+            )
+            name = self._truncate_text(
+                header["name"], MAX_INTERCEPTION_HEADER_NAME_BYTES
+            )
+            header_value = self._truncate_text(
+                header["value"], MAX_INTERCEPTION_HEADER_VALUE_BYTES
+            )
+            header_bytes += len(name.encode("utf-8")) + len(
+                header_value.encode("utf-8")
+            )
+            if header_bytes > MAX_INTERCEPTION_HEADER_BYTES:
+                raise ProtocolError("Debugger returned oversized experiment headers")
+            headers.append({"name": name, "value": header_value})
+        encoded_body = body.encode("utf-8")
+        truncated_by_bridge = len(encoded_body) > MAX_INTERCEPTION_RESPONSE_BYTES
+        return {
+            "protocol_version": 1,
+            "ok": True,
+            "status": status,
+            "status_text": self._truncate_text(status_text, 256),
+            "url": self._redacted_request_url(response_url),
+            "headers": headers,
+            "headers_truncated": headers_truncated,
+            "body": self._truncate_text(body, MAX_INTERCEPTION_RESPONSE_BYTES),
+            "body_truncated": body_truncated or truncated_by_bridge,
+            "error": None,
+        }
+
+    @staticmethod
+    def _required_protocol_identifier(value: Any, label: str) -> str:
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value.encode("utf-8")) > MAX_TARGET_ID_BYTES
+        ):
+            raise ProtocolError(f"Browser returned an invalid {label} identifier")
+        return value
+
+    @classmethod
+    def _redacted_request_url(cls, url: str) -> str:
+        if not url:
+            return ""
+        try:
+            parsed = urlparse(url)
+            _ = parsed.port
+        except ValueError:
+            return ""
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return ""
+        host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+        netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
+        path = parsed.path or "/"
+        return cls._truncate_text(
+            urlunparse((parsed.scheme, netloc, path, "", "", "")),
+            MAX_INTERCEPTION_URL_BYTES,
+        )
+
+    def _handle_request_interception_pause_async(self, params: dict[str, Any]) -> None:
+        request_id = params.get("requestId")
+        request = params.get("request")
+        if (
+            not isinstance(request_id, str)
+            or not request_id
+            or len(request_id.encode("utf-8")) > MAX_TARGET_ID_BYTES
+        ):
+            return
+        with self._lock:
+            active = (
+                self._request_interception_context_id is not None
+                and self._target is not None
+                and self._request_interception["target_id"] == self._target["id"]
+                and self._request_interception["state"]
+                in {"ready", "running", "error"}
+            )
+        if not active:
+            self._command_without_wait(
+                "Fetch.continueRequest", {"requestId": request_id}
+            )
+            return
+        if not isinstance(request, dict):
+            continued = self._command_without_wait(
+                "Fetch.continueRequest", {"requestId": request_id}
+            )
+            self._append_request_interception_audit(
+                request_id,
+                {},
+                params.get("resourceType"),
+                "error",
+                "Malformed paused request continued unchanged."
+                if continued
+                else "Malformed paused request could not be resumed.",
+            )
+            return
+        with self._lock:
+            if request_id in self._request_interception_pending:
+                return
+            if (
+                len(self._request_interception_pending)
+                >= MAX_INTERCEPTION_PENDING_REQUESTS
+            ):
+                overflow = True
+            else:
+                overflow = False
+                self._request_interception_pending.add(request_id)
+                self._request_interception["pending_requests"] = len(
+                    self._request_interception_pending
+                )
+                self._changed()
+        if overflow:
+            continued = self._command_without_wait(
+                "Fetch.continueRequest", {"requestId": request_id}
+            )
+            self._append_request_interception_audit(
+                request_id,
+                request,
+                params.get("resourceType"),
+                "overflow_continue" if continued else "error",
+                "Pending interception limit reached; request continued unchanged."
+                if continued
+                else "Pending interception limit reached and the request could not be resumed.",
+            )
+            return
+        thread = threading.Thread(
+            target=self._process_request_interception_pause,
+            args=(request_id, request, params.get("resourceType")),
+            name="reb-request-interception",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except RuntimeError as exception:
+            continued = self._command_without_wait(
+                "Fetch.continueRequest", {"requestId": request_id}
+            )
+            with self._lock:
+                self._request_interception_pending.discard(request_id)
+                self._request_interception["pending_requests"] = len(
+                    self._request_interception_pending
+                )
+                self._changed()
+            self._append_request_interception_audit(
+                request_id,
+                request,
+                params.get("resourceType"),
+                "error",
+                self._truncate_text(
+                    f"Interception worker could not start: {exception}. "
+                    f"Request {'continued unchanged' if continued else 'could not be resumed'}.",
+                    512,
+                ),
+            )
+
+    def _process_request_interception_pause(
+        self, request_id: str, request: dict[str, Any], resource_type: Any
+    ) -> None:
+        method = (
+            request.get("method")
+            if isinstance(request.get("method"), str)
+            else "UNKNOWN"
+        )
+        with self._lock:
+            rule = copy.deepcopy(self._request_interception_rule)
+        outcome = "continued"
+        detail = "Request continued unchanged."
+        command = "Fetch.continueRequest"
+        command_params: dict[str, Any] = {"requestId": request_id}
+        preflight_headers = self._request_interception_preflight_headers(request, rule)
+        if preflight_headers is not None:
+            command = "Fetch.fulfillRequest"
+            command_params.update(
+                {
+                    "responseCode": 204,
+                    "responseHeaders": preflight_headers,
+                    "body": "",
+                }
+            )
+            outcome = "fulfilled"
+            detail = "Synthetic credential-free CORS preflight returned."
+        elif rule["method_filter"] and method.upper() != rule["method_filter"]:
+            outcome = "bypassed"
+            detail = "Request method did not match the armed rule."
+        elif rule["mode"] == "block":
+            command = "Fetch.failRequest"
+            command_params["errorReason"] = "BlockedByClient"
+            outcome = "blocked"
+            detail = "Request failed with BlockedByClient."
+        elif rule["mode"] == "drop":
+            command = "Fetch.failRequest"
+            command_params["errorReason"] = "Aborted"
+            outcome = "dropped"
+            detail = "Request failed with Aborted."
+        elif rule["mode"] == "rewrite":
+            if rule["rewrite_url"]:
+                command_params["url"] = rule["rewrite_url"]
+            if rule["rewrite_method"]:
+                command_params["method"] = rule["rewrite_method"]
+            if rule["rewrite_headers"]:
+                command_params["headers"] = rule["rewrite_headers"]
+            if rule["rewrite_body"]:
+                command_params["postData"] = base64.b64encode(
+                    rule["rewrite_body"].encode("utf-8")
+                ).decode("ascii")
+            outcome = "rewritten"
+            detail = "Bounded request overrides applied."
+        elif rule["mode"] == "fulfill":
+            command = "Fetch.fulfillRequest"
+            command_params.update(
+                {
+                    "responseCode": rule["response_code"],
+                    "responseHeaders": rule["response_headers"],
+                    "body": base64.b64encode(
+                        rule["response_body"].encode("utf-8")
+                    ).decode("ascii"),
+                }
+            )
+            outcome = "fulfilled"
+            detail = f"Synthetic response {rule['response_code']} returned."
+        try:
+            self._command(command, command_params, timeout=3.0)
+        except DebuggerBridgeError as exception:
+            outcome = "error"
+            detail = self._truncate_text(str(exception), 512)
+            try:
+                self._command(
+                    "Fetch.continueRequest", {"requestId": request_id}, timeout=1.0
+                )
+            except DebuggerBridgeError:
+                pass
+        finally:
+            self._append_request_interception_audit(
+                request_id, request, resource_type, outcome, detail
+            )
+            with self._lock:
+                self._request_interception_pending.discard(request_id)
+                self._request_interception["pending_requests"] = len(
+                    self._request_interception_pending
+                )
+                self._changed()
+
+    @classmethod
+    def _request_interception_preflight_headers(
+        cls, request: dict[str, Any], rule: dict[str, Any]
+    ) -> Optional[list[dict[str, str]]]:
+        if rule["mode"] != "fulfill" or request.get("method") != "OPTIONS":
+            return None
+        headers = request.get("headers")
+        if not isinstance(headers, dict):
+            return None
+        requested_method = headers.get("Access-Control-Request-Method")
+        if not isinstance(requested_method, str):
+            requested_method = headers.get("access-control-request-method")
+        if not isinstance(requested_method, str):
+            return None
+        requested_method = requested_method.strip().upper()
+        try:
+            cls._validate_request_interception_method(requested_method)
+        except DebuggerBridgeError:
+            return None
+        if rule["method_filter"] and requested_method != rule["method_filter"]:
+            return None
+
+        requested_headers = headers.get("Access-Control-Request-Headers")
+        if not isinstance(requested_headers, str):
+            requested_headers = headers.get("access-control-request-headers", "")
+        if not isinstance(requested_headers, str) or len(
+            requested_headers.encode("utf-8")
+        ) > MAX_INTERCEPTION_HEADER_VALUE_BYTES:
+            return None
+        token_characters = frozenset(
+            "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        )
+        header_names = (
+            [name.strip().lower() for name in requested_headers.split(",")]
+            if requested_headers.strip()
+            else []
+        )
+        if any(
+            not name
+            or any(character not in token_characters for character in name)
+            or name in SENSITIVE_INTERCEPTION_HEADERS
+            for name in header_names
+        ) or len(header_names) > MAX_INTERCEPTION_HEADERS:
+            return None
+        response_headers = [
+            {"name": "access-control-allow-origin", "value": "*"},
+            {
+                "name": "access-control-allow-methods",
+                "value": requested_method,
+            },
+        ]
+        if requested_headers:
+            response_headers.append(
+                {
+                    "name": "access-control-allow-headers",
+                    "value": ", ".join(header_names),
+                }
+            )
+        return response_headers
+
+    def _append_request_interception_audit(
+        self,
+        request_id: str,
+        request: dict[str, Any],
+        resource_type: Any,
+        outcome: str,
+        detail: str,
+    ) -> None:
+        raw_url = request.get("url") if isinstance(request.get("url"), str) else ""
+        method = request.get("method") if isinstance(request.get("method"), str) else ""
+        with self._lock:
+            audit = self._request_interception["audit"]
+            if len(audit) >= MAX_INTERCEPTION_AUDIT_ENTRIES:
+                audit.pop(0)
+                self._request_interception["audit_evictions"] += 1
+            audit.append(
+                {
+                    "id": self._next_request_interception_audit_id,
+                    "occurred_at_ms": int(time.time() * 1_000),
+                    "request_id": self._truncate_text(request_id, 256),
+                    "method": self._truncate_text(
+                        method, MAX_INTERCEPTION_METHOD_BYTES
+                    ),
+                    "url": self._redacted_request_url(raw_url),
+                    "resource_type": self._truncate_text(
+                        resource_type if isinstance(resource_type, str) else "Other",
+                        128,
+                    ),
+                    "rule_mode": self._request_interception_rule["mode"],
+                    "outcome": outcome,
+                    "detail": self._truncate_text(detail, 512),
+                }
+            )
+            self._next_request_interception_audit_id += 1
+            self._changed()
+
     def _normalize_heap_snapshot_probe(self, value: Any) -> dict[str, Any]:
         if not isinstance(value, dict) or value.get("protocol_version") != 1:
             raise ProtocolError("Native heap snapshot probe returned malformed output")
@@ -2276,7 +3386,7 @@ class DebuggerBridge:
                 self._set_state("waiting", str(exception))
                 self._stop.wait(0.5)
 
-    def _discover_targets(self) -> list[dict[str, str]]:
+    def _devtools_endpoint(self) -> tuple[int, str]:
         if self.active_port_path is None or not self.active_port_path.is_file():
             raise DebuggerBridgeError("Waiting for the authorized browser debugger")
         with self.active_port_path.open("rb") as active_port_file:
@@ -2289,6 +3399,54 @@ class DebuggerBridge:
         port = int(lines[0])
         if port <= 0 or port >= 2**16:
             raise DebuggerBridgeError("The browser debugger port is invalid")
+        browser_endpoint = lines[1]
+        if browser_endpoint.startswith("/"):
+            browser_url = f"ws://127.0.0.1:{port}{browser_endpoint}"
+        elif browser_endpoint.startswith("ws://"):
+            browser_url = browser_endpoint
+        else:
+            raise DebuggerBridgeError("The browser debugger endpoint is malformed")
+        if len(browser_url.encode("utf-8")) > MAX_TARGET_URL_BYTES:
+            raise DebuggerBridgeError("The browser debugger endpoint is oversized")
+        return port, browser_url
+
+    def _browser_command(
+        self, method: str, params: Optional[dict[str, Any]] = None
+    ) -> dict[str, Any]:
+        _, browser_url = self._devtools_endpoint()
+        connection = WebSocketClient(browser_url)
+        try:
+            connection.send_json({"id": 1, "method": method, "params": params or {}})
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                response = connection.receive_json(
+                    timeout=min(0.5, max(0.0, deadline - time.monotonic()))
+                )
+                if response is None or response.get("id") != 1:
+                    continue
+                error = response.get("error")
+                if isinstance(error, dict):
+                    message = error.get("message")
+                    raise DebuggerBridgeError(
+                        self._truncate_text(
+                            message
+                            if isinstance(message, str)
+                            else f"Browser command {method} failed",
+                            512,
+                        )
+                    )
+                result = response.get("result")
+                if not isinstance(result, dict):
+                    raise ProtocolError(
+                        f"Browser command {method} returned malformed output"
+                    )
+                return result
+            raise DebuggerBridgeError(f"Browser command {method} timed out")
+        finally:
+            connection.close()
+
+    def _discover_targets(self) -> list[dict[str, str]]:
+        port, _ = self._devtools_endpoint()
         request = Request(
             f"http://127.0.0.1:{port}/json/list", headers={"Accept": "application/json"}
         )
@@ -2365,6 +3523,7 @@ class DebuggerBridge:
             )
             self._command("Log.enable")
             self._restore_settings()
+            self._restore_request_interception(target["id"])
             with self._lock:
                 already_paused = self._paused is not None
             if not already_paused:
@@ -2448,6 +3607,9 @@ class DebuggerBridge:
             connection.close()
 
     def _handle_event(self, method: str, params: dict[str, Any]) -> None:
+        if method == "Fetch.requestPaused":
+            self._handle_request_interception_pause_async(params)
+            return
         if method == "HeapProfiler.addHeapSnapshotChunk":
             with self._lock:
                 collector = self._heap_snapshot_collector
@@ -2586,6 +3748,23 @@ class DebuggerBridge:
         if not isinstance(result, dict):
             raise ProtocolError(f"Debugger returned malformed command result: {method}")
         return result
+
+    def _command_without_wait(
+        self, method: str, params: Optional[dict[str, Any]] = None
+    ) -> bool:
+        with self._lock:
+            connection = self._connection
+            if connection is None:
+                return False
+            command_id = self._next_command_id
+            self._next_command_id += 1
+        try:
+            connection.send_json(
+                {"id": command_id, "method": method, "params": params or {}}
+            )
+        except DebuggerBridgeError:
+            return False
+        return True
 
     def _set_breakpoint(
         self, request: dict[str, Any], replacing: Optional[str] = None
@@ -2749,6 +3928,33 @@ class DebuggerBridge:
                 )
             except DebuggerBridgeError:
                 continue
+
+    def _restore_request_interception(self, target_id: str) -> None:
+        with self._lock:
+            if (
+                self._request_interception_context_id is None
+                or self._request_interception["target_id"] != target_id
+            ):
+                return
+            pattern = self._request_interception_rule["url_pattern"]
+            was_running = self._request_interception["state"] == "running"
+        self._command(
+            "Fetch.enable",
+            {
+                "patterns": [{"urlPattern": pattern, "requestStage": "Request"}],
+                "handleAuthRequests": False,
+            },
+        )
+        with self._lock:
+            if self._request_interception["target_id"] != target_id:
+                return
+            self._request_interception["state"] = "error" if was_running else "ready"
+            self._request_interception["message"] = (
+                "The experiment target reattached while a request was running; run it again."
+                if was_running
+                else "Disposable context ready. Configure a bounded interception rule."
+            )
+            self._changed()
 
     def _parse_script(self, params: dict[str, Any]) -> Optional[dict[str, Any]]:
         script_id = params.get("scriptId")

@@ -51,12 +51,38 @@ MAX_HEAP_INCOMING_REFERENCES = 12
 HEAP_SNAPSHOT_CAPTURE_TIMEOUT_SECONDS = 60.0
 HEAP_SNAPSHOT_SEARCH_TIMEOUT_SECONDS = 20.0
 HEAP_SNAPSHOT_DIFF_TIMEOUT_SECONDS = 60.0
+HEAP_SNAPSHOT_PROBE_TIMEOUT_SECONDS = 20.0
+MAX_MEMORY_ORIGIN_TRACE_STEPS = 32
+MAX_MEMORY_ORIGIN_TRACE_BEFORE_STEPS = 8
+MAX_MEMORY_ORIGIN_TRACE_AFTER_STEPS = 16
+MEMORY_ORIGIN_TRACE_IDLE_TIMEOUT_SECONDS = 2.5
+MEMORY_ORIGIN_TRACE_TIMEOUT_SECONDS = 5 * 60.0
 MAX_ACTIVE_PORT_BYTES = 4_096
 MAX_TARGET_LIST_BYTES = 2 * 1024 * 1024
 MAX_TARGET_ID_BYTES = 4_096
 MAX_TARGET_TYPE_BYTES = 128
 MAX_TARGET_URL_BYTES = 64 * 1024
 MAX_REMOTE_TEXT_BYTES = 4_096
+
+MEMORY_ORIGIN_TRACE_FRAMEWORK_PATTERNS = (
+    "/node_modules/",
+    "react",
+    "react-dom",
+    "redux",
+    "vue",
+    "angular",
+    "jquery",
+    "lodash",
+    "rxjs",
+    "core-js",
+    "regenerator-runtime",
+    "polyfill",
+    "webpack",
+    "vite",
+    "rollup",
+    "parcel",
+    "zone.js",
+)
 
 
 LIVE_OBJECT_SEARCH_FUNCTION = r"""function(criteria) {
@@ -510,6 +536,13 @@ class DebuggerBridge:
         self._heap_snapshot_collector: Optional[HeapSnapshotCollector] = None
         self._heap_diff_baseline: Optional[HeapSnapshotCapture] = None
         self._heap_diff_busy = False
+        self._next_memory_origin_trace_id = 1
+        self._memory_origin_trace = self._empty_memory_origin_trace()
+        self._memory_origin_trace_started = 0.0
+        self._memory_origin_trace_processing = False
+        self._memory_origin_trace_stop_requested = False
+        self._memory_origin_trace_added_click_breakpoint = False
+        self._memory_origin_trace_timer: Optional[threading.Timer] = None
 
     def start(self) -> None:
         if self.active_port_path is None or self._thread is not None:
@@ -523,6 +556,7 @@ class DebuggerBridge:
         self._stop.set()
         with self._condition:
             connection = self._connection
+            self._cancel_memory_origin_trace_timer_locked()
             self._condition.notify_all()
         if connection is not None:
             connection.close()
@@ -573,6 +607,7 @@ class DebuggerBridge:
                     "event_breakpoints": list(self._event_breakpoints),
                 },
                 "heap_diff_baseline": self._heap_diff_baseline_metadata(),
+                "memory_origin_trace": copy.deepcopy(self._memory_origin_trace),
                 "limits": {
                     "scripts": MAX_SCRIPTS,
                     "call_frames": MAX_CALL_FRAMES,
@@ -586,6 +621,12 @@ class DebuggerBridge:
         action = request.get("action")
         if not isinstance(action, str):
             raise DebuggerBridgeError("Debugger action is required")
+        with self._lock:
+            origin_trace_active = self._memory_origin_trace_active_locked()
+        if origin_trace_active and action != "stop_memory_origin_trace":
+            raise DebuggerBridgeError(
+                "Memory Origin Trace controls the debugger until it finishes or is stopped"
+            )
         if action == "pause":
             self._command("Debugger.pause")
         elif action == "resume":
@@ -741,6 +782,14 @@ class DebuggerBridge:
             return self._search_live_objects(request)
         elif action == "search_heap_snapshot":
             return self._search_heap_snapshot(request)
+        elif action == "start_memory_origin_trace":
+            return self._start_memory_origin_trace(request)
+        elif action == "stop_memory_origin_trace":
+            return self._stop_memory_origin_trace()
+        elif action == "clear_memory_origin_trace":
+            with self._lock:
+                self._memory_origin_trace = self._empty_memory_origin_trace()
+                self._changed()
         elif action == "capture_heap_diff_baseline":
             return self._capture_heap_diff_baseline()
         elif action == "compare_heap_diff":
@@ -1049,6 +1098,584 @@ class DebuggerBridge:
             return self._normalize_heap_snapshot_search(document)
         finally:
             capture.path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _empty_memory_origin_trace() -> dict[str, Any]:
+        return {
+            "protocol_version": 1,
+            "trace_id": 0,
+            "state": "idle",
+            "target_id": None,
+            "query": "",
+            "scope": "all",
+            "case_sensitive": False,
+            "before_steps": 0,
+            "after_steps": 0,
+            "step_limit": MAX_MEMORY_ORIGIN_TRACE_STEPS,
+            "step_count": 0,
+            "first_match_step": None,
+            "started_at_ms": 0,
+            "elapsed_ms": 0,
+            "partial": False,
+            "limit_reason": None,
+            "message": "Enter a value and arm a trace.",
+            "steps": [],
+        }
+
+    def _memory_origin_trace_active_locked(self) -> bool:
+        return self._memory_origin_trace["state"] in {
+            "armed",
+            "capturing",
+            "stepping",
+            "stopping",
+        }
+
+    def _cancel_memory_origin_trace_timer_locked(self) -> None:
+        timer = self._memory_origin_trace_timer
+        self._memory_origin_trace_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _start_memory_origin_trace(self, request: dict[str, Any]) -> dict[str, Any]:
+        query = self._optional_search_text(request, "query").strip()
+        scope = request.get("scope", "all")
+        case_sensitive = request.get("case_sensitive", False)
+        before_steps = request.get("before_steps", 3)
+        after_steps = request.get("after_steps", 8)
+        if not query:
+            raise DebuggerBridgeError("Memory Origin Trace requires a value")
+        if not isinstance(scope, str) or scope not in {
+            "all",
+            "reachable",
+            "unreachable",
+        }:
+            raise DebuggerBridgeError("Memory Origin Trace reference scope is invalid")
+        if not isinstance(case_sensitive, bool):
+            raise DebuggerBridgeError("Memory Origin Trace options must be boolean")
+        if (
+            not isinstance(before_steps, int)
+            or isinstance(before_steps, bool)
+            or before_steps < 0
+            or before_steps > MAX_MEMORY_ORIGIN_TRACE_BEFORE_STEPS
+            or not isinstance(after_steps, int)
+            or isinstance(after_steps, bool)
+            or after_steps < 0
+            or after_steps > MAX_MEMORY_ORIGIN_TRACE_AFTER_STEPS
+        ):
+            raise DebuggerBridgeError("Memory Origin Trace tolerance window is invalid")
+        self._heap_snapshot_binary()
+
+        with self._lock:
+            if self._state != "running" or self._target is None:
+                raise DebuggerBridgeError(
+                    "Memory Origin Trace requires a running debugger target"
+                )
+            if self._heap_diff_busy or self._heap_snapshot_collector is not None:
+                raise DebuggerBridgeError("A heap snapshot operation is already running")
+            trace_id = self._next_memory_origin_trace_id
+            self._next_memory_origin_trace_id += 1
+            target_id = self._target["id"]
+            self._memory_origin_trace_started = time.monotonic()
+            self._memory_origin_trace_processing = False
+            self._memory_origin_trace_stop_requested = False
+            self._memory_origin_trace_added_click_breakpoint = (
+                not any(
+                    event_name in {"click", "listener:click"}
+                    for event_name in self._event_breakpoints
+                )
+            )
+            self._memory_origin_trace = {
+                "protocol_version": 1,
+                "trace_id": trace_id,
+                "state": "armed",
+                "target_id": target_id,
+                "query": query,
+                "scope": scope,
+                "case_sensitive": case_sensitive,
+                "before_steps": before_steps,
+                "after_steps": after_steps,
+                "step_limit": MAX_MEMORY_ORIGIN_TRACE_STEPS,
+                "step_count": 0,
+                "first_match_step": None,
+                "started_at_ms": int(time.time() * 1_000),
+                "elapsed_ms": 0,
+                "partial": False,
+                "limit_reason": None,
+                "message": "Trace armed. Click the page action that creates the value.",
+                "steps": [],
+            }
+            self._changed()
+            add_click_breakpoint = self._memory_origin_trace_added_click_breakpoint
+        try:
+            if add_click_breakpoint:
+                self._command(
+                    "DOMDebugger.setEventListenerBreakpoint",
+                    {"eventName": "click", "targetName": "*"},
+                )
+        except BaseException as exception:
+            self._complete_memory_origin_trace(
+                trace_id,
+                "error",
+                self._truncate_text(str(exception), 512),
+                resume=False,
+            )
+            raise
+        with self._lock:
+            trace = copy.deepcopy(self._memory_origin_trace)
+        return {"ok": True, "trace": trace, "generation": self.generation()}
+
+    def _stop_memory_origin_trace(self) -> dict[str, Any]:
+        with self._lock:
+            if not self._memory_origin_trace_active_locked():
+                raise DebuggerBridgeError("Memory Origin Trace is not running")
+            trace_id = self._memory_origin_trace["trace_id"]
+            self._memory_origin_trace_stop_requested = True
+            self._cancel_memory_origin_trace_timer_locked()
+            if self._memory_origin_trace_processing:
+                self._memory_origin_trace["state"] = "stopping"
+                self._memory_origin_trace["message"] = (
+                    "Stopping after the current bounded snapshot finishes."
+                )
+                self._changed()
+                return {"ok": True, "generation": self._generation}
+        self._complete_memory_origin_trace(trace_id, "aborted", "Trace stopped.")
+        return {"ok": True, "generation": self.generation()}
+
+    def _start_memory_origin_trace_pause_async(
+        self, pause_serial: int, paused: dict[str, Any]
+    ) -> None:
+        with self._lock:
+            if (
+                not self._memory_origin_trace_active_locked()
+                or self._memory_origin_trace["state"] == "stopping"
+                or self._memory_origin_trace_processing
+            ):
+                return
+            self._cancel_memory_origin_trace_timer_locked()
+            self._memory_origin_trace_processing = True
+            self._memory_origin_trace["state"] = "capturing"
+            self._memory_origin_trace["message"] = (
+                "Capturing and probing the bounded heap at this debugger pause."
+            )
+            trace_id = self._memory_origin_trace["trace_id"]
+            self._changed()
+        thread = threading.Thread(
+            target=self._process_memory_origin_trace_pause,
+            args=(trace_id, pause_serial, paused),
+            name="reb-memory-origin-trace",
+            daemon=True,
+        )
+        thread.start()
+
+    def _process_memory_origin_trace_pause(
+        self, trace_id: int, pause_serial: int, paused: dict[str, Any]
+    ) -> None:
+        capture: Optional[HeapSnapshotCapture] = None
+        try:
+            with self._lock:
+                trace = dict(self._memory_origin_trace)
+            capture = self._capture_heap_snapshot()
+            if capture.target_id != trace["target_id"]:
+                raise DebuggerBridgeError(
+                    "Debugger target changed during Memory Origin Trace"
+                )
+            command = [
+                str(self._heap_snapshot_binary()),
+                "--snapshot",
+                str(capture.path),
+                "--query",
+                trace["query"],
+                "--scope",
+                trace["scope"],
+                "--probe",
+            ]
+            if trace["case_sensitive"]:
+                command.append("--case-sensitive")
+            document = self._run_native_heap_snapshot(
+                command,
+                HEAP_SNAPSHOT_PROBE_TIMEOUT_SECONDS,
+                "probe",
+            )
+            probe = self._normalize_heap_snapshot_probe(document)
+            if probe["scope"] != trace["scope"]:
+                raise ProtocolError(
+                    "Native heap snapshot probe returned an unexpected scope"
+                )
+        except BaseException as exception:
+            with self._lock:
+                stopped = self._memory_origin_trace_stop_requested
+            self._complete_memory_origin_trace(
+                trace_id,
+                "aborted" if stopped else "error",
+                "Trace stopped."
+                if stopped
+                else self._truncate_text(str(exception), 512),
+            )
+            return
+        finally:
+            if capture is not None:
+                capture.path.unlink(missing_ok=True)
+
+        location = self._memory_origin_trace_location(paused)
+        finish: Optional[tuple[str, str, bool, Optional[str]]] = None
+        should_step = False
+        with self._lock:
+            if (
+                self._memory_origin_trace["trace_id"] != trace_id
+                or not self._memory_origin_trace_active_locked()
+            ):
+                return
+            self._memory_origin_trace_processing = False
+            if self._memory_origin_trace_stop_requested:
+                finish = ("aborted", "Trace stopped.", False, None)
+            elif pause_serial != self._pause_serial or self._state != "paused":
+                finish = (
+                    "error",
+                    "Debugger pause changed before the heap probe completed.",
+                    False,
+                    None,
+                )
+            else:
+                trace = self._memory_origin_trace
+                trace["step_count"] += 1
+                step_number = trace["step_count"]
+                coverage_partial = any(
+                    probe[field]
+                    for field in (
+                        "node_limit_reached",
+                        "edge_limit_reached",
+                        "string_limit_reached",
+                    )
+                )
+                if coverage_partial:
+                    trace["partial"] = True
+                    trace["limit_reason"] = "snapshot_coverage"
+                step = {
+                    "id": f"origin-{trace_id}-{step_number}",
+                    "step": step_number,
+                    "captured_at_ms": int(time.time() * 1_000),
+                    "capture_bytes": capture.byte_count,
+                    "duration_ms": probe["duration_ms"],
+                    "analyzed_nodes": probe["analyzed_nodes"],
+                    "total_nodes": probe["total_nodes"],
+                    "indexed_edges": probe["indexed_edges"],
+                    "total_edges": probe["total_edges"],
+                    "matched": probe["match_found"],
+                    "coverage_partial": coverage_partial,
+                    "is_first_match": False,
+                    "location": location,
+                    "match": probe["match"],
+                }
+                if probe["match_found"] and trace["first_match_step"] is None:
+                    trace["first_match_step"] = step_number
+                    step["is_first_match"] = True
+                trace["steps"].append(step)
+                if trace["first_match_step"] is None:
+                    while len(trace["steps"]) > trace["before_steps"]:
+                        trace["steps"].pop(0)
+                elapsed = max(
+                    0,
+                    int((time.monotonic() - self._memory_origin_trace_started) * 1_000),
+                )
+                trace["elapsed_ms"] = elapsed
+                after_captured = (
+                    step_number - trace["first_match_step"]
+                    if trace["first_match_step"] is not None
+                    else 0
+                )
+                if (
+                    trace["first_match_step"] is not None
+                    and after_captured >= trace["after_steps"]
+                ):
+                    finish = (
+                        "found",
+                        f"First appearance found at debugger step {trace['first_match_step']}.",
+                        trace["partial"],
+                        trace["limit_reason"],
+                    )
+                elif step_number >= trace["step_limit"]:
+                    finish = (
+                        "found" if trace["first_match_step"] is not None else "not_found",
+                        "Trace reached its 32-step limit.",
+                        True,
+                        "step_limit",
+                    )
+                elif elapsed >= int(MEMORY_ORIGIN_TRACE_TIMEOUT_SECONDS * 1_000):
+                    finish = (
+                        "found" if trace["first_match_step"] is not None else "not_found",
+                        "Trace reached its five-minute limit.",
+                        True,
+                        "time_limit",
+                    )
+                else:
+                    trace["state"] = "stepping"
+                    trace["message"] = (
+                        "First appearance found; collecting the requested after-window."
+                        if trace["first_match_step"] is not None
+                        else "Value not present yet; stepping out to the next function boundary."
+                    )
+                    should_step = True
+                    self._changed()
+
+        if finish is not None:
+            self._complete_memory_origin_trace(trace_id, *finish)
+            return
+        if should_step:
+            try:
+                self._command("Debugger.stepOut")
+            except BaseException as exception:
+                self._complete_memory_origin_trace(
+                    trace_id,
+                    "error",
+                    self._truncate_text(str(exception), 512),
+                    resume=False,
+                )
+                return
+            self._schedule_memory_origin_trace_idle_timeout(trace_id)
+
+    def _schedule_memory_origin_trace_idle_timeout(self, trace_id: int) -> None:
+        with self._lock:
+            if (
+                self._memory_origin_trace["trace_id"] != trace_id
+                or self._memory_origin_trace["state"] != "stepping"
+            ):
+                return
+            self._cancel_memory_origin_trace_timer_locked()
+            expected_step = self._memory_origin_trace["step_count"]
+            timer = threading.Timer(
+                MEMORY_ORIGIN_TRACE_IDLE_TIMEOUT_SECONDS,
+                self._memory_origin_trace_idle_timeout,
+                args=(trace_id, expected_step),
+            )
+            timer.daemon = True
+            self._memory_origin_trace_timer = timer
+        timer.start()
+
+    def _memory_origin_trace_idle_timeout(
+        self, trace_id: int, expected_step: int
+    ) -> None:
+        with self._lock:
+            if (
+                self._memory_origin_trace["trace_id"] != trace_id
+                or self._memory_origin_trace["state"] != "stepping"
+                or self._memory_origin_trace["step_count"] != expected_step
+                or self._memory_origin_trace_processing
+            ):
+                return
+            self._memory_origin_trace_timer = None
+            found = self._memory_origin_trace["first_match_step"] is not None
+            requested_after = self._memory_origin_trace["after_steps"]
+            captured_after = (
+                expected_step - self._memory_origin_trace["first_match_step"]
+                if found
+                else 0
+            )
+            incomplete_after = found and captured_after < requested_after
+            first_match_step = self._memory_origin_trace["first_match_step"]
+        self._complete_memory_origin_trace(
+            trace_id,
+            "found" if found else "not_found",
+            "Execution returned before another function-boundary pause."
+            if incomplete_after
+            else "Execution returned before the value appeared."
+            if not found
+            else f"First appearance found at debugger step {first_match_step}.",
+            partial=incomplete_after,
+            limit_reason="execution_quiet" if incomplete_after else None,
+            resume=False,
+        )
+
+    def _complete_memory_origin_trace(
+        self,
+        trace_id: int,
+        state: str,
+        message: str,
+        partial: bool = False,
+        limit_reason: Optional[str] = None,
+        resume: bool = True,
+    ) -> None:
+        with self._lock:
+            if (
+                self._memory_origin_trace["trace_id"] != trace_id
+                or not self._memory_origin_trace_active_locked()
+            ):
+                return
+            if self._memory_origin_trace_stop_requested and state != "aborted":
+                state = "aborted"
+                message = "Trace stopped."
+                limit_reason = None
+            self._cancel_memory_origin_trace_timer_locked()
+            self._memory_origin_trace_processing = False
+            self._memory_origin_trace_stop_requested = False
+            self._memory_origin_trace["state"] = state
+            self._memory_origin_trace["message"] = self._truncate_text(message, 512)
+            self._memory_origin_trace["elapsed_ms"] = max(
+                0,
+                int((time.monotonic() - self._memory_origin_trace_started) * 1_000),
+            )
+            self._memory_origin_trace["partial"] = (
+                self._memory_origin_trace["partial"] or partial
+            )
+            if limit_reason is not None:
+                self._memory_origin_trace["limit_reason"] = limit_reason
+            remove_click_breakpoint = self._memory_origin_trace_added_click_breakpoint
+            self._memory_origin_trace_added_click_breakpoint = False
+            should_resume = resume and self._state == "paused"
+            self._changed()
+        if remove_click_breakpoint:
+            try:
+                self._command(
+                    "DOMDebugger.removeEventListenerBreakpoint",
+                    {"eventName": "click", "targetName": "*"},
+                )
+            except DebuggerBridgeError:
+                pass
+        if should_resume:
+            try:
+                self._command("Debugger.resume")
+            except DebuggerBridgeError:
+                pass
+
+    def _memory_origin_trace_location(
+        self, paused: dict[str, Any]
+    ) -> dict[str, Any]:
+        frames = paused.get("call_frames", [])
+        selected = frames[0] if frames else None
+        filtered = False
+        for frame in frames:
+            url = frame.get("url", "")
+            if not url:
+                with self._lock:
+                    script = self._scripts.get(frame["location"]["script_id"])
+                if script is not None:
+                    url = script["url"]
+            lower_url = url.lower()
+            if (
+                lower_url.startswith(("chrome-extension:", "devtools:", "extensions::"))
+                or any(
+                    pattern in lower_url
+                    for pattern in MEMORY_ORIGIN_TRACE_FRAMEWORK_PATTERNS
+                )
+            ):
+                filtered = True
+                continue
+            selected = frame
+            break
+        if selected is None:
+            return {
+                "script_id": "",
+                "url": "",
+                "function_name": "(unknown)",
+                "line": 0,
+                "column": 0,
+                "framework_filtered": filtered,
+            }
+        location = selected["location"]
+        url = selected.get("url", "")
+        if not url:
+            with self._lock:
+                script = self._scripts.get(location["script_id"])
+            if script is not None:
+                url = script["url"]
+        return {
+            "script_id": location["script_id"],
+            "url": self._truncate_text(url, MAX_TARGET_URL_BYTES),
+            "function_name": self._truncate_text(
+                selected.get("function_name", "(anonymous)"), 512
+            ),
+            "line": location["line"],
+            "column": location["column"],
+            "framework_filtered": filtered,
+        }
+
+    def _normalize_heap_snapshot_probe(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict) or value.get("protocol_version") != 1:
+            raise ProtocolError("Native heap snapshot probe returned malformed output")
+        integer_fields = (
+            "file_bytes",
+            "total_nodes",
+            "analyzed_nodes",
+            "reachable_nodes",
+            "total_edges",
+            "indexed_edges",
+            "total_strings",
+            "duration_ms",
+        )
+        if any(
+            not isinstance(value.get(field), int)
+            or isinstance(value.get(field), bool)
+            or value[field] < 0
+            or value[field] > 2**53 - 1
+            for field in integer_fields
+        ):
+            raise ProtocolError("Native heap snapshot probe returned invalid counts")
+        boolean_fields = (
+            "match_found",
+            "reachability_indexed",
+            "node_limit_reached",
+            "edge_limit_reached",
+            "string_limit_reached",
+        )
+        if any(not isinstance(value.get(field), bool) for field in boolean_fields):
+            raise ProtocolError("Native heap snapshot probe returned invalid limits")
+        scope = value.get("scope")
+        if (
+            scope not in {"all", "reachable", "unreachable"}
+            or value["file_bytes"] > MAX_HEAP_SNAPSHOT_BYTES
+            or value["analyzed_nodes"] > value["total_nodes"]
+            or value["reachable_nodes"] > value["total_nodes"]
+            or value["indexed_edges"] > value["total_edges"]
+            or (value["match_found"] and value["analyzed_nodes"] == 0)
+            or (
+                not value["match_found"]
+                and not value["node_limit_reached"]
+                and value["analyzed_nodes"] != value["total_nodes"]
+            )
+            or (
+                scope == "all"
+                and (
+                    value["reachability_indexed"]
+                    or value["reachable_nodes"] != 0
+                    or value["indexed_edges"] != 0
+                )
+            )
+            or (scope != "all" and not value["reachability_indexed"])
+        ):
+            raise ProtocolError("Native heap snapshot probe returned invalid coverage")
+        raw_match = value.get("match")
+        if value["match_found"] != isinstance(raw_match, dict):
+            raise ProtocolError("Native heap snapshot probe returned a malformed match")
+        match = None
+        if isinstance(raw_match, dict):
+            match_id = raw_match.get("id")
+            self_size = raw_match.get("self_size")
+            if (
+                not isinstance(match_id, str)
+                or not match_id.isascii()
+                or not match_id.isdigit()
+                or (len(match_id) > 1 and match_id.startswith("0"))
+                or len(match_id) > 20
+                or not isinstance(raw_match.get("type"), str)
+                or not isinstance(raw_match.get("name"), str)
+                or not isinstance(self_size, int)
+                or isinstance(self_size, bool)
+                or self_size < 0
+                or self_size > 2**53 - 1
+            ):
+                raise ProtocolError("Native heap snapshot probe returned a malformed match")
+            match = {
+                "id": match_id,
+                "type": self._truncate_text(raw_match["type"], 64),
+                "name": self._truncate_text(raw_match["name"], 256),
+                "self_size": self_size,
+            }
+        return {
+            "protocol_version": 1,
+            **{field: value[field] for field in integer_fields},
+            **{field: value[field] for field in boolean_fields},
+            "scope": scope,
+            "match": match,
+        }
 
     def _heap_snapshot_binary(self) -> Path:
         binary = self.heap_snapshot_binary.resolve()
@@ -1768,6 +2395,11 @@ class DebuggerBridge:
             connection.close()
             reader.join(timeout=1.0)
             with self._lock:
+                origin_trace_id = (
+                    self._memory_origin_trace["trace_id"]
+                    if self._memory_origin_trace_active_locked()
+                    else None
+                )
                 clear_heap_baseline = (
                     self._connection is connection and not self._heap_diff_busy
                 )
@@ -1780,6 +2412,13 @@ class DebuggerBridge:
                     self._watch_frame_id = None
                     self._pause_serial += 1
                     self._changed()
+            if origin_trace_id is not None:
+                self._complete_memory_origin_trace(
+                    origin_trace_id,
+                    "error",
+                    "Debugger target disconnected during Memory Origin Trace.",
+                    resume=False,
+                )
             if clear_heap_baseline:
                 self._clear_heap_diff_baseline()
 
@@ -1839,8 +2478,18 @@ class DebuggerBridge:
                 )
                 self._state = "paused"
                 self._error = None
+                origin_trace_active = self._memory_origin_trace_active_locked()
+                if origin_trace_active:
+                    paused["scope_coverage"] = {
+                        "status": "partial",
+                        "properties": 0,
+                        "limit": MAX_TOTAL_SCOPE_PROPERTIES,
+                    }
                 self._changed()
-            self._enrich_pause_async(pause_serial)
+            if origin_trace_active:
+                self._start_memory_origin_trace_pause_async(pause_serial, paused)
+            else:
+                self._enrich_pause_async(pause_serial)
             return
         if method == "Debugger.resumed":
             with self._lock:

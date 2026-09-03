@@ -1153,10 +1153,10 @@
       .memory-grid { min-height: 0; display: grid; grid-template-columns: 292px minmax(0, 1fr); }
       .memory-search-pane { min-width: 0; overflow: auto; padding: 14px; border-right: 1px solid var(--line); background: var(--chrome); }
       .memory-form { display: grid; gap: 11px; }
-      .memory-mode-switch { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+      .memory-mode-switch { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
       .memory-mode-button { min-height: 30px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel-2); color: var(--muted); font: 8px var(--mono); }
       .memory-mode-button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
-      .memory-live-only[hidden], .memory-search-only[hidden], .memory-snapshot-only[hidden], .memory-diff-only[hidden] { display: none; }
+      .memory-live-only[hidden], .memory-search-only[hidden], .memory-reference-only[hidden], .memory-snapshot-only[hidden], .memory-diff-only[hidden], .memory-origin-only[hidden] { display: none; }
       .memory-form label { display: grid; gap: 5px; color: var(--muted); font: 8px var(--mono); text-transform: uppercase; }
       .memory-form input[type="text"], .memory-form input[type="number"], .memory-form textarea, .memory-form select {
         width: 100%;
@@ -1185,12 +1185,17 @@
       .memory-diff-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
       .memory-diff-actions button { min-height: 31px; }
       .memory-diff-actions .memory-diff-primary { grid-column: 1 / -1; }
+      .memory-origin-window { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+      .memory-origin-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+      .memory-origin-actions button { min-height: 31px; }
       .memory-results-pane { min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(250px, 38%) minmax(0, 1fr); }
       .memory-results-list { min-width: 0; overflow: auto; border-right: 1px solid var(--line); }
       .memory-results-head { display: grid; grid-template-columns: minmax(0, 1fr) 62px; gap: 8px; padding: 9px 11px; border-bottom: 1px solid var(--line); color: var(--faint); font: 650 8px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
       .memory-result-row { width: 100%; min-height: 54px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 8px; padding: 9px 11px; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; color: var(--text); text-align: left; }
       .memory-result-row:hover { background: var(--panel-3); }
       .memory-result-row[aria-selected="true"] { background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
+      .memory-result-row[data-first-match="true"] { box-shadow: inset 3px 0 var(--green); }
+      .memory-result-row[data-first-match="true"][aria-selected="true"] { box-shadow: inset 3px 0 var(--green), inset 0 0 0 1px color-mix(in srgb, var(--green) 28%, transparent); }
       .memory-result-class { overflow: hidden; font: 600 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
       .memory-result-score { color: var(--accent); font: 8px var(--mono); }
       .memory-result-meta { grid-column: 1 / -1; overflow: hidden; color: var(--faint); font: 8px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
@@ -1380,7 +1385,7 @@
         .memory-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
         .memory-search-pane { max-height: min(420px, 48vh); border-right: 0; border-bottom: 1px solid var(--line); }
         .memory-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .memory-mode-switch, .memory-form[data-mode="snapshot"] .memory-value-field, .memory-snapshot-only, .memory-shape-field, .memory-options, .memory-search-button, .memory-diff-controls, .memory-search-help { grid-column: 1 / -1; }
+        .memory-mode-switch, .memory-form[data-mode="snapshot"] .memory-value-field, .memory-form[data-mode="origin"] .memory-value-field, .memory-reference-only, .memory-snapshot-only, .memory-origin-only, .memory-shape-field, .memory-options, .memory-search-button, .memory-diff-controls, .memory-search-help { grid-column: 1 / -1; }
         .memory-results-pane { grid-template-columns: 1fr; grid-template-rows: minmax(170px, .8fr) minmax(190px, 1fr); }
         .memory-results-list { border-right: 0; border-bottom: 1px solid var(--line); }
         .memory-property { grid-template-columns: minmax(90px, .7fr) 62px minmax(100px, 1.3fr); }
@@ -1580,7 +1585,7 @@
 
           <section id="screen-memory" class="screen" aria-label="Memory investigation" hidden>
             <header class="screen-head">
-              <div><h1>Memory Explorer</h1><div class="screen-subtitle">Bounded live objects, native snapshots, and retained-memory comparisons</div></div>
+              <div><h1>Memory Explorer</h1><div class="screen-subtitle">Live objects, native snapshots, temporal origins, and retained-memory comparisons</div></div>
               <div class="screen-head-actions"><span class="memory-readonly">Local analysis</span></div>
             </header>
             <div id="memory-notice" class="memory-notice" data-kind="offline" role="status" aria-live="polite">Run a live session to attach an authorized browser target.</div>
@@ -1591,10 +1596,11 @@
                     <button class="memory-mode-button" type="button" data-memory-mode="live" aria-pressed="true">Live objects</button>
                     <button class="memory-mode-button" type="button" data-memory-mode="snapshot" aria-pressed="false">Heap snapshot</button>
                     <button class="memory-mode-button" type="button" data-memory-mode="diff" aria-pressed="false">Heap diff</button>
+                    <button class="memory-mode-button" type="button" data-memory-mode="origin" aria-pressed="false">Origin trace</button>
                   </div>
                   <label class="memory-live-only">Property name<input id="memory-property-query" type="text" placeholder="token, config, fingerprint" maxlength="512" autocomplete="off" /></label>
                   <label class="memory-search-only memory-value-field"><span id="memory-value-caption">Primitive value</span><input id="memory-value-query" type="text" placeholder="exact text or pattern" maxlength="512" autocomplete="off" /></label>
-                  <label class="memory-snapshot-only" hidden>Reference scope<select id="memory-reference-scope"><option value="all">All matching nodes</option><option value="reachable">Root-reachable only</option><option value="unreachable">Unreachable only</option></select></label>
+                  <label class="memory-reference-only" hidden>Reference scope<select id="memory-reference-scope"><option value="all">All matching nodes</option><option value="reachable">Root-reachable only</option><option value="unreachable">Unreachable only</option></select></label>
                   <label class="memory-live-only">Class name<input id="memory-class-query" type="text" placeholder="Object, Array, CartState" maxlength="512" autocomplete="off" /></label>
                   <label class="memory-live-only memory-shape-field">Structural shape<textarea id="memory-shape-query" placeholder='{"device":{"fingerprint":""}}' maxlength="4096" spellcheck="false"></textarea></label>
                   <label class="memory-live-only">Similarity threshold<input id="memory-similarity-threshold" type="number" min="0" max="1" step="0.05" value="0.75" /></label>
@@ -1604,6 +1610,16 @@
                     <label class="memory-check"><input id="memory-shape-values" type="checkbox" /> Match shape values</label>
                   </div>
                   <button id="memory-search-button" class="trace-button memory-search-button memory-search-only" type="submit" disabled>Search live objects</button>
+                  <div class="memory-origin-only" hidden>
+                    <div class="memory-origin-window">
+                      <label>Steps before<input id="memory-origin-before" type="number" min="0" max="8" step="1" value="3" /></label>
+                      <label>Steps after<input id="memory-origin-after" type="number" min="0" max="16" step="1" value="8" /></label>
+                    </div>
+                    <div class="memory-origin-actions">
+                      <button id="memory-origin-stop" class="secondary-button" type="button" disabled>Stop trace</button>
+                      <button id="memory-origin-reset" class="secondary-button" type="button" disabled>Clear result</button>
+                    </div>
+                  </div>
                   <div id="memory-diff-controls" class="memory-diff-controls memory-diff-only" hidden>
                     <div class="memory-baseline-card">
                       <span>Comparison baseline</span>
@@ -1944,6 +1960,10 @@ export async function checkout(cart, fingerprint) {
         memoryValueQuery: document.querySelector('#memory-value-query'),
         memoryValueCaption: document.querySelector('#memory-value-caption'),
         memoryReferenceScope: document.querySelector('#memory-reference-scope'),
+        memoryOriginBefore: document.querySelector('#memory-origin-before'),
+        memoryOriginAfter: document.querySelector('#memory-origin-after'),
+        memoryOriginStop: document.querySelector('#memory-origin-stop'),
+        memoryOriginReset: document.querySelector('#memory-origin-reset'),
         memoryClassQuery: document.querySelector('#memory-class-query'),
         memoryShapeQuery: document.querySelector('#memory-shape-query'),
         memorySimilarityThreshold: document.querySelector('#memory-similarity-threshold'),
@@ -2253,6 +2273,71 @@ export async function checkout(cart, fingerprint) {
             isSafeIntegerInRange(frame.line, 0, 0x7fffffff) && isSafeIntegerInRange(frame.column, 0, 0x7fffffff));
       }
 
+      function isMemoryOriginTraceStep(step) {
+        if (!isPlainObject(step) || typeof step.id !== 'string' ||
+            !isSafeIntegerInRange(step.step, 1, 32) ||
+            !isSafeIntegerInRange(step.captured_at_ms, 1, Number.MAX_SAFE_INTEGER) ||
+            !isSafeIntegerInRange(step.capture_bytes, 1, 256 * 1024 * 1024) ||
+            !isSafeIntegerInRange(step.duration_ms, 0, Number.MAX_SAFE_INTEGER) ||
+            !isSafeIntegerInRange(step.analyzed_nodes, 0, Number.MAX_SAFE_INTEGER) ||
+            !isSafeIntegerInRange(step.total_nodes, 0, Number.MAX_SAFE_INTEGER) ||
+            step.analyzed_nodes > step.total_nodes ||
+            !isSafeIntegerInRange(step.indexed_edges, 0, Number.MAX_SAFE_INTEGER) ||
+            !isSafeIntegerInRange(step.total_edges, 0, Number.MAX_SAFE_INTEGER) ||
+            step.indexed_edges > step.total_edges ||
+            typeof step.matched !== 'boolean' || typeof step.coverage_partial !== 'boolean' ||
+            typeof step.is_first_match !== 'boolean' || !isPlainObject(step.location) ||
+            typeof step.location.script_id !== 'string' || typeof step.location.url !== 'string' ||
+            typeof step.location.function_name !== 'string' ||
+            !isSafeIntegerInRange(step.location.line, 0, 0x7fffffff) ||
+            !isSafeIntegerInRange(step.location.column, 0, 0x7fffffff) ||
+            typeof step.location.framework_filtered !== 'boolean' ||
+            step.matched !== (step.match !== null)) return false;
+        if (step.match === null) return !step.is_first_match;
+        return isPlainObject(step.match) && typeof step.match.id === 'string' &&
+          /^(?:0|[1-9][0-9]*)$/.test(step.match.id) && step.match.id.length <= 20 &&
+          typeof step.match.type === 'string' && typeof step.match.name === 'string' &&
+          isSafeIntegerInRange(step.match.self_size, 0, Number.MAX_SAFE_INTEGER);
+      }
+
+      function isMemoryOriginTrace(trace) {
+        const states = ['idle', 'armed', 'capturing', 'stepping', 'stopping', 'found', 'not_found', 'aborted', 'error'];
+        const activeStates = ['armed', 'capturing', 'stepping', 'stopping'];
+        if (!isPlainObject(trace) || trace.protocol_version !== 1 ||
+            !isSafeIntegerInRange(trace.trace_id, 0, Number.MAX_SAFE_INTEGER) ||
+            !states.includes(trace.state) ||
+            (trace.target_id !== null && typeof trace.target_id !== 'string') ||
+            typeof trace.query !== 'string' || !['all', 'reachable', 'unreachable'].includes(trace.scope) ||
+            typeof trace.case_sensitive !== 'boolean' ||
+            !isSafeIntegerInRange(trace.before_steps, 0, 8) ||
+            !isSafeIntegerInRange(trace.after_steps, 0, 16) || trace.step_limit !== 32 ||
+            !isSafeIntegerInRange(trace.step_count, 0, trace.step_limit) ||
+            (trace.first_match_step !== null &&
+              !isSafeIntegerInRange(trace.first_match_step, 1, trace.step_count)) ||
+            !isSafeIntegerInRange(trace.started_at_ms, 0, Number.MAX_SAFE_INTEGER) ||
+            !isSafeIntegerInRange(trace.elapsed_ms, 0, Number.MAX_SAFE_INTEGER) ||
+            typeof trace.partial !== 'boolean' ||
+            (trace.limit_reason !== null &&
+              !['snapshot_coverage', 'step_limit', 'time_limit', 'execution_quiet'].includes(trace.limit_reason)) ||
+            typeof trace.message !== 'string' || !Array.isArray(trace.steps) ||
+            trace.steps.length > trace.before_steps + trace.after_steps + 1 ||
+            !trace.steps.every(isMemoryOriginTraceStep)) return false;
+        if (trace.steps.some((step, index) => index > 0 && trace.steps[index - 1].step >= step.step)) return false;
+        const firstMatches = trace.steps.filter(step => step.is_first_match);
+        if ((trace.first_match_step === null) !== (firstMatches.length === 0) || firstMatches.length > 1 ||
+            (firstMatches.length === 1 && firstMatches[0].step !== trace.first_match_step) ||
+            (trace.state === 'found' && trace.first_match_step === null) ||
+            (trace.state === 'not_found' && trace.first_match_step !== null) ||
+            (trace.steps.some(step => step.coverage_partial) && !trace.partial)) return false;
+        if (trace.state === 'idle') {
+          return trace.trace_id === 0 && trace.target_id === null && trace.query === '' &&
+            trace.step_count === 0 && trace.steps.length === 0 && trace.started_at_ms === 0;
+        }
+        return typeof trace.target_id === 'string' && trace.target_id.length > 0 &&
+          trace.trace_id > 0 && trace.query.length > 0 && trace.started_at_ms > 0 &&
+          (!activeStates.includes(trace.state) || trace.limit_reason === null || trace.partial);
+      }
+
       function isDebuggerResponse(body) {
         if (!isPlainObject(body) || body.protocol_version !== 1 ||
             !['unavailable', 'waiting', 'connecting', 'running', 'paused'].includes(body.state) ||
@@ -2263,6 +2348,7 @@ export async function checkout(cart, fingerprint) {
             !Array.isArray(body.breakpoints) || body.breakpoints.length > 1000 || !body.breakpoints.every(isDebuggerBreakpoint) ||
             !Array.isArray(body.watches) || body.watches.length > 100 || !body.watches.every(isDebuggerWatch) ||
             !Array.isArray(body.console) || body.console.length > 500 || !body.console.every(isDebuggerConsoleEntry) ||
+            !isMemoryOriginTrace(body.memory_origin_trace) ||
             !isPlainObject(body.settings) || !isPlainObject(body.limits)) return false;
         if (body.heap_diff_baseline !== null && (!isPlainObject(body.heap_diff_baseline) ||
             typeof body.heap_diff_baseline.target_id !== 'string' ||
@@ -3980,7 +4066,7 @@ export async function checkout(cart, fingerprint) {
           gutter.type = 'button';
           gutter.className = 'source-gutter';
           gutter.textContent = String(runtimeLine + 1);
-          gutter.disabled = source.source_type !== 'script' || state.sourcePretty || !['running', 'paused'].includes(state.debuggerSession?.state);
+          gutter.disabled = source.source_type !== 'script' || state.sourcePretty || !['running', 'paused'].includes(state.debuggerSession?.state) || memoryOriginTraceActive();
           gutter.title = state.sourcePretty ? 'Show original source to edit breakpoints' : '';
           gutter.setAttribute('aria-label', `${breakpoint ? 'Remove' : 'Add'} breakpoint on line ${runtimeLine + 1}`);
           gutter.addEventListener('click', event => {
@@ -4014,7 +4100,7 @@ export async function checkout(cart, fingerprint) {
         const source = selectedSource();
         if (source?.source_type !== 'script' || elements.sourceCode.hidden) return;
         const breakpointsByLine = breakpointLinesForSource(source);
-        const enabled = !state.sourcePretty && ['running', 'paused'].includes(state.debuggerSession?.state);
+        const enabled = !state.sourcePretty && ['running', 'paused'].includes(state.debuggerSession?.state) && !memoryOriginTraceActive();
         elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row => {
           const runtimeLine = Number(row.dataset.line) - 1;
           const breakpoint = breakpointsByLine.get(runtimeLine) ?? null;
@@ -4289,10 +4375,67 @@ export async function checkout(cart, fingerprint) {
         elements.memoryDetail.replaceChildren(...cards);
       }
 
+      function renderMemoryOriginDetail(result) {
+        const trace = state.memorySearchMeta;
+        if (!result) {
+          const message = trace && ['armed', 'capturing', 'stepping', 'stopping'].includes(trace.state)
+            ? trace.message
+            : 'Arm a trace, then click the page action that creates the value.';
+          elements.memoryDetail.replaceChildren(textElement('div', 'memory-empty', message));
+          return;
+        }
+        const card = document.createElement('article'); card.className = 'memory-detail-card';
+        const head = document.createElement('header'); head.className = 'memory-detail-head';
+        const title = document.createElement('div');
+        title.append(
+          textElement('h2', '', result.location.function_name || '(anonymous)'),
+          textElement('p', '', debuggerLocationText(result.location, result.location.url))
+        );
+        head.append(title, textElement('span', 'memory-readonly', result.is_first_match ? 'First appearance' : result.matched ? 'Present' : 'Not present'));
+        if (result.location.script_id && state.debuggerSession?.scripts.some(script => script.script_id === result.location.script_id)) {
+          const source = document.createElement('button'); source.type = 'button'; source.className = 'secondary-button'; source.textContent = 'Open source';
+          source.addEventListener('click', () => {
+            showScreen('sources');
+            revealDebuggerLocation(result.location);
+          });
+          head.append(source);
+        }
+        const facts = document.createElement('div'); facts.className = 'memory-properties';
+        facts.append(
+          memoryFactRow('trace step', result.is_first_match ? 'origin' : 'context', `${result.step} of ${trace?.step_count ?? result.step}`),
+          memoryFactRow('heap match', result.matched ? 'found' : 'absent', result.match ? `${result.match.type} · node ${result.match.id}` : 'No matching node in this snapshot'),
+          memoryFactRow('native probe', result.coverage_partial ? 'partial' : 'bounded', `${result.analyzed_nodes.toLocaleString()} of ${result.total_nodes.toLocaleString()} nodes · ${result.duration_ms} ms`),
+          memoryFactRow('heap capture', 'temporary', `${formatByteSize(result.capture_bytes)} · deleted after probe`),
+          memoryFactRow('source filter', result.location.framework_filtered ? 'applied' : 'direct', result.location.url || '(anonymous script)')
+        );
+        card.append(head, facts);
+        const context = document.createElement('article'); context.className = 'memory-detail-card';
+        const contextHead = document.createElement('header'); contextHead.className = 'memory-detail-head';
+        const contextTitle = document.createElement('div');
+        contextTitle.append(
+          textElement('h2', '', result.match ? result.match.name || `(${result.match.type})` : 'Temporal context'),
+          textElement('p', '', result.match
+            ? `${result.match.type} · ${result.match.self_size.toLocaleString()} self bytes`
+            : 'The value had not appeared at this function boundary')
+        );
+        contextHead.append(contextTitle, textElement('span', 'memory-readonly', result.matched ? 'Native match' : 'Before window'));
+        const explanation = textElement('div', 'memory-empty', result.is_first_match
+          ? 'This is the first sampled function boundary whose bounded V8 heap contains the requested value.'
+          : result.matched
+            ? 'The value remains present after its first sampled appearance.'
+            : 'This retained step provides execution context immediately before the first sampled appearance.');
+        context.append(contextHead, explanation);
+        elements.memoryDetail.replaceChildren(card, context);
+      }
+
       function renderMemoryDetail() {
         const result = state.memoryResults.find(candidate => candidate.id === state.selectedMemoryResultId);
         if (state.memoryMode === 'diff') {
           renderHeapDiffDetail(result);
+          return;
+        }
+        if (state.memoryMode === 'origin') {
+          renderMemoryOriginDetail(result);
           return;
         }
         if (!result) {
@@ -4413,7 +4556,9 @@ export async function checkout(cart, fingerprint) {
       function renderMemory() {
         const attached = memoryAttached();
         const targetId = state.debuggerSession?.target?.id ?? null;
-        if (state.memoryTargetId !== null && state.memoryTargetId !== targetId) {
+        const preserveDisconnectedOrigin = state.memoryMode === 'origin' && targetId === null &&
+          state.memorySearchMeta?.protocol_version === 1 && state.memorySearchMeta?.trace_id > 0;
+        if (state.memoryTargetId !== null && state.memoryTargetId !== targetId && !preserveDisconnectedOrigin) {
           state.memoryResults = [];
           state.selectedMemoryResultId = null;
           state.memorySearchMeta = null;
@@ -4421,14 +4566,17 @@ export async function checkout(cart, fingerprint) {
           state.memoryDiffBaseline = null;
           state.memoryTargetId = null;
           state.memorySearchStatus = attached ? 'idle' : 'offline';
-        } else if (!attached && state.memorySearchStatus !== 'searching') {
+        } else if (!attached && state.memorySearchStatus !== 'searching' && !preserveDisconnectedOrigin) {
           state.memorySearchStatus = 'offline';
         } else if (attached && state.memorySearchStatus === 'offline') {
           state.memorySearchStatus = 'idle';
         }
         const snapshotMode = state.memoryMode === 'snapshot';
         const diffMode = state.memoryMode === 'diff';
+        const originMode = state.memoryMode === 'origin';
         const liveMode = state.memoryMode === 'live';
+        const originTrace = state.debuggerSession?.memory_origin_trace ?? null;
+        const originActive = originTrace && ['armed', 'capturing', 'stepping', 'stopping'].includes(originTrace.state);
         elements.memorySearchForm.dataset.mode = state.memoryMode;
         elements.memoryModeButtons.forEach(button => {
           button.setAttribute('aria-pressed', String(button.dataset.memoryMode === state.memoryMode));
@@ -4440,16 +4588,24 @@ export async function checkout(cart, fingerprint) {
         elements.memorySearchForm.querySelectorAll('.memory-search-only').forEach(element => {
           element.hidden = diffMode;
         });
+        elements.memorySearchForm.querySelectorAll('.memory-reference-only').forEach(element => {
+          element.hidden = !(snapshotMode || originMode);
+        });
         elements.memorySearchForm.querySelectorAll('.memory-snapshot-only').forEach(element => {
           element.hidden = !snapshotMode;
         });
         elements.memorySearchForm.querySelectorAll('.memory-diff-only').forEach(element => {
           element.hidden = !diffMode;
         });
-        elements.memoryValueCaption.textContent = snapshotMode ? 'Snapshot value or node name' : 'Primitive value';
-        elements.memoryValueQuery.placeholder = snapshotMode ? 'value from a request, closure, or unreachable object' : 'exact text or pattern';
+        elements.memorySearchForm.querySelectorAll('.memory-origin-only').forEach(element => {
+          element.hidden = !originMode;
+        });
+        elements.memoryValueCaption.textContent = originMode ? 'Value or node name to trace' : snapshotMode ? 'Snapshot value or node name' : 'Primitive value';
+        elements.memoryValueQuery.placeholder = snapshotMode || originMode ? 'value from a request, closure, or unreachable object' : 'exact text or pattern';
         elements.memorySearchHelp.textContent = diffMode
           ? 'The baseline stays in local temporary storage until reset, target change, or shutdown. Current captures are deleted after native comparison.'
+          : originMode
+            ? 'The trace arms on the next page click, samples bounded heap snapshots at function-return boundaries, keeps only the requested context window, and deletes every temporary snapshot immediately.'
           : snapshotMode
             ? 'Capturing briefly pauses the target. Native C++ classifies root reachability and prioritizes hidden, internal, and weak incoming references. The temporary file is deleted immediately.'
             : 'Accessors are reported without invoking getters. Results are ephemeral and are never added to the evidence store.';
@@ -4458,8 +4614,10 @@ export async function checkout(cart, fingerprint) {
         elements.memorySearchButton.disabled = !attached || state.memorySearchPending;
         elements.memorySearchButton.setAttribute('aria-busy', String(state.memorySearchPending));
         elements.memorySearchButton.textContent = state.memorySearchPending
-          ? snapshotMode ? 'Capturing and indexing...' : 'Searching...'
-          : snapshotMode ? 'Capture and search snapshot' : 'Search live objects';
+          ? originMode ? originTrace?.state === 'armed' ? 'Armed for page click...' : 'Tracing function boundaries...' : snapshotMode ? 'Capturing and indexing...' : 'Searching...'
+          : originMode ? 'Arm origin trace' : snapshotMode ? 'Capture and search snapshot' : 'Search live objects';
+        elements.memoryOriginStop.disabled = !originActive || state.debuggerActionPending;
+        elements.memoryOriginReset.disabled = Boolean(originActive) || !originTrace || originTrace.state === 'idle' || state.debuggerActionPending;
         const baseline = state.memoryDiffBaseline;
         elements.memoryBaselineTitle.textContent = baseline ? 'Baseline ready' : 'Not captured';
         elements.memoryBaselineMeta.textContent = baseline
@@ -4483,6 +4641,14 @@ export async function checkout(cart, fingerprint) {
           ready: state.memorySearchMessage || 'Native retained-memory comparison completed.',
           partial: state.memorySearchMessage || 'Heap comparison completed with explicit bounded coverage.',
           error: state.memorySearchMessage || 'Native heap comparison failed.'
+        } : originMode ? {
+          offline: 'Run a live session to attach an authorized browser target.',
+          idle: state.memorySearchMessage || 'Enter a value, arm the trace, then click the page action that creates it.',
+          searching: state.memorySearchMessage || originTrace?.message || 'Sampling bounded heap snapshots at debugger function boundaries.',
+          empty: state.memorySearchMessage || originTrace?.message || 'The value did not appear in the bounded temporal trace.',
+          ready: state.memorySearchMessage || originTrace?.message || 'The first sampled appearance is highlighted with its source function.',
+          partial: state.memorySearchMessage || originTrace?.message || 'The origin was found with explicit partial context or snapshot coverage.',
+          error: state.memorySearchMessage || originTrace?.message || 'Memory Origin Trace failed.'
         } : snapshotMode ? {
           offline: 'Run a live session to attach an authorized browser target.',
           idle: state.memorySearchMessage || 'Enter a value to capture and search the full V8 heap, including unreachable nodes.',
@@ -4502,19 +4668,21 @@ export async function checkout(cart, fingerprint) {
         };
         elements.memoryNotice.dataset.kind = state.memorySearchStatus;
         elements.memoryNotice.textContent = messages[state.memorySearchStatus] ?? messages.idle;
-        elements.memoryResultLabel.textContent = diffMode ? 'Changed groups' : 'Matches';
+        elements.memoryResultLabel.textContent = diffMode ? 'Changed groups' : originMode ? 'Trace steps' : 'Matches';
         elements.memoryResultCount.textContent = String(state.memoryResults.length);
-        elements.memoryResults.setAttribute('aria-label', diffMode ? 'Heap growth groups' : snapshotMode ? 'Heap snapshot matches' : 'Live object matches');
+        elements.memoryResults.setAttribute('aria-label', diffMode ? 'Heap growth groups' : originMode ? 'Memory origin trace steps' : snapshotMode ? 'Heap snapshot matches' : 'Live object matches');
 
         if (state.memoryResults.length === 0) {
           const empty = textElement('div', 'memory-empty', state.memorySearchStatus === 'empty'
-            ? snapshotMode
+            ? originMode
+              ? 'The bounded trace contains no retained steps for this result.'
+              : snapshotMode
               ? 'No heap nodes matched this value and reference scope. Adjust the value or scope.'
               : diffMode ? 'The compared heaps have no reported memory changes.'
                 : 'No objects matched. Broaden one criterion or lower the similarity threshold.'
             : state.memorySearchStatus === 'error'
               ? 'The last search did not replace any retained results.'
-              : diffMode ? 'No heap comparison results yet.' : snapshotMode ? 'No heap snapshot search results yet.' : 'No live object search results yet.');
+              : diffMode ? 'No heap comparison results yet.' : originMode ? 'No temporal trace steps yet.' : snapshotMode ? 'No heap snapshot search results yet.' : 'No live object search results yet.');
           elements.memoryResults.removeAttribute('role');
           elements.memoryResults.replaceChildren(empty);
           renderMemoryDetail();
@@ -4530,14 +4698,19 @@ export async function checkout(cart, fingerprint) {
           row.setAttribute('role', 'option');
           row.setAttribute('aria-selected', String(result.id === state.selectedMemoryResultId));
           row.tabIndex = result.id === state.selectedMemoryResultId ? 0 : -1;
+          if (originMode) row.dataset.firstMatch = String(result.is_first_match);
           const score = diffMode
             ? formatSignedByteSize(result.self_size_delta)
+            : originMode
+            ? result.is_first_match ? 'origin' : result.matched ? 'present' : 'absent'
             : snapshotMode
             ? result.reachable ? 'root' : 'unreachable'
             : result.similarity === null ? 'match' : `${Math.round(result.similarity * 100)}%`;
-          const title = diffMode ? result.name || `(${result.type})` : snapshotMode ? result.name || `(${result.type})` : result.class_name || 'Object';
+          const title = diffMode ? result.name || `(${result.type})` : originMode ? result.location.function_name || '(anonymous)' : snapshotMode ? result.name || `(${result.type})` : result.class_name || 'Object';
           const metadata = diffMode
             ? `${result.type} · ${result.baseline_count.toLocaleString()} → ${result.current_count.toLocaleString()} objects (${formatSignedCount(result.count_delta)})`
+            : originMode
+            ? `step ${result.step} · ${debuggerLocationText(result.location, result.location.url)} · ${result.analyzed_nodes.toLocaleString()} nodes in ${result.duration_ms} ms`
             : snapshotMode
             ? `${result.type} · ${result.self_size.toLocaleString()} self bytes · ${result.incoming_reference_count.toLocaleString()} incoming references`
             : `${result.property_count} properties · ${result.preview.slice(0, 5).map(property => property.name).join(', ') || 'no own properties'}`;
@@ -4553,6 +4726,106 @@ export async function checkout(cart, fingerprint) {
         renderMemoryDetail();
       }
 
+      function applyMemoryOriginTrace(trace) {
+        if (!isMemoryOriginTrace(trace)) return false;
+        const active = ['armed', 'capturing', 'stepping', 'stopping'].includes(trace.state);
+        if (active && state.memoryMode !== 'origin') state.memoryMode = 'origin';
+        if (state.memoryMode !== 'origin') return true;
+        const previousFirstMatch = state.memorySearchMeta?.first_match_step ?? null;
+        state.memorySearchMeta = trace;
+        state.memoryResults = trace.steps;
+        state.memoryTargetId = trace.target_id;
+        state.memorySearchPending = active;
+        const firstMatch = trace.steps.find(step => step.is_first_match);
+        if (firstMatch && previousFirstMatch !== trace.first_match_step) {
+          state.selectedMemoryResultId = firstMatch.id;
+        } else if (!trace.steps.some(step => step.id === state.selectedMemoryResultId)) {
+          state.selectedMemoryResultId = firstMatch?.id ?? trace.steps.at(-1)?.id ?? null;
+        }
+        const coverage = trace.limit_reason ? ` · ${trace.limit_reason.replaceAll('_', ' ')}` : '';
+        state.memorySearchMessage = trace.state === 'idle'
+          ? null
+          : `${trace.message} · ${trace.step_count}/${trace.step_limit} sampled steps${coverage}`;
+        if (active) state.memorySearchStatus = 'searching';
+        else if (trace.state === 'found') state.memorySearchStatus = trace.partial ? 'partial' : 'ready';
+        else if (trace.state === 'not_found') state.memorySearchStatus = trace.partial ? 'partial' : 'empty';
+        else if (trace.state === 'error') state.memorySearchStatus = 'error';
+        else if (trace.state === 'aborted') state.memorySearchStatus = trace.steps.length > 0 ? 'partial' : 'idle';
+        else state.memorySearchStatus = memoryAttached() ? 'idle' : 'offline';
+        return true;
+      }
+
+      async function runMemoryOriginTrace() {
+        if (!memoryAttached() || state.memorySearchPending) return;
+        const query = elements.memoryValueQuery.value.trim();
+        if (!query) {
+          state.memorySearchStatus = 'error';
+          state.memorySearchMessage = 'Enter one value or node name to trace.';
+          renderMemory();
+          elements.memoryValueQuery.focus();
+          return;
+        }
+        const beforeSteps = Number(elements.memoryOriginBefore.value);
+        const afterSteps = Number(elements.memoryOriginAfter.value);
+        if (!Number.isInteger(beforeSteps) || beforeSteps < 0 || beforeSteps > 8 ||
+            !Number.isInteger(afterSteps) || afterSteps < 0 || afterSteps > 16) {
+          state.memorySearchStatus = 'error';
+          state.memorySearchMessage = 'Choose 0 to 8 steps before and 0 to 16 steps after the first match.';
+          renderMemory();
+          return;
+        }
+        state.memorySearchPending = true;
+        state.memorySearchStatus = 'searching';
+        state.memorySearchMessage = 'Arming a bounded click-driven temporal trace.';
+        state.memoryResults = [];
+        state.selectedMemoryResultId = null;
+        renderMemory();
+        const body = await debuggerAction({
+          action: 'start_memory_origin_trace', query,
+          scope: elements.memoryReferenceScope.value,
+          case_sensitive: false,
+          before_steps: beforeSteps,
+          after_steps: afterSteps
+        });
+        if (!isPlainObject(body) || body.ok !== true || !isMemoryOriginTrace(body.trace)) {
+          state.memorySearchPending = false;
+          state.memorySearchStatus = 'error';
+          state.memorySearchMessage = state.debuggerError || 'The debugger returned malformed Memory Origin Trace state.';
+          renderMemory();
+          return;
+        }
+        applyMemoryOriginTrace(body.trace);
+        renderMemory();
+      }
+
+      async function stopMemoryOriginTrace() {
+        if (!state.memorySearchPending) return;
+        const body = await debuggerAction({ action: 'stop_memory_origin_trace' });
+        if (!isPlainObject(body) || body.ok !== true) {
+          state.memorySearchStatus = 'error';
+          state.memorySearchMessage = state.debuggerError || 'Memory Origin Trace could not be stopped.';
+          renderMemory();
+        }
+      }
+
+      async function clearMemoryOriginTrace() {
+        if (state.memorySearchPending) return;
+        const body = await debuggerAction({ action: 'clear_memory_origin_trace' });
+        if (!isPlainObject(body) || body.ok !== true) {
+          state.memorySearchStatus = 'error';
+          state.memorySearchMessage = state.debuggerError || 'Memory Origin Trace could not be cleared.';
+          renderMemory();
+          return;
+        }
+        state.memoryResults = [];
+        state.selectedMemoryResultId = null;
+        state.memorySearchMeta = null;
+        state.memoryTargetId = null;
+        state.memorySearchStatus = memoryAttached() ? 'idle' : 'offline';
+        state.memorySearchMessage = 'Temporal trace result cleared.';
+        renderMemory();
+      }
+
       async function runLiveObjectSearch() {
         if (!memoryAttached() || state.memorySearchPending) return;
         if (state.memoryMode === 'diff') {
@@ -4561,6 +4834,10 @@ export async function checkout(cart, fingerprint) {
         }
         if (state.memoryMode === 'snapshot') {
           await runHeapSnapshotSearch();
+          return;
+        }
+        if (state.memoryMode === 'origin') {
+          await runMemoryOriginTrace();
           return;
         }
         const request = {
@@ -4742,13 +5019,14 @@ export async function checkout(cart, fingerprint) {
       }
 
       function setMemoryMode(mode) {
-        if (!['live', 'snapshot', 'diff'].includes(mode) || state.memorySearchPending || mode === state.memoryMode) return;
+        if (!['live', 'snapshot', 'diff', 'origin'].includes(mode) || state.memorySearchPending || mode === state.memoryMode) return;
         state.memoryMode = mode;
         state.memoryResults = [];
         state.selectedMemoryResultId = null;
         state.memorySearchMeta = null;
         state.memorySearchMessage = null;
         state.memorySearchStatus = memoryAttached() ? 'idle' : 'offline';
+        if (mode === 'origin') applyMemoryOriginTrace(state.debuggerSession?.memory_origin_trace);
         renderMemory();
       }
 
@@ -4777,8 +5055,15 @@ export async function checkout(cart, fingerprint) {
         return frames.find(frame => frame.id === state.selectedCallFrameId) ?? frames[0] ?? null;
       }
 
+      function memoryOriginTraceActive() {
+        return ['armed', 'capturing', 'stepping', 'stopping'].includes(
+          state.debuggerSession?.memory_origin_trace?.state
+        );
+      }
+
       function renderDebuggerState() {
         const session = state.debuggerSession;
+        const originTraceActive = memoryOriginTraceActive();
         const stateLabels = {
           unavailable: 'Offline', waiting: 'Waiting', connecting: 'Attaching', running: 'Running', paused: 'Paused'
         };
@@ -4796,6 +5081,7 @@ export async function checkout(cart, fingerprint) {
             const option = document.createElement('option'); option.value = candidate.id; option.textContent = candidate.title || candidate.url || candidate.id;
             option.selected = candidate.id === session.target?.id; select.append(option);
           });
+          select.disabled = originTraceActive;
           select.addEventListener('change', () => debuggerAction({ action: 'select_target', target_id: select.value }));
           nodes.push(select);
         }
@@ -4806,6 +5092,7 @@ export async function checkout(cart, fingerprint) {
       }
 
       function renderCallStack() {
+        const originTraceActive = memoryOriginTraceActive();
         const paused = state.debuggerSession?.paused;
         if (!paused || paused.call_frames.length === 0) {
           elements.callStack.textContent = state.debuggerSession?.state === 'paused' ? 'No JavaScript frames were reported.' : 'Not paused';
@@ -4834,6 +5121,7 @@ export async function checkout(cart, fingerprint) {
         });
         const tools = document.createElement('div'); tools.className = 'debug-form';
         const restart = document.createElement('button'); restart.type = 'button'; restart.textContent = 'Restart frame';
+        restart.disabled = originTraceActive;
         restart.addEventListener('click', () => {
           const frame = selectedCallFrame();
           if (frame) debuggerAction({ action: 'restart_frame', call_frame_id: frame.id });
@@ -4857,7 +5145,9 @@ export async function checkout(cart, fingerprint) {
       function selectCallFrame(frame) {
         state.selectedCallFrameId = frame.id;
         revealDebuggerLocation(frame.location);
-        debuggerAction({ action: 'evaluate_watches', call_frame_id: frame.id });
+        if (!memoryOriginTraceActive()) {
+          debuggerAction({ action: 'evaluate_watches', call_frame_id: frame.id });
+        }
         renderDebugger();
       }
 
@@ -4901,6 +5191,7 @@ export async function checkout(cart, fingerprint) {
       }
 
       function renderWatches() {
+        const originTraceActive = memoryOriginTraceActive();
         const watches = state.debuggerSession?.watches ?? [];
         const nodes = watches.map(watch => {
           const row = document.createElement('div'); row.className = 'debug-row';
@@ -4910,6 +5201,7 @@ export async function checkout(cart, fingerprint) {
           value.textContent = watch.error || debuggerValueText(watch.result);
           main.append(expression, value);
           const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'debug-row-action'; remove.textContent = '×'; remove.setAttribute('aria-label', `Remove watch ${watch.expression}`);
+          remove.disabled = originTraceActive;
           remove.addEventListener('click', () => debuggerAction({ action: 'remove_watch', watch_id: watch.id }));
           row.append(main, remove); return row;
         });
@@ -4918,6 +5210,7 @@ export async function checkout(cart, fingerprint) {
       }
 
       function renderBreakpoints() {
+        const originTraceActive = memoryOriginTraceActive();
         const breakpoints = state.debuggerSession?.breakpoints ?? [];
         const nodes = breakpoints.map(breakpoint => {
           const row = document.createElement('div'); row.className = 'debug-row';
@@ -4937,8 +5230,10 @@ export async function checkout(cart, fingerprint) {
           });
           const actions = document.createElement('div'); actions.className = 'debug-row-actions';
           const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'debug-row-action'; edit.textContent = '✎'; edit.setAttribute('aria-label', `Edit breakpoint on line ${breakpoint.line + 1}`);
+          edit.disabled = originTraceActive;
           edit.addEventListener('click', () => { state.editingBreakpointId = state.editingBreakpointId === breakpoint.id ? null : breakpoint.id; renderBreakpoints(); });
           const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'debug-row-action'; remove.textContent = '×'; remove.setAttribute('aria-label', `Remove breakpoint on line ${breakpoint.line + 1}`);
+          remove.disabled = originTraceActive;
           remove.addEventListener('click', () => debuggerAction({ action: 'remove_breakpoint', breakpoint_id: breakpoint.id }));
           actions.append(edit, remove);
           row.append(reveal, actions);
@@ -4950,6 +5245,9 @@ export async function checkout(cart, fingerprint) {
             });
             const expression = document.createElement('input'); expression.type = 'text'; expression.value = breakpoint.expression ?? ''; expression.placeholder = 'Expression'; expression.setAttribute('aria-label', 'Breakpoint expression');
             const save = document.createElement('button'); save.type = 'submit'; save.className = 'debug-row-action'; save.textContent = 'Save';
+            kind.disabled = originTraceActive;
+            expression.disabled = originTraceActive;
+            save.disabled = originTraceActive;
             const updateVisibility = () => { expression.hidden = kind.value === 'line'; };
             kind.addEventListener('change', updateVisibility); updateVisibility();
             editor.addEventListener('submit', event => {
@@ -4968,11 +5266,14 @@ export async function checkout(cart, fingerprint) {
 
       function renderSpecialBreakpoints() {
         const settings = state.debuggerSession?.settings;
+        const originTraceActive = memoryOriginTraceActive();
+        const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
         elements.pauseOnExceptions.value = settings?.pause_on_exceptions ?? 'none';
         const xhrRows = (settings?.xhr_breakpoints ?? []).map(pattern => {
           const row = document.createElement('div'); row.className = 'debug-row';
           const value = document.createElement('span'); value.className = 'debug-row-value'; value.textContent = pattern || 'Any XHR or fetch';
           const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'debug-row-action'; remove.textContent = '×';
+          remove.disabled = originTraceActive;
           remove.addEventListener('click', () => debuggerAction({ action: 'remove_xhr_breakpoint', pattern }));
           row.append(value, remove); return row;
         });
@@ -4986,6 +5287,7 @@ export async function checkout(cart, fingerprint) {
         const eventRows = events.map(([eventName, label]) => {
           const row = document.createElement('label'); row.className = 'debug-checkbox';
           const input = document.createElement('input'); input.type = 'checkbox'; input.checked = settings?.event_breakpoints.includes(eventName) ?? false;
+          input.disabled = !attached || originTraceActive;
           input.addEventListener('change', () => debuggerAction({ action: input.checked ? 'set_event_breakpoint' : 'remove_event_breakpoint', event_name: eventName }));
           const text = document.createElement('span'); text.textContent = label; row.append(input, text); return row;
         });
@@ -5030,28 +5332,32 @@ export async function checkout(cart, fingerprint) {
         const paused = session?.state === 'paused';
         const running = session?.state === 'running';
         const attached = paused || running;
-        elements.debugResume.disabled = !paused || state.debuggerActionPending;
-        elements.debugPause.disabled = !running || state.debuggerActionPending;
-        [elements.debugStepOver, elements.debugStepInto, elements.debugStepOut].forEach(button => { button.disabled = !paused || state.debuggerActionPending; });
-        elements.debugBreakpointsActive.disabled = !attached || state.debuggerActionPending;
+        const originTraceActive = memoryOriginTraceActive();
+        elements.debugResume.disabled = !paused || state.debuggerActionPending || originTraceActive;
+        elements.debugPause.disabled = !running || state.debuggerActionPending || originTraceActive;
+        [elements.debugStepOver, elements.debugStepInto, elements.debugStepOut].forEach(button => { button.disabled = !paused || state.debuggerActionPending || originTraceActive; });
+        elements.debugBreakpointsActive.disabled = !attached || state.debuggerActionPending || originTraceActive;
         elements.debugBreakpointsActive.setAttribute('aria-pressed', String(session?.settings.breakpoints_active ?? true));
         elements.debugBreakpointsActive.title = session?.settings.breakpoints_active ? 'Deactivate breakpoints' : 'Activate breakpoints';
-        elements.watchExpression.disabled = !attached;
-        elements.pauseOnExceptions.disabled = !attached;
-        elements.xhrBreakpointPattern.disabled = !attached;
+        elements.watchExpression.disabled = !attached || originTraceActive;
+        elements.watchForm.querySelector('button').disabled = !attached || originTraceActive;
+        elements.pauseOnExceptions.disabled = !attached || originTraceActive;
+        elements.xhrBreakpointPattern.disabled = !attached || originTraceActive;
+        elements.xhrBreakpointForm.querySelector('button').disabled = !attached || originTraceActive;
+        elements.consoleClear.disabled = !attached || originTraceActive;
         const pausedSignature = JSON.stringify(session?.paused ?? null);
         const selectedPauseSignature = `${state.selectedCallFrameId ?? ''}:${pausedSignature}`;
-        renderDebuggerPart('state', JSON.stringify([session?.state, session?.error, session?.target, session?.targets, state.debuggerError]), renderDebuggerState);
-        renderDebuggerPart('callStack', selectedPauseSignature, renderCallStack);
+        renderDebuggerPart('state', JSON.stringify([session?.state, session?.error, session?.target, session?.targets, state.debuggerError, originTraceActive]), renderDebuggerState);
+        renderDebuggerPart('callStack', `${originTraceActive}:${selectedPauseSignature}`, renderCallStack);
         renderDebuggerPart('scope', selectedPauseSignature, renderScope);
-        renderDebuggerPart('watches', JSON.stringify(session?.watches ?? []), renderWatches);
-        renderDebuggerPart('breakpoints', JSON.stringify(session?.breakpoints ?? []), renderBreakpoints);
-        renderDebuggerPart('specialBreakpoints', JSON.stringify(session?.settings ?? null), renderSpecialBreakpoints);
+        renderDebuggerPart('watches', JSON.stringify([session?.watches ?? [], originTraceActive]), renderWatches);
+        renderDebuggerPart('breakpoints', JSON.stringify([session?.breakpoints ?? [], originTraceActive]), renderBreakpoints);
+        renderDebuggerPart('specialBreakpoints', JSON.stringify([session?.settings ?? null, attached, originTraceActive]), renderSpecialBreakpoints);
         renderConsole();
       }
 
       async function debuggerAction(request) {
-        if (state.debuggerActionPending) return null;
+        if (state.debuggerActionPending || (memoryOriginTraceActive() && request.action !== 'stop_memory_origin_trace')) return null;
         state.debuggerActionPending = true;
         state.debuggerError = null;
         renderDebugger();
@@ -5110,6 +5416,7 @@ export async function checkout(cart, fingerprint) {
           const previousPendingLine = state.pendingSourceLine ? `${state.pendingSourceLine.scriptId}:${state.pendingSourceLine.line}` : '';
           state.debuggerSession = body;
           state.memoryDiffBaseline = body.heap_diff_baseline;
+          applyMemoryOriginTrace(body.memory_origin_trace);
           state.debuggerEtag = response.headers.get('ETag');
           state.debuggerError = null;
           state.openScriptIds = state.openScriptIds.filter(id => body.scripts.some(script => script.script_id === id));
@@ -5496,15 +5803,21 @@ export async function checkout(cart, fingerprint) {
         runLiveObjectSearch();
       });
       elements.memoryValueQuery.addEventListener('keydown', event => {
-        if (event.key !== 'Enter' || state.memoryMode !== 'snapshot') return;
+        if (event.key !== 'Enter' || !['snapshot', 'origin'].includes(state.memoryMode)) return;
         event.preventDefault();
-        runHeapSnapshotSearch();
+        if (state.memoryMode === 'origin') runMemoryOriginTrace();
+        else runHeapSnapshotSearch();
       });
       elements.memoryModeButtons.forEach(button => button.addEventListener('click', () => {
         setMemoryMode(button.dataset.memoryMode);
       }));
       elements.memoryReferenceScope.addEventListener('change', () => {
-        if (state.memoryMode !== 'snapshot' || state.memorySearchPending) return;
+        if (!['snapshot', 'origin'].includes(state.memoryMode) || state.memorySearchPending) return;
+        if (state.memoryMode === 'origin') {
+          state.memorySearchMessage = 'Reference scope changed. It will apply to the next trace.';
+          renderMemory();
+          return;
+        }
         state.memoryResults = [];
         state.selectedMemoryResultId = null;
         state.memorySearchMeta = null;
@@ -5512,6 +5825,8 @@ export async function checkout(cart, fingerprint) {
         state.memorySearchMessage = 'Reference scope changed. Capture a new snapshot to apply it.';
         renderMemory();
       });
+      elements.memoryOriginStop.addEventListener('click', stopMemoryOriginTrace);
+      elements.memoryOriginReset.addEventListener('click', clearMemoryOriginTrace);
       elements.memoryCaptureBaseline.addEventListener('click', captureHeapDiffBaseline);
       elements.memoryClearBaseline.addEventListener('click', clearHeapDiffBaseline);
       elements.memoryCompareSnapshot.addEventListener('click', runHeapSnapshotDiff);
@@ -5524,6 +5839,7 @@ export async function checkout(cart, fingerprint) {
         }
         if (sourcesVisible && ['F8', 'F10', 'F11'].includes(event.key)) {
           const debugState = state.debuggerSession?.state;
+          if (['armed', 'capturing', 'stepping', 'stopping'].includes(state.debuggerSession?.memory_origin_trace?.state)) return;
           if (!['running', 'paused'].includes(debugState)) return;
           if (event.key !== 'F8' && debugState !== 'paused') return;
           event.preventDefault();

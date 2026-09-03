@@ -11,6 +11,7 @@
 namespace reb {
 
 inline constexpr std::uint32_t kHeapSnapshotSearchProtocolVersion = 2;
+inline constexpr std::uint32_t kHeapSnapshotProbeProtocolVersion = 1;
 inline constexpr std::uint32_t kHeapSnapshotDiffProtocolVersion = 1;
 inline constexpr std::size_t kHeapSnapshotMaxFileBytes = 256U * 1024U * 1024U;
 inline constexpr std::size_t kHeapSnapshotMaxNodes = 2'000'000;
@@ -79,6 +80,32 @@ struct HeapSnapshotSearchResult final {
   std::vector<HeapSnapshotMatch> matches;
 };
 
+struct HeapSnapshotProbeMatch final {
+  std::uint64_t node_id = 0;
+  std::uint64_t self_size = 0;
+  std::string node_type;
+  std::string node_name;
+};
+
+struct HeapSnapshotProbeResult final {
+  std::uint32_t protocol_version = kHeapSnapshotProbeProtocolVersion;
+  std::uint64_t file_bytes = 0;
+  std::uint64_t total_nodes = 0;
+  std::uint64_t analyzed_nodes = 0;
+  std::uint64_t reachable_nodes = 0;
+  std::uint64_t total_edges = 0;
+  std::uint64_t indexed_edges = 0;
+  std::uint64_t total_strings = 0;
+  std::uint64_t duration_ms = 0;
+  HeapSnapshotSearchScope scope = HeapSnapshotSearchScope::kAll;
+  bool match_found = false;
+  bool reachability_indexed = false;
+  bool node_limit_reached = false;
+  bool edge_limit_reached = false;
+  bool string_limit_reached = false;
+  HeapSnapshotProbeMatch match;
+};
+
 struct HeapSnapshotDiffGroup final {
   std::string node_type;
   std::string node_name;
@@ -137,6 +164,15 @@ struct HeapSnapshotDiffResult final {
                                         std::string& error);
 
 [[nodiscard]] std::string HeapSnapshotSearchResultToJson(const HeapSnapshotSearchResult& result);
+
+[[nodiscard]] bool ProbeV8HeapSnapshot(const std::filesystem::path& snapshot_path,
+                                       std::string_view query,
+                                       bool case_sensitive,
+                                       HeapSnapshotSearchScope scope,
+                                       HeapSnapshotProbeResult& result,
+                                       std::string& error);
+
+[[nodiscard]] std::string HeapSnapshotProbeResultToJson(const HeapSnapshotProbeResult& result);
 
 [[nodiscard]] bool CompareV8HeapSnapshots(const std::filesystem::path& baseline_path,
                                           const std::filesystem::path& current_path,

@@ -138,7 +138,9 @@ explicit temporary V8 heap snapshot through a bounded native C++ indexer,
 including scoped unreachable values, retaining paths, and prioritized hidden,
 internal, weak, and ordinary incoming references. Heap Diff keeps an explicit
 local baseline and compares a later capture by object signature, self size, and
-exact retained size over the reachable non-weak edge graph. Selected
+exact retained size over the reachable non-weak edge graph. Memory Origin Trace
+samples bounded function-return pauses, uses an early-exit native heap probe,
+and highlights the first sampled source function containing a value. Selected
 request values can pivot directly into a prefilled Memory search. Artifact success events are
 emitted only after the receiver has committed the manifest record; capture or
 transfer failures remain visible as normal evidence events. Session

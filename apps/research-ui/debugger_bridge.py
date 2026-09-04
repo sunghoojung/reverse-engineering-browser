@@ -142,6 +142,26 @@ MEMORY_ORIGIN_TRACE_FRAMEWORK_PATTERNS = (
     "zone.js",
 )
 
+MEMORY_ORIGIN_TRACE_FRAMEWORK_PATTERNS = (
+    "/node_modules/",
+    "react",
+    "react-dom",
+    "redux",
+    "vue",
+    "angular",
+    "jquery",
+    "lodash",
+    "rxjs",
+    "core-js",
+    "regenerator-runtime",
+    "polyfill",
+    "webpack",
+    "vite",
+    "rollup",
+    "parcel",
+    "zone.js",
+)
+
 
 # V8's side-effect checker rejects this inspector's local arrays and counters.
 # Safety instead comes from fixed source that reads own descriptors, never values

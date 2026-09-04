@@ -208,5 +208,31 @@ fi
 test ! -e "${disabled_session_directory}/artifact-receiver.log"
 test ! -e "${disabled_session_directory}/artifacts/manifest.jsonl"
 
+readonly quiet_sessions="${test_root}/quiet-sessions"
+REB_BRAVE_BINARY="${fake_brave}" \
+REB_ORIGIN_TRACE_APP="${fake_app}" \
+REB_VM_ANALYZER="${fake_analyzer}" \
+REB_ANALYZER_STARTED="${analyzer_started}" \
+REB_ANALYZER_STOPPED="${analyzer_stopped}" \
+REB_LIVE_SESSION_ROOT="${quiet_sessions}" \
+REB_OPEN_COMMAND="${fake_open}" \
+REB_OPEN_ARGUMENTS="${open_arguments}" \
+REB_BRAVE_ARGUMENTS="${brave_arguments}" \
+REB_EVENT_PRODUCER="${event_producer}" \
+REB_ARTIFACT_PRODUCER="${artifact_producer}" \
+REB_CAPTURE_CATEGORY_MASK=257 \
+REB_CAPTURE_DURATION_SECONDS=60 \
+REB_NATIVE_QUIET_MODE=1 \
+  "${live_script}" >"${test_root}/quiet-live.out" \
+  2>"${test_root}/quiet-live.err"
+
+grep -Fxq -- '--js-flags=--reb-ignore-debugger-statements' "${brave_arguments}"
+if grep -Fxq -- '--remote-debugging-port=0' "${brave_arguments}"; then
+  echo "Native quiet mode exposed a remote debugging endpoint" >&2
+  exit 1
+fi
+grep -Fq 'Live debugger: disabled (native quiet mode)' \
+  "${test_root}/quiet-live.out"
+
 test_succeeded=true
 echo "live_session_test passed"

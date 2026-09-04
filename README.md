@@ -153,6 +153,21 @@ by default with category mask `1285` and expire after one hour. Override those
 startup limits with `REB_CAPTURE_CATEGORY_MASK` and
 `REB_CAPTURE_DURATION_SECONDS`.
 
+For a capture that must not attach DevTools to the live page, start native
+quiet mode:
+
+```sh
+REB_NATIVE_QUIET_MODE=1 make live
+```
+
+This mode does not open a remote-debugging endpoint or start the CDP debugger
+bridge. The patched V8 runtime treats page-authored `debugger;` statements as
+no-ops before Inspector handling, while the native evidence probes and captured
+Sources remain available. Live Page sources, breakpoints, stepping, watches,
+and the console are intentionally unavailable in this mode. This removes the
+debugger attachment and pause signals; it does not promise that arbitrary code
+cannot fingerprint the custom browser or measure instrumentation overhead.
+
 ## CI and release builds
 
 Every pull request runs formatting, shell, Python, workflow, repository hygiene,

@@ -47,6 +47,14 @@ for one hour by default with category mask `1285`;
 `REB_CAPTURE_CATEGORY_MASK` and `REB_CAPTURE_DURATION_SECONDS` change those
 low-level startup limits.
 
+Set `REB_NATIVE_QUIET_MODE=1` for a live capture with no DevTools endpoint or
+CDP connection to the page. The custom V8 runtime then ignores page-authored
+`debugger;` statements before Inspector handling. Native evidence capture and
+the Captured Sources catalog continue to work, while live Page debugging,
+stepping, watches, and the console remain disconnected by design. The mode
+removes those direct debugger signals but is not a general browser-fingerprint
+spoofing guarantee.
+
 For development, the same interface can still run in a browser:
 
 ```sh
@@ -252,6 +260,7 @@ also report live broker connectivity.
 Pass `--devtools-active-port /path/to/DevToolsActivePort` to enable the live
 debugger bridge. This path must belong to an explicitly authorized browser
 launched with `--remote-debugging-port=0` and an isolated user-data directory.
+Native quiet mode deliberately omits both options.
 
 Pass `--trace-store /path/to/origin-trace.jsonl` when the edge sidecar is not
 next to the default demo store. The origin-trace endpoint reads at most 10,000

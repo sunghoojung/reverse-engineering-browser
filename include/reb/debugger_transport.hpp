@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 struct sockaddr;
 
@@ -55,6 +56,9 @@ class DebuggerTransport final {
                                                   std::chrono::milliseconds timeout,
                                                   std::string& error);
   [[nodiscard]] int Descriptor() const noexcept { return descriptor_; }
+  [[nodiscard]] bool HasBufferedInput() const noexcept {
+    return buffered_input_offset_ < buffered_input_.size();
+  }
 
  private:
   friend class DebuggerTransportTestPeer;
@@ -62,6 +66,8 @@ class DebuggerTransport final {
   [[nodiscard]] bool SendFrame(std::uint8_t opcode, std::string_view payload, std::string& error);
 
   int descriptor_ = -1;
+  std::vector<unsigned char> buffered_input_;
+  std::size_t buffered_input_offset_ = 0;
 };
 
 [[nodiscard]] bool ReadDebuggerControlMessage(int descriptor,

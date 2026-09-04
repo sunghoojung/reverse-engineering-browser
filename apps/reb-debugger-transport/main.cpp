@@ -44,16 +44,19 @@ int main(const int argc, const char* const argv[]) {
   }
 
   while (true) {
+    const bool buffered_transport_input = transport.HasBufferedInput();
     pollfd descriptors[2] = {
         {STDIN_FILENO, POLLIN, 0},
         {transport.Descriptor(), POLLIN, 0},
     };
     int poll_result = 0;
-    do {
-      poll_result = poll(descriptors, 2, -1);
-    } while (poll_result < 0 && errno == EINTR);
-    if (poll_result < 0) {
-      return Fail(std::string("Debugger transport poll failed: ") + std::strerror(errno));
+    if (!buffered_transport_input) {
+      do {
+        poll_result = poll(descriptors, 2, -1);
+      } while (poll_result < 0 && errno == EINTR);
+      if (poll_result < 0) {
+        return Fail(std::string("Debugger transport poll failed: ") + std::strerror(errno));
+      }
     }
 
     if ((descriptors[0].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0) {
@@ -71,7 +74,8 @@ int main(const int argc, const char* const argv[]) {
       }
     }
 
-    if ((descriptors[1].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0) {
+    if (buffered_transport_input ||
+        (descriptors[1].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0) {
       std::string message;
       const auto status = transport.ReceiveText(message, kFrameReadTimeout, error);
       if (status == reb::DebuggerReceiveStatus::kMessage) {

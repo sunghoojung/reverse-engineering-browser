@@ -104,8 +104,8 @@ class FakeDebuggerWebSocket:
                         "Connection: Upgrade\r\n"
                         f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
                     ).encode()
+                    + self.encode_frame(0x9, b"native-transport")
                 )
-                self.send_frame(0x9, b"native-transport")
                 opcode, payload = self.receive_frame()
                 self.assert_frame(opcode == 0xA)
                 self.assert_frame(payload == b"native-transport")
@@ -169,7 +169,8 @@ class FakeDebuggerWebSocket:
             return
         self.send_frame(0x1, body)
 
-    def send_frame(self, opcode: int, body: bytes, final: bool = True) -> None:
+    @staticmethod
+    def encode_frame(opcode: int, body: bytes, final: bool = True) -> bytes:
         first = (0x80 if final else 0) | opcode
         if len(body) < 126:
             header = struct.pack("!BB", first, len(body))
@@ -177,7 +178,10 @@ class FakeDebuggerWebSocket:
             header = struct.pack("!BBH", first, 126, len(body))
         else:
             header = struct.pack("!BBQ", first, 127, len(body))
-        self.connection.sendall(header + body)
+        return header + body
+
+    def send_frame(self, opcode: int, body: bytes, final: bool = True) -> None:
+        self.connection.sendall(self.encode_frame(opcode, body, final))
 
     def respond(self, command: dict) -> None:
         method = command["method"]

@@ -385,11 +385,24 @@ bool SendAllSocket(const int descriptor,
 }
 
 ReadStatus ReadExactSocket(const int descriptor,
+                           std::vector<unsigned char>& buffered_input,
+                           std::size_t& buffered_input_offset,
                            unsigned char* output,
                            const std::size_t size,
                            const std::chrono::steady_clock::time_point deadline,
                            std::string& error) {
   std::size_t offset = 0;
+  if (buffered_input_offset < buffered_input.size()) {
+    const std::size_t available = buffered_input.size() - buffered_input_offset;
+    const std::size_t copy_size = std::min(size, available);
+    std::copy_n(buffered_input.data() + buffered_input_offset, copy_size, output);
+    buffered_input_offset += copy_size;
+    offset += copy_size;
+    if (buffered_input_offset == buffered_input.size()) {
+      buffered_input.clear();
+      buffered_input_offset = 0;
+    }
+  }
   while (offset < size) {
     const auto now = std::chrono::steady_clock::now();
     if (now >= deadline) {
@@ -443,7 +456,10 @@ bool SendHandshake(const int descriptor,
                        request.size(), std::chrono::steady_clock::now() + kConnectTimeout, error);
 }
 
-bool ReadHandshake(const int descriptor, const std::string_view key, std::string& error) {
+bool ReadHandshake(const int descriptor,
+                   const std::string_view key,
+                   std::vector<unsigned char>& buffered_input,
+                   std::string& error) {
   std::string response;
   response.reserve(4'096U);
   const auto deadline = std::chrono::steady_clock::now() + kConnectTimeout;
@@ -480,15 +496,17 @@ bool ReadHandshake(const int descriptor, const std::string_view key, std::string
       return false;
     }
     response.append(chunk.data(), static_cast<std::size_t>(count));
-    if (response.size() > kDebuggerMaxHandshakeBytes) {
+    const std::size_t header_end = response.find("\r\n\r\n");
+    if (header_end == std::string::npos && response.size() > kDebuggerMaxHandshakeBytes) {
       error = "Debugger WebSocket handshake is oversized";
       return false;
     }
   }
 
   const std::size_t end = response.find("\r\n\r\n");
-  if (end + 4U != response.size()) {
-    error = "Debugger WebSocket sent data during handshake";
+  const std::size_t frame_start = end + 4U;
+  if (frame_start > kDebuggerMaxHandshakeBytes) {
+    error = "Debugger WebSocket handshake is oversized";
     return false;
   }
   const std::string_view headers(response.data(), end);
@@ -531,6 +549,8 @@ bool ReadHandshake(const int descriptor, const std::string_view key, std::string
     error = "Debugger WebSocket returned an invalid handshake";
     return false;
   }
+  buffered_input.assign(response.begin() + static_cast<std::ptrdiff_t>(frame_start),
+                        response.end());
   return true;
 }
 
@@ -541,13 +561,16 @@ struct DebuggerWebSocketFrame final {
 };
 
 ReadStatus ReadDebuggerWebSocketFrame(const int descriptor,
+                                      std::vector<unsigned char>& buffered_input,
+                                      std::size_t& buffered_input_offset,
                                       const std::chrono::steady_clock::time_point deadline,
                                       const std::size_t maximum_data_bytes,
                                       DebuggerWebSocketFrame& frame,
                                       std::string& error) {
   frame = {};
   std::array<unsigned char, 2> prefix{};
-  ReadStatus status = ReadExactSocket(descriptor, prefix.data(), prefix.size(), deadline, error);
+  ReadStatus status = ReadExactSocket(descriptor, buffered_input, buffered_input_offset,
+                                      prefix.data(), prefix.size(), deadline, error);
   if (status != ReadStatus::kComplete) {
     return status;
   }
@@ -572,7 +595,8 @@ ReadStatus ReadDebuggerWebSocketFrame(const int descriptor,
   std::uint64_t length = prefix[1] & 0x7fU;
   if (length == 126U) {
     std::array<unsigned char, 2> extended{};
-    status = ReadExactSocket(descriptor, extended.data(), extended.size(), deadline, error);
+    status = ReadExactSocket(descriptor, buffered_input, buffered_input_offset, extended.data(),
+                             extended.size(), deadline, error);
     if (status != ReadStatus::kComplete) {
       return status;
     }
@@ -583,7 +607,8 @@ ReadStatus ReadDebuggerWebSocketFrame(const int descriptor,
     }
   } else if (length == 127U) {
     std::array<unsigned char, 8> extended{};
-    status = ReadExactSocket(descriptor, extended.data(), extended.size(), deadline, error);
+    status = ReadExactSocket(descriptor, buffered_input, buffered_input_offset, extended.data(),
+                             extended.size(), deadline, error);
     if (status != ReadStatus::kComplete) {
       return status;
     }
@@ -610,7 +635,8 @@ ReadStatus ReadDebuggerWebSocketFrame(const int descriptor,
   }
 
   frame.payload.resize(static_cast<std::size_t>(length));
-  return ReadExactSocket(descriptor, reinterpret_cast<unsigned char*>(frame.payload.data()),
+  return ReadExactSocket(descriptor, buffered_input, buffered_input_offset,
+                         reinterpret_cast<unsigned char*>(frame.payload.data()),
                          frame.payload.size(), deadline, error);
 }
 
@@ -750,8 +776,12 @@ bool DebuggerTransport::Connect(const std::string_view url, std::string& error) 
   if (descriptor < 0) {
     return false;
   }
+  buffered_input_.clear();
+  buffered_input_offset_ = 0;
   std::string key;
-  if (!SendHandshake(descriptor, endpoint, key, error) || !ReadHandshake(descriptor, key, error)) {
+  if (!SendHandshake(descriptor, endpoint, key, error) ||
+      !ReadHandshake(descriptor, key, buffered_input_, error)) {
+    buffered_input_.clear();
     static_cast<void>(close(descriptor));
     return false;
   }
@@ -834,8 +864,8 @@ DebuggerReceiveStatus DebuggerTransport::ReceiveText(std::string& message,
     const auto remaining =
         now >= deadline ? std::chrono::milliseconds(0)
                         : std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
-    bool ready = false;
-    if (!PollDescriptor(descriptor_, POLLIN, remaining, ready, error)) {
+    bool ready = buffered_input_offset_ < buffered_input_.size();
+    if (!ready && !PollDescriptor(descriptor_, POLLIN, remaining, ready, error)) {
       return DebuggerReceiveStatus::kError;
     }
     if (!ready) {
@@ -849,7 +879,8 @@ DebuggerReceiveStatus DebuggerTransport::ReceiveText(std::string& message,
     DebuggerWebSocketFrame frame;
     const std::size_t remaining_capacity = kDebuggerMaxMessageBytes - message.size();
     const ReadStatus frame_status =
-        ReadDebuggerWebSocketFrame(descriptor_, deadline, remaining_capacity, frame, error);
+        ReadDebuggerWebSocketFrame(descriptor_, buffered_input_, buffered_input_offset_, deadline,
+                                   remaining_capacity, frame, error);
     if (frame_status == ReadStatus::kClosed) {
       return DebuggerReceiveStatus::kClosed;
     }

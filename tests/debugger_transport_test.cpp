@@ -23,6 +23,12 @@ class DebuggerTransportTestPeer final {
   static void AdoptDescriptor(DebuggerTransport& transport, const int descriptor) {
     transport.descriptor_ = descriptor;
   }
+
+  static void BufferInput(DebuggerTransport& transport,
+                          const std::span<const unsigned char> bytes) {
+    transport.buffered_input_.assign(bytes.begin(), bytes.end());
+    transport.buffered_input_offset_ = 0;
+  }
 };
 
 }  // namespace reb
@@ -173,6 +179,21 @@ void TestPartialFrameTimeouts() {
   CheckPartialFrameTimeout(partial_payload);
 }
 
+void TestBufferedHandshakeRemainder() {
+  SocketPair sockets;
+  reb::DebuggerTransport transport;
+  reb::DebuggerTransportTestPeer::AdoptDescriptor(transport, sockets.ReleaseTransportDescriptor());
+  const auto frame = ServerFrame(true, 0x1U, "{\"id\":1}");
+  reb::DebuggerTransportTestPeer::BufferInput(transport, frame);
+  CHECK(transport.HasBufferedInput());
+  std::string message;
+  std::string error;
+  CHECK(transport.ReceiveText(message, std::chrono::milliseconds(250), error) ==
+        reb::DebuggerReceiveStatus::kMessage);
+  CHECK(message == "{\"id\":1}");
+  CHECK(!transport.HasBufferedInput());
+}
+
 void TestFragmentedMessageReassembly() {
   std::vector<unsigned char> frames;
   Append(frames, ServerFrame(false, 0x1U, "{\"id\":"));
@@ -223,6 +244,7 @@ void TestCanonicalFrameLengths() {
 int main() {
   TestLoopbackSockaddrValidation();
   TestPartialFrameTimeouts();
+  TestBufferedHandshakeRemainder();
   TestFragmentedMessageReassembly();
   TestMalformedFragmentation();
   TestCanonicalFrameLengths();

@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <climits>
 #include <cstdint>
 #include <cstring>
 #include <limits>

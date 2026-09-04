@@ -1226,6 +1226,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--decoder", type=Path, default=Path("build/reb-decoder"))
     parser.add_argument("--socket", type=Path)
     parser.add_argument("--devtools-active-port", type=Path)
+    parser.add_argument("--debugger-transport", type=Path)
     parser.add_argument("--endpoint-file", type=Path)
     return parser.parse_args()
 
@@ -1249,7 +1250,10 @@ def main() -> int:
     ResearchHandler.decoder_service = DecoderService(args.decoder.resolve())
     ResearchHandler.broker_socket = args.socket.resolve() if args.socket else None
     debugger = DebuggerBridge(
-        args.devtools_active_port.resolve() if args.devtools_active_port else None
+        args.devtools_active_port.resolve() if args.devtools_active_port else None,
+        debugger_transport_binary=(
+            args.debugger_transport.resolve() if args.debugger_transport else None
+        ),
     )
     ResearchHandler.debugger = debugger
     server = LoopbackThreadingHTTPServer((args.host, args.port), ResearchHandler)

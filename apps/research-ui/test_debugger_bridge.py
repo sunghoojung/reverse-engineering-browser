@@ -15,6 +15,7 @@ from typing import Optional
 from unittest import mock
 
 from debugger_bridge import (
+    ActionScopeTargetSession,
     AUTOMATION_RECIPE_FUNCTION,
     LIVE_OBJECT_SEARCH_FUNCTION,
     MAX_HEAP_SNAPSHOT_BYTES,
@@ -24,6 +25,7 @@ from debugger_bridge import (
     DebuggerBridgeError,
     HeapSnapshotCapture,
     HeapSnapshotCollector,
+    NativeDebuggerConnection,
     ProtocolError,
 )
 
@@ -51,6 +53,9 @@ class FakeDebuggerWebSocket:
         self.commands = []
         self.connection = None
         self.breakpoint_index = 0
+        self.pong_received = False
+        self.fragment_next_message = True
+        self.fragmented_message_sent = False
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
@@ -86,6 +91,11 @@ class FakeDebuggerWebSocket:
                     f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
                 ).encode()
             )
+            self.send_frame(0x9, b"native-transport")
+            opcode, payload = self.receive_frame()
+            self.assert_frame(opcode == 0xA)
+            self.assert_frame(payload == b"native-transport")
+            self.pong_received = True
             while True:
                 message = self.receive_json()
                 self.commands.append(message)
@@ -100,8 +110,13 @@ class FakeDebuggerWebSocket:
         return bytes(body).split(b"\r\n\r\n", 1)[0].decode()
 
     def receive_json(self) -> dict:
+        opcode, decoded = self.receive_frame()
+        self.assert_frame(opcode == 0x1)
+        return json.loads(decoded)
+
+    def receive_frame(self) -> tuple[int, bytes]:
         first, second = self.receive_exact(2)
-        self.assert_frame(first & 0x0F == 1)
+        opcode = first & 0x0F
         self.assert_frame((second & 0x80) != 0)
         length = second & 0x7F
         if length == 126:
@@ -111,7 +126,7 @@ class FakeDebuggerWebSocket:
         mask = self.receive_exact(4)
         body = self.receive_exact(length)
         decoded = bytes(value ^ mask[index % 4] for index, value in enumerate(body))
-        return json.loads(decoded)
+        return opcode, decoded
 
     def receive_exact(self, length: int) -> bytes:
         body = bytearray()
@@ -124,12 +139,23 @@ class FakeDebuggerWebSocket:
 
     def send_json(self, value: dict) -> None:
         body = json.dumps(value, separators=(",", ":")).encode()
+        if self.fragment_next_message:
+            split = max(1, len(body) // 2)
+            self.send_frame(0x1, body[:split], final=False)
+            self.send_frame(0x0, body[split:])
+            self.fragment_next_message = False
+            self.fragmented_message_sent = True
+            return
+        self.send_frame(0x1, body)
+
+    def send_frame(self, opcode: int, body: bytes, final: bool = True) -> None:
+        first = (0x80 if final else 0) | opcode
         if len(body) < 126:
-            header = struct.pack("!BB", 0x81, len(body))
+            header = struct.pack("!BB", first, len(body))
         elif len(body) < 2**16:
-            header = struct.pack("!BBH", 0x81, 126, len(body))
+            header = struct.pack("!BBH", first, 126, len(body))
         else:
-            header = struct.pack("!BBQ", 0x81, 127, len(body))
+            header = struct.pack("!BBQ", first, 127, len(body))
         self.connection.sendall(header + body)
 
     def respond(self, command: dict) -> None:
@@ -439,6 +465,61 @@ class DebuggerBridgeTests(unittest.TestCase):
         self.assertEqual(result, [initial_generation + 1])
         self.assertEqual(bridge.state(), "unavailable")
 
+    def test_native_transport_rejects_missing_binary_and_non_loopback_url(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "reb-debugger-transport"
+            with self.assertRaisesRegex(
+                DebuggerBridgeError, "run make debugger-transport"
+            ):
+                NativeDebuggerConnection("ws://127.0.0.1:9222/devtools/page/1", missing)
+            invalid = Path(directory) / "invalid-debugger-transport"
+            invalid.write_text("not an executable image\n", encoding="utf-8")
+            invalid.chmod(0o700)
+            with self.assertRaisesRegex(DebuggerBridgeError, "could not start"):
+                NativeDebuggerConnection("ws://127.0.0.1:9222/devtools/page/1", invalid)
+
+        binary = (
+            Path(__file__).resolve().parents[2]
+            / "build"
+            / "reb-debugger-transport"
+        )
+        with self.assertRaisesRegex(DebuggerBridgeError, "loopback ws://"):
+            NativeDebuggerConnection("ws://192.0.2.1/devtools/page/1", binary)
+
+    def test_action_scope_session_uses_native_transport(self) -> None:
+        web_socket = FakeDebuggerWebSocket()
+        binary = (
+            Path(__file__).resolve().parents[2]
+            / "build"
+            / "reb-debugger-transport"
+        )
+        closed = []
+        session = ActionScopeTargetSession(
+            {
+                "id": "action-scope-1",
+                "type": "page",
+                "title": "Action scope",
+                "url": "https://action-scope.test/",
+                "web_socket_url": (
+                    f"ws://127.0.0.1:{web_socket.port}/devtools/page/action-scope-1"
+                ),
+            },
+            lambda *_args: None,
+            lambda target_id, error: closed.append((target_id, error)),
+            binary,
+        )
+        try:
+            session.start()
+            self.assertTrue(session.ready())
+            self.assertTrue(web_socket.pong_received)
+            self.assertTrue(web_socket.fragmented_message_sent)
+            self.assertFalse(closed)
+        finally:
+            session.close()
+            web_socket.close()
+
     def test_real_protocol_state_drives_scripts_pause_scopes_watches_and_breakpoints(
         self,
     ) -> None:
@@ -470,6 +551,8 @@ class DebuggerBridgeTests(unittest.TestCase):
                     )
                 )
                 self.assertEqual(snapshot["target"]["title"], "Checkout")
+                self.assertTrue(web_socket.pong_received)
+                self.assertTrue(web_socket.fragmented_message_sent)
                 self.assertEqual(
                     snapshot["scripts"][0]["source_map_url"], "cart.js.map"
                 )
@@ -3224,8 +3307,14 @@ process.stdout.write(JSON.stringify({{result, timed, getterCalls}}));
         class RaceSession:
             instances = []
 
-            def __init__(self, session_target, event_handler, close_handler) -> None:
-                del event_handler, close_handler
+            def __init__(
+                self,
+                session_target,
+                event_handler,
+                close_handler,
+                debugger_transport_binary,
+            ) -> None:
+                del event_handler, close_handler, debugger_transport_binary
                 self.target_id = session_target["id"]
                 self.closed = False
                 self.ready_state = False

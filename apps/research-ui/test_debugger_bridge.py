@@ -548,7 +548,8 @@ class DebuggerBridgeTests(unittest.TestCase):
                         (value := bridge.snapshot())["state"] == "running"
                         and value["scripts"]
                         and value
-                    )
+                    ),
+                    timeout=10.0,
                 )
                 self.assertEqual(snapshot["target"]["title"], "Checkout")
                 self.assertTrue(web_socket.pong_received)

@@ -39,8 +39,9 @@ using NativeArtifactCompletion = void (*)(std::uint64_t artifact_id,
                                           NativeArtifactReceiveStatus status) noexcept;
 
 // Owns the browser-process side of the independently bounded artifact stream.
-// Network capture sequences enqueue completed immutable bodies; a dedicated
-// writer thread performs all socket I/O and waits for durable receiver acks.
+// Network and generated-source capture sequences enqueue completed immutable
+// bodies; a dedicated writer thread performs all socket I/O and waits for
+// durable receiver acks.
 class NativeArtifactSocketClient final {
  public:
   static NativeArtifactSocketClient& Get();

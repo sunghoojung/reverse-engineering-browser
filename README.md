@@ -1,164 +1,115 @@
 # Reverse Engineering Browser
 
-Private workspace for a Brave-based browser harness used in authorized website
-security research.
+Native browser observability for authorized reverse engineering.
 
-The project goal is to observe browser behavior through native browser
-instrumentation, not page JavaScript hooks. Native C++ probe surfaces emit
-bounded telemetry to a browser-process broker, which streams normalized events
-to a local research interface.
+[![Continuous integration](https://github.com/sunghoojung/reverse-engineering-browser/actions/workflows/ci.yml/badge.svg)](https://github.com/sunghoojung/reverse-engineering-browser/actions/workflows/ci.yml)
 
-## Start here
+Reverse Engineering Browser is a local-first research harness built around a
+custom Brave integration. Dormant native C++ probes capture selected browser
+behavior, move bounded records through the browser process, and persist
+normalized evidence for inspection in the Origin Trace macOS application.
 
-Validate the tracked workspace and native foundation:
+The project is an active research prototype. Its native event path, broker,
+evidence stores, artifact channel, deterministic producer, Origin Trace
+interface, and tracked Brave overlays are implemented and tested. The custom
+browser build remains an advanced workflow because it uses the full Brave and
+Chromium toolchain.
+
+## Why this exists
+
+Page-level JavaScript hooks can miss browser-internal context and can change
+the environment being studied. This project observes selected native browser
+boundaries while keeping the capture path separate from interpretation.
+
+The result is an evidence trail designed to answer questions such as:
+
+- Which script, frame, worker, or WebAssembly artifact caused an event?
+- Which browser signals contributed to a network request?
+- Where did a value originate, and what evidence supports that conclusion?
+- Can a hypothesis be tested in a disposable context without changing the
+  baseline capture?
+
+## Architecture
+
+```text
+native probe -> bounded renderer transport -> browser-process bridge
+             -> local event broker -> evidence store -> Origin Trace
+```
+
+![Reverse Engineering Browser system architecture](./docs/architecture/system-architecture.svg)
+
+The design keeps renderer work bounded and non-blocking, preserves raw evidence
+alongside later interpretations, and makes dropped events and sequence gaps
+visible. Cross-process records are versioned and retain session, navigation,
+frame, artifact, event, and parent identifiers.
+
+## What is implemented
+
+| Area | Current proof point |
+| --- | --- |
+| Native capture foundation | C++20 fixed-size events, bounded shared-memory queues, disabled fast paths, and explicit drop accounting |
+| Broker and evidence | Authenticated local sockets, validation, correlation, sequence-gap detection, JSONL evidence, and versioned contracts |
+| Artifact capture | Acknowledged, bounded transfer of immutable JavaScript and WebAssembly blobs with SHA-256 manifests |
+| Origin Trace | Native macOS application plus a browser-only development path for request-first evidence inspection, sources, memory analysis, and experiments |
+| Brave integration | Reproducible overlays and ordered patches pinned to specific Brave and Chromium revisions |
+| Verification | Native unit tests, socket and application end-to-end tests, sanitizers, repository hygiene checks, and macOS bundle verification in CI |
+
+The [feature roadmap](./docs/product/feature-list.md) separates the broader
+product direction from the currently proven vertical slices. Detailed design
+and subsystem contracts live in the [documentation index](./docs/README.md).
+
+## Quick start
+
+Requirements for the local foundation:
+
+- a C++20 compiler;
+- Python 3;
+- zlib headers and library;
+- GNU Make or a compatible `make` implementation.
+
+Build and run the test suite:
 
 ```sh
 make check
+make e2e
 ./build/reb-event-demo
 ```
 
-Prepare the pinned upstream Brave checkout without downloading Chromium:
-
-```sh
-./scripts/bootstrap-brave.sh
-```
-
-When you are ready for the large Chromium download, initialize Brave and then
-apply the integration tracked by this repository:
-
-```sh
-./scripts/bootstrap-brave.sh --init
-./scripts/sync-browser-integration.sh
-```
-
-Initialization uses Brave's shallow Chromium history mode by default. If an
-investigation specifically requires complete Chromium Git history, opt in with
-`./scripts/bootstrap-brave.sh --init --full-history`.
-Bootstrap refuses to switch a checkout with local changes when its revision
-does not match the requested pin, leaving those changes untouched.
-
-Check the local Apple toolchain and compile the tracked Brave probe:
-
-```sh
-make brave-doctor
-make brave-probe-check
-```
-
-On memory-constrained machines, set `REB_BRAVE_JOBS` to a positive integer to
-bound concurrent Brave compiler jobs, for example `REB_BRAVE_JOBS=4 make
-brave-probe-check`.
-
-## Current implementation
-
-The repository includes a dependency-free C++ vertical slice for the probe event path:
-
-- a fixed-size, versioned event record;
-- bounded multi-producer, single-consumer shared-memory queues;
-- explicit dropped-event accounting;
-- a bounded broker with validation, sequence-gap detection, and eviction accounting;
-- an authenticated, user-only Unix socket from Brave to the broker;
-- a native binary event stream and versioned JSONL evidence store;
-- a bounded request signal profile for fingerprint-relevant browser activity;
-- an authenticated, acknowledged artifact socket with immutable SHA-256 blobs;
-- a native macOS Origin Trace application that reads the broker evidence store;
-- bounded read-only live JavaScript object search plus native C++ V8
-  heap-snapshot search, comparison, retaining paths, and dominator analysis;
-- bounded browser-context automation recipes with confirmed manual runs and
-  explicitly armed created, before-load, and after-load triggers inside a
-  disposable Experiment BrowserContext;
-- a persistent Local Analyst Workspace with reusable async scripts,
-  non-executable scratchpads, private variables, frozen bounded evidence
-  snapshots, isolated helper processes, cancellation, and visible limits;
-- a threaded producer and consumer demo;
-- unit tests and sanitizer support.
-
-The deterministic producer validates the same broker boundary without launching
-Brave. The tracked Brave integration carries renderer records through shared
-memory and Mojo into the browser process, then sends them to the broker socket.
-The browser process also tees JavaScript and WASM response bodies into a
-separate bounded artifact queue without delaying or changing the response
-delivered to the page.
-
-## Native development
-
-Requirements:
-
-- a C++20 compiler;
-- GNU Make or a compatible `make` implementation.
-
-```sh
-make
-make test
-./build/reb-event-demo
-```
-
-## Origin Trace application
-
-On macOS, build the demo evidence and open the native Origin Trace application:
+On macOS, build demo evidence and open the native Origin Trace application:
 
 ```sh
 make app
 ```
 
-This builds `build/Origin Trace.app`, writes the demo evidence, and opens the
-application. It is a native WebKit window with no browser address bar and no
-localhost server. The application and broker stay local.
-
-The demo includes linked Navigator, Canvas, Web Audio, WebAssembly, and Network
-events, plus separately transferred JavaScript and WASM artifacts in the
-Sources tab. Its Web Audio record identifies the
-`OfflineAudioContext.startRendering` call, and both demo request profiles link
-that record through their observed parent chains.
-The research workflow starts from a live request and works backward through a
-versioned, bounded Origin Trace edge store to the available browser evidence.
-The request inspector also summarizes retained Canvas, WebGL, Web Audio,
-Navigator, Permissions, Storage, and WebRTC activity with explicit confidence
-and coverage.
-
-For browser-based UI development only, run:
+For browser-based UI development on any supported host:
 
 ```sh
 make ui
 ```
 
-Then open `http://127.0.0.1:7319`.
+Then open `http://127.0.0.1:7319`. The native application is the normal product
+path; the local server is a development convenience.
 
-After building the complete custom Brave application, launch one live capture
-session with:
+## Custom Brave integration
+
+Preparing and building Brave is optional for work on the native foundation,
+broker, evidence contracts, and deterministic UI path.
+
+Prepare the pinned upstream checkout without downloading Chromium:
 
 ```sh
-make live
+./scripts/bootstrap-brave.sh
 ```
 
-The launcher creates session-scoped event and artifact sockets with one
-user-only token, opens Origin Trace, and starts the custom Brave executable
-with the matching session flags. It also starts the research UI on a random
-loopback port and attaches an allowlisted debugger bridge to Brave's isolated,
-session-scoped profile. Sources then provides live scripts, breakpoints,
-stepping, sync and async call stacks, bounded scopes and watches, special
-breakpoints, and a console drawer. Memory adds property, primitive value,
-class, regular expression, and JSON-shape search over live JavaScript objects.
-The scan never invokes accessors, returns read-only previews, and enforces
-time, candidate, property, and result limits. Memory can also search an
-explicit temporary V8 heap snapshot through a bounded native C++ indexer,
-including scoped unreachable values, retaining paths, and prioritized hidden,
-internal, weak, and ordinary incoming references. Heap Diff keeps an explicit
-local baseline and compares a later capture by object signature, self size, and
-exact retained size over the reachable non-weak edge graph. Memory Origin Trace
-samples bounded function-return pauses, uses an early-exit native heap probe,
-and highlights the first sampled source function containing a value. Selected
-request values can pivot directly into a prefilled Memory search. Artifact success events are
-emitted only after the receiver has committed the manifest record; capture or
-transfer failures remain visible as normal evidence events. Session
-directories and evidence files are user-only. When the Artifact category is
-disabled, the launcher omits the artifact receiver and exits normally with
-Brave.
-Set `REB_BRAVE_BINARY` when the executable is outside the default component
-output directory. Live sessions enable Canvas, Web Audio, Network, and Artifact
-by default with category mask `1285` and expire after one hour. Override those
-startup limits with `REB_CAPTURE_CATEGORY_MASK` and
-`REB_CAPTURE_DURATION_SECONDS`.
+Initialize Chromium, apply the repository-owned integration, and verify the
+native probe target:
 
+```sh
+./scripts/bootstrap-brave.sh --init
+./scripts/sync-browser-integration.sh
+make brave-doctor
+make brave-probe-check
+```
 For a capture that must not attach DevTools to the live page, start native
 quiet mode:
 
@@ -174,75 +125,72 @@ and the console are intentionally unavailable in this mode. This removes the
 debugger attachment and pause signals; it does not promise that arbitrary code
 cannot fingerprint the custom browser or measure instrumentation overhead.
 
-## CI and release builds
+Initialization needs at least 150 GiB of free space; 200 to 250 GiB is the
+practical recommendation. The default shallow-history mode avoids unnecessary
+Git history. Use `--full-history` only when an investigation requires it.
 
-Every pull request runs formatting, shell, Python, workflow, repository hygiene,
-and evidence-contract checks. The native test suite runs on macOS and Ubuntu.
-Linux also runs the full end-to-end and sanitizer paths. The macOS job builds
-and verifies the application bundle, then keeps a downloadable preview for
-three days.
+The generated upstream checkout lives under `browser/worktree/` and is never
+tracked. All project-owned Brave files live in mirrored overlays or minimal
+ordered patches under `browser/integration/brave/`.
 
-After installing the pinned tool versions listed in the CI workflow, run the
-fast source and repository checks with:
+## Engineering principles
+
+- Local by default: services bind to loopback or user-only local sockets, and
+  captured evidence is never uploaded automatically.
+- Bounded by design: probe work, queues, payloads, searches, and experiments
+  have explicit limits and visible failure states.
+- Evidence before inference: raw observations remain available when later
+  analyzers assign meaning or confidence.
+- Privacy-aware capture: credentials, authorization headers, cookies, request
+  bodies, and personal content are excluded by default.
+- Reproducible integration: browser changes must apply cleanly to the pinned
+  upstream revisions from a clean checkout.
+
+This software is intended only for systems you own or are explicitly
+authorized to assess. It is not designed to bypass access controls or conceal
+malicious activity.
+
+## Repository map
+
+```text
+.agents/skills/         repository-specific agent validation workflows
+apps/                   demos, producers, and the Origin Trace interface
+browser/                pinned Brave integration and ignored upstream checkout
+docs/                   architecture, product direction, and feature designs
+include/ and src/       dependency-free native event foundation
+protocol/               versioned event, trace, and command contracts
+services/               local event broker and artifact receiver
+tests/                  native, socket, integration, and UI tests
+tools/                  offline validation and analysis utilities
+```
+
+## Development
+
+Run the complete local quality gate before handing off a change:
 
 ```sh
 make lint
-```
-
-To publish a versioned macOS download, push a version tag:
-
-```sh
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-GitHub Actions verifies the application, creates a ZIP archive, and attaches it
-to a GitHub Release. Release builds are locally signed for development; Apple
-notarization is intentionally deferred until external distribution is needed.
-
-Run sanitizer checks. Linux uses AddressSanitizer and UndefinedBehaviorSanitizer;
-macOS uses UndefinedBehaviorSanitizer:
-
-```sh
+make check
+make e2e
 make sanitize
+git diff --check
 ```
 
-## Layout
+CI runs source formatting, shell, Python, workflow, repository hygiene, native,
+end-to-end, sanitizer, and macOS application checks. Version tags matching
+`v*` build a locally signed macOS archive and publish it through GitHub
+Releases.
 
-```text
-.agents/skills/         repo-scoped validation and testing workflows
-.github/workflows/      pull-request checks and tag-triggered releases
-apps/                   runnable demos, producers, and Origin Trace
-  research-ui/macos/    native macOS shell and application icon source
-browser/                tracked Brave integration and ignored source worktree
-docs/                   product and architecture documentation
-  architecture/         technical architecture and system diagram
-  product/              feature roadmap and product catalog
-include/ and src/       dependency-free native event foundation
-protocol/               shared browser, broker, and UI contracts
-services/event-broker/  local browser-process bridge and evidence broker
-services/artifact-receiver/ bounded cold-path artifact receiver and store
-scripts/                setup, app packaging, and workspace validation
-tests/                  native unit and concurrency tests
-tools/                  development and analysis utilities
-```
+Start with [CONTRIBUTING.md](./CONTRIBUTING.md) before making a change. Coding
+agents should also read [AGENTS.md](./AGENTS.md) and use the repository skills
+under `.agents/skills/` for UI, Brave, and handoff validation.
 
-All project-owned Brave changes live in `browser/integration/brave` as tracked
-overlays and patches. The pinned upstream `brave-core` checkout and Chromium
-build output live under `browser/worktree` and are intentionally excluded from
-Git. This keeps every unique project file in one GitHub repository without
-duplicating hundreds of gigabytes of reproducible upstream source.
-
-Brave and Chromium initialization requires substantial storage. Keep at least
-150 GiB free before running `./scripts/bootstrap-brave.sh --init`; 200 to 250
-GiB is recommended for comfortable development and updates. The default
-shallow history avoids downloading unnecessary historical Git objects.
-
-## Docs
+## Documentation
 
 - [Documentation index](./docs/README.md)
 - [Technical architecture](./docs/architecture/technical-architecture.md)
 - [System architecture](./docs/architecture/system-architecture.md)
 - [Feature roadmap](./docs/product/feature-list.md)
 - [Feature catalog](./docs/product/feature-catalog.md)
-- [Brave integration](./browser/README.md)
+- [Origin Trace application](./apps/research-ui/README.md)
+- [Brave workspace](./browser/README.md)

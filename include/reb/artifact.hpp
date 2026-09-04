@@ -31,6 +31,15 @@ enum class ArtifactKind : std::uint16_t {
   kResponseBody = 4,
 };
 
+enum class ArtifactCaptureOrigin : std::uint16_t {
+  kUnknown = 0,
+  kNetworkResponse = 1,
+  kDynamicJavaScript = 2,
+  kWebAssemblyCompile = 3,
+  kWebAssemblyModule = 4,
+  kWebAssemblyInstantiate = 5,
+};
+
 struct ArtifactHeader final {
   std::uint32_t magic = kArtifactMagic;
   std::uint16_t protocol_version = kArtifactProtocolVersion;
@@ -48,7 +57,10 @@ struct ArtifactHeader final {
   std::uint32_t url_size = 0;
   std::uint32_t mime_type_size = 0;
   std::array<std::uint8_t, 32> expected_sha256{};
-  std::array<std::uint8_t, 16> reserved1{};
+  std::uint64_t execution_context_id = 0;
+  ArtifactCaptureOrigin capture_origin = ArtifactCaptureOrigin::kUnknown;
+  std::uint16_t reserved1 = 0;
+  std::uint32_t reserved2 = 0;
 };
 
 static_assert(sizeof(ArtifactHeader) == kArtifactHeaderSize);
@@ -57,6 +69,8 @@ static_assert(std::is_trivially_copyable_v<ArtifactHeader>);
 static_assert(offsetof(ArtifactHeader, session_id) == 16);
 static_assert(offsetof(ArtifactHeader, content_size) == 64);
 static_assert(offsetof(ArtifactHeader, expected_sha256) == 80);
+static_assert(offsetof(ArtifactHeader, execution_context_id) == 112);
+static_assert(offsetof(ArtifactHeader, capture_origin) == 120);
 
 enum class ArtifactReceiveStatus : std::uint32_t {
   kAccepted,
@@ -133,6 +147,7 @@ class ArtifactReceiver final {
 
 [[nodiscard]] bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept;
 [[nodiscard]] const char* ArtifactKindName(ArtifactKind kind) noexcept;
+[[nodiscard]] const char* ArtifactCaptureOriginName(ArtifactCaptureOrigin origin) noexcept;
 
 }  // namespace reb
 

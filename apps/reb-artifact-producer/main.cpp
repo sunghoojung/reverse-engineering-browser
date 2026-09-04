@@ -87,7 +87,9 @@ bool WriteArtifact(const int descriptor,
                    const std::uint64_t artifact_id,
                    const std::uint64_t parent_artifact_id,
                    const std::uint64_t creator_event_id,
+                   const std::uint64_t execution_context_id,
                    const reb::ArtifactKind kind,
+                   const reb::ArtifactCaptureOrigin capture_origin,
                    const std::string_view url,
                    const std::string_view mime_type,
                    const std::span<const std::byte> content) {
@@ -99,6 +101,8 @@ bool WriteArtifact(const int descriptor,
   header.artifact_id = artifact_id;
   header.parent_artifact_id = parent_artifact_id;
   header.creator_event_id = creator_event_id;
+  header.execution_context_id = execution_context_id;
+  header.capture_origin = capture_origin;
   header.content_size = content.size();
   header.url_size = static_cast<std::uint32_t>(url.size());
   header.mime_type_size = static_cast<std::uint32_t>(mime_type.size());
@@ -176,15 +180,18 @@ export function runGuest(host, program = guestProgram) {
   }
   const bool expect_ack = !options.socket_path.empty();
   const bool written =
-      WriteArtifact(descriptor, expect_ack, frame_session_id, 300, 0, 4,
-                    reb::ArtifactKind::kJavaScript, "https://checkout.acme.test/assets/cart.js",
-                    "text/javascript", javascript_bytes) &&
-      WriteArtifact(descriptor, expect_ack, frame_session_id, 301, 300, 3, reb::ArtifactKind::kWasm,
+      WriteArtifact(descriptor, expect_ack, frame_session_id, 300, 0, 4, 0,
+                    reb::ArtifactKind::kJavaScript, reb::ArtifactCaptureOrigin::kNetworkResponse,
+                    "https://checkout.acme.test/assets/cart.js", "text/javascript",
+                    javascript_bytes) &&
+      WriteArtifact(descriptor, expect_ack, frame_session_id, 301, 300, 3, 0,
+                    reb::ArtifactKind::kWasm, reb::ArtifactCaptureOrigin::kNetworkResponse,
                     "https://checkout.acme.test/assets/fingerprint.wasm", "application/wasm",
                     kWasmHeader) &&
-      WriteArtifact(
-          descriptor, expect_ack, frame_session_id, 302, 0, 0, reb::ArtifactKind::kJavaScript,
-          "https://checkout.acme.test/assets/vm-sample.js", "text/javascript", javascript_vm_bytes);
+      WriteArtifact(descriptor, expect_ack, frame_session_id, 302, 0, 0, 2200,
+                    reb::ArtifactKind::kJavaScript, reb::ArtifactCaptureOrigin::kDynamicJavaScript,
+                    "https://checkout.acme.test/assets/vm-sample.js", "text/javascript",
+                    javascript_vm_bytes);
   if (expect_ack && close(descriptor) != 0) {
     std::cerr << "Failed to close artifact socket\n";
     return 1;

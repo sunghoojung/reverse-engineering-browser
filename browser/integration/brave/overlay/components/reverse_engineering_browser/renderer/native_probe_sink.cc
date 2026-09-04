@@ -52,23 +52,84 @@ NativeProbeSink& NativeProbeSink::Get() {
   return sink;
 }
 
-void NativeProbeSink::SetEmitter(const NativeProbeEmitter emitter,
-                                 const std::uint64_t session_id,
-                                 const std::uint64_t category_mask,
-                                 const std::uint64_t expires_at_monotonic_ns) noexcept {
-  // SetEmitter is serialized by NativeProbeTransport's bound sequence. Stop
+void NativeProbeSink::SetEmitters(const NativeProbeEmitter emitter,
+                                  const NativeGeneratedArtifactEmitter artifact_emitter,
+                                  const std::uint64_t session_id,
+                                  const std::uint64_t category_mask,
+                                  const std::uint64_t expires_at_monotonic_ns) noexcept {
+  // SetEmitters is serialized by NativeProbeTransport's bound sequence. Stop
   // new readers before marking the independently atomic configuration fields
   // unstable. The completed even generation release-publishes the relaxed
   // policy fields and emitter together. Active readers acquire an even
   // generation, snapshot those fields, and accept only an unchanged final
   // generation.
   emitter_.store(nullptr, std::memory_order_release);
+  artifact_emitter_.store(nullptr, std::memory_order_release);
   config_generation_.fetch_add(1, std::memory_order_acq_rel);
-  session_id_.store(emitter ? session_id : 0, std::memory_order_relaxed);
-  category_mask_.store(emitter ? category_mask : 0, std::memory_order_relaxed);
-  expires_at_monotonic_ns_.store(emitter ? expires_at_monotonic_ns : 0, std::memory_order_relaxed);
+  const bool active = emitter && artifact_emitter;
+  session_id_.store(active ? session_id : 0, std::memory_order_relaxed);
+  category_mask_.store(active ? category_mask : 0, std::memory_order_relaxed);
+  expires_at_monotonic_ns_.store(active ? expires_at_monotonic_ns : 0, std::memory_order_relaxed);
   emitter_.store(emitter, std::memory_order_relaxed);
+  artifact_emitter_.store(artifact_emitter, std::memory_order_relaxed);
   config_generation_.fetch_add(1, std::memory_order_release);
+}
+
+bool NativeProbeSink::IsArtifactCaptureEnabled() const noexcept {
+  if (!artifact_emitter_.load(std::memory_order_acquire)) [[likely]] {
+    return false;
+  }
+  const std::uint64_t generation = config_generation_.load(std::memory_order_acquire);
+  if ((generation & 1U) != 0) {
+    return false;
+  }
+  const std::uint64_t category_mask = category_mask_.load(std::memory_order_relaxed);
+  const std::uint64_t expires_at = expires_at_monotonic_ns_.load(std::memory_order_relaxed);
+  const NativeGeneratedArtifactEmitter artifact_emitter =
+      artifact_emitter_.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  return config_generation_.load(std::memory_order_acquire) == generation && artifact_emitter &&
+         (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kArtifact)) != 0 &&
+         MonotonicTimeNs() < expires_at;
+}
+
+void NativeProbeSink::CaptureGeneratedArtifact(
+    const NativeArtifactKind kind,
+    const NativeArtifactCaptureOrigin capture_origin,
+    const std::uint64_t execution_context_id,
+    const std::uint64_t frame_id,
+    const std::string_view source_url,
+    const std::span<const std::uint8_t> content) noexcept {
+  if (!artifact_emitter_.load(std::memory_order_acquire) || execution_context_id == 0 ||
+      source_url.empty() || source_url.size() > kNativeArtifactMaxUrlBytes || content.empty() ||
+      content.size() > kNativeArtifactMaxContentBytes) [[likely]] {
+    return;
+  }
+  const bool valid_kind_and_origin =
+      (kind == NativeArtifactKind::kJavaScript &&
+       capture_origin == NativeArtifactCaptureOrigin::kDynamicJavaScript) ||
+      (kind == NativeArtifactKind::kWasm &&
+       (capture_origin == NativeArtifactCaptureOrigin::kWebAssemblyCompile ||
+        capture_origin == NativeArtifactCaptureOrigin::kWebAssemblyModule ||
+        capture_origin == NativeArtifactCaptureOrigin::kWebAssemblyInstantiate));
+  if (!valid_kind_and_origin) {
+    return;
+  }
+  const std::uint64_t generation = config_generation_.load(std::memory_order_acquire);
+  if ((generation & 1U) != 0) {
+    return;
+  }
+  const std::uint64_t category_mask = category_mask_.load(std::memory_order_relaxed);
+  const std::uint64_t expires_at = expires_at_monotonic_ns_.load(std::memory_order_relaxed);
+  const NativeGeneratedArtifactEmitter artifact_emitter =
+      artifact_emitter_.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (config_generation_.load(std::memory_order_acquire) != generation || !artifact_emitter ||
+      (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kArtifact)) == 0 ||
+      MonotonicTimeNs() >= expires_at) {
+    return;
+  }
+  artifact_emitter(kind, capture_origin, execution_context_id, frame_id, source_url, content);
 }
 
 void NativeProbeSink::RecordCanvasToDataUrl() noexcept {

@@ -19,6 +19,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let localAnalystStoreURL: URL
   private let analystRunnerURL: URL
   private let analystRunnerCoreURL: URL
+  private let decoderService: NativeDecoderService
   private let brokerSocketURL: URL?
   private let apiCollectionLock = NSLock()
   private let localAnalystLock = NSLock()
@@ -37,6 +38,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     localAnalystStoreURL: URL,
     analystRunnerURL: URL,
     analystRunnerCoreURL: URL,
+    decoderExecutableURL: URL,
     brokerSocketURL: URL?
   ) {
     self.indexURL = indexURL
@@ -48,6 +50,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     self.localAnalystStoreURL = localAnalystStoreURL
     self.analystRunnerURL = analystRunnerURL
     self.analystRunnerCoreURL = analystRunnerCoreURL
+    decoderService = NativeDecoderService(executableURL: decoderExecutableURL)
     self.brokerSocketURL = brokerSocketURL
   }
 
@@ -75,6 +78,14 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         response = (try Data(contentsOf: indexURL), "text/html; charset=utf-8", 200, [:])
       case "/api/health":
         response = (try healthResponse(), "application/json; charset=utf-8", 200, [:])
+      case "/api/decoder":
+        response = (try decoderService.state(), "application/json; charset=utf-8", 200, [:])
+      case "/api/decoder/actions":
+        guard urlSchemeTask.request.httpMethod == "POST" else {
+          throw LocalHTTPError(status: 405, message: "Decoder actions require POST")
+        }
+        handleDecoderAction(urlSchemeTask.request, to: urlSchemeTask)
+        return
       case "/api/debugger":
         let debuggerResponse = try debuggerUnavailableResponse(
           ifNoneMatch: urlSchemeTask.request.value(forHTTPHeaderField: "If-None-Match")
@@ -202,6 +213,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "local_analyst_runner_available": FileManager.default.isExecutableFile(
           atPath: analystRunnerURL.path
         ),
+        "decoder_available": decoderService.available,
         "broker_connected": brokerConnected(),
       ],
       options: []
@@ -1498,6 +1510,43 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     )
   }
 
+  private func handleDecoderAction(
+    _ request: URLRequest,
+    to task: WKURLSchemeTask
+  ) {
+    let action: [String: Any]
+    do {
+      let body = try apiCollectionRequestBody(request)
+      guard body.count <= 1_536 * 1_024,
+        let parsed = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+      else {
+        throw LocalHTTPError(status: 400, message: "Decoder action body is malformed or oversized")
+      }
+      action = parsed
+    } catch let error as LocalHTTPError {
+      sendError(error.message, status: error.status, to: task)
+      return
+    } catch {
+      sendError("Decoder action body is malformed", status: 400, to: task)
+      return
+    }
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        self.send(
+          try self.decoderService.action(action),
+          contentType: "application/json; charset=utf-8",
+          status: 200,
+          headers: [:],
+          to: task
+        )
+      } catch let error as NativeDecoderError {
+        self.sendError(error.message, status: error.status, to: task)
+      } catch {
+        self.sendError(error.localizedDescription, status: 500, to: task)
+      }
+    }
+  }
+
   private func handleLocalAnalystAction(
     _ request: URLRequest,
     to task: WKURLSchemeTask
@@ -1599,6 +1648,21 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           "limit_reason": NSNull(),
           "message": "Enter a value and arm a trace.",
           "steps": [],
+        ],
+        "action_scope": [
+          "protocol_version": 1,
+          "state": "idle",
+          "mode": "global",
+          "target_id": NSNull(),
+          "revision": 0,
+          "targets": [],
+          "matched_target_count": 0,
+          "connected_target_count": 0,
+          "target_overflow": 0,
+          "message": "Create an isolated Experiment context to choose mutable-rule scope.",
+          "rule_families": ["request_interception", "automation_recipes"],
+          "target_only_families": ["object_experiment", "runtime_hooks", "repeater"],
+          "limits": ["targets": 8, "pending_triggers": 16],
         ],
         "request_interception": [
           "protocol_version": 1,
@@ -1852,7 +1916,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     else {
       return false
     }
-    return [
+    let identifiersValid = [
       "artifact_id", "session_id", "navigation_id", "frame_id", "parent_artifact_id",
       "creator_event_id",
     ].allSatisfy { field in
@@ -1863,6 +1927,27 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       }
       return UInt64(value) != nil
     }
+    guard identifiersValid else { return false }
+    let hasExecutionContext = artifact["execution_context_id"] != nil
+    let hasCaptureOrigin = artifact["capture_origin"] != nil
+    guard hasExecutionContext == hasCaptureOrigin else { return false }
+    if hasExecutionContext {
+      guard let executionContextID = artifact["execution_context_id"] as? String,
+        executionContextID.range(
+          of: #"^(?:0|[1-9][0-9]*)$"#, options: .regularExpression) != nil,
+        UInt64(executionContextID) != nil,
+        let captureOrigin = artifact["capture_origin"] as? String,
+        Set([
+          "unknown", "network_response", "dynamic_javascript", "webassembly_compile",
+          "webassembly_module", "webassembly_instantiate",
+        ]).contains(captureOrigin),
+        captureOrigin != "dynamic_javascript" || (kind == "javascript" && executionContextID != "0"),
+        !captureOrigin.hasPrefix("webassembly_") || (kind == "wasm" && executionContextID != "0")
+      else {
+        return false
+      }
+    }
+    return true
   }
 
   private func artifactError(_ message: String) -> NSError {
@@ -2383,6 +2468,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     let analystRunnerURL = Bundle.main.bundleURL
       .appendingPathComponent("Contents/MacOS/OriginTraceAnalystRunner")
     let analystRunnerCoreURL = resourcesURL.appendingPathComponent("analyst_runner_core.js")
+    let decoderExecutableURL = Bundle.main.bundleURL
+      .appendingPathComponent("Contents/MacOS/OriginTraceDecoder")
     let handler = LocalContentHandler(
       indexURL: indexURL,
       eventStoreURL: eventStoreURL,
@@ -2393,6 +2480,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       localAnalystStoreURL: localAnalystStoreURL,
       analystRunnerURL: analystRunnerURL,
       analystRunnerCoreURL: analystRunnerCoreURL,
+      decoderExecutableURL: decoderExecutableURL,
       brokerSocketURL: configuredBrokerSocket()
     )
     contentHandler = handler
@@ -2658,7 +2746,40 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       let exercise = """
         window.__rebSmokeExerciseError = null;
         window.__rebSmokeAnalyst = null;
+        window.__rebSmokeDecoder = null;
         void (async () => {
+          const decoder = await fetch('/api/decoder', {cache: 'no-store'}).then(response => {
+            if (!response.ok) throw new Error(`Decoder GET returned ${response.status}`);
+            return response.json();
+          });
+          if (!isDecoderEngine(decoder) || !decoder.available) {
+            throw new Error('Packaged decoder contract or executable is unavailable');
+          }
+          const transformRequest = {protocol_version: 1, action: 'transform', operation_id: 1,
+            operation: 'base64-decode', input_base64: 'U0dWc2JHOD0='};
+          const transformResponse = await fetch('/api/decoder/actions', {
+            method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(transformRequest)
+          });
+          if (!transformResponse.ok) throw new Error(`Decoder transform returned ${transformResponse.status}`);
+          const transform = await transformResponse.json();
+          if (!isDecoderTransform(transform, transformRequest) || transform.utf8_text !== 'Hello') {
+            throw new Error('Packaged decoder transform result is invalid');
+          }
+          const verificationResponse = await fetch('/api/decoder/actions', {
+            method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({protocol_version: 1, action: 'jwt_verify',
+              token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjMiLCJhZG1pbiI6dHJ1ZX0.4EgcHtcYc2TlAm54RQRAMM4--ALPIGwXRwjRBu6AMoQ',
+              secret: 'secret'})
+          });
+          if (!verificationResponse.ok) {
+            throw new Error(`Decoder JWT verification returned ${verificationResponse.status}`);
+          }
+          const verification = await verificationResponse.json();
+          if (!isJwtInspection(verification) || verification.signature_status !== 'verified') {
+            throw new Error('Packaged decoder JWT verification result is invalid');
+          }
+          window.__rebSmokeDecoder = {decoder, transform, verification};
           if (\(exerciseCollectionWrite ? "true" : "false")) {
             const current = await fetch('/api/api-collection', {cache: 'no-store'}).then(response => {
               if (!response.ok) throw new Error(`Collection GET returned ${response.status}`);
@@ -2767,6 +2888,10 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
               localAnalystWriteExercised: \(exerciseAnalystWrite ? "true" : "false"),
               localAnalystRunOutcome: window.__rebSmokeAnalyst?.result?.outcome ?? null,
               localAnalystRunResult: window.__rebSmokeAnalyst?.result?.result_text ?? null,
+              decoderContractValid: isDecoderEngine(window.__rebSmokeDecoder?.decoder),
+              decoderAvailable: window.__rebSmokeDecoder?.decoder?.available === true,
+              decoderTransformText: window.__rebSmokeDecoder?.transform?.utf8_text ?? null,
+              decoderSignatureStatus: window.__rebSmokeDecoder?.verification?.signature_status ?? null,
               smokeExerciseError: window.__rebSmokeExerciseError,
               traceEnabled: !document.querySelector('#trace-origin')?.disabled,
               traceSteps: document.querySelectorAll('#backtrace-steps .trace-step').length,

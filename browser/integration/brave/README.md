@@ -63,3 +63,11 @@ content, then transfers frames over an authenticated user-only socket. Brave
 emits `artifact_captured` only after a durable receiver acknowledgment and
 emits `artifact_capture_failed` for limits, incomplete bodies, queue pressure,
 disconnects, and receiver rejection.
+
+The same category enables runtime-generated source capture. Blink submits only
+accepted dynamic JavaScript, and V8 exposes copied byte buffers used by
+`WebAssembly.compile`, `WebAssembly.Module`, and `WebAssembly.instantiate`.
+Renderer hooks perform one inactive atomic check, cap each submission at 16
+MiB, and send bytes one way to the browser process. The browser copies shared
+memory before validation, sanitizes the context URL, assigns the artifact ID,
+and remains the only process that owns the authenticated artifact socket.

@@ -6,10 +6,12 @@
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -23,12 +25,34 @@ namespace reb {
 namespace {
 
 std::vector<NativeProbeEvent>* g_events = nullptr;
+struct CapturedArtifact final {
+  NativeArtifactKind kind = NativeArtifactKind::kUnknown;
+  NativeArtifactCaptureOrigin capture_origin = NativeArtifactCaptureOrigin::kUnknown;
+  std::uint64_t execution_context_id = 0;
+  std::uint64_t frame_id = 0;
+  std::string source_url;
+  std::vector<std::uint8_t> content;
+};
+std::vector<CapturedArtifact>* g_artifacts = nullptr;
 std::atomic<std::uint64_t> g_concurrent_event_count{0};
 std::atomic<std::uint64_t> g_mixed_configuration_count{0};
 
 void CaptureEvent(const NativeProbeEvent& event) noexcept {
   if (g_events) {
     g_events->push_back(event);
+  }
+}
+
+void CaptureArtifact(const NativeArtifactKind kind,
+                     const NativeArtifactCaptureOrigin capture_origin,
+                     const std::uint64_t execution_context_id,
+                     const std::uint64_t frame_id,
+                     const std::string_view source_url,
+                     const std::span<const std::uint8_t> content) noexcept {
+  if (g_artifacts) {
+    g_artifacts->push_back({kind, capture_origin, execution_context_id, frame_id,
+                            std::string(source_url),
+                            std::vector<std::uint8_t>(content.begin(), content.end())});
   }
 }
 
@@ -65,23 +89,26 @@ class NativeProbeSinkTest : public testing::Test {
  protected:
   void SetUp() override {
     g_events = &events_;
+    g_artifacts = &artifacts_;
     g_concurrent_event_count.store(0, std::memory_order_relaxed);
     g_mixed_configuration_count.store(0, std::memory_order_relaxed);
-    NativeProbeSink::Get().SetEmitter(nullptr, 0, 0, 0);
+    NativeProbeSink::Get().SetEmitters(nullptr, nullptr, 0, 0, 0);
   }
 
   void TearDown() override {
-    NativeProbeSink::Get().SetEmitter(nullptr, 0, 0, 0);
+    NativeProbeSink::Get().SetEmitters(nullptr, nullptr, 0, 0, 0);
     g_events = nullptr;
+    g_artifacts = nullptr;
   }
 
   std::vector<NativeProbeEvent> events_;
+  std::vector<CapturedArtifact> artifacts_;
 };
 
 TEST_F(NativeProbeSinkTest, RecordsAuthorizedWebAudioFunctionCalls) {
-  NativeProbeSink::Get().SetEmitter(&CaptureEvent, 71,
-                                    NativeProbeCategoryMask(NativeProbeCategory::kWebAudio),
-                                    std::numeric_limits<std::uint64_t>::max());
+  NativeProbeSink::Get().SetEmitters(&CaptureEvent, &CaptureArtifact, 71,
+                                     NativeProbeCategoryMask(NativeProbeCategory::kWebAudio),
+                                     std::numeric_limits<std::uint64_t>::max());
 
   NativeProbeSink::Get().RecordWebAudioCall("OfflineAudioContext.startRendering");
 
@@ -97,9 +124,9 @@ TEST_F(NativeProbeSinkTest, RecordsAuthorizedWebAudioFunctionCalls) {
 }
 
 TEST_F(NativeProbeSinkTest, RejectsWebAudioOutsideCategoryPolicy) {
-  NativeProbeSink::Get().SetEmitter(&CaptureEvent, 71,
-                                    NativeProbeCategoryMask(NativeProbeCategory::kCanvas),
-                                    std::numeric_limits<std::uint64_t>::max());
+  NativeProbeSink::Get().SetEmitters(&CaptureEvent, &CaptureArtifact, 71,
+                                     NativeProbeCategoryMask(NativeProbeCategory::kCanvas),
+                                     std::numeric_limits<std::uint64_t>::max());
 
   NativeProbeSink::Get().RecordWebAudioCall("AudioBuffer.getChannelData");
 
@@ -107,20 +134,20 @@ TEST_F(NativeProbeSinkTest, RejectsWebAudioOutsideCategoryPolicy) {
 }
 
 TEST_F(NativeProbeSinkTest, DisabledWebAudioDoesNotEmitOrConsumeSequence) {
-  NativeProbeSink::Get().SetEmitter(&CaptureEvent, 71,
-                                    NativeProbeCategoryMask(NativeProbeCategory::kWebAudio),
-                                    std::numeric_limits<std::uint64_t>::max());
+  NativeProbeSink::Get().SetEmitters(&CaptureEvent, &CaptureArtifact, 71,
+                                     NativeProbeCategoryMask(NativeProbeCategory::kWebAudio),
+                                     std::numeric_limits<std::uint64_t>::max());
   NativeProbeSink::Get().RecordWebAudioCall("BaseAudioContext.createAnalyser");
   ASSERT_EQ(events_.size(), 1u);
   const std::uint64_t first_sequence = events_.front().header.sequence_number;
 
-  NativeProbeSink::Get().SetEmitter(nullptr, 0, 0, 0);
+  NativeProbeSink::Get().SetEmitters(nullptr, nullptr, 0, 0, 0);
   NativeProbeSink::Get().RecordWebAudioCall("AnalyserNode.getFloatFrequencyData");
   EXPECT_EQ(events_.size(), 1u);
 
-  NativeProbeSink::Get().SetEmitter(&CaptureEvent, 71,
-                                    NativeProbeCategoryMask(NativeProbeCategory::kWebAudio),
-                                    std::numeric_limits<std::uint64_t>::max());
+  NativeProbeSink::Get().SetEmitters(&CaptureEvent, &CaptureArtifact, 71,
+                                     NativeProbeCategoryMask(NativeProbeCategory::kWebAudio),
+                                     std::numeric_limits<std::uint64_t>::max());
   NativeProbeSink::Get().RecordWebAudioCall("BaseAudioContext.createOscillator");
 
   ASSERT_EQ(events_.size(), 2u);
@@ -144,14 +171,14 @@ TEST_F(NativeProbeSinkTest, DoesNotMixConcurrentConfigurations) {
   std::thread configurer([&start] {
     start.store(true, std::memory_order_release);
     for (int iteration = 0; iteration < kConfigurationIterations; ++iteration) {
-      NativeProbeSink::Get().SetEmitter(&ValidateConcurrentEventA, 71, kWebAudioMask,
-                                        std::numeric_limits<std::uint64_t>::max());
+      NativeProbeSink::Get().SetEmitters(&ValidateConcurrentEventA, &CaptureArtifact, 71,
+                                         kWebAudioMask, std::numeric_limits<std::uint64_t>::max());
       std::this_thread::yield();
-      NativeProbeSink::Get().SetEmitter(&ValidateConcurrentEventB, 72, kWebAudioMask,
-                                        std::numeric_limits<std::uint64_t>::max());
+      NativeProbeSink::Get().SetEmitters(&ValidateConcurrentEventB, &CaptureArtifact, 72,
+                                         kWebAudioMask, std::numeric_limits<std::uint64_t>::max());
     }
-    NativeProbeSink::Get().SetEmitter(&ValidateConcurrentEventA, 71, kWebAudioMask,
-                                      std::numeric_limits<std::uint64_t>::max());
+    NativeProbeSink::Get().SetEmitters(&ValidateConcurrentEventA, &CaptureArtifact, 71,
+                                       kWebAudioMask, std::numeric_limits<std::uint64_t>::max());
   });
 
   recorder.join();
@@ -163,8 +190,8 @@ TEST_F(NativeProbeSinkTest, DoesNotMixConcurrentConfigurations) {
 }
 
 TEST_F(NativeProbeSinkTest, RejectsWebAudioAfterExpiration) {
-  NativeProbeSink::Get().SetEmitter(&CaptureEvent, 71,
-                                    NativeProbeCategoryMask(NativeProbeCategory::kWebAudio), 1);
+  NativeProbeSink::Get().SetEmitters(&CaptureEvent, &CaptureArtifact, 71,
+                                     NativeProbeCategoryMask(NativeProbeCategory::kWebAudio), 1);
 
   NativeProbeSink::Get().RecordWebAudioCall("AnalyserNode.getFloatFrequencyData");
 
@@ -172,9 +199,9 @@ TEST_F(NativeProbeSinkTest, RejectsWebAudioAfterExpiration) {
 }
 
 TEST_F(NativeProbeSinkTest, MarksOversizedOperationNamesTruncated) {
-  NativeProbeSink::Get().SetEmitter(&CaptureEvent, 71,
-                                    NativeProbeCategoryMask(NativeProbeCategory::kWebAudio),
-                                    std::numeric_limits<std::uint64_t>::max());
+  NativeProbeSink::Get().SetEmitters(&CaptureEvent, &CaptureArtifact, 71,
+                                     NativeProbeCategoryMask(NativeProbeCategory::kWebAudio),
+                                     std::numeric_limits<std::uint64_t>::max());
   const std::string oversized(kNativeProbeInlinePayloadSize + 1, 'a');
 
   NativeProbeSink::Get().RecordWebAudioCall(oversized);
@@ -184,6 +211,53 @@ TEST_F(NativeProbeSinkTest, MarksOversizedOperationNamesTruncated) {
   EXPECT_NE(
       events_.front().header.flags & static_cast<std::uint16_t>(NativeProbeFlag::kPayloadTruncated),
       0u);
+}
+
+TEST_F(NativeProbeSinkTest, CapturesAuthorizedRuntimeGeneratedSource) {
+  NativeProbeSink::Get().SetEmitters(&CaptureEvent, &CaptureArtifact, 71,
+                                     NativeProbeCategoryMask(NativeProbeCategory::kArtifact),
+                                     std::numeric_limits<std::uint64_t>::max());
+  const std::array<std::uint8_t, 4> source = {'t', 'e', 's', 't'};
+
+  ASSERT_TRUE(NativeProbeSink::Get().IsArtifactCaptureEnabled());
+  NativeProbeSink::Get().CaptureGeneratedArtifact(
+      NativeArtifactKind::kJavaScript, NativeArtifactCaptureOrigin::kDynamicJavaScript, 91, 92,
+      "https://authorized.test/runtime", source);
+
+  ASSERT_EQ(artifacts_.size(), 1u);
+  EXPECT_EQ(artifacts_.front().kind, NativeArtifactKind::kJavaScript);
+  EXPECT_EQ(artifacts_.front().capture_origin, NativeArtifactCaptureOrigin::kDynamicJavaScript);
+  EXPECT_EQ(artifacts_.front().execution_context_id, 91u);
+  EXPECT_EQ(artifacts_.front().frame_id, 92u);
+  EXPECT_EQ(artifacts_.front().source_url, "https://authorized.test/runtime");
+  EXPECT_EQ(artifacts_.front().content, std::vector<std::uint8_t>(source.begin(), source.end()));
+}
+
+TEST_F(NativeProbeSinkTest, RejectsGeneratedSourceOutsidePolicyAndLimits) {
+  NativeProbeSink::Get().SetEmitters(&CaptureEvent, &CaptureArtifact, 71,
+                                     NativeProbeCategoryMask(NativeProbeCategory::kCanvas),
+                                     std::numeric_limits<std::uint64_t>::max());
+  const std::array<std::uint8_t, 1> source = {'x'};
+
+  EXPECT_FALSE(NativeProbeSink::Get().IsArtifactCaptureEnabled());
+  NativeProbeSink::Get().CaptureGeneratedArtifact(
+      NativeArtifactKind::kJavaScript, NativeArtifactCaptureOrigin::kDynamicJavaScript, 91, 92,
+      "https://authorized.test/runtime", source);
+
+  NativeProbeSink::Get().SetEmitters(&CaptureEvent, &CaptureArtifact, 71,
+                                     NativeProbeCategoryMask(NativeProbeCategory::kArtifact),
+                                     std::numeric_limits<std::uint64_t>::max());
+  NativeProbeSink::Get().CaptureGeneratedArtifact(
+      NativeArtifactKind::kWasm, NativeArtifactCaptureOrigin::kDynamicJavaScript, 91, 92,
+      "https://authorized.test/runtime", source);
+  NativeProbeSink::Get().CaptureGeneratedArtifact(NativeArtifactKind::kJavaScript,
+                                                  NativeArtifactCaptureOrigin::kDynamicJavaScript,
+                                                  0, 92, "https://authorized.test/runtime", source);
+  NativeProbeSink::Get().CaptureGeneratedArtifact(NativeArtifactKind::kJavaScript,
+                                                  NativeArtifactCaptureOrigin::kDynamicJavaScript,
+                                                  91, 92, "https://authorized.test/runtime", {});
+
+  EXPECT_TRUE(artifacts_.empty());
 }
 
 }  // namespace

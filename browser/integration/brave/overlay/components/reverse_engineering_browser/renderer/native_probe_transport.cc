@@ -13,6 +13,7 @@
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+#include "mojo/public/cpp/base/big_buffer.h"
 
 namespace reb {
 
@@ -62,17 +63,28 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
 
   queue_mappings_.push_back(std::move(mapping));
   queue_.store(queue, std::memory_order_release);
-  NativeProbeSink::Get().SetEmitter(&NativeProbeTransport::Emit, session_id, category_mask,
-                                    expires_at_monotonic_ns);
+  NativeProbeSink::Get().SetEmitters(&NativeProbeTransport::Emit,
+                                     &NativeProbeTransport::EmitArtifact, session_id, category_mask,
+                                     expires_at_monotonic_ns);
 }
 
 void NativeProbeTransport::Disable() {
-  NativeProbeSink::Get().SetEmitter(nullptr, 0, 0, 0);
+  NativeProbeSink::Get().SetEmitters(nullptr, nullptr, 0, 0, 0);
   queue_.store(nullptr, std::memory_order_release);
 }
 
 void NativeProbeTransport::Emit(const NativeProbeEvent& event) noexcept {
   Get().EmitEvent(event);
+}
+
+void NativeProbeTransport::EmitArtifact(const NativeArtifactKind kind,
+                                        const NativeArtifactCaptureOrigin capture_origin,
+                                        const std::uint64_t execution_context_id,
+                                        const std::uint64_t frame_id,
+                                        const std::string_view source_url,
+                                        const std::span<const std::uint8_t> content) noexcept {
+  Get().EmitGeneratedArtifact(kind, capture_origin, execution_context_id, frame_id, source_url,
+                              content);
 }
 
 void NativeProbeTransport::EmitEvent(const NativeProbeEvent& event) noexcept {
@@ -85,14 +97,35 @@ void NativeProbeTransport::EmitEvent(const NativeProbeEvent& event) noexcept {
     return;
   }
 
+  auto* const thread_host = HostForCurrentSequence();
+  if (*thread_host) {
+    (*thread_host)->EventsAvailable();
+  }
+}
+
+void NativeProbeTransport::EmitGeneratedArtifact(
+    const NativeArtifactKind kind,
+    const NativeArtifactCaptureOrigin capture_origin,
+    const std::uint64_t execution_context_id,
+    const std::uint64_t frame_id,
+    const std::string_view source_url,
+    const std::span<const std::uint8_t> content) noexcept {
+  auto* const thread_host = HostForCurrentSequence();
+  if (*thread_host) {
+    (*thread_host)
+        ->CaptureGeneratedArtifact(
+            static_cast<std::uint16_t>(kind), static_cast<std::uint16_t>(capture_origin),
+            execution_context_id, frame_id, std::string(source_url), mojo_base::BigBuffer(content));
+  }
+}
+
+mojo::SharedRemote<mojom::NativeProbeHost>* NativeProbeTransport::HostForCurrentSequence() {
   auto* thread_host = thread_hosts_.Get();
   if (!thread_host) {
     thread_hosts_.Set(std::make_unique<mojo::SharedRemote<mojom::NativeProbeHost>>(host_));
     thread_host = thread_hosts_.Get();
   }
-  if (*thread_host) {
-    (*thread_host)->EventsAvailable();
-  }
+  return thread_host;
 }
 
 }  // namespace reb

@@ -32,8 +32,9 @@ this execution contract.
   the current disposable context.
 - Arming snapshots up to 32 explicitly supplied variables with a 16 KiB total
   limit. Variable values are not returned in public debugger state.
-- The current isolated target identifier and experiment session identifier are
-  checked before every execution and report.
+- The experiment session and exact matched target identifier are checked before
+  every execution and report. Action Scope may match all eight bounded pages
+  or one exact page.
 - Target detach, context disposal, bridge shutdown, cancellation failure,
   timeout, malformed output, or the 64-run automatic ceiling disarms automatic
   execution and removes its before-load script.
@@ -47,7 +48,8 @@ this execution contract.
 
 ### Manual
 
-One selected recipe runs through `Runtime.evaluate` with `awaitPromise`, a
+One selected recipe runs sequentially on every matched target through
+`Runtime.evaluate` with `awaitPromise`, a
 2-second protocol timeout, breakpoints disabled, and a by-value result. The UI
 can cancel the active run because the target is disposable. Cancellation or
 timeout terminates page execution and reloads the isolated page so unresolved
@@ -56,13 +58,13 @@ promises and queued work cannot survive into a later run.
 ### Created
 
 When automatic execution is armed, every enabled `created` recipe runs once on
-the current disposable page. Arming immediately after context creation provides
+each matched disposable page. Arming immediately after context creation provides
 the page-created workflow while keeping consent visible.
 
 ### Before load
 
-Enabled `before-load` recipes are installed atomically as one
-`Page.addScriptToEvaluateOnNewDocument` bundle. The bundle rejects child frames,
+Enabled `before-load` recipes are installed atomically on every matched page as
+one `Page.addScriptToEvaluateOnNewDocument` bundle per target. The bundle rejects child frames,
 runs recipes sequentially in the main-frame page context, and reports bounded
 start, log, completion, and failure messages through a session-random
 `Runtime.addBinding` name and nonce. A start report arms a 2-second backend
@@ -77,8 +79,9 @@ subscribed and all later reports are ignored.
 ### After load
 
 `Page.loadEventFired` schedules enabled `after-load` recipes on a bounded worker.
-Only one recipe executes at a time. One pending trigger batch may be retained;
-additional load bursts are counted visibly as dropped automatic work.
+Only one recipe executes at a time across all pages. Up to sixteen distinct
+target and trigger pairs may be retained; additional load bursts are counted
+visibly as dropped automatic work.
 
 ## Browser helper surface
 

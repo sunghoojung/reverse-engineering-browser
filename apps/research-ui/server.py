@@ -21,6 +21,14 @@ from api_collection import (
     ApiCollectionStore,
 )
 from debugger_bridge import DebuggerBridge, DebuggerBridgeError, ProtocolError
+from decoder_service import (
+    MAX_DECODER_ACTION_BYTES,
+    DecoderError,
+    DecoderProtocolError,
+    DecoderService,
+    DecoderTimeout,
+    DecoderUnavailable,
+)
 from local_analyst import (
     MAX_ANALYST_DOCUMENT_BYTES,
     MAX_ANALYST_INPUT_BYTES,
@@ -76,6 +84,8 @@ PUBLIC_ARTIFACT_FIELDS = (
     "frame_id",
     "parent_artifact_id",
     "creator_event_id",
+    "execution_context_id",
+    "capture_origin",
     "kind",
     "url",
     "mime_type",
@@ -83,6 +93,14 @@ PUBLIC_ARTIFACT_FIELDS = (
     "sha256",
     "sensitive",
 )
+ARTIFACT_CAPTURE_ORIGINS = {
+    "unknown",
+    "network_response",
+    "dynamic_javascript",
+    "webassembly_compile",
+    "webassembly_module",
+    "webassembly_instantiate",
+}
 
 
 class LoopbackThreadingHTTPServer(ThreadingHTTPServer):
@@ -109,6 +127,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         Path("build/sessions/local-analyst-workspace-v1.json").resolve()
     )
     local_analyst_runner = LocalAnalystRunner(Path(__file__).resolve().parent)
+    decoder_service = DecoderService(Path("build/reb-decoder").resolve())
     broker_socket: Optional[Path] = None
     debugger: Optional[DebuggerBridge] = None
     analysis_lock = threading.Lock()
@@ -141,10 +160,14 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     "local_analyst_store": str(self.local_analyst_store.path),
                     "local_analyst_store_exists": self.local_analyst_store.path.exists(),
                     "local_analyst_runner_available": self.local_analyst_runner.available(),
+                    "decoder_available": self.decoder_service.available(),
                     "broker_connected": self.broker_connected(),
                     "debugger_state": self.debugger_state(),
                 }
             )
+            return
+        if parsed.path == "/api/decoder":
+            self.send_json(self.decoder_service.state())
             return
         if parsed.path == "/api/api-collection":
             try:
@@ -519,6 +542,23 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             self.send_json(
                 {"error": "Local request origin rejected"}, HTTPStatus.FORBIDDEN
             )
+            return
+        if parsed.path == "/api/decoder/actions":
+            try:
+                request = self.read_json_body(MAX_DECODER_ACTION_BYTES)
+                self.send_json(self.decoder_service.action(request))
+            except DecoderUnavailable as exception:
+                self.send_json(
+                    {"error": str(exception)}, HTTPStatus.SERVICE_UNAVAILABLE
+                )
+            except DecoderTimeout as exception:
+                self.send_json({"error": str(exception)}, HTTPStatus.REQUEST_TIMEOUT)
+            except DecoderProtocolError as exception:
+                self.send_json(
+                    {"error": str(exception)}, HTTPStatus.UNPROCESSABLE_ENTITY
+                )
+            except DecoderError as exception:
+                self.send_json({"error": str(exception)}, HTTPStatus.BAD_REQUEST)
             return
         if parsed.path == "/api/api-collection/actions":
             try:
@@ -910,6 +950,28 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             for field in identifier_fields
         ):
             return False
+        runtime_fields = ("execution_context_id", "capture_origin")
+        if any(field in artifact for field in runtime_fields):
+            if not all(field in artifact for field in runtime_fields):
+                return False
+            if (
+                not isinstance(artifact["execution_context_id"], str)
+                or not CANONICAL_UINT64.fullmatch(artifact["execution_context_id"])
+                or int(artifact["execution_context_id"]) >= 2**64
+                or artifact["capture_origin"] not in ARTIFACT_CAPTURE_ORIGINS
+            ):
+                return False
+            origin = artifact["capture_origin"]
+            if origin == "dynamic_javascript" and (
+                artifact.get("kind") != "javascript"
+                or artifact["execution_context_id"] == "0"
+            ):
+                return False
+            if origin.startswith("webassembly_") and (
+                artifact.get("kind") != "wasm"
+                or artifact["execution_context_id"] == "0"
+            ):
+                return False
         if artifact.get("kind") not in ARTIFACT_KINDS:
             return False
         if not isinstance(artifact.get("url"), str) or not artifact["url"]:
@@ -1001,6 +1063,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             "console": [],
             "heap_diff_baseline": None,
             "memory_origin_trace": DebuggerBridge._empty_memory_origin_trace(),
+            "action_scope": DebuggerBridge._empty_action_scope(),
             "request_interception": DebuggerBridge._empty_request_interception(),
             "object_experiment": DebuggerBridge._empty_object_experiment(),
             "runtime_hooks": DebuggerBridge._empty_runtime_hooks(),
@@ -1160,6 +1223,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("build/sessions/local-analyst-workspace-v1.json"),
     )
+    parser.add_argument("--decoder", type=Path, default=Path("build/reb-decoder"))
     parser.add_argument("--socket", type=Path)
     parser.add_argument("--devtools-active-port", type=Path)
     parser.add_argument("--endpoint-file", type=Path)
@@ -1182,6 +1246,7 @@ def main() -> int:
     ResearchHandler.local_analyst_runner = LocalAnalystRunner(
         Path(__file__).resolve().parent
     )
+    ResearchHandler.decoder_service = DecoderService(args.decoder.resolve())
     ResearchHandler.broker_socket = args.socket.resolve() if args.socket else None
     debugger = DebuggerBridge(
         args.devtools_active_port.resolve() if args.devtools_active_port else None

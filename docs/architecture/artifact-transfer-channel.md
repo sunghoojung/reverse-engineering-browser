@@ -7,10 +7,13 @@ response bodies can be much larger than a probe event. They use a dedicated
 browser-process transfer channel and never enter the renderer event ring, event
 broker queue, or inline event payload.
 
-The implemented development path is:
+The implemented development paths are:
 
 ```text
-browser-process response-body tee
+browser-process response-body tee ----------------------+
+renderer dynamic-code/WASM callback                     |
+  -> one-way bounded Mojo submission                    |
+  -> browser-process capture boundary ------------------+
   -> bounded artifact queue
   -> authenticated artifact socket
   -> reb-artifact-receiver
@@ -21,14 +24,16 @@ browser-process response-body tee
   -> Sources workspace
 ```
 
-The tracked Brave integration implements this path for JavaScript and
-WebAssembly responses. `reb-artifact-producer` exercises the same socket and
-acknowledgment contract in deterministic end-to-end fixtures.
+The tracked Brave integration captures JavaScript and WebAssembly responses,
+accepted dynamic JavaScript source, and byte-buffer WebAssembly compilation,
+module construction, and instantiation. `reb-artifact-producer` exercises the
+same socket and acknowledgment contract in deterministic end-to-end fixtures.
 
 ## Ownership boundaries
 
-- Renderer probes may emit only bounded `NativeProbeEvent` records through the
-  fast event transport.
+- Renderer probes emit bounded `NativeProbeEvent` records through the fast
+  event transport. Authorized generated-source hooks may also submit one
+  bounded immutable artifact to the browser over one-way Mojo.
 - Renderer probes must not open the artifact channel, write files, hash large
   buffers, or wait for artifact storage.
 - The browser process owns artifact authorization, identifiers, metadata, and
@@ -41,8 +46,10 @@ acknowledgment contract in deterministic end-to-end fixtures.
   captured bytes.
 
 An event and an artifact join through `session_id`, `navigation_id`, `frame_id`,
-`artifact_id`, and `creator_event_id`. Capture and interpretation remain
-separate.
+`artifact_id`, and `creator_event_id`. Runtime-generated artifacts additionally
+carry `execution_context_id` and `capture_origin`. Unknown parent artifacts and
+creator events remain zero rather than being inferred. Capture and
+interpretation remain separate.
 
 ## Wire frame
 
@@ -78,7 +85,10 @@ size. Native tests assert that the two definitions remain ABI-identical.
 | 72 | 4 | `url_size` | 1 to 8,192 bytes |
 | 76 | 4 | `mime_type_size` | 1 to 255 bytes |
 | 80 | 32 | expected SHA-256 | all zero if the sender omits preverification |
-| 112 | 16 | `reserved1` | zero |
+| 112 | 8 | `execution_context_id` | stable renderer context ID, or zero when unavailable |
+| 120 | 2 | `capture_origin` | unknown, network response, dynamic JavaScript, WASM compile/module/instantiate |
+| 122 | 2 | `reserved1` | zero |
+| 124 | 4 | `reserved2` | zero |
 
 The stream uses exact native frames only between matching local builds. A
 socket transport must authenticate the browser bridge before it accepts the
@@ -132,8 +142,10 @@ artifacts/
 Blob names are derived only from the receiver-computed digest. Original bytes
 are never overwritten. A manifest record contains protocol version,
 correlation IDs, kind, URL, MIME type, byte size, digest, sensitive flag, and a
-store-relative content path. The UI API removes `content_path` from catalog
-responses and resolves it beneath the configured store before reading.
+store-relative content path. New records also include execution context and
+capture origin while the reader remains backward-compatible with older version
+1 records. The UI API removes `content_path` from catalog responses and
+resolves it beneath the configured store before reading.
 
 Identical bytes may share one content-addressed blob. Artifact identifiers are
 still unique and immutable. The session limit is checked conservatively before

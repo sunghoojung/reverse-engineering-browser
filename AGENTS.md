@@ -1,75 +1,91 @@
 # Reverse Engineering Browser - Agent Guide
 
-## Mission
+This file is the authoritative operating contract for coding agents working in
+this repository. The Makefile owns executable commands, subsystem READMEs own
+local operating details, and versioned files under `protocol/` own wire and
+storage contracts.
 
-Build a local-first browser research harness for authorized reverse engineering.
-The product connects low-level browser observations to a normalized evidence
-timeline that a human researcher can inspect and work backward from.
+## Start every task here
 
-Optimize for trustworthy evidence, predictable overhead, and maintainable
-systems code. Do not optimize for bypassing access controls or concealing
-malicious activity.
+1. Read `git status --short` and the relevant diff. Existing changes belong to
+   the user unless proven otherwise. Never reset, clean, overwrite, or reformat
+   unrelated work.
+2. Read the nearest subsystem README, public contract, and existing tests before
+   editing. Use `rg` and `rg --files`, excluding `browser/worktree/`.
+3. Classify the affected surface and load the matching repository skill:
 
-## Current scope
+   | Surface | Required skill |
+   | --- | --- |
+   | Any implementation handoff or validation failure | `reb-validation` |
+   | Origin Trace UI, native app, packaging, assets, keyboard use, or visual behavior | `reb-ui-e2e` |
+   | Brave bootstrap, pins, overlays, patches, or browser compilation | `reb-brave-verify` |
 
-Work on these areas:
+4. For bug fixes, reproduce the problem through the closest user-facing path
+   before editing. Record the state, action, and visible or observable failure.
+5. Make the smallest coherent change, test it at the narrowest useful layer,
+   then run the complete handoff gate.
 
-1. The dependency-free C++ event and queue foundation.
-2. The event broker, correlation model, and evidence storage.
+Do not use the `no-mistakes` skill, remote gate, or alternate pipeline in this
+repository. Use the repository skills under `.agents/skills/` and the commands
+defined here.
+
+## Mission and boundaries
+
+Build a local-first browser research harness for authorized reverse
+engineering. Connect low-level browser observations to a normalized evidence
+timeline that a researcher can inspect and work backward from.
+
+Optimize for trustworthy evidence, predictable overhead, maintainable systems
+code, and reproducible browser integration. Do not optimize for bypassing
+access controls or concealing malicious activity.
+
+Current project scope:
+
+1. Dependency-free C++ event and queue foundations.
+2. Event validation, correlation, evidence storage, and artifact transfer.
 3. The native Origin Trace application and browser-only development UI.
-4. Versioned contracts between browser probes and the broker.
-5. Tracked Brave integration overlays and patches.
+4. Versioned contracts between probes, browser processes, services, and UI.
+5. Tracked Brave integration overlays, patches, pins, and bootstrap tooling.
 
-MCP is intentionally deferred. Do not create an MCP server, dependency, API,
-or documentation unless the user explicitly brings it back into scope.
+MCP is intentionally deferred. Do not create an MCP server, dependency, API, or
+documentation unless the user explicitly restores it to scope.
 
-## Repository map
+## Repository ownership
 
 ```text
-.agents/skills/         Repo-scoped validation and testing workflows
-.github/workflows/      pull-request checks and tag-triggered release builds
-apps/
-  reb-event-demo/       Small concurrency and event-path demonstration
-  reb-event-producer/   Deterministic browser-event development producer
-  research-ui/          Human-facing investigation interface
-    macos/              Native shell, bundle metadata, and app icon source
-browser/
-  config/               Pinned upstream browser revisions
-  integration/brave/    Tracked Brave overlays, patches, and instructions
-  worktree/             Ignored local Brave and Chromium checkout
-docs/
-  architecture/         Technical architecture and system diagram
-  product/              Feature roadmap and product catalog
-include/reb/             Public dependency-free C++ headers
-protocol/                Versioned event and command contracts
-services/event-broker/   Event validation, correlation, storage, and querying
-src/                     C++ implementations
-tests/                   Native unit and integration tests
-tools/                   Developer and offline analysis tools
+.agents/skills/         Task-specific validation workflows
+.github/workflows/      Pull request checks and release builds
+apps/                   Demos, producers, analysis tools, and Origin Trace
+browser/config/         Pinned upstream Brave and Chromium revisions
+browser/integration/    Tracked browser overlays, patches, and instructions
+browser/worktree/       Ignored generated Brave and Chromium checkout
+docs/architecture/      System design and diagrams
+docs/product/           Roadmap, feature catalog, and versioned designs
+include/reb/ and src/    Public C++ interfaces and implementations
+protocol/               Versioned event, trace, storage, and command contracts
+services/               Event broker and artifact receiver
+tests/                  Native, socket, fixture, integration, and UI tests
+tools/                  Offline validation and analysis utilities
 ```
 
-## Documentation ownership
+Ownership rules:
 
-- Keep product planning and architecture documents under `docs/`.
-- Keep operating instructions beside their subsystem, for example
-  `apps/research-ui/README.md` and `browser/README.md`.
-- Keep the root `README.md` focused on setup, application launch, CI, releases,
-  and the repository map.
-- Update links when moving documentation. Do not leave duplicate root-level
-  design documents behind.
+- This is the only project repository. Never stage or commit
+  `browser/worktree/`; it is a reproducible upstream checkout.
+- Put complete project-authored Brave files in
+  `browser/integration/brave/overlay/` at their real `brave-core` relative
+  paths. Put minimal upstream edits in ordered patches under
+  `browser/integration/brave/patches/`.
+- A browser change is incomplete until overlays and patches reproduce from the
+  pinned revisions through the synchronization script.
+- Never edit generated files, generated checkouts, changelogs, or captured
+  evidence unless the task explicitly targets that evidence.
+- Keep product and architecture documents under `docs/`. Keep operating
+  instructions beside their subsystem. Keep the root README focused on the
+  product, setup, quality signals, repository map, and documentation routes.
+- When moving documentation, update inbound links and remove obsolete copies.
 
-## Source ownership
-
-- This repository is the only project repository.
-- `browser/worktree/` is an ignored upstream checkout. Never stage or commit it.
-- Store authored Brave files under `browser/integration/brave/overlay/` using
-  the same relative path they have inside `brave-core`.
-- Store minimal upstream edits under `browser/integration/brave/patches/`.
-- A browser integration change is incomplete until its overlay or patch is
-  reproducible from a clean pinned upstream checkout.
-- Do not edit generated files or changelogs.
-
-## Architecture boundaries
+## Architecture invariants
 
 The intended evidence path is:
 
@@ -78,131 +94,144 @@ native probe -> bounded renderer transport -> browser-process bridge
              -> event broker -> evidence store -> research UI
 ```
 
-- Page JavaScript must not be the authoritative probe layer.
-- Renderer probes must not write files, open harness sockets, or call the UI.
-- The UI reads normalized broker output. It does not instrument pages itself.
+- Page JavaScript is never the authoritative probe layer.
+- Renderer probes never write files, open harness sockets, call the UI, or wait
+  for storage or analysis.
+- The UI consumes normalized broker output and never instruments pages itself.
 - Every cross-process record has an explicit version and fixed ownership.
-- Preserve session, navigation, frame, artifact, event, and parent identifiers.
-- Keep capture separate from interpretation. Raw evidence must remain available
-  even when a later analyzer assigns a different meaning to it.
+- Preserve session, navigation, frame, execution context, artifact, event, and
+  parent identifiers across boundaries.
+- Keep capture separate from interpretation. Preserve raw evidence when an
+  analyzer assigns or later revises meaning.
+- Keep all services on localhost or user-only local transports unless the user
+  explicitly changes the threat model.
 
-## Hot-path rules
+## Hot-path, data, and privacy rules
 
-Browser probes run in sensitive code paths. They must be:
+Browser probes run in sensitive execution paths. They must remain disabled by
+default, allocation-free while inactive, bounded in memory and per-event work,
+non-blocking, and observational unless a visibly enabled experiment authorizes
+mutation.
 
-- disabled by default;
-- bounded in memory and work per event;
-- non-blocking;
-- allocation-free on the inactive path;
-- explicit about dropped events and sequence gaps;
-- observational unless an experiment mode clearly authorizes mutation.
+Never lose evidence silently. A full queue must increment a visible drop
+counter or emit a gap marker as soon as capacity returns. Test disabled,
+capacity, expiration, malformed-input, and sequence-gap behavior whenever a
+change can affect those states.
 
-Never silently lose evidence. When a bounded queue is full, increment a visible
-drop counter or emit a gap marker as soon as capacity returns.
+Default capture to metadata, sizes, hashes, stable identifiers, and bounded
+previews. Do not capture credentials, authorization headers, cookies, request
+bodies, or personal content by default. Sensitive capture must be
+session-scoped, visibly enabled, documented, and covered by redaction tests.
+Never upload evidence automatically.
 
-## Data and privacy
+## Engineering standards
 
-- Default to metadata, sizes, hashes, and stable identifiers.
-- Do not capture credentials, authorization headers, cookies, request bodies,
-  or personal content by default.
-- Any sensitive capture must be session-scoped, visibly enabled, documented,
-  and covered by redaction tests.
-- Keep all services bound to localhost unless the user explicitly changes the
-  threat model.
-- Never upload captured evidence automatically.
+### C++ and concurrency
 
-## C++ standards
-
-- Use C++20 and the standard library unless a dependency has a clear benefit.
-- Prefer value types, RAII, explicit ownership, and fixed-width integer types.
-- Avoid exceptions and hidden allocation in probe and transport code.
-- Make concurrent invariants visible in names, comments, and tests.
-- Use acquire and release ordering only where the synchronization contract is
-  documented. Prefer simpler correctness over clever lock-free code.
-- Keep public protocol structs trivially copyable and guard their ABI with
+- Use C++20 and the standard library unless a dependency has a clear
+  architectural benefit.
+- Prefer value types, RAII, fixed-width integers, and explicit ownership.
+- Avoid exceptions and hidden allocation in probes and transports.
+- State concurrent invariants in names, comments, and tests. Use acquire and
+  release ordering only when the synchronization contract is documented.
+- Keep public protocol structs trivially copyable and protect their ABI with
   `static_assert` checks.
 - Format C++ with the repository `.clang-format` configuration.
 
-## UI standards
+### Origin Trace UI
 
 - Make the evidence chain understandable before adding visual density.
-- Every row must expose time, source, category, operation, and correlation IDs.
-- Search and filters must never mutate the stored evidence.
-- Insert captured values as text, never executable HTML.
-- Show loading, empty, disconnected, malformed-event, and sequence-gap states.
-- Keep the interface usable with a keyboard and at narrow viewport sizes.
-- `make app` is the normal macOS product path. `make ui` is only for
-  browser-based UI development.
-- Keep native application assets under `apps/research-ui/macos/` and verify
-  that the packaged application loads those assets at runtime.
+- Every evidence row exposes time, source, category, operation, and correlation
+  identifiers.
+- Search and filters never mutate stored evidence. Captured values are inserted
+  as text, never executable HTML.
+- Cover loading, empty, disconnected, malformed-event, and sequence-gap states.
+  Preserve the last understandable evidence when refresh fails.
+- Verify keyboard use, visible focus, narrow layouts, scrolling, truncation,
+  overlays, and selected state. Reject clipped controls, collisions, unexplained
+  blank space, and unreadable relationships.
+- `make app` is the normal macOS product path. `make ui` is only for browser
+  development or when the native path is unavailable.
+- Keep native assets under `apps/research-ui/macos/` and verify the packaged app
+  loads them rather than source-tree paths.
+
+### Scripts, contracts, and documentation
+
+- Keep shell and Python entry points deterministic, non-interactive by default,
+  and explicit about missing tools or partial results.
+- Treat protocol schemas, public C++ structs, socket records, and evidence files
+  as versioned compatibility boundaries. Update producers, consumers, tests,
+  fixtures, and nearby documentation together.
+- Document why a boundary or limit exists. Avoid comments and docs that merely
+  restate the code.
+- Prefer relative repository links and verify them after moving or renaming
+  files.
 
 ## Change workflow
 
-Do not use the `no-mistakes` skill, gate, remote, or pipeline in this
-repository. Use the explicit validation commands below and normal GitHub pull
-request checks.
+1. Reproduce or characterize the current behavior at the closest end-to-end
+   boundary.
+2. Inspect the relevant contract, producer, consumer, and tests.
+3. Implement the smallest architectural change that preserves the invariants
+   above.
+4. Add tests for success, failure, disabled behavior, and relevant limits.
+5. Update the nearest README or versioned design when ownership, operation, or
+   user-visible behavior changes.
+6. Review the final diff for unrelated edits, generated files, sensitive data,
+   and accidental changes under `browser/worktree/`.
 
-Use the repository skills under `.agents/skills/` for task-specific workflows:
-
-- `reb-validation` selects focused checks and records the complete handoff gate.
-- `reb-ui-e2e` reproduces and verifies user-visible Origin Trace behavior.
-- `reb-brave-verify` proves tracked browser integration changes are reproducible.
-
-This file owns permanent project rules, and the Makefile owns executable check
-commands. Skills coordinate those sources without replacing or duplicating
-them.
-
-1. Inspect the relevant contract and existing tests before editing.
-2. Reproduce bugs through the closest available end-to-end path.
-3. Make the smallest coherent architectural change.
-4. Add or update tests for behavior, failure, and boundary conditions.
-5. Update the nearest README when ownership or usage changes.
-
-Do not mix unrelated cleanup into a feature commit. Preserve user changes in a
-dirty worktree and never reset or overwrite them to simplify your task.
+Do not mix unrelated cleanup into a feature change. If a pre-existing problem
+blocks the task, report it with evidence instead of overwriting user work.
 
 ## Validation
 
-Run the narrowest relevant checks during development, then run the full local
-gate before handing work off:
+Use `reb-validation` to select focused feedback while developing. Before
+handing off any repository change, run the complete local gate:
 
 ```sh
+make lint
 make check
 make e2e
 make sanitize
-python3 -m py_compile apps/research-ui/server.py apps/research-ui/test_research_ui.py
 git diff --check
 ```
 
-For native macOS application, packaging, or icon changes, also run:
+For Origin Trace HTML, JavaScript, Swift, native packaging, application assets,
+or user-visible behavior, also use `reb-ui-e2e`. For app, packaging, or icon
+changes, run:
 
 ```sh
 make app-build
 codesign --verify --deep --strict "build/Origin Trace.app"
 ```
 
-For Brave integration changes, also verify:
+For changes under `browser/integration/brave/`, browser pins, bootstrap, or
+synchronization:
 
-1. Overlay paths map to real `brave-core` paths.
-2. Patches apply cleanly to the pinned revision.
-3. GN files pass `gn format --dry-run` when the browser toolchain is available.
-4. The affected target compiles when full Xcode and the Chromium toolchain are
-   installed.
+1. Verify fixture-based bootstrap or sync behavior as applicable.
+2. Verify overlay destinations exist at the pinned revision.
+3. Verify every patch preflights and applies cleanly.
+4. Run `make brave-doctor` without changing global Xcode selection.
+5. Run `make brave-probe-check` when the initialized toolchain is available.
+6. Run `gn format --dry-run` for changed GN files and compile the affected
+   target when full Xcode and Chromium tooling are installed.
 
-Use `make brave-doctor` for the local toolchain and `make brave-probe-check`
-for the tracked native probe target. These helpers select the installed Xcode
-and Brave's bundled Python without requiring a global `xcode-select` change.
+Never report an unavailable or skipped check as passing. State the exact
+missing tool, first actionable failure, or dirty upstream condition.
 
-If a required platform tool is unavailable, report the exact missing tool and
-do not claim that validation passed.
+## Definition of done and handoff
 
-## Definition of done
+A change is complete only when:
 
-A change is done only when:
+- behavior works through the intended user-facing or system boundary;
+- limits, drops, malformed input, disabled behavior, and privacy controls are
+  tested where relevant;
+- documentation and contracts match the implementation;
+- no generated checkout, build output, sensitive capture, or unrelated user
+  change is included;
+- every available required check passes;
+- each unavailable or skipped check has an exact reason.
 
-- behavior works through the intended user-facing path;
-- limits, drops, malformed input, and disabled behavior are tested;
-- documentation matches the implementation;
-- no generated checkout or sensitive evidence is staged;
-- all available required checks pass;
-- remaining validation gaps are stated plainly.
+In the final handoff, lead with what now works. List changed files by purpose,
+report each required validation command as passed, failed, unavailable, or
+skipped, and end with any remaining risk or the next concrete action.

@@ -43,14 +43,17 @@ captured.
 
 Large artifact bytes use the separate 128-byte framed contract and 32-byte
 acknowledgment in `common/native_artifact_header.h`. Only the browser-process
-bridge owns that channel. JavaScript and WASM response bodies are copied by an
-asynchronous Mojo tee with a 16 MiB per-artifact limit and a 32 MiB active
-capture budget. A dedicated writer thread drains a 16-artifact, 32 MiB queue to
-the authenticated artifact socket. Successful evidence is emitted only after
-receiver acknowledgment; every local or remote rejection becomes an
-`artifact_capture_failed` event. It is not part of the renderer event ring,
-and arbitrary response bodies still require explicit sensitive-capture
-authorization.
+bridge owns that receiver connection. JavaScript and WASM response bodies are
+copied by an asynchronous Mojo tee with a 16 MiB per-artifact limit and a 32
+MiB active capture budget. Accepted dynamic JavaScript and WASM byte-buffer API
+inputs use a separate one-way Mojo submission with the same per-artifact cap.
+The browser copies renderer-owned shared memory before validation and records
+the stable execution context plus exact capture origin. A dedicated writer
+thread drains a 16-artifact, 32 MiB queue to the authenticated artifact socket.
+Successful evidence is emitted only after receiver acknowledgment; every local
+or remote rejection becomes an `artifact_capture_failed` event. Artifact bytes
+do not enter the renderer event ring, and arbitrary response bodies still
+require explicit sensitive-capture authorization.
 
 Bounded VM investigation metadata uses `NativeVmFindingPayload` from
 `common/native_vm_finding.h` inside the existing event record. The record keeps

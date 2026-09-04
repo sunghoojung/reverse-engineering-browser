@@ -12,7 +12,7 @@ bounded evidence architecture. Matching a panel name is not sufficient.
 | WireBrowser capability | REB status | Evidence or remaining work |
 | --- | --- | --- |
 | Managed browser and page selection | Implemented | `make live` launches an isolated Brave profile, and the debugger target selector supports page and webview targets. |
-| Global or page-specific action scope | Partial | Capture sessions and debugger actions are scoped, but mutable rules do not yet have a shared global-versus-target policy model. |
+| Global or page-specific action scope | Implemented | [Action Scope Policy v1](./action-scope-policy-v1.md) applies Request Interception and Automation Recipes to every bounded page or one exact page in the disposable Experiment BrowserContext, with atomic coverage checks and no access to baseline tabs. |
 | Parsed-script catalog and source viewer | Implemented | Sources provides page, frame, and captured-artifact trees, quick open, search, line navigation, source maps, and bounded source loading. |
 | Debug console and breakpoint controls | Implemented | Pause, resume, step, line, conditional, log, XHR/fetch, event, watch, scope, and async stack workflows are live. |
 
@@ -47,18 +47,14 @@ bounded evidence architecture. Matching a panel name is not sufficient.
 | --- | --- | --- |
 | Browser-context scripts | Implemented | [Automation Recipes v1](./automation-recipes-v1.md) adds a bounded recipe library, private variables, manual execution, and explicitly armed created, before-load, and after-load triggers inside the disposable Experiment BrowserContext. |
 | Local Node-style analyst scripts | Implemented | [Local Analyst Workspace v1](./local-analyst-workspace-v1.md) adds reusable async scripts over frozen, bounded evidence snapshots, private variables, text-only logs and results, isolated helper processes, cancellation, timeout recovery, and visible limits. MCP remains deferred by project policy. |
-| Decoder chains | Missing | Add local byte, text, URL, Base64, hex, compression, and structured-data transforms without automatic execution. |
-| JWT inspection | Missing | Add bounded local decoding and claim inspection without signature or trust claims unless explicitly verified. |
+| Decoder chains | Implemented | [Decoder Tools v1](./decoder-tools-v1.md) adds explicit, branchable byte transformations for Base64, Base64URL, hex, URL components, HTML entities, Base36, gzip, zlib, raw deflate, and JSON, with binary-safe views and strict per-step and retained-byte caps. |
+| JWT inspection | Implemented | Decoder Tools v1 adds bounded compact-token inspection, separately initiated HS256, HS384, and HS512 verification, explicit unsigned-token creation, claim-time warnings, and clear trust labels. |
 | Scratchpad and reusable files | Implemented | Local Analyst Workspace adds a permission-restricted, atomically replaced folder and file library with stable IDs, generation conflicts, four scratchpad languages, and non-executable notes. |
 
 ## Delivery order
 
-Local Analyst Workspace is the current completed parity increment. The next
-implementation sequence is local decoding tools and JWT inspection.
-Each increment must preserve immutable baseline evidence, make mutation
-visible, and pass the repository's full native and UI gates.
-Memory Origin Trace is the current completed parity increment. The next
-implementation sequence is network interception, Repeater, API Collection,
-Experiment-only live object mutation, runtime hooks, automation recipes, and
-local decoding tools. Each increment must preserve immutable baseline evidence,
-make mutation visible, and pass the repository's full native and UI gates.
+Action Scope Policy is the completed final increment in this pinned parity
+inventory. Every listed WireBrowser workflow now has an implemented REB path,
+with REB-specific isolation, bounds, evidence ownership, and privacy rules.
+Future comparisons must pin a new upstream revision before adding gaps to this
+inventory.

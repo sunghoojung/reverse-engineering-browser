@@ -7,12 +7,14 @@
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_BROWSER_NATIVE_PROBE_HOST_H_
 
 #include <cstdint>
+#include <string>
 
 #include "base/memory/raw_ptr.h"
 #include "base/memory/raw_ref.h"
 #include "base/memory/shared_memory_mapping.h"
 #include "base/memory/unsafe_shared_memory_region.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h"
+#include "mojo/public/cpp/base/big_buffer.h"
 #include "mojo/public/cpp/bindings/remote.h"
 
 namespace reb {
@@ -30,6 +32,12 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   // mojom::NativeProbeHost:
   void BindClient(mojo::PendingRemote<mojom::NativeProbeClient> client) override;
   void EventsAvailable() override;
+  void CaptureGeneratedArtifact(std::uint16_t kind,
+                                std::uint16_t capture_origin,
+                                std::uint64_t execution_context_id,
+                                std::uint64_t frame_id,
+                                const std::string& source_url,
+                                mojo_base::BigBuffer content) override;
 
   void Configure(std::uint64_t session_id,
                  std::uint64_t category_mask,

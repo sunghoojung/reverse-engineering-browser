@@ -8,6 +8,7 @@
 #include <memory>
 #include <utility>
 
+#include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 
@@ -32,6 +33,18 @@ void NativeProbeHost::BindClient(mojo::PendingRemote<mojom::NativeProbeClient> c
 
 void NativeProbeHost::EventsAvailable() {
   Drain();
+}
+
+void NativeProbeHost::CaptureGeneratedArtifact(const std::uint16_t kind,
+                                               const std::uint16_t capture_origin,
+                                               const std::uint64_t execution_context_id,
+                                               const std::uint64_t frame_id,
+                                               const std::string& source_url,
+                                               mojo_base::BigBuffer content) {
+  NativeArtifactCaptureSink::Get().CaptureGeneratedArtifact(
+      static_cast<NativeArtifactKind>(kind),
+      static_cast<NativeArtifactCaptureOrigin>(capture_origin), execution_context_id, frame_id,
+      source_url, std::move(content));
 }
 
 void NativeProbeHost::Configure(const std::uint64_t session_id,

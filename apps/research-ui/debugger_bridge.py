@@ -123,6 +123,8 @@ MAX_AUTOMATION_RESULT_BYTES = 16 * 1024
 MAX_AUTOMATION_BINDING_REPORT_BYTES = 8 * 1024
 AUTOMATION_EXECUTION_TIMEOUT_MS = 2_000
 AUTOMATION_WATCHDOG_GRACE_SECONDS = 0.25
+MAX_ACTION_SCOPE_TARGETS = 8
+MAX_ACTION_SCOPE_PENDING_TRIGGERS = 16
 
 REPEATER_VARIABLE_TOKEN = re.compile(r"\{\{(=)?([^{}]+)\}\}")
 REPEATER_VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
@@ -974,6 +976,163 @@ class WebSocketClient:
         return bytes(body)
 
 
+class ActionScopeTargetSession:
+    """One bounded CDP client for mutable rules on an isolated page target."""
+
+    def __init__(
+        self,
+        target: dict[str, str],
+        event_handler: Any,
+        close_handler: Any,
+    ) -> None:
+        self.target = dict(target)
+        self.target_id = target["id"]
+        self._event_handler = event_handler
+        self._close_handler = close_handler
+        self._connection = WebSocketClient(target["web_socket_url"])
+        self._lock = threading.RLock()
+        self._pending: dict[int, PendingCommand] = {}
+        self._next_command_id = 1
+        self._closed = False
+        self._ready = False
+        self._reader = threading.Thread(
+            target=self._read_messages,
+            name=f"reb-action-scope-{self.target_id[:12]}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._reader.start()
+        try:
+            self.command("Runtime.enable")
+            self.command("Page.enable")
+        except BaseException:
+            self.close()
+            raise
+        with self._lock:
+            if self._closed:
+                raise DebuggerBridgeError("Action-scope target disconnected during setup")
+            self._ready = True
+
+    def ready(self) -> bool:
+        with self._lock:
+            return self._ready and not self._closed
+
+    def command(
+        self,
+        method: str,
+        params: Optional[dict[str, Any]] = None,
+        timeout: float = 3.0,
+    ) -> dict[str, Any]:
+        with self._lock:
+            if self._closed:
+                raise DebuggerBridgeError("Action-scope target is disconnected")
+            command_id = self._next_command_id
+            self._next_command_id += 1
+            pending = PendingCommand(threading.Event())
+            self._pending[command_id] = pending
+        try:
+            self._connection.send_json(
+                {"id": command_id, "method": method, "params": params or {}}
+            )
+        except BaseException:
+            with self._lock:
+                self._pending.pop(command_id, None)
+            raise
+        if not pending.event.wait(timeout):
+            with self._lock:
+                self._pending.pop(command_id, None)
+            raise DebuggerBridgeError(f"Action-scope command timed out: {method}")
+        if pending.error is not None:
+            raise DebuggerBridgeError(str(pending.error))
+        response = pending.response or {}
+        error = response.get("error")
+        if isinstance(error, dict):
+            message = error.get("message")
+            raise ProtocolError(
+                message
+                if isinstance(message, str)
+                else f"Action-scope command failed: {method}"
+            )
+        result = response.get("result", {})
+        if not isinstance(result, dict):
+            raise ProtocolError(
+                f"Action-scope target returned malformed output: {method}"
+            )
+        return result
+
+    def command_without_wait(
+        self, method: str, params: Optional[dict[str, Any]] = None
+    ) -> bool:
+        with self._lock:
+            if self._closed:
+                return False
+            command_id = self._next_command_id
+            self._next_command_id += 1
+        try:
+            self._connection.send_json(
+                {"id": command_id, "method": method, "params": params or {}}
+            )
+        except DebuggerBridgeError:
+            return False
+        return True
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._ready = False
+            pending = list(self._pending.values())
+            self._pending.clear()
+        error = WebSocketClosed("Action-scope target disconnected")
+        for command in pending:
+            command.error = error
+            command.event.set()
+        self._connection.close()
+        if threading.current_thread() is not self._reader:
+            self._reader.join(timeout=1.0)
+
+    def _read_messages(self) -> None:
+        error: Optional[BaseException] = None
+        try:
+            while True:
+                with self._lock:
+                    if self._closed:
+                        return
+                message = self._connection.receive_json()
+                if message is None:
+                    continue
+                command_id = message.get("id")
+                if isinstance(command_id, int):
+                    with self._lock:
+                        pending = self._pending.pop(command_id, None)
+                    if pending is not None:
+                        pending.response = message
+                        pending.event.set()
+                    continue
+                method = message.get("method")
+                params = message.get("params", {})
+                if isinstance(method, str) and isinstance(params, dict):
+                    self._event_handler(self, method, params)
+        except (OSError, DebuggerBridgeError, json.JSONDecodeError) as exception:
+            error = exception
+        finally:
+            with self._lock:
+                already_closed = self._closed
+                self._closed = True
+                self._ready = False
+                pending = list(self._pending.values())
+                self._pending.clear()
+            failure = error or WebSocketClosed("Action-scope target disconnected")
+            for command in pending:
+                command.error = failure
+                command.event.set()
+            self._connection.close()
+            if not already_closed:
+                self._close_handler(self.target_id, failure)
+
+
 class DebuggerBridge:
     def __init__(
         self,
@@ -1025,9 +1184,17 @@ class DebuggerBridge:
         self._next_request_interception_audit_id = 1
         self._request_interception = self._empty_request_interception()
         self._request_interception_rule = self._default_request_interception_rule()
+        self._request_interception_configured = False
         self._request_interception_context_id: Optional[str] = None
         self._request_interception_return_target_id: Optional[str] = None
-        self._request_interception_pending: set[str] = set()
+        self._request_interception_pending: set[tuple[str, str]] = set()
+        self._action_scope_mode = "global"
+        self._action_scope_target_id: Optional[str] = None
+        self._action_scope_targets: dict[str, dict[str, Any]] = {}
+        self._action_scope_sessions: dict[str, ActionScopeTargetSession] = {}
+        self._action_scope_target_overflow = 0
+        self._action_scope_revision = 0
+        self._action_scope_last_error: Optional[str] = None
         self._next_object_experiment_navigation_id = 1
         self._next_object_experiment_search_id = 1
         self._next_object_experiment_audit_id = 1
@@ -1049,14 +1216,17 @@ class DebuggerBridge:
         self._automation_source_bytes = 0
         self._automation_recipes_state = self._empty_automation_recipes()
         self._automation_variables: dict[str, str] = {}
-        self._automation_auto_script_id: Optional[str] = None
+        self._automation_auto_script_ids: dict[str, str] = {}
+        self._automation_binding_target_ids: set[str] = set()
         self._automation_binding_name = f"__reb_automation_{os.urandom(16).hex()}"
         self._automation_binding_nonce: Optional[str] = None
         self._automation_active_run_id: Optional[int] = None
         self._automation_active_document_id: Optional[str] = None
+        self._automation_active_target_id: Optional[str] = None
+        self._automation_active_session: Optional[ActionScopeTargetSession] = None
         self._automation_cancel_requested = False
         self._automation_auto_watchdog: Optional[threading.Timer] = None
-        self._automation_pending_trigger: Optional[str] = None
+        self._automation_pending_triggers: list[tuple[str, str]] = []
         self._automation_processing = False
         self._automation_epoch = 0
         self._next_repeater_execution_id = 1
@@ -1089,6 +1259,7 @@ class DebuggerBridge:
         self._fail_pending(DebuggerBridgeError("Debugger bridge stopped"))
         self._clear_heap_diff_baseline(force=True)
         self._dispose_request_interception_context(preserve_result=False, force=True)
+        self._close_action_scope_sessions()
 
     def generation(self) -> int:
         with self._lock:
@@ -1133,6 +1304,7 @@ class DebuggerBridge:
                 },
                 "heap_diff_baseline": self._heap_diff_baseline_metadata(),
                 "memory_origin_trace": copy.deepcopy(self._memory_origin_trace),
+                "action_scope": self._public_action_scope_locked(),
                 "request_interception": copy.deepcopy(self._request_interception),
                 "object_experiment": copy.deepcopy(self._object_experiment),
                 "runtime_hooks": copy.deepcopy(self._runtime_hooks),
@@ -1384,8 +1556,14 @@ class DebuggerBridge:
             with self._lock:
                 self._memory_origin_trace = self._empty_memory_origin_trace()
                 self._changed()
+        elif action == "set_action_scope":
+            return self._set_action_scope(request)
         elif action == "create_request_interception_experiment":
             return self._create_request_interception_experiment()
+        elif action == "create_experiment_page":
+            return self._create_experiment_page(request)
+        elif action == "close_experiment_page":
+            return self._close_experiment_page(request)
         elif action == "navigate_object_experiment":
             return self._navigate_object_experiment(request)
         elif action == "search_object_experiment":
@@ -3992,6 +4170,170 @@ class DebuggerBridge:
         }
 
     @staticmethod
+    def _empty_action_scope() -> dict[str, Any]:
+        return {
+            "protocol_version": 1,
+            "state": "idle",
+            "mode": "global",
+            "target_id": None,
+            "revision": 0,
+            "targets": [],
+            "matched_target_count": 0,
+            "connected_target_count": 0,
+            "target_overflow": 0,
+            "message": (
+                "Create an isolated Experiment context to choose mutable-rule scope."
+            ),
+            "rule_families": ["request_interception", "automation_recipes"],
+            "target_only_families": [
+                "object_experiment",
+                "runtime_hooks",
+                "repeater",
+            ],
+            "limits": {
+                "targets": MAX_ACTION_SCOPE_TARGETS,
+                "pending_triggers": MAX_ACTION_SCOPE_PENDING_TRIGGERS,
+            },
+        }
+
+    def _public_action_scope_locked(self) -> dict[str, Any]:
+        targets = []
+        for target_id, target in self._action_scope_targets.items():
+            session = self._action_scope_sessions.get(target_id)
+            targets.append(
+                {
+                    "id": target_id,
+                    "type": target["type"],
+                    "title": self._truncate_text(target["title"], 512),
+                    "url": self._redacted_request_url(target["url"])
+                    if target["url"].startswith(("http://", "https://"))
+                    else self._truncate_text(target["url"], MAX_TARGET_URL_BYTES),
+                    "connected": session is not None and session.ready(),
+                    "matched": self._action_scope_mode == "global"
+                    or self._action_scope_target_id == target_id,
+                }
+            )
+        matched_targets = [target for target in targets if target["matched"]]
+        connected_targets = [target for target in matched_targets if target["connected"]]
+        context_exists = self._request_interception_context_id is not None
+        if not context_exists:
+            state = (
+                "disposed"
+                if self._request_interception["state"] == "disposed"
+                else "idle"
+            )
+        elif self._action_scope_last_error is not None or (
+            self._action_scope_mode == "target"
+            and not any(
+                target["id"] == self._action_scope_target_id for target in targets
+            )
+        ):
+            state = "error"
+        elif not targets:
+            state = "discovering"
+        elif (
+            self._action_scope_target_overflow > 0
+            or len(connected_targets) != len(matched_targets)
+        ):
+            state = "partial"
+        else:
+            state = "ready"
+        if self._action_scope_last_error is not None:
+            message = self._action_scope_last_error
+        elif state == "idle":
+            message = "Create an isolated Experiment context to choose mutable-rule scope."
+        elif state == "disposed":
+            message = "The disposable context and every scoped target were deleted."
+        elif state == "discovering":
+            message = "Discovering bounded page targets in the disposable context."
+        elif state == "error":
+            message = "The selected page target is no longer available. Choose a new scope."
+        elif state == "partial":
+            message = (
+                f"{len(connected_targets)} of {len(matched_targets)} matched targets are connected."
+            )
+        elif self._action_scope_mode == "global":
+            message = (
+                f"Mutable rules apply to all {len(matched_targets)} disposable page targets."
+            )
+        else:
+            message = "Mutable rules apply only to the selected disposable page target."
+        return {
+            "protocol_version": 1,
+            "state": state,
+            "mode": self._action_scope_mode,
+            "target_id": self._action_scope_target_id,
+            "revision": self._action_scope_revision,
+            "targets": targets,
+            "matched_target_count": len(matched_targets),
+            "connected_target_count": len(connected_targets),
+            "target_overflow": self._action_scope_target_overflow,
+            "message": self._truncate_text(message, 512),
+            "rule_families": ["request_interception", "automation_recipes"],
+            "target_only_families": [
+                "object_experiment",
+                "runtime_hooks",
+                "repeater",
+            ],
+            "limits": {
+                "targets": MAX_ACTION_SCOPE_TARGETS,
+                "pending_triggers": MAX_ACTION_SCOPE_PENDING_TRIGGERS,
+            },
+        }
+
+    def _matching_action_scope_sessions_locked(
+        self,
+    ) -> list[ActionScopeTargetSession]:
+        sessions = []
+        for target_id in self._action_scope_targets:
+            if (
+                self._action_scope_mode == "target"
+                and target_id != self._action_scope_target_id
+            ):
+                continue
+            session = self._action_scope_sessions.get(target_id)
+            if session is not None and session.ready():
+                sessions.append(session)
+        return sessions
+
+    def _require_action_scope_sessions_locked(
+        self, label: str
+    ) -> list[ActionScopeTargetSession]:
+        public = self._public_action_scope_locked()
+        sessions = self._matching_action_scope_sessions_locked()
+        if (
+            public["state"] not in {"ready", "partial"}
+            or not sessions
+            or len(sessions) != public["matched_target_count"]
+            or public["target_overflow"] != 0
+        ):
+            raise DebuggerBridgeError(
+                f"{label} requires every matched disposable page target to be connected"
+            )
+        return sessions
+
+    def _scoped_command(
+        self,
+        session: Optional[ActionScopeTargetSession],
+        method: str,
+        params: Optional[dict[str, Any]] = None,
+        timeout: float = 3.0,
+    ) -> dict[str, Any]:
+        if session is None:
+            return self._command(method, params, timeout)
+        return session.command(method, params, timeout)
+
+    def _scoped_command_without_wait(
+        self,
+        session: Optional[ActionScopeTargetSession],
+        method: str,
+        params: Optional[dict[str, Any]] = None,
+    ) -> bool:
+        if session is None:
+            return self._command_without_wait(method, params)
+        return session.command_without_wait(method, params)
+
+    @staticmethod
     def _default_request_interception_rule() -> dict[str, Any]:
         return {
             "mode": "continue",
@@ -4231,12 +4573,15 @@ class DebuggerBridge:
             }
         )
         self._automation_variables = {}
-        self._automation_auto_script_id = None
+        self._automation_auto_script_ids = {}
+        self._automation_binding_target_ids = set()
         self._automation_binding_nonce = None
         self._automation_active_run_id = None
         self._automation_active_document_id = None
+        self._automation_active_target_id = None
+        self._automation_active_session = None
         self._automation_cancel_requested = False
-        self._automation_pending_trigger = None
+        self._automation_pending_triggers = []
         self._automation_processing = False
         self._automation_epoch += 1
 
@@ -4290,12 +4635,15 @@ class DebuggerBridge:
             }
         )
         self._automation_variables = {}
-        self._automation_auto_script_id = None
+        self._automation_auto_script_ids = {}
+        self._automation_binding_target_ids = set()
         self._automation_binding_nonce = None
         self._automation_active_run_id = None
         self._automation_active_document_id = None
+        self._automation_active_target_id = None
+        self._automation_active_session = None
         self._automation_cancel_requested = False
-        self._automation_pending_trigger = None
+        self._automation_pending_triggers = []
         self._automation_processing = False
         self._automation_epoch += 1
 
@@ -5154,7 +5502,9 @@ class DebuggerBridge:
             variables[raw_name] = raw_value
         return variables, total_bytes
 
-    def _require_automation_target_locked(self) -> None:
+    def _require_automation_target_locked(
+        self,
+    ) -> list[Optional[ActionScopeTargetSession]]:
         if (
             self._request_interception_context_id is None
             or self._automation_recipes_state["target_id"] is None
@@ -5166,6 +5516,11 @@ class DebuggerBridge:
             raise DebuggerBridgeError(
                 "Automation Recipes requires its attached disposable Experiment page"
             )
+        if self._action_scope_targets:
+            return list(
+                self._require_action_scope_sessions_locked("Automation Recipes")
+            )
+        return [None]
 
     def _automation_recipe_locked(self, recipe_id: int) -> dict[str, Any]:
         recipe = next(
@@ -5242,7 +5597,18 @@ class DebuggerBridge:
 }})();
 //# sourceURL=reb-automation-before-load.js"""
 
-    def _automation_source_locked(self) -> str:
+    def _automation_source_locked(self, target_id: Optional[str] = None) -> str:
+        if target_id is not None:
+            target = self._action_scope_targets.get(target_id)
+            if target is not None:
+                source = target.get("url", "")
+                return (
+                    self._redacted_request_url(source)
+                    if source.startswith(("http://", "https://"))
+                    else self._truncate_text(source, MAX_TARGET_URL_BYTES)
+                    if source
+                    else "about:blank"
+                )
         source = self._object_experiment.get("url", "")
         if not source and self._target is not None:
             source = self._target.get("url", "")
@@ -5254,6 +5620,8 @@ class DebuggerBridge:
         trigger: str,
         automatic: bool,
         document_id: Optional[str] = None,
+        target_id: Optional[str] = None,
+        session: Optional[ActionScopeTargetSession] = None,
     ) -> int:
         if self._automation_active_run_id is not None:
             raise DebuggerBridgeError("Another Automation Recipe is already running")
@@ -5274,12 +5642,16 @@ class DebuggerBridge:
             "label": recipe["label"],
             "trigger": trigger,
             "automatic": automatic,
-            "source": self._automation_source_locked(),
+            "source": self._automation_source_locked(target_id),
+            "target_id": target_id
+            or self._automation_recipes_state.get("target_id"),
             "started_at_ms": started_at_ms,
             "cancel_requested": False,
         }
         self._automation_active_run_id = run_id
         self._automation_active_document_id = document_id
+        self._automation_active_target_id = active["target_id"]
+        self._automation_active_session = session
         self._automation_cancel_requested = False
         self._automation_recipes_state["active_run"] = {
             key: value
@@ -5392,7 +5764,7 @@ class DebuggerBridge:
             "category": active["trigger"],
             "operation": outcome,
             "duration_ms": duration_ms,
-            "target_id": self._automation_recipes_state["target_id"],
+            "target_id": active["target_id"],
             "result_type": result["result_type"],
             "result_text": result["result_text"],
             "result_truncated": result["result_truncated"],
@@ -5407,6 +5779,8 @@ class DebuggerBridge:
         runs.append(run)
         self._automation_active_run_id = None
         self._automation_active_document_id = None
+        self._automation_active_target_id = None
+        self._automation_active_session = None
         self._automation_cancel_requested = False
         self._automation_recipes_state["active_run"] = None
         if outcome in {"failed", "timed_out"}:
@@ -5436,13 +5810,33 @@ class DebuggerBridge:
         }
 
     def _execute_automation_recipe(
-        self, recipe: dict[str, Any], trigger: str, automatic: bool
+        self,
+        recipe: dict[str, Any],
+        trigger: str,
+        automatic: bool,
+        target_id: Optional[str] = None,
+        session: Optional[ActionScopeTargetSession] = None,
     ) -> Optional[dict[str, Any]]:
         with self._lock:
             if automatic and not self._automation_recipes_state["auto_armed"]:
                 return None
-            self._require_automation_target_locked()
-            run_id = self._start_automation_run_locked(recipe, trigger, automatic)
+            sessions = self._require_automation_target_locked()
+            if self._action_scope_targets and session not in sessions:
+                raise DebuggerBridgeError(
+                    "Automation target is outside the active action scope"
+                )
+            resolved_target_id = (
+                session.target_id
+                if session is not None
+                else target_id or self._automation_recipes_state.get("target_id")
+            )
+            run_id = self._start_automation_run_locked(
+                recipe,
+                trigger,
+                automatic,
+                target_id=resolved_target_id,
+                session=session,
+            )
             variables = dict(self._automation_variables)
         configuration = self._automation_runner_config(recipe, variables)
         expression = (
@@ -5453,7 +5847,8 @@ class DebuggerBridge:
         outcome: Optional[str] = None
         runner_failure = False
         try:
-            evaluated = self._command(
+            evaluated = self._scoped_command(
+                session,
                 "Runtime.evaluate",
                 {
                     "expression": expression,
@@ -5501,11 +5896,15 @@ class DebuggerBridge:
                 except DebuggerBridgeError:
                     pass
             try:
-                self._command("Runtime.terminateExecution", timeout=3.0)
+                self._scoped_command(
+                    session, "Runtime.terminateExecution", timeout=3.0
+                )
             except DebuggerBridgeError:
                 pass
             try:
-                self._command("Page.reload", {"ignoreCache": True}, timeout=3.0)
+                self._scoped_command(
+                    session, "Page.reload", {"ignoreCache": True}, timeout=3.0
+                )
             except DebuggerBridgeError:
                 pass
         elif automatic and runner_failure:
@@ -5528,7 +5927,7 @@ class DebuggerBridge:
         recipe_id = self._automation_recipe_id(request)
         variables, variable_bytes = self._normalize_automation_variables(request)
         with self._lock:
-            self._require_automation_target_locked()
+            sessions = self._require_automation_target_locked()
             if self._automation_recipes_state["auto_armed"]:
                 raise DebuggerBridgeError(
                     "Disarm automatic recipes before starting a manual run"
@@ -5538,17 +5937,30 @@ class DebuggerBridge:
             self._automation_recipes_state["variable_count"] = len(variables)
             self._automation_recipes_state["variable_bytes"] = variable_bytes
             self._changed()
-        run = self._execute_automation_recipe(recipe, "manual", automatic=False)
+        runs = []
+        for session in sessions:
+            run = self._execute_automation_recipe(
+                recipe,
+                "manual",
+                automatic=False,
+                target_id=session.target_id if session is not None else None,
+                session=session,
+            )
+            if run is not None:
+                runs.append(run)
         with self._lock:
             state = copy.deepcopy(self._automation_recipes_state)
         return {
             "ok": True,
-            "run": run,
+            "run": runs[-1] if runs else None,
+            "runs": runs,
             "automation_recipes": state,
             "generation": self.generation(),
         }
 
-    def _queue_automation_trigger(self, trigger: str) -> None:
+    def _queue_automation_trigger(
+        self, trigger: str, target_id: Optional[str] = None
+    ) -> None:
         with self._lock:
             if not self._automation_recipes_state["auto_armed"]:
                 return
@@ -5558,13 +5970,28 @@ class DebuggerBridge:
             )
             if not has_recipes:
                 return
+            if target_id is None:
+                target_id = self._automation_recipes_state.get("target_id")
+            if not isinstance(target_id, str) or not target_id:
+                return
+            if self._action_scope_targets and (
+                not self._action_scope_matches_locked(target_id)
+                or target_id not in self._action_scope_sessions
+            ):
+                return
             if self._automation_processing or self._automation_active_run_id is not None:
-                if self._automation_pending_trigger is None:
-                    self._automation_pending_trigger = trigger
+                pending = (target_id, trigger)
+                if pending in self._automation_pending_triggers:
+                    return
+                if (
+                    len(self._automation_pending_triggers)
+                    < MAX_ACTION_SCOPE_PENDING_TRIGGERS
+                ):
+                    self._automation_pending_triggers.append(pending)
                 else:
                     self._automation_recipes_state["dropped_triggers"] += 1
                     self._automation_recipes_state["message"] = (
-                        "Dropped an automatic trigger batch because the bounded pending slot was full."
+                        "Dropped an automatic trigger batch because the bounded queue was full."
                     )
                     self._changed()
                 return
@@ -5572,7 +5999,7 @@ class DebuggerBridge:
             epoch = self._automation_epoch
         worker = threading.Thread(
             target=self._run_automation_trigger_worker,
-            args=(trigger, epoch),
+            args=(target_id, trigger, epoch),
             name="reb-automation-recipes",
             daemon=True,
         )
@@ -5590,7 +6017,9 @@ class DebuggerBridge:
                     self._automation_recipes_state["message"] = message
                     self._changed()
 
-    def _run_automation_trigger_worker(self, trigger: str, epoch: int) -> None:
+    def _run_automation_trigger_worker(
+        self, target_id: str, trigger: str, epoch: int
+    ) -> None:
         try:
             with self._lock:
                 recipes = [
@@ -5598,6 +6027,11 @@ class DebuggerBridge:
                     for recipe in self._automation_recipes
                     if recipe["enabled"] and recipe["trigger"] == trigger
                 ]
+                session = self._action_scope_sessions.get(target_id)
+                if self._action_scope_targets and session is None:
+                    raise DebuggerBridgeError(
+                        "Automatic recipe target disconnected before execution"
+                    )
             for recipe in recipes:
                 with self._lock:
                     if (
@@ -5616,7 +6050,13 @@ class DebuggerBridge:
                         reason="Automatic recipe run limit reached; recipes were disarmed."
                     )
                     break
-                self._execute_automation_recipe(recipe, trigger, automatic=True)
+                self._execute_automation_recipe(
+                    recipe,
+                    trigger,
+                    automatic=True,
+                    target_id=target_id,
+                    session=session,
+                )
         except BaseException as exception:
             with self._lock:
                 if epoch == self._automation_epoch:
@@ -5634,11 +6074,14 @@ class DebuggerBridge:
                 if epoch != self._automation_epoch:
                     return
                 self._automation_processing = False
-                pending = self._automation_pending_trigger
-                self._automation_pending_trigger = None
+                pending = (
+                    self._automation_pending_triggers.pop(0)
+                    if self._automation_pending_triggers
+                    else None
+                )
                 armed = self._automation_recipes_state["auto_armed"]
             if pending is not None and armed:
-                self._queue_automation_trigger(pending)
+                self._queue_automation_trigger(pending[1], pending[0])
 
     def _arm_automation_recipes(self, request: dict[str, Any]) -> dict[str, Any]:
         if request.get("confirmed") is not True:
@@ -5647,7 +6090,7 @@ class DebuggerBridge:
             )
         variables, variable_bytes = self._normalize_automation_variables(request)
         with self._lock:
-            self._require_automation_target_locked()
+            sessions = self._require_automation_target_locked()
             if self._automation_recipes_state["auto_armed"]:
                 raise DebuggerBridgeError("Automation Recipes is already armed")
             auto_recipes = [
@@ -5672,44 +6115,64 @@ class DebuggerBridge:
                 "Installing bounded automatic recipe triggers."
             )
             self._changed()
-        binding_added = False
-        script_id: Optional[str] = None
+        installed_scripts: dict[str, str] = {}
+        binding_targets: set[str] = set()
         try:
             if before_recipes:
-                self._command(
-                    "Runtime.addBinding", {"name": self._automation_binding_name}
-                )
-                binding_added = True
-                installed = self._command(
-                    "Page.addScriptToEvaluateOnNewDocument",
-                    {
-                        "source": self._automation_before_load_source(
-                            before_recipes, variables, nonce
-                        ),
-                        "runImmediately": False,
-                    },
-                )
-                script_id = installed.get("identifier")
-                if (
-                    not isinstance(script_id, str)
-                    or not script_id
-                    or len(script_id.encode("utf-8")) > MAX_TARGET_ID_BYTES
-                ):
-                    raise ProtocolError(
-                        "Debugger returned a malformed automation script identifier"
+                for session in sessions:
+                    target_id = (
+                        session.target_id
+                        if session is not None
+                        else self._automation_recipes_state["target_id"]
                     )
+                    self._scoped_command(
+                        session,
+                        "Runtime.addBinding",
+                        {"name": self._automation_binding_name},
+                    )
+                    binding_targets.add(target_id)
+                    installed = self._scoped_command(
+                        session,
+                        "Page.addScriptToEvaluateOnNewDocument",
+                        {
+                            "source": self._automation_before_load_source(
+                                before_recipes, variables, nonce
+                            ),
+                            "runImmediately": False,
+                        },
+                    )
+                    script_id = installed.get("identifier")
+                    if (
+                        not isinstance(script_id, str)
+                        or not script_id
+                        or len(script_id.encode("utf-8")) > MAX_TARGET_ID_BYTES
+                    ):
+                        raise ProtocolError(
+                            "Debugger returned a malformed automation script identifier"
+                        )
+                    installed_scripts[target_id] = script_id
         except BaseException as exception:
-            if script_id is not None:
+            session_by_target = {
+                (
+                    session.target_id
+                    if session is not None
+                    else self._automation_recipes_state["target_id"]
+                ): session
+                for session in sessions
+            }
+            for target_id, script_id in installed_scripts.items():
                 try:
-                    self._command(
+                    self._scoped_command(
+                        session_by_target.get(target_id),
                         "Page.removeScriptToEvaluateOnNewDocument",
                         {"identifier": script_id},
                     )
                 except DebuggerBridgeError:
                     pass
-            if binding_added:
+            for target_id in binding_targets:
                 try:
-                    self._command(
+                    self._scoped_command(
+                        session_by_target.get(target_id),
                         "Runtime.removeBinding", {"name": self._automation_binding_name}
                     )
                 except DebuggerBridgeError:
@@ -5723,7 +6186,8 @@ class DebuggerBridge:
             raise
         with self._lock:
             self._automation_variables = variables
-            self._automation_auto_script_id = script_id
+            self._automation_auto_script_ids = installed_scripts
+            self._automation_binding_target_ids = binding_targets
             self._automation_binding_nonce = nonce if before_recipes else None
             self._automation_recipes_state["auto_armed"] = True
             self._automation_recipes_state["state"] = "armed"
@@ -5735,7 +6199,13 @@ class DebuggerBridge:
             )
             self._changed()
             state = copy.deepcopy(self._automation_recipes_state)
-        self._queue_automation_trigger("created")
+        for session in sessions:
+            self._queue_automation_trigger(
+                "created",
+                session.target_id
+                if session is not None
+                else self._automation_recipes_state["target_id"],
+            )
         return {
             "ok": True,
             "automation_recipes": state,
@@ -5754,9 +6224,13 @@ class DebuggerBridge:
         with self._lock:
             armed = self._automation_recipes_state["auto_armed"]
             active = self._automation_active_run_id
-            script_id = self._automation_auto_script_id
-            binding_added = self._automation_binding_nonce is not None
-            if not armed and active is None and script_id is None:
+            active_session = self._automation_active_session
+            script_ids = dict(self._automation_auto_script_ids)
+            binding_target_ids = set(self._automation_binding_target_ids)
+            sessions = dict(self._action_scope_sessions)
+            if not sessions and self._automation_recipes_state.get("target_id"):
+                sessions[self._automation_recipes_state["target_id"]] = None
+            if not armed and active is None and not script_ids:
                 raise DebuggerBridgeError("Automation Recipes is not armed or running")
             self._automation_recipes_state["state"] = "stopping"
             self._automation_recipes_state["auto_armed"] = False
@@ -5765,7 +6239,7 @@ class DebuggerBridge:
             )
             self._automation_epoch += 1
             self._automation_processing = False
-            self._automation_pending_trigger = None
+            self._automation_pending_triggers = []
             if active is not None:
                 self._automation_cancel_requested = True
                 if self._automation_recipes_state["active_run"] is not None:
@@ -5777,31 +6251,41 @@ class DebuggerBridge:
         errors = []
         if active is not None:
             try:
-                self._command("Runtime.terminateExecution", timeout=3.0)
+                self._scoped_command(
+                    active_session, "Runtime.terminateExecution", timeout=3.0
+                )
             except DebuggerBridgeError as exception:
                 errors.append(str(exception))
-        if script_id is not None:
+        for target_id, script_id in script_ids.items():
             try:
-                self._command(
+                self._scoped_command(
+                    sessions.get(target_id),
                     "Page.removeScriptToEvaluateOnNewDocument",
                     {"identifier": script_id},
                 )
             except DebuggerBridgeError as exception:
                 errors.append(str(exception))
-        if binding_added:
+        for target_id in binding_target_ids:
             try:
-                self._command(
+                self._scoped_command(
+                    sessions.get(target_id),
                     "Runtime.removeBinding", {"name": self._automation_binding_name}
                 )
             except DebuggerBridgeError as exception:
                 errors.append(str(exception))
         if active is not None:
             try:
-                self._command("Page.reload", {"ignoreCache": True}, timeout=3.0)
+                self._scoped_command(
+                    active_session,
+                    "Page.reload",
+                    {"ignoreCache": True},
+                    timeout=3.0,
+                )
             except DebuggerBridgeError as exception:
                 errors.append(str(exception))
         with self._lock:
-            self._automation_auto_script_id = None
+            self._automation_auto_script_ids = {}
+            self._automation_binding_target_ids = set()
             self._automation_binding_nonce = None
             self._automation_variables = {}
             self._automation_recipes_state["variable_count"] = 0
@@ -5842,13 +6326,16 @@ class DebuggerBridge:
                 "Cancelling the active Automation Recipe."
             )
             automatic = self._automation_recipes_state["auto_armed"]
+            session = self._automation_active_session
             self._changed()
         if automatic:
             return self._disarm_automation_recipes(
                 reason="The active automatic recipe was cancelled and automatic triggers were disarmed."
             )
-        self._command("Runtime.terminateExecution", timeout=3.0)
-        self._command("Page.reload", {"ignoreCache": True}, timeout=3.0)
+        self._scoped_command(session, "Runtime.terminateExecution", timeout=3.0)
+        self._scoped_command(
+            session, "Page.reload", {"ignoreCache": True}, timeout=3.0
+        )
         with self._lock:
             state = copy.deepcopy(self._automation_recipes_state)
         return {
@@ -5887,7 +6374,12 @@ class DebuggerBridge:
             "generation": self.generation(),
         }
 
-    def _handle_automation_binding(self, params: dict[str, Any]) -> None:
+    def _handle_automation_binding(
+        self,
+        params: dict[str, Any],
+        target_id: Optional[str] = None,
+        session: Optional[ActionScopeTargetSession] = None,
+    ) -> None:
         name = params.get("name")
         payload = params.get("payload")
         if (
@@ -5921,9 +6413,19 @@ class DebuggerBridge:
         timed_out = False
         malformed = False
         with self._lock:
+            if target_id is None:
+                target_id = self._automation_recipes_state.get("target_id")
             if (
                 nonce != self._automation_binding_nonce
                 or not self._automation_recipes_state["auto_armed"]
+                or not isinstance(target_id, str)
+                or (
+                    self._action_scope_targets
+                    and (
+                        self._action_scope_sessions.get(target_id) is not session
+                        or not self._action_scope_matches_locked(target_id)
+                    )
+                )
             ):
                 return
             recipe = next(
@@ -5949,6 +6451,8 @@ class DebuggerBridge:
                         "before-load",
                         automatic=True,
                         document_id=document_id,
+                        target_id=target_id,
+                        session=session,
                     )
                 except DebuggerBridgeError as exception:
                     self._automation_recipes_state["last_failure"] = str(exception)
@@ -5970,6 +6474,7 @@ class DebuggerBridge:
                     or active.get("recipe_id") != recipe_id
                     or self._automation_active_run_id != active.get("id")
                     or self._automation_active_document_id != document_id
+                    or self._automation_active_target_id != target_id
                 ):
                     return
                 self._cancel_automation_watchdog_locked()
@@ -5980,7 +6485,7 @@ class DebuggerBridge:
                         active["id"], result, "timed_out" if timed_out else None
                     )
                     if timed_out:
-                        self._automation_pending_trigger = None
+                        self._automation_pending_triggers = []
                 except ProtocolError as exception:
                     malformed = True
                     result = self._automation_failure_result(str(exception))
@@ -5990,14 +6495,16 @@ class DebuggerBridge:
                 pending = (
                     None
                     if timed_out or malformed
-                    else self._automation_pending_trigger
+                    else self._automation_pending_triggers.pop(0)
+                    if self._automation_pending_triggers
+                    else None
                 )
-                self._automation_pending_trigger = None
         if start_timer is not None:
             start_timer.start()
         if timed_out:
             threading.Thread(
                 target=self._recover_automation_timeout,
+                args=(session,),
                 name="reb-automation-timeout-recovery",
                 daemon=True,
             ).start()
@@ -6008,7 +6515,7 @@ class DebuggerBridge:
                 daemon=True,
             ).start()
         if pending is not None:
-            self._queue_automation_trigger(pending)
+            self._queue_automation_trigger(pending[1], pending[0])
 
     def _disarm_automation_after_failure(self) -> None:
         try:
@@ -6021,7 +6528,9 @@ class DebuggerBridge:
         except DebuggerBridgeError:
             pass
 
-    def _recover_automation_timeout(self) -> None:
+    def _recover_automation_timeout(
+        self, session: Optional[ActionScopeTargetSession] = None
+    ) -> None:
         try:
             self._disarm_automation_recipes(
                 reason="An automatic recipe timed out; automatic triggers were disarmed."
@@ -6029,11 +6538,15 @@ class DebuggerBridge:
         except DebuggerBridgeError:
             pass
         try:
-            self._command("Runtime.terminateExecution", timeout=3.0)
+            self._scoped_command(
+                session, "Runtime.terminateExecution", timeout=3.0
+            )
         except DebuggerBridgeError:
             pass
         try:
-            self._command("Page.reload", {"ignoreCache": True}, timeout=3.0)
+            self._scoped_command(
+                session, "Page.reload", {"ignoreCache": True}, timeout=3.0
+            )
         except DebuggerBridgeError:
             pass
 
@@ -6049,12 +6562,324 @@ class DebuggerBridge:
                 or active.get("id") != run_id
             ):
                 return
+            session = self._automation_active_session
             self._automation_auto_watchdog = None
             result = self._automation_failure_result(
                 "Before-load recipe exceeded the 2 second execution limit"
             )
             self._finish_automation_run_locked(run_id, result, "timed_out")
-        self._recover_automation_timeout()
+        self._recover_automation_timeout(session)
+
+    def _action_scope_matches_locked(self, target_id: str) -> bool:
+        return self._action_scope_mode == "global" or (
+            self._action_scope_target_id == target_id
+        )
+
+    def _configure_action_scope_session(
+        self, session: ActionScopeTargetSession
+    ) -> None:
+        with self._lock:
+            configured = self._request_interception_configured
+            matches = self._action_scope_matches_locked(session.target_id)
+            pattern = self._request_interception_rule["url_pattern"]
+        if configured and matches:
+            session.command(
+                "Fetch.enable",
+                {
+                    "patterns": [
+                        {"urlPattern": pattern, "requestStage": "Request"}
+                    ],
+                    "handleAuthRequests": False,
+                },
+            )
+        else:
+            session.command("Fetch.disable")
+
+    def _on_action_scope_event(
+        self,
+        session: ActionScopeTargetSession,
+        method: str,
+        params: dict[str, Any],
+    ) -> None:
+        if method == "Fetch.requestPaused":
+            self._handle_request_interception_pause_async(params, session)
+            return
+        if method == "Page.loadEventFired":
+            self._queue_automation_trigger("after-load", session.target_id)
+            return
+        if method == "Runtime.bindingCalled":
+            self._handle_automation_binding(params, session.target_id, session)
+
+    def _on_action_scope_session_closed(
+        self, target_id: str, error: BaseException
+    ) -> None:
+        with self._lock:
+            session = self._action_scope_sessions.get(target_id)
+            if session is None or session.ready():
+                return
+            self._action_scope_sessions.pop(target_id, None)
+            if (
+                self._request_interception_context_id is not None
+                and target_id in self._action_scope_targets
+            ):
+                self._action_scope_last_error = self._truncate_text(
+                    f"Disposable page target disconnected: {error}", 512
+                )
+            automation_armed = self._automation_recipes_state["auto_armed"]
+            self._changed()
+        if automation_armed:
+            threading.Thread(
+                target=self._disarm_automation_after_scope_loss,
+                name="reb-automation-scope-recovery",
+                daemon=True,
+            ).start()
+
+    def _disarm_automation_after_scope_loss(self) -> None:
+        try:
+            self._disarm_automation_recipes(
+                reason=(
+                    "A matched page disconnected; automatic recipes were disarmed "
+                    "to prevent partial scope coverage."
+                )
+            )
+        except DebuggerBridgeError:
+            pass
+
+    def _close_action_scope_sessions(self) -> None:
+        with self._lock:
+            sessions = list(self._action_scope_sessions.values())
+            self._action_scope_sessions = {}
+            self._action_scope_targets = {}
+            self._action_scope_target_overflow = 0
+            self._action_scope_last_error = None
+        for session in sessions:
+            session.close()
+
+    def _refresh_action_scope_targets(self) -> None:
+        with self._lock:
+            context_id = self._request_interception_context_id
+            previous_public = self._public_action_scope_locked()
+        if context_id is None:
+            return
+        target_result = self._browser_command("Target.getTargets")
+        raw_infos = target_result.get("targetInfos")
+        if not isinstance(raw_infos, list) or len(raw_infos) > MAX_TARGETS * 4:
+            raise ProtocolError("Browser returned a malformed action-scope target list")
+        discovered = {target["id"]: target for target in self._discover_targets()}
+        candidates: list[dict[str, Any]] = []
+        for raw in raw_infos:
+            if (
+                not isinstance(raw, dict)
+                or raw.get("browserContextId") != context_id
+                or raw.get("type") not in {"page", "webview"}
+            ):
+                continue
+            target_id = raw.get("targetId")
+            target = discovered.get(target_id) if isinstance(target_id, str) else None
+            if target is None:
+                continue
+            candidates.append(target)
+        candidates.sort(key=lambda target: target["id"])
+        overflow = max(0, len(candidates) - MAX_ACTION_SCOPE_TARGETS)
+        candidates = candidates[:MAX_ACTION_SCOPE_TARGETS]
+        candidate_ids = {target["id"] for target in candidates}
+        with self._lock:
+            if self._request_interception_context_id != context_id:
+                return
+            removed = [
+                self._action_scope_sessions.pop(target_id)
+                for target_id in list(self._action_scope_sessions)
+                if target_id not in candidate_ids
+            ]
+            self._action_scope_targets = {
+                target["id"]: {
+                    "id": target["id"],
+                    "type": target["type"],
+                    "title": target["title"],
+                    "url": target["url"],
+                    "web_socket_url": target["web_socket_url"],
+                }
+                for target in candidates
+            }
+            self._action_scope_target_overflow = overflow
+            new_targets = [
+                target
+                for target in candidates
+                if target["id"] not in self._action_scope_sessions
+            ]
+            self._action_scope_last_error = None
+        for session in removed:
+            session.close()
+        failures = []
+        for target in new_targets:
+            session: Optional[ActionScopeTargetSession] = None
+            try:
+                session = ActionScopeTargetSession(
+                    target,
+                    self._on_action_scope_event,
+                    self._on_action_scope_session_closed,
+                )
+                session.start()
+                self._configure_action_scope_session(session)
+            except BaseException as exception:
+                if session is not None:
+                    session.close()
+                failures.append(f"{target['id'][:12]}: {exception}")
+                continue
+            keep_session = False
+            with self._lock:
+                if (
+                    self._request_interception_context_id == context_id
+                    and target["id"] in self._action_scope_targets
+                    and target["id"] not in self._action_scope_sessions
+                ):
+                    self._action_scope_sessions[target["id"]] = session
+                    keep_session = True
+            if not keep_session:
+                session.close()
+        with self._lock:
+            if self._request_interception_context_id != context_id:
+                return
+            self._action_scope_last_error = (
+                self._truncate_text("; ".join(failures), 512) if failures else None
+            )
+            if self._public_action_scope_locked() != previous_public:
+                self._changed()
+
+    def _set_action_scope(self, request: dict[str, Any]) -> dict[str, Any]:
+        mode = request.get("mode")
+        target_id = request.get("target_id")
+        if mode not in {"global", "target"}:
+            raise DebuggerBridgeError("Action scope mode is invalid")
+        if mode == "global":
+            if target_id is not None:
+                raise DebuggerBridgeError("Global action scope cannot include a target ID")
+        elif (
+            not isinstance(target_id, str)
+            or not target_id
+            or len(target_id.encode("utf-8")) > MAX_TARGET_ID_BYTES
+        ):
+            raise DebuggerBridgeError("Targeted action scope requires a valid target ID")
+        with self._lock:
+            if self._request_interception_context_id is None:
+                raise DebuggerBridgeError(
+                    "Create an isolated Experiment context before changing action scope"
+                )
+            if (
+                self._request_interception_pending
+                or self._request_interception["state"] == "running"
+                or self._automation_recipes_state["auto_armed"]
+                or self._automation_active_run_id is not None
+                or self._automation_processing
+            ):
+                raise DebuggerBridgeError(
+                    "Finish or disarm scoped rules before changing action scope"
+                )
+            if mode == "target" and target_id not in self._action_scope_targets:
+                raise DebuggerBridgeError("Action scope target is unavailable")
+            previous_mode = self._action_scope_mode
+            previous_target_id = self._action_scope_target_id
+            self._action_scope_mode = mode
+            self._action_scope_target_id = target_id if mode == "target" else None
+            sessions = list(self._action_scope_sessions.values())
+        try:
+            for session in sessions:
+                self._configure_action_scope_session(session)
+        except BaseException:
+            with self._lock:
+                self._action_scope_mode = previous_mode
+                self._action_scope_target_id = previous_target_id
+            for session in sessions:
+                try:
+                    self._configure_action_scope_session(session)
+                except DebuggerBridgeError:
+                    pass
+            raise
+        with self._lock:
+            self._action_scope_revision += 1
+            self._action_scope_last_error = None
+            self._changed()
+            scope = self._public_action_scope_locked()
+        return {"ok": True, "action_scope": scope, "generation": self.generation()}
+
+    def _create_experiment_page(self, request: dict[str, Any]) -> dict[str, Any]:
+        url = request.get("url", "about:blank")
+        if not isinstance(url, str):
+            raise DebuggerBridgeError("Disposable page URL is invalid")
+        url = url.strip() or "about:blank"
+        if url != "about:blank":
+            self._validate_request_interception_url(url)
+        with self._lock:
+            context_id = self._request_interception_context_id
+            if context_id is None:
+                raise DebuggerBridgeError(
+                    "Create an isolated Experiment context before adding a page"
+                )
+            if len(self._action_scope_targets) >= MAX_ACTION_SCOPE_TARGETS:
+                raise DebuggerBridgeError("Disposable page target limit reached")
+            if (
+                self._request_interception_pending
+                or self._automation_recipes_state["auto_armed"]
+                or self._automation_active_run_id is not None
+                or self._automation_processing
+            ):
+                raise DebuggerBridgeError(
+                    "Finish scoped rule work before adding a disposable page"
+                )
+        target_result = self._browser_command(
+            "Target.createTarget",
+            {
+                "url": url,
+                "browserContextId": context_id,
+                "background": True,
+            },
+        )
+        target_id = self._required_protocol_identifier(
+            target_result.get("targetId"), "experiment target"
+        )
+        try:
+            self._refresh_action_scope_targets()
+        except DebuggerBridgeError:
+            pass
+        with self._lock:
+            scope = self._public_action_scope_locked()
+        return {
+            "ok": True,
+            "target_id": target_id,
+            "action_scope": scope,
+            "generation": self.generation(),
+        }
+
+    def _close_experiment_page(self, request: dict[str, Any]) -> dict[str, Any]:
+        target_id = self._required_text(request, "target_id", MAX_TARGET_ID_BYTES)
+        with self._lock:
+            if self._request_interception_context_id is None:
+                raise DebuggerBridgeError("No isolated Experiment context exists")
+            if target_id not in self._action_scope_targets:
+                raise DebuggerBridgeError("Disposable page target is unavailable")
+            if target_id == self._request_interception["target_id"]:
+                raise DebuggerBridgeError(
+                    "The primary Experiment page remains until the context is disposed"
+                )
+            if (
+                self._request_interception_pending
+                or self._automation_recipes_state["auto_armed"]
+                or self._automation_active_run_id is not None
+                or self._automation_processing
+            ):
+                raise DebuggerBridgeError(
+                    "Finish scoped rule work before closing a disposable page"
+                )
+        closed = self._browser_command("Target.closeTarget", {"targetId": target_id})
+        if closed.get("success") is not True:
+            raise ProtocolError("Browser did not confirm the disposable page was closed")
+        try:
+            self._refresh_action_scope_targets()
+        except DebuggerBridgeError:
+            pass
+        with self._lock:
+            scope = self._public_action_scope_locked()
+        return {"ok": True, "action_scope": scope, "generation": self.generation()}
 
     def _create_request_interception_experiment(self) -> dict[str, Any]:
         with self._lock:
@@ -6083,7 +6908,14 @@ class DebuggerBridge:
                 }
             )
             self._request_interception_rule = self._default_request_interception_rule()
+            self._request_interception_configured = False
             self._request_interception_return_target_id = return_target_id
+            self._action_scope_mode = "global"
+            self._action_scope_target_id = None
+            self._action_scope_targets = {}
+            self._action_scope_target_overflow = 0
+            self._action_scope_last_error = None
+            self._action_scope_revision += 1
             self._begin_repeater_session_locked(experiment_id)
             self._begin_object_experiment_session_locked(experiment_id)
             self._begin_runtime_hook_session_locked(experiment_id)
@@ -6178,9 +7010,18 @@ class DebuggerBridge:
             self._changed()
         if connection is not None:
             connection.close()
+        try:
+            self._refresh_action_scope_targets()
+        except DebuggerBridgeError as exception:
+            with self._lock:
+                self._action_scope_last_error = self._truncate_text(str(exception), 512)
+                self._changed()
+        with self._lock:
+            action_scope = self._public_action_scope_locked()
         return {
             "ok": True,
             "experiment": copy.deepcopy(self._request_interception),
+            "action_scope": action_scope,
             "object_experiment": copy.deepcopy(self._object_experiment),
             "runtime_hooks": copy.deepcopy(self._runtime_hooks),
             "automation_recipes": copy.deepcopy(self._automation_recipes_state),
@@ -6204,20 +7045,61 @@ class DebuggerBridge:
                 raise DebuggerBridgeError(
                     "The isolated request interception target is not ready"
                 )
-        self._command(
-            "Fetch.enable",
-            {
-                "patterns": [
-                    {
-                        "urlPattern": rule["url_pattern"],
-                        "requestStage": "Request",
-                    }
-                ],
-                "handleAuthRequests": False,
-            },
-        )
+            scoped = bool(self._action_scope_targets)
+            matched_sessions = (
+                self._require_action_scope_sessions_locked("Request Interception")
+                if scoped
+                else []
+            )
+            all_sessions = list(self._action_scope_sessions.values())
+            previous_rule = copy.deepcopy(self._request_interception_rule)
+            previously_configured = self._request_interception_configured
+        patterns = [
+            {"urlPattern": rule["url_pattern"], "requestStage": "Request"}
+        ]
+        configured_sessions: list[ActionScopeTargetSession] = []
+        try:
+            if scoped:
+                matched_ids = {session.target_id for session in matched_sessions}
+                for session in all_sessions:
+                    if session.target_id in matched_ids:
+                        session.command(
+                            "Fetch.enable",
+                            {"patterns": patterns, "handleAuthRequests": False},
+                        )
+                        configured_sessions.append(session)
+                    else:
+                        session.command("Fetch.disable")
+            else:
+                self._command(
+                    "Fetch.enable",
+                    {"patterns": patterns, "handleAuthRequests": False},
+                )
+        except BaseException:
+            rollback_pattern = [
+                {
+                    "urlPattern": previous_rule["url_pattern"],
+                    "requestStage": "Request",
+                }
+            ]
+            for session in configured_sessions:
+                try:
+                    if previously_configured:
+                        session.command(
+                            "Fetch.enable",
+                            {
+                                "patterns": rollback_pattern,
+                                "handleAuthRequests": False,
+                            },
+                        )
+                    else:
+                        session.command("Fetch.disable")
+                except DebuggerBridgeError:
+                    pass
+            raise
         with self._lock:
             self._request_interception_rule = rule
+            self._request_interception_configured = True
             self._request_interception["rule"] = self._public_request_interception_rule(
                 rule
             )
@@ -6244,9 +7126,35 @@ class DebuggerBridge:
                 raise DebuggerBridgeError(
                     "The isolated request interception target is not ready"
                 )
+            if self._action_scope_targets:
+                sessions = self._require_action_scope_sessions_locked(
+                    "Request Interception"
+                )
+                requested_target_id = request.get("target_id")
+                if requested_target_id is not None and (
+                    not isinstance(requested_target_id, str)
+                    or requested_target_id
+                    not in {session.target_id for session in sessions}
+                ):
+                    raise DebuggerBridgeError(
+                        "Experiment request target is outside the active action scope"
+                    )
+                session = next(
+                    (
+                        candidate
+                        for candidate in sessions
+                        if candidate.target_id == requested_target_id
+                    ),
+                    sessions[0],
+                )
+                target_id = session.target_id
+            else:
+                session = None
+                target_id = self._request_interception["target_id"]
             self._request_interception["state"] = "running"
             self._request_interception["result"] = None
             self._request_interception["last_request"] = {
+                "target_id": target_id,
                 "url": self._redacted_request_url(replay["url"]),
                 "method": replay["method"],
                 "header_count": len(replay["headers"]),
@@ -6275,7 +7183,8 @@ class DebuggerBridge:
             f"({json.dumps(configuration, separators=(',', ':'))})"
         )
         try:
-            evaluated = self._command(
+            evaluated = self._scoped_command(
+                session,
                 "Runtime.evaluate",
                 {
                     "expression": expression,
@@ -6319,6 +7228,7 @@ class DebuggerBridge:
         self._dispose_request_interception_context(preserve_result=True)
         with self._lock:
             experiment = copy.deepcopy(self._request_interception)
+            action_scope = self._public_action_scope_locked()
             object_experiment = copy.deepcopy(self._object_experiment)
             runtime_hooks = copy.deepcopy(self._runtime_hooks)
             automation_recipes = copy.deepcopy(self._automation_recipes_state)
@@ -6326,6 +7236,7 @@ class DebuggerBridge:
         return {
             "ok": True,
             "experiment": experiment,
+            "action_scope": action_scope,
             "object_experiment": object_experiment,
             "runtime_hooks": runtime_hooks,
             "automation_recipes": automation_recipes,
@@ -6346,6 +7257,10 @@ class DebuggerBridge:
                         self._default_request_interception_rule()
                     )
                     self._request_interception_pending.clear()
+                    self._request_interception_configured = False
+                    self._action_scope_mode = "global"
+                    self._action_scope_target_id = None
+                    self._action_scope_revision += 1
                     self._repeater = self._empty_repeater()
                     self._repeater_history_bytes = 0
                     self._repeater_active_execution_id = None
@@ -6368,12 +7283,15 @@ class DebuggerBridge:
                         "source_bytes"
                     ] = self._automation_source_bytes
                     self._automation_variables = {}
-                    self._automation_auto_script_id = None
+                    self._automation_auto_script_ids = {}
+                    self._automation_binding_target_ids = set()
                     self._automation_binding_nonce = None
                     self._automation_active_run_id = None
                     self._automation_active_document_id = None
+                    self._automation_active_target_id = None
+                    self._automation_active_session = None
                     self._automation_cancel_requested = False
-                    self._automation_pending_trigger = None
+                    self._automation_pending_triggers = []
                     self._automation_processing = False
                     self._cancel_automation_watchdog_locked()
                     self._automation_epoch += 1
@@ -6451,10 +7369,15 @@ class DebuggerBridge:
             if preserve_result:
                 raise
             return
+        self._close_action_scope_sessions()
         with self._lock:
             self._request_interception_context_id = None
             self._request_interception_return_target_id = None
             self._request_interception_pending.clear()
+            self._request_interception_configured = False
+            self._action_scope_mode = "global"
+            self._action_scope_target_id = None
+            self._action_scope_revision += 1
             self._preferred_target_id = return_target_id
             self._request_interception_rule = self._default_request_interception_rule()
             if preserve_result:
@@ -6488,12 +7411,15 @@ class DebuggerBridge:
                     "source_bytes"
                 ] = self._automation_source_bytes
                 self._automation_variables = {}
-                self._automation_auto_script_id = None
+                self._automation_auto_script_ids = {}
+                self._automation_binding_target_ids = set()
                 self._automation_binding_nonce = None
                 self._automation_active_run_id = None
                 self._automation_active_document_id = None
+                self._automation_active_target_id = None
+                self._automation_active_session = None
                 self._automation_cancel_requested = False
-                self._automation_pending_trigger = None
+                self._automation_pending_triggers = []
                 self._automation_processing = False
                 self._cancel_automation_watchdog_locked()
                 self._automation_epoch += 1
@@ -6511,6 +7437,10 @@ class DebuggerBridge:
             self._request_interception = self._empty_request_interception()
             self._request_interception_rule = self._default_request_interception_rule()
             self._request_interception_pending.clear()
+            self._request_interception_configured = False
+            self._action_scope_mode = "global"
+            self._action_scope_target_id = None
+            self._action_scope_revision += 1
             self._repeater = self._empty_repeater()
             self._repeater_history_bytes = 0
             self._repeater_active_execution_id = None
@@ -6533,12 +7463,15 @@ class DebuggerBridge:
                 self._automation_source_bytes
             )
             self._automation_variables = {}
-            self._automation_auto_script_id = None
+            self._automation_auto_script_ids = {}
+            self._automation_binding_target_ids = set()
             self._automation_binding_nonce = None
             self._automation_active_run_id = None
             self._automation_active_document_id = None
+            self._automation_active_target_id = None
+            self._automation_active_session = None
             self._automation_cancel_requested = False
-            self._automation_pending_trigger = None
+            self._automation_pending_triggers = []
             self._automation_processing = False
             self._cancel_automation_watchdog_locked()
             self._automation_epoch += 1
@@ -6870,7 +7803,11 @@ class DebuggerBridge:
             MAX_INTERCEPTION_URL_BYTES,
         )
 
-    def _handle_request_interception_pause_async(self, params: dict[str, Any]) -> None:
+    def _handle_request_interception_pause_async(
+        self,
+        params: dict[str, Any],
+        session: Optional[ActionScopeTargetSession] = None,
+    ) -> None:
         request_id = params.get("requestId")
         request = params.get("request")
         if (
@@ -6880,20 +7817,41 @@ class DebuggerBridge:
         ):
             return
         with self._lock:
-            active = (
-                self._request_interception_context_id is not None
-                and self._target is not None
-                and self._request_interception["target_id"] == self._target["id"]
-                and self._request_interception["state"]
+            target_id = (
+                session.target_id
+                if session is not None
+                else self._target["id"]
+                if self._target is not None
+                else self._request_interception["target_id"]
+            )
+            active = self._request_interception_context_id is not None and (
+                self._request_interception["state"]
                 in {"ready", "running", "error"}
             )
+            if session is not None:
+                active = (
+                    active
+                    and self._request_interception_configured
+                    and self._action_scope_sessions.get(target_id) is session
+                    and self._action_scope_matches_locked(target_id)
+                )
+            else:
+                active = (
+                    active
+                    and self._target is not None
+                    and self._request_interception["target_id"] == self._target["id"]
+                    and not self._action_scope_targets
+                )
+            pending_key = (target_id or "", request_id)
         if not active:
-            self._command_without_wait(
+            self._scoped_command_without_wait(
+                session,
                 "Fetch.continueRequest", {"requestId": request_id}
             )
             return
         if not isinstance(request, dict):
-            continued = self._command_without_wait(
+            continued = self._scoped_command_without_wait(
+                session,
                 "Fetch.continueRequest", {"requestId": request_id}
             )
             self._append_request_interception_audit(
@@ -6904,10 +7862,11 @@ class DebuggerBridge:
                 "Malformed paused request continued unchanged."
                 if continued
                 else "Malformed paused request could not be resumed.",
+                target_id,
             )
             return
         with self._lock:
-            if request_id in self._request_interception_pending:
+            if pending_key in self._request_interception_pending:
                 return
             if (
                 len(self._request_interception_pending)
@@ -6916,13 +7875,14 @@ class DebuggerBridge:
                 overflow = True
             else:
                 overflow = False
-                self._request_interception_pending.add(request_id)
+                self._request_interception_pending.add(pending_key)
                 self._request_interception["pending_requests"] = len(
                     self._request_interception_pending
                 )
                 self._changed()
         if overflow:
-            continued = self._command_without_wait(
+            continued = self._scoped_command_without_wait(
+                session,
                 "Fetch.continueRequest", {"requestId": request_id}
             )
             self._append_request_interception_audit(
@@ -6933,22 +7893,30 @@ class DebuggerBridge:
                 "Pending interception limit reached; request continued unchanged."
                 if continued
                 else "Pending interception limit reached and the request could not be resumed.",
+                target_id,
             )
             return
         thread = threading.Thread(
             target=self._process_request_interception_pause,
-            args=(request_id, request, params.get("resourceType")),
+            args=(
+                request_id,
+                request,
+                params.get("resourceType"),
+                target_id,
+                session,
+            ),
             name="reb-request-interception",
             daemon=True,
         )
         try:
             thread.start()
         except RuntimeError as exception:
-            continued = self._command_without_wait(
+            continued = self._scoped_command_without_wait(
+                session,
                 "Fetch.continueRequest", {"requestId": request_id}
             )
             with self._lock:
-                self._request_interception_pending.discard(request_id)
+                self._request_interception_pending.discard(pending_key)
                 self._request_interception["pending_requests"] = len(
                     self._request_interception_pending
                 )
@@ -6963,10 +7931,16 @@ class DebuggerBridge:
                     f"Request {'continued unchanged' if continued else 'could not be resumed'}.",
                     512,
                 ),
+                target_id,
             )
 
     def _process_request_interception_pause(
-        self, request_id: str, request: dict[str, Any], resource_type: Any
+        self,
+        request_id: str,
+        request: dict[str, Any],
+        resource_type: Any,
+        target_id: Optional[str] = None,
+        session: Optional[ActionScopeTargetSession] = None,
     ) -> None:
         method = (
             request.get("method")
@@ -7031,22 +8005,25 @@ class DebuggerBridge:
             outcome = "fulfilled"
             detail = f"Synthetic response {rule['response_code']} returned."
         try:
-            self._command(command, command_params, timeout=3.0)
+            self._scoped_command(session, command, command_params, timeout=3.0)
         except DebuggerBridgeError as exception:
             outcome = "error"
             detail = self._truncate_text(str(exception), 512)
             try:
-                self._command(
+                self._scoped_command(
+                    session,
                     "Fetch.continueRequest", {"requestId": request_id}, timeout=1.0
                 )
             except DebuggerBridgeError:
                 pass
         finally:
             self._append_request_interception_audit(
-                request_id, request, resource_type, outcome, detail
+                request_id, request, resource_type, outcome, detail, target_id
             )
             with self._lock:
-                self._request_interception_pending.discard(request_id)
+                self._request_interception_pending.discard(
+                    (target_id or "", request_id)
+                )
                 self._request_interception["pending_requests"] = len(
                     self._request_interception_pending
                 )
@@ -7119,6 +8096,7 @@ class DebuggerBridge:
         resource_type: Any,
         outcome: str,
         detail: str,
+        target_id: Optional[str] = None,
     ) -> None:
         raw_url = request.get("url") if isinstance(request.get("url"), str) else ""
         method = request.get("method") if isinstance(request.get("method"), str) else ""
@@ -7132,6 +8110,12 @@ class DebuggerBridge:
                     "id": self._next_request_interception_audit_id,
                     "occurred_at_ms": int(time.time() * 1_000),
                     "request_id": self._truncate_text(request_id, 256),
+                    "target_id": self._truncate_text(
+                        target_id
+                        or self._request_interception.get("target_id")
+                        or "",
+                        MAX_TARGET_ID_BYTES,
+                    ),
                     "method": self._truncate_text(
                         method, MAX_INTERCEPTION_METHOD_BYTES
                     ),
@@ -8001,6 +8985,23 @@ class DebuggerBridge:
                                 for key in ("id", "type", "title", "url")
                             }
                         self._changed()
+                    refresh_action_scope = (
+                        self._request_interception_context_id is not None
+                    )
+                if refresh_action_scope:
+                    try:
+                        self._refresh_action_scope_targets()
+                    except (
+                        OSError,
+                        ValueError,
+                        DebuggerBridgeError,
+                        json.JSONDecodeError,
+                    ) as exception:
+                        with self._lock:
+                            self._action_scope_last_error = self._truncate_text(
+                                str(exception), 512
+                            )
+                            self._changed()
         finally:
             connection.close()
             reader.join(timeout=1.0)
@@ -8050,12 +9051,15 @@ class DebuggerBridge:
                         )
                 if self._automation_recipes_state.get("target_id") == target["id"]:
                     self._cancel_automation_watchdog_locked()
-                    self._automation_auto_script_id = None
+                    self._automation_auto_script_ids = {}
+                    self._automation_binding_target_ids = set()
                     self._automation_binding_nonce = None
                     self._automation_active_run_id = None
                     self._automation_active_document_id = None
+                    self._automation_active_target_id = None
+                    self._automation_active_session = None
                     self._automation_cancel_requested = False
-                    self._automation_pending_trigger = None
+                    self._automation_pending_triggers = []
                     self._automation_processing = False
                     self._automation_variables = {}
                     self._automation_epoch += 1
@@ -8120,13 +9124,22 @@ class DebuggerBridge:
 
     def _handle_event(self, method: str, params: dict[str, Any]) -> None:
         if method == "Runtime.bindingCalled":
-            self._handle_automation_binding(params)
+            with self._lock:
+                scoped = bool(self._action_scope_targets)
+            if not scoped:
+                self._handle_automation_binding(params)
             return
         if method == "Page.loadEventFired":
-            self._queue_automation_trigger("after-load")
+            with self._lock:
+                scoped = bool(self._action_scope_targets)
+            if not scoped:
+                self._queue_automation_trigger("after-load")
             return
         if method == "Fetch.requestPaused":
-            self._handle_request_interception_pause_async(params)
+            with self._lock:
+                scoped = bool(self._action_scope_targets)
+            if not scoped:
+                self._handle_request_interception_pause_async(params)
             return
         if method == "HeapProfiler.addHeapSnapshotChunk":
             with self._lock:
@@ -8468,13 +9481,17 @@ class DebuggerBridge:
                 "searching",
                 "mutating",
             }
-        self._command(
-            "Fetch.enable",
-            {
-                "patterns": [{"urlPattern": pattern, "requestStage": "Request"}],
-                "handleAuthRequests": False,
-            },
-        )
+            scoped_sessions_active = bool(self._action_scope_targets)
+        if not scoped_sessions_active:
+            self._command(
+                "Fetch.enable",
+                {
+                    "patterns": [
+                        {"urlPattern": pattern, "requestStage": "Request"}
+                    ],
+                    "handleAuthRequests": False,
+                },
+            )
         with self._lock:
             if self._request_interception["target_id"] != target_id:
                 return
@@ -8519,12 +9536,15 @@ class DebuggerBridge:
                 "Runtime Hooks is isolated and ready for a live JavaScript function."
             )
             self._cancel_automation_watchdog_locked()
-            self._automation_auto_script_id = None
+            self._automation_auto_script_ids = {}
+            self._automation_binding_target_ids = set()
             self._automation_binding_nonce = None
             self._automation_active_run_id = None
             self._automation_active_document_id = None
+            self._automation_active_target_id = None
+            self._automation_active_session = None
             self._automation_cancel_requested = False
-            self._automation_pending_trigger = None
+            self._automation_pending_triggers = []
             self._automation_processing = False
             self._automation_variables = {}
             self._automation_epoch += 1

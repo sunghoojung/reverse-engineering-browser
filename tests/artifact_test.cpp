@@ -41,7 +41,10 @@ CHECK_ARTIFACT_WIRE_OFFSET(content_size);
 CHECK_ARTIFACT_WIRE_OFFSET(url_size);
 CHECK_ARTIFACT_WIRE_OFFSET(mime_type_size);
 CHECK_ARTIFACT_WIRE_OFFSET(expected_sha256);
+CHECK_ARTIFACT_WIRE_OFFSET(execution_context_id);
+CHECK_ARTIFACT_WIRE_OFFSET(capture_origin);
 CHECK_ARTIFACT_WIRE_OFFSET(reserved1);
+CHECK_ARTIFACT_WIRE_OFFSET(reserved2);
 
 #undef CHECK_ARTIFACT_WIRE_OFFSET
 
@@ -79,6 +82,17 @@ CHECK_ARTIFACT_KIND_VALUE(kWasm);
 CHECK_ARTIFACT_KIND_VALUE(kSourceMap);
 CHECK_ARTIFACT_KIND_VALUE(kResponseBody);
 #undef CHECK_ARTIFACT_KIND_VALUE
+
+#define CHECK_ARTIFACT_ORIGIN_VALUE(value)                                       \
+  static_assert(static_cast<std::uint16_t>(reb::ArtifactCaptureOrigin::value) == \
+                static_cast<std::uint16_t>(reb::NativeArtifactCaptureOrigin::value))
+CHECK_ARTIFACT_ORIGIN_VALUE(kUnknown);
+CHECK_ARTIFACT_ORIGIN_VALUE(kNetworkResponse);
+CHECK_ARTIFACT_ORIGIN_VALUE(kDynamicJavaScript);
+CHECK_ARTIFACT_ORIGIN_VALUE(kWebAssemblyCompile);
+CHECK_ARTIFACT_ORIGIN_VALUE(kWebAssemblyModule);
+CHECK_ARTIFACT_ORIGIN_VALUE(kWebAssemblyInstantiate);
+#undef CHECK_ARTIFACT_ORIGIN_VALUE
 
 namespace {
 
@@ -159,9 +173,18 @@ int main() {
   reb::ArtifactHeader valid = Header(300, 3);
   CHECK(sizeof(valid) == 128);
   CHECK(reb::IsValidArtifactHeader(valid));
-  valid.reserved1[0] = 1;
+  valid.reserved1 = 1;
   CHECK(!reb::IsValidArtifactHeader(valid));
-  valid.reserved1[0] = 0;
+  valid.reserved1 = 0;
+  valid.reserved2 = 1;
+  CHECK(!reb::IsValidArtifactHeader(valid));
+  valid.reserved2 = 0;
+  valid.capture_origin = reb::ArtifactCaptureOrigin::kWebAssemblyCompile;
+  CHECK(!reb::IsValidArtifactHeader(valid));
+  valid.capture_origin = reb::ArtifactCaptureOrigin::kDynamicJavaScript;
+  CHECK(!reb::IsValidArtifactHeader(valid));
+  valid.execution_context_id = 9001;
+  CHECK(reb::IsValidArtifactHeader(valid));
   valid.kind = reb::ArtifactKind::kResponseBody;
   CHECK(!reb::IsValidArtifactHeader(valid));
 
@@ -178,11 +201,33 @@ int main() {
   const std::string manifest_line((std::istreambuf_iterator<char>(manifest)),
                                   std::istreambuf_iterator<char>());
   CHECK(manifest_line.find("\"artifact_id\":\"300\"") != std::string::npos);
+  CHECK(manifest_line.find("\"execution_context_id\":\"0\"") != std::string::npos);
+  CHECK(manifest_line.find("\"capture_origin\":\"unknown\"") != std::string::npos);
   CHECK(manifest_line.find("\"sha256\":\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9c"
                            "b410ff61f20015ad\"") != std::string::npos);
   CHECK(std::filesystem::file_size(
             accepted_directory.Path() /
             "blobs/ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad.bin") == 3);
+
+  TemporaryDirectory legacy_directory("legacy");
+  std::filesystem::create_directories(legacy_directory.Path() / "blobs");
+  std::string legacy_manifest = manifest_line;
+  const std::string runtime_fields =
+      ",\"execution_context_id\":\"0\",\"capture_origin\":\"unknown\"";
+  const std::size_t runtime_fields_position = legacy_manifest.find(runtime_fields);
+  CHECK(runtime_fields_position != std::string::npos);
+  legacy_manifest.erase(runtime_fields_position, runtime_fields.size());
+  {
+    std::ofstream legacy_file(legacy_directory.Path() / "manifest.jsonl");
+    legacy_file << legacy_manifest;
+  }
+  std::filesystem::copy_file(
+      accepted_directory.Path() /
+          "blobs/ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad.bin",
+      legacy_directory.Path() /
+          "blobs/ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad.bin");
+  reb::ArtifactReceiver legacy_receiver(legacy_directory.Path(), Limits(1024, 4096));
+  CHECK(legacy_receiver.StoredBytes() == 3);
 
   std::istringstream conflict_stream(Frame(Header(300, 3), "abc"));
   CHECK(receiver.ReceiveOne(conflict_stream) == reb::ArtifactReceiveStatus::kConflict);

@@ -54,6 +54,9 @@ session whose visible authorization scope explicitly permits bounded response
 body capture.
 
 The store contains immutable SHA-256-named blobs plus `manifest.jsonl`.
+Manifest records preserve execution-context and capture-origin provenance for
+runtime-generated source while remaining readable when those fields are absent
+from older version 1 sessions.
 Content bytes, artifact count, and manifest bytes have independent bounds, so
 empty artifacts cannot grow storage or duplicate checks indefinitely. In
 standard-input mode, the receiver stops on invalid or rejected input because a

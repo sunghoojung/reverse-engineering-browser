@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark light" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%23292a2d'/%3E%3Crect x='4' y='6' width='24' height='20' rx='2' fill='none' stroke='%238ab4f8' stroke-width='2'/%3E%3Cpath d='M9 12h4l-2 3 2 3H9m7-6v6m3-6h4l-2 3 2 3h-4' fill='none' stroke='%23e8eaed' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'/%3E%3C/svg%3E" />
     <title>Origin Trace - Reverse Engineering Browser</title>
     <style>
       :root {
@@ -99,6 +100,7 @@
         min-height: 0;
         margin: 0;
         display: grid;
+        grid-template-columns: minmax(0, 1fr);
         grid-template-rows: 41px 45px minmax(0, 1fr) 34px;
         overflow: hidden;
         background: var(--panel);
@@ -216,6 +218,7 @@
       .workspace {
         display: grid;
         grid-template-columns: 218px minmax(0, 1fr);
+        min-width: 0;
         min-height: 0;
         overflow: hidden;
       }
@@ -1158,7 +1161,7 @@
       .experiment-card h2 { margin: 0; font-size: 11px; }
       .experiment-card p { margin: 5px 0 0; color: var(--muted); font-size: 9px; }
       .experiment-body { padding: 13px; }
-      #screen-experiments:not([hidden]) { display: grid; grid-template-rows: 60px auto minmax(0, 1fr); }
+      #screen-experiments:not([hidden]) { display: grid; grid-template-rows: 60px auto auto minmax(0, 1fr); }
       .experiment-notice {
         min-height: 34px;
         display: flex;
@@ -1174,6 +1177,39 @@
       .experiment-notice[data-kind="ready"]::before { background: var(--green); }
       .experiment-notice[data-kind="working"]::before { background: var(--accent); }
       .experiment-notice[data-kind="error"]::before { background: var(--red); }
+      .action-scope-panel {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: minmax(190px, .8fr) minmax(310px, 1.2fr) minmax(250px, 1fr);
+        gap: 10px;
+        align-items: center;
+        padding: 9px 12px;
+        border-bottom: 1px solid var(--line);
+        background: color-mix(in srgb, var(--accent) 5%, var(--panel));
+      }
+      .action-scope-summary { min-width: 0; display: grid; grid-template-columns: auto 1fr; gap: 3px 8px; align-items: center; }
+      .action-scope-summary h2 { margin: 0; font-size: 10px; }
+      .action-scope-summary p { grid-column: 1 / -1; margin: 0; color: var(--muted); font: 8px/1.4 var(--mono); }
+      .action-scope-badge { min-width: 54px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 999px; color: var(--green); font: 650 7px var(--mono); text-align: center; text-transform: uppercase; }
+      .action-scope-badge[data-kind="error"] { color: var(--red); }
+      .action-scope-badge[data-kind="offline"] { color: var(--faint); }
+      .action-scope-controls { min-width: 0; display: grid; grid-template-columns: auto minmax(120px, 1fr) auto; gap: 7px; }
+      .action-scope-toggle { display: flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+      .action-scope-toggle button { min-height: 29px; padding: 0 8px; border: 0; border-right: 1px solid var(--line); background: var(--panel-2); color: var(--muted); font: 8px var(--mono); }
+      .action-scope-toggle button:last-child { border-right: 0; }
+      .action-scope-toggle button[aria-pressed="true"] { background: var(--accent-soft); color: var(--text); box-shadow: inset 0 -2px var(--accent); }
+      .action-scope-controls select, .action-scope-add input { min-width: 0; min-height: 31px; padding: 0 8px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); color: var(--text); font: 8px var(--mono); }
+      .action-scope-controls > button, .action-scope-add button { min-height: 31px; white-space: nowrap; }
+      .action-scope-pages { min-width: 0; display: grid; gap: 6px; }
+      .action-scope-add { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
+      .action-scope-targets { display: flex; gap: 5px; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
+      .action-scope-target { flex: 0 0 auto; max-width: 190px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 6px; align-items: center; padding: 5px 7px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); }
+      .action-scope-target[data-matched="true"] { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); background: var(--accent-soft); }
+      .action-scope-target strong, .action-scope-target small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .action-scope-target strong { font: 8px var(--mono); }
+      .action-scope-target small { color: var(--faint); font: 7px var(--mono); }
+      .action-scope-target button { grid-column: 2; grid-row: 1 / span 2; width: 22px; height: 22px; padding: 0; border: 0; background: transparent; color: var(--faint); }
+      .action-scope-target button:hover { color: var(--red); }
       .experiment-workspace {
         min-height: 0;
         display: grid;
@@ -1486,6 +1522,71 @@
       .analyst-snapshot span { display: block; color: var(--faint); font: 7px var(--mono); text-transform: uppercase; }
       .analyst-snapshot strong { display: block; margin-top: 4px; font: 9px var(--mono); }
 
+      #screen-tools:not([hidden]) { display: grid; grid-template-rows: 60px auto minmax(0, 1fr); }
+      .tools-notice { min-height: 34px; display: flex; align-items: center; gap: 8px; padding: 6px 13px; border-bottom: 1px solid var(--line); background: var(--panel-2); color: var(--muted); font-size: 10px; }
+      .tools-notice::before { content: ""; width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--green); }
+      .tools-notice[data-kind="loading"]::before, .tools-notice[data-kind="running"]::before { background: var(--accent); }
+      .tools-notice[data-kind="error"] { color: var(--red); }
+      .tools-notice[data-kind="error"]::before { background: var(--red); }
+      .tools-shell { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; }
+      .tools-tabs { display: flex; gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--chrome); }
+      .tools-tab { min-width: 96px; min-height: 29px; border: 1px solid transparent; border-radius: 3px; background: transparent; color: var(--muted); font: 9px var(--mono); }
+      .tools-tab:hover, .tools-tab:focus { color: var(--text); background: var(--panel-2); }
+      .tools-tab[aria-selected="true"] { border-color: var(--line); background: var(--panel); color: var(--text); box-shadow: inset 0 -2px var(--accent); }
+      .tools-panel { min-width: 0; min-height: 0; overflow: auto; }
+      .decoder-grid { min-width: 0; min-height: 100%; display: grid; grid-template-columns: minmax(430px, 1.25fr) minmax(320px, .85fr); }
+      .decoder-column { min-width: 0; min-height: 0; overflow: auto; border-right: 1px solid var(--line); background: var(--panel); }
+      .decoder-column:last-child { border-right: 0; }
+      .decoder-card { margin: 10px; border: 1px solid var(--line); background: var(--panel-2); }
+      .decoder-card > header { display: flex; align-items: flex-start; gap: 8px; padding: 10px 11px; border-bottom: 1px solid var(--line); }
+      .decoder-card > header > div:first-child { min-width: 0; flex: 1; }
+      .decoder-card h2 { margin: 0; font-size: 10px; }
+      .decoder-card p { margin: 4px 0 0; color: var(--muted); font: 8px/1.45 var(--mono); }
+      .decoder-form { display: grid; gap: 9px; padding: 11px; }
+      .decoder-form label { display: grid; gap: 5px; color: var(--faint); font: 7px var(--mono); text-transform: uppercase; }
+      .decoder-form input, .decoder-form textarea, .decoder-form select { width: 100%; min-height: 31px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); color: var(--text); font: 9px/1.45 var(--mono); text-transform: none; }
+      .decoder-form textarea { min-height: 115px; resize: vertical; tab-size: 2; }
+      .decoder-form-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(160px, .55fr); gap: 8px; }
+      .decoder-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+      .decoder-actions button { min-height: 30px; }
+      .decoder-primary { border-color: var(--accent) !important; background: var(--accent) !important; color: white !important; }
+      .decoder-pipeline { display: grid; max-height: 420px; overflow: auto; }
+      .decoder-step { width: 100%; display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 7px; align-items: center; padding: 9px 10px; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; color: var(--text); text-align: left; }
+      .decoder-step:hover, .decoder-step:focus, .decoder-step[aria-selected="true"] { background: var(--accent-soft); }
+      .decoder-step-index { display: grid; place-items: center; width: 21px; height: 21px; border: 1px solid var(--line); border-radius: 50%; color: var(--faint); font: 8px var(--mono); }
+      .decoder-step-copy { min-width: 0; }
+      .decoder-step-copy strong { display: block; overflow: hidden; font: 9px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+      .decoder-step-copy span { display: block; margin-top: 3px; color: var(--faint); font: 7px var(--mono); }
+      .decoder-step-size { color: var(--muted); font: 8px var(--mono); white-space: nowrap; }
+      .decoder-output { display: grid; gap: 8px; padding: 11px; }
+      .decoder-view-tabs { display: flex; flex-wrap: wrap; gap: 5px; }
+      .decoder-view-tabs button { min-height: 26px; padding: 4px 8px; }
+      .decoder-view-tabs button[aria-pressed="true"] { border-color: var(--accent); color: var(--text); background: var(--accent-soft); }
+      .decoder-output pre { min-height: 210px; max-height: 420px; margin: 0; padding: 10px; overflow: auto; border: 1px solid var(--line); background: var(--panel); color: var(--muted); font: 9px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+      .decoder-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--line-soft); }
+      .decoder-fact { padding: 9px 10px; border-right: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
+      .decoder-fact:nth-child(2n) { border-right: 0; }
+      .decoder-fact span { display: block; color: var(--faint); font: 7px var(--mono); text-transform: uppercase; }
+      .decoder-fact strong { display: block; margin-top: 4px; font: 9px var(--mono); }
+      .jwt-grid { min-width: 0; min-height: 100%; display: grid; grid-template-columns: minmax(390px, .9fr) minmax(430px, 1.1fr); }
+      .jwt-column { min-width: 0; overflow: auto; border-right: 1px solid var(--line); }
+      .jwt-column:last-child { border-right: 0; }
+      .jwt-secret { -webkit-text-security: disc; }
+      .jwt-unsigned[hidden] { display: none !important; }
+      .jwt-status { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 11px; border-bottom: 1px solid var(--line-soft); }
+      .jwt-status span { padding: 4px 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font: 8px var(--mono); }
+      .jwt-status span[data-kind="verified"] { border-color: var(--green); color: var(--green); }
+      .jwt-status span[data-kind="invalid"], .jwt-status span[data-kind="expired"] { border-color: var(--red); color: var(--red); }
+      .jwt-status span[data-kind="warning"], .jwt-status span[data-kind="unsigned"], .jwt-status span[data-kind="not_checked"] { border-color: var(--amber); color: var(--amber); }
+      .jwt-claims { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .jwt-claim { min-width: 0; padding: 9px 10px; border-right: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
+      .jwt-claim:nth-child(2n) { border-right: 0; }
+      .jwt-claim span { display: block; color: var(--faint); font: 7px var(--mono); text-transform: uppercase; }
+      .jwt-claim strong { display: block; margin-top: 4px; overflow-wrap: anywhere; font: 9px/1.4 var(--mono); }
+      .jwt-json { display: grid; gap: 8px; padding: 10px; }
+      .jwt-json h3 { margin: 0; color: var(--faint); font: 8px var(--mono); text-transform: uppercase; }
+      .jwt-json pre { max-height: 250px; margin: 0; padding: 9px; overflow: auto; border: 1px solid var(--line); background: var(--panel); color: var(--muted); font: 8px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+
 
       #screen-memory:not([hidden]) { display: grid; grid-template-rows: 60px auto minmax(0, 1fr); }
       #screen-memory > .screen-head { grid-row: 1; }
@@ -1698,6 +1799,9 @@
         .collection-run-pane { grid-template-columns: 1fr 1fr; }
       }
       @media (max-width: 900px) {
+        .toolbar { overflow-x: auto; }
+        .workspace.experiments-active { grid-template-columns: minmax(0, 1fr); }
+        .workspace.experiments-active > .sidebar { display: none; }
         .traffic-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
         .request-pane { border-right: 0; border-bottom: 1px solid var(--line); }
         .request-pane { grid-template-rows: auto auto auto; }
@@ -1712,6 +1816,8 @@
         .memory-grid { grid-template-columns: 245px minmax(0, 1fr); }
         .memory-results-pane { grid-template-columns: minmax(210px, 42%) minmax(0, 1fr); }
         .experiment-workspace { grid-template-columns: minmax(260px, .8fr) minmax(320px, 1.2fr); }
+        .action-scope-panel { grid-template-columns: minmax(170px, .7fr) minmax(300px, 1.3fr); }
+        .action-scope-pages { grid-column: 1 / -1; grid-template-columns: minmax(260px, .8fr) minmax(0, 1.2fr); }
         .experiment-column:last-child { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
         .repeater-workspace { grid-template-columns: minmax(235px, .7fr) minmax(340px, 1.3fr); }
         .repeater-column:last-child { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
@@ -1750,10 +1856,15 @@
         .confidence { justify-self: start; }
         .screen-head { padding: 9px 10px; }
         .screen-head-actions .secondary-button { display: none; }
-        #screen-experiments:not([hidden]) { grid-template-rows: auto auto minmax(0, 1fr); }
+        #screen-experiments:not([hidden]) { grid-template-rows: auto auto auto minmax(0, 1fr); }
         #screen-experiments > .screen-head { display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: start; gap: 8px 10px; }
         #screen-experiments > .screen-head .screen-head-actions { width: 100%; grid-column: 1 / -1; margin-left: 0; }
         #screen-experiments > .screen-head .experiment-mode-tabs { flex: 1 1 auto; }
+        .action-scope-panel { grid-template-columns: 1fr; align-items: stretch; }
+        .action-scope-controls { grid-template-columns: 1fr; }
+        .action-scope-toggle { width: 100%; }
+        .action-scope-toggle button { flex: 1; }
+        .action-scope-pages { grid-column: auto; grid-template-columns: 1fr; }
         .experiment-workspace { grid-template-columns: 1fr; }
         .experiment-column:last-child { grid-column: auto; grid-template-columns: 1fr; }
         .experiment-form-row { grid-template-columns: 1fr; }
@@ -1788,6 +1899,7 @@
       @media (max-width: 1100px) {
         .analyst-grid { grid-template-columns: minmax(220px, .65fr) minmax(390px, 1.35fr); overflow: auto; }
         .analyst-run-pane { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--line); }
+        .decoder-grid, .jwt-grid { grid-template-columns: minmax(360px, 1fr) minmax(310px, .82fr); }
       }
       @media (max-width: 760px) {
         #screen-analyst:not([hidden]) { overflow: auto; }
@@ -1795,6 +1907,12 @@
         .analyst-pane { min-height: auto; max-height: none; overflow: visible; border-right: 0; border-bottom: 1px solid var(--line); }
         .analyst-run-pane { display: grid; grid-template-columns: 1fr; }
         .analyst-editor-form { min-height: 560px; }
+        #screen-tools:not([hidden]), .tools-shell { overflow: auto; }
+        .tools-shell { display: block; }
+        .tools-tabs { position: sticky; top: 0; z-index: 2; }
+        .decoder-grid, .jwt-grid { display: block; min-height: auto; }
+        .decoder-column, .jwt-column { overflow: visible; border-right: 0; border-bottom: 1px solid var(--line); }
+        .decoder-form-row { grid-template-columns: 1fr; }
       }
       @media (prefers-reduced-motion: no-preference) {
         .screen:not([hidden]) { animation: reveal .16s ease-out; }
@@ -1823,6 +1941,7 @@
           <button class="nav-button" data-screen="experiments">Experiments</button>
           <button class="nav-button" data-screen="api-collection">Collection</button>
           <button class="nav-button" data-screen="analyst">Analyst</button>
+          <button class="nav-button" data-screen="tools">Tools</button>
         </nav>
         <div class="toolbar-actions">
           <span class="authorization">◇ authorized baseline</span>
@@ -1911,6 +2030,7 @@
                   <div id="trace-dock" class="trace-dock">
                     <div><div class="trace-label">Selected request field</div><div id="trace-target" class="trace-target">request-81 · Body · $.device.fingerprint</div></div>
                     <button id="request-repeater-pivot" class="secondary-button" type="button">Send to Repeater</button>
+                    <button id="request-decoder-pivot" class="secondary-button" type="button">Decode value</button>
                     <button id="request-memory-pivot" class="secondary-button" type="button">Find in Memory</button>
                     <button id="request-vm-candidates" class="secondary-button" type="button">Related VM candidates</button>
                     <button id="trace-origin" class="trace-button" type="button">⌘ Trace origin</button>
@@ -2121,6 +2241,28 @@
               </div>
             </header>
             <div id="experiment-notice" class="experiment-notice" data-kind="idle" role="status" aria-live="polite">Create an isolated experiment to configure request interception.</div>
+            <section id="action-scope-panel" class="action-scope-panel" aria-label="Mutable action scope">
+              <div class="action-scope-summary">
+                <span id="action-scope-badge" class="action-scope-badge" data-kind="offline">No scope</span>
+                <h2>Action scope</h2>
+                <p id="action-scope-message">Create an isolated context to choose all pages or one exact page.</p>
+              </div>
+              <div class="action-scope-controls">
+                <div class="action-scope-toggle" role="group" aria-label="Action scope mode">
+                  <button id="action-scope-global" type="button" aria-pressed="true">All pages</button>
+                  <button id="action-scope-targeted" type="button" aria-pressed="false">One page</button>
+                </div>
+                <select id="action-scope-target" aria-label="Target disposable page" disabled><option value="">No disposable pages</option></select>
+                <button id="action-scope-apply" class="secondary-button" type="button" disabled>Apply scope</button>
+              </div>
+              <div class="action-scope-pages">
+                <form id="action-scope-add-form" class="action-scope-add">
+                  <input id="action-scope-new-url" type="url" maxlength="8192" placeholder="https://app.example.test/page" autocomplete="off" aria-label="New disposable page URL" />
+                  <button id="action-scope-add" class="secondary-button" type="submit" disabled>Add page</button>
+                </form>
+                <div id="action-scope-targets" class="action-scope-targets" aria-label="Disposable pages"><span class="experiment-empty">No disposable pages.</span></div>
+              </div>
+            </section>
             <div id="interception-workspace" class="experiment-workspace">
               <div class="experiment-column">
                 <article class="experiment-card">
@@ -2484,7 +2626,7 @@
                   </div>
                 </article>
                 <article class="experiment-card">
-                  <header><div><h2>Automatic execution</h2><p>Created, before-load, and after-load recipes run sequentially with one pending trigger batch.</p></div><span id="automation-state-badge" class="experiment-card-badge" data-kind="offline">Disarmed</span></header>
+                  <header><div><h2>Automatic execution</h2><p>Created, before-load, and after-load recipes run sequentially with a bounded 16-trigger queue.</p></div><span id="automation-state-badge" class="experiment-card-badge" data-kind="offline">Disarmed</span></header>
                   <div class="experiment-body experiment-form">
                     <label>Variables (JSON object)<textarea id="automation-variables" maxlength="16384" spellcheck="false" placeholder='{"seed":"verified"}'></textarea></label>
                     <label class="hook-confirm"><input id="automation-confirm" type="checkbox" /> I confirm these recipes may execute and mutate only the disposable page</label>
@@ -2688,6 +2830,95 @@
               </aside>
             </div>
           </section>
+
+          <section id="screen-tools" class="screen" aria-label="Decoder and JWT tools" hidden>
+            <header class="screen-head">
+              <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
+              <div><h1>Decoder Lab</h1><div class="screen-subtitle">Bounded local transformations and explicit JWT signature verification</div></div>
+              <div class="screen-head-actions"><span id="decoder-engine-badge" class="memory-readonly">Engine checking</span><span class="memory-readonly">No network</span></div>
+            </header>
+            <div id="tools-notice" class="tools-notice" data-kind="loading" role="status" aria-live="polite">Checking the native decoder engine…</div>
+            <div class="tools-shell">
+              <div class="tools-tabs" role="tablist" aria-label="Local tools">
+                <button id="tools-tab-decoder" class="tools-tab" type="button" role="tab" data-tools-tab="decoder" aria-selected="true" aria-controls="tools-panel-decoder">Decoder chain</button>
+                <button id="tools-tab-jwt" class="tools-tab" type="button" role="tab" data-tools-tab="jwt" aria-selected="false" aria-controls="tools-panel-jwt" tabindex="-1">JWT inspector</button>
+              </div>
+
+              <div id="tools-panel-decoder" class="tools-panel" role="tabpanel" aria-labelledby="tools-tab-decoder">
+                <div class="decoder-grid">
+                  <section class="decoder-column" aria-label="Decoder pipeline">
+                    <article class="decoder-card">
+                      <header><div><h2>Input bytes</h2><p>Paste text or an encoded byte representation. Nothing runs automatically.</p></div><span id="decoder-input-badge" class="experiment-card-badge">0 B</span></header>
+                      <form id="decoder-form" class="decoder-form">
+                        <div class="decoder-form-row">
+                          <label>Representation<select id="decoder-input-encoding"><option value="text">UTF-8 text</option><option value="base64">Base64 bytes</option><option value="hex">Hex bytes</option></select></label>
+                          <label>Next transform<select id="decoder-operation">
+                            <optgroup label="Base64"><option value="base64-decode">Base64 decode</option><option value="base64-encode">Base64 encode</option><option value="base64url-decode">Base64URL decode</option><option value="base64url-encode">Base64URL encode</option></optgroup>
+                            <optgroup label="Bytes and text"><option value="hex-decode">Hex decode</option><option value="hex-encode">Hex encode</option><option value="url-decode">URL component decode</option><option value="url-encode">URL component encode</option><option value="html-decode">HTML entity decode</option><option value="html-encode">HTML entity encode</option><option value="base36-decode">Base36 to decimal</option><option value="base36-encode">Decimal to Base36</option></optgroup>
+                            <optgroup label="Compression"><option value="gzip-decompress">Gzip decompress</option><option value="gzip-compress">Gzip compress</option><option value="zlib-decompress">Zlib decompress</option><option value="zlib-compress">Zlib compress</option><option value="deflate-decompress">Raw deflate decompress</option><option value="deflate-compress">Raw deflate compress</option></optgroup>
+                            <optgroup label="Structured data"><option value="json-pretty">JSON pretty print</option><option value="json-minify">JSON minify</option></optgroup>
+                          </select></label>
+                        </div>
+                        <label>Input<textarea id="decoder-input" maxlength="1398110" spellcheck="false" placeholder="Paste a value, token segment, encoded string, or byte representation"></textarea></label>
+                        <div class="decoder-actions"><button id="decoder-append" class="secondary-button decoder-primary" type="submit">Append transform</button><button id="decoder-use-field" class="secondary-button" type="button">Use selected request value</button><button id="decoder-remove-after" class="secondary-button" type="button">Remove selected and later</button><button id="decoder-reset" class="secondary-button" type="button">Reset chain</button></div>
+                        <p class="experiment-privacy">At most 16 explicit steps, 1 MiB per input or output, and 4 MiB retained. Decompression stops at the output cap.</p>
+                      </form>
+                    </article>
+                    <article class="decoder-card">
+                      <header><div><h2>Transformation chain</h2><p>Select any step to inspect it or branch a new chain from that output.</p></div><span id="decoder-pipeline-badge" class="experiment-card-badge">0 / 16</span></header>
+                      <div id="decoder-pipeline" class="decoder-pipeline" role="listbox" aria-label="Decoder transformation steps"><div class="analyst-empty">Enter input and append the first transform.</div></div>
+                    </article>
+                  </section>
+
+                  <aside class="decoder-column" aria-label="Decoded output">
+                    <article class="decoder-card">
+                      <header><div><h2>Selected bytes</h2><p id="decoder-output-meta">Input has not been parsed.</p></div><span id="decoder-output-badge" class="experiment-card-badge" data-kind="offline">No output</span></header>
+                      <div class="decoder-output">
+                        <div class="decoder-view-tabs" role="group" aria-label="Output representation"><button class="secondary-button" type="button" data-decoder-view="text" aria-pressed="true">UTF-8</button><button class="secondary-button" type="button" data-decoder-view="hex" aria-pressed="false">Hex dump</button><button class="secondary-button" type="button" data-decoder-view="base64" aria-pressed="false">Base64</button></div>
+                        <pre id="decoder-output" tabindex="0">No bytes selected.</pre>
+                        <div class="decoder-actions"><button id="decoder-copy-output" class="secondary-button" type="button" disabled>Copy visible output</button></div>
+                      </div>
+                      <div class="decoder-facts"><div class="decoder-fact"><span>Selected bytes</span><strong id="decoder-selected-bytes">0 B</strong></div><div class="decoder-fact"><span>Retained</span><strong id="decoder-retained-bytes">0 B / 4 MiB</strong></div><div class="decoder-fact"><span>Engine time</span><strong id="decoder-duration">Not run</strong></div><div class="decoder-fact"><span>Execution</span><strong>Explicit only</strong></div></div>
+                    </article>
+                  </aside>
+                </div>
+              </div>
+
+              <div id="tools-panel-jwt" class="tools-panel" role="tabpanel" aria-labelledby="tools-tab-jwt" hidden>
+                <div class="jwt-grid">
+                  <section class="jwt-column" aria-label="JWT input and creation">
+                    <article class="decoder-card">
+                      <header><div><h2>Inspect compact JWT</h2><p>Decoding is not verification. Add a secret only when explicitly verifying an HMAC signature.</p></div><span class="experiment-card-badge">64 KiB max</span></header>
+                      <form id="jwt-inspect-form" class="decoder-form">
+                        <label>JWT compact serialization<textarea id="jwt-token" maxlength="65536" spellcheck="false" placeholder="header.payload.signature"></textarea></label>
+                        <label>HMAC secret for explicit verification<input id="jwt-secret" class="jwt-secret" type="password" maxlength="4096" autocomplete="off" /></label>
+                        <div class="decoder-actions"><button id="jwt-inspect" class="secondary-button decoder-primary" type="submit">Inspect without verifying</button><button id="jwt-verify" class="secondary-button" type="button">Verify HMAC signature</button><button id="jwt-clear" class="secondary-button" type="button">Clear</button></div>
+                      </form>
+                    </article>
+                    <article class="decoder-card">
+                      <header><div><h2>Create test JWT</h2><p>Create a local HS256, HS384, HS512, or explicitly confirmed unsigned test token.</p></div><span class="experiment-card-badge">Ephemeral</span></header>
+                      <form id="jwt-create-form" class="decoder-form">
+                        <label>Payload JSON<textarea id="jwt-payload" maxlength="57344" spellcheck="false">{}</textarea></label>
+                        <div class="decoder-form-row"><label>Algorithm<select id="jwt-algorithm"><option value="HS256">HS256</option><option value="HS384">HS384</option><option value="HS512">HS512</option><option value="none">Unsigned test token</option></select></label><label>Expires in seconds<input id="jwt-expiry" type="number" min="1" max="604800" value="3600" /></label></div>
+                        <label>HMAC secret<input id="jwt-create-secret" class="jwt-secret" type="password" maxlength="4096" autocomplete="off" /></label>
+                        <label id="jwt-unsigned-row" class="analyst-check analyst-sensitive jwt-unsigned" hidden><input id="jwt-confirm-unsigned" type="checkbox" /> I understand this creates an unsigned token with no authenticity</label>
+                        <div class="decoder-actions"><button id="jwt-create" class="secondary-button decoder-primary" type="submit">Create test token</button></div>
+                      </form>
+                    </article>
+                  </section>
+
+                  <aside class="jwt-column" aria-label="JWT inspection result">
+                    <article class="decoder-card">
+                      <header><div><h2>Trust and claims</h2><p id="jwt-result-message">Inspect a token to decode its header and claims.</p></div><span id="jwt-result-badge" class="experiment-card-badge" data-kind="offline">Not inspected</span></header>
+                      <div id="jwt-status" class="jwt-status"><span data-kind="not_checked">Signature not checked</span></div>
+                      <div id="jwt-claims" class="jwt-claims"><div class="analyst-empty">Decoded claims remain untrusted until a supported signature is explicitly verified.</div></div>
+                      <div class="jwt-json"><h3>Header</h3><pre id="jwt-header">No header decoded.</pre><h3>Payload</h3><pre id="jwt-payload-output">No payload decoded.</pre></div>
+                    </article>
+                  </aside>
+                </div>
+              </div>
+            </div>
+          </section>
         </main>
       </div>
 
@@ -2816,6 +3047,25 @@ export async function checkout(cart, fingerprint) {
         }
       });
 
+      const emptyDecoderEngine = () => ({
+        protocol_version: 1,
+        available: false,
+        busy: false,
+        limits: {
+          input_bytes: 1024 * 1024,
+          output_bytes: 1024 * 1024,
+          pipeline_steps: 16,
+          retained_bytes: 4 * 1024 * 1024,
+          jwt_bytes: 64 * 1024,
+          secret_bytes: 4 * 1024,
+          json_depth: 64,
+          json_tokens: 100000,
+          timeout_ms: 2000,
+          operations: [],
+          jwt_algorithms: ['HS256', 'HS384', 'HS512', 'none']
+        }
+      });
+
       const state = {
         events: [],
         requests: [...sampleRequests],
@@ -2879,6 +3129,8 @@ export async function checkout(cart, fingerprint) {
         experimentError: null,
         experimentPrefillKey: null,
         experimentMode: 'interceptor',
+        actionScopeDraftMode: null,
+        actionScopeDraftRevision: -1,
         objectSelectedResultId: null,
         objectSelectionSearchId: 0,
         automationEditingRecipeId: null,
@@ -2932,6 +3184,19 @@ export async function checkout(cart, fingerprint) {
         analystHistoryEvictions: 0,
         analystRuns: [],
         analystSelectedRunId: null,
+        decoderEngine: emptyDecoderEngine(),
+        decoderStatus: 'loading',
+        decoderMessage: 'Checking the native decoder engine…',
+        decoderRefreshing: false,
+        toolsTab: 'decoder',
+        decoderInputSnapshot: null,
+        decoderSteps: [],
+        decoderSelectedStepId: null,
+        decoderNextOperationId: 1,
+        decoderPending: false,
+        decoderView: 'text',
+        jwtResult: null,
+        jwtPending: false,
         signalProfile: null,
         signalProfileStatus: 'idle',
         signalProfileError: null,
@@ -2972,6 +3237,7 @@ export async function checkout(cart, fingerprint) {
         coverageBar: document.querySelector('#coverage-bar'),
         traceBranchExperiment: document.querySelector('#trace-branch-experiment'),
         requestRepeaterPivot: document.querySelector('#request-repeater-pivot'),
+        requestDecoderPivot: document.querySelector('#request-decoder-pivot'),
         requestCollectionPivot: document.querySelector('#request-collection-pivot'),
         experimentTitle: document.querySelector('#experiment-title'),
         experimentModeButtons: [...document.querySelectorAll('[data-experiment-mode]')],
@@ -2982,6 +3248,17 @@ export async function checkout(cart, fingerprint) {
         automationWorkspace: document.querySelector('#automation-workspace'),
         experimentSubtitle: document.querySelector('#experiment-subtitle'),
         experimentNotice: document.querySelector('#experiment-notice'),
+        actionScopePanel: document.querySelector('#action-scope-panel'),
+        actionScopeBadge: document.querySelector('#action-scope-badge'),
+        actionScopeMessage: document.querySelector('#action-scope-message'),
+        actionScopeGlobal: document.querySelector('#action-scope-global'),
+        actionScopeTargeted: document.querySelector('#action-scope-targeted'),
+        actionScopeTarget: document.querySelector('#action-scope-target'),
+        actionScopeApply: document.querySelector('#action-scope-apply'),
+        actionScopeAddForm: document.querySelector('#action-scope-add-form'),
+        actionScopeNewUrl: document.querySelector('#action-scope-new-url'),
+        actionScopeAdd: document.querySelector('#action-scope-add'),
+        actionScopeTargets: document.querySelector('#action-scope-targets'),
         experimentContextMessage: document.querySelector('#experiment-context-message'),
         experimentContextBadge: document.querySelector('#experiment-context-badge'),
         experimentStorageState: document.querySelector('#experiment-storage-state'),
@@ -3325,6 +3602,53 @@ export async function checkout(cart, fingerprint) {
         result: document.querySelector('#analyst-result')
       };
 
+      const toolsElements = {
+        engineBadge: document.querySelector('#decoder-engine-badge'),
+        notice: document.querySelector('#tools-notice'),
+        tabs: [...document.querySelectorAll('[data-tools-tab]')],
+        decoderPanel: document.querySelector('#tools-panel-decoder'),
+        jwtPanel: document.querySelector('#tools-panel-jwt'),
+        form: document.querySelector('#decoder-form'),
+        inputEncoding: document.querySelector('#decoder-input-encoding'),
+        operation: document.querySelector('#decoder-operation'),
+        input: document.querySelector('#decoder-input'),
+        inputBadge: document.querySelector('#decoder-input-badge'),
+        append: document.querySelector('#decoder-append'),
+        useField: document.querySelector('#decoder-use-field'),
+        removeAfter: document.querySelector('#decoder-remove-after'),
+        reset: document.querySelector('#decoder-reset'),
+        pipelineBadge: document.querySelector('#decoder-pipeline-badge'),
+        pipeline: document.querySelector('#decoder-pipeline'),
+        outputMeta: document.querySelector('#decoder-output-meta'),
+        outputBadge: document.querySelector('#decoder-output-badge'),
+        viewButtons: [...document.querySelectorAll('[data-decoder-view]')],
+        output: document.querySelector('#decoder-output'),
+        copyOutput: document.querySelector('#decoder-copy-output'),
+        selectedBytes: document.querySelector('#decoder-selected-bytes'),
+        retainedBytes: document.querySelector('#decoder-retained-bytes'),
+        duration: document.querySelector('#decoder-duration'),
+        jwtInspectForm: document.querySelector('#jwt-inspect-form'),
+        jwtToken: document.querySelector('#jwt-token'),
+        jwtSecret: document.querySelector('#jwt-secret'),
+        jwtInspect: document.querySelector('#jwt-inspect'),
+        jwtVerify: document.querySelector('#jwt-verify'),
+        jwtClear: document.querySelector('#jwt-clear'),
+        jwtCreateForm: document.querySelector('#jwt-create-form'),
+        jwtPayload: document.querySelector('#jwt-payload'),
+        jwtAlgorithm: document.querySelector('#jwt-algorithm'),
+        jwtExpiry: document.querySelector('#jwt-expiry'),
+        jwtCreateSecret: document.querySelector('#jwt-create-secret'),
+        jwtUnsignedRow: document.querySelector('#jwt-unsigned-row'),
+        jwtConfirmUnsigned: document.querySelector('#jwt-confirm-unsigned'),
+        jwtCreate: document.querySelector('#jwt-create'),
+        jwtResultMessage: document.querySelector('#jwt-result-message'),
+        jwtResultBadge: document.querySelector('#jwt-result-badge'),
+        jwtStatus: document.querySelector('#jwt-status'),
+        jwtClaims: document.querySelector('#jwt-claims'),
+        jwtHeader: document.querySelector('#jwt-header'),
+        jwtPayloadOutput: document.querySelector('#jwt-payload-output')
+      };
+
       const eventCategories = new Set([
         'unknown', 'canvas', 'webgl', 'web_audio', 'navigator', 'permissions',
         'storage', 'webrtc', 'wasm', 'network', 'vm', 'artifact'
@@ -3367,6 +3691,10 @@ export async function checkout(cart, fingerprint) {
       ]);
       const networkLifecycleTypes = new Set(lifecycleRanks.keys());
       const artifactKinds = new Set(['javascript', 'wasm', 'source_map', 'response_body']);
+      const artifactCaptureOrigins = new Set([
+        'unknown', 'network_response', 'dynamic_javascript', 'webassembly_compile',
+        'webassembly_module', 'webassembly_instantiate'
+      ]);
       const artifactIdentifierFields = [
         'artifact_id', 'session_id', 'navigation_id', 'frame_id', 'parent_artifact_id', 'creator_event_id'
       ];
@@ -3514,8 +3842,19 @@ export async function checkout(cart, fingerprint) {
       }
 
       function isArtifact(artifact) {
-        return isPlainObject(artifact) &&
-          artifact.protocol_version === 1 &&
+        if (!isPlainObject(artifact) ||
+          (Object.hasOwn(artifact, 'execution_context_id') !== Object.hasOwn(artifact, 'capture_origin'))) {
+          return false;
+        }
+        if (Object.hasOwn(artifact, 'execution_context_id')) {
+          if (!isCanonicalInteger(artifact.execution_context_id, 0n, uint64Max) ||
+            !artifactCaptureOrigins.has(artifact.capture_origin) ||
+            (artifact.capture_origin === 'dynamic_javascript' &&
+              (artifact.kind !== 'javascript' || artifact.execution_context_id === '0')) ||
+            (artifact.capture_origin.startsWith('webassembly_') &&
+              (artifact.kind !== 'wasm' || artifact.execution_context_id === '0'))) return false;
+        }
+        return artifact.protocol_version === 1 &&
           artifactIdentifierFields.every(field => isCanonicalInteger(artifact[field], 0n, uint64Max)) &&
           artifactKinds.has(artifact.kind) &&
           typeof artifact.url === 'string' && artifact.url.length > 0 &&
@@ -3681,6 +4020,39 @@ export async function checkout(cart, fingerprint) {
           (!activeStates.includes(trace.state) || trace.limit_reason === null || trace.partial);
       }
 
+      function isActionScope(scope) {
+        const states = ['idle', 'discovering', 'ready', 'partial', 'disposed', 'error'];
+        if (!isPlainObject(scope) || scope.protocol_version !== 1 || !states.includes(scope.state) ||
+            !['global', 'target'].includes(scope.mode) ||
+            (scope.target_id !== null && !isBoundedText(scope.target_id, 4 * 1024)) ||
+            !isSafeIntegerInRange(scope.revision, 0, Number.MAX_SAFE_INTEGER) ||
+            !Array.isArray(scope.targets) || scope.targets.length > 8 ||
+            !isSafeIntegerInRange(scope.matched_target_count, 0, 8) ||
+            !isSafeIntegerInRange(scope.connected_target_count, 0, 8) ||
+            scope.connected_target_count > scope.matched_target_count ||
+            !isSafeIntegerInRange(scope.target_overflow, 0, Number.MAX_SAFE_INTEGER) ||
+            !isBoundedText(scope.message, 512) ||
+            !Array.isArray(scope.rule_families) ||
+            scope.rule_families.join(',') !== 'request_interception,automation_recipes' ||
+            !Array.isArray(scope.target_only_families) ||
+            scope.target_only_families.join(',') !== 'object_experiment,runtime_hooks,repeater' ||
+            !isPlainObject(scope.limits) || scope.limits.targets !== 8 ||
+            scope.limits.pending_triggers !== 16) return false;
+        const ids = new Set();
+        if (!scope.targets.every(target => {
+          if (!isPlainObject(target) || !isBoundedText(target.id, 4 * 1024) ||
+              !['page', 'webview'].includes(target.type) || !isBoundedText(target.title, 512) ||
+              !isBoundedText(target.url, 8 * 1024) || typeof target.connected !== 'boolean' ||
+              typeof target.matched !== 'boolean' || ids.has(target.id)) return false;
+          ids.add(target.id);
+          return target.matched === (scope.mode === 'global' || target.id === scope.target_id);
+        })) return false;
+        if (scope.targets.filter(target => target.matched).length !== scope.matched_target_count ||
+            scope.targets.filter(target => target.matched && target.connected).length !== scope.connected_target_count) return false;
+        if (scope.mode === 'global') return scope.target_id === null;
+        return typeof scope.target_id === 'string' && scope.target_id.length > 0;
+      }
+
       function isRequestInterceptionRule(rule) {
         return isPlainObject(rule) && ['continue', 'block', 'drop', 'rewrite', 'fulfill'].includes(rule.mode) &&
           isBoundedText(rule.url_pattern, 2 * 1024) && isBoundedText(rule.method_filter, 32) &&
@@ -3721,6 +4093,7 @@ export async function checkout(cart, fingerprint) {
             !isSafeIntegerInRange(experiment.disposed_at_ms, 0, Number.MAX_SAFE_INTEGER) ||
             !isRequestInterceptionRule(experiment.rule) ||
             (experiment.last_request !== null && (!isPlainObject(experiment.last_request) ||
+              (experiment.last_request.target_id !== undefined && !isBoundedText(experiment.last_request.target_id, 4 * 1024)) ||
               !isBoundedText(experiment.last_request.url, 8 * 1024) || !isBoundedText(experiment.last_request.method, 32) ||
               !isSafeIntegerInRange(experiment.last_request.header_count, 0, 64) ||
               !isSafeIntegerInRange(experiment.last_request.body_bytes, 0, 64 * 1024))) ||
@@ -3733,7 +4106,8 @@ export async function checkout(cart, fingerprint) {
         if (!experiment.audit.every(entry => isPlainObject(entry) &&
             isSafeIntegerInRange(entry.id, 1, Number.MAX_SAFE_INTEGER) &&
             isSafeIntegerInRange(entry.occurred_at_ms, 1, Number.MAX_SAFE_INTEGER) &&
-            isBoundedText(entry.request_id, 256) && isBoundedText(entry.method, 32) &&
+            isBoundedText(entry.request_id, 256) &&
+            (entry.target_id === undefined || isBoundedText(entry.target_id, 4 * 1024)) && isBoundedText(entry.method, 32) &&
             isBoundedText(entry.url, 8 * 1024) && isBoundedText(entry.resource_type, 128) &&
             isBoundedText(entry.detail, 512) &&
             ['continue', 'block', 'drop', 'rewrite', 'fulfill'].includes(entry.rule_mode) &&
@@ -4223,6 +4597,7 @@ export async function checkout(cart, fingerprint) {
             !Array.isArray(body.watches) || body.watches.length > 100 || !body.watches.every(isDebuggerWatch) ||
             !Array.isArray(body.console) || body.console.length > 500 || !body.console.every(isDebuggerConsoleEntry) ||
             !isMemoryOriginTrace(body.memory_origin_trace) ||
+            !isActionScope(body.action_scope) ||
             !isRequestInterception(body.request_interception) ||
             !isObjectExperiment(body.object_experiment) ||
             !isRuntimeHooks(body.runtime_hooks) ||
@@ -5196,6 +5571,7 @@ export async function checkout(cart, fingerprint) {
             : 'No broker-backed trace target selected';
           elements.traceButton.disabled = !root;
           elements.requestMemoryPivot.disabled = true;
+          elements.requestDecoderPivot.disabled = true;
           return;
         }
 
@@ -5218,6 +5594,7 @@ export async function checkout(cart, fingerprint) {
           : 'Select a traceable field';
         elements.traceButton.disabled = !selected;
         elements.requestMemoryPivot.disabled = !selected;
+        elements.requestDecoderPivot.disabled = !selected;
       }
 
       function renderInspectorMessage(message) {
@@ -5551,6 +5928,10 @@ export async function checkout(cart, fingerprint) {
         return state.debuggerSession?.request_interception ?? null;
       }
 
+      function actionScopeState() {
+        return state.debuggerSession?.action_scope ?? null;
+      }
+
       function repeaterState() {
         return state.debuggerSession?.repeater ?? null;
       }
@@ -5587,6 +5968,79 @@ export async function checkout(cart, fingerprint) {
       function setExperimentNotice(kind, message) {
         elements.experimentNotice.dataset.kind = kind;
         elements.experimentNotice.textContent = message;
+      }
+
+      function renderActionScope() {
+        const scope = actionScopeState();
+        const experiment = requestInterception();
+        const sharedMode = ['interceptor', 'automation'].includes(state.experimentMode);
+        const busy = state.experimentPending || state.debuggerActionPending ||
+          (experiment?.pending_requests ?? 0) > 0 || experiment?.state === 'running' ||
+          automationRecipesState()?.auto_armed ||
+          ['arming', 'running', 'stopping'].includes(automationRecipesState()?.state);
+        const contextExists = Boolean(experiment?.isolated);
+        if (scope && state.actionScopeDraftRevision !== scope.revision) {
+          state.actionScopeDraftMode = scope.mode;
+          state.actionScopeDraftRevision = scope.revision;
+        }
+        const draftMode = state.actionScopeDraftMode ?? scope?.mode ?? 'global';
+        const targets = scope?.targets ?? [];
+        const previousTarget = elements.actionScopeTarget.value;
+        const selectedTarget = targets.some(target => target.id === previousTarget)
+          ? previousTarget
+          : scope?.target_id && targets.some(target => target.id === scope.target_id)
+            ? scope.target_id : targets[0]?.id ?? '';
+        const options = targets.map(target => {
+          const option = document.createElement('option'); option.value = target.id;
+          option.textContent = `${target.title || 'Untitled page'} · ${target.url || 'about:blank'}`;
+          return option;
+        });
+        if (!options.length) {
+          const option = document.createElement('option'); option.value = ''; option.textContent = 'No disposable pages';
+          options.push(option);
+        }
+        elements.actionScopeTarget.replaceChildren(...options);
+        elements.actionScopeTarget.value = selectedTarget;
+        elements.actionScopeGlobal.setAttribute('aria-pressed', String(draftMode === 'global'));
+        elements.actionScopeTargeted.setAttribute('aria-pressed', String(draftMode === 'target'));
+        elements.actionScopeGlobal.disabled = !sharedMode || !contextExists || busy;
+        elements.actionScopeTargeted.disabled = !sharedMode || !contextExists || busy || targets.length === 0;
+        elements.actionScopeTarget.disabled = !sharedMode || !contextExists || busy || draftMode !== 'target' || targets.length === 0;
+        const unchanged = scope && draftMode === scope.mode &&
+          (draftMode === 'global' || selectedTarget === scope.target_id);
+        elements.actionScopeApply.disabled = !sharedMode || !contextExists || busy || !scope || unchanged ||
+          (draftMode === 'target' && !selectedTarget);
+        elements.actionScopeNewUrl.disabled = !contextExists || busy || targets.length >= (scope?.limits.targets ?? 8);
+        elements.actionScopeAdd.disabled = elements.actionScopeNewUrl.disabled;
+        if (!sharedMode) {
+          elements.actionScopeBadge.dataset.kind = contextExists ? '' : 'offline';
+          elements.actionScopeBadge.textContent = 'Target only';
+          const labels = {repeater: 'Repeater', object: 'Object Lab', hooks: 'Runtime Hooks'};
+          elements.actionScopeMessage.textContent = `${labels[state.experimentMode]} stays on the primary disposable page. Shared scope applies to Interceptor and Automation.`;
+        } else {
+          elements.actionScopeBadge.dataset.kind = ['error', 'partial'].includes(scope?.state) ? 'error'
+            : scope?.state === 'ready' ? '' : 'offline';
+          elements.actionScopeBadge.textContent = scope?.state === 'ready'
+            ? `${scope.matched_target_count} ${scope.matched_target_count === 1 ? 'page' : 'pages'}`
+            : scope?.state ?? 'No scope';
+          elements.actionScopeMessage.textContent = scope?.message ?? 'Create an isolated context to choose action scope.';
+        }
+        elements.actionScopeTargets.replaceChildren(...(targets.length ? targets.map(target => {
+          const row = document.createElement('div'); row.className = 'action-scope-target';
+          row.dataset.matched = String(target.matched);
+          const title = textElement('strong', '', target.title || 'Untitled page');
+          const meta = textElement('small', '', `${target.connected ? 'connected' : 'disconnected'} · ${target.url || 'about:blank'}`);
+          row.append(title, meta);
+          if (target.id !== experiment?.target_id) {
+            const close = document.createElement('button'); close.type = 'button'; close.textContent = '×';
+            close.title = `Close ${target.title || 'disposable page'}`;
+            close.setAttribute('aria-label', close.title);
+            close.disabled = busy;
+            close.addEventListener('click', () => runExperimentAction({action: 'close_experiment_page', target_id: target.id}));
+            row.append(close);
+          }
+          return row;
+        }) : [textElement('span', 'experiment-empty', 'No disposable pages.') ]));
       }
 
       function parseExperimentHeaders(value, label) {
@@ -5687,7 +6141,8 @@ export async function checkout(cart, fingerprint) {
           const title = textElement('div', 'experiment-audit-title', `${entry.method || 'REQUEST'} ${entry.url || '(invalid URL)'}`);
           const outcome = textElement('div', 'experiment-audit-outcome', entry.outcome.replaceAll('_', ' '));
           const occurred = new Date(entry.occurred_at_ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-          const meta = textElement('div', 'experiment-audit-meta', `${occurred} · ${entry.resource_type} · ${entry.rule_mode} · ${entry.request_id} · ${entry.detail}`);
+          const target = entry.target_id ? ` · page ${entry.target_id.slice(0, 12)}` : '';
+          const meta = textElement('div', 'experiment-audit-meta', `${occurred} · ${entry.resource_type} · ${entry.rule_mode} · ${entry.request_id}${target} · ${entry.detail}`);
           row.append(title, outcome, meta);
           return row;
         }));
@@ -6531,6 +6986,7 @@ export async function checkout(cart, fingerprint) {
         elements.objectWorkspace.hidden = state.experimentMode !== 'object';
         elements.hooksWorkspace.hidden = state.experimentMode !== 'hooks';
         elements.automationWorkspace.hidden = state.experimentMode !== 'automation';
+        renderActionScope();
         if (state.experimentMode === 'repeater') {
           renderRepeater();
           return;
@@ -6615,6 +7071,9 @@ export async function checkout(cart, fingerprint) {
         const response = await debuggerAction(request);
         if (response?.experiment && isRequestInterception(response.experiment) && state.debuggerSession) {
           state.debuggerSession.request_interception = response.experiment;
+        }
+        if (response?.action_scope && isActionScope(response.action_scope) && state.debuggerSession) {
+          state.debuggerSession.action_scope = response.action_scope;
         }
         if (response?.object_experiment && isObjectExperiment(response.object_experiment) && state.debuggerSession) {
           state.debuggerSession.object_experiment = response.object_experiment;
@@ -8032,7 +8491,8 @@ export async function checkout(cart, fingerprint) {
       function analystArtifactMetadata(artifact) {
         const metadata = {};
         ['protocol_version', 'artifact_id', 'session_id', 'navigation_id', 'frame_id', 'parent_artifact_id',
-          'creator_event_id', 'kind', 'origin', 'url', 'mime_type', 'byte_size', 'sha256', 'sensitive']
+          'creator_event_id', 'execution_context_id', 'capture_origin', 'kind', 'origin', 'url',
+          'mime_type', 'byte_size', 'sha256', 'sensitive']
           .forEach(key => { if (artifact[key] !== undefined) metadata[key] = artifact[key]; });
         return metadata;
       }
@@ -8205,6 +8665,481 @@ export async function checkout(cart, fingerprint) {
         renderAnalystEditor();
         renderAnalystExecution();
         renderAnalystHistory();
+      }
+
+      const decoderNativeOperations = new Set([
+        'base64-encode', 'base64-decode', 'base64url-encode', 'base64url-decode',
+        'hex-encode', 'hex-decode', 'url-encode', 'url-decode', 'base36-encode',
+        'base36-decode', 'gzip-compress', 'gzip-decompress', 'zlib-compress',
+        'zlib-decompress', 'deflate-compress', 'deflate-decompress', 'json-pretty',
+        'json-minify'
+      ]);
+      const decoderAlgorithms = new Set(['HS256', 'HS384', 'HS512', 'none']);
+
+      function decoderHasExactKeys(value, keys) {
+        return isPlainObject(value) && Object.keys(value).length === keys.length &&
+          keys.every(key => Object.hasOwn(value, key));
+      }
+
+      function isDecoderEngine(value) {
+        if (!decoderHasExactKeys(value, ['protocol_version', 'available', 'busy', 'limits']) ||
+            value.protocol_version !== 1 || typeof value.available !== 'boolean' || typeof value.busy !== 'boolean') return false;
+        const limits = value.limits;
+        if (!decoderHasExactKeys(limits, ['input_bytes', 'output_bytes', 'pipeline_steps', 'retained_bytes',
+          'jwt_bytes', 'secret_bytes', 'json_depth', 'json_tokens', 'timeout_ms', 'operations', 'jwt_algorithms'])) return false;
+        if (limits.input_bytes !== 1048576 || limits.output_bytes !== 1048576 || limits.pipeline_steps !== 16 ||
+            limits.retained_bytes !== 4194304 || limits.jwt_bytes !== 65536 || limits.secret_bytes !== 4096 ||
+            limits.json_depth !== 64 || limits.json_tokens !== 100000 || limits.timeout_ms !== 2000) return false;
+        return Array.isArray(limits.operations) && limits.operations.length === decoderNativeOperations.size &&
+          limits.operations.every(operation => decoderNativeOperations.has(operation)) &&
+          new Set(limits.operations).size === decoderNativeOperations.size &&
+          Array.isArray(limits.jwt_algorithms) && limits.jwt_algorithms.length === decoderAlgorithms.size &&
+          limits.jwt_algorithms.every(algorithm => decoderAlgorithms.has(algorithm)) &&
+          new Set(limits.jwt_algorithms).size === decoderAlgorithms.size;
+      }
+
+      function isDecoderTransform(value, request) {
+        if (!decoderHasExactKeys(value, ['protocol_version', 'ok', 'operation_id', 'operation', 'input_bytes',
+          'output_bytes', 'output_base64', 'utf8_text', 'hex_preview', 'preview_truncated', 'duration_us'])) return false;
+        if (value.protocol_version !== 1 || value.ok !== true || value.operation_id !== request.operation_id ||
+            value.operation !== request.operation || !isSafeIntegerInRange(value.input_bytes, 0, 1048576) ||
+            !isSafeIntegerInRange(value.output_bytes, 0, 1048576) ||
+            !isSafeIntegerInRange(value.duration_us, 1, Number.MAX_SAFE_INTEGER) ||
+            (value.utf8_text !== null && typeof value.utf8_text !== 'string') || typeof value.hex_preview !== 'string' ||
+            !/^(?:[0-9a-f]{2})*$/u.test(value.hex_preview) || typeof value.preview_truncated !== 'boolean') return false;
+        try {
+          const output = decoderBase64ToBytes(value.output_base64);
+          return output.byteLength === value.output_bytes && value.hex_preview === decoderBytesToHex(output.slice(0, 256)) &&
+            value.preview_truncated === (output.byteLength > 256);
+        } catch {
+          return false;
+        }
+      }
+
+      function isJwtInspection(value) {
+        return decoderHasExactKeys(value, ['protocol_version', 'ok', 'algorithm', 'signature_status', 'header_json',
+          'payload_json', 'token_bytes', 'signature_bytes', 'error', 'duration_us']) && value.protocol_version === 1 &&
+          typeof value.ok === 'boolean' && typeof value.algorithm === 'string' && value.algorithm.length <= 128 &&
+          ['not_checked', 'verified', 'invalid', 'unsigned', 'unsupported'].includes(value.signature_status) &&
+          typeof value.header_json === 'string' && utf8ByteLength(value.header_json) <= 65536 &&
+          typeof value.payload_json === 'string' && utf8ByteLength(value.payload_json) <= 65536 &&
+          isSafeIntegerInRange(value.token_bytes, 0, 65536) && isSafeIntegerInRange(value.signature_bytes, 0, 65536) &&
+          (value.error === null || (typeof value.error === 'string' && utf8ByteLength(value.error) <= 4096)) &&
+          isSafeIntegerInRange(value.duration_us, 1, Number.MAX_SAFE_INTEGER);
+      }
+
+      function isJwtCreation(value) {
+        return decoderHasExactKeys(value, ['protocol_version', 'ok', 'token', 'error', 'duration_us']) &&
+          value.protocol_version === 1 && typeof value.ok === 'boolean' && typeof value.token === 'string' &&
+          utf8ByteLength(value.token) <= 65536 &&
+          (value.error === null || (typeof value.error === 'string' && utf8ByteLength(value.error) <= 4096)) &&
+          isSafeIntegerInRange(value.duration_us, 1, Number.MAX_SAFE_INTEGER);
+      }
+
+      function decoderBytesToBase64(bytes) {
+        let binary = '';
+        for (let offset = 0; offset < bytes.byteLength; offset += 32768) {
+          binary += String.fromCharCode(...bytes.subarray(offset, Math.min(bytes.byteLength, offset + 32768)));
+        }
+        return btoa(binary);
+      }
+
+      function decoderBase64ToBytes(value) {
+        if (typeof value !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)) {
+          throw new TypeError('Base64 input must be canonical and contain no whitespace.');
+        }
+        let binary;
+        try { binary = atob(value); } catch { throw new TypeError('Base64 input is malformed.'); }
+        const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+        if (decoderBytesToBase64(bytes) !== value) throw new TypeError('Base64 input must use canonical padding.');
+        return bytes;
+      }
+
+      function decoderBytesToHex(bytes) {
+        return [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
+      }
+
+      function decoderHexToBytes(value) {
+        let normalized = value.trim().replaceAll(/(?:\s|:|-)+/gu, '');
+        if (normalized.startsWith('0x') || normalized.startsWith('0X')) normalized = normalized.slice(2);
+        if (normalized.length % 2 !== 0 || !/^[0-9a-f]*$/iu.test(normalized)) {
+          throw new TypeError('Hex input must contain complete byte pairs.');
+        }
+        return Uint8Array.from(normalized.match(/.{2}/gu) ?? [], pair => Number.parseInt(pair, 16));
+      }
+
+      function decoderParseInput() {
+        let bytes;
+        if (toolsElements.inputEncoding.value === 'text') bytes = new TextEncoder().encode(toolsElements.input.value);
+        else if (toolsElements.inputEncoding.value === 'base64') bytes = decoderBase64ToBytes(toolsElements.input.value.trim());
+        else bytes = decoderHexToBytes(toolsElements.input.value);
+        if (bytes.byteLength > 1048576) throw new TypeError('Input exceeds the 1 MiB decoder limit.');
+        return bytes;
+      }
+
+      function decoderCurrentInputKey() {
+        return `${toolsElements.inputEncoding.value}\u0000${toolsElements.input.value}`;
+      }
+
+      function decoderSelectedBytes() {
+        if (state.decoderSelectedStepId !== null) {
+          const step = state.decoderSteps.find(candidate => candidate.id === state.decoderSelectedStepId);
+          if (step) return decoderBase64ToBytes(step.output_base64);
+        }
+        if (state.decoderInputSnapshot) return decoderBase64ToBytes(state.decoderInputSnapshot.base64);
+        return decoderParseInput();
+      }
+
+      function decoderRetainedBytes() {
+        return (state.decoderInputSnapshot?.bytes ?? 0) + state.decoderSteps.reduce((sum, step) => sum + step.output_bytes, 0);
+      }
+
+      function setToolsNotice(kind, message) {
+        state.decoderStatus = kind;
+        state.decoderMessage = message;
+      }
+
+      async function refreshDecoderEngine(force = false) {
+        if (state.decoderRefreshing || location.protocol === 'file:' || (!force && state.decoderStatus === 'ready')) return;
+        state.decoderRefreshing = true;
+        if (state.decoderStatus !== 'ready') setToolsNotice('loading', 'Checking the native decoder engine…');
+        renderTools();
+        try {
+          const response = await fetch('/api/decoder', {cache: 'no-store'});
+          if (!response.ok) throw new Error(`Decoder service returned ${response.status}`);
+          const body = await response.json();
+          if (!isDecoderEngine(body)) throw new TypeError('Decoder service returned a malformed capability contract.');
+          state.decoderEngine = body;
+          setToolsNotice(body.available ? 'ready' : 'error', body.available
+            ? 'Native C++ decoder ready. Every transform runs only when requested.'
+            : 'The native decoder executable is unavailable. Rebuild the application to restore local tools.');
+        } catch (error) {
+          state.decoderEngine = emptyDecoderEngine();
+          setToolsNotice('error', `Decoder service unavailable: ${error.message}`);
+        } finally {
+          state.decoderRefreshing = false;
+          renderTools();
+        }
+      }
+
+      function decoderHtmlTransform(operation, input) {
+        const started = performance.now();
+        const text = new TextDecoder('utf-8', {fatal: true}).decode(input);
+        const transformed = operation === 'html-encode'
+          ? text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;').replaceAll("'", '&#39;')
+          : new DOMParser().parseFromString(
+            `<textarea>${text.replaceAll('<', '&#60;').replaceAll('>', '&#62;')}</textarea>`, 'text/html'
+          ).body.firstElementChild.textContent;
+        const output = new TextEncoder().encode(transformed);
+        if (output.byteLength > 1048576) throw new TypeError('HTML entity output exceeds the 1 MiB limit.');
+        return {
+          protocol_version: 1, ok: true, operation_id: state.decoderNextOperationId,
+          operation, input_bytes: input.byteLength, output_bytes: output.byteLength,
+          output_base64: decoderBytesToBase64(output), utf8_text: new TextDecoder().decode(output),
+          hex_preview: decoderBytesToHex(output.slice(0, 256)), preview_truncated: output.byteLength > 256,
+          duration_us: Math.max(1, Math.round((performance.now() - started) * 1000))
+        };
+      }
+
+      async function appendDecoderTransform() {
+        if (state.decoderPending) return;
+        try {
+          if (state.decoderSteps.length >= 16) throw new TypeError('The 16-step chain limit was reached.');
+          if (state.decoderInputSnapshot && state.decoderInputSnapshot.key !== decoderCurrentInputKey()) {
+            throw new TypeError('Input changed. Reset the chain before using the new bytes.');
+          }
+          let input;
+          let branchIndex = state.decoderSteps.length - 1;
+          if (state.decoderSelectedStepId !== null) {
+            branchIndex = state.decoderSteps.findIndex(step => step.id === state.decoderSelectedStepId);
+            input = branchIndex >= 0 ? decoderBase64ToBytes(state.decoderSteps[branchIndex].output_base64) : null;
+          }
+          if (!input) {
+            input = state.decoderInputSnapshot ? decoderBase64ToBytes(state.decoderInputSnapshot.base64) : decoderParseInput();
+            branchIndex = -1;
+          }
+          if (!state.decoderInputSnapshot) {
+            state.decoderInputSnapshot = {key: decoderCurrentInputKey(), base64: decoderBytesToBase64(input), bytes: input.byteLength};
+          }
+          const operation = toolsElements.operation.value;
+          const operationId = state.decoderNextOperationId;
+          state.decoderPending = true;
+          setToolsNotice('running', `${operation.replaceAll('-', ' ')} is running locally…`);
+          renderTools();
+          const request = {protocol_version: 1, action: 'transform', operation_id: operationId,
+            operation, input_base64: decoderBytesToBase64(input)};
+          let result;
+          if (operation === 'html-encode' || operation === 'html-decode') result = decoderHtmlTransform(operation, input);
+          else {
+            if (!state.decoderEngine.available) throw new TypeError('The native decoder engine is unavailable.');
+            const response = await fetch('/api/decoder/actions', {method: 'POST', cache: 'no-store',
+              headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request)});
+            const body = await response.json();
+            if (!response.ok) throw new Error(body.error || `Decoder service returned ${response.status}`);
+            if (!isDecoderTransform(body, request)) throw new TypeError('Decoder service returned a malformed or mismatched result.');
+            result = body;
+          }
+          const prefix = state.decoderSteps.slice(0, branchIndex + 1);
+          const retained = (state.decoderInputSnapshot?.bytes ?? 0) + prefix.reduce((sum, step) => sum + step.output_bytes, 0) + result.output_bytes;
+          if (retained > 4194304) throw new TypeError('This result would exceed the 4 MiB retained-chain limit.');
+          const step = {...result, id: operationId};
+          state.decoderSteps = [...prefix, step];
+          state.decoderNextOperationId += 1;
+          state.decoderSelectedStepId = step.id;
+          setToolsNotice('ready', `${operation.replaceAll('-', ' ')} completed: ${formatByteSize(result.input_bytes)} to ${formatByteSize(result.output_bytes)}.`);
+        } catch (error) {
+          setToolsNotice('error', error.message);
+        } finally {
+          state.decoderPending = false;
+          renderTools();
+        }
+      }
+
+      function decoderHexDump(bytes, maximum = 4096) {
+        const rows = [];
+        const visible = bytes.slice(0, maximum);
+        for (let offset = 0; offset < visible.length; offset += 16) {
+          const chunk = visible.slice(offset, offset + 16);
+          const hex = [...chunk].map(byte => byte.toString(16).padStart(2, '0')).join(' ').padEnd(47, ' ');
+          const ascii = [...chunk].map(byte => byte >= 32 && byte < 127 ? String.fromCharCode(byte) : '.').join('');
+          rows.push(`${offset.toString(16).padStart(8, '0')}  ${hex}  |${ascii}|`);
+        }
+        if (bytes.byteLength > maximum) rows.push(`\n… ${formatByteSize(bytes.byteLength - maximum)} omitted from this preview`);
+        return rows.join('\n');
+      }
+
+      function decoderVisibleOutput(bytes) {
+        if (state.decoderView === 'hex') return decoderHexDump(bytes);
+        if (state.decoderView === 'base64') {
+          const visible = bytes.slice(0, 262144);
+          const encoded = decoderBytesToBase64(visible);
+          return bytes.byteLength > visible.byteLength ? `${encoded}\n\n… ${formatByteSize(bytes.byteLength - visible.byteLength)} omitted from this preview` : encoded;
+        }
+        try {
+          const text = new TextDecoder('utf-8', {fatal: true}).decode(bytes.slice(0, 262144));
+          return bytes.byteLength > 262144 ? `${text}\n\n… ${formatByteSize(bytes.byteLength - 262144)} omitted from this preview` : text;
+        } catch {
+          return 'These bytes are not valid UTF-8. Select Hex dump or Base64 to inspect them safely.';
+        }
+      }
+
+      function renderDecoder() {
+        toolsElements.engineBadge.textContent = state.decoderEngine.available ? (state.decoderEngine.busy ? 'Engine busy' : 'Native engine ready') : 'Engine unavailable';
+        toolsElements.engineBadge.dataset.kind = state.decoderEngine.available ? '' : 'offline';
+        let parsedInput = null;
+        let inputError = null;
+        try { parsedInput = state.decoderInputSnapshot ? decoderBase64ToBytes(state.decoderInputSnapshot.base64) : decoderParseInput(); }
+        catch (error) { inputError = error.message; }
+        toolsElements.inputBadge.textContent = inputError ? 'Invalid input' : formatByteSize(parsedInput.byteLength);
+        toolsElements.inputBadge.dataset.kind = inputError ? 'error' : '';
+        toolsElements.pipelineBadge.textContent = `${state.decoderSteps.length} / 16`;
+        toolsElements.append.disabled = state.decoderPending || state.decoderSteps.length >= 16 || Boolean(inputError) ||
+          (!state.decoderEngine.available && !toolsElements.operation.value.startsWith('html-'));
+        toolsElements.useField.disabled = !state.selectedField || state.decoderPending;
+        toolsElements.reset.disabled = state.decoderPending || (!state.decoderInputSnapshot && !state.decoderSteps.length);
+        toolsElements.removeAfter.disabled = state.decoderPending || state.decoderSelectedStepId === null;
+        const rows = [];
+        const root = document.createElement('button'); root.type = 'button'; root.className = 'decoder-step'; root.setAttribute('role', 'option');
+        root.setAttribute('aria-selected', String(state.decoderSelectedStepId === null)); root.tabIndex = state.decoderSelectedStepId === null ? 0 : -1;
+        root.append(textElement('strong', '', 'Input bytes'), textElement('span', '', state.decoderInputSnapshot
+          ? `${formatByteSize(state.decoderInputSnapshot.bytes)} · immutable chain root` : inputError ? inputError : `${formatByteSize(parsedInput.byteLength)} · current input`));
+        root.addEventListener('click', () => { state.decoderSelectedStepId = null; renderDecoder(); });
+        rows.push(root);
+        state.decoderSteps.forEach((step, index) => {
+          const row = document.createElement('button'); row.type = 'button'; row.className = 'decoder-step'; row.setAttribute('role', 'option');
+          row.setAttribute('aria-selected', String(step.id === state.decoderSelectedStepId)); row.tabIndex = step.id === state.decoderSelectedStepId ? 0 : -1;
+          row.append(textElement('strong', '', `${index + 1}. ${step.operation.replaceAll('-', ' ')}`),
+            textElement('span', '', `${formatByteSize(step.input_bytes)} → ${formatByteSize(step.output_bytes)} · ${step.duration_us.toLocaleString()} µs`));
+          row.addEventListener('click', () => { state.decoderSelectedStepId = step.id; renderDecoder(); });
+          rows.push(row);
+        });
+        toolsElements.pipeline.replaceChildren(...rows);
+        let selected = null;
+        try { selected = decoderSelectedBytes(); } catch { selected = null; }
+        const step = state.decoderSteps.find(candidate => candidate.id === state.decoderSelectedStepId);
+        toolsElements.output.textContent = selected ? decoderVisibleOutput(selected) : 'Input could not be parsed.';
+        toolsElements.outputMeta.textContent = selected ? (step
+          ? `Step ${state.decoderSteps.indexOf(step) + 1}: ${step.operation.replaceAll('-', ' ')}` : 'Original input bytes') : (inputError ?? 'No bytes selected.');
+        toolsElements.outputBadge.textContent = selected ? formatByteSize(selected.byteLength) : 'No output';
+        toolsElements.outputBadge.dataset.kind = selected ? '' : 'offline';
+        toolsElements.selectedBytes.textContent = selected ? formatByteSize(selected.byteLength) : '0 B';
+        toolsElements.retainedBytes.textContent = `${formatByteSize(decoderRetainedBytes())} / 4 MiB`;
+        toolsElements.duration.textContent = step ? `${step.duration_us.toLocaleString()} µs` : 'Not run';
+        toolsElements.copyOutput.disabled = !selected;
+        toolsElements.viewButtons.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.decoderView === state.decoderView)));
+      }
+
+      function renderJwt() {
+        const result = state.jwtResult;
+        const statusLabels = {not_checked: 'Signature not checked', verified: 'Signature verified', invalid: 'Signature invalid',
+          unsigned: 'Unsigned token', unsupported: 'Unsupported algorithm'};
+        toolsElements.jwtInspect.disabled = state.jwtPending;
+        toolsElements.jwtVerify.disabled = state.jwtPending;
+        toolsElements.jwtCreate.disabled = state.jwtPending;
+        toolsElements.jwtUnsignedRow.hidden = toolsElements.jwtAlgorithm.value !== 'none';
+        toolsElements.jwtCreateSecret.disabled = toolsElements.jwtAlgorithm.value === 'none';
+        toolsElements.jwtExpiry.disabled = false;
+        if (!result) {
+          toolsElements.jwtResultBadge.textContent = 'Not inspected'; toolsElements.jwtResultBadge.dataset.kind = 'offline';
+          toolsElements.jwtResultMessage.textContent = 'Inspect a token to decode its header and claims.';
+          toolsElements.jwtStatus.replaceChildren(textElement('span', '', 'Signature not checked'));
+          toolsElements.jwtClaims.replaceChildren(textElement('div', 'analyst-empty', 'Decoded claims remain untrusted until a supported signature is explicitly verified.'));
+          toolsElements.jwtHeader.textContent = 'No header decoded.'; toolsElements.jwtPayloadOutput.textContent = 'No payload decoded.';
+          return;
+        }
+        const status = statusLabels[result.signature_status] ?? 'Invalid result';
+        toolsElements.jwtResultBadge.textContent = status;
+        toolsElements.jwtResultBadge.dataset.kind = result.signature_status === 'verified' ? '' : result.signature_status === 'not_checked' ? 'offline' : 'error';
+        toolsElements.jwtResultMessage.textContent = result.error || (result.signature_status === 'verified'
+          ? 'The HMAC signature is valid. Claim times are evaluated separately below.'
+          : result.signature_status === 'not_checked' ? 'Header and payload decoded only. Treat all claims as untrusted.'
+            : result.signature_status === 'unsigned' ? 'This token has no signature and provides no authenticity.'
+              : result.signature_status === 'unsupported' ? 'The algorithm is not supported for local verification.'
+                : 'The signature or compact token structure is invalid.');
+        const algorithm = textElement('span', '', `Algorithm ${result.algorithm || 'unknown'}`);
+        const signature = textElement('span', '', status); signature.dataset.kind = result.signature_status;
+        toolsElements.jwtStatus.replaceChildren(algorithm, signature,
+          textElement('span', '', `${formatByteSize(result.token_bytes)} · ${result.duration_us.toLocaleString()} µs`));
+        toolsElements.jwtHeader.textContent = result.header_json || 'No header decoded.';
+        toolsElements.jwtPayloadOutput.textContent = result.payload_json || 'No payload decoded.';
+        const claims = [];
+        try {
+          const payload = JSON.parse(result.payload_json);
+          if (isPlainObject(payload)) {
+            ['iss', 'sub', 'aud', 'jti'].forEach(key => {
+              if (Object.hasOwn(payload, key)) claims.push([key, typeof payload[key] === 'string' ? payload[key] : JSON.stringify(payload[key]), '']);
+            });
+            const now = Math.floor(Date.now() / 1000);
+            [['exp', 'expires'], ['nbf', 'valid after'], ['iat', 'issued']].forEach(([key, label]) => {
+              if (!Object.hasOwn(payload, key)) return;
+              const value = payload[key];
+              const valid = typeof value === 'number' && Number.isFinite(value);
+              let note = 'not a numeric date';
+              if (valid) {
+                const date = new Date(value * 1000);
+                note = Number.isNaN(date.valueOf()) ? 'date out of range' : date.toLocaleString();
+                if (key === 'exp' && value <= now) note += ' · expired';
+                if (key === 'nbf' && value > now) note += ' · not active yet';
+                if (key === 'iat' && value > now + 60) note += ' · in the future';
+              }
+              claims.push([key, String(value), `${label}: ${note}`]);
+            });
+          }
+        } catch { /* Native validation reports malformed payloads before this point. */ }
+        if (!claims.length) toolsElements.jwtClaims.replaceChildren(textElement('div', 'analyst-empty', 'No standard identity or time claims were present.'));
+        else toolsElements.jwtClaims.replaceChildren(...claims.map(([key, value, note]) => {
+          const row = document.createElement('div'); row.className = 'jwt-claim';
+          row.append(textElement('span', '', key), textElement('strong', '', value), textElement('small', '', note)); return row;
+        }));
+      }
+
+      function renderTools() {
+        if (!toolsElements.notice) return;
+        toolsElements.notice.dataset.kind = state.decoderStatus;
+        toolsElements.notice.textContent = state.decoderMessage;
+        toolsElements.tabs.forEach(tab => {
+          const selected = tab.dataset.toolsTab === state.toolsTab;
+          tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1;
+        });
+        toolsElements.decoderPanel.hidden = state.toolsTab !== 'decoder';
+        toolsElements.jwtPanel.hidden = state.toolsTab !== 'jwt';
+        renderDecoder();
+        renderJwt();
+      }
+
+      function setToolsTab(tab) {
+        state.toolsTab = tab === 'jwt' ? 'jwt' : 'decoder';
+        renderTools();
+      }
+
+      function resetDecoderChain(message = 'Decoder chain cleared. Input was preserved.') {
+        state.decoderInputSnapshot = null;
+        state.decoderSteps = [];
+        state.decoderSelectedStepId = null;
+        state.decoderNextOperationId = 1;
+        if (message) setToolsNotice(state.decoderEngine.available ? 'ready' : 'error', message);
+        renderTools();
+      }
+
+      function useSelectedFieldInDecoder() {
+        const selected = state.selectedField;
+        if (!selected) return;
+        let value = String(selected.value ?? '').trim();
+        if (selected.type === 'str') {
+          try { const decoded = JSON.parse(value); if (typeof decoded === 'string') value = decoded; } catch { /* Keep captured display text. */ }
+        }
+        resetDecoderChain('Selected request value copied into a fresh decoder chain.');
+        toolsElements.inputEncoding.value = 'text';
+        toolsElements.input.value = value;
+        showScreen('tools', elements.requestDecoderPivot);
+        setToolsTab('decoder');
+        requestAnimationFrame(() => toolsElements.input.focus({preventScroll: true}));
+      }
+
+      async function runJwtAction(action) {
+        if (state.jwtPending) return;
+        try {
+          const token = toolsElements.jwtToken.value.trim();
+          if (!token) throw new TypeError('Enter a compact JWT first.');
+          state.jwtPending = true;
+          setToolsNotice('running', action === 'jwt_verify' ? 'Verifying the HMAC signature locally…' : 'Decoding the JWT locally…');
+          renderTools();
+          const request = action === 'jwt_verify'
+            ? {protocol_version: 1, action, token, secret: toolsElements.jwtSecret.value}
+            : {protocol_version: 1, action, token};
+          const response = await fetch('/api/decoder/actions', {method: 'POST', cache: 'no-store',
+            headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request)});
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.error || `Decoder service returned ${response.status}`);
+          if (!isJwtInspection(body)) throw new TypeError('Decoder service returned a malformed JWT result.');
+          state.jwtResult = body;
+          setToolsNotice(body.ok ? 'ready' : 'error', body.ok
+            ? (action === 'jwt_verify' ? 'JWT signature check completed locally.' : 'JWT decoded without checking its signature.')
+            : (body.error || 'JWT inspection failed.'));
+        } catch (error) {
+          state.jwtResult = null;
+          setToolsNotice('error', error.message);
+        } finally {
+          toolsElements.jwtSecret.value = '';
+          state.jwtPending = false;
+          renderTools();
+        }
+      }
+
+      async function createJwtToken() {
+        if (state.jwtPending) return;
+        try {
+          const algorithm = toolsElements.jwtAlgorithm.value;
+          let expiration = null;
+          if (toolsElements.jwtExpiry.value.trim()) {
+            expiration = Number(toolsElements.jwtExpiry.value);
+            if (!Number.isInteger(expiration) || expiration < 1 || expiration > 604800) throw new TypeError('Expiry must be between one second and seven days.');
+          }
+          const request = {protocol_version: 1, action: 'jwt_create', payload_json: toolsElements.jwtPayload.value,
+            algorithm, secret: algorithm === 'none' ? '' : toolsElements.jwtCreateSecret.value,
+            expires_in_seconds: expiration, allow_unsigned_confirmed: algorithm === 'none' && toolsElements.jwtConfirmUnsigned.checked};
+          state.jwtPending = true;
+          setToolsNotice('running', 'Creating the test JWT locally…');
+          renderTools();
+          const response = await fetch('/api/decoder/actions', {method: 'POST', cache: 'no-store',
+            headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request)});
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.error || `Decoder service returned ${response.status}`);
+          if (!isJwtCreation(body) || !body.ok || !body.token) throw new TypeError(body.error || 'Decoder service returned a malformed created token.');
+          toolsElements.jwtToken.value = body.token;
+          toolsElements.jwtConfirmUnsigned.checked = false;
+          setToolsNotice('ready', `${algorithm} test token created locally. Its signature has not been trusted automatically.`);
+        } catch (error) {
+          setToolsNotice('error', error.message);
+          toolsElements.jwtCreateSecret.value = '';
+          state.jwtPending = false;
+          renderTools();
+          return;
+        }
+        toolsElements.jwtCreateSecret.value = '';
+        state.jwtPending = false;
+        await runJwtAction('jwt_inspect');
       }
 
       async function createAnalystFolder() {
@@ -8591,6 +9526,8 @@ export async function checkout(cart, fingerprint) {
           : [
               ['Artifact', source.artifact_id], ['Kind', source.kind], ['Session', source.session_id],
               ['Navigation', source.navigation_id], ['Frame', source.frame_id], ['Creator', source.creator_event_id],
+              ['Context', source.execution_context_id ?? 'unreported'],
+              ['Origin', source.capture_origin?.replaceAll('_', ' ') ?? 'legacy capture'],
               ['Parent', source.parent_artifact_id], ['MIME', source.mime_type], ['SHA-256', source.sha256],
               ['Sensitive', source.sensitive ? 'approved' : 'no']
             ];
@@ -10161,7 +11098,8 @@ export async function checkout(cart, fingerprint) {
         line.append(label, target);
         const nodes = [line];
         if ((session?.targets.length ?? 0) > 1) {
-          const select = document.createElement('select'); select.className = 'debug-select'; select.setAttribute('aria-label', 'Debugger target');
+          const select = document.createElement('select'); select.id = 'debugger-target-select'; select.name = 'debugger_target';
+          select.className = 'debug-select'; select.setAttribute('aria-label', 'Debugger target');
           session.targets.filter(candidate => ['page', 'webview'].includes(candidate.type)).forEach(candidate => {
             const option = document.createElement('option'); option.value = candidate.id; option.textContent = candidate.title || candidate.url || candidate.id;
             option.selected = candidate.id === session.target?.id; select.append(option);
@@ -10371,7 +11309,9 @@ export async function checkout(cart, fingerprint) {
         ];
         const eventRows = events.map(([eventName, label]) => {
           const row = document.createElement('label'); row.className = 'debug-checkbox';
-          const input = document.createElement('input'); input.type = 'checkbox'; input.checked = settings?.event_breakpoints.includes(eventName) ?? false;
+          const input = document.createElement('input'); input.type = 'checkbox'; input.name = 'event_breakpoint';
+          input.id = `event-breakpoint-${eventName.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+          input.checked = settings?.event_breakpoints.includes(eventName) ?? false;
           input.disabled = !attached || originTraceActive;
           input.addEventListener('change', () => debuggerAction({ action: input.checked ? 'set_event_breakpoint' : 'remove_event_breakpoint', event_name: eventName }));
           const text = document.createElement('span'); text.textContent = label; row.append(input, text); return row;
@@ -10601,6 +11541,7 @@ export async function checkout(cart, fingerprint) {
         if (screenName === 'backtrace' && !traceIsAvailable()) return;
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
         elements.workspace.classList.toggle('sources-active', screenName === 'sources');
+        elements.workspace.classList.toggle('experiments-active', screenName === 'experiments');
         document.querySelectorAll('.nav-button').forEach(button => {
           const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence');
           if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
@@ -10620,6 +11561,10 @@ export async function checkout(cart, fingerprint) {
         if (screenName === 'analyst') {
           renderLocalAnalyst();
           refreshLocalAnalyst();
+        }
+        if (screenName === 'tools') {
+          renderTools();
+          refreshDecoderEngine();
         }
         if (screenName === 'sources') {
           renderDebugger();
@@ -10752,6 +11697,9 @@ export async function checkout(cart, fingerprint) {
         state.localAnalystRunner = {protocol_version: 1, available: false, active_run_id: null,
           limits: emptyLocalAnalystWorkspace().limits};
         renderLocalAnalyst();
+        state.decoderEngine = emptyDecoderEngine();
+        setToolsNotice('error', 'Standalone preview. Open the local app to run native decoder and JWT tools.');
+        renderTools();
       }
 
       function enableTabKeyboardNavigation(selector) {
@@ -10840,6 +11788,7 @@ export async function checkout(cart, fingerprint) {
           showScreen('api-collection', elements.requestCollectionPivot);
         }
       });
+      elements.requestDecoderPivot.addEventListener('click', useSelectedFieldInDecoder);
       elements.requestMemoryPivot.addEventListener('click', () => {
         const selected = state.selectedField;
         if (!selected) return;
@@ -10942,6 +11891,39 @@ export async function checkout(cart, fingerprint) {
         const pattern = elements.xhrBreakpointPattern.value.trim();
         elements.xhrBreakpointPattern.value = '';
         debuggerAction({ action: 'set_xhr_breakpoint', pattern });
+      });
+      elements.actionScopeGlobal.addEventListener('click', () => {
+        state.actionScopeDraftMode = 'global';
+        renderExperiment();
+      });
+      elements.actionScopeTargeted.addEventListener('click', () => {
+        state.actionScopeDraftMode = 'target';
+        renderExperiment();
+      });
+      elements.actionScopeTarget.addEventListener('change', renderExperiment);
+      elements.actionScopeApply.addEventListener('click', () => {
+        const mode = state.actionScopeDraftMode ?? actionScopeState()?.mode ?? 'global';
+        const request = {action: 'set_action_scope', mode};
+        if (mode === 'target') request.target_id = elements.actionScopeTarget.value;
+        runExperimentAction(request);
+      });
+      elements.actionScopeAddForm.addEventListener('submit', async event => {
+        event.preventDefault();
+        const value = elements.actionScopeNewUrl.value.trim();
+        let url = 'about:blank';
+        if (value) {
+          try {
+            const parsed = new URL(value);
+            if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.hash) throw new Error();
+            url = value;
+          } catch {
+            state.experimentError = 'Disposable page URL must be credential-free HTTP or HTTPS with no fragment.';
+            renderExperiment();
+            return;
+          }
+        }
+        const response = await runExperimentAction({action: 'create_experiment_page', url});
+        if (response) elements.actionScopeNewUrl.value = '';
       });
       elements.experimentCreate.addEventListener('click', () => runExperimentAction({
         action: 'create_request_interception_experiment'
@@ -11278,6 +12260,79 @@ export async function checkout(cart, fingerprint) {
         setAnalystNotice(state.localAnalyst.files.length ? 'ready' : 'empty', 'Ephemeral analyst run history was cleared. Saved files were not changed.');
         renderLocalAnalyst();
       });
+      toolsElements.tabs.forEach(tab => tab.addEventListener('click', () => setToolsTab(tab.dataset.toolsTab)));
+      enableTabKeyboardNavigation('[data-tools-tab]');
+      toolsElements.form.addEventListener('submit', event => {
+        event.preventDefault();
+        appendDecoderTransform();
+      });
+      let decoderInputRenderFrame = 0;
+      const scheduleDecoderInputRender = () => {
+        if (decoderInputRenderFrame) return;
+        decoderInputRenderFrame = requestAnimationFrame(() => {
+          decoderInputRenderFrame = 0;
+          if (state.decoderSteps.length) setToolsNotice('ready', 'Input changed. Reset the chain to use the new bytes.');
+          renderTools();
+        });
+      };
+      toolsElements.input.addEventListener('input', scheduleDecoderInputRender);
+      toolsElements.inputEncoding.addEventListener('change', scheduleDecoderInputRender);
+      toolsElements.operation.addEventListener('change', renderTools);
+      toolsElements.useField.addEventListener('click', useSelectedFieldInDecoder);
+      toolsElements.removeAfter.addEventListener('click', () => {
+        const index = state.decoderSteps.findIndex(step => step.id === state.decoderSelectedStepId);
+        if (index < 0) return;
+        state.decoderSteps = state.decoderSteps.slice(0, index);
+        state.decoderSelectedStepId = state.decoderSteps.at(-1)?.id ?? null;
+        setToolsNotice('ready', 'Selected transform and every later transform were removed.');
+        renderTools();
+      });
+      toolsElements.reset.addEventListener('click', () => resetDecoderChain());
+      toolsElements.pipeline.addEventListener('keydown', event => {
+        if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+        const rows = [...toolsElements.pipeline.querySelectorAll('.decoder-step')];
+        const current = rows.indexOf(document.activeElement);
+        if (current < 0 || !rows.length) return;
+        event.preventDefault();
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
+          : Math.max(0, Math.min(rows.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1)));
+        rows[next].click();
+        rows[next].focus();
+      });
+      toolsElements.viewButtons.forEach(button => button.addEventListener('click', () => {
+        state.decoderView = button.dataset.decoderView;
+        renderTools();
+      }));
+      toolsElements.copyOutput.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(toolsElements.output.textContent);
+          setToolsNotice('ready', 'Visible output copied. Truncated previews stay visibly marked.');
+        } catch (error) {
+          setToolsNotice('error', `Output could not be copied: ${error.message}`);
+        }
+        renderTools();
+      });
+      toolsElements.jwtInspectForm.addEventListener('submit', event => {
+        event.preventDefault();
+        runJwtAction('jwt_inspect');
+      });
+      toolsElements.jwtVerify.addEventListener('click', () => runJwtAction('jwt_verify'));
+      toolsElements.jwtClear.addEventListener('click', () => {
+        toolsElements.jwtToken.value = '';
+        toolsElements.jwtSecret.value = '';
+        state.jwtResult = null;
+        setToolsNotice(state.decoderEngine.available ? 'ready' : 'error', 'JWT input and ephemeral result cleared.');
+        renderTools();
+      });
+      toolsElements.jwtCreateForm.addEventListener('submit', event => {
+        event.preventDefault();
+        createJwtToken();
+      });
+      toolsElements.jwtAlgorithm.addEventListener('change', () => {
+        toolsElements.jwtConfirmUnsigned.checked = false;
+        toolsElements.jwtCreateSecret.value = '';
+        renderTools();
+      });
       elements.memorySearchForm.addEventListener('submit', event => {
         event.preventDefault();
         runLiveObjectSearch();
@@ -11364,6 +12419,10 @@ export async function checkout(cart, fingerprint) {
           renderLocalAnalyst();
           refreshLocalAnalyst();
         }
+        if (!document.querySelector('#screen-tools').hidden) {
+          renderTools();
+          refreshDecoderEngine(true);
+        }
         if (!document.querySelector('#screen-sources').hidden) renderSources();
         scheduleDebuggerRefresh(0);
       });
@@ -11377,12 +12436,14 @@ export async function checkout(cart, fingerprint) {
       renderVmLab();
       renderApiCollection();
       renderLocalAnalyst();
+      renderTools();
       if (location.protocol === 'file:') {
         useStandalonePreview();
       } else {
         refresh();
         refreshApiCollection();
         refreshLocalAnalyst();
+        refreshDecoderEngine();
         scheduleDebuggerRefresh();
         setInterval(refresh, 2000);
       }

@@ -12,11 +12,13 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/no_destructor.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
+#include "mojo/public/cpp/base/big_buffer.h"
 #include "mojo/public/cpp/system/data_pipe.h"
 
 namespace network {
@@ -29,8 +31,8 @@ class URLResponseHead;
 namespace reb {
 
 // Browser-process capture boundary for immutable JavaScript and WebAssembly
-// response bodies. It is enabled only for an authorized artifact category and
-// keeps both each body and all concurrently active captures explicitly bounded.
+// response bodies plus renderer-submitted generated source. It is enabled only
+// for an authorized artifact category and keeps every item explicitly bounded.
 class NativeArtifactCaptureSink final {
  public:
   static NativeArtifactCaptureSink& Get();
@@ -51,6 +53,13 @@ class NativeArtifactCaptureSink final {
       const network::ResourceRequest& request,
       const network::mojom::URLResponseHead& response_head,
       mojo::ScopedDataPipeConsumerHandle body);
+
+  void CaptureGeneratedArtifact(NativeArtifactKind kind,
+                                NativeArtifactCaptureOrigin capture_origin,
+                                std::uint64_t execution_context_id,
+                                std::uint64_t frame_id,
+                                std::string_view source_url,
+                                mojo_base::BigBuffer content);
 
   static void TransferCompleted(std::uint64_t artifact_id,
                                 NativeArtifactReceiveStatus status) noexcept;

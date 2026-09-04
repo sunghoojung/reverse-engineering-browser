@@ -91,7 +91,11 @@ Captured reads the artifact manifest and immutable blobs created by
 Brave debugger. Both use the DevTools origin, directory, and file organization.
 The center editor provides tabs, line numbers, `Command+P` or `Control+P`
 open-file navigation, `Command+F` or `Control+F` search, original and
-readable-derived views, and WASM display.
+readable-derived views, and WASM display. A dependency-free, stateful syntax
+layer applies VS Code-inspired dark and light palettes to JavaScript, JSON,
+HTML, CSS, and WebAssembly hex while preserving source as inert text. Coloring
+is capped at 50,000 token spans and visibly falls back to plain text after the
+limit without truncating source content.
 
 During `make live`, the debugger sidebar uses Chromium's Debugger, Runtime,
 Log, and DOMDebugger protocol domains. It supports line breakpoints, pause,
@@ -198,6 +202,17 @@ points; disposal also erases definitions and the 128-entry ephemeral hit log.
 Promise returns are reported and preserved rather than overridden. Hook data
 never enters the evidence store. See
 [Runtime Hooks v1](../../docs/product/runtime-hooks-v1.md).
+
+Automation Studio also shares the disposable Experiment BrowserContext. Its
+process-local library holds up to 16 bounded browser-context recipes. Manual
+runs require confirmation, while created, before-load, and after-load triggers
+remain inert until explicitly armed for the current isolated page. An automatic
+run ceiling, a two-second timeout, one pending trigger batch, cancellation,
+visible drops, and deterministic page reload recovery bound execution. Variables
+remain private to the bridge, and logs and results are text-only previews.
+Recipe definitions survive disposable-context recreation, while variables,
+runs, and active target state are erased on disposal. See
+[Automation Recipes v1](../../docs/product/automation-recipes-v1.md).
 
 Repeater shares that disposable request-lab context and sends one editable,
 credential-free request at a time. It supports immediate cancellation, a

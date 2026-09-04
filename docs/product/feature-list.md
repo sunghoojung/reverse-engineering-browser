@@ -112,8 +112,9 @@
 ## Automation
 
 - Permission-controlled analyst recipes that query captured evidence.
-- Browser-context scripts for explicit Experiment sessions.
-- Manual execution or scoped automatic execution on page creation, before load, or after load.
+- Bounded browser-context recipes for explicit disposable Experiment sessions.
+- Confirmed manual execution or scoped automatic execution on page creation, before load, or after load.
+- Private session variables, bounded page-side helpers, text-only logs, result previews, cancellation, timeout recovery, and visible drop accounting.
 - Access to selected browser, memory, instrumentation, debugger, network, and artifact capabilities.
 - Reusable files, folders, variables, logs, and execution results.
 

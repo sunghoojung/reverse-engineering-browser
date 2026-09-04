@@ -25,6 +25,17 @@
         --amber: #fdd663;
         --red: #f28b82;
         --blue: #8ab4f8;
+        --syntax-keyword: #569cd6;
+        --syntax-control: #c586c0;
+        --syntax-string: #ce9178;
+        --syntax-number: #b5cea8;
+        --syntax-comment: #6a9955;
+        --syntax-function: #dcdcaa;
+        --syntax-property: #9cdcfe;
+        --syntax-type: #4ec9b0;
+        --syntax-regexp: #d16969;
+        --syntax-tag: #569cd6;
+        --syntax-attribute: #9cdcfe;
         --shadow: rgba(0, 0, 0, 0.34);
         --mono: "SFMono-Regular", "Cascadia Code", "Roboto Mono", Consolas, monospace;
         --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -49,6 +60,17 @@
         --amber: #b06000;
         --red: #d93025;
         --blue: #1a73e8;
+        --syntax-keyword: #0000ff;
+        --syntax-control: #af00db;
+        --syntax-string: #a31515;
+        --syntax-number: #098658;
+        --syntax-comment: #008000;
+        --syntax-function: #795e26;
+        --syntax-property: #001080;
+        --syntax-type: #267f99;
+        --syntax-regexp: #811f3f;
+        --syntax-tag: #800000;
+        --syntax-attribute: #e50000;
         --shadow: rgba(24, 31, 42, 0.15);
       }
 
@@ -967,6 +989,17 @@
       .source-gutter:disabled { cursor: default; }
       .source-gutter:not(:disabled):hover { color: var(--text); }
       .source-text { padding-left: 7px; }
+      .syntax-keyword { color: var(--syntax-keyword); }
+      .syntax-control { color: var(--syntax-control); }
+      .syntax-string { color: var(--syntax-string); }
+      .syntax-number { color: var(--syntax-number); }
+      .syntax-comment { color: var(--syntax-comment); }
+      .syntax-function { color: var(--syntax-function); }
+      .syntax-property { color: var(--syntax-property); }
+      .syntax-type { color: var(--syntax-type); }
+      .syntax-regexp { color: var(--syntax-regexp); }
+      .syntax-tag { color: var(--syntax-tag); }
+      .syntax-attribute { color: var(--syntax-attribute); }
       .source-line.search-match { background: color-mix(in srgb, var(--amber) 13%, transparent); }
       .source-empty {
         min-height: 100%;
@@ -1235,6 +1268,26 @@
       .hook-remove { min-height: 24px; padding: 0 7px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); color: var(--muted); font: 8px var(--mono); }
       .hook-remove:hover:not(:disabled) { color: var(--text); background: var(--panel-3); }
       .hook-hits-card { min-height: 300px; }
+      .automation-code { min-height: 210px !important; tab-size: 2; }
+      .automation-recipe-list, .automation-run-list { display: grid; max-height: 390px; overflow: auto; }
+      .automation-recipe-row, .automation-run-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 8px; padding: 10px; border-bottom: 1px solid var(--line-soft); }
+      .automation-recipe-row:last-child, .automation-run-row:last-child { border-bottom: 0; }
+      .automation-run-row { width: 100%; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; color: var(--text); text-align: left; content-visibility: auto; contain-intrinsic-size: auto 76px; }
+      .automation-run-row:hover, .automation-run-row:focus, .automation-run-row[aria-selected="true"] { background: var(--accent-soft); }
+      .automation-recipe-title, .automation-run-title { min-width: 0; overflow: hidden; font: 9px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+      .automation-trigger, .automation-outcome { color: var(--accent); font: 650 7px var(--mono); text-transform: uppercase; }
+      .automation-recipe-meta, .automation-run-meta { grid-column: 1 / -1; color: var(--faint); font: 8px/1.45 var(--mono); overflow-wrap: anywhere; }
+      .automation-recipe-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; }
+      .automation-recipe-actions button { min-height: 24px; padding: 0 8px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); color: var(--muted); font: 8px var(--mono); }
+      .automation-recipe-actions button:hover:not(:disabled) { color: var(--text); background: var(--panel-3); }
+      .automation-result { display: grid; gap: 8px; min-height: 180px; padding: 10px; }
+      .automation-result pre { max-height: 220px; margin: 0; padding: 9px; overflow: auto; border: 1px solid var(--line-soft); background: var(--panel); color: var(--muted); font: 8px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+      .automation-log-list { display: grid; gap: 4px; }
+      .automation-log-row { padding: 6px 8px; border-left: 2px solid var(--line); background: var(--panel); color: var(--muted); font: 8px/1.45 var(--mono); overflow-wrap: anywhere; }
+      .automation-log-row[data-level="warn"], .automation-log-row[data-level="error"] { border-left-color: var(--red); }
+      .automation-editor-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+      .automation-editor-actions .trace-button { grid-column: 1 / -1; }
+      #automation-cancel { grid-column: 1 / -1; }
       .object-property-preview { display: grid; max-height: 210px; margin-bottom: 9px; overflow: auto; border: 1px solid var(--line-soft); background: var(--panel); }
       .object-property-row { display: grid; grid-template-columns: minmax(90px, .8fr) 70px minmax(110px, 1.2fr); gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--line-soft); font: 8px/1.4 var(--mono); }
       .object-property-row:last-child { border-bottom: 0; }
@@ -1811,6 +1864,7 @@
                 <span id="source-position">Line 1, Column 1</span>
                 <span id="source-size">0 bytes</span>
                 <span id="source-view-kind">Original evidence</span>
+                <span id="source-language">Plain text</span>
                 <span id="source-hash" class="source-hash"></span>
               </div>
               <section id="console-drawer" class="console-drawer" aria-label="Console drawer" hidden>
@@ -1976,6 +2030,7 @@
                   <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="repeater" aria-selected="false" tabindex="-1">Repeater</button>
                   <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="object" aria-selected="false" tabindex="-1">Object Lab</button>
                   <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="hooks" aria-selected="false" tabindex="-1">Runtime Hooks</button>
+                  <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="automation" aria-selected="false" tabindex="-1">Automation</button>
                 </div>
                 <span class="memory-readonly">Experiment only</span>
               </div>
@@ -2315,6 +2370,87 @@
                 </article>
               </div>
             </div>
+            <div id="automation-workspace" class="experiment-workspace" hidden>
+              <div class="experiment-column">
+                <article class="experiment-card">
+                  <header>
+                    <div><h2>Isolated Automation Studio</h2><p id="automation-context-message">Recipe definitions stay local; execution requires a disposable context.</p></div>
+                    <span id="automation-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span>
+                  </header>
+                  <div class="experiment-body">
+                    <div class="experiment-actions">
+                      <button id="automation-create" class="trace-button experiment-primary" type="button">Create isolated context</button>
+                      <button id="automation-dispose" class="secondary-button" type="button" disabled>Dispose and erase runs</button>
+                      <button id="automation-clear" class="secondary-button" type="button" disabled>Clear run history</button>
+                    </div>
+                  </div>
+                  <div class="experiment-context-facts">
+                    <div class="experiment-context-fact"><span>Storage</span><strong id="automation-storage-state">Definitions in memory</strong></div>
+                    <div class="experiment-context-fact"><span>Runs</span><strong id="automation-run-usage">0 / 256</strong></div>
+                  </div>
+                </article>
+                <article class="experiment-card">
+                  <header><div><h2>Disposable page</h2><p>Open one explicit credential-free page for manual and automatic recipes.</p></div><span id="automation-page-badge" class="experiment-card-badge" data-kind="offline">No page</span></header>
+                  <div class="experiment-body">
+                    <form id="automation-navigation-form" class="experiment-form">
+                      <label>Page URL<input id="automation-page-url" type="url" maxlength="8192" placeholder="https://app.example.test/lab" autocomplete="off" /></label>
+                      <button id="automation-navigate" class="secondary-button" type="submit" disabled>Open isolated page</button>
+                    </form>
+                  </div>
+                </article>
+                <article class="experiment-card">
+                  <header><div><h2>Automatic execution</h2><p>Created, before-load, and after-load recipes run sequentially with one pending trigger batch.</p></div><span id="automation-state-badge" class="experiment-card-badge" data-kind="offline">Disarmed</span></header>
+                  <div class="experiment-body experiment-form">
+                    <label>Variables (JSON object)<textarea id="automation-variables" maxlength="16384" spellcheck="false" placeholder='{"seed":"verified"}'></textarea></label>
+                    <label class="hook-confirm"><input id="automation-confirm" type="checkbox" /> I confirm these recipes may execute and mutate only the disposable page</label>
+                    <div class="hook-control-actions">
+                      <button id="automation-arm" class="trace-button" type="button" disabled>Arm automatic recipes</button>
+                      <button id="automation-disarm" class="secondary-button" type="button" disabled>Disarm</button>
+                      <button id="automation-cancel" class="secondary-button" type="button" disabled>Cancel active run</button>
+                    </div>
+                    <p class="experiment-privacy">Variable values are never returned in public session state. A new explicit snapshot is required for each arm or manual run.</p>
+                  </div>
+                </article>
+              </div>
+              <div class="experiment-column">
+                <article class="experiment-card">
+                  <header><div><h2>Recipe editor</h2><p>WireBrowser-compatible page helpers: WB.Browser.Utils and Utils.</p></div><span id="automation-recipe-count" class="experiment-card-badge" data-kind="offline">0 / 16</span></header>
+                  <div class="experiment-body">
+                    <form id="automation-recipe-form" class="experiment-form">
+                      <label>Label<input id="automation-label" type="text" maxlength="128" placeholder="mark checkout state" autocomplete="off" /></label>
+                      <div class="experiment-form-row">
+                        <label>Trigger<select id="automation-trigger"><option value="manual">Manual only</option><option value="created">Context created / armed</option><option value="before-load">Before page load</option><option value="after-load">After page load</option></select></label>
+                        <div class="object-search-options"><label class="memory-check"><input id="automation-enabled" type="checkbox" checked /> Enabled</label></div>
+                      </div>
+                      <label>Async page-context JavaScript<textarea id="automation-source" class="automation-code" maxlength="16384" spellcheck="false" placeholder='console.info("seed", Utils.getVar("seed"));&#10;return document.title;'></textarea></label>
+                      <div class="automation-editor-actions">
+                        <button id="automation-save" class="trace-button" type="submit" disabled>Add recipe</button>
+                        <button id="automation-cancel-edit" class="secondary-button" type="button" hidden>Cancel edit</button>
+                      </div>
+                    </form>
+                  </div>
+                </article>
+                <article class="experiment-card">
+                  <header><div><h2>Recipe library</h2><p>Definitions survive disposable-context recreation until Origin Trace exits.</p></div><span id="automation-source-usage" class="experiment-card-badge" data-kind="offline">0 / 64 KiB</span></header>
+                  <div id="automation-recipes" class="automation-recipe-list"><div class="experiment-empty">No page-context recipes configured.</div></div>
+                </article>
+              </div>
+              <div class="experiment-column">
+                <article class="experiment-card">
+                  <header><div><h2>Run timeline</h2><p id="automation-run-meta">Time, source, trigger, outcome, and correlation IDs for every retained run.</p></div><span id="automation-run-count" class="experiment-card-badge" data-kind="offline">0 / 64</span></header>
+                  <div id="automation-runs" class="automation-run-list" role="listbox" aria-label="Automation recipe runs"><div class="experiment-empty">Run a recipe to see its bounded result and logs.</div></div>
+                </article>
+                <article class="experiment-card">
+                  <header><div><h2>Selected result</h2><p id="automation-result-meta">Select a completed run.</p></div><span id="automation-result-badge" class="experiment-card-badge" data-kind="offline">No result</span></header>
+                  <div id="automation-result" class="automation-result"><div class="experiment-empty">No run selected.</div></div>
+                </article>
+                <article class="experiment-card">
+                  <header><div><h2>Hard limits</h2><p>Cold-path debugger execution with visible drops and deterministic cleanup.</p></div><span class="experiment-card-badge">Protocol v1</span></header>
+                  <div class="experiment-context-facts"><div class="experiment-context-fact"><span>Recipes</span><strong>16 / 64 KiB total</strong></div><div class="experiment-context-fact"><span>Automatic</span><strong>8 recipes / 64 runs</strong></div></div>
+                  <div class="experiment-context-facts"><div class="experiment-context-fact"><span>Runtime</span><strong>2 seconds each</strong></div><div class="experiment-context-fact"><span>Output</span><strong>16 KiB / 32 logs</strong></div></div>
+                </article>
+              </div>
+            </div>
           </section>
 
           <section id="screen-api-collection" class="screen" aria-label="API Collection" hidden>
@@ -2552,6 +2688,8 @@ export async function checkout(cart, fingerprint) {
         experimentMode: 'interceptor',
         objectSelectedResultId: null,
         objectSelectionSearchId: 0,
+        automationEditingRecipeId: null,
+        automationSelectedRunId: null,
         repeaterPrefillKey: null,
         repeaterSelectedHistoryId: null,
         repeaterExpectedHistoryId: null,
@@ -2625,6 +2763,7 @@ export async function checkout(cart, fingerprint) {
         repeaterWorkspace: document.querySelector('#repeater-workspace'),
         objectWorkspace: document.querySelector('#object-workspace'),
         hooksWorkspace: document.querySelector('#hooks-workspace'),
+        automationWorkspace: document.querySelector('#automation-workspace'),
         experimentSubtitle: document.querySelector('#experiment-subtitle'),
         experimentNotice: document.querySelector('#experiment-notice'),
         experimentContextMessage: document.querySelector('#experiment-context-message'),
@@ -2732,6 +2871,39 @@ export async function checkout(cart, fingerprint) {
         hooksHitMeta: document.querySelector('#hooks-hit-meta'),
         hooksHitCount: document.querySelector('#hooks-hit-count'),
         hooksHits: document.querySelector('#hooks-hits'),
+        automationContextMessage: document.querySelector('#automation-context-message'),
+        automationContextBadge: document.querySelector('#automation-context-badge'),
+        automationStorageState: document.querySelector('#automation-storage-state'),
+        automationRunUsage: document.querySelector('#automation-run-usage'),
+        automationCreate: document.querySelector('#automation-create'),
+        automationDispose: document.querySelector('#automation-dispose'),
+        automationClear: document.querySelector('#automation-clear'),
+        automationNavigationForm: document.querySelector('#automation-navigation-form'),
+        automationPageUrl: document.querySelector('#automation-page-url'),
+        automationNavigate: document.querySelector('#automation-navigate'),
+        automationPageBadge: document.querySelector('#automation-page-badge'),
+        automationStateBadge: document.querySelector('#automation-state-badge'),
+        automationVariables: document.querySelector('#automation-variables'),
+        automationConfirm: document.querySelector('#automation-confirm'),
+        automationArm: document.querySelector('#automation-arm'),
+        automationDisarm: document.querySelector('#automation-disarm'),
+        automationCancel: document.querySelector('#automation-cancel'),
+        automationRecipeCount: document.querySelector('#automation-recipe-count'),
+        automationRecipeForm: document.querySelector('#automation-recipe-form'),
+        automationLabel: document.querySelector('#automation-label'),
+        automationTrigger: document.querySelector('#automation-trigger'),
+        automationEnabled: document.querySelector('#automation-enabled'),
+        automationSource: document.querySelector('#automation-source'),
+        automationSave: document.querySelector('#automation-save'),
+        automationCancelEdit: document.querySelector('#automation-cancel-edit'),
+        automationSourceUsage: document.querySelector('#automation-source-usage'),
+        automationRecipes: document.querySelector('#automation-recipes'),
+        automationRunMeta: document.querySelector('#automation-run-meta'),
+        automationRunCount: document.querySelector('#automation-run-count'),
+        automationRuns: document.querySelector('#automation-runs'),
+        automationResultMeta: document.querySelector('#automation-result-meta'),
+        automationResultBadge: document.querySelector('#automation-result-badge'),
+        automationResult: document.querySelector('#automation-result'),
         repeaterContextMessage: document.querySelector('#repeater-context-message'),
         repeaterContextBadge: document.querySelector('#repeater-context-badge'),
         repeaterStorageState: document.querySelector('#repeater-storage-state'),
@@ -2822,6 +2994,7 @@ export async function checkout(cart, fingerprint) {
         sourcePosition: document.querySelector('#source-position'),
         sourceSize: document.querySelector('#source-size'),
         sourceViewKind: document.querySelector('#source-view-kind'),
+        sourceLanguage: document.querySelector('#source-language'),
         sourceHash: document.querySelector('#source-hash'),
         artifactFacts: document.querySelector('#artifact-facts'),
         sourcesEditor: document.querySelector('.sources-editor'),
@@ -3489,6 +3662,83 @@ export async function checkout(cart, fingerprint) {
           (hooks.isolated && typeof hooks.target_id === 'string' && hooks.target_id.length > 0));
       }
 
+      function isAutomationRecipes(automation) {
+        const states = ['idle', 'attaching', 'ready', 'arming', 'armed', 'running', 'stopping',
+          'disposing', 'disposed', 'error'];
+        const triggers = ['manual', 'created', 'before-load', 'after-load'];
+        const outcomes = ['completed', 'failed', 'cancelled', 'timed_out'];
+        if (!isPlainObject(automation) || 'variables' in automation || automation.protocol_version !== 1 ||
+            !isSafeIntegerInRange(automation.session_id, 0, Number.MAX_SAFE_INTEGER) ||
+            !states.includes(automation.state) || typeof automation.isolated !== 'boolean' ||
+            (automation.target_id !== null && !isBoundedText(automation.target_id, 4 * 1024)) ||
+            !Array.isArray(automation.recipes) || automation.recipes.length > 16 ||
+            !isSafeIntegerInRange(automation.source_bytes, 0, 64 * 1024) ||
+            typeof automation.auto_armed !== 'boolean' ||
+            !isSafeIntegerInRange(automation.total_runs, 0, 256) ||
+            !isSafeIntegerInRange(automation.automatic_runs, 0, 64) ||
+            automation.automatic_runs > automation.total_runs ||
+            !Array.isArray(automation.runs) || automation.runs.length > 64 ||
+            automation.runs.length > automation.total_runs ||
+            !isSafeIntegerInRange(automation.run_evictions, 0, Number.MAX_SAFE_INTEGER) ||
+            !isSafeIntegerInRange(automation.dropped_triggers, 0, Number.MAX_SAFE_INTEGER) ||
+            !isSafeIntegerInRange(automation.variable_count, 0, 32) ||
+            !isSafeIntegerInRange(automation.variable_bytes, 0, 16 * 1024) ||
+            (automation.last_failure !== null && !isBoundedText(automation.last_failure, 512)) ||
+            !isBoundedText(automation.message, 512) || !isPlainObject(automation.limits)) return false;
+        const limits = {recipes: 16, automatic_recipes: 8, recipe_source_bytes: 16 * 1024,
+          total_source_bytes: 64 * 1024, variables: 32, variable_value_bytes: 4 * 1024,
+          variable_bytes: 16 * 1024, total_runs: 256, automatic_runs: 64,
+          retained_runs: 64, logs_per_run: 32, log_bytes: 1024,
+          result_bytes: 16 * 1024, execution_timeout_ms: 2000};
+        if (Object.keys(limits).some(key => automation.limits[key] !== limits[key])) return false;
+        const recipeIds = new Set();
+        let sourceBytes = 0;
+        for (const recipe of automation.recipes) {
+          if (!isPlainObject(recipe) || !isSafeIntegerInRange(recipe.id, 1, Number.MAX_SAFE_INTEGER) ||
+              recipeIds.has(recipe.id) || !isBoundedText(recipe.label, 128) || !recipe.label ||
+              !triggers.includes(recipe.trigger) || typeof recipe.enabled !== 'boolean' ||
+              !isBoundedText(recipe.source, 16 * 1024) || !recipe.source.trim() ||
+              !isSafeIntegerInRange(recipe.source_bytes, 1, 16 * 1024) ||
+              utf8ByteLength(recipe.source) !== recipe.source_bytes) return false;
+          recipeIds.add(recipe.id);
+          sourceBytes += recipe.source_bytes;
+        }
+        if (sourceBytes !== automation.source_bytes) return false;
+        const active = automation.active_run;
+        if (active !== null && (!isPlainObject(active) ||
+            !isSafeIntegerInRange(active.id, 1, Number.MAX_SAFE_INTEGER) ||
+            !isSafeIntegerInRange(active.recipe_id, 1, Number.MAX_SAFE_INTEGER) ||
+            !isBoundedText(active.label, 128) || !triggers.includes(active.trigger) ||
+            !isBoundedText(active.source, 8 * 1024) ||
+            !isSafeIntegerInRange(active.started_at_ms, 1, Number.MAX_SAFE_INTEGER) ||
+            typeof active.cancel_requested !== 'boolean')) return false;
+        let previousRunId = 0;
+        for (const run of automation.runs) {
+          if (!isPlainObject(run) || !isSafeIntegerInRange(run.id, 1, Number.MAX_SAFE_INTEGER) ||
+              run.id <= previousRunId || !isSafeIntegerInRange(run.session_id, 1, Number.MAX_SAFE_INTEGER) ||
+              !isSafeIntegerInRange(run.recipe_id, 1, Number.MAX_SAFE_INTEGER) ||
+              !isBoundedText(run.label, 128) ||
+              !isSafeIntegerInRange(run.occurred_at_ms, 1, Number.MAX_SAFE_INTEGER) ||
+              !isBoundedText(run.source, 8 * 1024) || !triggers.includes(run.category) ||
+              !outcomes.includes(run.operation) ||
+              !isSafeIntegerInRange(run.duration_ms, 0, 60 * 1000) ||
+              !isBoundedText(run.target_id, 4 * 1024) || !isBoundedText(run.result_type, 64) ||
+              !isBoundedText(run.result_text, 16 * 1024) || typeof run.result_truncated !== 'boolean' ||
+              !Array.isArray(run.logs) || run.logs.length > 32 ||
+              !run.logs.every(log => isPlainObject(log) && ['log', 'info', 'warn', 'error'].includes(log.level) &&
+                isBoundedText(log.text, 1024)) || typeof run.logs_truncated !== 'boolean' ||
+              !isBoundedText(run.error, 512)) return false;
+          previousRunId = run.id;
+        }
+        if (['running', 'stopping'].includes(automation.state) && active === null && !automation.auto_armed) return false;
+        if (automation.state === 'idle') return automation.session_id === 0 && !automation.isolated && automation.target_id === null &&
+          automation.runs.length === 0 && active === null && !automation.auto_armed;
+        if (automation.state === 'disposed') return automation.session_id > 0 && !automation.isolated && automation.target_id === null &&
+          automation.runs.length === 0 && active === null && !automation.auto_armed && automation.variable_count === 0;
+        return automation.session_id > 0 && (automation.state === 'attaching' || automation.state === 'error' ||
+          (automation.isolated && typeof automation.target_id === 'string' && automation.target_id.length > 0));
+      }
+
       function isRepeaterRequest(request, resolved = false) {
         if (!isPlainObject(request) || !isBoundedText(request.url, 8 * 1024) ||
             !isBoundedText(request.method, resolved ? 32 : 256) ||
@@ -3710,6 +3960,7 @@ export async function checkout(cart, fingerprint) {
             !isRequestInterception(body.request_interception) ||
             !isObjectExperiment(body.object_experiment) ||
             !isRuntimeHooks(body.runtime_hooks) ||
+            !isAutomationRecipes(body.automation_recipes) ||
             !isRepeater(body.repeater) ||
             !isPlainObject(body.settings) || !isPlainObject(body.limits)) return false;
         if (body.heap_diff_baseline !== null && (!isPlainObject(body.heap_diff_baseline) ||
@@ -5046,13 +5297,18 @@ export async function checkout(cart, fingerprint) {
         return state.debuggerSession?.runtime_hooks ?? null;
       }
 
+      function automationRecipesState() {
+        return state.debuggerSession?.automation_recipes ?? null;
+      }
+
       function setExperimentMode(mode, focus = false) {
-        if (!['interceptor', 'repeater', 'object', 'hooks'].includes(mode)) return;
+        if (!['interceptor', 'repeater', 'object', 'hooks', 'automation'].includes(mode)) return;
         state.experimentMode = mode;
         elements.interceptionWorkspace.hidden = mode !== 'interceptor';
         elements.repeaterWorkspace.hidden = mode !== 'repeater';
         elements.objectWorkspace.hidden = mode !== 'object';
         elements.hooksWorkspace.hidden = mode !== 'hooks';
+        elements.automationWorkspace.hidden = mode !== 'automation';
         elements.experimentModeButtons.forEach(button => {
           const selected = button.dataset.experimentMode === mode;
           button.setAttribute('aria-selected', String(selected));
@@ -5415,12 +5671,14 @@ export async function checkout(cart, fingerprint) {
         const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
         const active = ['running', 'cancelling'].includes(repeater?.state);
         const hookBusy = ['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state);
-        const working = state.experimentPending || ['creating', 'disposing'].includes(experiment?.state) || hookBusy;
+        const automationBusy = automationRecipesState()?.auto_armed ||
+          ['arming', 'running', 'stopping'].includes(automationRecipesState()?.state);
+        const working = state.experimentPending || ['creating', 'disposing'].includes(experiment?.state) || hookBusy || automationBusy;
         const contextReady = attached && experiment?.isolated &&
           experiment.target_id === state.debuggerSession?.target?.id && ['ready', 'error'].includes(experiment.state) &&
           ['ready', 'error'].includes(repeater?.state);
         const canDispose = experiment?.isolated && ['ready', 'error'].includes(experiment.state) &&
-          experiment.pending_requests === 0 && !active && !hookBusy;
+          experiment.pending_requests === 0 && !active && !hookBusy && !automationBusy;
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         elements.experimentTitle.textContent = 'Repeater';
         elements.experimentSubtitle.textContent = request
@@ -5456,7 +5714,7 @@ export async function checkout(cart, fingerprint) {
         elements.repeaterVariables.disabled = !contextReady || active || working;
         elements.repeaterRequestForm.querySelectorAll('input, textarea').forEach(field => { field.disabled = !contextReady || active || working; });
         elements.repeaterSend.disabled = !contextReady || active || working || state.debuggerActionPending;
-        elements.repeaterCancel.disabled = !active || state.debuggerActionPending || repeater?.state === 'cancelling';
+        elements.repeaterCancel.disabled = !active || repeater?.state === 'cancelling';
         elements.repeaterRequestBadge.dataset.kind = active ? '' : contextReady ? '' : 'offline';
         elements.repeaterRequestBadge.textContent = repeater?.state === 'cancelling' ? 'Cancelling'
           : repeater?.state === 'running' ? 'Running' : 'Draft';
@@ -5589,8 +5847,10 @@ export async function checkout(cart, fingerprint) {
         const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
         const objectBusy = ['navigating', 'searching', 'mutating'].includes(objectExperiment?.state);
         const hookBusy = ['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state);
+        const automationBusy = automationRecipesState()?.auto_armed ||
+          ['arming', 'running', 'stopping'].includes(automationRecipesState()?.state);
         const contextBusy = state.experimentPending || ['creating', 'running', 'disposing'].includes(experiment?.state) ||
-          ['running', 'cancelling'].includes(repeater?.state) || objectBusy || hookBusy;
+          ['running', 'cancelling'].includes(repeater?.state) || objectBusy || hookBusy || automationBusy;
         const contextReady = attached && experiment?.isolated && objectExperiment?.isolated &&
           experiment.target_id === state.debuggerSession?.target?.id &&
           objectExperiment.target_id === state.debuggerSession?.target?.id &&
@@ -5604,7 +5864,7 @@ export async function checkout(cart, fingerprint) {
         }
         const selected = selectedObjectExperimentResult(objectExperiment);
         const canDispose = experiment?.isolated && experiment.pending_requests === 0 &&
-          !['running', 'cancelling'].includes(repeater?.state) && !objectBusy && !hookBusy;
+          !['running', 'cancelling'].includes(repeater?.state) && !objectBusy && !hookBusy && !automationBusy;
         elements.experimentTitle.textContent = 'Live Object Lab';
         elements.experimentSubtitle.textContent = 'Disposable page · typed own-property patches · immutable baseline evidence';
 
@@ -5725,8 +5985,10 @@ export async function checkout(cart, fingerprint) {
         const active = activeStates.includes(hooks?.state);
         const objectBusy = ['navigating', 'searching', 'mutating'].includes(objectExperiment?.state);
         const requestBusy = ['running', 'cancelling'].includes(repeaterState()?.state);
+        const automationBusy = automationRecipesState()?.auto_armed ||
+          ['arming', 'running', 'stopping'].includes(automationRecipesState()?.state);
         const contextWorking = state.experimentPending || ['creating', 'disposing'].includes(experiment?.state) ||
-          objectBusy || requestBusy;
+          objectBusy || requestBusy || automationBusy;
         const contextReady = attached && experiment?.isolated && hooks?.isolated &&
           experiment.target_id === state.debuggerSession?.target?.id && hooks.target_id === state.debuggerSession?.target?.id &&
           ['ready', 'error'].includes(experiment.state) && !['attaching', 'disposing', 'disposed'].includes(hooks.state);
@@ -5794,6 +6056,204 @@ export async function checkout(cart, fingerprint) {
         renderRuntimeHookHits(hooks);
       }
 
+      function parseAutomationVariables() {
+        const source = elements.automationVariables.value.trim();
+        if (!source) return {};
+        let variables;
+        try { variables = JSON.parse(source); }
+        catch { throw new TypeError('Automation variables must be valid JSON.'); }
+        if (!isPlainObject(variables) || Object.values(variables).some(value => typeof value !== 'string')) {
+          throw new TypeError('Automation variables must map names to text values.');
+        }
+        if (Object.keys(variables).length > 32 || Object.entries(variables).some(([name, value]) =>
+          !/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(name) || utf8ByteLength(name) > 128 || utf8ByteLength(value) > 4 * 1024)) {
+          throw new TypeError('Automation variables exceed the visible name, count, or 4 KiB value limits.');
+        }
+        const total = Object.entries(variables).reduce((bytes, [name, value]) =>
+          bytes + utf8ByteLength(name) + utf8ByteLength(value), 0);
+        if (total > 16 * 1024) throw new TypeError('Automation variables exceed the 16 KiB session limit.');
+        return variables;
+      }
+
+      function resetAutomationEditor() {
+        state.automationEditingRecipeId = null;
+        elements.automationLabel.value = '';
+        elements.automationTrigger.value = 'manual';
+        elements.automationEnabled.checked = true;
+        elements.automationSource.value = '';
+      }
+
+      function editAutomationRecipe(recipeId) {
+        const recipe = automationRecipesState()?.recipes.find(candidate => candidate.id === recipeId);
+        if (!recipe) return;
+        state.automationEditingRecipeId = recipe.id;
+        elements.automationLabel.value = recipe.label;
+        elements.automationTrigger.value = recipe.trigger;
+        elements.automationEnabled.checked = recipe.enabled;
+        elements.automationSource.value = recipe.source;
+        renderAutomationRecipes();
+        elements.automationLabel.focus();
+      }
+
+      function renderAutomationRecipeLibrary(automation, libraryEditable, canRun) {
+        const recipes = automation?.recipes ?? [];
+        elements.automationRecipeCount.textContent = `${recipes.length} / ${automation?.limits?.recipes ?? 16}`;
+        elements.automationRecipeCount.dataset.kind = recipes.length ? '' : 'offline';
+        elements.automationSourceUsage.textContent = `${Math.ceil((automation?.source_bytes ?? 0) / 1024)} / 64 KiB`;
+        elements.automationSourceUsage.dataset.kind = recipes.length ? '' : 'offline';
+        if (!recipes.length) {
+          elements.automationRecipes.replaceChildren(textElement('div', 'experiment-empty', 'No page-context recipes configured.'));
+          return;
+        }
+        elements.automationRecipes.replaceChildren(...recipes.map(recipe => {
+          const row = document.createElement('div'); row.className = 'automation-recipe-row';
+          const title = textElement('span', 'automation-recipe-title', recipe.label);
+          const trigger = textElement('span', 'automation-trigger', recipe.enabled ? recipe.trigger : 'disabled');
+          const meta = textElement('span', 'automation-recipe-meta',
+            `recipe ${recipe.id} · ${recipe.source_bytes.toLocaleString()} source bytes · ${recipe.trigger === 'manual' ? 'manual execution' : 'automatic and manual execution'}`);
+          const actions = document.createElement('div'); actions.className = 'automation-recipe-actions';
+          const run = document.createElement('button'); run.type = 'button'; run.textContent = 'Run now';
+          run.disabled = !canRun || !elements.automationConfirm.checked;
+          run.setAttribute('aria-label', `Run ${recipe.label} now`);
+          run.addEventListener('click', () => runAutomationRecipe(recipe.id));
+          const edit = document.createElement('button'); edit.type = 'button'; edit.textContent = 'Edit';
+          edit.disabled = !libraryEditable;
+          edit.addEventListener('click', () => editAutomationRecipe(recipe.id));
+          const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Remove';
+          remove.disabled = !libraryEditable;
+          remove.addEventListener('click', async () => {
+            const response = await runExperimentAction({action: 'remove_automation_recipe', recipe_id: recipe.id});
+            if (response && state.automationEditingRecipeId === recipe.id) resetAutomationEditor();
+          });
+          actions.append(run, edit, remove);
+          row.append(title, trigger, meta, actions);
+          return row;
+        }));
+      }
+
+      function selectAutomationRun(runId, focus = false) {
+        if (!automationRecipesState()?.runs.some(run => run.id === runId)) return;
+        state.automationSelectedRunId = runId;
+        renderAutomationRecipes();
+        if (focus) elements.automationRuns.querySelector(`[data-automation-run-id="${runId}"]`)?.focus();
+      }
+
+      function renderAutomationTimeline(automation) {
+        const runs = automation?.runs ?? [];
+        if (!runs.some(run => run.id === state.automationSelectedRunId)) {
+          state.automationSelectedRunId = runs.at(-1)?.id ?? null;
+        }
+        elements.automationRunCount.textContent = `${runs.length} / ${automation?.limits?.retained_runs ?? 64}`;
+        elements.automationRunCount.dataset.kind = automation?.last_failure ? 'error' : runs.length ? '' : 'offline';
+        elements.automationRunMeta.textContent = runs.length
+          ? `${automation.total_runs} total · ${automation.automatic_runs} automatic · ${automation.run_evictions} evicted · ${automation.dropped_triggers} trigger batches dropped`
+          : 'Time, source, trigger, outcome, and correlation IDs for every retained run.';
+        if (!runs.length) {
+          elements.automationRuns.replaceChildren(textElement('div', 'experiment-empty', 'Run a recipe to see its bounded result and logs.'));
+        } else {
+          elements.automationRuns.replaceChildren(...[...runs].reverse().map(run => {
+            const row = document.createElement('button'); row.type = 'button'; row.className = 'automation-run-row';
+            row.dataset.automationRunId = String(run.id);
+            row.setAttribute('role', 'option');
+            row.setAttribute('aria-selected', String(run.id === state.automationSelectedRunId));
+            const title = textElement('span', 'automation-run-title', run.label);
+            const outcome = textElement('span', 'automation-outcome', run.operation.replaceAll('_', ' '));
+            if (['failed', 'timed_out'].includes(run.operation)) outcome.style.color = 'var(--red)';
+            const source = sourceName({url: run.source, source_type: 'script', script_id: ''});
+            const meta = textElement('span', 'automation-run-meta',
+              `${new Date(run.occurred_at_ms).toLocaleTimeString()} · ${source} · ${run.category} · ${run.duration_ms} ms · session ${run.session_id} / recipe ${run.recipe_id} / run ${run.id}`);
+            row.append(title, outcome, meta);
+            row.addEventListener('click', () => selectAutomationRun(run.id));
+            return row;
+          }));
+        }
+        const selected = runs.find(run => run.id === state.automationSelectedRunId) ?? null;
+        elements.automationResultBadge.dataset.kind = selected
+          ? ['failed', 'timed_out'].includes(selected.operation) ? 'error' : '' : 'offline';
+        elements.automationResultBadge.textContent = selected ? selected.operation.replaceAll('_', ' ') : 'No result';
+        elements.automationResultMeta.textContent = selected
+          ? `${selected.result_type} · ${selected.duration_ms} ms · ${selected.logs.length} logs${selected.logs_truncated ? ' · log limit reached' : ''}`
+          : 'Select a completed run.';
+        if (!selected) {
+          elements.automationResult.replaceChildren(textElement('div', 'experiment-empty', 'No run selected.'));
+          return;
+        }
+        const output = document.createElement('pre');
+        output.textContent = selected.error || selected.result_text || '[undefined]';
+        const logs = document.createElement('div'); logs.className = 'automation-log-list';
+        if (!selected.logs.length) logs.append(textElement('div', 'experiment-empty', 'No console output captured.'));
+        else selected.logs.forEach(log => {
+          const row = textElement('div', 'automation-log-row', `${log.level.toUpperCase()}  ${log.text}`);
+          row.dataset.level = log.level;
+          logs.append(row);
+        });
+        elements.automationResult.replaceChildren(output, logs);
+      }
+
+      function renderAutomationRecipes() {
+        const experiment = requestInterception();
+        const objectExperiment = objectExperimentState();
+        const automation = automationRecipesState();
+        const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
+        const autoBusy = ['arming', 'running', 'stopping'].includes(automation?.state) || automation?.active_run !== null;
+        const otherBusy = ['navigating', 'searching', 'mutating'].includes(objectExperiment?.state) ||
+          ['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state) ||
+          ['running', 'cancelling'].includes(repeaterState()?.state) || experiment?.state === 'running';
+        const working = state.experimentPending || ['creating', 'disposing'].includes(experiment?.state) || autoBusy || otherBusy;
+        const contextReady = attached && experiment?.isolated && automation?.isolated &&
+          experiment.target_id === state.debuggerSession?.target?.id && automation.target_id === state.debuggerSession?.target?.id &&
+          ['ready', 'error'].includes(experiment.state) && !['attaching', 'disposing', 'disposed'].includes(automation.state);
+        const pageReady = contextReady && objectExperiment?.navigation_id > 0 && objectExperiment.url;
+        const libraryEditable = !state.experimentPending && !automation?.auto_armed && !autoBusy && !otherBusy;
+        const canRun = contextReady && !working && !automation?.auto_armed;
+        const canDispose = experiment?.isolated && experiment.pending_requests === 0 && !autoBusy && !otherBusy;
+        const automaticRecipes = automation?.recipes.filter(recipe => recipe.enabled && recipe.trigger !== 'manual').length ?? 0;
+
+        elements.experimentTitle.textContent = 'Automation Recipe Studio';
+        elements.experimentSubtitle.textContent = 'Disposable page · WireBrowser-compatible helpers · bounded automatic triggers';
+        if (state.experimentError) setExperimentNotice('error', state.experimentError);
+        else if (!experiment || !automation || !objectExperiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
+        else if (working) setExperimentNotice('working', automation.message);
+        else if (automation.last_failure) setExperimentNotice('error', automation.last_failure);
+        else if (automation.auto_armed || contextReady || automation.state === 'disposed') setExperimentNotice('ready', automation.message);
+        else if (!attached) setExperimentNotice('idle', 'Attach an authorized browser target before creating Automation Studio.');
+        else setExperimentNotice('idle', automation.message);
+
+        elements.automationContextBadge.dataset.kind = automation?.state === 'error' ? 'error' : automation?.isolated ? '' : 'offline';
+        elements.automationContextBadge.textContent = experiment?.state === 'creating' ? 'Creating'
+          : experiment?.state === 'disposing' ? 'Disposing' : automation?.isolated ? 'Isolated'
+            : automation?.state === 'disposed' ? 'Disposed' : 'Not created';
+        elements.automationContextMessage.textContent = automation?.message ?? 'Recipe definitions stay local; execution requires a disposable context.';
+        elements.automationStorageState.textContent = automation?.isolated ? 'Ephemeral execution'
+          : automation?.state === 'disposed' ? 'Runs erased · recipes retained' : 'Definitions in memory';
+        elements.automationRunUsage.textContent = `${automation?.total_runs ?? 0} / ${automation?.limits?.total_runs ?? 256}`;
+        elements.automationPageBadge.dataset.kind = pageReady ? '' : objectExperiment?.state === 'error' ? 'error' : 'offline';
+        elements.automationPageBadge.textContent = objectExperiment?.state === 'navigating' ? 'Opening' : pageReady ? 'Loaded' : 'No page';
+        const stateLabels = {arming: 'Arming', armed: 'Armed', running: 'Running', stopping: 'Stopping', ready: 'Disarmed', error: 'Error'};
+        elements.automationStateBadge.textContent = stateLabels[automation?.state] ?? 'Disarmed';
+        elements.automationStateBadge.dataset.kind = automation?.last_failure ? 'error' : automation?.auto_armed ? '' : 'offline';
+
+        elements.automationCreate.disabled = !attached || Boolean(experiment?.isolated) || working || state.debuggerActionPending;
+        elements.automationDispose.disabled = !canDispose || state.debuggerActionPending;
+        elements.automationClear.disabled = !automation?.runs.length || automation.auto_armed || autoBusy || state.debuggerActionPending;
+        elements.automationPageUrl.disabled = !contextReady || autoBusy || otherBusy;
+        elements.automationNavigate.disabled = !contextReady || autoBusy || otherBusy || state.debuggerActionPending;
+        elements.automationVariables.disabled = !contextReady || automation?.auto_armed || autoBusy || otherBusy;
+        elements.automationConfirm.disabled = !contextReady || autoBusy || otherBusy;
+        elements.automationArm.disabled = !contextReady || autoBusy || otherBusy || automation?.auto_armed ||
+          automaticRecipes === 0 || !elements.automationConfirm.checked || state.debuggerActionPending;
+        elements.automationDisarm.disabled = !(automation?.auto_armed || automation?.active_run) || state.debuggerActionPending;
+        elements.automationCancel.disabled = !automation?.active_run;
+        elements.automationRecipeForm.querySelectorAll('input, select, textarea').forEach(field => { field.disabled = !libraryEditable; });
+        elements.automationSave.disabled = !libraryEditable || !elements.automationLabel.value.trim() ||
+          !elements.automationSource.value.trim() || state.debuggerActionPending;
+        elements.automationSave.textContent = state.automationEditingRecipeId === null ? 'Add recipe' : 'Save recipe';
+        elements.automationCancelEdit.hidden = state.automationEditingRecipeId === null;
+        elements.automationCancelEdit.disabled = !libraryEditable;
+        renderAutomationRecipeLibrary(automation, libraryEditable, canRun);
+        renderAutomationTimeline(automation);
+      }
+
       function renderExperiment() {
         elements.experimentModeButtons.forEach(button => {
           const selected = button.dataset.experimentMode === state.experimentMode;
@@ -5804,6 +6264,7 @@ export async function checkout(cart, fingerprint) {
         elements.repeaterWorkspace.hidden = state.experimentMode !== 'repeater';
         elements.objectWorkspace.hidden = state.experimentMode !== 'object';
         elements.hooksWorkspace.hidden = state.experimentMode !== 'hooks';
+        elements.automationWorkspace.hidden = state.experimentMode !== 'automation';
         if (state.experimentMode === 'repeater') {
           renderRepeater();
           return;
@@ -5816,6 +6277,10 @@ export async function checkout(cart, fingerprint) {
           renderRuntimeHooks();
           return;
         }
+        if (state.experimentMode === 'automation') {
+          renderAutomationRecipes();
+          return;
+        }
         elements.experimentTitle.textContent = 'Request Interception Lab';
         prefillExperimentRequest();
         setExperimentRuleVisibility();
@@ -5823,11 +6288,12 @@ export async function checkout(cart, fingerprint) {
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
         const hookBusy = ['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state);
-        const working = state.experimentPending || ['creating', 'running', 'disposing'].includes(experiment?.state) || hookBusy;
+        const automationBusy = automationRecipesState()?.auto_armed || ['arming', 'running', 'stopping'].includes(automationRecipesState()?.state);
+        const working = state.experimentPending || ['creating', 'running', 'disposing'].includes(experiment?.state) || hookBusy || automationBusy;
         const hasPendingRequests = (experiment?.pending_requests ?? 0) > 0;
         const contextReady = attached && experiment?.isolated &&
           experiment.target_id === state.debuggerSession?.target?.id && ['ready', 'error'].includes(experiment.state);
-        const canDispose = experiment?.isolated && ['ready', 'error'].includes(experiment.state) && experiment.pending_requests === 0 && !hookBusy;
+        const canDispose = experiment?.isolated && ['ready', 'error'].includes(experiment.state) && experiment.pending_requests === 0 && !hookBusy && !automationBusy;
         elements.experimentSubtitle.textContent = request && state.selectedField
           ? `request-${request.id} · ${state.selectedField.label} ${state.selectedField.path} · isolated replay only`
           : 'Disposable context · no baseline cookies, storage, or credentials';
@@ -5875,8 +6341,9 @@ export async function checkout(cart, fingerprint) {
       }
 
       async function runExperimentAction(request) {
-        if (state.experimentPending) return null;
-        state.experimentPending = true;
+        const parallelControl = ['cancel_repeater_request', 'cancel_automation_recipe'].includes(request.action);
+        if (state.experimentPending && !parallelControl) return null;
+        if (!parallelControl) state.experimentPending = true;
         state.experimentError = null;
         renderExperiment();
         const response = await debuggerAction(request);
@@ -5889,11 +6356,14 @@ export async function checkout(cart, fingerprint) {
         if (response?.runtime_hooks && isRuntimeHooks(response.runtime_hooks) && state.debuggerSession) {
           state.debuggerSession.runtime_hooks = response.runtime_hooks;
         }
+        if (response?.automation_recipes && isAutomationRecipes(response.automation_recipes) && state.debuggerSession) {
+          state.debuggerSession.automation_recipes = response.automation_recipes;
+        }
         if (response?.repeater && isRepeater(response.repeater) && state.debuggerSession) {
           state.debuggerSession.repeater = response.repeater;
         }
         if (!response) state.experimentError = state.debuggerError || 'The experiment action did not complete.';
-        state.experimentPending = false;
+        if (!parallelControl) state.experimentPending = false;
         renderExperiment();
         return response;
       }
@@ -6050,6 +6520,56 @@ export async function checkout(cart, fingerprint) {
         if (response) {
           elements.hooksConfirm.checked = false;
           renderRuntimeHooks();
+        }
+      }
+
+      async function navigateAutomationRecipes() {
+        const url = elements.automationPageUrl.value.trim();
+        if (!url) {
+          state.experimentError = 'Enter one HTTP or HTTPS URL for the disposable page.';
+          renderExperiment();
+          elements.automationPageUrl.focus();
+          return;
+        }
+        await runExperimentAction({action: 'navigate_object_experiment', url});
+      }
+
+      async function saveAutomationRecipe() {
+        const request = {
+          action: state.automationEditingRecipeId === null ? 'add_automation_recipe' : 'update_automation_recipe',
+          label: elements.automationLabel.value.trim(),
+          trigger: elements.automationTrigger.value,
+          enabled: elements.automationEnabled.checked,
+          source: elements.automationSource.value
+        };
+        if (state.automationEditingRecipeId !== null) request.recipe_id = state.automationEditingRecipeId;
+        if (!request.label || !request.source.trim()) {
+          state.experimentError = 'Enter a recipe label and page-context JavaScript.';
+          renderExperiment();
+          (!request.label ? elements.automationLabel : elements.automationSource).focus();
+          return;
+        }
+        const response = await runExperimentAction(request);
+        if (response) resetAutomationEditor();
+      }
+
+      async function runAutomationRecipe(recipeId) {
+        if (!elements.automationConfirm.checked) {
+          state.experimentError = 'Confirm disposable-page code execution before running a recipe.';
+          renderExperiment();
+          elements.automationConfirm.focus();
+          return;
+        }
+        try {
+          const response = await runExperimentAction({
+            action: 'run_automation_recipe', recipe_id: recipeId, confirmed: true,
+            variables: parseAutomationVariables()
+          });
+          if (response?.run) state.automationSelectedRunId = response.run.id;
+          if (response) elements.automationConfirm.checked = false;
+        } catch (error) {
+          state.experimentError = error.message;
+          renderExperiment();
         }
       }
 
@@ -7091,6 +7611,394 @@ export async function checkout(cart, fingerprint) {
         return output.trim();
       }
 
+      const SOURCE_HIGHLIGHT_TOKEN_LIMIT = 50000;
+      const SOURCE_CONTROL_WORDS = new Set([
+        'break', 'case', 'catch', 'continue', 'debugger', 'default', 'do', 'else',
+        'finally', 'for', 'if', 'return', 'switch', 'throw', 'try', 'while', 'with',
+        'yield', 'await'
+      ]);
+      const SOURCE_KEYWORDS = new Set([
+        'as', 'async', 'class', 'const', 'delete', 'enum', 'export', 'extends',
+        'from', 'function', 'get', 'implements', 'import', 'in', 'instanceof',
+        'interface', 'let', 'new', 'of', 'package', 'private', 'protected', 'public',
+        'set', 'static', 'super', 'this', 'typeof', 'var', 'void'
+      ]);
+      const SOURCE_LITERALS = new Set([
+        'false', 'Infinity', 'NaN', 'null', 'true', 'undefined'
+      ]);
+      const SOURCE_NUMBER_PATTERN = /(?:0[xX][\da-fA-F]+|0[bB][01]+|0[oO][0-7]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?n?)/y;
+      const SOURCE_IDENTIFIER_PATTERN = /[A-Za-z_$][\w$]*/y;
+      const SOURCE_CSS_COLOR_PATTERN = /#[\da-fA-F]{3,8}\b/y;
+      const SOURCE_CSS_NUMBER_PATTERN = /(?:\d+\.?\d*|\.\d+)(?:[a-z%]+)?/iy;
+      const SOURCE_CSS_IDENTIFIER_PATTERN = /@?-{0,2}[A-Za-z_][\w-]*/y;
+      const SOURCE_MARKUP_IDENTIFIER_PATTERN = /[A-Za-z_:][\w:.-]*/y;
+      const SOURCE_WASM_VALUE_PATTERN = /(?:[\da-fA-F]{8}|[\da-fA-F]{2})(?=\s|$)/y;
+      const SOURCE_WASM_IDENTIFIER_PATTERN = /\$?[A-Za-z_][\w.$-]*/y;
+
+      function sourceMatchAt(pattern, value, index) {
+        pattern.lastIndex = index;
+        return pattern.exec(value)?.[0] ?? null;
+      }
+
+      function sourceNextSignificant(value, index) {
+        while (/\s/.test(value[index] ?? '')) index += 1;
+        return value[index] ?? '';
+      }
+
+      function sourcePreviousSignificant(value, index) {
+        for (let previous = index - 1; previous >= 0; previous -= 1) {
+          if (!/\s/.test(value[previous])) return value[previous];
+        }
+        return '';
+      }
+
+      function sourceIdentifierStart(character) {
+        const code = character.charCodeAt(0);
+        return character === '$' || character === '_' ||
+          (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+      }
+
+      function sourceDigit(character) {
+        const code = character.charCodeAt(0);
+        return code >= 48 && code <= 57;
+      }
+
+      function sourceCodeTokenStart(value, index, json) {
+        const character = value[index] ?? '';
+        const next = value[index + 1] ?? '';
+        return sourceIdentifierStart(character) || sourceDigit(character) ||
+          (character === '.' && sourceDigit(next)) || character === '/' ||
+          character === '"' || character === "'" || (!json && character === '`');
+      }
+
+      function sourceCssTokenStart(value, index) {
+        const character = value[index] ?? '';
+        const next = value[index + 1] ?? '';
+        return sourceIdentifierStart(character) || sourceDigit(character) ||
+          (character === '.' && sourceDigit(next)) ||
+          ['#', '/', '"', "'", '@', '-'].includes(character);
+      }
+
+      function sourceSyntaxLanguage(source) {
+        if (!source) return 'text';
+        const mime = String(source.mime_type ?? '').toLowerCase().split(';', 1)[0];
+        const name = sourceName(source).toLowerCase();
+        if (source.kind === 'wasm' || mime === 'application/wasm') return 'wasm';
+        if (source.kind === 'javascript' || /(?:java|ecma)script/.test(mime) || /\.[cm]?jsx?$/.test(name)) return 'javascript';
+        if (source.kind === 'source_map' || /json/.test(mime) || /\.(?:json|map)$/.test(name)) return 'json';
+        if (/css/.test(mime) || /\.css$/.test(name)) return 'css';
+        if (/(?:html|xml|svg)/.test(mime) || /\.(?:html?|xml|svg)$/.test(name)) return 'markup';
+        return 'text';
+      }
+
+      function sourceSyntaxLabel(language) {
+        return {javascript: 'JavaScript', json: 'JSON', css: 'CSS', markup: 'HTML', wasm: 'WebAssembly hex', text: 'Plain text'}[language];
+      }
+
+      function createSourceTokenizer(source) {
+        return {
+          language: sourceSyntaxLanguage(source),
+          state: 'code',
+          coloredTokens: 0,
+          truncated: false
+        };
+      }
+
+      function pushSourceToken(tokens, tokenizer, type, text) {
+        if (!text) return;
+        let boundedType = type;
+        if (type !== 'plain') {
+          if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
+            boundedType = 'plain';
+            tokenizer.truncated = true;
+          } else {
+            tokenizer.coloredTokens += 1;
+          }
+        }
+        const previous = tokens.at(-1);
+        if (previous?.type === boundedType) previous.text += text;
+        else tokens.push({type: boundedType, text});
+      }
+
+      function quotedSourceEnd(line, start, quote) {
+        let escaped = false;
+        for (let index = start + 1; index < line.length; index += 1) {
+          const character = line[index];
+          if (escaped) escaped = false;
+          else if (character === '\\') escaped = true;
+          else if (character === quote) return index + 1;
+        }
+        return line.length;
+      }
+
+      function regexpSourceEnd(line, start) {
+        let escaped = false;
+        let characterClass = false;
+        for (let index = start + 1; index < line.length; index += 1) {
+          const character = line[index];
+          if (escaped) { escaped = false; continue; }
+          if (character === '\\') { escaped = true; continue; }
+          if (character === '[') { characterClass = true; continue; }
+          if (character === ']') { characterClass = false; continue; }
+          if (character === '/' && !characterClass) {
+            let end = index + 1;
+            while (/[a-z]/i.test(line[end] ?? '')) end += 1;
+            return end;
+          }
+        }
+        return start + 1;
+      }
+
+      function tokenizeCodeSourceLine(line, tokenizer) {
+        const tokens = [];
+        const json = tokenizer.language === 'json';
+        let index = 0;
+        while (index < line.length) {
+          if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
+            tokenizer.truncated = true;
+            pushSourceToken(tokens, tokenizer, 'plain', line.slice(index));
+            break;
+          }
+          if (tokenizer.state === 'block-comment') {
+            const end = line.indexOf('*/', index);
+            if (end === -1) { pushSourceToken(tokens, tokenizer, 'comment', line.slice(index)); break; }
+            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 2));
+            tokenizer.state = 'code'; index = end + 2; continue;
+          }
+          if (tokenizer.state === 'template') {
+            const end = quotedSourceEnd(line, index - 1, '`');
+            pushSourceToken(tokens, tokenizer, 'string', line.slice(index, end));
+            if (end < line.length || line[end - 1] === '`') tokenizer.state = 'code';
+            index = end; continue;
+          }
+          const character = line[index];
+          const next = line[index + 1] ?? '';
+          if (character === '/' && next === '/') {
+            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index)); break;
+          }
+          if (character === '/' && next === '*') {
+            const end = line.indexOf('*/', index + 2);
+            if (end === -1) {
+              pushSourceToken(tokens, tokenizer, 'comment', line.slice(index));
+              tokenizer.state = 'block-comment'; break;
+            }
+            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 2));
+            index = end + 2; continue;
+          }
+          if (character === '"' || character === "'" || (!json && character === '`')) {
+            const end = quotedSourceEnd(line, index, character);
+            const nextSignificant = sourceNextSignificant(line, end);
+            const type = json && nextSignificant === ':' ? 'property' : 'string';
+            pushSourceToken(tokens, tokenizer, type, line.slice(index, end));
+            if (character === '`' && line[end - 1] !== '`') tokenizer.state = 'template';
+            index = end; continue;
+          }
+          if (!sourceCodeTokenStart(line, index, json)) {
+            const start = index;
+            do { index += 1; } while (index < line.length && !sourceCodeTokenStart(line, index, json));
+            pushSourceToken(tokens, tokenizer, 'plain', line.slice(start, index));
+            continue;
+          }
+          const number = sourceMatchAt(SOURCE_NUMBER_PATTERN, line, index);
+          if (number) {
+            pushSourceToken(tokens, tokenizer, 'number', number); index += number.length; continue;
+          }
+          const identifier = sourceMatchAt(SOURCE_IDENTIFIER_PATTERN, line, index);
+          if (identifier) {
+            const following = sourceNextSignificant(line, index + identifier.length);
+            const type = SOURCE_CONTROL_WORDS.has(identifier) ? 'control'
+              : SOURCE_KEYWORDS.has(identifier) ? 'keyword'
+                : SOURCE_LITERALS.has(identifier) ? 'number'
+                    : following === '(' ? 'function'
+                      : /^[A-Z]/.test(identifier) ? 'type'
+                        : 'property';
+            pushSourceToken(tokens, tokenizer, type, identifier);
+            index += identifier.length; continue;
+          }
+          const previous = sourcePreviousSignificant(line, index);
+          if (!json && character === '/' && next && !/[/\s]/.test(next) &&
+              (!previous || /[([{=,:;!&|?+\-*%^~<>]/.test(previous))) {
+            const end = regexpSourceEnd(line, index);
+            if (end > index + 1) {
+              pushSourceToken(tokens, tokenizer, 'regexp', line.slice(index, end));
+              index = end; continue;
+            }
+          }
+          pushSourceToken(tokens, tokenizer, 'plain', character);
+          index += 1;
+        }
+        return tokens;
+      }
+
+      function tokenizeCssSourceLine(line, tokenizer) {
+        const tokens = [];
+        let index = 0;
+        while (index < line.length) {
+          if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
+            tokenizer.truncated = true;
+            pushSourceToken(tokens, tokenizer, 'plain', line.slice(index));
+            break;
+          }
+          if (tokenizer.state === 'block-comment') {
+            const end = line.indexOf('*/', index);
+            if (end === -1) { pushSourceToken(tokens, tokenizer, 'comment', line.slice(index)); break; }
+            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 2));
+            tokenizer.state = 'code'; index = end + 2; continue;
+          }
+          if (line.startsWith('/*', index)) {
+            const end = line.indexOf('*/', index + 2);
+            if (end === -1) {
+              pushSourceToken(tokens, tokenizer, 'comment', line.slice(index));
+              tokenizer.state = 'block-comment'; break;
+            }
+            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 2));
+            index = end + 2; continue;
+          }
+          const character = line[index];
+          if (character === '"' || character === "'") {
+            const end = quotedSourceEnd(line, index, character);
+            pushSourceToken(tokens, tokenizer, 'string', line.slice(index, end));
+            index = end; continue;
+          }
+          if (!sourceCssTokenStart(line, index)) {
+            const start = index;
+            do { index += 1; } while (index < line.length && !sourceCssTokenStart(line, index));
+            pushSourceToken(tokens, tokenizer, 'plain', line.slice(start, index));
+            continue;
+          }
+          const color = sourceMatchAt(SOURCE_CSS_COLOR_PATTERN, line, index);
+          const number = sourceMatchAt(SOURCE_CSS_NUMBER_PATTERN, line, index);
+          if (color || number) {
+            const value = color || number;
+            pushSourceToken(tokens, tokenizer, 'number', value); index += value.length; continue;
+          }
+          const identifier = sourceMatchAt(SOURCE_CSS_IDENTIFIER_PATTERN, line, index);
+          if (identifier) {
+            const following = sourceNextSignificant(line, index + identifier.length);
+            pushSourceToken(tokens, tokenizer, identifier.startsWith('@') ? 'keyword' : following === ':' ? 'property' : 'type', identifier);
+            index += identifier.length; continue;
+          }
+          pushSourceToken(tokens, tokenizer, 'plain', character); index += 1;
+        }
+        return tokens;
+      }
+
+      function tokenizeMarkupTag(text, tokenizer, tokens) {
+        let index = 0;
+        let tagSeen = false;
+        while (index < text.length) {
+          if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
+            tokenizer.truncated = true;
+            pushSourceToken(tokens, tokenizer, 'plain', text.slice(index));
+            break;
+          }
+          const character = text[index];
+          if (character === '"' || character === "'") {
+            const end = quotedSourceEnd(text, index, character);
+            pushSourceToken(tokens, tokenizer, 'string', text.slice(index, end));
+            index = end; continue;
+          }
+          const identifier = sourceMatchAt(SOURCE_MARKUP_IDENTIFIER_PATTERN, text, index);
+          if (identifier) {
+            pushSourceToken(tokens, tokenizer, tagSeen ? 'attribute' : 'tag', identifier);
+            tagSeen = true; index += identifier.length; continue;
+          }
+          pushSourceToken(tokens, tokenizer, 'plain', character); index += 1;
+        }
+      }
+
+      function tokenizeMarkupSourceLine(line, tokenizer) {
+        const tokens = [];
+        let index = 0;
+        while (index < line.length) {
+          if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
+            tokenizer.truncated = true;
+            pushSourceToken(tokens, tokenizer, 'plain', line.slice(index));
+            break;
+          }
+          if (tokenizer.state === 'markup-comment') {
+            const end = line.indexOf('-->', index);
+            if (end === -1) { pushSourceToken(tokens, tokenizer, 'comment', line.slice(index)); break; }
+            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 3));
+            tokenizer.state = 'code'; index = end + 3; continue;
+          }
+          const tag = line.indexOf('<', index);
+          if (tag === -1) {
+            pushSourceToken(tokens, tokenizer, 'plain', line.slice(index)); break;
+          }
+          pushSourceToken(tokens, tokenizer, 'plain', line.slice(index, tag));
+          if (line.startsWith('<!--', tag)) {
+            const end = line.indexOf('-->', tag + 4);
+            if (end === -1) {
+              pushSourceToken(tokens, tokenizer, 'comment', line.slice(tag));
+              tokenizer.state = 'markup-comment'; break;
+            }
+            pushSourceToken(tokens, tokenizer, 'comment', line.slice(tag, end + 3));
+            index = end + 3; continue;
+          }
+          const end = line.indexOf('>', tag + 1);
+          if (end === -1) {
+            tokenizeMarkupTag(line.slice(tag), tokenizer, tokens); break;
+          }
+          tokenizeMarkupTag(line.slice(tag, end + 1), tokenizer, tokens);
+          index = end + 1;
+        }
+        return tokens;
+      }
+
+      function tokenizeWasmSourceLine(line, tokenizer) {
+        const tokens = [];
+        let index = 0;
+        while (index < line.length) {
+          if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
+            tokenizer.truncated = true;
+            pushSourceToken(tokens, tokenizer, 'plain', line.slice(index));
+            break;
+          }
+          if (line.startsWith(';;', index)) {
+            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index)); break;
+          }
+          if (line[index] === '|') {
+            pushSourceToken(tokens, tokenizer, 'string', line.slice(index)); break;
+          }
+          const value = sourceMatchAt(SOURCE_WASM_VALUE_PATTERN, line, index);
+          const identifier = sourceMatchAt(SOURCE_WASM_IDENTIFIER_PATTERN, line, index);
+          if (value) {
+            pushSourceToken(tokens, tokenizer, 'number', value); index += value.length; continue;
+          }
+          if (identifier) {
+            pushSourceToken(tokens, tokenizer, /^(?:i32|i64|f32|f64|v128|funcref|externref)$/.test(identifier) ? 'type' : 'keyword', identifier);
+            index += identifier.length; continue;
+          }
+          pushSourceToken(tokens, tokenizer, 'plain', line[index]); index += 1;
+        }
+        return tokens;
+      }
+
+      function sourceSyntaxTokens(line, tokenizer) {
+        if (!line) return [{type: 'plain', text: ' '}];
+        if (tokenizer.truncated) return [{type: 'plain', text: line}];
+        if (tokenizer.language === 'javascript' || tokenizer.language === 'json') return tokenizeCodeSourceLine(line, tokenizer);
+        if (tokenizer.language === 'css') return tokenizeCssSourceLine(line, tokenizer);
+        if (tokenizer.language === 'markup') return tokenizeMarkupSourceLine(line, tokenizer);
+        if (tokenizer.language === 'wasm') return tokenizeWasmSourceLine(line, tokenizer);
+        return [{type: 'plain', text: line}];
+      }
+
+      function appendSourceSyntax(container, tokens) {
+        const fragment = document.createDocumentFragment();
+        tokens.forEach(token => {
+          if (token.type === 'plain') fragment.append(document.createTextNode(token.text));
+          else {
+            const span = document.createElement('span');
+            span.className = `syntax-${token.type}`;
+            span.textContent = token.text;
+            fragment.append(span);
+          }
+        });
+        container.replaceChildren(fragment);
+      }
+
       function applySourceSearch() {
         const needle = elements.sourceSearch.value.toLowerCase();
         let matches = 0;
@@ -7138,18 +8046,21 @@ export async function checkout(cart, fingerprint) {
 
       function renderSourceContent(source) {
         if (!source) {
+          elements.sourceLanguage.textContent = 'Plain text';
           elements.sourceCode.hidden = true;
           elements.sourceCodeEmpty.hidden = false;
           elements.sourceCodeEmpty.textContent = 'Select a JavaScript file, WASM module, source map, or approved response body.';
           return;
         }
         if (source.loading) {
+          elements.sourceLanguage.textContent = 'Detecting syntax';
           elements.sourceCode.hidden = true;
           elements.sourceCodeEmpty.hidden = false;
           elements.sourceCodeEmpty.textContent = source.source_type === 'script' ? 'Loading live script source…' : 'Loading immutable artifact bytes…';
           return;
         }
         if (source.loadError) {
+          elements.sourceLanguage.textContent = 'Unavailable';
           elements.sourceCode.hidden = true;
           elements.sourceCodeEmpty.hidden = false;
           elements.sourceCodeEmpty.textContent = source.loadError;
@@ -7162,6 +8073,7 @@ export async function checkout(cart, fingerprint) {
         const lines = content.split('\n');
         const renderedLines = lines.slice(0, 20000);
         const breakpointsByLine = breakpointLinesForSource(source);
+        const tokenizer = createSourceTokenizer(source);
         const nodes = renderedLines.map((line, index) => {
           const runtimeLine = sourceRuntimeLine(source, index);
           const row = document.createElement('span');
@@ -7188,7 +8100,7 @@ export async function checkout(cart, fingerprint) {
           });
           const text = document.createElement('span');
           text.className = 'source-text';
-          text.textContent = line || ' ';
+          appendSourceSyntax(text, sourceSyntaxTokens(line, tokenizer));
           row.append(gutter, text);
           return row;
         });
@@ -7202,6 +8114,7 @@ export async function checkout(cart, fingerprint) {
           nodes.push(notice);
         }
         elements.sourceCode.replaceChildren(...nodes);
+        elements.sourceLanguage.textContent = `${sourceSyntaxLabel(tokenizer.language)}${tokenizer.truncated ? ' · color limit reached' : ''}`;
         elements.sourceCode.hidden = false;
         elements.sourceCodeEmpty.hidden = true;
         elements.sourceCodeWrap.scrollTop = 0;
@@ -8474,8 +9387,9 @@ export async function checkout(cart, fingerprint) {
       }
 
       async function debuggerAction(request) {
-        if (state.debuggerActionPending || (memoryOriginTraceActive() && request.action !== 'stop_memory_origin_trace')) return null;
-        state.debuggerActionPending = true;
+        const parallelControl = ['cancel_repeater_request', 'cancel_automation_recipe'].includes(request.action);
+        if ((state.debuggerActionPending && !parallelControl) || (memoryOriginTraceActive() && request.action !== 'stop_memory_origin_trace')) return null;
+        if (!parallelControl) state.debuggerActionPending = true;
         state.debuggerError = null;
         renderDebugger();
         let result = null;
@@ -8489,7 +9403,7 @@ export async function checkout(cart, fingerprint) {
         } catch (error) {
           state.debuggerError = error.message;
         } finally {
-          state.debuggerActionPending = false;
+          if (!parallelControl) state.debuggerActionPending = false;
           renderDebugger();
           if (!state.debuggerRefreshing) scheduleDebuggerRefresh(0);
         }
@@ -9084,6 +9998,68 @@ export async function checkout(cart, fingerprint) {
       elements.hooksDisarm.addEventListener('click', async () => {
         const response = await runExperimentAction({action: 'disarm_runtime_hooks'});
         if (response) elements.hooksConfirm.checked = false;
+      });
+      elements.automationCreate.addEventListener('click', () => runExperimentAction({
+        action: 'create_request_interception_experiment'
+      }));
+      elements.automationDispose.addEventListener('click', async () => {
+        const response = await runExperimentAction({action: 'dispose_request_interception_experiment'});
+        if (response) {
+          state.automationSelectedRunId = null;
+          elements.automationConfirm.checked = false;
+          elements.automationVariables.value = '';
+          resetAutomationEditor();
+        }
+      });
+      elements.automationClear.addEventListener('click', async () => {
+        const response = await runExperimentAction({action: 'clear_automation_runs'});
+        if (response) state.automationSelectedRunId = null;
+      });
+      elements.automationNavigationForm.addEventListener('submit', event => {
+        event.preventDefault();
+        navigateAutomationRecipes();
+      });
+      elements.automationRecipeForm.addEventListener('submit', event => {
+        event.preventDefault();
+        saveAutomationRecipe();
+      });
+      elements.automationRecipeForm.addEventListener('input', () => {
+        state.experimentError = null;
+        renderAutomationRecipes();
+      });
+      elements.automationCancelEdit.addEventListener('click', () => {
+        resetAutomationEditor();
+        renderAutomationRecipes();
+      });
+      elements.automationConfirm.addEventListener('change', renderAutomationRecipes);
+      elements.automationArm.addEventListener('click', async () => {
+        try {
+          const response = await runExperimentAction({
+            action: 'arm_automation_recipes', confirmed: elements.automationConfirm.checked,
+            variables: parseAutomationVariables()
+          });
+          if (response) elements.automationConfirm.checked = false;
+        } catch (error) {
+          state.experimentError = error.message;
+          renderExperiment();
+        }
+      });
+      elements.automationDisarm.addEventListener('click', async () => {
+        const response = await runExperimentAction({action: 'disarm_automation_recipes'});
+        if (response) elements.automationConfirm.checked = false;
+      });
+      elements.automationCancel.addEventListener('click', () => runExperimentAction({
+        action: 'cancel_automation_recipe'
+      }));
+      elements.automationRuns.addEventListener('keydown', event => {
+        if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+        const runs = automationRecipesState()?.runs ?? [];
+        if (!runs.length) return;
+        event.preventDefault();
+        const current = Math.max(0, runs.findIndex(run => run.id === state.automationSelectedRunId));
+        const index = event.key === 'Home' ? 0 : event.key === 'End' ? runs.length - 1
+          : event.key === 'ArrowUp' ? Math.max(0, current - 1) : Math.min(runs.length - 1, current + 1);
+        selectAutomationRun(runs[index].id, true);
       });
       elements.repeaterCreate.addEventListener('click', () => runExperimentAction({
         action: 'create_request_interception_experiment'

@@ -105,9 +105,167 @@ MAX_RUNTIME_HOOK_CONDITION_BYTES = 1024
 MAX_RUNTIME_HOOK_LOGIC_BYTES = 8 * 1024
 MAX_RUNTIME_HOOK_RETURN_BYTES = 8 * 1024
 RUNTIME_HOOK_EVALUATION_TIMEOUT_MS = 100
+MAX_AUTOMATION_RECIPES = 16
+MAX_AUTOMATION_AUTO_RECIPES = 8
+MAX_AUTOMATION_RECIPE_SOURCE_BYTES = 16 * 1024
+MAX_AUTOMATION_TOTAL_SOURCE_BYTES = 64 * 1024
+MAX_AUTOMATION_LABEL_BYTES = 128
+MAX_AUTOMATION_VARIABLES = 32
+MAX_AUTOMATION_VARIABLE_NAME_BYTES = 128
+MAX_AUTOMATION_VARIABLE_VALUE_BYTES = 4 * 1024
+MAX_AUTOMATION_VARIABLE_BYTES = 16 * 1024
+MAX_AUTOMATION_RUNS = 256
+MAX_AUTOMATION_AUTO_RUNS = 64
+MAX_AUTOMATION_RETAINED_RUNS = 64
+MAX_AUTOMATION_LOGS = 32
+MAX_AUTOMATION_LOG_BYTES = 1024
+MAX_AUTOMATION_RESULT_BYTES = 16 * 1024
+MAX_AUTOMATION_BINDING_REPORT_BYTES = 8 * 1024
+AUTOMATION_EXECUTION_TIMEOUT_MS = 2_000
+AUTOMATION_WATCHDOG_GRACE_SECONDS = 0.25
 
 REPEATER_VARIABLE_TOKEN = re.compile(r"\{\{(=)?([^{}]+)\}\}")
 REPEATER_VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
+
+
+AUTOMATION_RECIPE_FUNCTION = r"""async function(config) {
+  const started = Date.now();
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const boundedText = (value, limit) => {
+    let text;
+    try { text = String(value); } catch { text = "<unavailable>"; }
+    const encoded = encoder.encode(text);
+    if (encoded.length <= limit) return text;
+    text = decoder.decode(encoded.subarray(0, limit));
+    while (text && encoder.encode(text).length > limit) text = text.slice(0, -1);
+    return text;
+  };
+  const serialize = (value, limit) => {
+    const seen = new WeakSet();
+    let entries = 0;
+    let truncated = false;
+    const clone = (candidate, depth) => {
+      if (candidate === null || typeof candidate === "boolean" || typeof candidate === "number") return candidate;
+      if (typeof candidate === "string") {
+        const result = boundedText(candidate, Math.min(limit, 4096));
+        if (result !== candidate) truncated = true;
+        return result;
+      }
+      if (typeof candidate === "bigint") return `${candidate}n`;
+      if (typeof candidate === "undefined") return "[undefined]";
+      if (typeof candidate === "symbol") return boundedText(candidate, 256);
+      if (typeof candidate === "function") return `[Function ${boundedText(candidate.name || "anonymous", 128)}]`;
+      if (depth >= 8) { truncated = true; return "[MaxDepth]"; }
+      if (seen.has(candidate)) return "[Circular]";
+      seen.add(candidate);
+      let keys;
+      try { keys = Reflect.ownKeys(candidate); } catch { return "[Uninspectable]"; }
+      const output = Array.isArray(candidate) ? [] : {};
+      for (const rawKey of keys) {
+        if (entries >= 256) { truncated = true; break; }
+        entries += 1;
+        const key = boundedText(rawKey, 256);
+        let descriptor;
+        try { descriptor = Object.getOwnPropertyDescriptor(candidate, rawKey); } catch { descriptor = null; }
+        if (!descriptor) output[key] = "[Unavailable]";
+        else if (!("value" in descriptor)) output[key] = "[Accessor not invoked]";
+        else output[key] = clone(descriptor.value, depth + 1);
+      }
+      return output;
+    };
+    let text;
+    try { text = JSON.stringify(clone(value, 0)); } catch { text = '"[Unserializable]"'; }
+    if (text === undefined) text = '"[undefined]"';
+    const byteLength = encoder.encode(text).length;
+    return {text: boundedText(text, limit), truncated: truncated || byteLength > limit};
+  };
+  const safeJsonStringify = value => serialize(value, config.resultLimit).text;
+  function* iterate(value) {
+    if (value == null) return;
+    let count = 0;
+    if (value instanceof Map) {
+      for (const entry of value.entries()) { if (count++ >= 256) return; yield entry; }
+      return;
+    }
+    if (value instanceof Set || Array.isArray(value) || ArrayBuffer.isView(value) ||
+        (typeof NodeList !== "undefined" && value instanceof NodeList) ||
+        (typeof HTMLCollection !== "undefined" && value instanceof HTMLCollection)) {
+      for (const item of value) { if (count >= 256) return; yield [count++, item]; }
+      return;
+    }
+    let keys;
+    try { keys = Object.keys(value); } catch { return; }
+    for (const key of keys) {
+      if (count++ >= 256) return;
+      let descriptor;
+      try { descriptor = Object.getOwnPropertyDescriptor(value, key); } catch { descriptor = null; }
+      if (descriptor && "value" in descriptor) yield [key, descriptor.value];
+    }
+  }
+  const variables = Object.freeze({...config.variables});
+  const Utils = Object.freeze({
+    getVar: name => typeof name === "string" ? variables[name] : undefined,
+    safeJsonStringify,
+    iterate
+  });
+  const WB = Object.freeze({Browser: Object.freeze({Utils})});
+  const logs = [];
+  let logsTruncated = false;
+  const capture = (level, values) => {
+    if (logs.length >= config.logLimit) { logsTruncated = true; return; }
+    const text = boundedText(values.map(value => safeJsonStringify(value)).join(" "), config.logBytes);
+    logs.push({level, text});
+  };
+  const recipeConsole = Object.freeze({
+    log: (...values) => capture("log", values),
+    info: (...values) => capture("info", values),
+    warn: (...values) => capture("warn", values),
+    error: (...values) => capture("error", values)
+  });
+  const timeoutToken = Object.freeze({});
+  let timeoutId = null;
+  try {
+    const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
+    const run = new AsyncFunction(
+      "WB", "Utils", "console",
+      `"use strict";\n${config.source}\n//# sourceURL=reb-automation-recipe.js`
+    );
+    const execution = run(WB, Utils, recipeConsole);
+    const timeout = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(timeoutToken), config.timeoutMs);
+    });
+    const result = await Promise.race([execution, timeout]);
+    const serialized = serialize(result, config.resultLimit);
+    return {
+      protocolVersion: 1,
+      ok: true,
+      resultType: result === null ? "null" : typeof result,
+      resultText: serialized.text,
+      resultTruncated: serialized.truncated,
+      logs,
+      logsTruncated,
+      elapsedMs: Math.max(0, Date.now() - started),
+      timedOut: false
+    };
+  } catch (error) {
+    const timedOut = error === timeoutToken;
+    return {
+      protocolVersion: 1,
+      ok: false,
+      resultType: "error",
+      resultText: "",
+      resultTruncated: false,
+      logs,
+      logsTruncated,
+      elapsedMs: Math.max(0, Date.now() - started),
+      error: timedOut ? "Recipe exceeded the 2 second execution limit" : boundedText(error && error.message ? error.message : error, 512),
+      timedOut
+    };
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+  }
+}"""
 
 SENSITIVE_INTERCEPTION_HEADERS = {
     "authorization",
@@ -885,6 +1043,22 @@ class DebuggerBridge:
         self._runtime_hook_stop_requested = False
         self._runtime_hook_deferred_pause: Optional[dict[str, Any]] = None
         self._runtime_hook_epoch = 0
+        self._next_automation_recipe_id = 1
+        self._next_automation_run_id = 1
+        self._automation_recipes: list[dict[str, Any]] = []
+        self._automation_source_bytes = 0
+        self._automation_recipes_state = self._empty_automation_recipes()
+        self._automation_variables: dict[str, str] = {}
+        self._automation_auto_script_id: Optional[str] = None
+        self._automation_binding_name = f"__reb_automation_{os.urandom(16).hex()}"
+        self._automation_binding_nonce: Optional[str] = None
+        self._automation_active_run_id: Optional[int] = None
+        self._automation_active_document_id: Optional[str] = None
+        self._automation_cancel_requested = False
+        self._automation_auto_watchdog: Optional[threading.Timer] = None
+        self._automation_pending_trigger: Optional[str] = None
+        self._automation_processing = False
+        self._automation_epoch = 0
         self._next_repeater_execution_id = 1
         self._repeater = self._empty_repeater()
         self._repeater_history_bytes = 0
@@ -962,6 +1136,9 @@ class DebuggerBridge:
                 "request_interception": copy.deepcopy(self._request_interception),
                 "object_experiment": copy.deepcopy(self._object_experiment),
                 "runtime_hooks": copy.deepcopy(self._runtime_hooks),
+                "automation_recipes": copy.deepcopy(
+                    self._automation_recipes_state
+                ),
                 "repeater": copy.deepcopy(self._repeater),
                 "limits": {
                     "scripts": MAX_SCRIPTS,
@@ -993,6 +1170,13 @@ class DebuggerBridge:
                 "handling",
                 "stopping",
             }
+            automation_running = (
+                self._automation_active_run_id is not None
+                or self._automation_processing
+                or self._automation_recipes_state["state"]
+                in {"arming", "running", "stopping"}
+            )
+            automation_armed = self._automation_recipes_state["auto_armed"]
         if origin_trace_active and action != "stop_memory_origin_trace":
             raise DebuggerBridgeError(
                 "Memory Origin Trace controls the debugger until it finishes or is stopped"
@@ -1012,6 +1196,30 @@ class DebuggerBridge:
         if runtime_hooks_active and action != "disarm_runtime_hooks":
             raise DebuggerBridgeError(
                 "Runtime Hooks controls the isolated debugger target until it is disarmed"
+            )
+        automation_control_actions = {
+            "add_automation_recipe",
+            "update_automation_recipe",
+            "remove_automation_recipe",
+            "arm_automation_recipes",
+            "disarm_automation_recipes",
+            "run_automation_recipe",
+            "cancel_automation_recipe",
+            "clear_automation_runs",
+        }
+        if automation_running and action not in {
+            "cancel_automation_recipe",
+            "disarm_automation_recipes",
+        }:
+            raise DebuggerBridgeError(
+                "Automation Recipes controls the isolated debugger target until the active run finishes or is cancelled"
+            )
+        if automation_armed and action not in automation_control_actions | {
+            "navigate_object_experiment",
+            "dispose_request_interception_experiment",
+        }:
+            raise DebuggerBridgeError(
+                "Automatic recipes control the isolated debugger target until they are disarmed"
             )
         if action == "pause":
             self._command("Debugger.pause")
@@ -1194,6 +1402,22 @@ class DebuggerBridge:
             return self._disarm_runtime_hooks()
         elif action == "clear_runtime_hook_hits":
             return self._clear_runtime_hook_hits()
+        elif action == "add_automation_recipe":
+            return self._add_automation_recipe(request)
+        elif action == "update_automation_recipe":
+            return self._update_automation_recipe(request)
+        elif action == "remove_automation_recipe":
+            return self._remove_automation_recipe(request)
+        elif action == "arm_automation_recipes":
+            return self._arm_automation_recipes(request)
+        elif action == "disarm_automation_recipes":
+            return self._disarm_automation_recipes()
+        elif action == "run_automation_recipe":
+            return self._run_automation_recipe(request)
+        elif action == "cancel_automation_recipe":
+            return self._cancel_automation_recipe()
+        elif action == "clear_automation_runs":
+            return self._clear_automation_runs()
         elif action == "configure_request_interception":
             return self._configure_request_interception(request)
         elif action == "run_request_interception":
@@ -3891,6 +4115,45 @@ class DebuggerBridge:
         }
 
     @staticmethod
+    def _empty_automation_recipes() -> dict[str, Any]:
+        return {
+            "protocol_version": 1,
+            "session_id": 0,
+            "state": "idle",
+            "isolated": False,
+            "target_id": None,
+            "recipes": [],
+            "source_bytes": 0,
+            "auto_armed": False,
+            "active_run": None,
+            "total_runs": 0,
+            "automatic_runs": 0,
+            "runs": [],
+            "run_evictions": 0,
+            "dropped_triggers": 0,
+            "variable_count": 0,
+            "variable_bytes": 0,
+            "last_failure": None,
+            "message": "Create recipes now, then open an isolated Experiment context to run them.",
+            "limits": {
+                "recipes": MAX_AUTOMATION_RECIPES,
+                "automatic_recipes": MAX_AUTOMATION_AUTO_RECIPES,
+                "recipe_source_bytes": MAX_AUTOMATION_RECIPE_SOURCE_BYTES,
+                "total_source_bytes": MAX_AUTOMATION_TOTAL_SOURCE_BYTES,
+                "variables": MAX_AUTOMATION_VARIABLES,
+                "variable_value_bytes": MAX_AUTOMATION_VARIABLE_VALUE_BYTES,
+                "variable_bytes": MAX_AUTOMATION_VARIABLE_BYTES,
+                "total_runs": MAX_AUTOMATION_RUNS,
+                "automatic_runs": MAX_AUTOMATION_AUTO_RUNS,
+                "retained_runs": MAX_AUTOMATION_RETAINED_RUNS,
+                "logs_per_run": MAX_AUTOMATION_LOGS,
+                "log_bytes": MAX_AUTOMATION_LOG_BYTES,
+                "result_bytes": MAX_AUTOMATION_RESULT_BYTES,
+                "execution_timeout_ms": AUTOMATION_EXECUTION_TIMEOUT_MS,
+            },
+        }
+
+    @staticmethod
     def _empty_repeater() -> dict[str, Any]:
         return {
             "protocol_version": 1,
@@ -3955,6 +4218,28 @@ class DebuggerBridge:
         self._runtime_hook_deferred_pause = None
         self._runtime_hook_epoch += 1
 
+    def _begin_automation_session_locked(self, session_id: int) -> None:
+        self._cancel_automation_watchdog_locked()
+        self._automation_recipes_state = self._empty_automation_recipes()
+        self._automation_recipes_state.update(
+            {
+                "session_id": session_id,
+                "state": "attaching",
+                "recipes": copy.deepcopy(self._automation_recipes),
+                "source_bytes": self._automation_source_bytes,
+                "message": "Waiting for the disposable Automation Recipes page to attach.",
+            }
+        )
+        self._automation_variables = {}
+        self._automation_auto_script_id = None
+        self._automation_binding_nonce = None
+        self._automation_active_run_id = None
+        self._automation_active_document_id = None
+        self._automation_cancel_requested = False
+        self._automation_pending_trigger = None
+        self._automation_processing = False
+        self._automation_epoch += 1
+
     def _dispose_object_experiment_locked(self, session_id: int) -> None:
         self._object_experiment = self._empty_object_experiment()
         self._object_experiment.update(
@@ -3988,6 +4273,31 @@ class DebuggerBridge:
         self._runtime_hook_stop_requested = False
         self._runtime_hook_deferred_pause = None
         self._runtime_hook_epoch += 1
+
+    def _dispose_automation_locked(self, session_id: int) -> None:
+        self._cancel_automation_watchdog_locked()
+        self._automation_recipes_state = self._empty_automation_recipes()
+        self._automation_recipes_state.update(
+            {
+                "session_id": session_id,
+                "state": "disposed",
+                "recipes": copy.deepcopy(self._automation_recipes),
+                "source_bytes": self._automation_source_bytes,
+                "message": (
+                    "Disposable context deleted. Variables, results, logs, and "
+                    "automatic execution state were erased; recipe definitions remain local."
+                ),
+            }
+        )
+        self._automation_variables = {}
+        self._automation_auto_script_id = None
+        self._automation_binding_nonce = None
+        self._automation_active_run_id = None
+        self._automation_active_document_id = None
+        self._automation_cancel_requested = False
+        self._automation_pending_trigger = None
+        self._automation_processing = False
+        self._automation_epoch += 1
 
     def _dispose_repeater_locked(self, session_id: int) -> None:
         self._repeater = self._empty_repeater()
@@ -4646,6 +4956,1106 @@ class DebuggerBridge:
             repeater = copy.deepcopy(self._repeater)
         return {"ok": True, "repeater": repeater, "generation": self.generation()}
 
+    def _sync_automation_library_locked(self) -> None:
+        self._automation_recipes_state["recipes"] = copy.deepcopy(
+            self._automation_recipes
+        )
+        self._automation_recipes_state["source_bytes"] = (
+            self._automation_source_bytes
+        )
+
+    def _require_automation_library_editable_locked(self) -> None:
+        if (
+            self._automation_recipes_state["auto_armed"]
+            or self._automation_active_run_id is not None
+            or self._automation_processing
+        ):
+            raise DebuggerBridgeError(
+                "Disarm or finish Automation Recipes before editing the recipe library"
+            )
+
+    def _normalize_automation_recipe(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        label = self._required_text(
+            request, "label", MAX_AUTOMATION_LABEL_BYTES
+        ).strip()
+        if not label:
+            raise DebuggerBridgeError("Automation recipe label is required")
+        source = self._required_text(
+            request, "source", MAX_AUTOMATION_RECIPE_SOURCE_BYTES
+        )
+        if not source.strip():
+            raise DebuggerBridgeError("Automation recipe source is required")
+        trigger = request.get("trigger", "manual")
+        if trigger not in {"manual", "created", "before-load", "after-load"}:
+            raise DebuggerBridgeError("Automation recipe trigger is invalid")
+        enabled = request.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise DebuggerBridgeError("Automation recipe enabled state must be boolean")
+        return {
+            "label": label,
+            "trigger": trigger,
+            "enabled": enabled,
+            "source": source,
+            "source_bytes": len(source.encode("utf-8")),
+        }
+
+    @staticmethod
+    def _automation_recipe_id(request: dict[str, Any]) -> int:
+        recipe_id = request.get("recipe_id")
+        if (
+            not isinstance(recipe_id, int)
+            or isinstance(recipe_id, bool)
+            or recipe_id <= 0
+            or recipe_id > 2**53 - 1
+        ):
+            raise DebuggerBridgeError("Automation recipe identifier is invalid")
+        return recipe_id
+
+    def _add_automation_recipe(self, request: dict[str, Any]) -> dict[str, Any]:
+        normalized = self._normalize_automation_recipe(request)
+        with self._lock:
+            self._require_automation_library_editable_locked()
+            if len(self._automation_recipes) >= MAX_AUTOMATION_RECIPES:
+                raise DebuggerBridgeError("Automation recipe limit reached")
+            if (
+                self._automation_source_bytes + normalized["source_bytes"]
+                > MAX_AUTOMATION_TOTAL_SOURCE_BYTES
+            ):
+                raise DebuggerBridgeError(
+                    "Automation recipe library exceeds the 64 KiB source limit"
+                )
+            recipe = {
+                "id": self._next_automation_recipe_id,
+                **normalized,
+            }
+            self._next_automation_recipe_id += 1
+            self._automation_recipes.append(recipe)
+            self._automation_source_bytes += recipe["source_bytes"]
+            self._sync_automation_library_locked()
+            self._automation_recipes_state["message"] = (
+                f"Added recipe {recipe['label']}."
+            )
+            self._changed()
+            state = copy.deepcopy(self._automation_recipes_state)
+        return {
+            "ok": True,
+            "recipe": copy.deepcopy(recipe),
+            "automation_recipes": state,
+            "generation": self.generation(),
+        }
+
+    def _update_automation_recipe(self, request: dict[str, Any]) -> dict[str, Any]:
+        recipe_id = self._automation_recipe_id(request)
+        normalized = self._normalize_automation_recipe(request)
+        with self._lock:
+            self._require_automation_library_editable_locked()
+            index = next(
+                (
+                    index
+                    for index, recipe in enumerate(self._automation_recipes)
+                    if recipe["id"] == recipe_id
+                ),
+                None,
+            )
+            if index is None:
+                raise DebuggerBridgeError("Automation recipe is unavailable")
+            existing = self._automation_recipes[index]
+            source_bytes = (
+                self._automation_source_bytes
+                - existing["source_bytes"]
+                + normalized["source_bytes"]
+            )
+            if source_bytes > MAX_AUTOMATION_TOTAL_SOURCE_BYTES:
+                raise DebuggerBridgeError(
+                    "Automation recipe library exceeds the 64 KiB source limit"
+                )
+            recipe = {"id": recipe_id, **normalized}
+            self._automation_recipes[index] = recipe
+            self._automation_source_bytes = source_bytes
+            self._sync_automation_library_locked()
+            self._automation_recipes_state["message"] = (
+                f"Updated recipe {recipe['label']}."
+            )
+            self._changed()
+            state = copy.deepcopy(self._automation_recipes_state)
+        return {
+            "ok": True,
+            "recipe": copy.deepcopy(recipe),
+            "automation_recipes": state,
+            "generation": self.generation(),
+        }
+
+    def _remove_automation_recipe(self, request: dict[str, Any]) -> dict[str, Any]:
+        recipe_id = self._automation_recipe_id(request)
+        with self._lock:
+            self._require_automation_library_editable_locked()
+            recipe = next(
+                (
+                    recipe
+                    for recipe in self._automation_recipes
+                    if recipe["id"] == recipe_id
+                ),
+                None,
+            )
+            if recipe is None:
+                raise DebuggerBridgeError("Automation recipe is unavailable")
+            self._automation_recipes = [
+                item for item in self._automation_recipes if item["id"] != recipe_id
+            ]
+            self._automation_source_bytes -= recipe["source_bytes"]
+            self._sync_automation_library_locked()
+            self._automation_recipes_state["message"] = (
+                f"Removed recipe {recipe['label']}."
+            )
+            self._changed()
+            state = copy.deepcopy(self._automation_recipes_state)
+        return {
+            "ok": True,
+            "automation_recipes": state,
+            "generation": self.generation(),
+        }
+
+    def _normalize_automation_variables(
+        self, request: dict[str, Any]
+    ) -> tuple[dict[str, str], int]:
+        raw_variables = request.get("variables", {})
+        if not isinstance(raw_variables, dict):
+            raise DebuggerBridgeError("Automation variables must be a JSON object")
+        if len(raw_variables) > MAX_AUTOMATION_VARIABLES:
+            raise DebuggerBridgeError("Automation variable limit reached")
+        variables: dict[str, str] = {}
+        total_bytes = 0
+        for raw_name, raw_value in raw_variables.items():
+            if (
+                not isinstance(raw_name, str)
+                or REPEATER_VARIABLE_NAME.fullmatch(raw_name) is None
+                or not raw_name
+                or len(raw_name.encode("utf-8"))
+                > MAX_AUTOMATION_VARIABLE_NAME_BYTES
+            ):
+                raise DebuggerBridgeError("Automation variable name is invalid")
+            if (
+                not isinstance(raw_value, str)
+                or len(raw_value.encode("utf-8"))
+                > MAX_AUTOMATION_VARIABLE_VALUE_BYTES
+            ):
+                raise DebuggerBridgeError(
+                    "Automation variable values must be strings no larger than 4 KiB"
+                )
+            total_bytes += len(raw_name.encode("utf-8")) + len(
+                raw_value.encode("utf-8")
+            )
+            if total_bytes > MAX_AUTOMATION_VARIABLE_BYTES:
+                raise DebuggerBridgeError(
+                    "Automation variables exceed the 16 KiB session limit"
+                )
+            variables[raw_name] = raw_value
+        return variables, total_bytes
+
+    def _require_automation_target_locked(self) -> None:
+        if (
+            self._request_interception_context_id is None
+            or self._automation_recipes_state["target_id"] is None
+            or self._target is None
+            or self._target["id"] != self._automation_recipes_state["target_id"]
+            or self._state not in {"running", "paused"}
+            or not self._automation_recipes_state["isolated"]
+        ):
+            raise DebuggerBridgeError(
+                "Automation Recipes requires its attached disposable Experiment page"
+            )
+
+    def _automation_recipe_locked(self, recipe_id: int) -> dict[str, Any]:
+        recipe = next(
+            (
+                recipe
+                for recipe in self._automation_recipes
+                if recipe["id"] == recipe_id
+            ),
+            None,
+        )
+        if recipe is None:
+            raise DebuggerBridgeError("Automation recipe is unavailable")
+        return copy.deepcopy(recipe)
+
+    @staticmethod
+    def _automation_runner_config(
+        recipe: dict[str, Any], variables: dict[str, str], binding: bool = False
+    ) -> dict[str, Any]:
+        return {
+            "source": recipe["source"],
+            "variables": variables,
+            "resultLimit": 4 * 1024 if binding else MAX_AUTOMATION_RESULT_BYTES,
+            "logLimit": 4 if binding else MAX_AUTOMATION_LOGS,
+            "logBytes": 512 if binding else MAX_AUTOMATION_LOG_BYTES,
+            "timeoutMs": AUTOMATION_EXECUTION_TIMEOUT_MS,
+        }
+
+    def _automation_before_load_source(
+        self,
+        recipes: list[dict[str, Any]],
+        variables: dict[str, str],
+        nonce: str,
+    ) -> str:
+        configs = [
+            {
+                "recipeId": recipe["id"],
+                "config": self._automation_runner_config(
+                    recipe, variables, binding=True
+                ),
+            }
+            for recipe in recipes
+        ]
+        binding = json.dumps(self._automation_binding_name)
+        encoded_nonce = json.dumps(nonce)
+        encoded_configs = json.dumps(configs, separators=(",", ":"))
+        return f"""(() => {{
+  if (globalThis !== globalThis.top) return;
+  const report = globalThis[{binding}];
+  if (typeof report !== "function") return;
+  const run = ({AUTOMATION_RECIPE_FUNCTION});
+  const nonce = {encoded_nonce};
+  const documentId = `${{Date.now()}}-${{Math.random().toString(16).slice(2)}}`;
+  const configs = {encoded_configs};
+  const reportEncoder = new TextEncoder();
+  const send = value => {{
+    let payload = JSON.stringify(value);
+    if (reportEncoder.encode(payload).length > {MAX_AUTOMATION_BINDING_REPORT_BYTES}) {{
+      const result = value && value.kind === "done" && value.result;
+      if (!result || typeof result !== "object") return;
+      value = {{...value, result: {{...result, resultText: "", resultTruncated: true,
+        logs: [], logsTruncated: true}}}};
+      payload = JSON.stringify(value);
+      if (reportEncoder.encode(payload).length > {MAX_AUTOMATION_BINDING_REPORT_BYTES}) return;
+    }}
+    report(payload);
+  }};
+  void (async () => {{
+    for (const entry of configs) {{
+      send({{protocolVersion:1, nonce, kind:"start", recipeId:entry.recipeId, documentId}});
+      const result = await run(entry.config);
+      send({{protocolVersion:1, nonce, kind:"done", recipeId:entry.recipeId, documentId, result}});
+    }}
+  }})();
+}})();
+//# sourceURL=reb-automation-before-load.js"""
+
+    def _automation_source_locked(self) -> str:
+        source = self._object_experiment.get("url", "")
+        if not source and self._target is not None:
+            source = self._target.get("url", "")
+        return self._redacted_request_url(source) if source else "about:blank"
+
+    def _start_automation_run_locked(
+        self,
+        recipe: dict[str, Any],
+        trigger: str,
+        automatic: bool,
+        document_id: Optional[str] = None,
+    ) -> int:
+        if self._automation_active_run_id is not None:
+            raise DebuggerBridgeError("Another Automation Recipe is already running")
+        if self._automation_recipes_state["total_runs"] >= MAX_AUTOMATION_RUNS:
+            raise DebuggerBridgeError("Automation session run limit reached")
+        if (
+            automatic
+            and self._automation_recipes_state["automatic_runs"]
+            >= MAX_AUTOMATION_AUTO_RUNS
+        ):
+            raise DebuggerBridgeError("Automatic recipe run limit reached")
+        run_id = self._next_automation_run_id
+        self._next_automation_run_id += 1
+        started_at_ms = int(time.time() * 1_000)
+        active = {
+            "id": run_id,
+            "recipe_id": recipe["id"],
+            "label": recipe["label"],
+            "trigger": trigger,
+            "automatic": automatic,
+            "source": self._automation_source_locked(),
+            "started_at_ms": started_at_ms,
+            "cancel_requested": False,
+        }
+        self._automation_active_run_id = run_id
+        self._automation_active_document_id = document_id
+        self._automation_cancel_requested = False
+        self._automation_recipes_state["active_run"] = {
+            key: value
+            for key, value in active.items()
+            if key != "automatic"
+        }
+        self._automation_recipes_state["total_runs"] += 1
+        if automatic:
+            self._automation_recipes_state["automatic_runs"] += 1
+        self._automation_recipes_state["state"] = "running"
+        self._automation_recipes_state["message"] = (
+            f"Running {recipe['label']} for {trigger}."
+        )
+        self._changed()
+        return run_id
+
+    def _normalize_automation_result(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict) or value.get("protocolVersion") != 1:
+            raise ProtocolError("Debugger returned a malformed automation result")
+        ok = value.get("ok")
+        result_type = value.get("resultType")
+        result_text = value.get("resultText")
+        result_truncated = value.get("resultTruncated")
+        logs_truncated = value.get("logsTruncated")
+        elapsed_ms = value.get("elapsedMs")
+        timed_out = value.get("timedOut")
+        raw_logs = value.get("logs")
+        if (
+            not isinstance(ok, bool)
+            or not isinstance(result_type, str)
+            or len(result_type.encode("utf-8")) > 64
+            or not isinstance(result_text, str)
+            or len(result_text.encode("utf-8")) > MAX_AUTOMATION_RESULT_BYTES
+            or not isinstance(result_truncated, bool)
+            or not isinstance(logs_truncated, bool)
+            or not isinstance(elapsed_ms, int)
+            or isinstance(elapsed_ms, bool)
+            or elapsed_ms < 0
+            or elapsed_ms > AUTOMATION_EXECUTION_TIMEOUT_MS + 5_000
+            or not isinstance(timed_out, bool)
+            or not isinstance(raw_logs, list)
+            or len(raw_logs) > MAX_AUTOMATION_LOGS
+        ):
+            raise ProtocolError("Debugger returned a malformed automation result")
+        logs = []
+        for raw_log in raw_logs:
+            if not isinstance(raw_log, dict):
+                raise ProtocolError("Debugger returned a malformed automation log")
+            level = raw_log.get("level")
+            text = raw_log.get("text")
+            if (
+                level not in {"log", "info", "warn", "error"}
+                or not isinstance(text, str)
+                or len(text.encode("utf-8")) > MAX_AUTOMATION_LOG_BYTES
+            ):
+                raise ProtocolError("Debugger returned a malformed automation log")
+            logs.append({"level": level, "text": text})
+        error = value.get("error", "")
+        if (
+            not isinstance(error, str)
+            or len(error.encode("utf-8")) > 512
+            or (not ok and not error)
+        ):
+            raise ProtocolError("Debugger returned a malformed automation result")
+        return {
+            "ok": ok,
+            "result_type": result_type,
+            "result_text": result_text,
+            "result_truncated": result_truncated,
+            "logs": logs,
+            "logs_truncated": logs_truncated,
+            "elapsed_ms": elapsed_ms,
+            "timed_out": timed_out,
+            "error": error,
+        }
+
+    def _finish_automation_run_locked(
+        self,
+        run_id: int,
+        result: dict[str, Any],
+        outcome: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        active = self._automation_recipes_state.get("active_run")
+        if (
+            self._automation_active_run_id != run_id
+            or not isinstance(active, dict)
+            or active.get("id") != run_id
+        ):
+            return next(
+                (
+                    copy.deepcopy(run)
+                    for run in self._automation_recipes_state["runs"]
+                    if run["id"] == run_id
+                ),
+                None,
+            )
+        if outcome is None:
+            outcome = "completed" if result["ok"] else "failed"
+        duration_ms = max(
+            0,
+            int(time.time() * 1_000) - active["started_at_ms"],
+        )
+        run = {
+            "id": run_id,
+            "session_id": self._automation_recipes_state["session_id"],
+            "recipe_id": active["recipe_id"],
+            "label": active["label"],
+            "occurred_at_ms": active["started_at_ms"],
+            "source": active["source"],
+            "category": active["trigger"],
+            "operation": outcome,
+            "duration_ms": duration_ms,
+            "target_id": self._automation_recipes_state["target_id"],
+            "result_type": result["result_type"],
+            "result_text": result["result_text"],
+            "result_truncated": result["result_truncated"],
+            "logs": copy.deepcopy(result["logs"]),
+            "logs_truncated": result["logs_truncated"],
+            "error": result["error"],
+        }
+        runs = self._automation_recipes_state["runs"]
+        if len(runs) >= MAX_AUTOMATION_RETAINED_RUNS:
+            runs.pop(0)
+            self._automation_recipes_state["run_evictions"] += 1
+        runs.append(run)
+        self._automation_active_run_id = None
+        self._automation_active_document_id = None
+        self._automation_cancel_requested = False
+        self._automation_recipes_state["active_run"] = None
+        if outcome in {"failed", "timed_out"}:
+            self._automation_recipes_state["last_failure"] = result["error"]
+        else:
+            self._automation_recipes_state["last_failure"] = None
+        self._automation_recipes_state["state"] = (
+            "armed" if self._automation_recipes_state["auto_armed"] else "ready"
+        )
+        self._automation_recipes_state["message"] = (
+            f"{active['label']} {outcome.replace('_', ' ')} in {duration_ms} ms."
+        )
+        self._changed()
+        return copy.deepcopy(run)
+
+    def _automation_failure_result(self, message: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "result_type": "error",
+            "result_text": "",
+            "result_truncated": False,
+            "logs": [],
+            "logs_truncated": False,
+            "elapsed_ms": 0,
+            "timed_out": False,
+            "error": self._truncate_text(message, 512),
+        }
+
+    def _execute_automation_recipe(
+        self, recipe: dict[str, Any], trigger: str, automatic: bool
+    ) -> Optional[dict[str, Any]]:
+        with self._lock:
+            if automatic and not self._automation_recipes_state["auto_armed"]:
+                return None
+            self._require_automation_target_locked()
+            run_id = self._start_automation_run_locked(recipe, trigger, automatic)
+            variables = dict(self._automation_variables)
+        configuration = self._automation_runner_config(recipe, variables)
+        expression = (
+            f"({AUTOMATION_RECIPE_FUNCTION})"
+            f"({json.dumps(configuration, separators=(',', ':'))})"
+            "\n//# sourceURL=reb-automation-runner.js"
+        )
+        outcome: Optional[str] = None
+        runner_failure = False
+        try:
+            evaluated = self._command(
+                "Runtime.evaluate",
+                {
+                    "expression": expression,
+                    "returnByValue": True,
+                    "awaitPromise": True,
+                    "silent": True,
+                    "userGesture": False,
+                    "allowUnsafeEvalBlockedByCSP": True,
+                    "timeout": AUTOMATION_EXECUTION_TIMEOUT_MS,
+                },
+                timeout=(AUTOMATION_EXECUTION_TIMEOUT_MS / 1_000)
+                + AUTOMATION_WATCHDOG_GRACE_SECONDS
+                + 1.0,
+            )
+            if isinstance(evaluated.get("exceptionDetails"), dict):
+                raise DebuggerBridgeError(
+                    "The automation recipe failed before returning a result"
+                )
+            remote = evaluated.get("result")
+            document = remote.get("value") if isinstance(remote, dict) else None
+            result = self._normalize_automation_result(document)
+            if result["timed_out"]:
+                outcome = "timed_out"
+        except BaseException as exception:
+            runner_failure = True
+            with self._lock:
+                cancelled = self._automation_cancel_requested
+            message = str(exception)
+            if cancelled:
+                outcome = "cancelled"
+                message = "Recipe cancelled"
+            elif "timed out" in message.lower() or "terminated" in message.lower():
+                outcome = "timed_out"
+                message = "Recipe exceeded the 2 second execution limit"
+            result = self._automation_failure_result(message)
+        with self._lock:
+            run = self._finish_automation_run_locked(run_id, result, outcome)
+        timed_out = result["timed_out"] or outcome == "timed_out"
+        if timed_out:
+            if automatic:
+                try:
+                    self._disarm_automation_recipes(
+                        reason="An automatic recipe timed out; automatic triggers were disarmed."
+                    )
+                except DebuggerBridgeError:
+                    pass
+            try:
+                self._command("Runtime.terminateExecution", timeout=3.0)
+            except DebuggerBridgeError:
+                pass
+            try:
+                self._command("Page.reload", {"ignoreCache": True}, timeout=3.0)
+            except DebuggerBridgeError:
+                pass
+        elif automatic and runner_failure:
+            try:
+                self._disarm_automation_recipes(
+                    reason=(
+                        "An automatic recipe runner failed; automatic triggers "
+                        "were disarmed."
+                    )
+                )
+            except DebuggerBridgeError:
+                pass
+        return run
+
+    def _run_automation_recipe(self, request: dict[str, Any]) -> dict[str, Any]:
+        if request.get("confirmed") is not True:
+            raise DebuggerBridgeError(
+                "Confirm manual page-context code execution before running a recipe"
+            )
+        recipe_id = self._automation_recipe_id(request)
+        variables, variable_bytes = self._normalize_automation_variables(request)
+        with self._lock:
+            self._require_automation_target_locked()
+            if self._automation_recipes_state["auto_armed"]:
+                raise DebuggerBridgeError(
+                    "Disarm automatic recipes before starting a manual run"
+                )
+            recipe = self._automation_recipe_locked(recipe_id)
+            self._automation_variables = variables
+            self._automation_recipes_state["variable_count"] = len(variables)
+            self._automation_recipes_state["variable_bytes"] = variable_bytes
+            self._changed()
+        run = self._execute_automation_recipe(recipe, "manual", automatic=False)
+        with self._lock:
+            state = copy.deepcopy(self._automation_recipes_state)
+        return {
+            "ok": True,
+            "run": run,
+            "automation_recipes": state,
+            "generation": self.generation(),
+        }
+
+    def _queue_automation_trigger(self, trigger: str) -> None:
+        with self._lock:
+            if not self._automation_recipes_state["auto_armed"]:
+                return
+            has_recipes = any(
+                recipe["enabled"] and recipe["trigger"] == trigger
+                for recipe in self._automation_recipes
+            )
+            if not has_recipes:
+                return
+            if self._automation_processing or self._automation_active_run_id is not None:
+                if self._automation_pending_trigger is None:
+                    self._automation_pending_trigger = trigger
+                else:
+                    self._automation_recipes_state["dropped_triggers"] += 1
+                    self._automation_recipes_state["message"] = (
+                        "Dropped an automatic trigger batch because the bounded pending slot was full."
+                    )
+                    self._changed()
+                return
+            self._automation_processing = True
+            epoch = self._automation_epoch
+        worker = threading.Thread(
+            target=self._run_automation_trigger_worker,
+            args=(trigger, epoch),
+            name="reb-automation-recipes",
+            daemon=True,
+        )
+        try:
+            worker.start()
+        except RuntimeError as exception:
+            with self._lock:
+                if epoch == self._automation_epoch:
+                    self._automation_processing = False
+                    message = self._truncate_text(
+                        f"Automation worker could not start: {exception}", 512
+                    )
+                    self._automation_recipes_state["state"] = "error"
+                    self._automation_recipes_state["last_failure"] = message
+                    self._automation_recipes_state["message"] = message
+                    self._changed()
+
+    def _run_automation_trigger_worker(self, trigger: str, epoch: int) -> None:
+        try:
+            with self._lock:
+                recipes = [
+                    copy.deepcopy(recipe)
+                    for recipe in self._automation_recipes
+                    if recipe["enabled"] and recipe["trigger"] == trigger
+                ]
+            for recipe in recipes:
+                with self._lock:
+                    if (
+                        epoch != self._automation_epoch
+                        or not self._automation_recipes_state["auto_armed"]
+                    ):
+                        break
+                    limit_reached = (
+                        self._automation_recipes_state["automatic_runs"]
+                        >= MAX_AUTOMATION_AUTO_RUNS
+                        or self._automation_recipes_state["total_runs"]
+                        >= MAX_AUTOMATION_RUNS
+                    )
+                if limit_reached:
+                    self._disarm_automation_recipes(
+                        reason="Automatic recipe run limit reached; recipes were disarmed."
+                    )
+                    break
+                self._execute_automation_recipe(recipe, trigger, automatic=True)
+        except BaseException as exception:
+            with self._lock:
+                if epoch == self._automation_epoch:
+                    message = self._truncate_text(str(exception), 512)
+                    self._automation_recipes_state["last_failure"] = message
+                    self._automation_recipes_state["message"] = message
+                    self._automation_recipes_state["state"] = (
+                        "armed"
+                        if self._automation_recipes_state["auto_armed"]
+                        else "error"
+                    )
+                    self._changed()
+        finally:
+            with self._lock:
+                if epoch != self._automation_epoch:
+                    return
+                self._automation_processing = False
+                pending = self._automation_pending_trigger
+                self._automation_pending_trigger = None
+                armed = self._automation_recipes_state["auto_armed"]
+            if pending is not None and armed:
+                self._queue_automation_trigger(pending)
+
+    def _arm_automation_recipes(self, request: dict[str, Any]) -> dict[str, Any]:
+        if request.get("confirmed") is not True:
+            raise DebuggerBridgeError(
+                "Confirm automatic page-context code execution before arming recipes"
+            )
+        variables, variable_bytes = self._normalize_automation_variables(request)
+        with self._lock:
+            self._require_automation_target_locked()
+            if self._automation_recipes_state["auto_armed"]:
+                raise DebuggerBridgeError("Automation Recipes is already armed")
+            auto_recipes = [
+                copy.deepcopy(recipe)
+                for recipe in self._automation_recipes
+                if recipe["enabled"] and recipe["trigger"] != "manual"
+            ]
+            if not auto_recipes:
+                raise DebuggerBridgeError(
+                    "Enable at least one created, before-load, or after-load recipe"
+                )
+            if len(auto_recipes) > MAX_AUTOMATION_AUTO_RECIPES:
+                raise DebuggerBridgeError("Automatic recipe limit reached")
+            if self._automation_recipes_state["total_runs"] >= MAX_AUTOMATION_RUNS:
+                raise DebuggerBridgeError("Automation session run limit reached")
+            before_recipes = [
+                recipe for recipe in auto_recipes if recipe["trigger"] == "before-load"
+            ]
+            nonce = os.urandom(16).hex()
+            self._automation_recipes_state["state"] = "arming"
+            self._automation_recipes_state["message"] = (
+                "Installing bounded automatic recipe triggers."
+            )
+            self._changed()
+        binding_added = False
+        script_id: Optional[str] = None
+        try:
+            if before_recipes:
+                self._command(
+                    "Runtime.addBinding", {"name": self._automation_binding_name}
+                )
+                binding_added = True
+                installed = self._command(
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    {
+                        "source": self._automation_before_load_source(
+                            before_recipes, variables, nonce
+                        ),
+                        "runImmediately": False,
+                    },
+                )
+                script_id = installed.get("identifier")
+                if (
+                    not isinstance(script_id, str)
+                    or not script_id
+                    or len(script_id.encode("utf-8")) > MAX_TARGET_ID_BYTES
+                ):
+                    raise ProtocolError(
+                        "Debugger returned a malformed automation script identifier"
+                    )
+        except BaseException as exception:
+            if script_id is not None:
+                try:
+                    self._command(
+                        "Page.removeScriptToEvaluateOnNewDocument",
+                        {"identifier": script_id},
+                    )
+                except DebuggerBridgeError:
+                    pass
+            if binding_added:
+                try:
+                    self._command(
+                        "Runtime.removeBinding", {"name": self._automation_binding_name}
+                    )
+                except DebuggerBridgeError:
+                    pass
+            with self._lock:
+                message = self._truncate_text(str(exception), 512)
+                self._automation_recipes_state["state"] = "error"
+                self._automation_recipes_state["last_failure"] = message
+                self._automation_recipes_state["message"] = message
+                self._changed()
+            raise
+        with self._lock:
+            self._automation_variables = variables
+            self._automation_auto_script_id = script_id
+            self._automation_binding_nonce = nonce if before_recipes else None
+            self._automation_recipes_state["auto_armed"] = True
+            self._automation_recipes_state["state"] = "armed"
+            self._automation_recipes_state["variable_count"] = len(variables)
+            self._automation_recipes_state["variable_bytes"] = variable_bytes
+            self._automation_recipes_state["last_failure"] = None
+            self._automation_recipes_state["message"] = (
+                "Automatic recipes armed. Created recipes are running now."
+            )
+            self._changed()
+            state = copy.deepcopy(self._automation_recipes_state)
+        self._queue_automation_trigger("created")
+        return {
+            "ok": True,
+            "automation_recipes": state,
+            "generation": self.generation(),
+        }
+
+    def _cancel_automation_watchdog_locked(self) -> None:
+        timer = self._automation_auto_watchdog
+        self._automation_auto_watchdog = None
+        if timer is not None:
+            timer.cancel()
+
+    def _disarm_automation_recipes(
+        self, reason: str = "Automatic recipes disarmed and session variables erased."
+    ) -> dict[str, Any]:
+        with self._lock:
+            armed = self._automation_recipes_state["auto_armed"]
+            active = self._automation_active_run_id
+            script_id = self._automation_auto_script_id
+            binding_added = self._automation_binding_nonce is not None
+            if not armed and active is None and script_id is None:
+                raise DebuggerBridgeError("Automation Recipes is not armed or running")
+            self._automation_recipes_state["state"] = "stopping"
+            self._automation_recipes_state["auto_armed"] = False
+            self._automation_recipes_state["message"] = (
+                "Stopping Automation Recipes and removing automatic triggers."
+            )
+            self._automation_epoch += 1
+            self._automation_processing = False
+            self._automation_pending_trigger = None
+            if active is not None:
+                self._automation_cancel_requested = True
+                if self._automation_recipes_state["active_run"] is not None:
+                    self._automation_recipes_state["active_run"][
+                        "cancel_requested"
+                    ] = True
+            self._cancel_automation_watchdog_locked()
+            self._changed()
+        errors = []
+        if active is not None:
+            try:
+                self._command("Runtime.terminateExecution", timeout=3.0)
+            except DebuggerBridgeError as exception:
+                errors.append(str(exception))
+        if script_id is not None:
+            try:
+                self._command(
+                    "Page.removeScriptToEvaluateOnNewDocument",
+                    {"identifier": script_id},
+                )
+            except DebuggerBridgeError as exception:
+                errors.append(str(exception))
+        if binding_added:
+            try:
+                self._command(
+                    "Runtime.removeBinding", {"name": self._automation_binding_name}
+                )
+            except DebuggerBridgeError as exception:
+                errors.append(str(exception))
+        if active is not None:
+            try:
+                self._command("Page.reload", {"ignoreCache": True}, timeout=3.0)
+            except DebuggerBridgeError as exception:
+                errors.append(str(exception))
+        with self._lock:
+            self._automation_auto_script_id = None
+            self._automation_binding_nonce = None
+            self._automation_variables = {}
+            self._automation_recipes_state["variable_count"] = 0
+            self._automation_recipes_state["variable_bytes"] = 0
+            if active is not None and self._automation_active_run_id == active:
+                result = self._automation_failure_result("Recipe cancelled")
+                self._finish_automation_run_locked(active, result, "cancelled")
+            self._automation_recipes_state["state"] = "error" if errors else "ready"
+            self._automation_recipes_state["message"] = (
+                self._truncate_text("; ".join(errors), 512) if errors else reason
+            )
+            if errors:
+                self._automation_recipes_state["last_failure"] = (
+                    self._automation_recipes_state["message"]
+                )
+            self._changed()
+            state = copy.deepcopy(self._automation_recipes_state)
+        if errors:
+            raise DebuggerBridgeError(state["message"])
+        return {
+            "ok": True,
+            "automation_recipes": state,
+            "generation": self.generation(),
+        }
+
+    def _cancel_automation_recipe(self) -> dict[str, Any]:
+        with self._lock:
+            run_id = self._automation_active_run_id
+            if run_id is None:
+                raise DebuggerBridgeError("No Automation Recipe is running")
+            self._automation_cancel_requested = True
+            self._automation_recipes_state["state"] = "stopping"
+            if self._automation_recipes_state["active_run"] is not None:
+                self._automation_recipes_state["active_run"][
+                    "cancel_requested"
+                ] = True
+            self._automation_recipes_state["message"] = (
+                "Cancelling the active Automation Recipe."
+            )
+            automatic = self._automation_recipes_state["auto_armed"]
+            self._changed()
+        if automatic:
+            return self._disarm_automation_recipes(
+                reason="The active automatic recipe was cancelled and automatic triggers were disarmed."
+            )
+        self._command("Runtime.terminateExecution", timeout=3.0)
+        self._command("Page.reload", {"ignoreCache": True}, timeout=3.0)
+        with self._lock:
+            state = copy.deepcopy(self._automation_recipes_state)
+        return {
+            "ok": True,
+            "automation_recipes": state,
+            "generation": self.generation(),
+        }
+
+    def _clear_automation_runs(self) -> dict[str, Any]:
+        with self._lock:
+            if (
+                self._automation_active_run_id is not None
+                or self._automation_processing
+                or self._automation_recipes_state["auto_armed"]
+            ):
+                raise DebuggerBridgeError(
+                    "Disarm and finish Automation Recipes before clearing runs"
+                )
+            self._automation_recipes_state["runs"] = []
+            self._automation_recipes_state["run_evictions"] = 0
+            self._automation_recipes_state["total_runs"] = 0
+            self._automation_recipes_state["automatic_runs"] = 0
+            self._automation_recipes_state["dropped_triggers"] = 0
+            self._automation_recipes_state["last_failure"] = None
+            self._automation_variables = {}
+            self._automation_recipes_state["variable_count"] = 0
+            self._automation_recipes_state["variable_bytes"] = 0
+            self._automation_recipes_state["message"] = (
+                "Automation run results, logs, counters, and variables were cleared."
+            )
+            self._changed()
+            state = copy.deepcopy(self._automation_recipes_state)
+        return {
+            "ok": True,
+            "automation_recipes": state,
+            "generation": self.generation(),
+        }
+
+    def _handle_automation_binding(self, params: dict[str, Any]) -> None:
+        name = params.get("name")
+        payload = params.get("payload")
+        if (
+            name != self._automation_binding_name
+            or not isinstance(payload, str)
+            or len(payload.encode("utf-8")) > MAX_AUTOMATION_BINDING_REPORT_BYTES
+        ):
+            return
+        try:
+            value = json.loads(payload)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(value, dict) or value.get("protocolVersion") != 1:
+            return
+        nonce = value.get("nonce")
+        recipe_id = value.get("recipeId")
+        kind = value.get("kind")
+        document_id = value.get("documentId")
+        if (
+            not isinstance(nonce, str)
+            or not isinstance(recipe_id, int)
+            or isinstance(recipe_id, bool)
+            or kind not in {"start", "done"}
+            or not isinstance(document_id, str)
+            or not document_id
+            or len(document_id.encode("utf-8")) > 128
+        ):
+            return
+        start_timer: Optional[threading.Timer] = None
+        pending: Optional[str] = None
+        timed_out = False
+        malformed = False
+        with self._lock:
+            if (
+                nonce != self._automation_binding_nonce
+                or not self._automation_recipes_state["auto_armed"]
+            ):
+                return
+            recipe = next(
+                (
+                    recipe
+                    for recipe in self._automation_recipes
+                    if recipe["id"] == recipe_id
+                    and recipe["enabled"]
+                    and recipe["trigger"] == "before-load"
+                ),
+                None,
+            )
+            if recipe is None:
+                return
+            if kind == "start":
+                if self._automation_active_run_id is not None:
+                    self._automation_recipes_state["dropped_triggers"] += 1
+                    self._changed()
+                    return
+                try:
+                    run_id = self._start_automation_run_locked(
+                        recipe,
+                        "before-load",
+                        automatic=True,
+                        document_id=document_id,
+                    )
+                except DebuggerBridgeError as exception:
+                    self._automation_recipes_state["last_failure"] = str(exception)
+                    self._automation_recipes_state["message"] = str(exception)
+                    self._changed()
+                    return
+                start_timer = threading.Timer(
+                    (AUTOMATION_EXECUTION_TIMEOUT_MS / 1_000)
+                    + AUTOMATION_WATCHDOG_GRACE_SECONDS,
+                    self._automation_before_load_timeout,
+                    args=(run_id, nonce, document_id),
+                )
+                start_timer.daemon = True
+                self._automation_auto_watchdog = start_timer
+            else:
+                active = self._automation_recipes_state.get("active_run")
+                if (
+                    not isinstance(active, dict)
+                    or active.get("recipe_id") != recipe_id
+                    or self._automation_active_run_id != active.get("id")
+                    or self._automation_active_document_id != document_id
+                ):
+                    return
+                self._cancel_automation_watchdog_locked()
+                try:
+                    result = self._normalize_automation_result(value.get("result"))
+                    timed_out = result["timed_out"]
+                    self._finish_automation_run_locked(
+                        active["id"], result, "timed_out" if timed_out else None
+                    )
+                    if timed_out:
+                        self._automation_pending_trigger = None
+                except ProtocolError as exception:
+                    malformed = True
+                    result = self._automation_failure_result(str(exception))
+                    self._finish_automation_run_locked(
+                        active["id"], result, "failed"
+                    )
+                pending = (
+                    None
+                    if timed_out or malformed
+                    else self._automation_pending_trigger
+                )
+                self._automation_pending_trigger = None
+        if start_timer is not None:
+            start_timer.start()
+        if timed_out:
+            threading.Thread(
+                target=self._recover_automation_timeout,
+                name="reb-automation-timeout-recovery",
+                daemon=True,
+            ).start()
+        elif malformed:
+            threading.Thread(
+                target=self._disarm_automation_after_failure,
+                name="reb-automation-failure-recovery",
+                daemon=True,
+            ).start()
+        if pending is not None:
+            self._queue_automation_trigger(pending)
+
+    def _disarm_automation_after_failure(self) -> None:
+        try:
+            self._disarm_automation_recipes(
+                reason=(
+                    "A malformed automatic recipe report was rejected; "
+                    "automatic triggers were disarmed."
+                )
+            )
+        except DebuggerBridgeError:
+            pass
+
+    def _recover_automation_timeout(self) -> None:
+        try:
+            self._disarm_automation_recipes(
+                reason="An automatic recipe timed out; automatic triggers were disarmed."
+            )
+        except DebuggerBridgeError:
+            pass
+        try:
+            self._command("Runtime.terminateExecution", timeout=3.0)
+        except DebuggerBridgeError:
+            pass
+        try:
+            self._command("Page.reload", {"ignoreCache": True}, timeout=3.0)
+        except DebuggerBridgeError:
+            pass
+
+    def _automation_before_load_timeout(
+        self, run_id: int, nonce: str, document_id: str
+    ) -> None:
+        with self._lock:
+            active = self._automation_recipes_state.get("active_run")
+            if (
+                self._automation_active_run_id != run_id
+                or self._automation_binding_nonce != nonce
+                or not isinstance(active, dict)
+                or active.get("id") != run_id
+            ):
+                return
+            self._automation_auto_watchdog = None
+            result = self._automation_failure_result(
+                "Before-load recipe exceeded the 2 second execution limit"
+            )
+            self._finish_automation_run_locked(run_id, result, "timed_out")
+        self._recover_automation_timeout()
+
     def _create_request_interception_experiment(self) -> dict[str, Any]:
         with self._lock:
             if self._state not in {"running", "paused"} or self._target is None:
@@ -4677,6 +6087,7 @@ class DebuggerBridge:
             self._begin_repeater_session_locked(experiment_id)
             self._begin_object_experiment_session_locked(experiment_id)
             self._begin_runtime_hook_session_locked(experiment_id)
+            self._begin_automation_session_locked(experiment_id)
             self._changed()
 
         context_id: Optional[str] = None
@@ -4729,6 +6140,14 @@ class DebuggerBridge:
                 self._runtime_hooks["state"] = "error"
                 self._runtime_hooks["isolated"] = cleanup_error is not None
                 self._runtime_hooks["message"] = self._truncate_text(message, 512)
+                self._automation_recipes_state["state"] = "error"
+                self._automation_recipes_state["isolated"] = cleanup_error is not None
+                self._automation_recipes_state["last_failure"] = self._truncate_text(
+                    message, 512
+                )
+                self._automation_recipes_state["message"] = self._truncate_text(
+                    message, 512
+                )
                 self._changed()
             raise
 
@@ -4749,6 +6168,11 @@ class DebuggerBridge:
             self._runtime_hooks["message"] = (
                 "Isolated context created. Attaching the Runtime Hooks page."
             )
+            self._automation_recipes_state["isolated"] = True
+            self._automation_recipes_state["target_id"] = target_id
+            self._automation_recipes_state["message"] = (
+                "Isolated context created. Attaching the Automation Recipes page."
+            )
             self._preferred_target_id = target_id
             connection = self._connection
             self._changed()
@@ -4759,6 +6183,7 @@ class DebuggerBridge:
             "experiment": copy.deepcopy(self._request_interception),
             "object_experiment": copy.deepcopy(self._object_experiment),
             "runtime_hooks": copy.deepcopy(self._runtime_hooks),
+            "automation_recipes": copy.deepcopy(self._automation_recipes_state),
             "repeater": copy.deepcopy(self._repeater),
             "generation": self.generation(),
         }
@@ -4896,12 +6321,14 @@ class DebuggerBridge:
             experiment = copy.deepcopy(self._request_interception)
             object_experiment = copy.deepcopy(self._object_experiment)
             runtime_hooks = copy.deepcopy(self._runtime_hooks)
+            automation_recipes = copy.deepcopy(self._automation_recipes_state)
             repeater = copy.deepcopy(self._repeater)
         return {
             "ok": True,
             "experiment": experiment,
             "object_experiment": object_experiment,
             "runtime_hooks": runtime_hooks,
+            "automation_recipes": automation_recipes,
             "repeater": repeater,
             "generation": self.generation(),
         }
@@ -4933,6 +6360,23 @@ class DebuggerBridge:
                     self._runtime_hook_stop_requested = False
                     self._runtime_hook_deferred_pause = None
                     self._runtime_hook_epoch += 1
+                    self._automation_recipes_state = self._empty_automation_recipes()
+                    self._automation_recipes_state["recipes"] = copy.deepcopy(
+                        self._automation_recipes
+                    )
+                    self._automation_recipes_state[
+                        "source_bytes"
+                    ] = self._automation_source_bytes
+                    self._automation_variables = {}
+                    self._automation_auto_script_id = None
+                    self._automation_binding_nonce = None
+                    self._automation_active_run_id = None
+                    self._automation_active_document_id = None
+                    self._automation_cancel_requested = False
+                    self._automation_pending_trigger = None
+                    self._automation_processing = False
+                    self._cancel_automation_watchdog_locked()
+                    self._automation_epoch += 1
                     self._changed()
                 return
             if not force and (
@@ -4940,6 +6384,8 @@ class DebuggerBridge:
                 or self._request_interception_pending
                 or self._repeater_active_execution_id is not None
                 or self._runtime_hook_processing
+                or self._automation_active_run_id is not None
+                or self._automation_processing
             ):
                 raise DebuggerBridgeError(
                     "Finish or cancel active request-lab work before disposing its context"
@@ -4947,6 +6393,7 @@ class DebuggerBridge:
             repeater_session_id = self._repeater["session_id"]
             object_session_id = self._object_experiment["session_id"]
             runtime_hook_session_id = self._runtime_hooks["session_id"]
+            automation_session_id = self._automation_recipes_state["session_id"]
             self._request_interception["state"] = "disposing"
             self._request_interception["message"] = (
                 "Disposing the isolated browser context and all of its storage."
@@ -4959,6 +6406,10 @@ class DebuggerBridge:
             self._runtime_hooks["state"] = "disposing"
             self._runtime_hooks["message"] = (
                 "Disposing Runtime Hooks and erasing code and captured values."
+            )
+            self._automation_recipes_state["state"] = "disposing"
+            self._automation_recipes_state["message"] = (
+                "Disposing Automation Recipes and erasing variables, results, and logs."
             )
             connection = (
                 self._connection
@@ -4989,6 +6440,13 @@ class DebuggerBridge:
                 ]
                 self._runtime_hooks["state"] = "error"
                 self._runtime_hooks["message"] = self._request_interception["message"]
+                self._automation_recipes_state["state"] = "error"
+                self._automation_recipes_state["last_failure"] = (
+                    self._request_interception["message"]
+                )
+                self._automation_recipes_state["message"] = (
+                    self._request_interception["message"]
+                )
                 self._changed()
             if preserve_result:
                 raise
@@ -5011,6 +6469,7 @@ class DebuggerBridge:
                 self._dispose_repeater_locked(repeater_session_id)
                 self._dispose_object_experiment_locked(object_session_id)
                 self._dispose_runtime_hooks_locked(runtime_hook_session_id)
+                self._dispose_automation_locked(automation_session_id)
             else:
                 self._request_interception = self._empty_request_interception()
                 self._repeater = self._empty_repeater()
@@ -5021,6 +6480,23 @@ class DebuggerBridge:
                 self._runtime_hook_stop_requested = False
                 self._runtime_hook_deferred_pause = None
                 self._runtime_hook_epoch += 1
+                self._automation_recipes_state = self._empty_automation_recipes()
+                self._automation_recipes_state["recipes"] = copy.deepcopy(
+                    self._automation_recipes
+                )
+                self._automation_recipes_state[
+                    "source_bytes"
+                ] = self._automation_source_bytes
+                self._automation_variables = {}
+                self._automation_auto_script_id = None
+                self._automation_binding_nonce = None
+                self._automation_active_run_id = None
+                self._automation_active_document_id = None
+                self._automation_cancel_requested = False
+                self._automation_pending_trigger = None
+                self._automation_processing = False
+                self._cancel_automation_watchdog_locked()
+                self._automation_epoch += 1
                 self._repeater_history_bytes = 0
                 self._repeater_active_execution_id = None
                 self._repeater_cancel_requested = False
@@ -5049,6 +6525,23 @@ class DebuggerBridge:
             self._runtime_hook_stop_requested = False
             self._runtime_hook_deferred_pause = None
             self._runtime_hook_epoch += 1
+            self._automation_recipes_state = self._empty_automation_recipes()
+            self._automation_recipes_state["recipes"] = copy.deepcopy(
+                self._automation_recipes
+            )
+            self._automation_recipes_state["source_bytes"] = (
+                self._automation_source_bytes
+            )
+            self._automation_variables = {}
+            self._automation_auto_script_id = None
+            self._automation_binding_nonce = None
+            self._automation_active_run_id = None
+            self._automation_active_document_id = None
+            self._automation_cancel_requested = False
+            self._automation_pending_trigger = None
+            self._automation_processing = False
+            self._cancel_automation_watchdog_locked()
+            self._automation_epoch += 1
             self._changed()
         return {"ok": True, "generation": self.generation()}
 
@@ -6555,6 +8048,32 @@ class DebuggerBridge:
                         self._runtime_hooks["message"] = (
                             "Runtime Hooks target disconnected. Reattach it and add hooks again."
                         )
+                if self._automation_recipes_state.get("target_id") == target["id"]:
+                    self._cancel_automation_watchdog_locked()
+                    self._automation_auto_script_id = None
+                    self._automation_binding_nonce = None
+                    self._automation_active_run_id = None
+                    self._automation_active_document_id = None
+                    self._automation_cancel_requested = False
+                    self._automation_pending_trigger = None
+                    self._automation_processing = False
+                    self._automation_variables = {}
+                    self._automation_epoch += 1
+                    self._automation_recipes_state["auto_armed"] = False
+                    self._automation_recipes_state["active_run"] = None
+                    self._automation_recipes_state["variable_count"] = 0
+                    self._automation_recipes_state["variable_bytes"] = 0
+                    if self._automation_recipes_state["state"] not in {
+                        "disposing",
+                        "disposed",
+                    }:
+                        message = (
+                            "Automation Recipes target disconnected. Automatic execution, "
+                            "variables, and active results were cleared; recipe definitions remain."
+                        )
+                        self._automation_recipes_state["state"] = "error"
+                        self._automation_recipes_state["last_failure"] = message
+                        self._automation_recipes_state["message"] = message
                 if self._connection is connection:
                     self._connection = None
                     self._target = None
@@ -6600,6 +8119,12 @@ class DebuggerBridge:
             connection.close()
 
     def _handle_event(self, method: str, params: dict[str, Any]) -> None:
+        if method == "Runtime.bindingCalled":
+            self._handle_automation_binding(params)
+            return
+        if method == "Page.loadEventFired":
+            self._queue_automation_trigger("after-load")
+            return
         if method == "Fetch.requestPaused":
             self._handle_request_interception_pause_async(params)
             return
@@ -6993,6 +8518,27 @@ class DebuggerBridge:
             self._runtime_hooks["message"] = (
                 "Runtime Hooks is isolated and ready for a live JavaScript function."
             )
+            self._cancel_automation_watchdog_locked()
+            self._automation_auto_script_id = None
+            self._automation_binding_nonce = None
+            self._automation_active_run_id = None
+            self._automation_active_document_id = None
+            self._automation_cancel_requested = False
+            self._automation_pending_trigger = None
+            self._automation_processing = False
+            self._automation_variables = {}
+            self._automation_epoch += 1
+            self._automation_recipes_state["isolated"] = True
+            self._automation_recipes_state["target_id"] = target_id
+            self._automation_recipes_state["auto_armed"] = False
+            self._automation_recipes_state["active_run"] = None
+            self._automation_recipes_state["variable_count"] = 0
+            self._automation_recipes_state["variable_bytes"] = 0
+            self._automation_recipes_state["state"] = "ready"
+            self._automation_recipes_state["message"] = (
+                "Automation Recipes is isolated and ready for explicit page-context code."
+            )
+            self._sync_automation_library_locked()
             self._changed()
 
     def _parse_script(self, params: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -7007,6 +8553,7 @@ class DebuggerBridge:
         if (
             not isinstance(script_id, str)
             or not isinstance(url, str)
+            or url.startswith("reb-automation-")
             or len(script_id.encode("utf-8")) > MAX_TARGET_ID_BYTES
             or len(url.encode("utf-8")) > MAX_TARGET_URL_BYTES
             or len(script_hash.encode("utf-8")) > MAX_TARGET_URL_BYTES

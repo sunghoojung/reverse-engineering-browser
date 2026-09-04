@@ -1090,9 +1090,144 @@ const originFound = {
     match: {id: '5', type: 'string', name: 'secret-value', self_size: 24}
   }]
 };
+const interceptionIdle = {
+  protocol_version: 1, experiment_id: 0, state: 'idle', isolated: false,
+  target_id: null, created_at_ms: 0, disposed_at_ms: 0,
+  rule: {mode: 'continue', url_pattern: '*', method_filter: '', rewrite_url: '',
+    rewrite_method: '', rewrite_header_count: 0, rewrite_body_bytes: 0,
+    response_code: 200, response_header_count: 0, response_body_bytes: 0},
+  last_request: null, result: null, audit: [], audit_evictions: 0,
+  pending_requests: 0, message: 'Create an isolated experiment.',
+  limits: {audit_entries: 128, pending_requests: 16, headers: 64,
+    body_bytes: 65536, response_bytes: 65536}
+};
+const interceptionReady = {
+  ...interceptionIdle, experiment_id: 4, state: 'ready', isolated: true,
+  target_id: 'page-1', created_at_ms: 1,
+  rule: {...interceptionIdle.rule, mode: 'fulfill', response_header_count: 1,
+    response_body_bytes: 11},
+  last_request: {url: 'https://checkout.test/cart', method: 'POST',
+    header_count: 1, body_bytes: 2},
+  result: {protocol_version: 1, ok: true, status: 201, status_text: 'Created',
+    url: 'https://checkout.test/cart', headers: [{name: 'content-type', value: 'application/json'}],
+    headers_truncated: false, body: '{"ok":true}', body_truncated: false, error: null},
+  audit: [{id: 1, occurred_at_ms: 2, request_id: 'fetch-1', method: 'POST',
+    url: 'https://checkout.test/cart', resource_type: 'Fetch', rule_mode: 'fulfill',
+    outcome: 'fulfilled', detail: 'Synthetic response 201 returned.'}]
+};
+const objectIdle = {
+  protocol_version: 1, session_id: 0, state: 'idle', isolated: false,
+  target_id: null, url: '', navigation_id: 0, search_id: 0, search: null,
+  results: [], last_mutation: null, audit: [], audit_evictions: 0,
+  mutation_attempts: 0,
+  message: 'Create an isolated Experiment context to use Object Lab.',
+  limits: {search_results: 50, search_candidates: 25000, search_timeout_ms: 750,
+    preview_properties: 16, mutation_attempts: 256, audit_entries: 128,
+    property_bytes: 256, value_bytes: 16384, value_depth: 8,
+    value_entries: 256, value_string_bytes: 4096}
+};
+const objectResult = {
+  id: '4', class_name: 'CheckoutState', property_count: 2,
+  properties_truncated: false, similarity: 0.875,
+  preview: [{name: 'ready', type: 'boolean', value: 'true'}]
+};
+const objectSearch = {
+  protocol_version: 2, analyzed: 17, total_objects: 17, result_limit: 50,
+  duration_ms: 3, result_limit_reached: false, scan_limit_reached: false,
+  property_limit_reached: false, timed_out: false
+};
+const objectDescriptorBefore = {
+  exists: false, type: 'undefined', class_name: '', writable: true,
+  configurable: true, preview: null
+};
+const objectDescriptorAfter = {
+  exists: true, type: 'string', class_name: 'String', writable: true,
+  configurable: true, preview: 'updated'
+};
+const objectAudit = {
+  id: 1, occurred_at_ms: 5, session_id: 4, navigation_id: 2, search_id: 3,
+  result_id: '4', operation: 'set', property: 'status',
+  target_class: 'CheckoutState', outcome: 'created', success: true,
+  before_type: 'undefined', after_type: 'string', value_bytes: 9,
+  value_digest: 'a'.repeat(64), url: 'https://checkout.test/cart'
+};
+const objectReady = {
+  ...objectIdle, session_id: 4, state: 'loaded', isolated: true,
+  target_id: 'page-1', url: 'https://checkout.test/cart', navigation_id: 2,
+  search_id: 3, search: objectSearch, results: [objectResult],
+  last_mutation: {audit_id: 1, ok: true, operation: 'set', property: 'status',
+    result_id: '4', outcome: 'created', error: null,
+    before: objectDescriptorBefore, after: objectDescriptorAfter,
+    value_bytes: 9, value_digest: 'a'.repeat(64)},
+  audit: [objectAudit], mutation_attempts: 1, message: 'Property created.'
+};
+const hooksIdle = {
+  protocol_version: 1, session_id: 0, state: 'idle', isolated: false,
+  target_id: null, definitions: [], active_points: 0, total_hits: 0,
+  hits: [], hit_evictions: 0, last_failure: null,
+  message: 'Create an isolated Experiment context to use Runtime Hooks.',
+  limits: {definitions: 8, active_points: 64, return_points_per_definition: 32,
+    total_hits: 512, retained_hits: 128, bindings_per_hit: 32,
+    binding_preview_bytes: 512, condition_bytes: 1024, logic_bytes: 8192,
+    return_bytes: 8192, evaluation_timeout_ms: 100}
+};
+const hookRemote = {type: 'boolean', subtype: null, class_name: null,
+  description: 'true', value: true, unserializable_value: null,
+  value_truncated: false};
+const hookDefinition = {
+  id: 1, label: 'checkout guard', script_id: 'script-1', url: script.url,
+  line: 3, column: 0, entry_enabled: true, return_enabled: true,
+  condition: 'cart.total > 100', entry_logic: 'cart.reviewed = true;',
+  return_logic: '', return_mode: 'json', return_expression: '',
+  return_value: true, return_value_bytes: 4,
+  resolved: {entry_points: 1, return_points: 1}
+};
+const hookHit = {
+  id: 1, occurred_at_ms: 5, session_id: 4, hook_id: 1,
+  target_id: 'page-1', label: 'checkout guard', source: script.url,
+  function: 'checkout', category: 'return', operation: 'return_overridden',
+  line: 3, column: 8,
+  bindings: [{name: 'cart', value: hookRemote, accessor: false}],
+  bindings_truncated: false, original_return: hookRemote,
+  replacement_return: hookRemote, error: null
+};
+const hooksReady = {...hooksIdle, session_id: 4, state: 'armed', isolated: true,
+  target_id: 'page-1', definitions: [hookDefinition], active_points: 2,
+  total_hits: 1, hits: [hookHit], message: 'Runtime Hooks armed.'};
+const repeaterIdle = {
+  protocol_version: 1, session_id: 0, state: 'idle', variables: [], history: [],
+  history_bytes: 0, history_evictions: 0, active_execution: null, comparison: null,
+  message: 'Create an isolated request-lab context to use Repeater.',
+  limits: {history_entries: 24, history_bytes: 524288, variables: 32,
+    variable_bytes: 32768, request_bytes: 65536, response_bytes: 65536,
+    timeout_ms: 30000}
+};
+const repeaterEntry = {
+  id: 1, started_at_ms: 2, completed_at_ms: 5, state: 'complete',
+  collection_request_id: null,
+  variable_names: ['host'],
+  request: {url: 'https://{{host}}/cart', method: 'POST',
+    headers: [{name: 'x-run', value: '{{host}}'}], body: '{}', timeout_ms: 15000},
+  resolved_request: {url: 'https://checkout.test/cart', method: 'POST',
+    headers: [{name: 'x-run', value: 'checkout.test'}], body: '{}', timeout_ms: 15000},
+  response: {protocol_version: 1, ok: true, status: 201, status_text: 'Created',
+    url: 'https://checkout.test/cart', headers: [{name: 'content-type', value: 'application/json'}],
+    headers_truncated: false, body: '{"ok":true}', body_truncated: false, error: null,
+    duration_ms: 3, cancelled: false, timed_out: false, body_sha256: 'a'.repeat(64)},
+  stored_bytes: 512
+};
+const repeaterReady = {
+  ...repeaterIdle, session_id: 4, state: 'ready',
+  variables: [{name: 'host', value: 'checkout.test'}], history: [repeaterEntry],
+  history_bytes: 512, message: 'Repeater is ready.'
+};
 const snapshot = {
   protocol_version: 1, state: 'paused', generation: 7, error: null,
   heap_diff_baseline: null, memory_origin_trace: originIdle,
+  request_interception: interceptionIdle,
+  object_experiment: objectIdle,
+  runtime_hooks: hooksIdle,
+  repeater: repeaterIdle,
   target, targets: [target], scripts: [script],
   paused: {reason: 'breakpoint', description: null, call_frames: [frame],
     async_stack: [{description: 'Promise.then', call_frames: [{
@@ -1186,6 +1321,40 @@ process.stdout.write(JSON.stringify({
     ...originFound.steps[0], match: {...originFound.steps[0].match, id: '05'}}]}),
   originFirstMatchRequired: !isMemoryOriginTrace({...originFound, first_match_step: null}),
   missingOriginRejected: !isDebuggerResponse({...snapshot, memory_origin_trace: undefined}),
+  interceptionReadyAccepted: isRequestInterception(interceptionReady),
+  interceptionAuditBound: !isRequestInterception({...interceptionReady,
+    audit: Array(129).fill(interceptionReady.audit[0])}),
+  interceptionCredentialRejected: !isRequestInterception({...interceptionReady,
+    result: {...interceptionReady.result,
+      headers: [{name: 'set-cookie', value: 'private=1'}]}}),
+  interceptionBodyByteBound: !isRequestInterception({...interceptionReady,
+    result: {...interceptionReady.result, body: 'é'.repeat(32769)}}),
+  interceptionPendingBound: !isRequestInterception({...interceptionReady, pending_requests: 17}),
+  missingInterceptionRejected: !isDebuggerResponse({...snapshot, request_interception: undefined}),
+  objectReadyAccepted: isObjectExperiment(objectReady),
+  objectAuditBound: !isObjectExperiment({...objectReady,
+    audit: Array(129).fill(objectAudit)}),
+  objectMutationBound: !isObjectExperiment({...objectReady, mutation_attempts: 257}),
+  objectDigestRequired: !isObjectExperiment({...objectReady, last_mutation: {
+    ...objectReady.last_mutation, value_digest: 'private-value'}}),
+  objectQueryRejected: !isObjectExperiment({...objectReady,
+    url: 'https://checkout.test/cart?token=private'}),
+  objectSearchPairRequired: !isObjectExperiment({...objectReady, search: null}),
+  missingObjectExperimentRejected: !isDebuggerResponse({...snapshot, object_experiment: undefined}),
+  hooksReadyAccepted: isRuntimeHooks(hooksReady),
+  hooksPointBound: !isRuntimeHooks({...hooksReady, active_points: 65}),
+  hooksBindingBound: !isRuntimeHooks({...hooksReady, hits: [{...hookHit,
+    bindings: Array(33).fill(hookHit.bindings[0])}]}),
+  hooksPromiseOperationRejected: !isRuntimeHooks({...hooksReady, hits: [{...hookHit,
+    operation: 'async_override'}]}),
+  missingRuntimeHooksRejected: !isDebuggerResponse({...snapshot, runtime_hooks: undefined}),
+  repeaterReadyAccepted: isRepeater(repeaterReady),
+  repeaterHistoryBound: !isRepeater({...repeaterReady,
+    history: Array(25).fill(repeaterEntry)}),
+  repeaterHistoryBytesRequired: !isRepeater({...repeaterReady, history_bytes: 511}),
+  repeaterCredentialRejected: !isRepeater({...repeaterReady, history: [{...repeaterEntry,
+    request: {...repeaterEntry.request, headers: [{name: 'Authorization', value: 'secret'}]}}]}),
+  missingRepeaterRejected: !isDebuggerResponse({...snapshot, repeater: undefined}),
   liveSearchAccepted: isLiveObjectSearchResponse(liveSearch),
   liveSearchResultLimitRequired: !isLiveObjectSearchResponse({...liveSearch,
     search: {...liveSearch.search, result_limit: 51}}),
@@ -1239,6 +1408,29 @@ process.stdout.write(JSON.stringify({
                 "originCanonicalIdRequired": True,
                 "originFirstMatchRequired": True,
                 "missingOriginRejected": True,
+                "interceptionReadyAccepted": True,
+                "interceptionAuditBound": True,
+                "interceptionCredentialRejected": True,
+                "interceptionBodyByteBound": True,
+                "interceptionPendingBound": True,
+                "missingInterceptionRejected": True,
+                "objectReadyAccepted": True,
+                "objectAuditBound": True,
+                "objectMutationBound": True,
+                "objectDigestRequired": True,
+                "objectQueryRejected": True,
+                "objectSearchPairRequired": True,
+                "missingObjectExperimentRejected": True,
+                "hooksReadyAccepted": True,
+                "hooksPointBound": True,
+                "hooksBindingBound": True,
+                "hooksPromiseOperationRejected": True,
+                "missingRuntimeHooksRejected": True,
+                "repeaterReadyAccepted": True,
+                "repeaterHistoryBound": True,
+                "repeaterHistoryBytesRequired": True,
+                "repeaterCredentialRejected": True,
+                "missingRepeaterRejected": True,
                 "liveSearchAccepted": True,
                 "liveSearchResultLimitRequired": True,
                 "liveSearchSimilarityBound": True,
@@ -1290,6 +1482,158 @@ process.stdout.write(JSON.stringify({
         self.assertIn("incoming_reference_limit_reached", html)
         self.assertIn("!['snapshot', 'origin'].includes(state.memoryMode)", html)
         self.assertNotIn("expose_live_object", html)
+
+    def test_experiment_workspace_exposes_isolated_request_interception(self) -> None:
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("Request Interception Lab", html)
+        self.assertIn('id="experiment-create"', html)
+        self.assertIn('id="experiment-rule-form"', html)
+        self.assertIn('id="experiment-request-form"', html)
+        self.assertIn("function isRequestInterception(experiment)", html)
+        self.assertIn("function renderExperiment()", html)
+        self.assertIn("action: 'create_request_interception_experiment'", html)
+        self.assertIn("action: 'configure_request_interception'", html)
+        self.assertIn("action: 'run_request_interception'", html)
+        self.assertIn("action: 'dispose_request_interception_experiment'", html)
+        self.assertIn("Credentials are always omitted", html)
+        self.assertIn("128 entries", html)
+        self.assertIn("64 KiB", html)
+
+    def test_object_lab_exposes_bounded_confirmed_disposable_mutation(self) -> None:
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('data-experiment-mode="object"', html)
+        self.assertIn('id="object-workspace"', html)
+        self.assertIn('id="object-navigation-form"', html)
+        self.assertIn('id="object-search-form"', html)
+        self.assertIn('role="listbox" aria-label="Object Lab live matches"', html)
+        self.assertIn('id="object-mutation-form"', html)
+        self.assertIn('id="object-confirm"', html)
+        self.assertIn('id="object-audit"', html)
+        self.assertIn("function isObjectExperiment(experiment)", html)
+        self.assertIn("function renderObjectExperiment()", html)
+        self.assertIn("action: 'navigate_object_experiment'", html)
+        self.assertIn("action: 'search_object_experiment'", html)
+        self.assertIn("action: 'mutate_object_experiment'", html)
+        self.assertIn("confirmed: true", html)
+        self.assertIn("25,000 objects / 750 ms", html)
+        self.assertIn("The baseline page and evidence store are never modified", html)
+        self.assertNotIn("expose_live_object", html)
+
+    def test_runtime_hooks_expose_bounded_isolated_synchronous_control(self) -> None:
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('data-experiment-mode="hooks"', html)
+        self.assertIn('id="hooks-workspace"', html)
+        self.assertIn('id="hooks-navigation-form"', html)
+        self.assertIn('id="hooks-definition-form"', html)
+        self.assertIn('id="hooks-confirm"', html)
+        self.assertIn('id="hooks-hits"', html)
+        self.assertIn('id="source-hook-pivot"', html)
+        self.assertIn("function isRuntimeHooks(hooks)", html)
+        self.assertIn("function renderRuntimeHooks()", html)
+        self.assertIn("function pivotSourceToRuntimeHooks()", html)
+        self.assertIn("#screen-experiments:not([hidden]) { grid-template-rows: auto auto", html)
+        self.assertIn("action: 'add_runtime_hook'", html)
+        self.assertIn("action: 'arm_runtime_hooks'", html)
+        self.assertIn("action: 'disarm_runtime_hooks'", html)
+        self.assertIn("action: 'clear_runtime_hook_hits'", html)
+        self.assertIn("Promise return replacement is rejected", html)
+        self.assertIn("512 / 128 retained", html)
+        self.assertIn("100 ms / 32 bindings", html)
+        self.assertIn("!url.startsWith('pptr:')", html)
+
+    def test_repeater_exposes_bounded_edit_cancel_history_variables_and_comparison(self) -> None:
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('data-experiment-mode="repeater"', html)
+        self.assertIn('id="request-repeater-pivot"', html)
+        self.assertIn('id="repeater-request-form"', html)
+        self.assertIn('id="repeater-cancel"', html)
+        self.assertIn('id="repeater-history"', html)
+        self.assertIn('id="repeater-variable-form"', html)
+        self.assertIn('id="repeater-comparison"', html)
+        self.assertIn("function isRepeater(repeater)", html)
+        self.assertIn("function renderRepeater()", html)
+        self.assertIn("function renderRepeaterVariableStatus()", html)
+        self.assertIn("action: 'configure_repeater_variables'", html)
+        self.assertIn("action: 'run_repeater_request'", html)
+        self.assertIn("action: 'cancel_repeater_request'", html)
+        self.assertIn("action: 'compare_repeater_history'", html)
+        self.assertIn("action: 'clear_repeater_history'", html)
+        self.assertIn("24 runs / 512 KiB", html)
+        self.assertIn("History is ephemeral and never enters the evidence store", html)
+
+    def test_api_collection_exposes_atomic_hierarchy_scopes_import_and_execution(self) -> None:
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('data-screen="api-collection"', html)
+        self.assertIn('id="request-collection-pivot"', html)
+        self.assertIn('id="collection-tree"', html)
+        self.assertIn('id="collection-folder-form"', html)
+        self.assertIn('id="collection-request-form"', html)
+        self.assertIn('id="collection-run"', html)
+        self.assertIn('id="collection-history"', html)
+        self.assertIn("function isApiCollection(collection)", html)
+        self.assertIn("function renderApiCollection()", html)
+        self.assertIn("function refreshApiCollection", html)
+        self.assertIn("if (!state.apiCollectionLoaded) setCollectionNotice('loading'", html)
+        self.assertIn("action: 'replace_api_collection'", html)
+        self.assertIn("collection_request_id: saved.id", html)
+        self.assertIn("32 folders / 128 requests", html)
+        self.assertIn("2 MiB atomic file", html)
+        self.assertIn("Captured headers, cookies, bodies, and credentials are never imported", html)
+
+    def test_api_collection_browser_contract_accepts_native_key_order_and_rejects_malformed_state(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        start = html.index("      function isPlainObject")
+        end = html.index("      function isRepeaterResult")
+        model = html[start:end]
+        exercise = r"""
+const limits = {
+  document_bytes: 2097152, request_body_bytes: 65536, folder_depth: 4,
+  requests: 128, variables_per_scope: 32, variable_bytes_per_scope: 32768,
+  folders: 32
+};
+const root = {id: 1, name: 'API Collection', parent_id: null, variables: []};
+const empty = {contract_version: 1, document_kind: 'api-collection', generation: 0,
+  updated_at_ms: 0, folders: [root], requests: [], limits};
+const cycle = {...empty, generation: 1, updated_at_ms: 1, folders: [root,
+  {id: 2, name: 'A', parent_id: 3, variables: []},
+  {id: 3, name: 'B', parent_id: 2, variables: []}]};
+const sensitive = {...empty, generation: 1, updated_at_ms: 1, requests: [{
+  id: 1, folder_id: 1, name: 'unsafe', url: 'https://example.test/', method: 'GET',
+  headers: [{name: 'authorization', value: 'secret'}], body: '', timeout_ms: 100,
+  variables: [], created_at_ms: 1, updated_at_ms: 1
+}]};
+process.stdout.write(JSON.stringify({
+  reorderedLimitsAccepted: isApiCollection(empty),
+  cycleRejected: !isApiCollection(cycle),
+  sensitiveHeaderRejected: !isApiCollection(sensitive),
+  unexpectedFieldRejected: !isApiCollection({...empty, extra: true}),
+  generationZeroMutationRejected: !isApiCollection({...empty, updated_at_ms: 1})
+}));
+"""
+        completed = subprocess.run(
+            [node, "-e", model + exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "reorderedLimitsAccepted": True,
+                "cycleRejected": True,
+                "sensitiveHeaderRejected": True,
+                "unexpectedFieldRejected": True,
+                "generationZeroMutationRejected": True,
+            },
+        )
 
     def test_sources_model_rejects_malformed_artifact_catalogs(self) -> None:
         node = shutil.which("node")
@@ -1367,7 +1711,8 @@ process.stdout.write(JSON.stringify({
         self.assertIn("row.setAttribute('aria-pressed'", html)
         self.assertIn('aria-label="Filter requests"', html)
         self.assertIn("button.disabled = !traceIsAvailable()", html)
-        self.assertIn("&& !state.selectedField) return", html)
+        self.assertNotIn("screenName === 'experiments' && !state.selectedField", html)
+        self.assertIn("enableTabKeyboardNavigation('.experiment-mode-tab')", html)
         self.assertIn("requestAnimationFrame", html)
         self.assertIn("selectedRow ?? elements.requestFilter", html)
 
@@ -1820,7 +2165,27 @@ process.stdout.write(JSON.stringify({
         self.assertIn('case "/api/origin-trace":', application)
         self.assertIn('case "/api/request-signal-profile":', application)
         self.assertIn('case "/api/debugger":', application)
+        self.assertIn('case "/api/api-collection":', application)
+        self.assertIn('case "/api/api-collection/actions":', application)
         self.assertIn("debuggerUnavailableResponse(", application)
+        self.assertIn('"heap_diff_baseline": NSNull()', application)
+        self.assertIn('"memory_origin_trace": [', application)
+        self.assertIn('"request_interception": [', application)
+        self.assertIn('"object_experiment": [', application)
+        self.assertIn('"runtime_hooks": [', application)
+        self.assertIn('"repeater": [', application)
+        self.assertIn(r'let etag = "\"debugger-unavailable-v3\""', application)
+        self.assertIn("debuggerContractValid: isDebuggerResponse(state.debuggerSession)", application)
+        self.assertIn("objectExperimentAvailable: state.debuggerSession?.object_experiment?.protocol_version === 1", application)
+        self.assertIn("runtimeHooksAvailable: state.debuggerSession?.runtime_hooks?.protocol_version === 1", application)
+        self.assertIn("repeaterAvailable: state.debuggerSession?.repeater?.protocol_version === 1", application)
+        self.assertIn("apiCollectionContractValid: isApiCollection(state.apiCollection)", application)
+        self.assertIn("REB_APP_SMOKE_API_COLLECTION_WRITE", application)
+        self.assertIn("apiCollectionWriteExercised", application)
+        self.assertIn('firstIndex(of: "--api-collection")', application)
+        self.assertIn('appendingPathComponent("Origin Trace/api-collection-v1.json")', application)
+        self.assertIn("writeApiCollectionLocked", application)
+        self.assertIn("[.posixPermissions: 0o600]", application)
         self.assertIn("originTraceResponse(for: requestURL)", application)
         self.assertIn("requestSignalProfileResponse(", application)
         self.assertIn('value(forHTTPHeaderField: "If-None-Match")', application)

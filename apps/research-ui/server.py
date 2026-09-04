@@ -14,6 +14,12 @@ from socketserver import TCPServer
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
+from api_collection import (
+    MAX_API_COLLECTION_BYTES,
+    ApiCollectionConflict,
+    ApiCollectionError,
+    ApiCollectionStore,
+)
 from debugger_bridge import DebuggerBridge, DebuggerBridgeError, ProtocolError
 from origin_trace import OriginTraceError, build_origin_trace
 from vm_analyzer import (
@@ -32,7 +38,8 @@ MAX_EVENT_JSON_BYTES = 4 * 1024
 MAX_TRACE_EDGE_JSON_BYTES = 2 * 1024
 MAX_SIGNAL_PROFILE_JSON_BYTES = 8 * 1024
 MAX_ARTIFACT_JSON_BYTES = 8 * 1024
-MAX_DEBUGGER_ACTION_BYTES = 16 * 1024
+MAX_DEBUGGER_ACTION_BYTES = 128 * 1024
+MAX_API_COLLECTION_ACTION_BYTES = MAX_API_COLLECTION_BYTES + 64 * 1024
 MAX_DEBUGGER_WAIT_MS = 25_000
 MAX_TRACE_EVENT_WINDOW = 10_000
 MAX_TRACE_EDGE_WINDOW = 30_000
@@ -81,6 +88,9 @@ class ResearchHandler(SimpleHTTPRequestHandler):
     trace_store: Path
     signal_store: Path
     artifact_store: Path
+    api_collection_store = ApiCollectionStore(
+        Path("build/sessions/api-collection-v1.json").resolve()
+    )
     broker_socket: Optional[Path] = None
     debugger: Optional[DebuggerBridge] = None
     analysis_lock = threading.Lock()
@@ -108,10 +118,25 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     "signal_store_exists": self.signal_store.exists(),
                     "artifact_store": str(self.artifact_store),
                     "artifact_store_exists": self.artifact_store.exists(),
+                    "api_collection_store": str(self.api_collection_store.path),
+                    "api_collection_store_exists": self.api_collection_store.path.exists(),
                     "broker_connected": self.broker_connected(),
                     "debugger_state": self.debugger_state(),
                 }
             )
+            return
+        if parsed.path == "/api/api-collection":
+            try:
+                collection = self.api_collection_store.load()
+            except (ApiCollectionError, OSError) as exception:
+                self.send_json(
+                    {"error": str(exception)}, HTTPStatus.INTERNAL_SERVER_ERROR
+                )
+                return
+            etag = f'"api-collection-{collection["generation"]}"'
+            if self.send_not_modified(etag):
+                return
+            self.send_json(collection, etag=etag)
             return
         if parsed.path == "/api/debugger":
             query = parse_qs(parsed.query, keep_blank_values=True)
@@ -449,6 +474,25 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         if not self.is_trusted_local_request():
             self.send_json(
                 {"error": "Local request origin rejected"}, HTTPStatus.FORBIDDEN
+            )
+            return
+        if parsed.path == "/api/api-collection/actions":
+            try:
+                request = self.read_json_body(MAX_API_COLLECTION_ACTION_BYTES)
+                collection = self.api_collection_store.replace(request)
+            except ApiCollectionConflict as exception:
+                self.send_json({"error": str(exception)}, HTTPStatus.CONFLICT)
+                return
+            except (ApiCollectionError, ValueError) as exception:
+                self.send_json({"error": str(exception)}, HTTPStatus.BAD_REQUEST)
+                return
+            except OSError as exception:
+                self.send_json(
+                    {"error": str(exception)}, HTTPStatus.INTERNAL_SERVER_ERROR
+                )
+                return
+            self.send_json(
+                collection, etag=f'"api-collection-{collection["generation"]}"'
             )
             return
         if parsed.path != "/api/debugger/actions":
@@ -862,6 +906,12 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             "breakpoints": [],
             "watches": [],
             "console": [],
+            "heap_diff_baseline": None,
+            "memory_origin_trace": DebuggerBridge._empty_memory_origin_trace(),
+            "request_interception": DebuggerBridge._empty_request_interception(),
+            "object_experiment": DebuggerBridge._empty_object_experiment(),
+            "runtime_hooks": DebuggerBridge._empty_runtime_hooks(),
+            "repeater": DebuggerBridge._empty_repeater(),
             "settings": {
                 "breakpoints_active": True,
                 "pause_on_exceptions": "none",
@@ -958,7 +1008,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         if etag is not None:
             self.send_header("ETag", etag)
         self.end_headers()
-        self.wfile.write(body)
+        self.write_response_body(body)
 
     def send_artifact_bytes(self, body: bytes, total_size: int, offset: int) -> None:
         self.send_response(HTTPStatus.OK)
@@ -974,7 +1024,15 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             "X-Artifact-Truncated", "1" if offset + len(body) < total_size else "0"
         )
         self.end_headers()
-        self.wfile.write(body)
+        self.write_response_body(body)
+
+    def write_response_body(self, body: bytes) -> None:
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # Conditional debugger requests are intentionally long-lived. A tab
+            # close or refresh may end the loopback connection before a change.
+            return
 
     def log_message(self, format: str, *args) -> None:
         return
@@ -998,6 +1056,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--artifacts", type=Path, default=Path("build/sessions/artifacts")
     )
+    parser.add_argument(
+        "--api-collection",
+        type=Path,
+        default=Path("build/sessions/api-collection-v1.json"),
+    )
     parser.add_argument("--socket", type=Path)
     parser.add_argument("--devtools-active-port", type=Path)
     parser.add_argument("--endpoint-file", type=Path)
@@ -1011,6 +1074,9 @@ def main() -> int:
     ResearchHandler.trace_store = args.trace_store.resolve()
     ResearchHandler.signal_store = args.signal_store.resolve()
     ResearchHandler.artifact_store = args.artifacts.resolve()
+    ResearchHandler.api_collection_store = ApiCollectionStore(
+        args.api_collection.resolve()
+    )
     ResearchHandler.broker_socket = args.socket.resolve() if args.socket else None
     debugger = DebuggerBridge(
         args.devtools_active_port.resolve() if args.devtools_active_port else None
@@ -1031,6 +1097,7 @@ def main() -> int:
     print(f"Origin trace store: {ResearchHandler.trace_store}")
     print(f"Request signal profile store: {ResearchHandler.signal_store}")
     print(f"Artifact store: {ResearchHandler.artifact_store}")
+    print(f"API Collection store: {ResearchHandler.api_collection_store.path}")
     debugger.start()
     try:
         server.serve_forever()

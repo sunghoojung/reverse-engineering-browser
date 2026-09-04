@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import select
 import socket
 import struct
@@ -16,7 +17,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 MAX_TARGETS = 128
@@ -63,6 +64,83 @@ MAX_TARGET_ID_BYTES = 4_096
 MAX_TARGET_TYPE_BYTES = 128
 MAX_TARGET_URL_BYTES = 64 * 1024
 MAX_REMOTE_TEXT_BYTES = 4_096
+MAX_INTERCEPTION_URL_BYTES = 8 * 1024
+MAX_INTERCEPTION_PATTERN_BYTES = 2 * 1024
+MAX_INTERCEPTION_METHOD_BYTES = 32
+MAX_INTERCEPTION_HEADERS = 64
+MAX_INTERCEPTION_HEADER_NAME_BYTES = 128
+MAX_INTERCEPTION_HEADER_VALUE_BYTES = 2 * 1024
+MAX_INTERCEPTION_HEADER_BYTES = 16 * 1024
+MAX_INTERCEPTION_BODY_BYTES = 64 * 1024
+MAX_INTERCEPTION_RESPONSE_BYTES = 64 * 1024
+MAX_INTERCEPTION_AUDIT_ENTRIES = 128
+MAX_INTERCEPTION_PENDING_REQUESTS = 16
+INTERCEPTION_RUN_TIMEOUT_SECONDS = 15.0
+MAX_REPEATER_HISTORY_ENTRIES = 24
+MAX_REPEATER_HISTORY_BYTES = 512 * 1024
+MAX_REPEATER_VARIABLES = 32
+MAX_REPEATER_VARIABLE_NAME_BYTES = 64
+MAX_REPEATER_VARIABLE_VALUE_BYTES = 4 * 1024
+MAX_REPEATER_VARIABLE_BYTES = 32 * 1024
+MAX_REPEATER_TEMPLATE_METHOD_BYTES = 256
+MIN_REPEATER_TIMEOUT_MS = 100
+MAX_REPEATER_TIMEOUT_MS = 30_000
+MAX_OBJECT_EXPERIMENT_AUDIT_ENTRIES = 128
+MAX_OBJECT_EXPERIMENT_MUTATIONS = 256
+MAX_OBJECT_EXPERIMENT_PROPERTY_BYTES = 256
+MAX_OBJECT_EXPERIMENT_VALUE_BYTES = 16 * 1024
+MAX_OBJECT_EXPERIMENT_VALUE_DEPTH = 8
+MAX_OBJECT_EXPERIMENT_VALUE_ENTRIES = 256
+MAX_OBJECT_EXPERIMENT_STRING_BYTES = 4 * 1024
+OBJECT_EXPERIMENT_NAVIGATION_TIMEOUT_SECONDS = 15.0
+MAX_RUNTIME_HOOKS = 8
+MAX_RUNTIME_HOOK_BREAKPOINTS = 64
+MAX_RUNTIME_HOOK_RETURN_POINTS = 32
+MAX_RUNTIME_HOOK_HITS = 512
+MAX_RUNTIME_HOOK_RETAINED_HITS = 128
+MAX_RUNTIME_HOOK_BINDINGS = 32
+MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES = 512
+MAX_RUNTIME_HOOK_LABEL_BYTES = 128
+MAX_RUNTIME_HOOK_CONDITION_BYTES = 1024
+MAX_RUNTIME_HOOK_LOGIC_BYTES = 8 * 1024
+MAX_RUNTIME_HOOK_RETURN_BYTES = 8 * 1024
+RUNTIME_HOOK_EVALUATION_TIMEOUT_MS = 100
+
+REPEATER_VARIABLE_TOKEN = re.compile(r"\{\{(=)?([^{}]+)\}\}")
+REPEATER_VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
+
+SENSITIVE_INTERCEPTION_HEADERS = {
+    "authorization",
+    "cookie",
+    "proxy-authorization",
+    "set-cookie",
+}
+
+FORBIDDEN_OBJECT_EXPERIMENT_PROPERTIES = {
+    "__proto__",
+    "constructor",
+    "prototype",
+}
+
+MEMORY_ORIGIN_TRACE_FRAMEWORK_PATTERNS = (
+    "/node_modules/",
+    "react",
+    "react-dom",
+    "redux",
+    "vue",
+    "angular",
+    "jquery",
+    "lodash",
+    "rxjs",
+    "core-js",
+    "regenerator-runtime",
+    "polyfill",
+    "webpack",
+    "vite",
+    "rollup",
+    "parcel",
+    "zone.js",
+)
 
 MEMORY_ORIGIN_TRACE_FRAMEWORK_PATTERNS = (
     "/node_modules/",
@@ -85,6 +163,9 @@ MEMORY_ORIGIN_TRACE_FRAMEWORK_PATTERNS = (
 )
 
 
+# V8's side-effect checker rejects this inspector's local arrays and counters.
+# Safety instead comes from fixed source that reads own descriptors, never values
+# behind accessors, and returns only bounded by-value metadata.
 LIVE_OBJECT_SEARCH_FUNCTION = r"""function(criteria) {
   const started = Date.now();
   const deadline = started + criteria.timeoutMs;
@@ -246,6 +327,245 @@ LIVE_OBJECT_SEARCH_FUNCTION = r"""function(criteria) {
     timedOut,
     durationMs: Math.max(0, Date.now() - started)
   };
+}"""
+
+OBJECT_EXPERIMENT_MUTATE_FUNCTION = r"""function(config) {
+  const boundedText = value => {
+    let text;
+    try { text = String(value); } catch { return "<unavailable>"; }
+    return text.length > 160 ? `${text.slice(0, 160)}...` : text;
+  };
+  const valueType = value => value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+  const className = value => {
+    if (Array.isArray(value)) return "Array";
+    try {
+      const prototype = Object.getPrototypeOf(value);
+      const descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, "constructor");
+      const name = descriptor && "value" in descriptor && descriptor.value && descriptor.value.name;
+      return typeof name === "string" && name ? name.slice(0, 160) : "Object";
+    } catch { return "Object"; }
+  };
+  const descriptorSummary = descriptor => {
+    if (!descriptor) return {exists: false, type: "missing", className: "", writable: false, configurable: false};
+    if (!("value" in descriptor)) {
+      return {exists: true, type: "accessor", className: "", writable: false, configurable: descriptor.configurable === true};
+    }
+    const value = descriptor.value;
+    const type = valueType(value);
+    return {
+      exists: true,
+      type,
+      className: (type === "object" || type === "array" || type === "function") && value !== null ? className(value) : "",
+      writable: descriptor.writable === true,
+      configurable: descriptor.configurable === true,
+      preview: (type === "object" || type === "array" || type === "function") && value !== null
+        ? `[${className(value)}]`
+        : boundedText(value)
+    };
+  };
+  const inspect = candidate => {
+    let names;
+    try { names = Object.getOwnPropertyNames(candidate).sort(); }
+    catch { names = []; }
+    const preview = [];
+    for (const name of names.slice(0, config.previewProperties)) {
+      let descriptor;
+      try { descriptor = Object.getOwnPropertyDescriptor(candidate, name); } catch {}
+      if (!descriptor || !("value" in descriptor)) {
+        preview.push({name: name.slice(0, 256), type: "accessor", value: "<getter not invoked>"});
+        continue;
+      }
+      const value = descriptor.value;
+      const type = value === null ? "null" : typeof value;
+      preview.push({
+        name: name.slice(0, 256),
+        type,
+        value: ((typeof value === "object" && value !== null) || typeof value === "function")
+          ? `[${className(value)}]`
+          : boundedText(value)
+      });
+    }
+    return {
+      id: config.resultId,
+      className: className(candidate),
+      propertyCount: names.length,
+      propertiesTruncated: names.length > config.previewProperties,
+      similarity: config.similarity,
+      preview
+    };
+  };
+
+  try {
+    const beforeDescriptor = Object.getOwnPropertyDescriptor(this, config.property);
+    const before = descriptorSummary(beforeDescriptor);
+    let outcome;
+    if (beforeDescriptor && !("value" in beforeDescriptor)) {
+      return {protocolVersion: 1, ok: false, error: "Accessor properties cannot be patched", outcome: "accessor", before, after: before, object: inspect(this)};
+    }
+    if (config.operation === "delete") {
+      if (!beforeDescriptor) {
+        return {protocolVersion: 1, ok: false, error: "The selected own property does not exist", outcome: "missing", before, after: before, object: inspect(this)};
+      }
+      if (!beforeDescriptor.configurable) {
+        return {protocolVersion: 1, ok: false, error: "The selected own property is not configurable", outcome: "non_configurable", before, after: before, object: inspect(this)};
+      }
+      if (!Reflect.deleteProperty(this, config.property)) {
+        return {protocolVersion: 1, ok: false, error: "The selected own property could not be deleted", outcome: "rejected", before, after: before, object: inspect(this)};
+      }
+      outcome = "deleted";
+    } else {
+      if (beforeDescriptor && !beforeDescriptor.writable) {
+        return {protocolVersion: 1, ok: false, error: "The selected own property is not writable", outcome: "non_writable", before, after: before, object: inspect(this)};
+      }
+      if (!beforeDescriptor && !Object.isExtensible(this)) {
+        return {protocolVersion: 1, ok: false, error: "The selected object is not extensible", outcome: "non_extensible", before, after: before, object: inspect(this)};
+      }
+      const descriptor = beforeDescriptor
+        ? {...beforeDescriptor, value: config.value}
+        : {value: config.value, writable: true, enumerable: true, configurable: true};
+      Object.defineProperty(this, config.property, descriptor);
+      outcome = beforeDescriptor ? "updated" : "created";
+    }
+    const after = descriptorSummary(Object.getOwnPropertyDescriptor(this, config.property));
+    return {protocolVersion: 1, ok: true, error: null, outcome, before, after, object: inspect(this)};
+  } catch (error) {
+    return {
+      protocolVersion: 1,
+      ok: false,
+      error: boundedText(error && error.message ? error.message : error),
+      outcome: "error",
+      before: {exists: false, type: "unknown", className: "", writable: false, configurable: false},
+      after: {exists: false, type: "unknown", className: "", writable: false, configurable: false},
+      object: null
+    };
+  }
+}"""
+
+REQUEST_INTERCEPTION_FUNCTION = r"""async function(config) {
+  const started = performance.now();
+  const registry = config.controllerRegistryKey
+    ? globalThis[config.controllerRegistryKey]
+    : null;
+  const controller = registry instanceof Map
+    ? registry.get(config.executionId)
+    : new AbortController();
+  if (!(controller instanceof AbortController)) {
+    return {
+      protocolVersion: 1,
+      ok: false,
+      error: "Request controller is unavailable",
+      durationMs: 0,
+      cancelled: false,
+      timedOut: false
+    };
+  }
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, config.timeoutMs);
+  try {
+    const options = {
+      method: config.method,
+      headers: config.headers,
+      credentials: "omit",
+      cache: "no-store",
+      redirect: "follow",
+      referrerPolicy: "no-referrer",
+      signal: controller.signal
+    };
+    if (config.body !== "") options.body = config.body;
+    const response = await fetch(config.url, options);
+    const decoder = new TextDecoder();
+    const bodyParts = [];
+    let bodyBytes = 0;
+    let bodyTruncated = false;
+    if (response.body) {
+      const reader = response.body.getReader();
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        const remaining = Math.max(0, config.responseByteLimit - bodyBytes);
+        if (value.byteLength > remaining) {
+          if (remaining > 0) {
+            bodyParts.push(decoder.decode(value.subarray(0, remaining), {stream: true}));
+            bodyBytes += remaining;
+          }
+          bodyTruncated = true;
+          try { await reader.cancel(); } catch {}
+          break;
+        }
+        bodyParts.push(decoder.decode(value, {stream: true}));
+        bodyBytes += value.byteLength;
+        if (bodyBytes === config.responseByteLimit) {
+          const next = await reader.read();
+          if (!next.done) {
+            bodyTruncated = true;
+            try { await reader.cancel(); } catch {}
+          }
+          break;
+        }
+      }
+      bodyParts.push(decoder.decode());
+    }
+    const headers = [];
+    const headerEncoder = new TextEncoder();
+    let headerBytes = 0;
+    let headersTruncated = false;
+    for (const [name, value] of response.headers.entries()) {
+      if (["set-cookie", "set-cookie2"].includes(name.toLowerCase())) continue;
+      if (headers.length >= config.headerLimit) {
+        headersTruncated = true;
+        break;
+      }
+      const encodedValue = headerEncoder.encode(value);
+      const boundedValue = encodedValue.byteLength <= config.headerValueLimit
+        ? value
+        : new TextDecoder().decode(encodedValue.subarray(0, config.headerValueLimit));
+      const entryBytes = headerEncoder.encode(name).byteLength + headerEncoder.encode(boundedValue).byteLength;
+      if (headerBytes + entryBytes > config.headerTotalLimit) {
+        headersTruncated = true;
+        break;
+      }
+      headerBytes += entryBytes;
+      headers.push({name, value: boundedValue});
+      if (encodedValue.byteLength > config.headerValueLimit) headersTruncated = true;
+    }
+    return {
+      protocolVersion: 1,
+      ok: true,
+      status: response.status,
+      statusText: response.statusText.slice(0, 256),
+      url: response.url,
+      headers,
+      headersTruncated,
+      body: bodyParts.join(""),
+      bodyTruncated,
+      durationMs: Math.max(0, Math.round(performance.now() - started)),
+      cancelled: false,
+      timedOut: false
+    };
+  } catch (error) {
+    let message = "Request failed";
+    try { message = String(error && error.message ? error.message : error); } catch {}
+    const cancelled = controller.signal.aborted && !timedOut;
+    return {
+      protocolVersion: 1,
+      ok: false,
+      error: (timedOut ? "Request timed out" : cancelled ? "Request cancelled" : message).slice(0, 512),
+      durationMs: Math.max(0, Math.round(performance.now() - started)),
+      cancelled,
+      timedOut
+    };
+  } finally {
+    clearTimeout(timer);
+    if (registry instanceof Map) {
+      registry.delete(config.executionId);
+      if (registry.size === 0) {
+        try { delete globalThis[config.controllerRegistryKey]; } catch {}
+      }
+    }
+  }
 }"""
 
 
@@ -543,6 +863,36 @@ class DebuggerBridge:
         self._memory_origin_trace_stop_requested = False
         self._memory_origin_trace_added_click_breakpoint = False
         self._memory_origin_trace_timer: Optional[threading.Timer] = None
+        self._next_request_interception_id = 1
+        self._next_request_interception_audit_id = 1
+        self._request_interception = self._empty_request_interception()
+        self._request_interception_rule = self._default_request_interception_rule()
+        self._request_interception_context_id: Optional[str] = None
+        self._request_interception_return_target_id: Optional[str] = None
+        self._request_interception_pending: set[str] = set()
+        self._next_object_experiment_navigation_id = 1
+        self._next_object_experiment_search_id = 1
+        self._next_object_experiment_audit_id = 1
+        self._object_experiment = self._empty_object_experiment()
+        self._object_experiment_group: Optional[str] = None
+        self._object_experiment_objects_id: Optional[str] = None
+        self._object_experiment_result_indices: set[int] = set()
+        self._next_runtime_hook_id = 1
+        self._next_runtime_hook_hit_id = 1
+        self._runtime_hooks = self._empty_runtime_hooks()
+        self._runtime_hook_points: dict[str, dict[str, Any]] = {}
+        self._runtime_hook_processing = False
+        self._runtime_hook_stop_requested = False
+        self._runtime_hook_deferred_pause: Optional[dict[str, Any]] = None
+        self._runtime_hook_epoch = 0
+        self._next_repeater_execution_id = 1
+        self._repeater = self._empty_repeater()
+        self._repeater_history_bytes = 0
+        self._repeater_active_execution_id: Optional[int] = None
+        self._repeater_cancel_requested = False
+        self._repeater_controller_key = (
+            f"__reb_repeater_controllers_{os.urandom(16).hex()}"
+        )
 
     def start(self) -> None:
         if self.active_port_path is None or self._thread is not None:
@@ -564,6 +914,7 @@ class DebuggerBridge:
             self._thread.join(timeout=3.0)
         self._fail_pending(DebuggerBridgeError("Debugger bridge stopped"))
         self._clear_heap_diff_baseline(force=True)
+        self._dispose_request_interception_context(preserve_result=False, force=True)
 
     def generation(self) -> int:
         with self._lock:
@@ -608,6 +959,10 @@ class DebuggerBridge:
                 },
                 "heap_diff_baseline": self._heap_diff_baseline_metadata(),
                 "memory_origin_trace": copy.deepcopy(self._memory_origin_trace),
+                "request_interception": copy.deepcopy(self._request_interception),
+                "object_experiment": copy.deepcopy(self._object_experiment),
+                "runtime_hooks": copy.deepcopy(self._runtime_hooks),
+                "repeater": copy.deepcopy(self._repeater),
                 "limits": {
                     "scripts": MAX_SCRIPTS,
                     "call_frames": MAX_CALL_FRAMES,
@@ -623,9 +978,40 @@ class DebuggerBridge:
             raise DebuggerBridgeError("Debugger action is required")
         with self._lock:
             origin_trace_active = self._memory_origin_trace_active_locked()
+            request_interception_running = (
+                self._request_interception["state"] == "running"
+            )
+            repeater_running = self._repeater_active_execution_id is not None
+            object_experiment_running = self._object_experiment["state"] in {
+                "navigating",
+                "searching",
+                "mutating",
+            }
+            runtime_hooks_active = self._runtime_hooks["state"] in {
+                "arming",
+                "armed",
+                "handling",
+                "stopping",
+            }
         if origin_trace_active and action != "stop_memory_origin_trace":
             raise DebuggerBridgeError(
                 "Memory Origin Trace controls the debugger until it finishes or is stopped"
+            )
+        if request_interception_running:
+            raise DebuggerBridgeError(
+                "The isolated experiment controls the debugger until its request finishes"
+            )
+        if repeater_running and action != "cancel_repeater_request":
+            raise DebuggerBridgeError(
+                "Repeater controls the isolated debugger target until its request finishes or is cancelled"
+            )
+        if object_experiment_running:
+            raise DebuggerBridgeError(
+                "Object Lab controls the isolated debugger target until its action finishes"
+            )
+        if runtime_hooks_active and action != "disarm_runtime_hooks":
+            raise DebuggerBridgeError(
+                "Runtime Hooks controls the isolated debugger target until it is disarmed"
             )
         if action == "pause":
             self._command("Debugger.pause")
@@ -790,6 +1176,42 @@ class DebuggerBridge:
             with self._lock:
                 self._memory_origin_trace = self._empty_memory_origin_trace()
                 self._changed()
+        elif action == "create_request_interception_experiment":
+            return self._create_request_interception_experiment()
+        elif action == "navigate_object_experiment":
+            return self._navigate_object_experiment(request)
+        elif action == "search_object_experiment":
+            return self._search_object_experiment(request)
+        elif action == "mutate_object_experiment":
+            return self._mutate_object_experiment(request)
+        elif action == "add_runtime_hook":
+            return self._add_runtime_hook(request)
+        elif action == "remove_runtime_hook":
+            return self._remove_runtime_hook(request)
+        elif action == "arm_runtime_hooks":
+            return self._arm_runtime_hooks(request)
+        elif action == "disarm_runtime_hooks":
+            return self._disarm_runtime_hooks()
+        elif action == "clear_runtime_hook_hits":
+            return self._clear_runtime_hook_hits()
+        elif action == "configure_request_interception":
+            return self._configure_request_interception(request)
+        elif action == "run_request_interception":
+            return self._run_request_interception(request)
+        elif action == "dispose_request_interception_experiment":
+            return self._dispose_request_interception_experiment()
+        elif action == "clear_request_interception_result":
+            return self._clear_request_interception_result()
+        elif action == "configure_repeater_variables":
+            return self._configure_repeater_variables(request)
+        elif action == "run_repeater_request":
+            return self._run_repeater_request(request)
+        elif action == "cancel_repeater_request":
+            return self._cancel_repeater_request()
+        elif action == "compare_repeater_history":
+            return self._compare_repeater_history(request)
+        elif action == "clear_repeater_history":
+            return self._clear_repeater_history()
         elif action == "capture_heap_diff_baseline":
             return self._capture_heap_diff_baseline()
         elif action == "compare_heap_diff":
@@ -835,6 +1257,57 @@ class DebuggerBridge:
         }
 
     def _search_live_objects(self, request: dict[str, Any]) -> dict[str, Any]:
+        criteria = self._live_object_search_criteria(request)
+        prototype_id: Optional[str] = None
+        objects_id: Optional[str] = None
+        try:
+            prototype = self._command(
+                "Runtime.evaluate",
+                {
+                    "expression": "Object.prototype",
+                    "objectGroup": "reb-live-object-search",
+                    "silent": True,
+                },
+            )
+            prototype_id = self._runtime_result_object_id(prototype, "prototype")
+            objects = self._command(
+                "Runtime.queryObjects", {"prototypeObjectId": prototype_id}, timeout=5.0
+            )
+            objects_id = self._runtime_result_object_id(
+                objects, "object collection", field="objects"
+            )
+            evaluated = self._command(
+                "Runtime.callFunctionOn",
+                {
+                    "objectId": objects_id,
+                    "functionDeclaration": LIVE_OBJECT_SEARCH_FUNCTION,
+                    "arguments": [{"value": criteria}],
+                    "returnByValue": True,
+                    "silent": True,
+                    "awaitPromise": False,
+                    "userGesture": False,
+                    "timeout": LIVE_OBJECT_SEARCH_TIMEOUT_MS,
+                },
+                timeout=3.0,
+            )
+        finally:
+            for object_id in (objects_id, prototype_id):
+                if object_id is None:
+                    continue
+                try:
+                    self._command("Runtime.releaseObject", {"objectId": object_id})
+                except DebuggerBridgeError:
+                    pass
+
+        if isinstance(evaluated.get("exceptionDetails"), dict):
+            raise DebuggerBridgeError("Live object search failed in the target")
+        remote = evaluated.get("result")
+        document = remote.get("value") if isinstance(remote, dict) else None
+        return self._normalize_live_object_search(document)
+
+    def _live_object_search_criteria(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
         property_query = self._optional_search_text(request, "property_query")
         value_query = self._optional_search_text(request, "value_query")
         class_query = self._optional_search_text(request, "class_query")
@@ -876,7 +1349,7 @@ class DebuggerBridge:
         if not any((property_query, value_query, class_query, shape is not None)):
             raise DebuggerBridgeError("Live object search requires at least one criterion")
 
-        criteria = {
+        return {
             "propertyQuery": property_query,
             "valueQuery": value_query,
             "classQuery": class_query,
@@ -891,51 +1364,6 @@ class DebuggerBridge:
             "propertyScanLimit": MAX_LIVE_OBJECT_SEARCH_PROPERTIES,
             "timeoutMs": LIVE_OBJECT_SEARCH_TIMEOUT_MS,
         }
-        prototype_id: Optional[str] = None
-        objects_id: Optional[str] = None
-        try:
-            prototype = self._command(
-                "Runtime.evaluate",
-                {
-                    "expression": "Object.prototype",
-                    "objectGroup": "reb-live-object-search",
-                    "silent": True,
-                },
-            )
-            prototype_id = self._runtime_result_object_id(prototype, "prototype")
-            objects = self._command(
-                "Runtime.queryObjects", {"prototypeObjectId": prototype_id}, timeout=5.0
-            )
-            objects_id = self._runtime_result_object_id(objects, "object collection")
-            evaluated = self._command(
-                "Runtime.callFunctionOn",
-                {
-                    "objectId": objects_id,
-                    "functionDeclaration": LIVE_OBJECT_SEARCH_FUNCTION,
-                    "arguments": [{"value": criteria}],
-                    "returnByValue": True,
-                    "silent": True,
-                    "awaitPromise": False,
-                    "userGesture": False,
-                    "throwOnSideEffect": True,
-                    "timeout": LIVE_OBJECT_SEARCH_TIMEOUT_MS,
-                },
-                timeout=3.0,
-            )
-        finally:
-            for object_id in (objects_id, prototype_id):
-                if object_id is None:
-                    continue
-                try:
-                    self._command("Runtime.releaseObject", {"objectId": object_id})
-                except DebuggerBridgeError:
-                    pass
-
-        if isinstance(evaluated.get("exceptionDetails"), dict):
-            raise DebuggerBridgeError("Live object search failed in the target")
-        remote = evaluated.get("result")
-        document = remote.get("value") if isinstance(remote, dict) else None
-        return self._normalize_live_object_search(document)
 
     def _optional_search_text(self, request: dict[str, Any], field: str) -> str:
         value = request.get(field, "")
@@ -946,8 +1374,10 @@ class DebuggerBridge:
         return value
 
     @staticmethod
-    def _runtime_result_object_id(result: dict[str, Any], label: str) -> str:
-        remote = result.get("result")
+    def _runtime_result_object_id(
+        result: dict[str, Any], label: str, *, field: str = "result"
+    ) -> str:
+        remote = result.get(field)
         object_id = remote.get("objectId") if isinstance(remote, dict) else None
         if not isinstance(object_id, str) or not object_id:
             raise ProtocolError(f"Debugger returned a malformed {label}")
@@ -1058,6 +1488,1755 @@ class DebuggerBridge:
             },
             "generation": self.generation(),
         }
+
+    def _clear_object_experiment_search_locked(self) -> Optional[str]:
+        group = self._object_experiment_group
+        releasable_group = (
+            group
+            if group is not None
+            and self._connection is not None
+            and self._target is not None
+            and self._target["id"] == self._object_experiment.get("target_id")
+            else None
+        )
+        self._object_experiment_group = None
+        self._object_experiment_objects_id = None
+        self._object_experiment_result_indices.clear()
+        self._object_experiment["search_id"] = 0
+        self._object_experiment["search"] = None
+        self._object_experiment["results"] = []
+        self._object_experiment["last_mutation"] = None
+        return releasable_group
+
+    def _release_object_experiment_group(self, group: Optional[str]) -> None:
+        if group is not None:
+            try:
+                self._command("Runtime.releaseObjectGroup", {"objectGroup": group})
+            except DebuggerBridgeError:
+                pass
+
+    def _release_object_experiment_search(self) -> None:
+        with self._lock:
+            group = self._clear_object_experiment_search_locked()
+        self._release_object_experiment_group(group)
+
+    def _require_object_experiment_target_locked(
+        self, require_navigation: bool
+    ) -> None:
+        if self._object_experiment["state"] in {
+            "navigating",
+            "searching",
+            "mutating",
+        }:
+            raise DebuggerBridgeError(
+                "Object Lab is already running an isolated-page action"
+            )
+        if (
+            self._request_interception_context_id is None
+            or not self._object_experiment["isolated"]
+            or self._object_experiment["target_id"] is None
+            or self._target is None
+            or self._target["id"] != self._object_experiment["target_id"]
+            or self._state not in {"running", "paused"}
+        ):
+            raise DebuggerBridgeError(
+                "Object Lab requires its attached disposable Experiment page"
+            )
+        if self._request_interception_pending:
+            raise DebuggerBridgeError(
+                "Wait for paused Experiment requests before using Object Lab"
+            )
+        if require_navigation and (
+            self._object_experiment["navigation_id"] <= 0
+            or not self._object_experiment["url"]
+        ):
+            raise DebuggerBridgeError(
+                "Open an HTTP or HTTPS page in Object Lab before searching"
+            )
+
+    def _navigate_object_experiment(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        url = self._required_text(
+            request, "url", MAX_INTERCEPTION_URL_BYTES
+        ).strip()
+        self._validate_request_interception_url(url)
+        with self._lock:
+            self._require_object_experiment_target_locked(require_navigation=False)
+            stale_group = self._clear_object_experiment_search_locked()
+            navigation_id = self._next_object_experiment_navigation_id
+            self._next_object_experiment_navigation_id += 1
+            self._object_experiment["state"] = "navigating"
+            self._object_experiment["navigation_id"] = navigation_id
+            self._object_experiment["url"] = self._redacted_request_url(url)
+            self._object_experiment["message"] = (
+                "Opening one credential-free page inside the disposable context."
+            )
+            self._changed()
+        self._release_object_experiment_group(stale_group)
+
+        try:
+            navigation = self._command(
+                "Page.navigate", {"url": url}, timeout=5.0
+            )
+            error_text = navigation.get("errorText")
+            if isinstance(error_text, str) and error_text:
+                raise DebuggerBridgeError(
+                    self._truncate_text(f"Object Lab navigation failed: {error_text}", 512)
+                )
+            deadline = time.monotonic() + OBJECT_EXPERIMENT_NAVIGATION_TIMEOUT_SECONDS
+            loaded_url = url
+            while True:
+                if time.monotonic() >= deadline:
+                    raise DebuggerBridgeError(
+                        "Object Lab page did not become interactive within 15 seconds"
+                    )
+                try:
+                    evaluated = self._command(
+                        "Runtime.evaluate",
+                        {
+                            "expression": (
+                                "({protocolVersion:1,readyState:document.readyState,"
+                                "url:location.href})"
+                            ),
+                            "returnByValue": True,
+                            "silent": True,
+                            "throwOnSideEffect": True,
+                        },
+                        timeout=2.0,
+                    )
+                    if isinstance(evaluated.get("exceptionDetails"), dict):
+                        raise DebuggerBridgeError("Navigation is still replacing the page")
+                    remote = evaluated.get("result")
+                    status = remote.get("value") if isinstance(remote, dict) else None
+                    if (
+                        isinstance(status, dict)
+                        and status.get("protocolVersion") == 1
+                        and status.get("readyState") in {"interactive", "complete"}
+                        and isinstance(status.get("url"), str)
+                    ):
+                        loaded_url = status["url"]
+                        break
+                except DebuggerBridgeError:
+                    pass
+                time.sleep(0.05)
+            final_url = urlunparse(urlparse(loaded_url)._replace(fragment=""))
+            self._validate_request_interception_url(final_url)
+        except DebuggerBridgeError as exception:
+            with self._lock:
+                if self._object_experiment["navigation_id"] == navigation_id:
+                    self._object_experiment["state"] = "error"
+                    self._object_experiment["message"] = self._truncate_text(
+                        str(exception), 512
+                    )
+                    self._changed()
+            raise
+
+        with self._lock:
+            if self._object_experiment["navigation_id"] != navigation_id:
+                raise DebuggerBridgeError("Object Lab navigation became stale")
+            self._object_experiment["state"] = "loaded"
+            self._object_experiment["url"] = self._redacted_request_url(loaded_url)
+            self._object_experiment["message"] = (
+                "Isolated page loaded. Run a bounded live-object search."
+            )
+            self._changed()
+            experiment = copy.deepcopy(self._object_experiment)
+        return {
+            "ok": True,
+            "object_experiment": experiment,
+            "generation": self.generation(),
+        }
+
+    def _search_object_experiment(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        criteria = self._live_object_search_criteria(request)
+        with self._lock:
+            self._require_object_experiment_target_locked(require_navigation=True)
+            stale_group = self._clear_object_experiment_search_locked()
+            search_id = self._next_object_experiment_search_id
+            self._next_object_experiment_search_id += 1
+            session_id = self._object_experiment["session_id"]
+            navigation_id = self._object_experiment["navigation_id"]
+            target_id = self._object_experiment["target_id"]
+            group = f"reb-object-experiment-{session_id}-{navigation_id}-{search_id}"
+            self._object_experiment["state"] = "searching"
+            self._object_experiment["message"] = (
+                "Searching the isolated page without invoking property getters."
+            )
+            self._changed()
+        self._release_object_experiment_group(stale_group)
+
+        prototype_id: Optional[str] = None
+        objects_id: Optional[str] = None
+        try:
+            prototype = self._command(
+                "Runtime.evaluate",
+                {
+                    "expression": "Object.prototype",
+                    "objectGroup": group,
+                    "silent": True,
+                },
+            )
+            prototype_id = self._runtime_result_object_id(prototype, "prototype")
+            objects = self._command(
+                "Runtime.queryObjects",
+                {"prototypeObjectId": prototype_id, "objectGroup": group},
+                timeout=5.0,
+            )
+            objects_id = self._runtime_result_object_id(
+                objects, "object collection", field="objects"
+            )
+            evaluated = self._command(
+                "Runtime.callFunctionOn",
+                {
+                    "objectId": objects_id,
+                    "functionDeclaration": LIVE_OBJECT_SEARCH_FUNCTION,
+                    "arguments": [{"value": criteria}],
+                    "returnByValue": True,
+                    "silent": True,
+                    "awaitPromise": False,
+                    "userGesture": False,
+                    "timeout": LIVE_OBJECT_SEARCH_TIMEOUT_MS,
+                },
+                timeout=3.0,
+            )
+            if isinstance(evaluated.get("exceptionDetails"), dict):
+                raise DebuggerBridgeError("Live object search failed in Object Lab")
+            remote = evaluated.get("result")
+            document = remote.get("value") if isinstance(remote, dict) else None
+            normalized = self._normalize_live_object_search(document)["search"]
+            indices: set[int] = set()
+            for result in normalized["results"]:
+                if not result["id"].isdigit():
+                    raise ProtocolError("Object Lab returned an invalid result identifier")
+                index = int(result["id"])
+                if index >= normalized["total_objects"] or index in indices:
+                    raise ProtocolError("Object Lab returned a stale result identifier")
+                indices.add(index)
+        except DebuggerBridgeError as exception:
+            try:
+                self._command("Runtime.releaseObjectGroup", {"objectGroup": group})
+            except DebuggerBridgeError:
+                pass
+            with self._lock:
+                if (
+                    self._object_experiment["session_id"] == session_id
+                    and self._object_experiment["navigation_id"] == navigation_id
+                ):
+                    self._object_experiment["state"] = "error"
+                    self._object_experiment["message"] = self._truncate_text(
+                        str(exception), 512
+                    )
+                    self._changed()
+            raise
+        finally:
+            if prototype_id is not None:
+                try:
+                    self._command("Runtime.releaseObject", {"objectId": prototype_id})
+                except DebuggerBridgeError:
+                    pass
+
+        stale = False
+        with self._lock:
+            stale = (
+                self._object_experiment["session_id"] != session_id
+                or self._object_experiment["navigation_id"] != navigation_id
+                or self._object_experiment["target_id"] != target_id
+            )
+            if not stale:
+                self._object_experiment_group = group
+                self._object_experiment_objects_id = objects_id
+                self._object_experiment_result_indices = indices
+                self._object_experiment["state"] = "loaded"
+                self._object_experiment["search_id"] = search_id
+                self._object_experiment["search"] = {
+                    key: value for key, value in normalized.items() if key != "results"
+                }
+                self._object_experiment["results"] = normalized["results"]
+                self._object_experiment["message"] = (
+                    f"Found {len(normalized['results'])} matching live objects in the isolated page."
+                )
+                self._changed()
+                experiment = copy.deepcopy(self._object_experiment)
+        if stale:
+            try:
+                self._command("Runtime.releaseObjectGroup", {"objectGroup": group})
+            except DebuggerBridgeError:
+                pass
+            raise DebuggerBridgeError("Object Lab search became stale")
+        return {
+            "ok": True,
+            "object_experiment": experiment,
+            "generation": self.generation(),
+        }
+
+    def _mutate_object_experiment(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        operation = request.get("operation")
+        if operation not in {"set", "delete"}:
+            raise DebuggerBridgeError("Object Lab mutation operation is invalid")
+        if request.get("confirmed") is not True:
+            raise DebuggerBridgeError("Object Lab mutation requires explicit confirmation")
+        search_id = request.get("search_id")
+        if (
+            not isinstance(search_id, int)
+            or isinstance(search_id, bool)
+            or search_id <= 0
+            or search_id > 2**53 - 1
+        ):
+            raise DebuggerBridgeError("Object Lab search identifier is invalid")
+        result_id = self._required_text(request, "result_id", 128)
+        if not result_id.isdigit():
+            raise DebuggerBridgeError("Object Lab result identifier is invalid")
+        result_index = int(result_id)
+        property_name = self._required_text(
+            request, "property", MAX_OBJECT_EXPERIMENT_PROPERTY_BYTES
+        )
+        if (
+            property_name in FORBIDDEN_OBJECT_EXPERIMENT_PROPERTIES
+            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in property_name)
+        ):
+            raise DebuggerBridgeError("Object Lab property name is not allowed")
+
+        value: Any = None
+        value_bytes = 0
+        value_digest: Optional[str] = None
+        if operation == "set":
+            if "value" not in request:
+                raise DebuggerBridgeError("Object Lab set requires a JSON value")
+            value, canonical = self._normalize_object_experiment_value(request["value"])
+            value_bytes = len(canonical)
+            value_digest = hashlib.sha256(canonical).hexdigest()
+        elif "value" in request:
+            raise DebuggerBridgeError("Object Lab delete does not accept a value")
+
+        with self._lock:
+            self._require_object_experiment_target_locked(require_navigation=True)
+            if (
+                self._object_experiment["search_id"] != search_id
+                or self._object_experiment_objects_id is None
+                or self._object_experiment_group is None
+                or result_index not in self._object_experiment_result_indices
+            ):
+                raise DebuggerBridgeError(
+                    "Object Lab result is stale; run the live-object search again"
+                )
+            if (
+                self._object_experiment["mutation_attempts"]
+                >= MAX_OBJECT_EXPERIMENT_MUTATIONS
+            ):
+                raise DebuggerBridgeError(
+                    "Object Lab reached the 256-attempt session limit"
+                )
+            selected = next(
+                (
+                    result
+                    for result in self._object_experiment["results"]
+                    if result["id"] == result_id
+                ),
+                None,
+            )
+            if selected is None:
+                raise DebuggerBridgeError("Object Lab result is unavailable")
+            objects_id = self._object_experiment_objects_id
+            group = self._object_experiment_group
+            session_id = self._object_experiment["session_id"]
+            navigation_id = self._object_experiment["navigation_id"]
+            target_class = selected["class_name"]
+            similarity = selected["similarity"]
+            self._object_experiment["mutation_attempts"] += 1
+            self._object_experiment["state"] = "mutating"
+            self._object_experiment["message"] = (
+                f"Applying one confirmed {operation} operation inside Object Lab."
+            )
+            self._changed()
+
+        candidate_id: Optional[str] = None
+        try:
+            candidate = self._command(
+                "Runtime.callFunctionOn",
+                {
+                    "objectId": objects_id,
+                    "functionDeclaration": (
+                        "function(index){const value=this[index];"
+                        "if((typeof value!==\"object\"&&typeof value!==\"function\")||value===null)"
+                        "throw new TypeError(\"Object Lab result is unavailable\");return value;}"
+                    ),
+                    "arguments": [{"value": result_index}],
+                    "returnByValue": False,
+                    "objectGroup": group,
+                    "silent": True,
+                },
+            )
+            if isinstance(candidate.get("exceptionDetails"), dict):
+                raise DebuggerBridgeError("Object Lab result is no longer available")
+            candidate_id = self._runtime_result_object_id(candidate, "object result")
+            config: dict[str, Any] = {
+                "operation": operation,
+                "property": property_name,
+                "previewProperties": MAX_LIVE_OBJECT_PREVIEW_PROPERTIES,
+                "resultId": result_id,
+                "similarity": similarity,
+            }
+            if operation == "set":
+                config["value"] = value
+            evaluated = self._command(
+                "Runtime.callFunctionOn",
+                {
+                    "objectId": candidate_id,
+                    "functionDeclaration": OBJECT_EXPERIMENT_MUTATE_FUNCTION,
+                    "arguments": [{"value": config}],
+                    "returnByValue": True,
+                    "silent": True,
+                    "awaitPromise": False,
+                    "userGesture": False,
+                    "timeout": 1_000,
+                },
+                timeout=3.0,
+            )
+            if isinstance(evaluated.get("exceptionDetails"), dict):
+                raise DebuggerBridgeError("Object Lab mutation failed in the target")
+            remote = evaluated.get("result")
+            document = remote.get("value") if isinstance(remote, dict) else None
+            mutation = self._normalize_object_experiment_mutation(document)
+        except DebuggerBridgeError as exception:
+            mutation = {
+                "ok": False,
+                "outcome": "error",
+                "error": self._truncate_text(str(exception), 512),
+                "before": self._empty_object_experiment_descriptor("unknown"),
+                "after": self._empty_object_experiment_descriptor("unknown"),
+                "object": None,
+            }
+        finally:
+            if candidate_id is not None:
+                try:
+                    self._command("Runtime.releaseObject", {"objectId": candidate_id})
+                except DebuggerBridgeError:
+                    pass
+
+        with self._lock:
+            if (
+                self._object_experiment["session_id"] != session_id
+                or self._object_experiment["navigation_id"] != navigation_id
+            ):
+                raise DebuggerBridgeError("Object Lab mutation became stale")
+            search_invalidated = self._object_experiment["search_id"] != search_id
+            audit = self._append_object_experiment_audit_locked(
+                operation=operation,
+                property_name=property_name,
+                result_id=result_id,
+                search_id=search_id,
+                target_class=target_class,
+                mutation=mutation,
+                value_bytes=value_bytes,
+                value_digest=value_digest,
+            )
+            if mutation["object"] is not None and not search_invalidated:
+                self._object_experiment["results"] = [
+                    mutation["object"] if result["id"] == result_id else result
+                    for result in self._object_experiment["results"]
+                ]
+            if not search_invalidated:
+                self._object_experiment["state"] = "loaded"
+            self._object_experiment["last_mutation"] = {
+                "audit_id": audit["id"],
+                "ok": mutation["ok"],
+                "operation": operation,
+                "property": property_name,
+                "result_id": result_id,
+                "outcome": mutation["outcome"],
+                "error": mutation["error"],
+                "before": mutation["before"],
+                "after": mutation["after"],
+                "value_bytes": value_bytes,
+                "value_digest": value_digest,
+            }
+            self._object_experiment["message"] = (
+                f"Object Lab {operation} completed and audit entry {audit['id']} was recorded."
+                if mutation["ok"]
+                else f"Object Lab rejected the mutation: {mutation['error']}"
+            )
+            if search_invalidated:
+                self._object_experiment["message"] += (
+                    " The target disconnected, so run the search again."
+                )
+            self._changed()
+            experiment = copy.deepcopy(self._object_experiment)
+        return {
+            "ok": True,
+            "object_experiment": experiment,
+            "generation": self.generation(),
+        }
+
+    def _normalize_object_experiment_value(
+        self, value: Any
+    ) -> tuple[Any, bytes]:
+        entries = 0
+
+        def validate(candidate: Any, depth: int) -> None:
+            nonlocal entries
+            if depth > MAX_OBJECT_EXPERIMENT_VALUE_DEPTH:
+                raise DebuggerBridgeError("Object Lab JSON value exceeds depth 8")
+            if candidate is None or isinstance(candidate, bool):
+                return
+            if isinstance(candidate, int):
+                if abs(candidate) > 2**53 - 1:
+                    raise DebuggerBridgeError(
+                        "Object Lab integer exceeds JavaScript's exact range"
+                    )
+                return
+            if isinstance(candidate, float):
+                if not math.isfinite(candidate):
+                    raise DebuggerBridgeError("Object Lab number must be finite")
+                return
+            if isinstance(candidate, str):
+                if len(candidate.encode("utf-8")) > MAX_OBJECT_EXPERIMENT_STRING_BYTES:
+                    raise DebuggerBridgeError("Object Lab JSON string exceeds 4 KiB")
+                return
+            if isinstance(candidate, list):
+                entries += len(candidate)
+                if entries > MAX_OBJECT_EXPERIMENT_VALUE_ENTRIES:
+                    raise DebuggerBridgeError("Object Lab JSON value exceeds 256 entries")
+                for item in candidate:
+                    validate(item, depth + 1)
+                return
+            if isinstance(candidate, dict):
+                entries += len(candidate)
+                if entries > MAX_OBJECT_EXPERIMENT_VALUE_ENTRIES:
+                    raise DebuggerBridgeError("Object Lab JSON value exceeds 256 entries")
+                for key, item in candidate.items():
+                    if (
+                        not isinstance(key, str)
+                        or len(key.encode("utf-8"))
+                        > MAX_OBJECT_EXPERIMENT_STRING_BYTES
+                    ):
+                        raise DebuggerBridgeError(
+                            "Object Lab JSON object key exceeds 4 KiB"
+                        )
+                    validate(item, depth + 1)
+                return
+            raise DebuggerBridgeError("Object Lab set value must be JSON data")
+
+        validate(value, 0)
+        try:
+            canonical = json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exception:
+            raise DebuggerBridgeError("Object Lab set value must be valid JSON") from exception
+        if len(canonical) > MAX_OBJECT_EXPERIMENT_VALUE_BYTES:
+            raise DebuggerBridgeError("Object Lab JSON value exceeds 16 KiB")
+        return value, canonical
+
+    @staticmethod
+    def _empty_object_experiment_descriptor(value_type: str) -> dict[str, Any]:
+        return {
+            "exists": False,
+            "type": value_type,
+            "class_name": "",
+            "writable": False,
+            "configurable": False,
+            "preview": None,
+        }
+
+    def _normalize_object_experiment_descriptor(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise ProtocolError("Object Lab returned a malformed property descriptor")
+        exists = value.get("exists")
+        value_type = value.get("type")
+        class_name = value.get("className", "")
+        writable = value.get("writable")
+        configurable = value.get("configurable")
+        preview = value.get("preview")
+        if (
+            not isinstance(exists, bool)
+            or not isinstance(value_type, str)
+            or not value_type
+            or len(value_type.encode("utf-8")) > 128
+            or not isinstance(class_name, str)
+            or len(class_name.encode("utf-8")) > 256
+            or not isinstance(writable, bool)
+            or not isinstance(configurable, bool)
+            or (preview is not None and not isinstance(preview, str))
+        ):
+            raise ProtocolError("Object Lab returned an invalid property descriptor")
+        return {
+            "exists": exists,
+            "type": value_type,
+            "class_name": class_name,
+            "writable": writable,
+            "configurable": configurable,
+            "preview": self._truncate_text(preview, 512)
+            if isinstance(preview, str)
+            else None,
+        }
+
+    def _normalize_object_experiment_mutation(self, value: Any) -> dict[str, Any]:
+        outcomes = {
+            "created",
+            "updated",
+            "deleted",
+            "missing",
+            "non_configurable",
+            "rejected",
+            "accessor",
+            "non_writable",
+            "non_extensible",
+            "error",
+        }
+        if (
+            not isinstance(value, dict)
+            or value.get("protocolVersion") != 1
+            or not isinstance(value.get("ok"), bool)
+            or value.get("outcome") not in outcomes
+        ):
+            raise ProtocolError("Object Lab returned a malformed mutation result")
+        error = value.get("error")
+        if error is not None and (
+            not isinstance(error, str) or len(error.encode("utf-8")) > 512
+        ):
+            raise ProtocolError("Object Lab returned an invalid mutation error")
+        if value["ok"] != (error is None):
+            raise ProtocolError("Object Lab returned an inconsistent mutation result")
+        before = self._normalize_object_experiment_descriptor(value.get("before"))
+        after = self._normalize_object_experiment_descriptor(value.get("after"))
+        raw_object = value.get("object")
+        normalized_object = None
+        if raw_object is not None:
+            synthetic = {
+                "protocolVersion": 2,
+                "analyzed": 1,
+                "totalObjects": 1,
+                "resultLimit": MAX_LIVE_OBJECT_RESULTS,
+                "resultLimitReached": False,
+                "scanLimitReached": False,
+                "propertyLimitReached": False,
+                "timedOut": False,
+                "durationMs": 0,
+                "results": [raw_object],
+            }
+            normalized_object = self._normalize_live_object_search(synthetic)["search"][
+                "results"
+            ][0]
+        if value["ok"] and normalized_object is None:
+            raise ProtocolError("Object Lab omitted the patched object preview")
+        return {
+            "ok": value["ok"],
+            "outcome": value["outcome"],
+            "error": error,
+            "before": before,
+            "after": after,
+            "object": normalized_object,
+        }
+
+    def _append_object_experiment_audit_locked(
+        self,
+        *,
+        operation: str,
+        property_name: str,
+        result_id: str,
+        search_id: int,
+        target_class: str,
+        mutation: dict[str, Any],
+        value_bytes: int,
+        value_digest: Optional[str],
+    ) -> dict[str, Any]:
+        entry = {
+            "id": self._next_object_experiment_audit_id,
+            "occurred_at_ms": int(time.time() * 1_000),
+            "session_id": self._object_experiment["session_id"],
+            "navigation_id": self._object_experiment["navigation_id"],
+            "search_id": search_id,
+            "result_id": result_id,
+            "operation": operation,
+            "property": property_name,
+            "target_class": self._truncate_text(target_class, 256),
+            "outcome": mutation["outcome"],
+            "success": mutation["ok"],
+            "before_type": mutation["before"]["type"],
+            "after_type": mutation["after"]["type"],
+            "value_bytes": value_bytes,
+            "value_digest": value_digest,
+            "url": self._object_experiment["url"],
+        }
+        self._next_object_experiment_audit_id += 1
+        audit = self._object_experiment["audit"]
+        audit.append(entry)
+        if len(audit) > MAX_OBJECT_EXPERIMENT_AUDIT_ENTRIES:
+            del audit[: len(audit) - MAX_OBJECT_EXPERIMENT_AUDIT_ENTRIES]
+            self._object_experiment["audit_evictions"] += 1
+        return entry
+
+    def _runtime_hook_target_ready_locked(self) -> None:
+        if (
+            self._request_interception_context_id is None
+            or not self._runtime_hooks["isolated"]
+            or self._runtime_hooks["target_id"] is None
+            or self._target is None
+            or self._target["id"] != self._runtime_hooks["target_id"]
+            or self._state not in {"running", "paused"}
+        ):
+            raise DebuggerBridgeError(
+                "Runtime Hooks requires its attached disposable Experiment page"
+            )
+        if self._request_interception_pending:
+            raise DebuggerBridgeError(
+                "Wait for paused Experiment requests before using Runtime Hooks"
+            )
+        if self._runtime_hook_processing:
+            raise DebuggerBridgeError("Runtime Hooks is handling a function call")
+
+    @staticmethod
+    def _runtime_hook_text(
+        request: dict[str, Any], field: str, limit: int
+    ) -> str:
+        value = request.get(field, "")
+        if not isinstance(value, str) or len(value.encode("utf-8")) > limit:
+            raise DebuggerBridgeError(
+                f"Runtime Hooks {field.replace('_', ' ')} is invalid or oversized"
+            )
+        return value
+
+    @classmethod
+    def _runtime_hook_source_label(cls, url: str) -> str:
+        if not url:
+            return "(anonymous script)"
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            return "(anonymous script)"
+        if parsed.scheme in {"http", "https"}:
+            return cls._redacted_request_url(url) or "(anonymous script)"
+        if parsed.scheme == "data":
+            return "data:(inline script)"
+        return cls._truncate_text(
+            urlunparse(parsed._replace(query="", fragment="")),
+            MAX_INTERCEPTION_URL_BYTES,
+        )
+
+    @staticmethod
+    def _normalize_runtime_hook_json(value: Any) -> tuple[Any, bytes]:
+        entries = 0
+
+        def validate(candidate: Any, depth: int) -> None:
+            nonlocal entries
+            if depth > MAX_OBJECT_EXPERIMENT_VALUE_DEPTH:
+                raise DebuggerBridgeError("Runtime Hooks JSON exceeds depth 8")
+            if candidate is None or isinstance(candidate, bool):
+                return
+            if isinstance(candidate, int):
+                if abs(candidate) > 2**53 - 1:
+                    raise DebuggerBridgeError(
+                        "Runtime Hooks integer exceeds JavaScript's exact range"
+                    )
+                return
+            if isinstance(candidate, float):
+                if not math.isfinite(candidate):
+                    raise DebuggerBridgeError("Runtime Hooks number must be finite")
+                return
+            if isinstance(candidate, str):
+                if len(candidate.encode("utf-8")) > MAX_RUNTIME_HOOK_RETURN_BYTES:
+                    raise DebuggerBridgeError("Runtime Hooks JSON string exceeds 8 KiB")
+                return
+            if isinstance(candidate, list):
+                entries += len(candidate)
+                if entries > MAX_OBJECT_EXPERIMENT_VALUE_ENTRIES:
+                    raise DebuggerBridgeError("Runtime Hooks JSON exceeds 256 entries")
+                for item in candidate:
+                    validate(item, depth + 1)
+                return
+            if isinstance(candidate, dict):
+                entries += len(candidate)
+                if entries > MAX_OBJECT_EXPERIMENT_VALUE_ENTRIES:
+                    raise DebuggerBridgeError("Runtime Hooks JSON exceeds 256 entries")
+                for key, item in candidate.items():
+                    if not isinstance(key, str) or len(key.encode("utf-8")) > 4096:
+                        raise DebuggerBridgeError("Runtime Hooks JSON key is invalid")
+                    validate(item, depth + 1)
+                return
+            raise DebuggerBridgeError("Runtime Hooks replacement must be JSON data")
+
+        validate(value, 0)
+        try:
+            canonical = json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exception:
+            raise DebuggerBridgeError(
+                "Runtime Hooks replacement must be valid JSON"
+            ) from exception
+        if len(canonical) > MAX_RUNTIME_HOOK_RETURN_BYTES:
+            raise DebuggerBridgeError("Runtime Hooks replacement exceeds 8 KiB")
+        return value, canonical
+
+    def _normalize_runtime_hook_definition(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        label = self._runtime_hook_text(
+            request, "label", MAX_RUNTIME_HOOK_LABEL_BYTES
+        ).strip()
+        if not label:
+            raise DebuggerBridgeError("Runtime Hooks label is required")
+        script_id = self._required_text(request, "script_id", MAX_TARGET_ID_BYTES)
+        line = request.get("line")
+        column = request.get("column", 0)
+        if not all(
+            isinstance(value, int) and not isinstance(value, bool)
+            for value in (line, column)
+        ) or not (0 <= line < 2**31 and 0 <= column < 2**31):
+            raise DebuggerBridgeError("Runtime Hooks source location is invalid")
+        entry_enabled = request.get("entry_enabled", True)
+        return_enabled = request.get("return_enabled", True)
+        if not isinstance(entry_enabled, bool) or not isinstance(return_enabled, bool):
+            raise DebuggerBridgeError("Runtime Hooks phases must be boolean")
+        if not entry_enabled and not return_enabled:
+            raise DebuggerBridgeError("Runtime Hooks requires an entry or return phase")
+        condition = self._runtime_hook_text(
+            request, "condition", MAX_RUNTIME_HOOK_CONDITION_BYTES
+        )
+        entry_logic = self._runtime_hook_text(
+            request, "entry_logic", MAX_RUNTIME_HOOK_LOGIC_BYTES
+        )
+        return_logic = self._runtime_hook_text(
+            request, "return_logic", MAX_RUNTIME_HOOK_LOGIC_BYTES
+        )
+        return_mode = request.get("return_mode", "none")
+        if return_mode not in {"none", "json", "expression"}:
+            raise DebuggerBridgeError("Runtime Hooks return mode is invalid")
+        return_expression = ""
+        return_value: Any = None
+        return_value_bytes = 0
+        if return_mode == "expression":
+            return_expression = self._runtime_hook_text(
+                request, "return_expression", MAX_RUNTIME_HOOK_RETURN_BYTES
+            ).strip()
+            if not return_expression:
+                raise DebuggerBridgeError(
+                    "Runtime Hooks return expression is required"
+                )
+        elif return_mode == "json":
+            if "return_value" not in request:
+                raise DebuggerBridgeError("Runtime Hooks JSON replacement is required")
+            return_value, canonical = self._normalize_runtime_hook_json(
+                request["return_value"]
+            )
+            return_value_bytes = len(canonical)
+        if return_mode != "none" and not return_enabled:
+            raise DebuggerBridgeError(
+                "Runtime Hooks return replacement requires the return phase"
+            )
+        with self._lock:
+            script = self._scripts.get(script_id)
+            if script is None or script["language"] != "JavaScript":
+                raise DebuggerBridgeError(
+                    "Runtime Hooks requires a live JavaScript source"
+                )
+            if line < script["start_line"] or line > script["end_line"]:
+                raise DebuggerBridgeError(
+                    "Runtime Hooks location is outside the selected script"
+                )
+            source_url = self._runtime_hook_source_label(script["url"])
+        return {
+            "id": 0,
+            "label": label,
+            "script_id": script_id,
+            "url": source_url,
+            "line": line,
+            "column": column,
+            "entry_enabled": entry_enabled,
+            "return_enabled": return_enabled,
+            "condition": condition,
+            "entry_logic": entry_logic,
+            "return_logic": return_logic,
+            "return_mode": return_mode,
+            "return_expression": return_expression,
+            "return_value": return_value,
+            "return_value_bytes": return_value_bytes,
+            "resolved": None,
+        }
+
+    def _add_runtime_hook(self, request: dict[str, Any]) -> dict[str, Any]:
+        definition = self._normalize_runtime_hook_definition(request)
+        with self._lock:
+            self._runtime_hook_target_ready_locked()
+            if self._runtime_hooks["state"] in {
+                "arming",
+                "armed",
+                "handling",
+                "stopping",
+            }:
+                raise DebuggerBridgeError(
+                    "Disarm Runtime Hooks before changing definitions"
+                )
+            definitions = self._runtime_hooks["definitions"]
+            if len(definitions) >= MAX_RUNTIME_HOOKS:
+                raise DebuggerBridgeError("Runtime Hooks reached the 8-definition limit")
+            if any(
+                item["script_id"] == definition["script_id"]
+                and item["line"] == definition["line"]
+                and item["column"] == definition["column"]
+                for item in definitions
+            ):
+                raise DebuggerBridgeError(
+                    "A Runtime Hook already uses this script location"
+                )
+            definition["id"] = self._next_runtime_hook_id
+            self._next_runtime_hook_id += 1
+            definitions.append(definition)
+            self._runtime_hooks["state"] = "ready"
+            self._runtime_hooks["last_failure"] = None
+            self._runtime_hooks["message"] = (
+                f"Added {definition['label']}. Confirm mutation permission to arm."
+            )
+            self._changed()
+            hooks = copy.deepcopy(self._runtime_hooks)
+        return {"ok": True, "runtime_hooks": hooks, "generation": self.generation()}
+
+    def _remove_runtime_hook(self, request: dict[str, Any]) -> dict[str, Any]:
+        hook_id = request.get("hook_id")
+        if (
+            not isinstance(hook_id, int)
+            or isinstance(hook_id, bool)
+            or hook_id <= 0
+        ):
+            raise DebuggerBridgeError("Runtime Hooks definition identifier is invalid")
+        with self._lock:
+            self._runtime_hook_target_ready_locked()
+            if self._runtime_hooks["state"] in {
+                "arming",
+                "armed",
+                "handling",
+                "stopping",
+            }:
+                raise DebuggerBridgeError(
+                    "Disarm Runtime Hooks before changing definitions"
+                )
+            before = len(self._runtime_hooks["definitions"])
+            self._runtime_hooks["definitions"] = [
+                item
+                for item in self._runtime_hooks["definitions"]
+                if item["id"] != hook_id
+            ]
+            if len(self._runtime_hooks["definitions"]) == before:
+                raise DebuggerBridgeError("Runtime Hooks definition is unavailable")
+            self._runtime_hooks["message"] = "Runtime Hook definition removed."
+            self._changed()
+            hooks = copy.deepcopy(self._runtime_hooks)
+        return {"ok": True, "runtime_hooks": hooks, "generation": self.generation()}
+
+    def _runtime_hook_possible_locations(
+        self, definition: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        result = self._command(
+            "Debugger.getPossibleBreakpoints",
+            {
+                "start": {
+                    "scriptId": definition["script_id"],
+                    "lineNumber": definition["line"],
+                    "columnNumber": definition["column"],
+                },
+                "restrictToFunction": True,
+            },
+            timeout=3.0,
+        )
+        raw_locations = result.get("locations")
+        if not isinstance(raw_locations, list):
+            raise ProtocolError("Debugger returned malformed hook locations")
+        first_location = None
+        return_locations = []
+        return_keys: set[tuple[str, int, int]] = set()
+        for raw in raw_locations:
+            location = self._parse_location(raw)
+            if location is None or location["script_id"] != definition["script_id"]:
+                continue
+            location["type"] = (
+                raw.get("type")
+                if isinstance(raw, dict)
+                and raw.get("type") in {"debuggerStatement", "call", "return"}
+                else "other"
+            )
+            if first_location is None:
+                first_location = location
+            if location["type"] != "return" or not definition["return_enabled"]:
+                continue
+            key = (location["script_id"], location["line"], location["column"])
+            if key in return_keys:
+                continue
+            if len(return_locations) >= MAX_RUNTIME_HOOK_RETURN_POINTS:
+                raise DebuggerBridgeError(
+                    f"{definition['label']} exceeds 32 synchronous return points"
+                )
+            return_keys.add(key)
+            return_locations.append(location)
+        if first_location is None:
+            raise DebuggerBridgeError(
+                f"No breakable function was found for {definition['label']}"
+            )
+        first_key = (
+            first_location["script_id"],
+            first_location["line"],
+            first_location["column"],
+        )
+        return [
+            first_location,
+            *(
+                location
+                for location in return_locations
+                if (
+                    location["script_id"],
+                    location["line"],
+                    location["column"],
+                )
+                != first_key
+            ),
+        ]
+
+    def _arm_runtime_hooks(self, request: dict[str, Any]) -> dict[str, Any]:
+        if request.get("confirmed") is not True:
+            raise DebuggerBridgeError(
+                "Runtime Hooks requires explicit isolated-page mutation confirmation"
+            )
+        with self._lock:
+            self._runtime_hook_target_ready_locked()
+            if not self._runtime_hooks["definitions"]:
+                raise DebuggerBridgeError("Add a Runtime Hook before arming")
+            if not self._breakpoints_active:
+                raise DebuggerBridgeError(
+                    "Activate debugger breakpoints before arming Runtime Hooks"
+                )
+            if self._runtime_hooks["state"] in {
+                "arming",
+                "armed",
+                "handling",
+                "stopping",
+            }:
+                raise DebuggerBridgeError("Runtime Hooks is already active")
+            self._runtime_hook_epoch += 1
+            epoch = self._runtime_hook_epoch
+            definitions = copy.deepcopy(self._runtime_hooks["definitions"])
+            self._runtime_hook_stop_requested = False
+            self._runtime_hook_deferred_pause = None
+            self._runtime_hooks["state"] = "arming"
+            self._runtime_hooks["last_failure"] = None
+            self._runtime_hooks["message"] = (
+                "Resolving bounded entry and synchronous return points."
+            )
+            self._changed()
+
+        point_specs: list[dict[str, Any]] = []
+        installed: dict[str, dict[str, Any]] = {}
+        try:
+            for definition in definitions:
+                locations = self._runtime_hook_possible_locations(definition)
+                returns = [item for item in locations if item["type"] == "return"]
+                if definition["return_enabled"] and not returns:
+                    raise DebuggerBridgeError(
+                        f"{definition['label']} has no synchronous return point"
+                    )
+                by_location: dict[tuple[str, int, int], dict[str, Any]] = {}
+                if definition["entry_enabled"]:
+                    entry = locations[0]
+                    key = (entry["script_id"], entry["line"], entry["column"])
+                    by_location[key] = {
+                        "hook_id": definition["id"],
+                        "location": entry,
+                        "phases": ["entry"],
+                    }
+                if definition["return_enabled"]:
+                    for location in returns:
+                        key = (
+                            location["script_id"],
+                            location["line"],
+                            location["column"],
+                        )
+                        spec = by_location.setdefault(
+                            key,
+                            {
+                                "hook_id": definition["id"],
+                                "location": location,
+                                "phases": [],
+                            },
+                        )
+                        if "return" not in spec["phases"]:
+                            spec["phases"].append("return")
+                definition["resolved"] = {
+                    "entry_points": 1 if definition["entry_enabled"] else 0,
+                    "return_points": len(returns)
+                    if definition["return_enabled"]
+                    else 0,
+                }
+                point_specs.extend(by_location.values())
+                with self._lock:
+                    if self._runtime_hook_stop_requested or epoch != self._runtime_hook_epoch:
+                        raise DebuggerBridgeError("Runtime Hooks arming was cancelled")
+            if len(point_specs) > MAX_RUNTIME_HOOK_BREAKPOINTS:
+                raise DebuggerBridgeError(
+                    "Runtime Hooks exceeds the 64 active-point limit"
+                )
+            for spec in point_specs:
+                location = spec["location"]
+                result = self._command(
+                    "Debugger.setBreakpoint",
+                    {
+                        "location": {
+                            "scriptId": location["script_id"],
+                            "lineNumber": location["line"],
+                            "columnNumber": location["column"],
+                        }
+                    },
+                )
+                breakpoint_id = self._required_protocol_identifier(
+                    result.get("breakpointId"), "runtime hook breakpoint"
+                )
+                installed[breakpoint_id] = spec
+                with self._lock:
+                    if self._runtime_hook_stop_requested or epoch != self._runtime_hook_epoch:
+                        raise DebuggerBridgeError("Runtime Hooks arming was cancelled")
+        except BaseException as exception:
+            for breakpoint_id in installed:
+                try:
+                    self._command(
+                        "Debugger.removeBreakpoint", {"breakpointId": breakpoint_id}
+                    )
+                except DebuggerBridgeError:
+                    pass
+            with self._lock:
+                if epoch == self._runtime_hook_epoch:
+                    self._runtime_hook_points.clear()
+                    self._runtime_hooks["active_points"] = 0
+                    self._runtime_hooks["state"] = "disarmed"
+                    self._runtime_hooks["last_failure"] = self._truncate_text(
+                        str(exception), 512
+                    )
+                    self._runtime_hooks["message"] = (
+                        "No hook points were left armed. Fix the definition and try again."
+                    )
+                    self._runtime_hook_stop_requested = False
+                    self._runtime_hook_deferred_pause = None
+                    self._changed()
+            raise
+
+        with self._lock:
+            if epoch != self._runtime_hook_epoch:
+                raise DebuggerBridgeError("Runtime Hooks arming became stale")
+            resolved_by_id = {item["id"]: item["resolved"] for item in definitions}
+            for definition in self._runtime_hooks["definitions"]:
+                definition["resolved"] = resolved_by_id.get(definition["id"])
+            self._runtime_hook_points = installed
+            self._runtime_hooks["active_points"] = len(installed)
+            self._runtime_hooks["state"] = "armed"
+            self._runtime_hooks["message"] = (
+                f"Armed {len(definitions)} hooks across {len(installed)} bounded points."
+            )
+            self._changed()
+            hooks = copy.deepcopy(self._runtime_hooks)
+        return {"ok": True, "runtime_hooks": hooks, "generation": self.generation()}
+
+    def _remove_runtime_hook_points(
+        self, reason: str, expected_epoch: Optional[int] = None
+    ) -> None:
+        with self._lock:
+            if expected_epoch is not None and expected_epoch != self._runtime_hook_epoch:
+                return
+            self._runtime_hook_epoch += 1
+            epoch = self._runtime_hook_epoch
+            breakpoint_ids = list(self._runtime_hook_points)
+            self._runtime_hook_stop_requested = True
+            self._runtime_hooks["state"] = "stopping"
+            self._runtime_hooks["message"] = "Removing Runtime Hooks breakpoints."
+            self._changed()
+        failures = 0
+        for breakpoint_id in breakpoint_ids:
+            try:
+                self._command(
+                    "Debugger.removeBreakpoint", {"breakpointId": breakpoint_id}
+                )
+            except DebuggerBridgeError:
+                failures += 1
+        with self._lock:
+            if epoch != self._runtime_hook_epoch:
+                return
+            self._runtime_hook_points.clear()
+            self._runtime_hooks["active_points"] = 0
+            self._runtime_hook_processing = False
+            self._runtime_hook_stop_requested = False
+            self._runtime_hook_deferred_pause = None
+            self._runtime_hooks["state"] = "disarmed"
+            self._runtime_hooks["message"] = reason
+            if failures:
+                self._runtime_hooks["last_failure"] = (
+                    f"{failures} stale breakpoint removals could not be confirmed."
+                )
+            self._changed()
+
+    def _disarm_runtime_hooks(self) -> dict[str, Any]:
+        with self._lock:
+            if self._runtime_hooks["state"] not in {
+                "arming",
+                "armed",
+                "handling",
+                "stopping",
+            }:
+                hooks = copy.deepcopy(self._runtime_hooks)
+                return {
+                    "ok": True,
+                    "runtime_hooks": hooks,
+                    "generation": self._generation,
+                }
+            if self._runtime_hook_processing or self._runtime_hooks["state"] == "arming":
+                self._runtime_hook_stop_requested = True
+                self._runtime_hooks["state"] = "stopping"
+                self._runtime_hooks["message"] = (
+                    "Stopping after the current bounded hook operation."
+                )
+                self._changed()
+                hooks = copy.deepcopy(self._runtime_hooks)
+                return {
+                    "ok": True,
+                    "runtime_hooks": hooks,
+                    "generation": self._generation,
+                }
+        self._remove_runtime_hook_points("Runtime Hooks disarmed. Definitions remain editable.")
+        with self._lock:
+            hooks = copy.deepcopy(self._runtime_hooks)
+        return {"ok": True, "runtime_hooks": hooks, "generation": self.generation()}
+
+    def _clear_runtime_hook_hits(self) -> dict[str, Any]:
+        with self._lock:
+            self._runtime_hook_target_ready_locked()
+            if self._runtime_hooks["state"] in {
+                "arming",
+                "armed",
+                "handling",
+                "stopping",
+            }:
+                raise DebuggerBridgeError("Disarm Runtime Hooks before clearing hits")
+            self._runtime_hooks["total_hits"] = 0
+            self._runtime_hooks["hits"] = []
+            self._runtime_hooks["hit_evictions"] = 0
+            self._runtime_hooks["last_failure"] = None
+            self._runtime_hooks["message"] = "Runtime Hooks hit records were cleared."
+            self._changed()
+            hooks = copy.deepcopy(self._runtime_hooks)
+        return {"ok": True, "runtime_hooks": hooks, "generation": self.generation()}
+
+    def _handle_runtime_hook_navigation(self) -> None:
+        with self._lock:
+            if (
+                not self._runtime_hooks["definitions"]
+                and not self._runtime_hook_points
+                and self._runtime_hooks["state"]
+                not in {"arming", "armed", "handling", "stopping"}
+            ):
+                return
+            self._runtime_hook_epoch += 1
+            self._runtime_hook_points.clear()
+            self._runtime_hook_processing = False
+            self._runtime_hook_stop_requested = False
+            self._runtime_hook_deferred_pause = None
+            self._runtime_hooks["definitions"] = []
+            self._runtime_hooks["active_points"] = 0
+            self._runtime_hooks["state"] = "ready"
+            self._runtime_hooks["last_failure"] = (
+                "The page navigated. Script identifiers changed, so all hooks were cleared."
+            )
+            self._runtime_hooks["message"] = (
+                "Navigation disarmed Runtime Hooks. Choose a live function and add it again."
+            )
+            self._changed()
+
+    def _handle_runtime_hook_pause_async(self, params: dict[str, Any]) -> bool:
+        raw_hits = params.get("hitBreakpoints")
+        if not isinstance(raw_hits, list):
+            return False
+        with self._lock:
+            matches = [
+                copy.deepcopy(self._runtime_hook_points[item])
+                for item in raw_hits
+                if isinstance(item, str) and item in self._runtime_hook_points
+            ]
+            if not matches:
+                return False
+            if self._runtime_hooks["state"] == "stopping":
+                self._command_without_wait("Debugger.resume")
+                return True
+            if self._runtime_hook_processing:
+                if self._runtime_hook_deferred_pause is not None:
+                    self._runtime_hooks["last_failure"] = (
+                        "Runtime Hooks received more than one deferred pause."
+                    )
+                    self._runtime_hook_stop_requested = True
+                    self._command_without_wait("Debugger.resume")
+                    self._changed()
+                    return True
+                self._runtime_hook_deferred_pause = {
+                    "epoch": self._runtime_hook_epoch,
+                    "matches": matches,
+                    "params": params,
+                }
+                self._runtime_hooks["message"] = (
+                    "Handing the synchronous return phase to the bounded hook worker."
+                )
+                self._changed()
+                return True
+            self._runtime_hook_processing = True
+            epoch = self._runtime_hook_epoch
+            self._runtime_hooks["state"] = "handling"
+            self._runtime_hooks["message"] = "Handling one bounded function hook."
+            self._changed()
+        thread = threading.Thread(
+            target=self._process_runtime_hook_pause,
+            args=(epoch, matches, params),
+            name="reb-runtime-hooks",
+            daemon=True,
+        )
+        thread.start()
+        return True
+
+    def _runtime_hook_evaluate(
+        self,
+        frame_id: str,
+        expression: str,
+        object_group: str,
+        *,
+        return_by_value: bool,
+        throw_on_side_effect: bool,
+    ) -> dict[str, Any]:
+        result = self._command(
+            "Debugger.evaluateOnCallFrame",
+            {
+                "callFrameId": frame_id,
+                "expression": expression,
+                "objectGroup": object_group,
+                "includeCommandLineAPI": False,
+                "silent": True,
+                "returnByValue": return_by_value,
+                "generatePreview": not return_by_value,
+                "throwOnSideEffect": throw_on_side_effect,
+                "timeout": RUNTIME_HOOK_EVALUATION_TIMEOUT_MS,
+            },
+            timeout=1.0,
+        )
+        if isinstance(result.get("exceptionDetails"), dict):
+            raise DebuggerBridgeError("Runtime Hooks evaluation threw an exception")
+        remote = result.get("result")
+        if not isinstance(remote, dict) or not isinstance(remote.get("type"), str):
+            raise ProtocolError("Debugger returned a malformed hook evaluation")
+        return remote
+
+    def _runtime_hook_bindings(
+        self, raw_frame: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], bool]:
+        raw_scopes = raw_frame.get("scopeChain")
+        if not isinstance(raw_scopes, list):
+            return [], False
+        local_id = None
+        for scope in raw_scopes[:MAX_SCOPES_PER_FRAME]:
+            if not isinstance(scope, dict) or scope.get("type") != "local":
+                continue
+            remote = scope.get("object")
+            if isinstance(remote, dict) and isinstance(remote.get("objectId"), str):
+                local_id = remote["objectId"]
+                break
+        if local_id is None or len(local_id.encode("utf-8")) > MAX_TARGET_ID_BYTES:
+            return [], False
+        result = self._command(
+            "Runtime.getProperties",
+            {
+                "objectId": local_id,
+                "ownProperties": True,
+                "accessorPropertiesOnly": False,
+                "generatePreview": True,
+            },
+            timeout=1.0,
+        )
+        raw_properties = result.get("result")
+        if not isinstance(raw_properties, list):
+            raise ProtocolError("Debugger returned malformed hook bindings")
+        bindings = []
+        for item in raw_properties[:MAX_RUNTIME_HOOK_BINDINGS]:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                continue
+            name = self._truncate_text(item["name"], 256)
+            if isinstance(item.get("value"), dict):
+                preview = self._runtime_hook_remote_preview(item["value"])
+                accessor = False
+            else:
+                accessor = isinstance(item.get("get"), dict) or isinstance(
+                    item.get("set"), dict
+                )
+                preview = {
+                    "type": "accessor" if accessor else "unavailable",
+                    "subtype": None,
+                    "class_name": None,
+                    "description": (
+                        "Accessor not invoked"
+                        if accessor
+                        else "Not initialized or unavailable"
+                    ),
+                    "value": None,
+                    "unserializable_value": None,
+                    "value_truncated": False,
+                }
+            bindings.append(
+                {"name": name, "value": preview, "accessor": accessor}
+            )
+        return bindings, len(raw_properties) > MAX_RUNTIME_HOOK_BINDINGS
+
+    def _runtime_hook_remote_preview(self, value: Any) -> Optional[dict[str, Any]]:
+        remote = self._remote_object(value)
+        if remote is None:
+            return None
+        remote.pop("object_id", None)
+        if isinstance(remote.get("value"), str):
+            original = remote["value"]
+            remote["value_truncated"] = (
+                remote["value_truncated"]
+                or len(original.encode("utf-8"))
+                > MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES
+            )
+            remote["value"] = self._truncate_text(
+                original, MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES
+            )
+        for field in ("description", "unserializable_value", "class_name"):
+            if isinstance(remote.get(field), str):
+                remote[field] = self._truncate_text(
+                    remote[field], MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES
+                )
+        return remote
+
+    @staticmethod
+    def _runtime_hook_call_argument(remote: dict[str, Any]) -> dict[str, Any]:
+        if "value" in remote:
+            return {"value": remote["value"]}
+        if isinstance(remote.get("unserializableValue"), str):
+            return {"unserializableValue": remote["unserializableValue"]}
+        if isinstance(remote.get("objectId"), str):
+            return {"objectId": remote["objectId"]}
+        raise DebuggerBridgeError("Runtime Hooks expression result cannot be returned")
+
+    def _append_runtime_hook_hit_locked(
+        self,
+        *,
+        hook: dict[str, Any],
+        phase: str,
+        raw_frame: dict[str, Any],
+        operation: str,
+        bindings: list[dict[str, Any]],
+        bindings_truncated: bool,
+        original_return: Optional[dict[str, Any]],
+        replacement_return: Optional[dict[str, Any]],
+        error: Optional[str],
+    ) -> None:
+        location = self._parse_location(raw_frame.get("location")) or {
+            "script_id": hook["script_id"],
+            "line": hook["line"],
+            "column": hook["column"],
+        }
+        function_name = raw_frame.get("functionName")
+        entry = {
+            "id": self._next_runtime_hook_hit_id,
+            "occurred_at_ms": int(time.time() * 1_000),
+            "session_id": self._runtime_hooks["session_id"],
+            "hook_id": hook["id"],
+            "target_id": self._runtime_hooks["target_id"],
+            "label": hook["label"],
+            "source": self._truncate_text(hook["url"], MAX_INTERCEPTION_URL_BYTES),
+            "function": self._truncate_text(function_name, 256)
+            if isinstance(function_name, str) and function_name
+            else "(anonymous)",
+            "category": phase,
+            "operation": operation,
+            "line": location["line"],
+            "column": location["column"],
+            "bindings": bindings,
+            "bindings_truncated": bindings_truncated,
+            "original_return": original_return,
+            "replacement_return": replacement_return,
+            "error": self._truncate_text(error, 512) if error else None,
+        }
+        self._next_runtime_hook_hit_id += 1
+        self._runtime_hooks["total_hits"] += 1
+        hits = self._runtime_hooks["hits"]
+        hits.append(entry)
+        if len(hits) > MAX_RUNTIME_HOOK_RETAINED_HITS:
+            del hits[: len(hits) - MAX_RUNTIME_HOOK_RETAINED_HITS]
+            self._runtime_hooks["hit_evictions"] += 1
+        if error:
+            self._runtime_hooks["last_failure"] = entry["error"]
+
+    def _process_runtime_hook_pause(
+        self,
+        epoch: int,
+        matches: list[dict[str, Any]],
+        params: dict[str, Any],
+    ) -> None:
+        raw_frames = params.get("callFrames")
+        raw_frame = raw_frames[0] if isinstance(raw_frames, list) and raw_frames else None
+        frame_id = raw_frame.get("callFrameId") if isinstance(raw_frame, dict) else None
+        with self._lock:
+            hooks_by_id = {
+                item["id"]: copy.deepcopy(item)
+                for item in self._runtime_hooks["definitions"]
+            }
+            session_id = self._runtime_hooks["session_id"]
+        object_group = f"reb-runtime-hook-{session_id}-{self._next_runtime_hook_hit_id}"
+        auto_disarm = False
+        fatal_error: Optional[str] = None
+        try:
+            if (
+                not isinstance(raw_frame, dict)
+                or not isinstance(frame_id, str)
+                or len(frame_id.encode("utf-8")) > MAX_TARGET_ID_BYTES
+            ):
+                raise ProtocolError("Debugger omitted the Runtime Hooks top frame")
+            for match in matches:
+                hook = hooks_by_id.get(match["hook_id"])
+                if hook is None:
+                    continue
+                for phase in match["phases"]:
+                    with self._lock:
+                        if (
+                            epoch != self._runtime_hook_epoch
+                            or self._runtime_hooks["total_hits"]
+                            >= MAX_RUNTIME_HOOK_HITS
+                        ):
+                            auto_disarm = True
+                            break
+                    bindings: list[dict[str, Any]] = []
+                    bindings_truncated = False
+                    original_return = (
+                        self._runtime_hook_remote_preview(raw_frame.get("returnValue"))
+                        if phase == "return"
+                        else None
+                    )
+                    replacement_return = None
+                    operation = "observed"
+                    error = None
+                    try:
+                        if hook["condition"]:
+                            condition_remote = self._runtime_hook_evaluate(
+                                frame_id,
+                                f"Boolean(({hook['condition']}))",
+                                object_group,
+                                return_by_value=True,
+                                throw_on_side_effect=True,
+                            )
+                            if condition_remote.get("value") is not True:
+                                operation = "skipped"
+                                with self._lock:
+                                    self._append_runtime_hook_hit_locked(
+                                        hook=hook,
+                                        phase=phase,
+                                        raw_frame=raw_frame,
+                                        operation=operation,
+                                        bindings=[],
+                                        bindings_truncated=False,
+                                        original_return=original_return,
+                                        replacement_return=None,
+                                        error=None,
+                                    )
+                                    self._changed()
+                                continue
+                        bindings, bindings_truncated = self._runtime_hook_bindings(
+                            raw_frame
+                        )
+                        logic = (
+                            hook["entry_logic"]
+                            if phase == "entry"
+                            else hook["return_logic"]
+                        )
+                        if logic:
+                            logic_remote = self._runtime_hook_evaluate(
+                                frame_id,
+                                f"(()=>{{\n{logic}\n}})()",
+                                object_group,
+                                return_by_value=False,
+                                throw_on_side_effect=False,
+                            )
+                            if logic_remote.get("subtype") == "promise":
+                                raise DebuggerBridgeError(
+                                    "Injected logic returned a Promise; only synchronous logic is supported"
+                                )
+                            operation = "logic_run"
+                        if phase == "return" and hook["return_mode"] != "none":
+                            raw_return = raw_frame.get("returnValue")
+                            if (
+                                isinstance(raw_return, dict)
+                                and raw_return.get("subtype") == "promise"
+                            ):
+                                raise DebuggerBridgeError(
+                                    "Promise return values cannot be synchronously replaced"
+                                )
+                            if hook["return_mode"] == "json":
+                                argument = {"value": hook["return_value"]}
+                                replacement_return = {
+                                    "type": (
+                                        "null"
+                                        if hook["return_value"] is None
+                                        else type(hook["return_value"]).__name__
+                                    ),
+                                    "subtype": None,
+                                    "class_name": None,
+                                    "description": self._truncate_text(
+                                        json.dumps(
+                                            hook["return_value"],
+                                            ensure_ascii=False,
+                                            separators=(",", ":"),
+                                        ),
+                                        MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES,
+                                    ),
+                                    "value": hook["return_value"]
+                                    if isinstance(
+                                        hook["return_value"],
+                                        (str, bool, int, float),
+                                    )
+                                    or hook["return_value"] is None
+                                    else None,
+                                    "unserializable_value": None,
+                                    "value_truncated": hook["return_value_bytes"]
+                                    > MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES,
+                                }
+                            else:
+                                replacement_remote = self._runtime_hook_evaluate(
+                                    frame_id,
+                                    hook["return_expression"],
+                                    object_group,
+                                    return_by_value=False,
+                                    throw_on_side_effect=False,
+                                )
+                                if replacement_remote.get("subtype") == "promise":
+                                    raise DebuggerBridgeError(
+                                        "A Promise expression cannot be used as a synchronous return value"
+                                    )
+                                argument = self._runtime_hook_call_argument(
+                                    replacement_remote
+                                )
+                                replacement_return = self._runtime_hook_remote_preview(
+                                    replacement_remote
+                                )
+                            self._command(
+                                "Debugger.setReturnValue", {"newValue": argument}
+                            )
+                            operation = "return_overridden"
+                    except DebuggerBridgeError as exception:
+                        operation = "failed"
+                        error = str(exception)
+                    with self._lock:
+                        if epoch != self._runtime_hook_epoch:
+                            auto_disarm = True
+                            break
+                        self._append_runtime_hook_hit_locked(
+                            hook=hook,
+                            phase=phase,
+                            raw_frame=raw_frame,
+                            operation=operation,
+                            bindings=bindings,
+                            bindings_truncated=bindings_truncated,
+                            original_return=original_return,
+                            replacement_return=replacement_return,
+                            error=error,
+                        )
+                        auto_disarm = (
+                            self._runtime_hooks["total_hits"]
+                            >= MAX_RUNTIME_HOOK_HITS
+                        )
+                        self._changed()
+                    if auto_disarm:
+                        break
+                if auto_disarm:
+                    break
+        except DebuggerBridgeError as exception:
+            fatal_error = self._truncate_text(str(exception), 512)
+            auto_disarm = True
+        finally:
+            try:
+                self._command("Runtime.releaseObjectGroup", {"objectGroup": object_group})
+            except DebuggerBridgeError:
+                pass
+            try:
+                self._command("Debugger.resume")
+            except DebuggerBridgeError as exception:
+                fatal_error = self._truncate_text(str(exception), 512)
+                auto_disarm = True
+            deferred: Optional[dict[str, Any]] = None
+            with self._lock:
+                stop_requested = self._runtime_hook_stop_requested
+                still_current = epoch == self._runtime_hook_epoch
+                if still_current and fatal_error:
+                    self._runtime_hooks["last_failure"] = fatal_error
+                    self._runtime_hooks["message"] = fatal_error
+                if still_current:
+                    candidate = self._runtime_hook_deferred_pause
+                    self._runtime_hook_deferred_pause = None
+                    if (
+                        isinstance(candidate, dict)
+                        and candidate.get("epoch") == epoch
+                    ):
+                        deferred = candidate
+                if (
+                    still_current
+                    and deferred is not None
+                    and not (auto_disarm or stop_requested)
+                ):
+                    self._runtime_hooks["state"] = "handling"
+                    self._runtime_hooks["message"] = (
+                        "Handling the queued synchronous return phase."
+                    )
+                    self._changed()
+                elif still_current and not (auto_disarm or stop_requested):
+                    self._runtime_hook_processing = False
+                    self._runtime_hooks["state"] = "armed"
+                    self._runtime_hooks["message"] = (
+                        f"Runtime Hooks armed. {self._runtime_hooks['total_hits']} hits observed."
+                    )
+                    self._changed()
+            if still_current and deferred is not None and not (
+                auto_disarm or stop_requested
+            ):
+                try:
+                    threading.Thread(
+                        target=self._process_runtime_hook_pause,
+                        args=(epoch, deferred["matches"], deferred["params"]),
+                        name="reb-runtime-hooks",
+                        daemon=True,
+                    ).start()
+                    return
+                except RuntimeError as exception:
+                    fatal_error = self._truncate_text(
+                        f"Runtime Hooks worker could not continue: {exception}", 512
+                    )
+                    auto_disarm = True
+                    with self._lock:
+                        if epoch == self._runtime_hook_epoch:
+                            self._runtime_hooks["last_failure"] = fatal_error
+                            self._changed()
+            if still_current and deferred is not None and (
+                auto_disarm or stop_requested
+            ):
+                try:
+                    self._command("Debugger.resume")
+                except DebuggerBridgeError:
+                    pass
+            if still_current and (auto_disarm or stop_requested):
+                reason = (
+                    "Runtime Hooks reached the 512-hit limit and disarmed automatically."
+                    if auto_disarm and not fatal_error
+                    else "Runtime Hooks disarmed after the current hook operation."
+                )
+                self._remove_runtime_hook_points(reason, expected_epoch=epoch)
 
     def _search_heap_snapshot(self, request: dict[str, Any]) -> dict[str, Any]:
         query = self._optional_search_text(request, "query").strip()
@@ -1587,6 +3766,1894 @@ class DebuggerBridge:
             "column": location["column"],
             "framework_filtered": filtered,
         }
+
+    @staticmethod
+    def _default_request_interception_rule() -> dict[str, Any]:
+        return {
+            "mode": "continue",
+            "url_pattern": "*",
+            "method_filter": "",
+            "rewrite_url": "",
+            "rewrite_method": "",
+            "rewrite_headers": [],
+            "rewrite_body": "",
+            "response_code": 200,
+            "response_headers": [],
+            "response_body": "",
+        }
+
+    @classmethod
+    def _public_request_interception_rule(cls, rule: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "mode": rule["mode"],
+            "url_pattern": rule["url_pattern"],
+            "method_filter": rule["method_filter"],
+            "rewrite_url": cls._redacted_request_url(rule["rewrite_url"])
+            if rule["rewrite_url"]
+            else "",
+            "rewrite_method": rule["rewrite_method"],
+            "rewrite_header_count": len(rule["rewrite_headers"]),
+            "rewrite_body_bytes": len(rule["rewrite_body"].encode("utf-8")),
+            "response_code": rule["response_code"],
+            "response_header_count": len(rule["response_headers"]),
+            "response_body_bytes": len(rule["response_body"].encode("utf-8")),
+        }
+
+    @classmethod
+    def _empty_request_interception(cls) -> dict[str, Any]:
+        return {
+            "protocol_version": 1,
+            "experiment_id": 0,
+            "state": "idle",
+            "isolated": False,
+            "target_id": None,
+            "created_at_ms": 0,
+            "disposed_at_ms": 0,
+            "rule": cls._public_request_interception_rule(
+                cls._default_request_interception_rule()
+            ),
+            "last_request": None,
+            "result": None,
+            "audit": [],
+            "audit_evictions": 0,
+            "pending_requests": 0,
+            "message": "Create an isolated experiment to intercept a request.",
+            "limits": {
+                "audit_entries": MAX_INTERCEPTION_AUDIT_ENTRIES,
+                "pending_requests": MAX_INTERCEPTION_PENDING_REQUESTS,
+                "headers": MAX_INTERCEPTION_HEADERS,
+                "body_bytes": MAX_INTERCEPTION_BODY_BYTES,
+                "response_bytes": MAX_INTERCEPTION_RESPONSE_BYTES,
+            },
+        }
+
+    @staticmethod
+    def _empty_object_experiment() -> dict[str, Any]:
+        return {
+            "protocol_version": 1,
+            "session_id": 0,
+            "state": "idle",
+            "isolated": False,
+            "target_id": None,
+            "url": "",
+            "navigation_id": 0,
+            "search_id": 0,
+            "search": None,
+            "results": [],
+            "last_mutation": None,
+            "audit": [],
+            "audit_evictions": 0,
+            "mutation_attempts": 0,
+            "message": "Create an isolated Experiment context to use Object Lab.",
+            "limits": {
+                "search_results": MAX_LIVE_OBJECT_RESULTS,
+                "search_candidates": MAX_LIVE_OBJECT_SCAN,
+                "search_timeout_ms": LIVE_OBJECT_SEARCH_TIMEOUT_MS,
+                "preview_properties": MAX_LIVE_OBJECT_PREVIEW_PROPERTIES,
+                "mutation_attempts": MAX_OBJECT_EXPERIMENT_MUTATIONS,
+                "audit_entries": MAX_OBJECT_EXPERIMENT_AUDIT_ENTRIES,
+                "property_bytes": MAX_OBJECT_EXPERIMENT_PROPERTY_BYTES,
+                "value_bytes": MAX_OBJECT_EXPERIMENT_VALUE_BYTES,
+                "value_depth": MAX_OBJECT_EXPERIMENT_VALUE_DEPTH,
+                "value_entries": MAX_OBJECT_EXPERIMENT_VALUE_ENTRIES,
+                "value_string_bytes": MAX_OBJECT_EXPERIMENT_STRING_BYTES,
+            },
+        }
+
+    @staticmethod
+    def _empty_runtime_hooks() -> dict[str, Any]:
+        return {
+            "protocol_version": 1,
+            "session_id": 0,
+            "state": "idle",
+            "isolated": False,
+            "target_id": None,
+            "definitions": [],
+            "active_points": 0,
+            "total_hits": 0,
+            "hits": [],
+            "hit_evictions": 0,
+            "last_failure": None,
+            "message": "Create an isolated Experiment context to use Runtime Hooks.",
+            "limits": {
+                "definitions": MAX_RUNTIME_HOOKS,
+                "active_points": MAX_RUNTIME_HOOK_BREAKPOINTS,
+                "return_points_per_definition": MAX_RUNTIME_HOOK_RETURN_POINTS,
+                "total_hits": MAX_RUNTIME_HOOK_HITS,
+                "retained_hits": MAX_RUNTIME_HOOK_RETAINED_HITS,
+                "bindings_per_hit": MAX_RUNTIME_HOOK_BINDINGS,
+                "binding_preview_bytes": MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES,
+                "condition_bytes": MAX_RUNTIME_HOOK_CONDITION_BYTES,
+                "logic_bytes": MAX_RUNTIME_HOOK_LOGIC_BYTES,
+                "return_bytes": MAX_RUNTIME_HOOK_RETURN_BYTES,
+                "evaluation_timeout_ms": RUNTIME_HOOK_EVALUATION_TIMEOUT_MS,
+            },
+        }
+
+    @staticmethod
+    def _empty_repeater() -> dict[str, Any]:
+        return {
+            "protocol_version": 1,
+            "session_id": 0,
+            "state": "idle",
+            "variables": [],
+            "history": [],
+            "history_bytes": 0,
+            "history_evictions": 0,
+            "active_execution": None,
+            "comparison": None,
+            "message": "Create an isolated request-lab context to use Repeater.",
+            "limits": {
+                "history_entries": MAX_REPEATER_HISTORY_ENTRIES,
+                "history_bytes": MAX_REPEATER_HISTORY_BYTES,
+                "variables": MAX_REPEATER_VARIABLES,
+                "variable_bytes": MAX_REPEATER_VARIABLE_BYTES,
+                "request_bytes": MAX_INTERCEPTION_BODY_BYTES,
+                "response_bytes": MAX_INTERCEPTION_RESPONSE_BYTES,
+                "timeout_ms": MAX_REPEATER_TIMEOUT_MS,
+            },
+        }
+
+    def _begin_repeater_session_locked(self, session_id: int) -> None:
+        self._repeater = self._empty_repeater()
+        self._repeater.update(
+            {
+                "session_id": session_id,
+                "state": "attaching",
+                "message": "Waiting for the disposable page debugger to attach.",
+            }
+        )
+        self._repeater_history_bytes = 0
+        self._repeater_active_execution_id = None
+        self._repeater_cancel_requested = False
+
+    def _begin_object_experiment_session_locked(self, session_id: int) -> None:
+        self._object_experiment = self._empty_object_experiment()
+        self._object_experiment.update(
+            {
+                "session_id": session_id,
+                "state": "attaching",
+                "message": "Waiting for the disposable Object Lab page to attach.",
+            }
+        )
+        self._object_experiment_group = None
+        self._object_experiment_objects_id = None
+        self._object_experiment_result_indices.clear()
+
+    def _begin_runtime_hook_session_locked(self, session_id: int) -> None:
+        self._runtime_hooks = self._empty_runtime_hooks()
+        self._runtime_hooks.update(
+            {
+                "session_id": session_id,
+                "state": "attaching",
+                "message": "Waiting for the disposable Runtime Hooks page to attach.",
+            }
+        )
+        self._runtime_hook_points.clear()
+        self._runtime_hook_processing = False
+        self._runtime_hook_stop_requested = False
+        self._runtime_hook_deferred_pause = None
+        self._runtime_hook_epoch += 1
+
+    def _dispose_object_experiment_locked(self, session_id: int) -> None:
+        self._object_experiment = self._empty_object_experiment()
+        self._object_experiment.update(
+            {
+                "session_id": session_id,
+                "state": "disposed",
+                "message": (
+                    "Disposable context deleted. Object references, mutation values, "
+                    "previews, and audit records were cleared."
+                ),
+            }
+        )
+        self._object_experiment_group = None
+        self._object_experiment_objects_id = None
+        self._object_experiment_result_indices.clear()
+
+    def _dispose_runtime_hooks_locked(self, session_id: int) -> None:
+        self._runtime_hooks = self._empty_runtime_hooks()
+        self._runtime_hooks.update(
+            {
+                "session_id": session_id,
+                "state": "disposed",
+                "message": (
+                    "Disposable context deleted. Hook code, captured bindings, "
+                    "return values, and hit records were cleared."
+                ),
+            }
+        )
+        self._runtime_hook_points.clear()
+        self._runtime_hook_processing = False
+        self._runtime_hook_stop_requested = False
+        self._runtime_hook_deferred_pause = None
+        self._runtime_hook_epoch += 1
+
+    def _dispose_repeater_locked(self, session_id: int) -> None:
+        self._repeater = self._empty_repeater()
+        self._repeater.update(
+            {
+                "session_id": session_id,
+                "state": "disposed",
+                "message": (
+                    "Disposable context deleted. Repeater variables, request bodies, "
+                    "responses, and history were cleared."
+                ),
+            }
+        )
+        self._repeater_history_bytes = 0
+        self._repeater_active_execution_id = None
+        self._repeater_cancel_requested = False
+
+    def _repeater_context_ready_locked(self) -> bool:
+        return (
+            self._request_interception_context_id is not None
+            and self._request_interception["target_id"] is not None
+            and self._target is not None
+            and self._target["id"] == self._request_interception["target_id"]
+            and self._request_interception["state"] in {"ready", "error"}
+            and self._repeater["state"] in {"ready", "error"}
+        )
+
+    @staticmethod
+    def _normalize_repeater_variables(value: Any) -> list[dict[str, str]]:
+        if not isinstance(value, dict) or len(value) > MAX_REPEATER_VARIABLES:
+            raise DebuggerBridgeError("Repeater variables must be a bounded object")
+        total_bytes = 0
+        variables = []
+        for name, variable_value in sorted(value.items()):
+            if not isinstance(name, str) or not isinstance(variable_value, str):
+                raise DebuggerBridgeError("Repeater variable names and values must be text")
+            name_bytes = len(name.encode("utf-8"))
+            value_bytes = len(variable_value.encode("utf-8"))
+            if (
+                not REPEATER_VARIABLE_NAME.fullmatch(name)
+                or name_bytes > MAX_REPEATER_VARIABLE_NAME_BYTES
+                or value_bytes > MAX_REPEATER_VARIABLE_VALUE_BYTES
+            ):
+                raise DebuggerBridgeError("Repeater variable is invalid or oversized")
+            total_bytes += name_bytes + value_bytes
+            if total_bytes > MAX_REPEATER_VARIABLE_BYTES:
+                raise DebuggerBridgeError("Repeater variables exceed 32 KiB")
+            variables.append({"name": name, "value": variable_value})
+        return variables
+
+    @classmethod
+    def _resolve_repeater_text(
+        cls, value: str, variables: dict[str, str]
+    ) -> tuple[str, set[str]]:
+        used: set[str] = set()
+        missing: set[str] = set()
+
+        def replace(match: re.Match[str]) -> str:
+            escaped = match.group(1) == "="
+            name = match.group(2)
+            if (
+                not REPEATER_VARIABLE_NAME.fullmatch(name)
+                or len(name.encode("utf-8")) > MAX_REPEATER_VARIABLE_NAME_BYTES
+            ):
+                raise DebuggerBridgeError("Repeater request contains an invalid variable")
+            if escaped:
+                return "{{" + name + "}}"
+            used.add(name)
+            if name not in variables:
+                missing.add(name)
+                return match.group(0)
+            return variables[name]
+
+        resolved = REPEATER_VARIABLE_TOKEN.sub(replace, value)
+        if missing:
+            names = ", ".join(sorted(missing)[:8])
+            raise DebuggerBridgeError(f"Unresolved Repeater variables: {names}")
+        return resolved, used
+
+    def _normalize_repeater_template(self, request: dict[str, Any]) -> dict[str, Any]:
+        url = self._required_text(request, "url", MAX_INTERCEPTION_URL_BYTES).strip()
+        if any(ord(character) < 0x20 or ord(character) == 0x7F for character in url):
+            raise DebuggerBridgeError("Repeater request URL is invalid")
+        method = request.get("method", "GET")
+        if (
+            not isinstance(method, str)
+            or not method.strip()
+            or len(method.strip().encode("utf-8")) > MAX_REPEATER_TEMPLATE_METHOD_BYTES
+            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in method)
+        ):
+            raise DebuggerBridgeError("Repeater request method template is invalid")
+        headers = self._normalize_request_interception_headers(
+            request.get("headers", {}), "Repeater request"
+        )
+        body = request.get("body", "")
+        if (
+            not isinstance(body, str)
+            or len(body.encode("utf-8")) > MAX_INTERCEPTION_BODY_BYTES
+        ):
+            raise DebuggerBridgeError("Repeater request body exceeds 64 KiB")
+        timeout_ms = request.get("timeout_ms", MAX_REPEATER_TIMEOUT_MS)
+        if (
+            not isinstance(timeout_ms, int)
+            or isinstance(timeout_ms, bool)
+            or timeout_ms < MIN_REPEATER_TIMEOUT_MS
+            or timeout_ms > MAX_REPEATER_TIMEOUT_MS
+        ):
+            raise DebuggerBridgeError("Repeater timeout must be between 100 and 30000 ms")
+        collection_request_id = request.get("collection_request_id")
+        if collection_request_id is not None and (
+            not isinstance(collection_request_id, int)
+            or isinstance(collection_request_id, bool)
+            or collection_request_id <= 0
+            or collection_request_id > 2**53 - 1
+        ):
+            raise DebuggerBridgeError("Repeater collection request ID is invalid")
+        return {
+            "url": url,
+            "method": method.strip(),
+            "headers": headers,
+            "body": body,
+            "timeout_ms": timeout_ms,
+            "collection_request_id": collection_request_id,
+        }
+
+    def _resolve_repeater_request(
+        self, template: dict[str, Any], variables: list[dict[str, str]]
+    ) -> tuple[dict[str, Any], list[str]]:
+        variable_map = {entry["name"]: entry["value"] for entry in variables}
+        url, used = self._resolve_repeater_text(template["url"], variable_map)
+        method, method_used = self._resolve_repeater_text(
+            template["method"], variable_map
+        )
+        used.update(method_used)
+        body, body_used = self._resolve_repeater_text(template["body"], variable_map)
+        used.update(body_used)
+        resolved_headers: dict[str, str] = {}
+        for header in template["headers"]:
+            header_value, header_used = self._resolve_repeater_text(
+                header["value"], variable_map
+            )
+            used.update(header_used)
+            resolved_headers[header["name"]] = header_value
+        resolved = self._normalize_request_interception_request(
+            {
+                "url": url,
+                "method": method,
+                "headers": resolved_headers,
+                "body": body,
+            }
+        )
+        resolved["timeout_ms"] = template["timeout_ms"]
+        return resolved, sorted(used)
+
+    def _configure_repeater_variables(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        variables = self._normalize_repeater_variables(request.get("variables", {}))
+        with self._lock:
+            if not self._repeater_context_ready_locked():
+                raise DebuggerBridgeError("The isolated Repeater target is not ready")
+            self._repeater["variables"] = variables
+            self._repeater["state"] = "ready"
+            self._repeater["message"] = (
+                f"{len(variables)} session-scoped Repeater "
+                f"{'variable is' if len(variables) == 1 else 'variables are'} ready."
+            )
+            self._changed()
+            repeater = copy.deepcopy(self._repeater)
+        return {"ok": True, "repeater": repeater, "generation": self.generation()}
+
+    def _install_repeater_controller(self, execution_id: int) -> None:
+        key = json.dumps(self._repeater_controller_key)
+        identifier = json.dumps(str(execution_id))
+        expression = f"""(() => {{
+          const key = {key};
+          const id = {identifier};
+          let registry = globalThis[key];
+          if (!(registry instanceof Map)) {{
+            registry = new Map();
+            Object.defineProperty(globalThis, key, {{value: registry, configurable: true}});
+          }}
+          if (registry.size >= 1 || registry.has(id)) return false;
+          registry.set(id, new AbortController());
+          return true;
+        }})()"""
+        evaluated = self._command(
+            "Runtime.evaluate",
+            {
+                "expression": expression,
+                "returnByValue": True,
+                "awaitPromise": False,
+                "silent": True,
+                "userGesture": False,
+            },
+            timeout=3.0,
+        )
+        remote = evaluated.get("result")
+        installed = remote.get("value") if isinstance(remote, dict) else None
+        if installed is not True:
+            raise DebuggerBridgeError("Repeater could not reserve a request controller")
+
+    def _run_repeater_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        template = self._normalize_repeater_template(request)
+        with self._lock:
+            variables = copy.deepcopy(self._repeater["variables"])
+        resolved, variable_names = self._resolve_repeater_request(template, variables)
+        with self._lock:
+            if not self._repeater_context_ready_locked():
+                raise DebuggerBridgeError("The isolated Repeater target is not ready")
+            if self._repeater_active_execution_id is not None:
+                raise DebuggerBridgeError("A Repeater request is already running")
+            execution_id = self._next_repeater_execution_id
+            self._next_repeater_execution_id += 1
+            session_id = self._repeater["session_id"]
+            started_at_ms = int(time.time() * 1_000)
+            self._repeater_active_execution_id = execution_id
+            self._repeater_cancel_requested = False
+            self._repeater["state"] = "running"
+            self._repeater["active_execution"] = {
+                "execution_id": execution_id,
+                "started_at_ms": started_at_ms,
+                "request": copy.deepcopy(template),
+                "resolved_url": self._redacted_request_url(resolved["url"]),
+                "resolved_method": resolved["method"],
+                "variable_names": variable_names,
+                "collection_request_id": template["collection_request_id"],
+                "cancel_requested": False,
+            }
+            self._repeater["message"] = (
+                "Sending one credential-free Repeater request through the disposable page."
+            )
+            self._changed()
+        try:
+            self._install_repeater_controller(execution_id)
+        except BaseException as exception:
+            with self._lock:
+                if self._repeater_active_execution_id == execution_id:
+                    self._repeater_active_execution_id = None
+                    self._repeater["active_execution"] = None
+                    self._repeater["state"] = "error"
+                    self._repeater["message"] = self._truncate_text(str(exception), 512)
+                    self._changed()
+            raise
+
+        worker = threading.Thread(
+            target=self._execute_repeater_request,
+            args=(
+                session_id,
+                execution_id,
+                started_at_ms,
+                template,
+                resolved,
+                variable_names,
+            ),
+            name="reb-repeater-request",
+            daemon=True,
+        )
+        try:
+            worker.start()
+        except RuntimeError as exception:
+            try:
+                self._abort_repeater_controller(execution_id)
+            except DebuggerBridgeError:
+                pass
+            with self._lock:
+                if self._repeater_active_execution_id == execution_id:
+                    self._repeater_active_execution_id = None
+                    self._repeater["active_execution"] = None
+                    self._repeater["state"] = "error"
+                    self._repeater["message"] = self._truncate_text(
+                        f"Repeater worker could not start: {exception}", 512
+                    )
+                    self._changed()
+            raise DebuggerBridgeError("Repeater worker could not start") from exception
+        with self._lock:
+            repeater = copy.deepcopy(self._repeater)
+        return {"ok": True, "repeater": repeater, "generation": self.generation()}
+
+    def _execute_repeater_request(
+        self,
+        session_id: int,
+        execution_id: int,
+        started_at_ms: int,
+        template: dict[str, Any],
+        resolved: dict[str, Any],
+        variable_names: list[str],
+    ) -> None:
+        configuration = {
+            "url": resolved["url"],
+            "method": resolved["method"],
+            "headers": {
+                header["name"]: header["value"] for header in resolved["headers"]
+            },
+            "body": resolved["body"],
+            "timeoutMs": resolved["timeout_ms"],
+            "headerLimit": MAX_INTERCEPTION_HEADERS,
+            "headerValueLimit": MAX_INTERCEPTION_HEADER_VALUE_BYTES,
+            "headerTotalLimit": MAX_INTERCEPTION_HEADER_BYTES,
+            "responseByteLimit": MAX_INTERCEPTION_RESPONSE_BYTES,
+            "controllerRegistryKey": self._repeater_controller_key,
+            "executionId": str(execution_id),
+        }
+        expression = (
+            f"({REQUEST_INTERCEPTION_FUNCTION})"
+            f"({json.dumps(configuration, separators=(',', ':'))})"
+        )
+        try:
+            evaluated = self._command(
+                "Runtime.evaluate",
+                {
+                    "expression": expression,
+                    "returnByValue": True,
+                    "awaitPromise": True,
+                    "silent": True,
+                    "userGesture": False,
+                    "timeout": resolved["timeout_ms"],
+                },
+                timeout=resolved["timeout_ms"] / 1_000.0 + 2.0,
+            )
+            if isinstance(evaluated.get("exceptionDetails"), dict):
+                raise DebuggerBridgeError(
+                    "The isolated Repeater runner failed before returning a result"
+                )
+            remote = evaluated.get("result")
+            document = remote.get("value") if isinstance(remote, dict) else None
+            result = self._normalize_repeater_result(document)
+        except BaseException as exception:
+            with self._lock:
+                cancelled = (
+                    self._repeater_active_execution_id == execution_id
+                    and self._repeater_cancel_requested
+                )
+            duration_ms = max(0, int(time.time() * 1_000) - started_at_ms)
+            result = {
+                "protocol_version": 1,
+                "ok": False,
+                "status": 0,
+                "status_text": "",
+                "url": "",
+                "headers": [],
+                "headers_truncated": False,
+                "body": "",
+                "body_truncated": False,
+                "error": self._truncate_text(
+                    "Request cancelled" if cancelled else str(exception), 512
+                ),
+                "duration_ms": duration_ms,
+                "cancelled": cancelled,
+                "timed_out": False,
+                "body_sha256": hashlib.sha256(b"").hexdigest(),
+            }
+        self._complete_repeater_execution(
+            session_id,
+            execution_id,
+            started_at_ms,
+            template,
+            resolved,
+            variable_names,
+            result,
+        )
+
+    def _normalize_repeater_result(self, value: Any) -> dict[str, Any]:
+        result = self._normalize_request_interception_result(value)
+        duration_ms = value.get("durationMs") if isinstance(value, dict) else None
+        cancelled = value.get("cancelled") if isinstance(value, dict) else None
+        timed_out = value.get("timedOut") if isinstance(value, dict) else None
+        if (
+            not isinstance(duration_ms, int)
+            or isinstance(duration_ms, bool)
+            or duration_ms < 0
+            or duration_ms > MAX_REPEATER_TIMEOUT_MS + 5_000
+            or not isinstance(cancelled, bool)
+            or not isinstance(timed_out, bool)
+            or (cancelled and timed_out)
+            or (result["ok"] and (cancelled or timed_out))
+        ):
+            raise ProtocolError("Debugger returned a malformed Repeater result")
+        result.update(
+            {
+                "duration_ms": duration_ms,
+                "cancelled": cancelled,
+                "timed_out": timed_out,
+                "body_sha256": hashlib.sha256(
+                    result["body"].encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+        return result
+
+    def _complete_repeater_execution(
+        self,
+        session_id: int,
+        execution_id: int,
+        started_at_ms: int,
+        template: dict[str, Any],
+        resolved: dict[str, Any],
+        variable_names: list[str],
+        result: dict[str, Any],
+    ) -> None:
+        with self._lock:
+            if (
+                self._repeater["session_id"] != session_id
+                or self._repeater_active_execution_id != execution_id
+            ):
+                return
+            completed_at_ms = max(
+                started_at_ms, int(time.time() * 1_000)
+            )
+            entry_state = (
+                "complete"
+                if result["ok"]
+                else "cancelled"
+                if result["cancelled"]
+                else "timed_out"
+                if result["timed_out"]
+                else "error"
+            )
+            entry = {
+                "id": execution_id,
+                "started_at_ms": started_at_ms,
+                "completed_at_ms": completed_at_ms,
+                "state": entry_state,
+                "collection_request_id": template["collection_request_id"],
+                "variable_names": variable_names,
+                "request": copy.deepcopy(template),
+                "resolved_request": {
+                    "url": resolved["url"],
+                    "method": resolved["method"],
+                    "headers": copy.deepcopy(resolved["headers"]),
+                    "body": resolved["body"],
+                    "timeout_ms": resolved["timeout_ms"],
+                },
+                "response": copy.deepcopy(result),
+            }
+            self._append_repeater_history_locked(entry)
+            self._repeater_active_execution_id = None
+            self._repeater_cancel_requested = False
+            self._repeater["active_execution"] = None
+            self._repeater["state"] = "ready"
+            self._repeater["message"] = (
+                f"Repeater request completed with status {result['status']}."
+                if result["ok"]
+                else "Repeater request was cancelled."
+                if result["cancelled"]
+                else "Repeater request reached its timeout."
+                if result["timed_out"]
+                else f"Repeater request failed: {result['error']}"
+            )
+            successful = [
+                item for item in self._repeater["history"] if item["response"]["ok"]
+            ]
+            if len(successful) >= 2:
+                self._repeater["comparison"] = self._compare_repeater_entries(
+                    successful[-2], successful[-1]
+                )
+            self._changed()
+
+    def _append_repeater_history_locked(self, entry: dict[str, Any]) -> None:
+        stored_bytes = len(
+            json.dumps(entry, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        )
+        entry["stored_bytes"] = stored_bytes
+        history = self._repeater["history"]
+        while history and (
+            len(history) >= MAX_REPEATER_HISTORY_ENTRIES
+            or self._repeater_history_bytes + stored_bytes
+            > MAX_REPEATER_HISTORY_BYTES
+        ):
+            evicted = history.pop(0)
+            self._repeater_history_bytes -= evicted["stored_bytes"]
+            self._repeater["history_evictions"] += 1
+        history.append(entry)
+        self._repeater_history_bytes += stored_bytes
+        self._repeater["history_bytes"] = self._repeater_history_bytes
+        comparison = self._repeater.get("comparison")
+        retained_ids = {item["id"] for item in history}
+        if comparison is not None and (
+            comparison["baseline_id"] not in retained_ids
+            or comparison["current_id"] not in retained_ids
+        ):
+            self._repeater["comparison"] = None
+
+    def _abort_repeater_controller(self, execution_id: int) -> bool:
+        key = json.dumps(self._repeater_controller_key)
+        identifier = json.dumps(str(execution_id))
+        expression = f"""(() => {{
+          const registry = globalThis[{key}];
+          const controller = registry instanceof Map ? registry.get({identifier}) : null;
+          if (!(controller instanceof AbortController)) return false;
+          controller.abort();
+          return true;
+        }})()"""
+        evaluated = self._command(
+            "Runtime.evaluate",
+            {
+                "expression": expression,
+                "returnByValue": True,
+                "awaitPromise": False,
+                "silent": True,
+                "userGesture": False,
+            },
+            timeout=3.0,
+        )
+        remote = evaluated.get("result")
+        value = remote.get("value") if isinstance(remote, dict) else None
+        if not isinstance(value, bool):
+            raise ProtocolError("Debugger returned a malformed cancellation result")
+        return value
+
+    def _cancel_repeater_request(self) -> dict[str, Any]:
+        with self._lock:
+            execution_id = self._repeater_active_execution_id
+            if execution_id is None:
+                raise DebuggerBridgeError("No Repeater request is running")
+            self._repeater_cancel_requested = True
+            self._repeater["state"] = "cancelling"
+            if self._repeater["active_execution"] is not None:
+                self._repeater["active_execution"]["cancel_requested"] = True
+            self._repeater["message"] = "Cancelling the active Repeater request."
+            self._changed()
+        try:
+            delivered = self._abort_repeater_controller(execution_id)
+        except BaseException:
+            with self._lock:
+                if self._repeater_active_execution_id == execution_id:
+                    self._repeater_cancel_requested = False
+                    self._repeater["state"] = "running"
+                    if self._repeater["active_execution"] is not None:
+                        self._repeater["active_execution"]["cancel_requested"] = False
+                    self._repeater["message"] = (
+                        "Cancellation could not be delivered; the request is still running."
+                    )
+                    self._changed()
+            raise
+        with self._lock:
+            if self._repeater_active_execution_id == execution_id and not delivered:
+                self._repeater_cancel_requested = False
+                self._repeater["state"] = "running"
+                if self._repeater["active_execution"] is not None:
+                    self._repeater["active_execution"]["cancel_requested"] = False
+                self._repeater["message"] = (
+                    "The request completed before cancellation was delivered."
+                )
+                self._changed()
+            repeater = copy.deepcopy(self._repeater)
+        return {"ok": True, "repeater": repeater, "generation": self.generation()}
+
+    @staticmethod
+    def _compare_repeater_entries(
+        baseline: dict[str, Any], current: dict[str, Any]
+    ) -> dict[str, Any]:
+        baseline_response = baseline["response"]
+        current_response = current["response"]
+
+        def header_map(response: dict[str, Any]) -> dict[str, str]:
+            return {
+                header["name"].lower(): header["value"]
+                for header in response["headers"]
+            }
+
+        before_headers = header_map(baseline_response)
+        after_headers = header_map(current_response)
+        before_names = set(before_headers)
+        after_names = set(after_headers)
+        changed = sorted(
+            name
+            for name in before_names & after_names
+            if before_headers[name] != after_headers[name]
+        )
+        baseline_body_bytes = len(baseline_response["body"].encode("utf-8"))
+        current_body_bytes = len(current_response["body"].encode("utf-8"))
+        return {
+            "protocol_version": 1,
+            "baseline_id": baseline["id"],
+            "current_id": current["id"],
+            "baseline_status": baseline_response["status"],
+            "current_status": current_response["status"],
+            "status_changed": baseline_response["status"]
+            != current_response["status"],
+            "duration_delta_ms": current_response["duration_ms"]
+            - baseline_response["duration_ms"],
+            "baseline_body_bytes": baseline_body_bytes,
+            "current_body_bytes": current_body_bytes,
+            "body_bytes_delta": current_body_bytes - baseline_body_bytes,
+            "baseline_body_sha256": baseline_response["body_sha256"],
+            "current_body_sha256": current_response["body_sha256"],
+            "body_changed": baseline_response["body_sha256"]
+            != current_response["body_sha256"],
+            "headers_added": sorted(after_names - before_names),
+            "headers_removed": sorted(before_names - after_names),
+            "headers_changed": changed,
+            "partial": any(
+                (
+                    baseline_response["headers_truncated"],
+                    baseline_response["body_truncated"],
+                    current_response["headers_truncated"],
+                    current_response["body_truncated"],
+                )
+            ),
+        }
+
+    def _compare_repeater_history(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        baseline_id = request.get("baseline_id")
+        current_id = request.get("current_id")
+        if (
+            not isinstance(baseline_id, int)
+            or isinstance(baseline_id, bool)
+            or baseline_id <= 0
+            or not isinstance(current_id, int)
+            or isinstance(current_id, bool)
+            or current_id <= 0
+            or baseline_id == current_id
+        ):
+            raise DebuggerBridgeError("Repeater comparison identifiers are invalid")
+        with self._lock:
+            entries = {entry["id"]: entry for entry in self._repeater["history"]}
+            baseline = entries.get(baseline_id)
+            current = entries.get(current_id)
+            if (
+                baseline is None
+                or current is None
+                or not baseline["response"]["ok"]
+                or not current["response"]["ok"]
+            ):
+                raise DebuggerBridgeError(
+                    "Repeater comparison requires two retained successful responses"
+                )
+            self._repeater["comparison"] = self._compare_repeater_entries(
+                baseline, current
+            )
+            self._repeater["message"] = (
+                f"Compared Repeater runs {baseline_id} and {current_id}."
+            )
+            self._changed()
+            repeater = copy.deepcopy(self._repeater)
+        return {"ok": True, "repeater": repeater, "generation": self.generation()}
+
+    def _clear_repeater_history(self) -> dict[str, Any]:
+        with self._lock:
+            if self._repeater_active_execution_id is not None:
+                raise DebuggerBridgeError(
+                    "Cancel or finish the active Repeater request before clearing history"
+                )
+            self._repeater["history"] = []
+            self._repeater["history_bytes"] = 0
+            self._repeater["history_evictions"] = 0
+            self._repeater["comparison"] = None
+            self._repeater_history_bytes = 0
+            self._repeater["message"] = "Repeater history and comparisons were cleared."
+            self._changed()
+            repeater = copy.deepcopy(self._repeater)
+        return {"ok": True, "repeater": repeater, "generation": self.generation()}
+
+    def _create_request_interception_experiment(self) -> dict[str, Any]:
+        with self._lock:
+            if self._state not in {"running", "paused"} or self._target is None:
+                raise DebuggerBridgeError(
+                    "Request interception requires a running debugger target"
+                )
+            if self._request_interception_context_id is not None:
+                raise DebuggerBridgeError(
+                    "An isolated request interception experiment already exists"
+                )
+            if self._heap_diff_busy or self._heap_snapshot_collector is not None:
+                raise DebuggerBridgeError(
+                    "A heap snapshot operation is already running"
+                )
+            experiment_id = self._next_request_interception_id
+            self._next_request_interception_id += 1
+            return_target_id = self._target["id"]
+            self._request_interception = self._empty_request_interception()
+            self._request_interception.update(
+                {
+                    "experiment_id": experiment_id,
+                    "state": "creating",
+                    "created_at_ms": int(time.time() * 1_000),
+                    "message": "Creating a disposable browser context with no shared cookies or storage.",
+                }
+            )
+            self._request_interception_rule = self._default_request_interception_rule()
+            self._request_interception_return_target_id = return_target_id
+            self._begin_repeater_session_locked(experiment_id)
+            self._begin_object_experiment_session_locked(experiment_id)
+            self._begin_runtime_hook_session_locked(experiment_id)
+            self._changed()
+
+        context_id: Optional[str] = None
+        try:
+            context_result = self._browser_command("Target.createBrowserContext")
+            context_id = self._required_protocol_identifier(
+                context_result.get("browserContextId"), "browser context"
+            )
+            target_result = self._browser_command(
+                "Target.createTarget",
+                {
+                    "url": "about:blank",
+                    "browserContextId": context_id,
+                    "background": True,
+                },
+            )
+            target_id = self._required_protocol_identifier(
+                target_result.get("targetId"), "experiment target"
+            )
+        except BaseException as exception:
+            cleanup_error: Optional[BaseException] = None
+            if context_id is not None:
+                try:
+                    self._browser_command(
+                        "Target.disposeBrowserContext",
+                        {"browserContextId": context_id},
+                    )
+                except DebuggerBridgeError as cleanup_exception:
+                    cleanup_error = cleanup_exception
+            with self._lock:
+                self._request_interception_return_target_id = None
+                self._request_interception["state"] = "error"
+                if cleanup_error is not None:
+                    self._request_interception_context_id = context_id
+                    self._request_interception["isolated"] = True
+                    message = (
+                        f"{exception}. The partial disposable context could not be "
+                        f"confirmed as deleted: {cleanup_error}"
+                    )
+                else:
+                    message = str(exception)
+                self._request_interception["message"] = self._truncate_text(
+                    message, 512
+                )
+                self._repeater["state"] = "error"
+                self._repeater["message"] = self._truncate_text(message, 512)
+                self._object_experiment["state"] = "error"
+                self._object_experiment["isolated"] = cleanup_error is not None
+                self._object_experiment["message"] = self._truncate_text(message, 512)
+                self._runtime_hooks["state"] = "error"
+                self._runtime_hooks["isolated"] = cleanup_error is not None
+                self._runtime_hooks["message"] = self._truncate_text(message, 512)
+                self._changed()
+            raise
+
+        with self._lock:
+            self._request_interception_context_id = context_id
+            self._request_interception["isolated"] = True
+            self._request_interception["target_id"] = target_id
+            self._request_interception["message"] = (
+                "Isolated context created. Attaching its disposable page."
+            )
+            self._object_experiment["isolated"] = True
+            self._object_experiment["target_id"] = target_id
+            self._object_experiment["message"] = (
+                "Isolated context created. Attaching the Object Lab page."
+            )
+            self._runtime_hooks["isolated"] = True
+            self._runtime_hooks["target_id"] = target_id
+            self._runtime_hooks["message"] = (
+                "Isolated context created. Attaching the Runtime Hooks page."
+            )
+            self._preferred_target_id = target_id
+            connection = self._connection
+            self._changed()
+        if connection is not None:
+            connection.close()
+        return {
+            "ok": True,
+            "experiment": copy.deepcopy(self._request_interception),
+            "object_experiment": copy.deepcopy(self._object_experiment),
+            "runtime_hooks": copy.deepcopy(self._runtime_hooks),
+            "repeater": copy.deepcopy(self._repeater),
+            "generation": self.generation(),
+        }
+
+    def _configure_request_interception(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        rule = self._normalize_request_interception_rule(request)
+        with self._lock:
+            if (
+                self._request_interception_context_id is None
+                or self._request_interception["target_id"] is None
+                or self._target is None
+                or self._target["id"] != self._request_interception["target_id"]
+                or self._request_interception["state"] not in {"ready", "error"}
+                or self._request_interception_pending
+            ):
+                raise DebuggerBridgeError(
+                    "The isolated request interception target is not ready"
+                )
+        self._command(
+            "Fetch.enable",
+            {
+                "patterns": [
+                    {
+                        "urlPattern": rule["url_pattern"],
+                        "requestStage": "Request",
+                    }
+                ],
+                "handleAuthRequests": False,
+            },
+        )
+        with self._lock:
+            self._request_interception_rule = rule
+            self._request_interception["rule"] = self._public_request_interception_rule(
+                rule
+            )
+            self._request_interception["state"] = "ready"
+            self._request_interception["result"] = None
+            self._request_interception["message"] = (
+                "Interception rule armed inside the disposable context."
+            )
+            self._changed()
+            experiment = copy.deepcopy(self._request_interception)
+        return {"ok": True, "experiment": experiment, "generation": self.generation()}
+
+    def _run_request_interception(self, request: dict[str, Any]) -> dict[str, Any]:
+        replay = self._normalize_request_interception_request(request)
+        with self._lock:
+            if (
+                self._request_interception_context_id is None
+                or self._request_interception["target_id"] is None
+                or self._target is None
+                or self._target["id"] != self._request_interception["target_id"]
+                or self._request_interception["state"] not in {"ready", "error"}
+                or self._request_interception_pending
+            ):
+                raise DebuggerBridgeError(
+                    "The isolated request interception target is not ready"
+                )
+            self._request_interception["state"] = "running"
+            self._request_interception["result"] = None
+            self._request_interception["last_request"] = {
+                "url": self._redacted_request_url(replay["url"]),
+                "method": replay["method"],
+                "header_count": len(replay["headers"]),
+                "body_bytes": len(replay["body"].encode("utf-8")),
+            }
+            self._request_interception["message"] = (
+                "Sending one credential-free request through the armed rule."
+            )
+            self._changed()
+
+        configuration = {
+            "url": replay["url"],
+            "method": replay["method"],
+            "headers": {
+                header["name"]: header["value"] for header in replay["headers"]
+            },
+            "body": replay["body"],
+            "timeoutMs": int(INTERCEPTION_RUN_TIMEOUT_SECONDS * 1_000),
+            "headerLimit": MAX_INTERCEPTION_HEADERS,
+            "headerValueLimit": MAX_INTERCEPTION_HEADER_VALUE_BYTES,
+            "headerTotalLimit": MAX_INTERCEPTION_HEADER_BYTES,
+            "responseByteLimit": MAX_INTERCEPTION_RESPONSE_BYTES,
+        }
+        expression = (
+            f"({REQUEST_INTERCEPTION_FUNCTION})"
+            f"({json.dumps(configuration, separators=(',', ':'))})"
+        )
+        try:
+            evaluated = self._command(
+                "Runtime.evaluate",
+                {
+                    "expression": expression,
+                    "returnByValue": True,
+                    "awaitPromise": True,
+                    "silent": True,
+                    "userGesture": False,
+                    "timeout": int(INTERCEPTION_RUN_TIMEOUT_SECONDS * 1_000),
+                },
+                timeout=INTERCEPTION_RUN_TIMEOUT_SECONDS + 2.0,
+            )
+            if isinstance(evaluated.get("exceptionDetails"), dict):
+                raise DebuggerBridgeError(
+                    "The isolated request runner failed before returning a result"
+                )
+            remote = evaluated.get("result")
+            document = remote.get("value") if isinstance(remote, dict) else None
+            result = self._normalize_request_interception_result(document)
+        except BaseException as exception:
+            with self._lock:
+                self._request_interception["state"] = "error"
+                self._request_interception["message"] = self._truncate_text(
+                    str(exception), 512
+                )
+                self._changed()
+            raise
+
+        with self._lock:
+            self._request_interception["state"] = "ready"
+            self._request_interception["result"] = result
+            self._request_interception["message"] = (
+                f"Experiment request completed with status {result['status']}."
+                if result["ok"]
+                else f"Experiment request finished with an error: {result['error']}"
+            )
+            self._changed()
+            experiment = copy.deepcopy(self._request_interception)
+        return {"ok": True, "experiment": experiment, "generation": self.generation()}
+
+    def _dispose_request_interception_experiment(self) -> dict[str, Any]:
+        self._dispose_request_interception_context(preserve_result=True)
+        with self._lock:
+            experiment = copy.deepcopy(self._request_interception)
+            object_experiment = copy.deepcopy(self._object_experiment)
+            runtime_hooks = copy.deepcopy(self._runtime_hooks)
+            repeater = copy.deepcopy(self._repeater)
+        return {
+            "ok": True,
+            "experiment": experiment,
+            "object_experiment": object_experiment,
+            "runtime_hooks": runtime_hooks,
+            "repeater": repeater,
+            "generation": self.generation(),
+        }
+
+    def _dispose_request_interception_context(
+        self, preserve_result: bool, force: bool = False
+    ) -> None:
+        self._release_object_experiment_search()
+        with self._lock:
+            context_id = self._request_interception_context_id
+            if context_id is None:
+                if not preserve_result:
+                    self._request_interception = self._empty_request_interception()
+                    self._request_interception_rule = (
+                        self._default_request_interception_rule()
+                    )
+                    self._request_interception_pending.clear()
+                    self._repeater = self._empty_repeater()
+                    self._repeater_history_bytes = 0
+                    self._repeater_active_execution_id = None
+                    self._repeater_cancel_requested = False
+                    self._object_experiment = self._empty_object_experiment()
+                    self._object_experiment_group = None
+                    self._object_experiment_objects_id = None
+                    self._object_experiment_result_indices.clear()
+                    self._runtime_hooks = self._empty_runtime_hooks()
+                    self._runtime_hook_points.clear()
+                    self._runtime_hook_processing = False
+                    self._runtime_hook_stop_requested = False
+                    self._runtime_hook_deferred_pause = None
+                    self._runtime_hook_epoch += 1
+                    self._changed()
+                return
+            if not force and (
+                self._request_interception["state"] == "running"
+                or self._request_interception_pending
+                or self._repeater_active_execution_id is not None
+                or self._runtime_hook_processing
+            ):
+                raise DebuggerBridgeError(
+                    "Finish or cancel active request-lab work before disposing its context"
+                )
+            repeater_session_id = self._repeater["session_id"]
+            object_session_id = self._object_experiment["session_id"]
+            runtime_hook_session_id = self._runtime_hooks["session_id"]
+            self._request_interception["state"] = "disposing"
+            self._request_interception["message"] = (
+                "Disposing the isolated browser context and all of its storage."
+            )
+            target_id = self._request_interception["target_id"]
+            self._object_experiment["state"] = "disposing"
+            self._object_experiment["message"] = (
+                "Disposing Object Lab and releasing all live references."
+            )
+            self._runtime_hooks["state"] = "disposing"
+            self._runtime_hooks["message"] = (
+                "Disposing Runtime Hooks and erasing code and captured values."
+            )
+            connection = (
+                self._connection
+                if self._target is not None and self._target["id"] == target_id
+                else None
+            )
+            return_target_id = self._request_interception_return_target_id
+            self._changed()
+        if connection is not None:
+            connection.close()
+        try:
+            self._browser_command(
+                "Target.disposeBrowserContext",
+                {"browserContextId": context_id},
+            )
+        except DebuggerBridgeError as exception:
+            with self._lock:
+                self._request_interception["state"] = "error"
+                self._request_interception["message"] = self._truncate_text(
+                    f"The disposable context could not be confirmed as deleted: {exception}",
+                    512,
+                )
+                self._repeater["state"] = "error"
+                self._repeater["message"] = self._request_interception["message"]
+                self._object_experiment["state"] = "error"
+                self._object_experiment["message"] = self._request_interception[
+                    "message"
+                ]
+                self._runtime_hooks["state"] = "error"
+                self._runtime_hooks["message"] = self._request_interception["message"]
+                self._changed()
+            if preserve_result:
+                raise
+            return
+        with self._lock:
+            self._request_interception_context_id = None
+            self._request_interception_return_target_id = None
+            self._request_interception_pending.clear()
+            self._preferred_target_id = return_target_id
+            self._request_interception_rule = self._default_request_interception_rule()
+            if preserve_result:
+                self._request_interception["state"] = "disposed"
+                self._request_interception["isolated"] = False
+                self._request_interception["target_id"] = None
+                self._request_interception["disposed_at_ms"] = int(time.time() * 1_000)
+                self._request_interception["pending_requests"] = 0
+                self._request_interception["message"] = (
+                    "Disposable context deleted. The ephemeral result and audit remain visible."
+                )
+                self._dispose_repeater_locked(repeater_session_id)
+                self._dispose_object_experiment_locked(object_session_id)
+                self._dispose_runtime_hooks_locked(runtime_hook_session_id)
+            else:
+                self._request_interception = self._empty_request_interception()
+                self._repeater = self._empty_repeater()
+                self._object_experiment = self._empty_object_experiment()
+                self._runtime_hooks = self._empty_runtime_hooks()
+                self._runtime_hook_points.clear()
+                self._runtime_hook_processing = False
+                self._runtime_hook_stop_requested = False
+                self._runtime_hook_deferred_pause = None
+                self._runtime_hook_epoch += 1
+                self._repeater_history_bytes = 0
+                self._repeater_active_execution_id = None
+                self._repeater_cancel_requested = False
+            self._changed()
+
+    def _clear_request_interception_result(self) -> dict[str, Any]:
+        with self._lock:
+            if self._request_interception_context_id is not None:
+                raise DebuggerBridgeError(
+                    "Dispose the isolated context before clearing its result"
+                )
+            self._request_interception = self._empty_request_interception()
+            self._request_interception_rule = self._default_request_interception_rule()
+            self._request_interception_pending.clear()
+            self._repeater = self._empty_repeater()
+            self._repeater_history_bytes = 0
+            self._repeater_active_execution_id = None
+            self._repeater_cancel_requested = False
+            self._object_experiment = self._empty_object_experiment()
+            self._object_experiment_group = None
+            self._object_experiment_objects_id = None
+            self._object_experiment_result_indices.clear()
+            self._runtime_hooks = self._empty_runtime_hooks()
+            self._runtime_hook_points.clear()
+            self._runtime_hook_processing = False
+            self._runtime_hook_stop_requested = False
+            self._runtime_hook_deferred_pause = None
+            self._runtime_hook_epoch += 1
+            self._changed()
+        return {"ok": True, "generation": self.generation()}
+
+    def _normalize_request_interception_rule(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        mode = request.get("mode")
+        if mode not in {"continue", "block", "drop", "rewrite", "fulfill"}:
+            raise DebuggerBridgeError("Request interception mode is invalid")
+        pattern = self._required_text(
+            request, "url_pattern", MAX_INTERCEPTION_PATTERN_BYTES
+        )
+        if any(ord(character) < 0x20 or ord(character) > 0x7E for character in pattern):
+            raise DebuggerBridgeError("Request interception URL pattern is invalid")
+        if pattern != "*" and not pattern.startswith(("http://", "https://")):
+            raise DebuggerBridgeError(
+                "Request interception URL pattern must use HTTP, HTTPS, or *"
+            )
+        method_filter = request.get("method_filter", "")
+        if not isinstance(method_filter, str):
+            raise DebuggerBridgeError("Request interception method filter is invalid")
+        method_filter = method_filter.strip().upper()
+        if method_filter:
+            self._validate_request_interception_method(method_filter)
+
+        rule = self._default_request_interception_rule()
+        rule.update(
+            {"mode": mode, "url_pattern": pattern, "method_filter": method_filter}
+        )
+        if mode == "rewrite":
+            rewrite_url = request.get("rewrite_url", "")
+            if not isinstance(rewrite_url, str):
+                raise DebuggerBridgeError("Request rewrite URL is invalid")
+            rewrite_url = rewrite_url.strip()
+            if rewrite_url:
+                self._validate_request_interception_url(rewrite_url)
+            rewrite_method = request.get("rewrite_method", "")
+            if not isinstance(rewrite_method, str):
+                raise DebuggerBridgeError("Request rewrite method is invalid")
+            rewrite_method = rewrite_method.strip().upper()
+            if rewrite_method:
+                self._validate_request_interception_method(rewrite_method)
+            rewrite_headers = self._normalize_request_interception_headers(
+                request.get("rewrite_headers", {}), "rewrite"
+            )
+            rewrite_body = request.get("rewrite_body", "")
+            if (
+                not isinstance(rewrite_body, str)
+                or len(rewrite_body.encode("utf-8")) > MAX_INTERCEPTION_BODY_BYTES
+            ):
+                raise DebuggerBridgeError("Request rewrite body exceeds 64 KiB")
+            if not any((rewrite_url, rewrite_method, rewrite_headers, rewrite_body)):
+                raise DebuggerBridgeError(
+                    "Request rewrite requires at least one bounded override"
+                )
+            rule.update(
+                {
+                    "rewrite_url": rewrite_url,
+                    "rewrite_method": rewrite_method,
+                    "rewrite_headers": rewrite_headers,
+                    "rewrite_body": rewrite_body,
+                }
+            )
+        elif mode == "fulfill":
+            response_code = request.get("response_code", 200)
+            if (
+                not isinstance(response_code, int)
+                or isinstance(response_code, bool)
+                or response_code < 100
+                or response_code > 599
+            ):
+                raise DebuggerBridgeError("Synthetic response status is invalid")
+            response_headers = self._normalize_request_interception_headers(
+                request.get("response_headers", {}), "response"
+            )
+            response_body = request.get("response_body", "")
+            if (
+                not isinstance(response_body, str)
+                or len(response_body.encode("utf-8")) > MAX_INTERCEPTION_RESPONSE_BYTES
+            ):
+                raise DebuggerBridgeError("Synthetic response body exceeds 64 KiB")
+            if not response_headers:
+                response_headers = [
+                    {"name": "content-type", "value": "text/plain; charset=utf-8"},
+                ]
+            if not any(
+                header["name"].lower() == "access-control-allow-origin"
+                for header in response_headers
+            ):
+                if len(response_headers) >= MAX_INTERCEPTION_HEADERS:
+                    raise DebuggerBridgeError(
+                        "Synthetic response headers must include access-control-allow-origin at the 64-header limit"
+                    )
+                response_headers.append(
+                    {"name": "access-control-allow-origin", "value": "*"}
+                )
+            rule.update(
+                {
+                    "response_code": response_code,
+                    "response_headers": response_headers,
+                    "response_body": response_body,
+                }
+            )
+        return rule
+
+    def _normalize_request_interception_request(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        url = self._required_text(request, "url", MAX_INTERCEPTION_URL_BYTES).strip()
+        self._validate_request_interception_url(url)
+        method = request.get("method", "GET")
+        if not isinstance(method, str):
+            raise DebuggerBridgeError("Experiment request method is invalid")
+        method = method.strip().upper()
+        self._validate_request_interception_method(method)
+        headers = self._normalize_request_interception_headers(
+            request.get("headers", {}), "request"
+        )
+        body = request.get("body", "")
+        if (
+            not isinstance(body, str)
+            or len(body.encode("utf-8")) > MAX_INTERCEPTION_BODY_BYTES
+        ):
+            raise DebuggerBridgeError("Experiment request body exceeds 64 KiB")
+        if method in {"GET", "HEAD"} and body:
+            raise DebuggerBridgeError(
+                "GET and HEAD experiment requests cannot include a body"
+            )
+        return {"url": url, "method": method, "headers": headers, "body": body}
+
+    @staticmethod
+    def _validate_request_interception_url(url: str) -> None:
+        try:
+            parsed = urlparse(url)
+            _ = parsed.port
+        except ValueError as exception:
+            raise DebuggerBridgeError(
+                "Experiment request URL is invalid"
+            ) from exception
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            raise DebuggerBridgeError(
+                "Experiment request URL must be credential-free HTTP or HTTPS"
+            )
+
+    @staticmethod
+    def _validate_request_interception_method(method: str) -> None:
+        allowed = frozenset(
+            "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        )
+        if (
+            not method
+            or len(method.encode("ascii", errors="ignore"))
+            != len(method.encode("utf-8"))
+            or len(method) > MAX_INTERCEPTION_METHOD_BYTES
+            or method[0] not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            or any(character not in allowed for character in method)
+        ):
+            raise DebuggerBridgeError("Experiment request method is invalid")
+
+    @staticmethod
+    def _normalize_request_interception_headers(
+        value: Any, label: str
+    ) -> list[dict[str, str]]:
+        if not isinstance(value, dict) or len(value) > MAX_INTERCEPTION_HEADERS:
+            raise DebuggerBridgeError(
+                f"Request interception {label} headers are invalid"
+            )
+        token_characters = frozenset(
+            "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        )
+        forbidden = SENSITIVE_INTERCEPTION_HEADERS | {
+            "connection",
+            "content-length",
+            "host",
+            "transfer-encoding",
+        }
+        total_bytes = 0
+        headers = []
+        for name, header_value in value.items():
+            if not isinstance(name, str) or not isinstance(header_value, str):
+                raise DebuggerBridgeError(
+                    f"Request interception {label} headers must be text"
+                )
+            name_bytes = len(name.encode("utf-8"))
+            value_bytes = len(header_value.encode("utf-8"))
+            if (
+                not name
+                or name_bytes > MAX_INTERCEPTION_HEADER_NAME_BYTES
+                or value_bytes > MAX_INTERCEPTION_HEADER_VALUE_BYTES
+                or any(character not in token_characters for character in name)
+                or any(
+                    ord(character) < 0x20 or ord(character) == 0x7F
+                    for character in header_value
+                )
+                or name.lower() in forbidden
+            ):
+                raise DebuggerBridgeError(
+                    f"Request interception {label} header is forbidden or invalid"
+                )
+            total_bytes += name_bytes + value_bytes
+            if total_bytes > MAX_INTERCEPTION_HEADER_BYTES:
+                raise DebuggerBridgeError(
+                    f"Request interception {label} headers exceed 16 KiB"
+                )
+            headers.append({"name": name, "value": header_value})
+        return headers
+
+    def _normalize_request_interception_result(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict) or value.get("protocolVersion") != 1:
+            raise ProtocolError("Debugger returned a malformed experiment result")
+        ok = value.get("ok")
+        if not isinstance(ok, bool):
+            raise ProtocolError("Debugger returned a malformed experiment result")
+        if not ok:
+            error = value.get("error")
+            if not isinstance(error, str):
+                raise ProtocolError("Debugger returned a malformed experiment error")
+            return {
+                "protocol_version": 1,
+                "ok": False,
+                "status": 0,
+                "status_text": "",
+                "url": "",
+                "headers": [],
+                "headers_truncated": False,
+                "body": "",
+                "body_truncated": False,
+                "error": self._truncate_text(error, 512),
+            }
+        status = value.get("status")
+        status_text = value.get("statusText")
+        response_url = value.get("url")
+        raw_headers = value.get("headers")
+        headers_truncated = value.get("headersTruncated")
+        body = value.get("body")
+        body_truncated = value.get("bodyTruncated")
+        if (
+            not isinstance(status, int)
+            or isinstance(status, bool)
+            or status < 0
+            or status > 599
+            or not isinstance(status_text, str)
+            or not isinstance(response_url, str)
+            or not isinstance(raw_headers, list)
+            or len(raw_headers) > MAX_INTERCEPTION_HEADERS
+            or not isinstance(headers_truncated, bool)
+            or not isinstance(body, str)
+            or not isinstance(body_truncated, bool)
+        ):
+            raise ProtocolError("Debugger returned a malformed experiment result")
+        headers = []
+        header_bytes = 0
+        for header in raw_headers:
+            if (
+                not isinstance(header, dict)
+                or not isinstance(header.get("name"), str)
+                or not isinstance(header.get("value"), str)
+                or header["name"].lower() in SENSITIVE_INTERCEPTION_HEADERS
+            ):
+                raise ProtocolError("Debugger returned malformed experiment headers")
+            headers_truncated = headers_truncated or (
+                len(header["name"].encode("utf-8"))
+                > MAX_INTERCEPTION_HEADER_NAME_BYTES
+                or len(header["value"].encode("utf-8"))
+                > MAX_INTERCEPTION_HEADER_VALUE_BYTES
+            )
+            name = self._truncate_text(
+                header["name"], MAX_INTERCEPTION_HEADER_NAME_BYTES
+            )
+            header_value = self._truncate_text(
+                header["value"], MAX_INTERCEPTION_HEADER_VALUE_BYTES
+            )
+            header_bytes += len(name.encode("utf-8")) + len(
+                header_value.encode("utf-8")
+            )
+            if header_bytes > MAX_INTERCEPTION_HEADER_BYTES:
+                raise ProtocolError("Debugger returned oversized experiment headers")
+            headers.append({"name": name, "value": header_value})
+        encoded_body = body.encode("utf-8")
+        truncated_by_bridge = len(encoded_body) > MAX_INTERCEPTION_RESPONSE_BYTES
+        return {
+            "protocol_version": 1,
+            "ok": True,
+            "status": status,
+            "status_text": self._truncate_text(status_text, 256),
+            "url": self._redacted_request_url(response_url),
+            "headers": headers,
+            "headers_truncated": headers_truncated,
+            "body": self._truncate_text(body, MAX_INTERCEPTION_RESPONSE_BYTES),
+            "body_truncated": body_truncated or truncated_by_bridge,
+            "error": None,
+        }
+
+    @staticmethod
+    def _required_protocol_identifier(value: Any, label: str) -> str:
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value.encode("utf-8")) > MAX_TARGET_ID_BYTES
+        ):
+            raise ProtocolError(f"Browser returned an invalid {label} identifier")
+        return value
+
+    @classmethod
+    def _redacted_request_url(cls, url: str) -> str:
+        if not url:
+            return ""
+        try:
+            parsed = urlparse(url)
+            _ = parsed.port
+        except ValueError:
+            return ""
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return ""
+        host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+        netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
+        path = parsed.path or "/"
+        return cls._truncate_text(
+            urlunparse((parsed.scheme, netloc, path, "", "", "")),
+            MAX_INTERCEPTION_URL_BYTES,
+        )
+
+    def _handle_request_interception_pause_async(self, params: dict[str, Any]) -> None:
+        request_id = params.get("requestId")
+        request = params.get("request")
+        if (
+            not isinstance(request_id, str)
+            or not request_id
+            or len(request_id.encode("utf-8")) > MAX_TARGET_ID_BYTES
+        ):
+            return
+        with self._lock:
+            active = (
+                self._request_interception_context_id is not None
+                and self._target is not None
+                and self._request_interception["target_id"] == self._target["id"]
+                and self._request_interception["state"]
+                in {"ready", "running", "error"}
+            )
+        if not active:
+            self._command_without_wait(
+                "Fetch.continueRequest", {"requestId": request_id}
+            )
+            return
+        if not isinstance(request, dict):
+            continued = self._command_without_wait(
+                "Fetch.continueRequest", {"requestId": request_id}
+            )
+            self._append_request_interception_audit(
+                request_id,
+                {},
+                params.get("resourceType"),
+                "error",
+                "Malformed paused request continued unchanged."
+                if continued
+                else "Malformed paused request could not be resumed.",
+            )
+            return
+        with self._lock:
+            if request_id in self._request_interception_pending:
+                return
+            if (
+                len(self._request_interception_pending)
+                >= MAX_INTERCEPTION_PENDING_REQUESTS
+            ):
+                overflow = True
+            else:
+                overflow = False
+                self._request_interception_pending.add(request_id)
+                self._request_interception["pending_requests"] = len(
+                    self._request_interception_pending
+                )
+                self._changed()
+        if overflow:
+            continued = self._command_without_wait(
+                "Fetch.continueRequest", {"requestId": request_id}
+            )
+            self._append_request_interception_audit(
+                request_id,
+                request,
+                params.get("resourceType"),
+                "overflow_continue" if continued else "error",
+                "Pending interception limit reached; request continued unchanged."
+                if continued
+                else "Pending interception limit reached and the request could not be resumed.",
+            )
+            return
+        thread = threading.Thread(
+            target=self._process_request_interception_pause,
+            args=(request_id, request, params.get("resourceType")),
+            name="reb-request-interception",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except RuntimeError as exception:
+            continued = self._command_without_wait(
+                "Fetch.continueRequest", {"requestId": request_id}
+            )
+            with self._lock:
+                self._request_interception_pending.discard(request_id)
+                self._request_interception["pending_requests"] = len(
+                    self._request_interception_pending
+                )
+                self._changed()
+            self._append_request_interception_audit(
+                request_id,
+                request,
+                params.get("resourceType"),
+                "error",
+                self._truncate_text(
+                    f"Interception worker could not start: {exception}. "
+                    f"Request {'continued unchanged' if continued else 'could not be resumed'}.",
+                    512,
+                ),
+            )
+
+    def _process_request_interception_pause(
+        self, request_id: str, request: dict[str, Any], resource_type: Any
+    ) -> None:
+        method = (
+            request.get("method")
+            if isinstance(request.get("method"), str)
+            else "UNKNOWN"
+        )
+        with self._lock:
+            rule = copy.deepcopy(self._request_interception_rule)
+        outcome = "continued"
+        detail = "Request continued unchanged."
+        command = "Fetch.continueRequest"
+        command_params: dict[str, Any] = {"requestId": request_id}
+        preflight_headers = self._request_interception_preflight_headers(request, rule)
+        if preflight_headers is not None:
+            command = "Fetch.fulfillRequest"
+            command_params.update(
+                {
+                    "responseCode": 204,
+                    "responseHeaders": preflight_headers,
+                    "body": "",
+                }
+            )
+            outcome = "fulfilled"
+            detail = "Synthetic credential-free CORS preflight returned."
+        elif rule["method_filter"] and method.upper() != rule["method_filter"]:
+            outcome = "bypassed"
+            detail = "Request method did not match the armed rule."
+        elif rule["mode"] == "block":
+            command = "Fetch.failRequest"
+            command_params["errorReason"] = "BlockedByClient"
+            outcome = "blocked"
+            detail = "Request failed with BlockedByClient."
+        elif rule["mode"] == "drop":
+            command = "Fetch.failRequest"
+            command_params["errorReason"] = "Aborted"
+            outcome = "dropped"
+            detail = "Request failed with Aborted."
+        elif rule["mode"] == "rewrite":
+            if rule["rewrite_url"]:
+                command_params["url"] = rule["rewrite_url"]
+            if rule["rewrite_method"]:
+                command_params["method"] = rule["rewrite_method"]
+            if rule["rewrite_headers"]:
+                command_params["headers"] = rule["rewrite_headers"]
+            if rule["rewrite_body"]:
+                command_params["postData"] = base64.b64encode(
+                    rule["rewrite_body"].encode("utf-8")
+                ).decode("ascii")
+            outcome = "rewritten"
+            detail = "Bounded request overrides applied."
+        elif rule["mode"] == "fulfill":
+            command = "Fetch.fulfillRequest"
+            command_params.update(
+                {
+                    "responseCode": rule["response_code"],
+                    "responseHeaders": rule["response_headers"],
+                    "body": base64.b64encode(
+                        rule["response_body"].encode("utf-8")
+                    ).decode("ascii"),
+                }
+            )
+            outcome = "fulfilled"
+            detail = f"Synthetic response {rule['response_code']} returned."
+        try:
+            self._command(command, command_params, timeout=3.0)
+        except DebuggerBridgeError as exception:
+            outcome = "error"
+            detail = self._truncate_text(str(exception), 512)
+            try:
+                self._command(
+                    "Fetch.continueRequest", {"requestId": request_id}, timeout=1.0
+                )
+            except DebuggerBridgeError:
+                pass
+        finally:
+            self._append_request_interception_audit(
+                request_id, request, resource_type, outcome, detail
+            )
+            with self._lock:
+                self._request_interception_pending.discard(request_id)
+                self._request_interception["pending_requests"] = len(
+                    self._request_interception_pending
+                )
+                self._changed()
+
+    @classmethod
+    def _request_interception_preflight_headers(
+        cls, request: dict[str, Any], rule: dict[str, Any]
+    ) -> Optional[list[dict[str, str]]]:
+        if rule["mode"] != "fulfill" or request.get("method") != "OPTIONS":
+            return None
+        headers = request.get("headers")
+        if not isinstance(headers, dict):
+            return None
+        requested_method = headers.get("Access-Control-Request-Method")
+        if not isinstance(requested_method, str):
+            requested_method = headers.get("access-control-request-method")
+        if not isinstance(requested_method, str):
+            return None
+        requested_method = requested_method.strip().upper()
+        try:
+            cls._validate_request_interception_method(requested_method)
+        except DebuggerBridgeError:
+            return None
+        if rule["method_filter"] and requested_method != rule["method_filter"]:
+            return None
+
+        requested_headers = headers.get("Access-Control-Request-Headers")
+        if not isinstance(requested_headers, str):
+            requested_headers = headers.get("access-control-request-headers", "")
+        if not isinstance(requested_headers, str) or len(
+            requested_headers.encode("utf-8")
+        ) > MAX_INTERCEPTION_HEADER_VALUE_BYTES:
+            return None
+        token_characters = frozenset(
+            "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        )
+        header_names = (
+            [name.strip().lower() for name in requested_headers.split(",")]
+            if requested_headers.strip()
+            else []
+        )
+        if any(
+            not name
+            or any(character not in token_characters for character in name)
+            or name in SENSITIVE_INTERCEPTION_HEADERS
+            for name in header_names
+        ) or len(header_names) > MAX_INTERCEPTION_HEADERS:
+            return None
+        response_headers = [
+            {"name": "access-control-allow-origin", "value": "*"},
+            {
+                "name": "access-control-allow-methods",
+                "value": requested_method,
+            },
+        ]
+        if requested_headers:
+            response_headers.append(
+                {
+                    "name": "access-control-allow-headers",
+                    "value": ", ".join(header_names),
+                }
+            )
+        return response_headers
+
+    def _append_request_interception_audit(
+        self,
+        request_id: str,
+        request: dict[str, Any],
+        resource_type: Any,
+        outcome: str,
+        detail: str,
+    ) -> None:
+        raw_url = request.get("url") if isinstance(request.get("url"), str) else ""
+        method = request.get("method") if isinstance(request.get("method"), str) else ""
+        with self._lock:
+            audit = self._request_interception["audit"]
+            if len(audit) >= MAX_INTERCEPTION_AUDIT_ENTRIES:
+                audit.pop(0)
+                self._request_interception["audit_evictions"] += 1
+            audit.append(
+                {
+                    "id": self._next_request_interception_audit_id,
+                    "occurred_at_ms": int(time.time() * 1_000),
+                    "request_id": self._truncate_text(request_id, 256),
+                    "method": self._truncate_text(
+                        method, MAX_INTERCEPTION_METHOD_BYTES
+                    ),
+                    "url": self._redacted_request_url(raw_url),
+                    "resource_type": self._truncate_text(
+                        resource_type if isinstance(resource_type, str) else "Other",
+                        128,
+                    ),
+                    "rule_mode": self._request_interception_rule["mode"],
+                    "outcome": outcome,
+                    "detail": self._truncate_text(detail, 512),
+                }
+            )
+            self._next_request_interception_audit_id += 1
+            self._changed()
 
     def _normalize_heap_snapshot_probe(self, value: Any) -> dict[str, Any]:
         if not isinstance(value, dict) or value.get("protocol_version") != 1:
@@ -2276,7 +6343,7 @@ class DebuggerBridge:
                 self._set_state("waiting", str(exception))
                 self._stop.wait(0.5)
 
-    def _discover_targets(self) -> list[dict[str, str]]:
+    def _devtools_endpoint(self) -> tuple[int, str]:
         if self.active_port_path is None or not self.active_port_path.is_file():
             raise DebuggerBridgeError("Waiting for the authorized browser debugger")
         with self.active_port_path.open("rb") as active_port_file:
@@ -2289,6 +6356,54 @@ class DebuggerBridge:
         port = int(lines[0])
         if port <= 0 or port >= 2**16:
             raise DebuggerBridgeError("The browser debugger port is invalid")
+        browser_endpoint = lines[1]
+        if browser_endpoint.startswith("/"):
+            browser_url = f"ws://127.0.0.1:{port}{browser_endpoint}"
+        elif browser_endpoint.startswith("ws://"):
+            browser_url = browser_endpoint
+        else:
+            raise DebuggerBridgeError("The browser debugger endpoint is malformed")
+        if len(browser_url.encode("utf-8")) > MAX_TARGET_URL_BYTES:
+            raise DebuggerBridgeError("The browser debugger endpoint is oversized")
+        return port, browser_url
+
+    def _browser_command(
+        self, method: str, params: Optional[dict[str, Any]] = None
+    ) -> dict[str, Any]:
+        _, browser_url = self._devtools_endpoint()
+        connection = WebSocketClient(browser_url)
+        try:
+            connection.send_json({"id": 1, "method": method, "params": params or {}})
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                response = connection.receive_json(
+                    timeout=min(0.5, max(0.0, deadline - time.monotonic()))
+                )
+                if response is None or response.get("id") != 1:
+                    continue
+                error = response.get("error")
+                if isinstance(error, dict):
+                    message = error.get("message")
+                    raise DebuggerBridgeError(
+                        self._truncate_text(
+                            message
+                            if isinstance(message, str)
+                            else f"Browser command {method} failed",
+                            512,
+                        )
+                    )
+                result = response.get("result")
+                if not isinstance(result, dict):
+                    raise ProtocolError(
+                        f"Browser command {method} returned malformed output"
+                    )
+                return result
+            raise DebuggerBridgeError(f"Browser command {method} timed out")
+        finally:
+            connection.close()
+
+    def _discover_targets(self) -> list[dict[str, str]]:
+        port, _ = self._devtools_endpoint()
         request = Request(
             f"http://127.0.0.1:{port}/json/list", headers={"Accept": "application/json"}
         )
@@ -2357,6 +6472,7 @@ class DebuggerBridge:
         reader.start()
         try:
             self._command("Runtime.enable")
+            self._command("Page.enable")
             self._command(
                 "Debugger.enable", {"maxScriptsCacheSize": float(100 * 1024 * 1024)}
             )
@@ -2365,6 +6481,7 @@ class DebuggerBridge:
             )
             self._command("Log.enable")
             self._restore_settings()
+            self._restore_request_interception(target["id"])
             with self._lock:
                 already_paused = self._paused is not None
             if not already_paused:
@@ -2403,6 +6520,41 @@ class DebuggerBridge:
                 clear_heap_baseline = (
                     self._connection is connection and not self._heap_diff_busy
                 )
+                if self._object_experiment.get("target_id") == target["id"]:
+                    self._object_experiment_group = None
+                    self._object_experiment_objects_id = None
+                    self._object_experiment_result_indices.clear()
+                    self._object_experiment["search_id"] = 0
+                    self._object_experiment["search"] = None
+                    self._object_experiment["results"] = []
+                    self._object_experiment["last_mutation"] = None
+                    if self._object_experiment["state"] not in {
+                        "disposing",
+                        "disposed",
+                    }:
+                        self._object_experiment["state"] = "error"
+                        self._object_experiment["message"] = (
+                            "Object Lab target disconnected. Reattach it and run the search again."
+                        )
+                if self._runtime_hooks.get("target_id") == target["id"]:
+                    self._runtime_hook_points.clear()
+                    self._runtime_hook_processing = False
+                    self._runtime_hook_stop_requested = False
+                    self._runtime_hook_deferred_pause = None
+                    self._runtime_hook_epoch += 1
+                    self._runtime_hooks["active_points"] = 0
+                    self._runtime_hooks["definitions"] = []
+                    if self._runtime_hooks["state"] not in {
+                        "disposing",
+                        "disposed",
+                    }:
+                        self._runtime_hooks["state"] = "error"
+                        self._runtime_hooks["last_failure"] = (
+                            "The isolated target disconnected. Hook definitions were cleared."
+                        )
+                        self._runtime_hooks["message"] = (
+                            "Runtime Hooks target disconnected. Reattach it and add hooks again."
+                        )
                 if self._connection is connection:
                     self._connection = None
                     self._target = None
@@ -2448,6 +6600,9 @@ class DebuggerBridge:
             connection.close()
 
     def _handle_event(self, method: str, params: dict[str, Any]) -> None:
+        if method == "Fetch.requestPaused":
+            self._handle_request_interception_pause_async(params)
+            return
         if method == "HeapProfiler.addHeapSnapshotChunk":
             with self._lock:
                 collector = self._heap_snapshot_collector
@@ -2467,7 +6622,14 @@ class DebuggerBridge:
                     self._scripts[script["script_id"]] = script
                     self._changed()
             return
+        if method == "Page.frameNavigated":
+            frame = params.get("frame")
+            if isinstance(frame, dict) and not isinstance(frame.get("parentId"), str):
+                self._handle_runtime_hook_navigation()
+            return
         if method == "Debugger.paused":
+            if self._handle_runtime_hook_pause_async(params):
+                return
             paused = self._parse_pause(params)
             with self._lock:
                 self._pause_serial += 1
@@ -2586,6 +6748,23 @@ class DebuggerBridge:
         if not isinstance(result, dict):
             raise ProtocolError(f"Debugger returned malformed command result: {method}")
         return result
+
+    def _command_without_wait(
+        self, method: str, params: Optional[dict[str, Any]] = None
+    ) -> bool:
+        with self._lock:
+            connection = self._connection
+            if connection is None:
+                return False
+            command_id = self._next_command_id
+            self._next_command_id += 1
+        try:
+            connection.send_json(
+                {"id": command_id, "method": method, "params": params or {}}
+            )
+        except DebuggerBridgeError:
+            return False
+        return True
 
     def _set_breakpoint(
         self, request: dict[str, Any], replacing: Optional[str] = None
@@ -2749,6 +6928,72 @@ class DebuggerBridge:
                 )
             except DebuggerBridgeError:
                 continue
+
+    def _restore_request_interception(self, target_id: str) -> None:
+        with self._lock:
+            if (
+                self._request_interception_context_id is None
+                or self._request_interception["target_id"] != target_id
+            ):
+                return
+            pattern = self._request_interception_rule["url_pattern"]
+            was_running = self._request_interception["state"] == "running"
+            object_was_running = self._object_experiment["state"] in {
+                "navigating",
+                "searching",
+                "mutating",
+            }
+        self._command(
+            "Fetch.enable",
+            {
+                "patterns": [{"urlPattern": pattern, "requestStage": "Request"}],
+                "handleAuthRequests": False,
+            },
+        )
+        with self._lock:
+            if self._request_interception["target_id"] != target_id:
+                return
+            self._request_interception["state"] = "error" if was_running else "ready"
+            self._request_interception["message"] = (
+                "The experiment target reattached while a request was running; run it again."
+                if was_running
+                else "Disposable context ready. Configure a bounded interception rule."
+            )
+            if self._repeater_active_execution_id is None:
+                self._repeater["state"] = "ready"
+                self._repeater["message"] = (
+                    "Repeater is ready inside the disposable credential-free context."
+                )
+            self._object_experiment["isolated"] = True
+            self._object_experiment["target_id"] = target_id
+            self._object_experiment["state"] = (
+                "error"
+                if object_was_running
+                else "loaded"
+                if self._object_experiment["url"]
+                else "ready"
+            )
+            self._object_experiment["message"] = (
+                "The Object Lab target reattached during an action; run that action again."
+                if object_was_running
+                else "Object Lab page reattached. Run the bounded search again."
+                if self._object_experiment["url"]
+                else "Object Lab is isolated and ready for an explicit page URL."
+            )
+            self._runtime_hooks["isolated"] = True
+            self._runtime_hooks["target_id"] = target_id
+            self._runtime_hook_points.clear()
+            self._runtime_hook_processing = False
+            self._runtime_hook_stop_requested = False
+            self._runtime_hook_deferred_pause = None
+            self._runtime_hook_epoch += 1
+            self._runtime_hooks["active_points"] = 0
+            self._runtime_hooks["definitions"] = []
+            self._runtime_hooks["state"] = "ready"
+            self._runtime_hooks["message"] = (
+                "Runtime Hooks is isolated and ready for a live JavaScript function."
+            )
+            self._changed()
 
     def _parse_script(self, params: dict[str, Any]) -> Optional[dict[str, Any]]:
         script_id = params.get("scriptId")

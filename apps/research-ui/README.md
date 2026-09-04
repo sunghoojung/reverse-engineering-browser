@@ -157,6 +157,75 @@ first sampled appearance, shows the surrounding function locations and explicit
 coverage, and can open the candidate source. See
 [Memory Origin Trace v1](../../docs/product/memory-origin-trace-v1.md).
 
+The Request Interception Lab creates a new disposable DevTools BrowserContext
+and page for each experiment. It never arms Fetch interception on the baseline
+target and never shares that target's cookies or storage. One URL-pattern rule
+can continue, block, drop, rewrite, or fulfill a request. Requests always use
+`credentials: omit`, and credential, cookie, connection, host, and framing
+headers are rejected. Rules and explicit requests are limited to 64 headers,
+16 KiB total header text, and 64 KiB bodies. At most 16 paused requests are
+processed concurrently; overflow requests continue unchanged and create a
+visible audit record. Results are capped at 64 KiB, while the 128-entry audit
+stores only redacted URLs and mutation metadata. Disposal deletes the complete
+BrowserContext before the ephemeral result can be cleared. See
+[Request Interception v1](../../docs/product/request-interception-v1.md).
+
+Object Lab shares the disposable Experiment BrowserContext but never the
+baseline target. It opens one explicit credential-free HTTP or HTTPS page,
+then applies the existing bounded live-object search without invoking accessors.
+Results retain references only for the current navigation and search. A
+researcher can explicitly confirm a typed JSON own-property set or a safe
+configurable own-property delete. The fixed operation rejects accessors,
+prototype-related names, inherited setters, non-writable properties, and
+non-extensible targets. It exposes no arbitrary evaluation, function calls, or
+prototype mutation. Values are capped at 16 KiB, depth eight, 256 JSON entries,
+and 4 KiB per string. Each session allows 256 attempts and keeps at most 128
+metadata-only audit records containing the operation, target class, before and
+after types, redacted URL, byte count, and value digest. Disposal erases object
+references, previews, submitted values, and the audit with the BrowserContext.
+See [Live Object Experiment v1](../../docs/product/live-object-experiment-v1.md).
+
+Runtime Hook Studio shares that disposable Experiment BrowserContext and can
+instrument only its isolated page. Select a live JavaScript source and function
+location, add up to eight entry or synchronous-return hooks, then explicitly
+confirm page mutation before arming. A hook can inspect at most 32 own local
+data properties without invoking accessors, run a bounded condition and phase
+action, and replace a synchronous return with typed JSON or a frame expression.
+V8 resolution is capped at 32 return points per definition and 64 active points
+per session. Every handled pause resumes automatically. Navigation, target
+detach, disposal, the 512-hit ceiling, or a processing failure removes the hook
+points; disposal also erases definitions and the 128-entry ephemeral hit log.
+Promise returns are reported and preserved rather than overridden. Hook data
+never enters the evidence store. See
+[Runtime Hooks v1](../../docs/product/runtime-hooks-v1.md).
+
+Repeater shares that disposable request-lab context and sends one editable,
+credential-free request at a time. It supports immediate cancellation, a
+100-millisecond to 30-second timeout, 32 session-scoped `{{name}}` variables,
+copying the fully resolved explicit request, a 24-entry and 512-KiB history, and
+response comparison across status, duration, retained-body digest and size, and
+changed header names. Expanded requests are validated after variable
+substitution, and disposal erases variables, request bodies, responses, history,
+and comparisons. Traffic prefills only the selected method and URL without query,
+headers, cookies, or body content. See
+[Repeater v1](../../docs/product/repeater-v1.md).
+
+API Collection persists up to 128 credential-free request templates in 32
+folders with four bounded hierarchy levels. Root, ancestor-folder,
+selected-folder, and request variables resolve in that order before the
+existing Repeater validator runs the request inside the disposable Request Lab
+context. Traffic import copies only method and URL with query and fragment
+removed. It never copies captured headers, cookies, request bodies, or
+credentials. The versioned document is capped at 2 MiB, uses generation-based
+conflict rejection, and is atomically replaced with user-only permissions.
+Saved templates persist, while the associated 24-entry and 512-KiB Repeater
+history remains ephemeral and is erased with the Request Lab context. The
+browser development server defaults to
+`build/sessions/api-collection-v1.json`; the native app defaults to
+`Application Support/Origin Trace/api-collection-v1.json`. Pass
+`--api-collection /path/to/api-collection-v1.json` to override either path. See
+[API Collection v1](../../docs/product/api-collection-v1.md).
+
 The Traffic workspace can pivot a selected request value into Memory. The pivot
 only prefills an ephemeral query. It does not persist the selected value or
 begin a heap capture without a separate user action.

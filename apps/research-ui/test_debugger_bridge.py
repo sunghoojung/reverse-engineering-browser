@@ -11,10 +11,13 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Optional
 
 from debugger_bridge import (
     LIVE_OBJECT_SEARCH_FUNCTION,
     MAX_HEAP_SNAPSHOT_BYTES,
+    OBJECT_EXPERIMENT_MUTATE_FUNCTION,
+    REQUEST_INTERCEPTION_FUNCTION,
     DebuggerBridge,
     DebuggerBridgeError,
     HeapSnapshotCapture,
@@ -147,16 +150,50 @@ class FakeDebuggerWebSocket:
         elif method == "Debugger.getScriptSource":
             result = {"scriptSource": "function checkout(cart) { return cart; }"}
         elif method == "Runtime.evaluate":
-            result = {
-                "result": {
-                    "type": "object",
-                    "className": "Object",
-                    "objectId": "prototype-1",
+            if 'credentials: "omit"' in command["params"].get("expression", ""):
+                self.send_json(
+                    {
+                        "method": "Fetch.requestPaused",
+                        "params": {
+                            "requestId": "protocol-intercept-1",
+                            "resourceType": "Fetch",
+                            "request": {
+                                "url": "https://api.test/checkout?secret=hidden",
+                                "method": "POST",
+                                "headers": {"x-experiment": "1"},
+                            },
+                        },
+                    }
+                )
+                result = {
+                    "result": {
+                        "type": "object",
+                        "value": {
+                            "protocolVersion": 1,
+                            "ok": True,
+                            "status": 202,
+                            "statusText": "Accepted",
+                            "url": "https://api.test/checkout?secret=hidden",
+                            "headers": [
+                                {"name": "content-type", "value": "application/json"}
+                            ],
+                            "headersTruncated": False,
+                            "body": '{"accepted":true}',
+                            "bodyTruncated": False,
+                        },
+                    }
                 }
-            }
+            else:
+                result = {
+                    "result": {
+                        "type": "object",
+                        "className": "Object",
+                        "objectId": "prototype-1",
+                    }
+                }
         elif method == "Runtime.queryObjects":
             result = {
-                "result": {
+                "objects": {
                     "type": "object",
                     "subtype": "array",
                     "objectId": "objects-1",
@@ -523,7 +560,11 @@ class DebuggerBridgeTests(unittest.TestCase):
                 )
                 self.assertTrue(search_command["params"]["returnByValue"])
                 self.assertTrue(search_command["params"]["silent"])
-                self.assertTrue(search_command["params"]["throwOnSideEffect"])
+                self.assertNotIn("throwOnSideEffect", search_command["params"])
+                self.assertEqual(
+                    search_command["params"]["functionDeclaration"],
+                    LIVE_OBJECT_SEARCH_FUNCTION,
+                )
                 self.assertIn(
                     "Object.getOwnPropertyNames",
                     search_command["params"]["functionDeclaration"],
@@ -653,6 +694,63 @@ class DebuggerBridgeTests(unittest.TestCase):
                 self.assertIn("DOMDebugger.setEventListenerBreakpoint", methods)
                 self.assertIn("DOMDebugger.removeEventListenerBreakpoint", methods)
                 self.wait_for(lambda: bridge.snapshot()["state"] == "running")
+
+                with bridge._lock:
+                    bridge._request_interception_context_id = "context-protocol"
+                    bridge._request_interception_return_target_id = "page-1"
+                    bridge._request_interception = bridge._empty_request_interception()
+                    bridge._request_interception.update(
+                        {
+                            "experiment_id": 1,
+                            "state": "ready",
+                            "isolated": True,
+                            "target_id": "page-1",
+                            "created_at_ms": 1,
+                            "message": "Protocol fixture ready.",
+                        }
+                    )
+                bridge._restore_request_interception("page-1")
+                bridge.action(
+                    {
+                        "action": "configure_request_interception",
+                        "mode": "fulfill",
+                        "url_pattern": "https://api.test/*",
+                        "method_filter": "POST",
+                        "response_code": 202,
+                        "response_headers": {"content-type": "application/json"},
+                        "response_body": '{"accepted":true}',
+                    }
+                )
+                experiment_result = bridge.action(
+                    {
+                        "action": "run_request_interception",
+                        "url": "https://api.test/checkout?secret=hidden",
+                        "method": "POST",
+                        "headers": {"x-experiment": "1"},
+                        "body": "{}",
+                    }
+                )["experiment"]
+                self.assertEqual(experiment_result["result"]["status"], 202)
+                self.assertEqual(
+                    experiment_result["result"]["url"],
+                    "https://api.test/checkout",
+                )
+                protocol_audit = self.wait_for(
+                    lambda: (
+                        (value := bridge.snapshot()["request_interception"])["audit"]
+                        and value
+                    )
+                )["audit"][-1]
+                self.assertEqual(protocol_audit["outcome"], "fulfilled")
+                self.assertNotIn("secret", protocol_audit["url"])
+                methods = [command["method"] for command in web_socket.commands]
+                self.assertIn("Fetch.enable", methods)
+                self.assertIn("Fetch.fulfillRequest", methods)
+                with bridge._lock:
+                    bridge._request_interception_context_id = None
+                    bridge._request_interception_return_target_id = None
+                    bridge._request_interception_pending.clear()
+                    bridge._request_interception = bridge._empty_request_interception()
             finally:
                 bridge.stop()
 
@@ -1126,6 +1224,1392 @@ process.stdout.write(JSON.stringify({{
         self.assertTrue(all(not path.exists() for path in bridge.capture_paths))
         self.assertEqual(bridge.documents, [])
         self.assertIn("DOMDebugger.removeEventListenerBreakpoint", bridge.commands)
+
+    def test_request_interception_is_isolated_bounded_and_audited(self) -> None:
+        class RecordingConnection:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        class InterceptionBridge(DebuggerBridge):
+            def __init__(self) -> None:
+                super().__init__()
+                self.browser_commands = []
+                self.commands = []
+                self._state = "running"
+                self._target = {
+                    "id": "baseline-page",
+                    "type": "page",
+                    "title": "Baseline",
+                    "url": "https://baseline.test/",
+                }
+                self.recording_connection = RecordingConnection()
+                self._connection = self.recording_connection
+
+            def _browser_command(self, method: str, params=None) -> dict:
+                self.browser_commands.append((method, params or {}))
+                if method == "Target.createBrowserContext":
+                    return {"browserContextId": "context-1"}
+                if method == "Target.createTarget":
+                    return {"targetId": "experiment-page"}
+                return {}
+
+            def _command(self, method: str, params=None, timeout: float = 3.0) -> dict:
+                self.commands.append((method, params or {}, timeout))
+                if method == "Runtime.evaluate":
+                    self._handle_request_interception_pause_async(
+                        {
+                            "requestId": "intercept-run",
+                            "resourceType": "Fetch",
+                            "request": {
+                                "url": "https://api.test/private?token=secret",
+                                "method": "POST",
+                                "headers": {"x-visible": "yes"},
+                            },
+                        }
+                    )
+                    return {
+                        "result": {
+                            "value": {
+                                "protocolVersion": 1,
+                                "ok": True,
+                                "status": 202,
+                                "statusText": "Accepted",
+                                "url": "https://api.test/private?token=secret",
+                                "headers": [
+                                    {"name": "content-type", "value": "text/plain"}
+                                ],
+                                "headersTruncated": False,
+                                "body": "synthetic",
+                                "bodyTruncated": False,
+                            }
+                        }
+                    }
+                return {}
+
+        bridge = InterceptionBridge()
+        created = bridge.action({"action": "create_request_interception_experiment"})
+        self.assertTrue(created["experiment"]["isolated"])
+        self.assertEqual(created["experiment"]["state"], "creating")
+        self.assertTrue(bridge.recording_connection.closed)
+        self.assertEqual(
+            [method for method, _ in bridge.browser_commands[:2]],
+            ["Target.createBrowserContext", "Target.createTarget"],
+        )
+
+        bridge._target = {
+            "id": "experiment-page",
+            "type": "page",
+            "title": "about:blank",
+            "url": "about:blank",
+        }
+        bridge._connection = RecordingConnection()
+        bridge._restore_request_interception("experiment-page")
+        self.assertEqual(bridge.snapshot()["request_interception"]["state"], "ready")
+
+        cases = [
+            ({"mode": "continue"}, "Fetch.continueRequest", None),
+            ({"mode": "block"}, "Fetch.failRequest", "BlockedByClient"),
+            ({"mode": "drop"}, "Fetch.failRequest", "Aborted"),
+            (
+                {
+                    "mode": "rewrite",
+                    "rewrite_method": "PUT",
+                    "rewrite_headers": {"x-experiment": "1"},
+                    "rewrite_body": "changed",
+                },
+                "Fetch.continueRequest",
+                None,
+            ),
+            (
+                {
+                    "mode": "fulfill",
+                    "response_code": 202,
+                    "response_headers": {"content-type": "text/plain"},
+                    "response_body": "synthetic",
+                },
+                "Fetch.fulfillRequest",
+                None,
+            ),
+        ]
+        for index, (rule, expected_method, expected_reason) in enumerate(cases, 1):
+            bridge.action(
+                {
+                    "action": "configure_request_interception",
+                    "url_pattern": "https://api.test/*",
+                    "method_filter": "POST",
+                    **rule,
+                }
+            )
+            request_id = f"intercept-{index}"
+            bridge._handle_request_interception_pause_async(
+                {
+                    "requestId": request_id,
+                    "resourceType": "Fetch",
+                    "request": {
+                        "url": "https://api.test/private?token=secret",
+                        "method": "POST",
+                        "headers": {"authorization": "must-not-copy"},
+                    },
+                }
+            )
+            self.wait_for(
+                lambda: bridge.snapshot()["request_interception"]["pending_requests"]
+                == 0
+                and bridge.snapshot()["request_interception"]["audit"][-1]["request_id"]
+                == request_id
+            )
+            command = next(
+                entry
+                for entry in reversed(bridge.commands)
+                if entry[1].get("requestId") == request_id
+            )
+            self.assertEqual(command[0], expected_method)
+            self.assertEqual(command[1].get("errorReason"), expected_reason)
+        rewrite_command = next(
+            entry
+            for entry in bridge.commands
+            if entry[1].get("requestId") == "intercept-4"
+        )
+        self.assertEqual(rewrite_command[1]["method"], "PUT")
+        self.assertEqual(base64.b64decode(rewrite_command[1]["postData"]), b"changed")
+
+        bridge._handle_request_interception_pause_async(
+            {
+                "requestId": "intercept-preflight",
+                "resourceType": "Fetch",
+                "request": {
+                    "url": "https://api.test/private?token=secret",
+                    "method": "OPTIONS",
+                    "headers": {
+                        "access-control-request-method": "POST",
+                        "access-control-request-headers": "content-type, x-test",
+                    },
+                },
+            }
+        )
+        self.wait_for(
+            lambda: bridge.snapshot()["request_interception"]["audit"][-1][
+                "request_id"
+            ]
+            == "intercept-preflight"
+        )
+        preflight_command = next(
+            entry
+            for entry in bridge.commands
+            if entry[1].get("requestId") == "intercept-preflight"
+        )
+        self.assertEqual(preflight_command[0], "Fetch.fulfillRequest")
+        self.assertEqual(preflight_command[1]["responseCode"], 204)
+        self.assertIn(
+            {
+                "name": "access-control-allow-headers",
+                "value": "content-type, x-test",
+            },
+            preflight_command[1]["responseHeaders"],
+        )
+
+        completed = bridge.action(
+            {
+                "action": "run_request_interception",
+                "url": "https://api.test/private?token=secret",
+                "method": "POST",
+                "headers": {"x-test": "1"},
+                "body": "request",
+            }
+        )
+        experiment = completed["experiment"]
+        self.assertEqual(experiment["result"]["status"], 202)
+        self.assertEqual(experiment["result"]["url"], "https://api.test/private")
+        self.assertEqual(experiment["last_request"]["url"], "https://api.test/private")
+        self.wait_for(
+            lambda: bridge.snapshot()["request_interception"]["pending_requests"] == 0
+        )
+        self.assertTrue(
+            all(
+                "token" not in entry["url"]
+                for entry in bridge.snapshot()["request_interception"]["audit"]
+            )
+        )
+
+        disposed = bridge.action({"action": "dispose_request_interception_experiment"})
+        self.assertEqual(disposed["experiment"]["state"], "disposed")
+        self.assertFalse(disposed["experiment"]["isolated"])
+        self.assertIsNone(disposed["experiment"]["target_id"])
+        self.assertEqual(
+            bridge.browser_commands[-1],
+            (
+                "Target.disposeBrowserContext",
+                {"browserContextId": "context-1"},
+            ),
+        )
+        bridge.action({"action": "clear_request_interception_result"})
+        self.assertEqual(bridge.snapshot()["request_interception"]["state"], "idle")
+
+    def test_request_interception_rejects_credentials_and_unbounded_rules(self) -> None:
+        bridge = DebuggerBridge()
+        self.assertEqual(
+            bridge._redacted_request_url(
+                "https://user:password@[2001:db8::1]:8443/private?token=secret"
+            ),
+            "https://[2001:db8::1]:8443/private",
+        )
+        self.assertEqual(
+            bridge._normalize_request_interception_request(
+                {"url": "https://example.test/", "method": "CUSTOM_METHOD"}
+            )["method"],
+            "CUSTOM_METHOD",
+        )
+        bridge._handle_request_interception_pause_async(
+            {
+                "requestId": "inactive-request",
+                "resourceType": "Fetch",
+                "request": {"url": "https://example.test/", "method": "GET"},
+            }
+        )
+        self.assertEqual(bridge.snapshot()["request_interception"]["audit"], [])
+        fulfill_rule = bridge._normalize_request_interception_rule(
+            {
+                "mode": "fulfill",
+                "url_pattern": "*",
+                "response_headers": {"content-type": "application/json"},
+                "response_body": "{}",
+            }
+        )
+        self.assertIn(
+            {"name": "access-control-allow-origin", "value": "*"},
+            fulfill_rule["response_headers"],
+        )
+        with self.assertRaisesRegex(DebuggerBridgeError, "credential-free"):
+            bridge._normalize_request_interception_request(
+                {
+                    "url": "https://user:password@example.test/",
+                    "method": "GET",
+                }
+            )
+        with self.assertRaisesRegex(DebuggerBridgeError, "forbidden"):
+            bridge._normalize_request_interception_request(
+                {
+                    "url": "https://example.test/",
+                    "method": "GET",
+                    "headers": {"Authorization": "secret"},
+                }
+            )
+        with self.assertRaisesRegex(DebuggerBridgeError, "64 KiB"):
+            bridge._normalize_request_interception_rule(
+                {
+                    "mode": "fulfill",
+                    "url_pattern": "*",
+                    "response_body": "x" * (64 * 1024 + 1),
+                }
+            )
+        with self.assertRaisesRegex(DebuggerBridgeError, "at least one"):
+            bridge._normalize_request_interception_rule(
+                {"mode": "rewrite", "url_pattern": "*"}
+            )
+        with self.assertRaisesRegex(ProtocolError, "malformed"):
+            bridge._normalize_request_interception_result(
+                {
+                    "protocolVersion": 1,
+                    "ok": True,
+                    "status": 200,
+                    "statusText": "OK",
+                    "url": "https://example.test/",
+                    "headers": [{"name": "set-cookie", "value": "secret=1"}],
+                    "headersTruncated": False,
+                    "body": "ok",
+                    "bodyTruncated": False,
+                }
+            )
+
+    def test_partial_request_interception_context_remains_disposable(self) -> None:
+        class PartialContextBridge(DebuggerBridge):
+            def __init__(self) -> None:
+                super().__init__()
+                self._state = "running"
+                self._target = {
+                    "id": "baseline-page",
+                    "type": "page",
+                    "title": "Baseline",
+                    "url": "https://baseline.test/",
+                }
+                self.cleanup_fails = True
+
+            def _browser_command(self, method: str, params=None) -> dict:
+                if method == "Target.createBrowserContext":
+                    return {"browserContextId": "partial-context"}
+                if method == "Target.createTarget":
+                    raise DebuggerBridgeError("Target creation failed")
+                if method == "Target.disposeBrowserContext" and self.cleanup_fails:
+                    raise DebuggerBridgeError("Context disposal failed")
+                return {}
+
+        bridge = PartialContextBridge()
+        with self.assertRaisesRegex(DebuggerBridgeError, "Target creation failed"):
+            bridge.action({"action": "create_request_interception_experiment"})
+        failed = bridge.snapshot()["request_interception"]
+        self.assertEqual(failed["state"], "error")
+        self.assertTrue(failed["isolated"])
+        self.assertIsNone(failed["target_id"])
+        self.assertIn("could not be confirmed as deleted", failed["message"])
+
+        bridge.cleanup_fails = False
+        disposed = bridge.action({"action": "dispose_request_interception_experiment"})[
+            "experiment"
+        ]
+        self.assertEqual(disposed["state"], "disposed")
+        self.assertFalse(disposed["isolated"])
+
+    def test_request_interception_runner_streams_only_the_bounded_response(
+        self,
+    ) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+        exercise = f"""
+const run = ({REQUEST_INTERCEPTION_FUNCTION});
+let reads = 0;
+let cancellations = 0;
+let capturedOptions = null;
+globalThis.fetch = async (_url, options) => {{
+  capturedOptions = options;
+  const oversized = new Uint8Array(80 * 1024);
+  oversized.fill(97);
+  return {{
+    status: 202,
+    statusText: 'Accepted',
+    url: 'https://api.test/result?private=1',
+    headers: new Map([['content-type', 'text/plain']]),
+    body: {{getReader() {{ return {{
+      async read() {{ reads += 1; return {{done: false, value: oversized}}; }},
+      async cancel() {{ cancellations += 1; }}
+    }}; }}}}
+  }};
+}};
+const result = await run({{
+  url: 'https://api.test/result', method: 'POST', headers: {{'x-test': '1'}},
+  body: 'request', timeoutMs: 1000, headerLimit: 64,
+  headerValueLimit: 2048, headerTotalLimit: 16384, responseByteLimit: 65536
+}});
+process.stdout.write(JSON.stringify({{
+  ok: result.ok,
+  bodyBytes: new TextEncoder().encode(result.body).byteLength,
+  truncated: result.bodyTruncated,
+  headersTruncated: result.headersTruncated,
+  reads,
+  cancellations,
+  credentials: capturedOptions.credentials,
+  cache: capturedOptions.cache,
+  referrerPolicy: capturedOptions.referrerPolicy
+}}));
+"""
+        completed = subprocess.run(
+            [node, "-e", exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "ok": True,
+                "bodyBytes": 65_536,
+                "truncated": True,
+                "headersTruncated": False,
+                "reads": 1,
+                "cancellations": 1,
+                "credentials": "omit",
+                "cache": "no-store",
+                "referrerPolicy": "no-referrer",
+            },
+        )
+
+    def test_repeater_resolves_cancels_compares_and_bounds_history(self) -> None:
+        class RecordingConnection:
+            def close(self) -> None:
+                return
+
+        class RepeaterBridge(DebuggerBridge):
+            def __init__(self) -> None:
+                super().__init__()
+                self._state = "running"
+                self._target = {
+                    "id": "baseline-page",
+                    "type": "page",
+                    "title": "Baseline",
+                    "url": "https://baseline.test/",
+                }
+                self._connection = RecordingConnection()
+                self.browser_commands = []
+                self.response_index = 0
+                self.block_next = False
+                self.request_started = threading.Event()
+                self.cancelled = threading.Event()
+
+            def _browser_command(self, method: str, params=None) -> dict:
+                self.browser_commands.append((method, params or {}))
+                if method == "Target.createBrowserContext":
+                    return {"browserContextId": "repeater-context"}
+                if method == "Target.createTarget":
+                    return {"targetId": "repeater-page"}
+                return {}
+
+            def _command(self, method: str, params=None, timeout: float = 3.0) -> dict:
+                if method != "Runtime.evaluate":
+                    return {}
+                expression = (params or {}).get("expression", "")
+                if "registry.set(id, new AbortController())" in expression:
+                    return {"result": {"value": True}}
+                if not expression.startswith("(async function(config)"):
+                    if "const controller = registry instanceof Map" in expression:
+                        self.cancelled.set()
+                        return {"result": {"value": True}}
+                    return {}
+                if self.block_next:
+                    self.block_next = False
+                    self.request_started.set()
+                    self.cancelled.wait(timeout=2.0)
+                    return {
+                        "result": {
+                            "value": {
+                                "protocolVersion": 1,
+                                "ok": False,
+                                "error": "Request cancelled",
+                                "durationMs": 4,
+                                "cancelled": True,
+                                "timedOut": False,
+                            }
+                        }
+                    }
+                self.response_index += 1
+                status = 200 if self.response_index == 1 else 201
+                body = "alpha" if self.response_index == 1 else "beta"
+                headers = [{"name": "x-version", "value": str(self.response_index)}]
+                if self.response_index > 1:
+                    headers.append({"name": "x-added", "value": "yes"})
+                return {
+                    "result": {
+                        "value": {
+                            "protocolVersion": 1,
+                            "ok": True,
+                            "status": status,
+                            "statusText": "OK",
+                            "url": "https://api.test/orders/42?private=1",
+                            "headers": headers,
+                            "headersTruncated": False,
+                            "body": body,
+                            "bodyTruncated": False,
+                            "durationMs": self.response_index + 2,
+                            "cancelled": False,
+                            "timedOut": False,
+                        }
+                    }
+                }
+
+        bridge = RepeaterBridge()
+        bridge.action({"action": "create_request_interception_experiment"})
+        bridge._target = {
+            "id": "repeater-page",
+            "type": "page",
+            "title": "about:blank",
+            "url": "about:blank",
+        }
+        bridge._connection = RecordingConnection()
+        bridge._restore_request_interception("repeater-page")
+        configured = bridge.action(
+            {
+                "action": "configure_repeater_variables",
+                "variables": {"host": "api.test", "order": "42"},
+            }
+        )["repeater"]
+        self.assertEqual(
+            configured["variables"],
+            [{"name": "host", "value": "api.test"}, {"name": "order", "value": "42"}],
+        )
+
+        def send(
+            body: str = '{"id":"{{order}}"}',
+            collection_request_id: Optional[int] = None,
+        ) -> dict:
+            before_history = bridge.snapshot()["repeater"]["history"]
+            before_id = before_history[-1]["id"] if before_history else 0
+            started = bridge.action(
+                {
+                    "action": "run_repeater_request",
+                    "url": "https://{{host}}/orders/{{order}}?private=1",
+                    "method": "POST",
+                    "headers": {"x-order": "{{order}}"},
+                    "body": body,
+                    "timeout_ms": 500,
+                    "collection_request_id": collection_request_id,
+                }
+            )
+            self.assertTrue(started["ok"])
+
+            def completed_entry():
+                history = bridge.snapshot()["repeater"]["history"]
+                return history[-1] if history and history[-1]["id"] > before_id else None
+
+            return self.wait_for(completed_entry)
+
+        first = send(collection_request_id=41)
+        second = send()
+        self.assertEqual(first["collection_request_id"], 41)
+        self.assertEqual(first["request"]["url"], "https://{{host}}/orders/{{order}}?private=1")
+        self.assertEqual(second["resolved_request"]["url"], "https://api.test/orders/42?private=1")
+        self.assertEqual(second["variable_names"], ["host", "order"])
+        comparison = bridge.snapshot()["repeater"]["comparison"]
+        self.assertEqual((comparison["baseline_status"], comparison["current_status"]), (200, 201))
+        self.assertTrue(comparison["body_changed"])
+        self.assertEqual(comparison["headers_added"], ["x-added"])
+        self.assertEqual(comparison["headers_changed"], ["x-version"])
+
+        bridge.block_next = True
+        bridge.request_started.clear()
+        bridge.cancelled.clear()
+        bridge.action(
+            {
+                "action": "run_repeater_request",
+                "url": "https://{{host}}/slow",
+                "method": "GET",
+                "headers": {},
+                "body": "",
+                "timeout_ms": 500,
+            }
+        )
+        self.assertTrue(bridge.request_started.wait(timeout=1.0))
+        cancelling = bridge.action({"action": "cancel_repeater_request"})["repeater"]
+        self.assertIn(cancelling["state"], {"cancelling", "ready"})
+        cancelled_entry = self.wait_for(
+            lambda: next(
+                (
+                    entry
+                    for entry in bridge.snapshot()["repeater"]["history"]
+                    if entry["state"] == "cancelled"
+                ),
+                None,
+            )
+        )
+        self.assertTrue(cancelled_entry["response"]["cancelled"])
+
+        for _ in range(26):
+            send()
+        bounded = bridge.snapshot()["repeater"]
+        self.assertEqual(len(bounded["history"]), 24)
+        self.assertGreaterEqual(bounded["history_evictions"], 5)
+        self.assertLessEqual(bounded["history_bytes"], 512 * 1024)
+        self.assertEqual(
+            bounded["history_bytes"],
+            sum(entry["stored_bytes"] for entry in bounded["history"]),
+        )
+
+        disposed = bridge.action(
+            {"action": "dispose_request_interception_experiment"}
+        )["repeater"]
+        self.assertEqual(disposed["state"], "disposed")
+        self.assertEqual(disposed["variables"], [])
+        self.assertEqual(disposed["history"], [])
+
+    def test_repeater_rejects_unresolved_sensitive_and_expanded_inputs(self) -> None:
+        bridge = DebuggerBridge()
+        variables = bridge._normalize_repeater_variables({"large": "x" * 4096})
+        template = bridge._normalize_repeater_template(
+            {
+                "url": "https://example.test/{{missing}}",
+                "method": "GET",
+                "headers": {},
+                "body": "",
+                "timeout_ms": 100,
+            }
+        )
+        with self.assertRaisesRegex(DebuggerBridgeError, "Unresolved"):
+            bridge._resolve_repeater_request(template, variables)
+        literal_template = bridge._normalize_repeater_template(
+            {
+                "url": "https://example.test/",
+                "method": "POST",
+                "headers": {},
+                "body": "{{=large}}",
+                "timeout_ms": 100,
+            }
+        )
+        literal, literal_variables = bridge._resolve_repeater_request(
+            literal_template, variables
+        )
+        self.assertEqual(literal["body"], "{{large}}")
+        self.assertEqual(literal_variables, [])
+        with self.assertRaisesRegex(DebuggerBridgeError, "forbidden"):
+            bridge._normalize_repeater_template(
+                {
+                    "url": "https://example.test/",
+                    "method": "GET",
+                    "headers": {"Authorization": "{{large}}"},
+                    "body": "",
+                    "timeout_ms": 100,
+                }
+            )
+        expanded = bridge._normalize_repeater_template(
+            {
+                "url": "https://example.test/",
+                "method": "POST",
+                "headers": {},
+                "body": "{{large}}" * 17,
+                "timeout_ms": 100,
+            }
+        )
+        with self.assertRaisesRegex(DebuggerBridgeError, "64 KiB"):
+            bridge._resolve_repeater_request(expanded, variables)
+        with self.assertRaisesRegex(DebuggerBridgeError, "100 and 30000"):
+            bridge._normalize_repeater_template(
+                {
+                    "url": "https://example.test/",
+                    "method": "GET",
+                    "headers": {},
+                    "body": "",
+                    "timeout_ms": 30_001,
+                }
+            )
+
+    def test_object_experiment_navigates_searches_mutates_and_erases(self) -> None:
+        class RecordingConnection:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        class ObjectExperimentBridge(DebuggerBridge):
+            def __init__(self) -> None:
+                super().__init__()
+                self._state = "running"
+                self._target = {
+                    "id": "baseline-page",
+                    "type": "page",
+                    "title": "Baseline",
+                    "url": "https://baseline.test/",
+                }
+                self._connection = RecordingConnection()
+                self.browser_commands = []
+                self.commands = []
+                self.mutation_outcome = "updated"
+
+            def _browser_command(self, method: str, params=None) -> dict:
+                self.browser_commands.append((method, params or {}))
+                if method == "Target.createBrowserContext":
+                    return {"browserContextId": "object-context"}
+                if method == "Target.createTarget":
+                    return {"targetId": "object-page"}
+                return {}
+
+            def _command(self, method: str, params=None, timeout: float = 3.0) -> dict:
+                params = params or {}
+                self.commands.append((method, params, timeout))
+                if method == "Page.navigate":
+                    return {"frameId": "object-frame"}
+                if method == "Runtime.evaluate":
+                    if "readyState:document.readyState" in params.get("expression", ""):
+                        return {
+                            "result": {
+                                "value": {
+                                    "protocolVersion": 1,
+                                    "readyState": "complete",
+                                    "url": "https://app.test/lab?private=hidden",
+                                }
+                            }
+                        }
+                    return {"result": {"objectId": "object-prototype"}}
+                if method == "Runtime.queryObjects":
+                    return {"objects": {"objectId": "object-results"}}
+                if method == "Runtime.callFunctionOn":
+                    declaration = params.get("functionDeclaration")
+                    if declaration == LIVE_OBJECT_SEARCH_FUNCTION:
+                        return {
+                            "result": {
+                                "value": {
+                                    "protocolVersion": 2,
+                                    "analyzed": 12,
+                                    "totalObjects": 12,
+                                    "results": [
+                                        {
+                                            "id": "4",
+                                            "className": "CheckoutState",
+                                            "propertyCount": 2,
+                                            "propertiesTruncated": False,
+                                            "similarity": None,
+                                            "preview": [
+                                                {
+                                                    "name": "ready",
+                                                    "type": "boolean",
+                                                    "value": "false",
+                                                }
+                                            ],
+                                        }
+                                    ],
+                                    "resultLimit": 50,
+                                    "resultLimitReached": False,
+                                    "scanLimitReached": False,
+                                    "propertyLimitReached": False,
+                                    "timedOut": False,
+                                    "durationMs": 2,
+                                }
+                            }
+                        }
+                    if declaration == OBJECT_EXPERIMENT_MUTATE_FUNCTION:
+                        config = params["arguments"][0]["value"]
+                        success = self.mutation_outcome == "updated"
+                        return {
+                            "result": {
+                                "value": {
+                                    "protocolVersion": 1,
+                                    "ok": success,
+                                    "error": None if success else "Accessor properties cannot be patched",
+                                    "outcome": self.mutation_outcome,
+                                    "before": {
+                                        "exists": True,
+                                        "type": "boolean" if success else "accessor",
+                                        "className": "",
+                                        "writable": success,
+                                        "configurable": True,
+                                        "preview": "false" if success else None,
+                                    },
+                                    "after": {
+                                        "exists": True,
+                                        "type": "object" if success else "accessor",
+                                        "className": "Object" if success else "",
+                                        "writable": success,
+                                        "configurable": True,
+                                        "preview": "[Object]" if success else None,
+                                    },
+                                    "object": {
+                                        "id": config["resultId"],
+                                        "className": "CheckoutState",
+                                        "propertyCount": 2,
+                                        "propertiesTruncated": False,
+                                        "similarity": config["similarity"],
+                                        "preview": [
+                                            {
+                                                "name": config["property"],
+                                                "type": "object" if success else "accessor",
+                                                "value": "[Object]" if success else "<getter not invoked>",
+                                            }
+                                        ],
+                                    },
+                                }
+                            }
+                        }
+                    return {"result": {"objectId": "candidate-4"}}
+                return {}
+
+        bridge = ObjectExperimentBridge()
+        created = bridge.action({"action": "create_request_interception_experiment"})
+        self.assertTrue(created["object_experiment"]["isolated"])
+        bridge._target = {
+            "id": "object-page",
+            "type": "page",
+            "title": "about:blank",
+            "url": "about:blank",
+        }
+        bridge._connection = RecordingConnection()
+        bridge._restore_request_interception("object-page")
+        self.assertEqual(bridge.snapshot()["object_experiment"]["state"], "ready")
+
+        navigated = bridge.action(
+            {
+                "action": "navigate_object_experiment",
+                "url": "https://app.test/lab?private=hidden",
+            }
+        )["object_experiment"]
+        self.assertEqual(navigated["state"], "loaded")
+        self.assertEqual(navigated["url"], "https://app.test/lab")
+        self.assertEqual(navigated["navigation_id"], 1)
+
+        searched = bridge.action(
+            {"action": "search_object_experiment", "property_query": "ready"}
+        )["object_experiment"]
+        self.assertEqual(searched["search_id"], 1)
+        self.assertEqual(searched["results"][0]["class_name"], "CheckoutState")
+        self.assertEqual(bridge._object_experiment_result_indices, {4})
+
+        secret_value = {"enabled": True, "label": "do-not-retain"}
+        mutated = bridge.action(
+            {
+                "action": "mutate_object_experiment",
+                "search_id": searched["search_id"],
+                "result_id": "4",
+                "operation": "set",
+                "property": "ready",
+                "value": secret_value,
+                "confirmed": True,
+            }
+        )["object_experiment"]
+        self.assertTrue(mutated["last_mutation"]["ok"])
+        self.assertEqual(mutated["results"][0]["preview"][0]["value"], "[Object]")
+        self.assertEqual(len(mutated["audit"]), 1)
+        audit = mutated["audit"][0]
+        canonical = b'{"enabled":true,"label":"do-not-retain"}'
+        self.assertEqual(audit["value_bytes"], len(canonical))
+        self.assertEqual(audit["value_digest"], hashlib.sha256(canonical).hexdigest())
+        self.assertNotIn("do-not-retain", json.dumps(audit))
+        self.assertNotIn("private", audit["url"])
+        mutation_command = next(
+            command
+            for command in bridge.commands
+            if command[0] == "Runtime.callFunctionOn"
+            and command[1].get("functionDeclaration") == OBJECT_EXPERIMENT_MUTATE_FUNCTION
+        )
+        self.assertNotIn("do-not-retain", mutation_command[1]["functionDeclaration"])
+
+        bridge.mutation_outcome = "accessor"
+        rejected = bridge.action(
+            {
+                "action": "mutate_object_experiment",
+                "search_id": searched["search_id"],
+                "result_id": "4",
+                "operation": "set",
+                "property": "accessor",
+                "value": False,
+                "confirmed": True,
+            }
+        )["object_experiment"]
+        self.assertFalse(rejected["last_mutation"]["ok"])
+        self.assertEqual(rejected["audit"][-1]["outcome"], "accessor")
+
+        disposed = bridge.action(
+            {"action": "dispose_request_interception_experiment"}
+        )["object_experiment"]
+        self.assertEqual(disposed["state"], "disposed")
+        self.assertEqual(disposed["results"], [])
+        self.assertEqual(disposed["audit"], [])
+        self.assertFalse(disposed["isolated"])
+
+    def test_object_experiment_rejects_unsafe_or_unbounded_mutations(self) -> None:
+        bridge = DebuggerBridge()
+        for invalid in (
+            "x" * (4 * 1024 + 1),
+            {"nested": [[[[[[[[[True]]]]]]]]]},
+            list(range(257)),
+            2**53,
+            float("inf"),
+        ):
+            with self.assertRaises(DebuggerBridgeError):
+                bridge._normalize_object_experiment_value(invalid)
+        with self.assertRaisesRegex(DebuggerBridgeError, "credential-free"):
+            bridge._validate_request_interception_url(
+                "https://user:secret@example.test/"
+            )
+
+        bridge._state = "running"
+        bridge._target = {
+            "id": "baseline-page",
+            "type": "page",
+            "title": "Baseline",
+            "url": "https://baseline.test/",
+        }
+        with self.assertRaisesRegex(DebuggerBridgeError, "disposable"):
+            bridge.action(
+                {
+                    "action": "mutate_object_experiment",
+                    "search_id": 1,
+                    "result_id": "0",
+                    "operation": "set",
+                    "property": "safe",
+                    "value": True,
+                    "confirmed": True,
+                }
+            )
+        with self.assertRaisesRegex(DebuggerBridgeError, "confirmation"):
+            bridge.action(
+                {
+                    "action": "mutate_object_experiment",
+                    "search_id": 1,
+                    "result_id": "0",
+                    "operation": "set",
+                    "property": "safe",
+                    "value": True,
+                }
+            )
+        with self.assertRaisesRegex(DebuggerBridgeError, "not allowed"):
+            bridge.action(
+                {
+                    "action": "mutate_object_experiment",
+                    "search_id": 1,
+                    "result_id": "0",
+                    "operation": "set",
+                    "property": "__proto__",
+                    "value": {},
+                    "confirmed": True,
+                }
+            )
+
+    def test_runtime_hooks_arm_capture_override_disarm_and_erase(self) -> None:
+        class RuntimeHookBridge(DebuggerBridge):
+            def __init__(self) -> None:
+                super().__init__()
+                self.commands = []
+                self.breakpoint_index = 0
+                self.pause_on_resume = None
+                self._state = "running"
+                self._target = {
+                    "id": "hook-page",
+                    "type": "page",
+                    "title": "Hook Lab",
+                    "url": "https://app.test/lab",
+                }
+                self._request_interception_context_id = "hook-context"
+                self._request_interception = self._empty_request_interception()
+                self._request_interception.update(
+                    {
+                        "experiment_id": 7,
+                        "state": "ready",
+                        "isolated": True,
+                        "target_id": "hook-page",
+                        "created_at_ms": 1,
+                    }
+                )
+                self._begin_runtime_hook_session_locked(7)
+                self._runtime_hooks.update(
+                    {"state": "ready", "isolated": True, "target_id": "hook-page"}
+                )
+                self._scripts["script-hook"] = {
+                    "script_id": "script-hook",
+                    "url": "https://app.test/lab.js?private=ephemeral",
+                    "start_line": 0,
+                    "start_column": 0,
+                    "end_line": 20,
+                    "end_column": 0,
+                    "execution_context_id": 1,
+                    "hash": "",
+                    "source_map_url": "",
+                    "has_source_url": False,
+                    "is_module": False,
+                    "length": 100,
+                    "language": "JavaScript",
+                }
+
+            def _command(self, method: str, params=None, timeout: float = 3.0) -> dict:
+                params = params or {}
+                self.commands.append((method, params, timeout))
+                if method == "Debugger.getPossibleBreakpoints":
+                    return {
+                        "locations": [
+                            {
+                                "scriptId": "script-hook",
+                                "lineNumber": 3,
+                                "columnNumber": 0,
+                                "type": "call",
+                            },
+                            {
+                                "scriptId": "script-hook",
+                                "lineNumber": 5,
+                                "columnNumber": 2,
+                                "type": "return",
+                            },
+                        ]
+                    }
+                if method == "Debugger.setBreakpoint":
+                    self.breakpoint_index += 1
+                    return {"breakpointId": f"hook-breakpoint-{self.breakpoint_index}"}
+                if method == "Debugger.evaluateOnCallFrame":
+                    expression = params.get("expression", "")
+                    if expression.startswith("Boolean(("):
+                        return {"result": {"type": "boolean", "value": True}}
+                    return {"result": {"type": "undefined", "description": "undefined"}}
+                if method == "Runtime.getProperties":
+                    properties = [
+                        {
+                            "name": "accessor",
+                            "get": {"type": "function", "description": "get accessor"},
+                        },
+                        {"name": "notInitialized"},
+                    ]
+                    properties.extend(
+                        {
+                            "name": f"argument{index}",
+                            "value": {
+                                "type": "string",
+                                "value": "value-" + str(index),
+                            },
+                        }
+                        for index in range(40)
+                    )
+                    return {"result": properties}
+                if method == "Debugger.resume" and self.pause_on_resume is not None:
+                    pause = self.pause_on_resume
+                    self.pause_on_resume = None
+                    self._handle_runtime_hook_pause_async(pause)
+                return {}
+
+        bridge = RuntimeHookBridge()
+        added = bridge.action(
+            {
+                "action": "add_runtime_hook",
+                "label": "checkout guard",
+                "script_id": "script-hook",
+                "line": 3,
+                "column": 0,
+                "entry_enabled": True,
+                "return_enabled": True,
+                "condition": "cart.total > 100",
+                "entry_logic": "cart.reviewed = true;",
+                "return_logic": "window.__hookHits = 1;",
+                "return_mode": "json",
+                "return_value": {"allowed": True},
+            }
+        )["runtime_hooks"]
+        self.assertEqual(len(added["definitions"]), 1)
+        self.assertNotIn("private=ephemeral", json.dumps(added))
+        with self.assertRaisesRegex(DebuggerBridgeError, "confirmation"):
+            bridge.action({"action": "arm_runtime_hooks"})
+
+        armed = bridge.action(
+            {"action": "arm_runtime_hooks", "confirmed": True}
+        )["runtime_hooks"]
+        self.assertEqual(armed["state"], "armed")
+        self.assertEqual(armed["active_points"], 2)
+        self.assertEqual(
+            armed["definitions"][0]["resolved"],
+            {"entry_points": 1, "return_points": 1},
+        )
+
+        return_breakpoint = next(
+            breakpoint_id
+            for breakpoint_id, point in bridge._runtime_hook_points.items()
+            if "return" in point["phases"]
+        )
+        bridge.pause_on_resume = {
+            "hitBreakpoints": [return_breakpoint],
+            "callFrames": [
+                {
+                    "callFrameId": "frame-return",
+                    "functionName": "checkout",
+                    "location": {
+                        "scriptId": "script-hook",
+                        "lineNumber": 5,
+                        "columnNumber": 2,
+                    },
+                    "scopeChain": [
+                        {"type": "local", "object": {"objectId": "locals-return"}}
+                    ],
+                    "returnValue": {"type": "boolean", "value": False},
+                }
+            ],
+        }
+
+        entry_breakpoint = next(
+            breakpoint_id
+            for breakpoint_id, point in bridge._runtime_hook_points.items()
+            if "entry" in point["phases"]
+        )
+        entry_pause = {
+            "hitBreakpoints": [entry_breakpoint],
+            "callFrames": [
+                {
+                    "callFrameId": "frame-entry",
+                    "functionName": "checkout",
+                    "location": {
+                        "scriptId": "script-hook",
+                        "lineNumber": 3,
+                        "columnNumber": 0,
+                    },
+                    "scopeChain": [
+                        {"type": "local", "object": {"objectId": "locals-entry"}}
+                    ],
+                }
+            ],
+        }
+        self.assertTrue(bridge._handle_runtime_hook_pause_async(entry_pause))
+        first_hit = self.wait_for(
+            lambda: bridge.snapshot()["runtime_hooks"]["state"] == "armed"
+            and bridge.snapshot()["runtime_hooks"]["total_hits"] == 2
+            and bridge.snapshot()["runtime_hooks"]
+        )
+        self.assertEqual(first_hit["hits"][0]["operation"], "logic_run")
+        self.assertEqual(len(first_hit["hits"][0]["bindings"]), 32)
+        self.assertTrue(first_hit["hits"][0]["bindings_truncated"])
+        self.assertTrue(first_hit["hits"][0]["bindings"][0]["accessor"])
+        self.assertFalse(first_hit["hits"][0]["bindings"][1]["accessor"])
+        self.assertEqual(
+            first_hit["hits"][0]["bindings"][1]["value"]["description"],
+            "Not initialized or unavailable",
+        )
+        self.assertNotIn("object_id", json.dumps(first_hit["hits"]))
+        self.assertEqual(first_hit["hits"][-1]["operation"], "return_overridden")
+        override = next(
+            params
+            for method, params, _ in bridge.commands
+            if method == "Debugger.setReturnValue"
+        )
+        self.assertEqual(override["newValue"], {"value": {"allowed": True}})
+        self.assertGreaterEqual(
+            sum(method == "Debugger.resume" for method, _, _ in bridge.commands), 2
+        )
+
+        disarmed = bridge.action({"action": "disarm_runtime_hooks"})[
+            "runtime_hooks"
+        ]
+        self.assertEqual(disarmed["state"], "disarmed")
+        self.assertEqual(disarmed["active_points"], 0)
+        self.assertEqual(len(disarmed["definitions"]), 1)
+        bridge._handle_runtime_hook_navigation()
+        self.assertEqual(bridge.snapshot()["runtime_hooks"]["definitions"], [])
+        bridge._dispose_runtime_hooks_locked(7)
+        erased = bridge.snapshot()["runtime_hooks"]
+        self.assertEqual(erased["state"], "disposed")
+        self.assertEqual(erased["hits"], [])
+        self.assertEqual(erased["definitions"], [])
+
+    def test_runtime_hooks_reject_promises_bounds_and_partial_arming(self) -> None:
+        bridge = DebuggerBridge()
+        with self.assertRaisesRegex(DebuggerBridgeError, "8 KiB"):
+            bridge._normalize_runtime_hook_json("x" * (8 * 1024 + 1))
+        with self.assertRaisesRegex(DebuggerBridgeError, "depth 8"):
+            bridge._normalize_runtime_hook_json([[[[[[[[[True]]]]]]]]])
+
+        class PartialArmBridge(DebuggerBridge):
+            def __init__(self) -> None:
+                super().__init__()
+                self.commands = []
+                self.set_count = 0
+                self._state = "running"
+                self._target = {"id": "hook-page"}
+                self._request_interception_context_id = "hook-context"
+                self._request_interception = self._empty_request_interception()
+                self._request_interception.update(
+                    {"state": "ready", "isolated": True, "target_id": "hook-page"}
+                )
+                self._begin_runtime_hook_session_locked(1)
+                self._runtime_hooks.update(
+                    {"state": "ready", "isolated": True, "target_id": "hook-page"}
+                )
+                self._scripts["script"] = {
+                    "script_id": "script",
+                    "url": "https://app.test/lab.js",
+                    "start_line": 0,
+                    "end_line": 10,
+                    "language": "JavaScript",
+                }
+
+            def _command(self, method: str, params=None, timeout: float = 3.0) -> dict:
+                self.commands.append((method, params or {}))
+                if method == "Debugger.getPossibleBreakpoints":
+                    return {"locations": [
+                        {"scriptId": "script", "lineNumber": 1, "columnNumber": 0, "type": "call"},
+                        {"scriptId": "script", "lineNumber": 2, "columnNumber": 0, "type": "return"},
+                    ]}
+                if method == "Debugger.setBreakpoint":
+                    self.set_count += 1
+                    if self.set_count == 2:
+                        raise DebuggerBridgeError("second point failed")
+                    return {"breakpointId": "partial-point"}
+                return {}
+
+        partial = PartialArmBridge()
+        partial.action(
+            {
+                "action": "add_runtime_hook",
+                "label": "partial",
+                "script_id": "script",
+                "line": 1,
+                "column": 0,
+                "entry_enabled": True,
+                "return_enabled": True,
+                "return_mode": "none",
+            }
+        )
+        with self.assertRaisesRegex(DebuggerBridgeError, "second point failed"):
+            partial.action({"action": "arm_runtime_hooks", "confirmed": True})
+        failed = partial.snapshot()["runtime_hooks"]
+        self.assertEqual(failed["state"], "disarmed")
+        self.assertEqual(failed["active_points"], 0)
+        self.assertEqual(partial._runtime_hook_points, {})
+        self.assertIn(
+            ("Debugger.removeBreakpoint", {"breakpointId": "partial-point"}),
+            partial.commands,
+        )
+
+        class ExcessReturnsBridge(PartialArmBridge):
+            def _command(self, method: str, params=None, timeout: float = 3.0) -> dict:
+                if method == "Debugger.getPossibleBreakpoints":
+                    return {
+                        "locations": [
+                            {
+                                "scriptId": "script",
+                                "lineNumber": index + 1,
+                                "columnNumber": 0,
+                                "type": "return" if index else "call",
+                            }
+                            for index in range(34)
+                        ]
+                    }
+                return super()._command(method, params, timeout)
+
+        excess = ExcessReturnsBridge()
+        excess.action(
+            {
+                "action": "add_runtime_hook",
+                "label": "too many returns",
+                "script_id": "script",
+                "line": 1,
+                "column": 0,
+                "entry_enabled": True,
+                "return_enabled": True,
+                "return_mode": "none",
+            }
+        )
+        with self.assertRaisesRegex(DebuggerBridgeError, "32 synchronous"):
+            excess.action({"action": "arm_runtime_hooks", "confirmed": True})
+        self.assertFalse(
+            any(method == "Debugger.setBreakpoint" for method, _ in excess.commands)
+        )
+
+        entry_only = ExcessReturnsBridge()
+        armed_entry_only = entry_only.action(
+            {
+                "action": "add_runtime_hook",
+                "label": "entry only",
+                "script_id": "script",
+                "line": 1,
+                "column": 0,
+                "entry_enabled": True,
+                "return_enabled": False,
+                "return_mode": "none",
+            }
+        )
+        self.assertEqual(len(armed_entry_only["runtime_hooks"]["definitions"]), 1)
+        armed_entry_only = entry_only.action(
+            {"action": "arm_runtime_hooks", "confirmed": True}
+        )["runtime_hooks"]
+        self.assertEqual(armed_entry_only["active_points"], 1)
+        self.assertEqual(
+            armed_entry_only["definitions"][0]["resolved"],
+            {"entry_points": 1, "return_points": 0},
+        )
+        entry_only.action({"action": "disarm_runtime_hooks"})
+
+        class PromiseBridge(PartialArmBridge):
+            def _command(self, method: str, params=None, timeout: float = 3.0) -> dict:
+                if method == "Debugger.setBreakpoint":
+                    self.commands.append((method, params or {}))
+                    return {"breakpointId": "promise-return"}
+                if method == "Runtime.getProperties":
+                    self.commands.append((method, params or {}))
+                    return {"result": []}
+                return super()._command(method, params, timeout)
+
+        promise = PromiseBridge()
+        promise.action(
+            {
+                "action": "add_runtime_hook",
+                "label": "promise guard",
+                "script_id": "script",
+                "line": 1,
+                "column": 0,
+                "entry_enabled": False,
+                "return_enabled": True,
+                "return_mode": "json",
+                "return_value": False,
+            }
+        )
+        promise.action({"action": "arm_runtime_hooks", "confirmed": True})
+        self.assertTrue(
+            promise._handle_runtime_hook_pause_async(
+                {
+                    "hitBreakpoints": ["promise-return"],
+                    "callFrames": [
+                        {
+                            "callFrameId": "promise-frame",
+                            "functionName": "load",
+                            "location": {
+                                "scriptId": "script",
+                                "lineNumber": 2,
+                                "columnNumber": 0,
+                            },
+                            "scopeChain": [],
+                            "returnValue": {
+                                "type": "object",
+                                "subtype": "promise",
+                                "className": "Promise",
+                                "description": "Promise",
+                                "objectId": "promise-object",
+                            },
+                        }
+                    ],
+                }
+            )
+        )
+        promise_hit = self.wait_for(
+            lambda: promise.snapshot()["runtime_hooks"]["state"] == "armed"
+            and promise.snapshot()["runtime_hooks"]["hits"]
+            and promise.snapshot()["runtime_hooks"]["hits"][-1]
+        )
+        self.assertEqual(promise_hit["operation"], "failed")
+        self.assertIn("Promise return values", promise_hit["error"])
+        self.assertFalse(
+            any(method == "Debugger.setReturnValue" for method, _ in promise.commands)
+        )
+        promise.action({"action": "disarm_runtime_hooks"})
+
+    def test_object_experiment_mutator_never_invokes_accessors(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+        exercise = f"""
+const mutate = ({OBJECT_EXPERIMENT_MUTATE_FUNCTION});
+let getterCalls = 0;
+let setterCalls = 0;
+const prototype = {{set inherited(value) {{ setterCalls += 1; }}}};
+const candidate = Object.create(prototype);
+Object.defineProperty(candidate, 'accessor', {{
+  get() {{ getterCalls += 1; return 'secret'; }},
+  set(value) {{ setterCalls += 1; }},
+  configurable: true
+}});
+Object.defineProperty(candidate, 'fixed', {{value: 1, writable: false, configurable: false}});
+Object.defineProperty(candidate, 'softFixed', {{value: 1, writable: false, configurable: true}});
+candidate.removable = true;
+const config = {{previewProperties: 16, resultId: '1', similarity: null}};
+const inherited = mutate.call(candidate, {{...config, operation: 'set', property: 'inherited', value: 7}});
+const accessor = mutate.call(candidate, {{...config, operation: 'set', property: 'accessor', value: 8}});
+const fixed = mutate.call(candidate, {{...config, operation: 'set', property: 'fixed', value: 9}});
+const softFixed = mutate.call(candidate, {{...config, operation: 'set', property: 'softFixed', value: 9}});
+const accessorDelete = mutate.call(candidate, {{...config, operation: 'delete', property: 'accessor'}});
+const removed = mutate.call(candidate, {{...config, operation: 'delete', property: 'removable'}});
+process.stdout.write(JSON.stringify({{
+  inherited: inherited.outcome,
+  inheritedOwn: Object.hasOwn(candidate, 'inherited'),
+  accessor: accessor.outcome,
+  accessorDelete: accessorDelete.outcome,
+  fixed: fixed.outcome,
+  softFixed: softFixed.outcome,
+  removed: removed.outcome,
+  getterCalls,
+  setterCalls
+}}));
+"""
+        completed = subprocess.run(
+            [node, "-e", exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "inherited": "created",
+                "inheritedOwn": True,
+                "accessor": "accessor",
+                "accessorDelete": "accessor",
+                "fixed": "non_writable",
+                "softFixed": "non_writable",
+                "removed": "deleted",
+                "getterCalls": 0,
+                "setterCalls": 0,
+            },
+        )
 
 
 if __name__ == "__main__":

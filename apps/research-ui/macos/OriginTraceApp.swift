@@ -1,4 +1,6 @@
 import Cocoa
+import CoreFoundation
+import Darwin
 import Foundation
 import WebKit
 
@@ -13,7 +15,9 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let traceStoreURL: URL
   private let signalStoreURL: URL
   private let artifactStoreURL: URL
+  private let apiCollectionStoreURL: URL
   private let brokerSocketURL: URL?
+  private let apiCollectionLock = NSLock()
 
   init(
     indexURL: URL,
@@ -21,6 +25,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     traceStoreURL: URL,
     signalStoreURL: URL,
     artifactStoreURL: URL,
+    apiCollectionStoreURL: URL,
     brokerSocketURL: URL?
   ) {
     self.indexURL = indexURL
@@ -28,6 +33,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     self.traceStoreURL = traceStoreURL
     self.signalStoreURL = signalStoreURL
     self.artifactStoreURL = artifactStoreURL
+    self.apiCollectionStoreURL = apiCollectionStoreURL
     self.brokerSocketURL = brokerSocketURL
   }
 
@@ -56,6 +62,30 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           "application/json; charset=utf-8",
           debuggerResponse.1,
           debuggerResponse.2
+        )
+      case "/api/api-collection":
+        guard urlSchemeTask.request.httpMethod == nil || urlSchemeTask.request.httpMethod == "GET" else {
+          throw LocalHTTPError(status: 405, message: "API Collection only supports GET on this route")
+        }
+        let collectionResponse = try apiCollectionResponse(
+          ifNoneMatch: urlSchemeTask.request.value(forHTTPHeaderField: "If-None-Match")
+        )
+        response = (
+          collectionResponse.0,
+          "application/json; charset=utf-8",
+          collectionResponse.1,
+          collectionResponse.2
+        )
+      case "/api/api-collection/actions":
+        guard urlSchemeTask.request.httpMethod == "POST" else {
+          throw LocalHTTPError(status: 405, message: "API Collection actions require POST")
+        }
+        let collectionResponse = try replaceApiCollection(request: urlSchemeTask.request)
+        response = (
+          collectionResponse.0,
+          "application/json; charset=utf-8",
+          collectionResponse.1,
+          collectionResponse.2
         )
       case "/api/events":
         response = (try eventsResponse(for: requestURL), "application/json; charset=utf-8", 200, [:])
@@ -113,16 +143,579 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "signal_store_exists": FileManager.default.fileExists(atPath: signalStoreURL.path),
         "artifact_store": artifactStoreURL.path,
         "artifact_store_exists": FileManager.default.fileExists(atPath: artifactStoreURL.path),
+        "api_collection_store": apiCollectionStoreURL.path,
+        "api_collection_store_exists": FileManager.default.fileExists(
+          atPath: apiCollectionStoreURL.path
+        ),
         "broker_connected": brokerConnected(),
       ],
       options: []
     )
   }
 
+  private func apiCollectionLimits() -> [String: Int] {
+    [
+      "folders": 32,
+      "requests": 128,
+      "folder_depth": 4,
+      "variables_per_scope": 32,
+      "variable_bytes_per_scope": 32 * 1_024,
+      "request_body_bytes": 64 * 1_024,
+      "document_bytes": 2 * 1_024 * 1_024,
+    ]
+  }
+
+  private func emptyApiCollection() -> [String: Any] {
+    [
+      "contract_version": 1,
+      "document_kind": "api-collection",
+      "generation": 0,
+      "updated_at_ms": 0,
+      "folders": [[
+        "id": 1,
+        "name": "API Collection",
+        "parent_id": NSNull(),
+        "variables": [],
+      ]],
+      "requests": [],
+      "limits": apiCollectionLimits(),
+    ]
+  }
+
+  private func apiCollectionExactKeys(_ value: [String: Any], _ keys: Set<String>) -> Bool {
+    Set(value.keys) == keys
+  }
+
+  private func apiCollectionInteger(
+    _ value: Any?,
+    label: String,
+    minimum: Int = 0
+  ) throws -> Int {
+    guard let number = value as? NSNumber,
+      CFGetTypeID(number) != CFBooleanGetTypeID(),
+      number.doubleValue.isFinite,
+      number.doubleValue.rounded(.towardZero) == number.doubleValue,
+      number.doubleValue >= Double(minimum),
+      number.doubleValue <= 9_007_199_254_740_991
+    else {
+      throw LocalHTTPError(status: 400, message: "\(label) is invalid")
+    }
+    return number.intValue
+  }
+
+  private func apiCollectionText(
+    _ value: Any?,
+    label: String,
+    maximumBytes: Int,
+    allowEmpty: Bool = false,
+    trim: Bool = false
+  ) throws -> String {
+    guard let raw = value as? String else {
+      throw LocalHTTPError(status: 400, message: "\(label) must be text")
+    }
+    let result = trim ? raw.trimmingCharacters(in: .whitespacesAndNewlines) : raw
+    let containsControls = result.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7f }
+    guard (allowEmpty || !result.isEmpty), result.utf8.count <= maximumBytes, !containsControls
+    else {
+      throw LocalHTTPError(
+        status: 400,
+        message: "\(label) is empty, oversized, or contains controls"
+      )
+    }
+    return result
+  }
+
+  private func normalizeApiCollectionVariables(_ value: Any?) throws -> [[String: Any]] {
+    guard let values = value as? [[String: Any]], values.count <= 32 else {
+      throw LocalHTTPError(status: 400, message: "API Collection variables are invalid")
+    }
+    var names = Set<String>()
+    var totalBytes = 0
+    var normalized: [[String: Any]] = []
+    normalized.reserveCapacity(values.count)
+    for variable in values {
+      guard apiCollectionExactKeys(variable, ["name", "value"]) else {
+        throw LocalHTTPError(status: 400, message: "API Collection variable shape is invalid")
+      }
+      let name = try apiCollectionText(
+        variable["name"],
+        label: "API Collection variable name",
+        maximumBytes: 64
+      )
+      let variableValue = try apiCollectionText(
+        variable["value"],
+        label: "API Collection variable value",
+        maximumBytes: 4 * 1_024,
+        allowEmpty: true
+      )
+      guard name.range(of: #"^[A-Za-z_][A-Za-z0-9_.-]*$"#, options: .regularExpression) != nil,
+        names.insert(name).inserted
+      else {
+        throw LocalHTTPError(
+          status: 400,
+          message: "API Collection variable name is invalid or duplicated"
+        )
+      }
+      totalBytes += name.utf8.count + variableValue.utf8.count
+      guard totalBytes <= 32 * 1_024 else {
+        throw LocalHTTPError(status: 400, message: "API Collection variable scope exceeds 32 KiB")
+      }
+      normalized.append(["name": name, "value": variableValue])
+    }
+    return normalized.sorted { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
+  }
+
+  private func normalizeApiCollectionHeaders(_ value: Any?) throws -> [[String: Any]] {
+    guard let values = value as? [[String: Any]], values.count <= 64 else {
+      throw LocalHTTPError(status: 400, message: "API Collection request headers are invalid")
+    }
+    let forbidden = Set([
+      "authorization", "connection", "content-length", "cookie", "host",
+      "proxy-authorization", "set-cookie", "transfer-encoding",
+    ])
+    var names = Set<String>()
+    var totalBytes = 0
+    var normalized: [[String: Any]] = []
+    normalized.reserveCapacity(values.count)
+    for header in values {
+      guard apiCollectionExactKeys(header, ["name", "value"]) else {
+        throw LocalHTTPError(status: 400, message: "API Collection request header shape is invalid")
+      }
+      let name = try apiCollectionText(
+        header["name"],
+        label: "API Collection request header name",
+        maximumBytes: 128
+      )
+      let headerValue = try apiCollectionText(
+        header["value"],
+        label: "API Collection request header value",
+        maximumBytes: 2 * 1_024,
+        allowEmpty: true
+      )
+      let lowerName = name.lowercased()
+      guard name.range(of: #"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"#, options: .regularExpression) != nil,
+        !forbidden.contains(lowerName), names.insert(lowerName).inserted
+      else {
+        throw LocalHTTPError(status: 400, message: "API Collection request header is forbidden or invalid")
+      }
+      totalBytes += name.utf8.count + headerValue.utf8.count
+      guard totalBytes <= 16 * 1_024 else {
+        throw LocalHTTPError(status: 400, message: "API Collection request headers exceed 16 KiB")
+      }
+      normalized.append(["name": name, "value": headerValue])
+    }
+    return normalized
+  }
+
+  private func normalizeApiCollectionFolder(_ value: Any?) throws -> [String: Any] {
+    guard let folder = value as? [String: Any],
+      apiCollectionExactKeys(folder, ["id", "name", "parent_id", "variables"])
+    else {
+      throw LocalHTTPError(status: 400, message: "API Collection folder shape is invalid")
+    }
+    let identifier = try apiCollectionInteger(folder["id"], label: "API Collection folder ID", minimum: 1)
+    let parent: Any
+    if folder["parent_id"] is NSNull {
+      parent = NSNull()
+    } else {
+      parent = try apiCollectionInteger(
+        folder["parent_id"],
+        label: "API Collection parent folder ID",
+        minimum: 1
+      )
+    }
+    let name = try apiCollectionText(
+      folder["name"],
+      label: "API Collection folder name",
+      maximumBytes: 128,
+      trim: true
+    )
+    guard !name.contains("/") else {
+      throw LocalHTTPError(status: 400, message: "API Collection folder names cannot contain slashes")
+    }
+    return [
+      "id": identifier,
+      "name": name,
+      "parent_id": parent,
+      "variables": try normalizeApiCollectionVariables(folder["variables"]),
+    ]
+  }
+
+  private func normalizeApiCollectionRequest(
+    _ value: Any?,
+    requireMetadata: Bool
+  ) throws -> [String: Any] {
+    guard let request = value as? [String: Any] else {
+      throw LocalHTTPError(status: 400, message: "API Collection request shape is invalid")
+    }
+    var expected = Set([
+      "id", "folder_id", "name", "url", "method", "headers", "body", "timeout_ms", "variables",
+    ])
+    if requireMetadata {
+      expected.formUnion(["created_at_ms", "updated_at_ms"])
+    }
+    guard apiCollectionExactKeys(request, expected) else {
+      throw LocalHTTPError(status: 400, message: "API Collection request shape is invalid")
+    }
+    let name = try apiCollectionText(
+      request["name"],
+      label: "API Collection request name",
+      maximumBytes: 128,
+      trim: true
+    )
+    guard !name.contains("/") else {
+      throw LocalHTTPError(status: 400, message: "API Collection request names cannot contain slashes")
+    }
+    guard let body = request["body"] as? String, body.utf8.count <= 64 * 1_024 else {
+      throw LocalHTTPError(status: 400, message: "API Collection request body exceeds 64 KiB")
+    }
+    let timeout = try apiCollectionInteger(
+      request["timeout_ms"],
+      label: "API Collection request timeout",
+      minimum: 100
+    )
+    guard timeout <= 30_000 else {
+      throw LocalHTTPError(status: 400, message: "API Collection request timeout exceeds 30 seconds")
+    }
+    var normalized: [String: Any] = [
+      "id": try apiCollectionInteger(request["id"], label: "API Collection request ID", minimum: 1),
+      "folder_id": try apiCollectionInteger(
+        request["folder_id"],
+        label: "API Collection request folder ID",
+        minimum: 1
+      ),
+      "name": name,
+      "url": try apiCollectionText(
+        request["url"],
+        label: "API Collection request URL template",
+        maximumBytes: 8 * 1_024,
+        trim: true
+      ),
+      "method": try apiCollectionText(
+        request["method"],
+        label: "API Collection request method template",
+        maximumBytes: 256,
+        trim: true
+      ),
+      "headers": try normalizeApiCollectionHeaders(request["headers"]),
+      "body": body,
+      "timeout_ms": timeout,
+      "variables": try normalizeApiCollectionVariables(request["variables"]),
+    ]
+    if requireMetadata {
+      let created = try apiCollectionInteger(
+        request["created_at_ms"],
+        label: "API Collection request creation time"
+      )
+      let updated = try apiCollectionInteger(
+        request["updated_at_ms"],
+        label: "API Collection request update time"
+      )
+      guard updated >= created else {
+        throw LocalHTTPError(status: 400, message: "API Collection request timestamps are invalid")
+      }
+      normalized["created_at_ms"] = created
+      normalized["updated_at_ms"] = updated
+    }
+    return normalized
+  }
+
+  private func normalizeApiCollection(_ value: Any?) throws -> [String: Any] {
+    guard let collection = value as? [String: Any],
+      apiCollectionExactKeys(
+        collection,
+        ["contract_version", "document_kind", "generation", "updated_at_ms", "folders", "requests", "limits"]
+      ),
+      try apiCollectionInteger(collection["contract_version"], label: "API Collection contract") == 1,
+      collection["document_kind"] as? String == "api-collection",
+      let limits = collection["limits"] as? [String: Any],
+      NSDictionary(dictionary: limits).isEqual(to: apiCollectionLimits())
+    else {
+      throw LocalHTTPError(status: 400, message: "API Collection document contract is unsupported")
+    }
+    let generation = try apiCollectionInteger(collection["generation"], label: "API Collection generation")
+    let updatedAt = try apiCollectionInteger(collection["updated_at_ms"], label: "API Collection update time")
+    guard let rawFolders = collection["folders"] as? [Any], 1...32 ~= rawFolders.count,
+      let rawRequests = collection["requests"] as? [Any], rawRequests.count <= 128
+    else {
+      throw LocalHTTPError(status: 400, message: "API Collection counts are invalid")
+    }
+    let folders = try rawFolders.map(normalizeApiCollectionFolder)
+    let requests = try rawRequests.map { try normalizeApiCollectionRequest($0, requireMetadata: true) }
+    var foldersByID: [Int: [String: Any]] = [:]
+    for folder in folders {
+      let identifier = folder["id"] as! Int
+      guard foldersByID.updateValue(folder, forKey: identifier) == nil else {
+        throw LocalHTTPError(status: 400, message: "API Collection folder IDs are duplicated")
+      }
+    }
+    guard let root = foldersByID[1], root["name"] as? String == "API Collection",
+      root["parent_id"] is NSNull,
+      !folders.contains(where: { ($0["id"] as! Int) != 1 && $0["parent_id"] is NSNull })
+    else {
+      throw LocalHTTPError(status: 400, message: "API Collection root folder is invalid")
+    }
+    var siblingNames = Set<String>()
+    for folder in folders {
+      let identifier = folder["id"] as! Int
+      let parent = folder["parent_id"] as? Int
+      let siblingKey = "\(parent.map(String.init) ?? "root")\u{0}\((folder["name"] as! String).lowercased())"
+      guard siblingNames.insert(siblingKey).inserted else {
+        throw LocalHTTPError(status: 400, message: "API Collection folder name is duplicated")
+      }
+      var seen = Set([identifier])
+      var current = folder
+      var depth = 0
+      while let parentID = current["parent_id"] as? Int {
+        guard let parentFolder = foldersByID[parentID], seen.insert(parentID).inserted else {
+          throw LocalHTTPError(status: 400, message: "API Collection folder hierarchy is invalid")
+        }
+        current = parentFolder
+        depth += 1
+        guard depth <= 4 else {
+          throw LocalHTTPError(status: 400, message: "API Collection folder depth exceeds four levels")
+        }
+      }
+    }
+    var requestIDs = Set<Int>()
+    var requestNames = Set<String>()
+    for request in requests {
+      let identifier = request["id"] as! Int
+      let folderID = request["folder_id"] as! Int
+      let nameKey = "\(folderID)\u{0}\((request["name"] as! String).lowercased())"
+      guard requestIDs.insert(identifier).inserted, foldersByID[folderID] != nil,
+        requestNames.insert(nameKey).inserted
+      else {
+        throw LocalHTTPError(status: 400, message: "API Collection request ID, folder, or name is invalid")
+      }
+    }
+    let normalized: [String: Any] = [
+      "contract_version": 1,
+      "document_kind": "api-collection",
+      "generation": generation,
+      "updated_at_ms": updatedAt,
+      "folders": folders.sorted { ($0["id"] as! Int) < ($1["id"] as! Int) },
+      "requests": requests.sorted { ($0["id"] as! Int) < ($1["id"] as! Int) },
+      "limits": apiCollectionLimits(),
+    ]
+    let encoded = try JSONSerialization.data(withJSONObject: normalized, options: [])
+    guard encoded.count <= 2 * 1_024 * 1_024 else {
+      throw LocalHTTPError(status: 400, message: "API Collection document exceeds 2 MiB")
+    }
+    if generation == 0 {
+      guard updatedAt == 0, folders.count == 1,
+        (root["variables"] as? [Any])?.isEmpty == true, requests.isEmpty
+      else {
+        throw LocalHTTPError(status: 400, message: "API Collection generation zero must be empty")
+      }
+    }
+    return normalized
+  }
+
+  private func loadApiCollectionLocked() throws -> [String: Any] {
+    let descriptor = Darwin.open(apiCollectionStoreURL.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    if descriptor < 0 {
+      if errno == ENOENT { return emptyApiCollection() }
+      throw LocalHTTPError(status: 500, message: "API Collection store could not be opened safely")
+    }
+    defer { Darwin.close(descriptor) }
+    var metadata = stat()
+    guard fstat(descriptor, &metadata) == 0,
+      (metadata.st_mode & S_IFMT) == S_IFREG,
+      metadata.st_size <= 2 * 1_024 * 1_024
+    else {
+      throw LocalHTTPError(status: 500, message: "API Collection store must be a bounded regular file")
+    }
+    do {
+      let maximumBytes = 2 * 1_024 * 1_024
+      var data = Data()
+      data.reserveCapacity(min(Int(metadata.st_size), maximumBytes))
+      var buffer = [UInt8](repeating: 0, count: 16 * 1_024)
+      while data.count <= maximumBytes {
+        let requested = min(buffer.count, maximumBytes + 1 - data.count)
+        let count = Darwin.read(descriptor, &buffer, requested)
+        if count < 0 {
+          throw LocalHTTPError(status: 500, message: "API Collection store could not be read")
+        }
+        if count == 0 { break }
+        data.append(buffer, count: count)
+      }
+      guard data.count <= maximumBytes else {
+        throw LocalHTTPError(status: 500, message: "API Collection store exceeds 2 MiB")
+      }
+      return try normalizeApiCollection(JSONSerialization.jsonObject(with: data, options: []))
+    } catch let error as LocalHTTPError where error.status == 500 {
+      throw error
+    } catch {
+      throw LocalHTTPError(status: 500, message: "API Collection store is malformed")
+    }
+  }
+
+  private func apiCollectionData(_ collection: [String: Any]) throws -> Data {
+    try JSONSerialization.data(withJSONObject: collection, options: [])
+  }
+
+  private func apiCollectionResponse(ifNoneMatch: String?) throws -> (Data, Int, [String: String]) {
+    apiCollectionLock.lock()
+    defer { apiCollectionLock.unlock() }
+    let collection = try loadApiCollectionLocked()
+    let generation = collection["generation"] as! Int
+    let etag = "\"api-collection-\(generation)\""
+    if ifNoneMatch == etag {
+      return (Data(), 304, ["ETag": etag])
+    }
+    return (try apiCollectionData(collection), 200, ["ETag": etag])
+  }
+
+  private func apiCollectionRequestBody(_ request: URLRequest) throws -> Data {
+    if let body = request.httpBody {
+      guard body.count <= 2 * 1_024 * 1_024 + 64 * 1_024 else {
+        throw LocalHTTPError(status: 413, message: "API Collection action is oversized")
+      }
+      return body
+    }
+    guard let stream = request.httpBodyStream else {
+      throw LocalHTTPError(status: 400, message: "API Collection action body is missing")
+    }
+    stream.open()
+    defer { stream.close() }
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 16 * 1_024)
+    while stream.hasBytesAvailable {
+      let count = stream.read(&buffer, maxLength: buffer.count)
+      if count < 0 {
+        throw LocalHTTPError(status: 400, message: "API Collection action body could not be read")
+      }
+      if count == 0 { break }
+      data.append(buffer, count: count)
+      guard data.count <= 2 * 1_024 * 1_024 + 64 * 1_024 else {
+        throw LocalHTTPError(status: 413, message: "API Collection action is oversized")
+      }
+    }
+    return data
+  }
+
+  private func apiCollectionContent(_ collection: [String: Any]) -> [String: Any] {
+    let requests = (collection["requests"] as? [[String: Any]] ?? []).map { request in
+      request.filter { !["created_at_ms", "updated_at_ms"].contains($0.key) }
+    }
+    return ["folders": collection["folders"] ?? [], "requests": requests]
+  }
+
+  private func writeApiCollectionLocked(_ collection: [String: Any]) throws {
+    let directory = apiCollectionStoreURL.deletingLastPathComponent()
+    try FileManager.default.createDirectory(
+      at: directory,
+      withIntermediateDirectories: true,
+      attributes: [.posixPermissions: 0o700]
+    )
+    var data = try apiCollectionData(collection)
+    data.append(0x0a)
+    guard data.count <= 2 * 1_024 * 1_024 else {
+      throw LocalHTTPError(status: 400, message: "API Collection store exceeds 2 MiB")
+    }
+    try data.write(to: apiCollectionStoreURL, options: [.atomic])
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o600],
+      ofItemAtPath: apiCollectionStoreURL.path
+    )
+    let storedDescriptor = Darwin.open(
+      apiCollectionStoreURL.path,
+      O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+    )
+    guard storedDescriptor >= 0 else {
+      throw LocalHTTPError(status: 500, message: "API Collection store could not be synchronized")
+    }
+    defer { Darwin.close(storedDescriptor) }
+    guard Darwin.fsync(storedDescriptor) == 0 else {
+      throw LocalHTTPError(status: 500, message: "API Collection store could not be synchronized")
+    }
+    let directoryDescriptor = Darwin.open(directory.path, O_RDONLY | O_CLOEXEC)
+    if directoryDescriptor >= 0 {
+      _ = Darwin.fsync(directoryDescriptor)
+      Darwin.close(directoryDescriptor)
+    }
+  }
+
+  private func replaceApiCollection(request: URLRequest) throws -> (Data, Int, [String: String]) {
+    let body: Any
+    do {
+      body = try JSONSerialization.jsonObject(with: apiCollectionRequestBody(request), options: [])
+    } catch let error as LocalHTTPError {
+      throw error
+    } catch {
+      throw LocalHTTPError(status: 400, message: "API Collection action body is malformed")
+    }
+    guard let action = body as? [String: Any],
+      apiCollectionExactKeys(action, ["action", "expected_generation", "folders", "requests"]),
+      action["action"] as? String == "replace_api_collection",
+      let rawFolders = action["folders"] as? [Any],
+      let rawRequests = action["requests"] as? [Any]
+    else {
+      throw LocalHTTPError(status: 400, message: "API Collection action is invalid")
+    }
+    let expectedGeneration = try apiCollectionInteger(
+      action["expected_generation"],
+      label: "Expected API Collection generation"
+    )
+    apiCollectionLock.lock()
+    defer { apiCollectionLock.unlock() }
+    let current = try loadApiCollectionLocked()
+    guard current["generation"] as? Int == expectedGeneration else {
+      throw LocalHTTPError(
+        status: 409,
+        message: "API Collection changed in another window; refresh before saving"
+      )
+    }
+    let folders = try rawFolders.map(normalizeApiCollectionFolder)
+    let requestContents = try rawRequests.map {
+      try normalizeApiCollectionRequest($0, requireMetadata: false)
+    }
+    let currentRequests = Dictionary(uniqueKeysWithValues:
+      (current["requests"] as? [[String: Any]] ?? []).map { ($0["id"] as! Int, $0) }
+    )
+    let now = Int(Date().timeIntervalSince1970 * 1_000)
+    let requests = requestContents.map { content -> [String: Any] in
+      var result = content
+      if let previous = currentRequests[content["id"] as! Int] {
+        result["created_at_ms"] = previous["created_at_ms"]
+        let previousContent = previous.filter { !["created_at_ms", "updated_at_ms"].contains($0.key) }
+        result["updated_at_ms"] = NSDictionary(dictionary: previousContent).isEqual(to: content)
+          ? previous["updated_at_ms"] : now
+      } else {
+        result["created_at_ms"] = now
+        result["updated_at_ms"] = now
+      }
+      return result
+    }
+    let candidate = try normalizeApiCollection([
+      "contract_version": 1,
+      "document_kind": "api-collection",
+      "generation": expectedGeneration + 1,
+      "updated_at_ms": now,
+      "folders": folders,
+      "requests": requests,
+      "limits": apiCollectionLimits(),
+    ])
+    let result: [String: Any]
+    if NSDictionary(dictionary: apiCollectionContent(candidate)).isEqual(to: apiCollectionContent(current)) {
+      result = current
+    } else {
+      try writeApiCollectionLocked(candidate)
+      result = candidate
+    }
+    let generation = result["generation"] as! Int
+    return (
+      try apiCollectionData(result),
+      200,
+      ["ETag": "\"api-collection-\(generation)\""]
+    )
+  }
+
   private func debuggerUnavailableResponse(
     ifNoneMatch: String?
   ) throws -> (Data, Int, [String: String]) {
-    let etag = "\"debugger-unavailable-v1\""
+    let etag = "\"debugger-unavailable-v3\""
     if ifNoneMatch == etag {
       return (Data(), 304, ["ETag": etag])
     }
@@ -139,6 +732,139 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "breakpoints": [],
         "watches": [],
         "console": [],
+        "heap_diff_baseline": NSNull(),
+        "memory_origin_trace": [
+          "protocol_version": 1,
+          "trace_id": 0,
+          "state": "idle",
+          "target_id": NSNull(),
+          "query": "",
+          "scope": "all",
+          "case_sensitive": false,
+          "before_steps": 0,
+          "after_steps": 0,
+          "step_limit": 32,
+          "step_count": 0,
+          "first_match_step": NSNull(),
+          "started_at_ms": 0,
+          "elapsed_ms": 0,
+          "partial": false,
+          "limit_reason": NSNull(),
+          "message": "Enter a value and arm a trace.",
+          "steps": [],
+        ],
+        "request_interception": [
+          "protocol_version": 1,
+          "experiment_id": 0,
+          "state": "idle",
+          "isolated": false,
+          "target_id": NSNull(),
+          "created_at_ms": 0,
+          "disposed_at_ms": 0,
+          "rule": [
+            "mode": "continue",
+            "url_pattern": "*",
+            "method_filter": "",
+            "rewrite_url": "",
+            "rewrite_method": "",
+            "rewrite_header_count": 0,
+            "rewrite_body_bytes": 0,
+            "response_code": 200,
+            "response_header_count": 0,
+            "response_body_bytes": 0,
+          ],
+          "last_request": NSNull(),
+          "result": NSNull(),
+          "audit": [],
+          "audit_evictions": 0,
+          "pending_requests": 0,
+          "message": "Create an isolated experiment to intercept a request.",
+          "limits": [
+            "audit_entries": 128,
+            "pending_requests": 16,
+            "headers": 64,
+            "body_bytes": 64 * 1_024,
+            "response_bytes": 64 * 1_024,
+          ],
+        ],
+        "object_experiment": [
+          "protocol_version": 1,
+          "session_id": 0,
+          "state": "idle",
+          "isolated": false,
+          "target_id": NSNull(),
+          "url": "",
+          "navigation_id": 0,
+          "search_id": 0,
+          "search": NSNull(),
+          "results": [],
+          "last_mutation": NSNull(),
+          "audit": [],
+          "audit_evictions": 0,
+          "mutation_attempts": 0,
+          "message": "Create an isolated Experiment context to use Object Lab.",
+          "limits": [
+            "search_results": 50,
+            "search_candidates": 25_000,
+            "search_timeout_ms": 750,
+            "preview_properties": 16,
+            "mutation_attempts": 256,
+            "audit_entries": 128,
+            "property_bytes": 256,
+            "value_bytes": 16 * 1_024,
+            "value_depth": 8,
+            "value_entries": 256,
+            "value_string_bytes": 4 * 1_024,
+          ],
+        ],
+        "runtime_hooks": [
+          "protocol_version": 1,
+          "session_id": 0,
+          "state": "idle",
+          "isolated": false,
+          "target_id": NSNull(),
+          "definitions": [],
+          "active_points": 0,
+          "total_hits": 0,
+          "hits": [],
+          "hit_evictions": 0,
+          "last_failure": NSNull(),
+          "message": "Create an isolated Experiment context to use Runtime Hooks.",
+          "limits": [
+            "definitions": 8,
+            "active_points": 64,
+            "return_points_per_definition": 32,
+            "total_hits": 512,
+            "retained_hits": 128,
+            "bindings_per_hit": 32,
+            "binding_preview_bytes": 512,
+            "condition_bytes": 1_024,
+            "logic_bytes": 8 * 1_024,
+            "return_bytes": 8 * 1_024,
+            "evaluation_timeout_ms": 100,
+          ],
+        ],
+        "repeater": [
+          "protocol_version": 1,
+          "session_id": 0,
+          "state": "idle",
+          "variables": [],
+          "history": [],
+          "history_bytes": 0,
+          "history_evictions": 0,
+          "active_execution": NSNull(),
+          "comparison": NSNull(),
+          "message": "Create an isolated request-lab context to use Repeater.",
+          "limits": [
+            "history_entries": 24,
+            "history_bytes": 512 * 1_024,
+            "variables": 32,
+            "variable_bytes": 32 * 1_024,
+            "request_bytes": 64 * 1_024,
+            "response_bytes": 64 * 1_024,
+            "timeout_ms": 30_000,
+          ],
+        ],
         "settings": [
           "breakpoints_active": true,
           "pause_on_exceptions": "none",
@@ -769,12 +1495,14 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     let traceStoreURL = configuredTraceStore(eventStoreURL: eventStoreURL)
     let signalStoreURL = configuredSignalStore(eventStoreURL: eventStoreURL)
     let artifactStoreURL = configuredArtifactStore(eventStoreURL: eventStoreURL)
+    let apiCollectionStoreURL = configuredApiCollectionStore()
     let handler = LocalContentHandler(
       indexURL: indexURL,
       eventStoreURL: eventStoreURL,
       traceStoreURL: traceStoreURL,
       signalStoreURL: signalStoreURL,
       artifactStoreURL: artifactStoreURL,
+      apiCollectionStoreURL: apiCollectionStoreURL,
       brokerSocketURL: configuredBrokerSocket()
     )
     contentHandler = handler
@@ -878,6 +1606,27 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       return URL(fileURLWithPath: configuredPath).standardizedFileURL
     }
     return eventStoreURL.deletingLastPathComponent().appendingPathComponent("request-signals.jsonl")
+  }
+
+  private func configuredApiCollectionStore() -> URL {
+    let arguments = CommandLine.arguments
+    if let storeFlag = arguments.firstIndex(of: "--api-collection"),
+      storeFlag + 1 < arguments.count
+    {
+      return URL(fileURLWithPath: arguments[storeFlag + 1]).standardizedFileURL
+    }
+    if let configuredPath = ProcessInfo.processInfo.environment["REB_API_COLLECTION_STORE"],
+      !configuredPath.isEmpty
+    {
+      return URL(fileURLWithPath: configuredPath).standardizedFileURL
+    }
+    let base = FileManager.default.urls(
+      for: .applicationSupportDirectory,
+      in: .userDomainMask
+    ).first ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
+      "Library/Application Support"
+    )
+    return base.appendingPathComponent("Origin Trace/api-collection-v1.json")
   }
 
   private func configuredBrokerSocket() -> URL? {
@@ -989,10 +1738,41 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     guard smokeTest else { return }
     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+      let exerciseCollectionWrite =
+        ProcessInfo.processInfo.environment["REB_APP_SMOKE_API_COLLECTION_WRITE"] == "1"
       let exercise = """
+        window.__rebSmokeExerciseError = null;
+        void (async () => {
+          if (\(exerciseCollectionWrite ? "true" : "false")) {
+            const current = await fetch('/api/api-collection', {cache: 'no-store'}).then(response => {
+              if (!response.ok) throw new Error(`Collection GET returned ${response.status}`);
+              return response.json();
+            });
+            const folders = current.folders.map(folder => folder.id !== 1 ? folder : ({
+              ...folder,
+              variables: [...folder.variables.filter(variable => variable.name !== 'native_smoke'),
+                {name: 'native_smoke', value: 'verified'}]
+            }));
+            const requests = current.requests.map(({created_at_ms, updated_at_ms, ...request}) => request);
+            const response = await fetch('/api/api-collection/actions', {
+              method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({action: 'replace_api_collection',
+                expected_generation: current.generation, folders, requests})
+            });
+            if (!response.ok) throw new Error(`Collection POST returned ${response.status}`);
+            const updated = await response.json();
+            if (!isApiCollection(updated)) throw new Error('Collection POST returned a malformed document');
+            state.apiCollection = updated;
+            state.apiCollectionLoaded = true;
+            state.apiCollectionEtag = `"api-collection-${updated.generation}"`;
+            setCollectionNotice('ready', 'Native API Collection write verified.');
+            renderApiCollection();
+          }
         [...document.querySelectorAll('.request-row')]
           .find(row => row.textContent.includes('live'))?.click();
         document.querySelector('#trace-origin')?.click();
+        })().catch(error => { window.__rebSmokeExerciseError = String(error); });
+        true
         """
       webView.evaluateJavaScript(exercise) { _, exerciseError in
         if let exerciseError {
@@ -1000,7 +1780,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
           NSApp.terminate(nil)
           return
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
           let inspection = """
             JSON.stringify({
               title: document.title,
@@ -1011,6 +1791,15 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
               sourceLines: document.querySelectorAll('.source-line').length,
               broker: document.querySelector('#broker-status')?.textContent,
               debuggerState: document.querySelector('#debug-state strong')?.textContent,
+              debuggerContractValid: isDebuggerResponse(state.debuggerSession),
+              objectExperimentAvailable: state.debuggerSession?.object_experiment?.protocol_version === 1,
+              runtimeHooksAvailable: state.debuggerSession?.runtime_hooks?.protocol_version === 1,
+              repeaterAvailable: state.debuggerSession?.repeater?.protocol_version === 1,
+              apiCollectionContractValid: isApiCollection(state.apiCollection),
+              apiCollectionGeneration: state.apiCollection?.generation,
+              apiCollectionStoreVisible: document.querySelector('#collection-generation')?.textContent,
+              apiCollectionWriteExercised: \(exerciseCollectionWrite ? "true" : "false"),
+              smokeExerciseError: window.__rebSmokeExerciseError,
               traceEnabled: !document.querySelector('#trace-origin')?.disabled,
               traceSteps: document.querySelectorAll('#backtrace-steps .trace-step').length,
               traceCoverage: document.querySelector('#coverage-value')?.textContent,

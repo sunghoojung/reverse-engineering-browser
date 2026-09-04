@@ -103,10 +103,10 @@
 - Script tree organized by page, frame, worker, context, and artifact origin.
 - Original source, source maps, readable derived source, search, and annotations.
 - Create a hook from a selected function or source location.
-- Inspect arguments, locals, closures, stack, source, and return values.
+- Inspect bounded local data properties, stack, source, and return values without invoking accessors.
 - Conditional logging and selected-value capture.
 - Step into, over, out, and across selected asynchronous continuations.
-- Modify variables and override synchronous return values in Experiment mode.
+- Run explicitly confirmed phase logic and override synchronous return values only in the disposable Experiment mode.
 - Follow a produced value toward likely consumers.
 
 ## Automation

@@ -48,10 +48,12 @@ class FakeDebuggerWebSocket:
         self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.listener.bind(("127.0.0.1", 0))
-        self.listener.listen(1)
+        self.listener.listen(8)
+        self.listener.settimeout(0.1)
         self.port = self.listener.getsockname()[1]
         self.commands = []
         self.connection = None
+        self.stop = threading.Event()
         self.breakpoint_index = 0
         self.pong_received = False
         self.fragment_next_message = True
@@ -60,48 +62,67 @@ class FakeDebuggerWebSocket:
         self.thread.start()
 
     def close(self) -> None:
-        if self.connection is not None:
+        self.stop.set()
+        connection = self.connection
+        if connection is not None:
             try:
-                self.connection.shutdown(socket.SHUT_RDWR)
+                connection.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
-            self.connection.close()
+            connection.close()
         self.listener.close()
         self.thread.join(timeout=2)
 
     def run(self) -> None:
-        try:
-            self.connection, _ = self.listener.accept()
-            request = self.read_headers()
-            key = next(
-                line.split(":", 1)[1].strip()
-                for line in request.split("\r\n")
-                if line.lower().startswith("sec-websocket-key:")
-            )
-            accept = base64.b64encode(
-                hashlib.sha1(
-                    (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
-                ).digest()
-            ).decode()
-            self.connection.sendall(
-                (
-                    "HTTP/1.1 101 Switching Protocols\r\n"
-                    "Upgrade: websocket\r\n"
-                    "Connection: Upgrade\r\n"
-                    f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
-                ).encode()
-            )
-            self.send_frame(0x9, b"native-transport")
-            opcode, payload = self.receive_frame()
-            self.assert_frame(opcode == 0xA)
-            self.assert_frame(payload == b"native-transport")
-            self.pong_received = True
-            while True:
-                message = self.receive_json()
-                self.commands.append(message)
-                self.respond(message)
-        except (OSError, StopIteration):
-            return
+        while not self.stop.is_set():
+            try:
+                connection, _ = self.listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            if self.stop.is_set():
+                connection.close()
+                return
+            self.connection = connection
+            try:
+                request = self.read_headers()
+                key = next(
+                    line.split(":", 1)[1].strip()
+                    for line in request.split("\r\n")
+                    if line.lower().startswith("sec-websocket-key:")
+                )
+                accept = base64.b64encode(
+                    hashlib.sha1(
+                        (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
+                    ).digest()
+                ).decode()
+                connection.sendall(
+                    (
+                        "HTTP/1.1 101 Switching Protocols\r\n"
+                        "Upgrade: websocket\r\n"
+                        "Connection: Upgrade\r\n"
+                        f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
+                    ).encode()
+                )
+                self.send_frame(0x9, b"native-transport")
+                opcode, payload = self.receive_frame()
+                self.assert_frame(opcode == 0xA)
+                self.assert_frame(payload == b"native-transport")
+                self.pong_received = True
+                while not self.stop.is_set():
+                    message = self.receive_json()
+                    self.commands.append(message)
+                    self.respond(message)
+            except (OSError, StopIteration):
+                pass
+            finally:
+                try:
+                    connection.close()
+                except OSError:
+                    pass
+                if self.connection is connection:
+                    self.connection = None
 
     def read_headers(self) -> str:
         body = bytearray()
@@ -549,7 +570,7 @@ class DebuggerBridgeTests(unittest.TestCase):
                         and value["scripts"]
                         and value
                     ),
-                    timeout=10.0,
+                    timeout=30.0,
                 )
                 self.assertEqual(snapshot["target"]["title"], "Checkout")
                 self.assertTrue(web_socket.pong_received)

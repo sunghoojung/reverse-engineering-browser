@@ -66,6 +66,9 @@ The repository includes a dependency-free C++ vertical slice for the probe event
 - bounded browser-context automation recipes with confirmed manual runs and
   explicitly armed created, before-load, and after-load triggers inside a
   disposable Experiment BrowserContext;
+- a persistent Local Analyst Workspace with reusable async scripts,
+  non-executable scratchpads, private variables, frozen bounded evidence
+  snapshots, isolated helper processes, cancellation, and visible limits;
 - a threaded producer and consumer demo;
 - unit tests and sanitizer support.
 

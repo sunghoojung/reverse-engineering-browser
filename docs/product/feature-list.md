@@ -111,12 +111,16 @@
 
 ## Automation
 
-- Permission-controlled analyst recipes that query captured evidence.
+- Reusable local analyst scripts that query explicitly selected, immutable
+  evidence snapshots through a bounded capability API.
+- A persistent user-only folder library for analyst scripts and non-executable
+  JavaScript, JSON, Markdown, or plain-text scratchpads.
 - Bounded browser-context recipes for explicit disposable Experiment sessions.
 - Confirmed manual execution or scoped automatic execution on page creation, before load, or after load.
 - Private session variables, bounded page-side helpers, text-only logs, result previews, cancellation, timeout recovery, and visible drop accounting.
 - Access to selected browser, memory, instrumentation, debugger, network, and artifact capabilities.
-- Reusable files, folders, variables, logs, and execution results.
+- Private per-run variables, bounded text logs and results, cancellation,
+  timeouts, visible evidence drops, and ephemeral run history.
 
 ## Experiment Lab
 
@@ -138,7 +142,8 @@
 - Unified investigation timeline and causal graph.
 - Source-to-event and event-to-source navigation.
 - Bookmarks, annotations, hypotheses, and evidence-backed conclusions.
-- Console, scratchpad, byte viewer, decoder chains, and JWT inspection.
+- Console and the persistent Local Analyst scratchpad.
+- Byte viewer, decoder chains, and JWT inspection.
 - Baseline, Deep Analysis, and Experiment status shown at all times.
 - Global, tab, frame, worker, origin, artifact, and session scopes.
 - Human, agent, and synthetic actions identified separately.

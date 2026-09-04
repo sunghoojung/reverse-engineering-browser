@@ -57,6 +57,12 @@ Reverse Engineering Browser is a Brave-based research browser for authorized web
 
 ## Research workspace
 
+- Organize reusable local analyst scripts and non-executable scratchpads in a
+  permission-restricted folder library, then run saved scripts against a
+  frozen, bounded evidence snapshot with explicit confirmation.
+- Pass private per-run variables to a capability-only API, retain bounded
+  text logs and results, and make cancellation, timeouts, truncation, and
+  correlation IDs visible without changing captured evidence.
 - Trace a selected live request backward through bounded parent, initiator,
   lifecycle, artifact, WASM, and browser-signal evidence, with explicit gaps
   and confidence labels.

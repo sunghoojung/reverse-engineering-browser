@@ -21,6 +21,17 @@ from api_collection import (
     ApiCollectionStore,
 )
 from debugger_bridge import DebuggerBridge, DebuggerBridgeError, ProtocolError
+from local_analyst import (
+    MAX_ANALYST_DOCUMENT_BYTES,
+    MAX_ANALYST_INPUT_BYTES,
+    LocalAnalystBusy,
+    LocalAnalystConflict,
+    LocalAnalystError,
+    LocalAnalystProtocolError,
+    LocalAnalystRunner,
+    LocalAnalystStore,
+    local_analyst_limits,
+)
 from origin_trace import OriginTraceError, build_origin_trace
 from vm_analyzer import (
     AnalysisError,
@@ -40,6 +51,9 @@ MAX_SIGNAL_PROFILE_JSON_BYTES = 8 * 1024
 MAX_ARTIFACT_JSON_BYTES = 8 * 1024
 MAX_DEBUGGER_ACTION_BYTES = 128 * 1024
 MAX_API_COLLECTION_ACTION_BYTES = MAX_API_COLLECTION_BYTES + 64 * 1024
+MAX_LOCAL_ANALYST_ACTION_BYTES = (
+    max(MAX_ANALYST_DOCUMENT_BYTES, MAX_ANALYST_INPUT_BYTES) + 64 * 1024
+)
 MAX_DEBUGGER_WAIT_MS = 25_000
 MAX_TRACE_EVENT_WINDOW = 10_000
 MAX_TRACE_EDGE_WINDOW = 30_000
@@ -91,6 +105,10 @@ class ResearchHandler(SimpleHTTPRequestHandler):
     api_collection_store = ApiCollectionStore(
         Path("build/sessions/api-collection-v1.json").resolve()
     )
+    local_analyst_store = LocalAnalystStore(
+        Path("build/sessions/local-analyst-workspace-v1.json").resolve()
+    )
+    local_analyst_runner = LocalAnalystRunner(Path(__file__).resolve().parent)
     broker_socket: Optional[Path] = None
     debugger: Optional[DebuggerBridge] = None
     analysis_lock = threading.Lock()
@@ -120,6 +138,9 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     "artifact_store_exists": self.artifact_store.exists(),
                     "api_collection_store": str(self.api_collection_store.path),
                     "api_collection_store_exists": self.api_collection_store.path.exists(),
+                    "local_analyst_store": str(self.local_analyst_store.path),
+                    "local_analyst_store_exists": self.local_analyst_store.path.exists(),
+                    "local_analyst_runner_available": self.local_analyst_runner.available(),
                     "broker_connected": self.broker_connected(),
                     "debugger_state": self.debugger_state(),
                 }
@@ -137,6 +158,29 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             if self.send_not_modified(etag):
                 return
             self.send_json(collection, etag=etag)
+            return
+        if parsed.path == "/api/local-analyst":
+            try:
+                workspace = self.local_analyst_store.load()
+            except (LocalAnalystError, OSError) as exception:
+                self.send_json(
+                    {"error": str(exception)}, HTTPStatus.INTERNAL_SERVER_ERROR
+                )
+                return
+            etag = f'"local-analyst-{workspace["generation"]}"'
+            if self.send_not_modified(etag):
+                return
+            self.send_json(workspace, etag=etag)
+            return
+        if parsed.path == "/api/local-analyst/runner":
+            self.send_json(
+                {
+                    "protocol_version": 1,
+                    "available": self.local_analyst_runner.available(),
+                    "active_run_id": self.local_analyst_runner.active_run_id(),
+                    "limits": local_analyst_limits(),
+                }
+            )
             return
         if parsed.path == "/api/debugger":
             query = parse_qs(parsed.query, keep_blank_values=True)
@@ -495,6 +539,55 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                 collection, etag=f'"api-collection-{collection["generation"]}"'
             )
             return
+        if parsed.path == "/api/local-analyst/actions":
+            try:
+                request = self.read_json_body(MAX_LOCAL_ANALYST_ACTION_BYTES)
+                action = request.get("action")
+                if action == "replace_local_analyst_workspace":
+                    response = self.local_analyst_store.replace(request)
+                    self.send_json(
+                        response,
+                        etag=f'"local-analyst-{response["generation"]}"',
+                    )
+                    return
+                if action == "run_local_analyst_script":
+                    workspace = self.local_analyst_store.load()
+                    self.send_json(self.local_analyst_runner.run(request, workspace))
+                    return
+                if action == "cancel_local_analyst_script":
+                    if set(request) != {"action", "run_id"}:
+                        raise LocalAnalystError(
+                            "Analyst cancellation action is invalid"
+                        )
+                    delivered = self.local_analyst_runner.cancel(request.get("run_id"))
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "run_id": request.get("run_id"),
+                            "cancel_requested": delivered,
+                        }
+                    )
+                    return
+                raise LocalAnalystError("Analyst workspace action is invalid")
+            except LocalAnalystConflict as exception:
+                self.send_json({"error": str(exception)}, HTTPStatus.CONFLICT)
+                return
+            except LocalAnalystBusy as exception:
+                self.send_json({"error": str(exception)}, HTTPStatus.CONFLICT)
+                return
+            except LocalAnalystProtocolError as exception:
+                self.send_json(
+                    {"error": str(exception)}, HTTPStatus.UNPROCESSABLE_ENTITY
+                )
+                return
+            except (LocalAnalystError, ValueError) as exception:
+                self.send_json({"error": str(exception)}, HTTPStatus.BAD_REQUEST)
+                return
+            except OSError as exception:
+                self.send_json(
+                    {"error": str(exception)}, HTTPStatus.INTERNAL_SERVER_ERROR
+                )
+                return
         if parsed.path != "/api/debugger/actions":
             self.send_json(
                 {"error": "Application resource not found"}, HTTPStatus.NOT_FOUND
@@ -1062,6 +1155,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("build/sessions/api-collection-v1.json"),
     )
+    parser.add_argument(
+        "--local-analyst",
+        type=Path,
+        default=Path("build/sessions/local-analyst-workspace-v1.json"),
+    )
     parser.add_argument("--socket", type=Path)
     parser.add_argument("--devtools-active-port", type=Path)
     parser.add_argument("--endpoint-file", type=Path)
@@ -1077,6 +1175,12 @@ def main() -> int:
     ResearchHandler.artifact_store = args.artifacts.resolve()
     ResearchHandler.api_collection_store = ApiCollectionStore(
         args.api_collection.resolve()
+    )
+    ResearchHandler.local_analyst_store = LocalAnalystStore(
+        args.local_analyst.resolve()
+    )
+    ResearchHandler.local_analyst_runner = LocalAnalystRunner(
+        Path(__file__).resolve().parent
     )
     ResearchHandler.broker_socket = args.socket.resolve() if args.socket else None
     debugger = DebuggerBridge(
@@ -1099,6 +1203,7 @@ def main() -> int:
     print(f"Request signal profile store: {ResearchHandler.signal_store}")
     print(f"Artifact store: {ResearchHandler.artifact_store}")
     print(f"API Collection store: {ResearchHandler.api_collection_store.path}")
+    print(f"Local analyst store: {ResearchHandler.local_analyst_store.path}")
     debugger.start()
     try:
         server.serve_forever()
@@ -1106,6 +1211,7 @@ def main() -> int:
         pass
     finally:
         server.server_close()
+        ResearchHandler.local_analyst_runner.stop()
         debugger.stop()
         if endpoint_file is not None:
             try:

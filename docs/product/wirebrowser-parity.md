@@ -46,15 +46,15 @@ bounded evidence architecture. Matching a panel name is not sufficient.
 | WireBrowser capability | REB status | Evidence or remaining work |
 | --- | --- | --- |
 | Browser-context scripts | Implemented | [Automation Recipes v1](./automation-recipes-v1.md) adds a bounded recipe library, private variables, manual execution, and explicitly armed created, before-load, and after-load triggers inside the disposable Experiment BrowserContext. |
-| Local Node-style analyst scripts | Missing | Requires a local capability API over captured evidence. MCP remains deferred by project policy. |
+| Local Node-style analyst scripts | Implemented | [Local Analyst Workspace v1](./local-analyst-workspace-v1.md) adds reusable async scripts over frozen, bounded evidence snapshots, private variables, text-only logs and results, isolated helper processes, cancellation, timeout recovery, and visible limits. MCP remains deferred by project policy. |
 | Decoder chains | Missing | Add local byte, text, URL, Base64, hex, compression, and structured-data transforms without automatic execution. |
 | JWT inspection | Missing | Add bounded local decoding and claim inspection without signature or trust claims unless explicitly verified. |
-| Scratchpad and reusable files | Missing | Add an investigation-local editor with explicit storage ownership and size limits. |
+| Scratchpad and reusable files | Implemented | Local Analyst Workspace adds a permission-restricted, atomically replaced folder and file library with stable IDs, generation conflicts, four scratchpad languages, and non-executable notes. |
 
 ## Delivery order
 
-Automation Recipes is the current completed parity increment. The next
-implementation sequence is local analyst scripts and local decoding tools.
+Local Analyst Workspace is the current completed parity increment. The next
+implementation sequence is local decoding tools and JWT inspection.
 Each increment must preserve immutable baseline evidence, make mutation
 visible, and pass the repository's full native and UI gates.
 Memory Origin Trace is the current completed parity increment. The next

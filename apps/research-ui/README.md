@@ -110,6 +110,13 @@ drawer. Watch evaluation requests `throwOnSideEffect` with a 500 ms timeout.
 Arbitrary protocol commands, interactive console evaluation, variable edits,
 and live source edits are not exposed in Baseline mode.
 
+The browser-facing DevTools WebSocket runs in `build/reb-debugger-transport`, a
+dependency-free C++20 helper. It validates the loopback endpoint and handshake,
+enforces command and message bounds, handles WebSocket control frames, and
+passes versioned, length-prefixed JSON records over private process pipes.
+Python remains the HTTP and debugger-state adapter, so the public UI routes and
+response contracts do not depend on the native transport protocol.
+
 The Memory workspace uses the same authorized live target for bounded,
 read-only object discovery. A search can combine an own-property name,
 primitive value, class name, regular expression, and JSON structural shape.
@@ -306,7 +313,9 @@ also report live broker connectivity.
 Pass `--devtools-active-port /path/to/DevToolsActivePort` to enable the live
 debugger bridge. This path must belong to an explicitly authorized browser
 launched with `--remote-debugging-port=0` and an isolated user-data directory.
-Native quiet mode deliberately omits both options.
+Pass `--debugger-transport /path/to/reb-debugger-transport` to override the
+native helper built by `make debugger-transport`. Native quiet mode deliberately
+omits both options and does not start the helper.
 
 Pass `--trace-store /path/to/origin-trace.jsonl` when the edge sidecar is not
 next to the default demo store. The origin-trace endpoint reads at most 10,000

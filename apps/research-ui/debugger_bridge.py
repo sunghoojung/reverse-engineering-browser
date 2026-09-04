@@ -8,7 +8,6 @@ import math
 import os
 import re
 import select
-import socket
 import struct
 import subprocess
 import tempfile
@@ -64,6 +63,10 @@ MAX_TARGET_ID_BYTES = 4_096
 MAX_TARGET_TYPE_BYTES = 128
 MAX_TARGET_URL_BYTES = 64 * 1024
 MAX_REMOTE_TEXT_BYTES = 4_096
+MAX_NATIVE_TRANSPORT_ERROR_BYTES = 4_096
+NATIVE_TRANSPORT_STARTUP_TIMEOUT_SECONDS = 3.0
+NATIVE_TRANSPORT_WRITE_TIMEOUT_SECONDS = 5.0
+NATIVE_TRANSPORT_PROTOCOL_HEADER = b"REB\x01"
 MAX_INTERCEPTION_URL_BYTES = 8 * 1024
 MAX_INTERCEPTION_PATTERN_BYTES = 2 * 1024
 MAX_INTERCEPTION_METHOD_BYTES = 32
@@ -793,187 +796,175 @@ class HeapSnapshotCapture:
     captured_at_ms: int
 
 
-class WebSocketClient:
-    def __init__(self, url: str) -> None:
-        parsed = urlparse(url)
-        try:
-            hostname = parsed.hostname
-            port = parsed.port or 80
-        except ValueError as exception:
+class NativeDebuggerConnection:
+    def __init__(self, url: str, binary: Path) -> None:
+        resolved_binary = binary.resolve()
+        if not resolved_binary.is_file() or not os.access(resolved_binary, os.X_OK):
             raise DebuggerBridgeError(
-                "The debugger WebSocket URL is malformed"
-            ) from exception
-        if parsed.scheme != "ws" or hostname not in {
-            "127.0.0.1",
-            "localhost",
-            "::1",
-        }:
-            raise DebuggerBridgeError("The debugger WebSocket must use loopback ws://")
-        if (
-            parsed.username is not None
-            or parsed.password is not None
-            or parsed.fragment
-        ):
-            raise DebuggerBridgeError("The debugger WebSocket URL is malformed")
-        path = parsed.path or "/"
-        if parsed.query:
-            path = f"{path}?{parsed.query}"
-        if any(ord(character) < 0x20 or ord(character) > 0x7E for character in path):
-            raise DebuggerBridgeError("The debugger WebSocket URL is malformed")
-        connection = socket.create_connection((hostname, port), timeout=2.0)
-        connection.settimeout(2.0)
-        key = base64.b64encode(os.urandom(16)).decode("ascii")
-        host = hostname
-        if hostname == "::1":
-            host = "[::1]"
-        request = (
-            f"GET {path} HTTP/1.1\r\n"
-            f"Host: {host}:{port}\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            f"Sec-WebSocket-Key: {key}\r\n"
-            "Sec-WebSocket-Version: 13\r\n"
-            "\r\n"
-        ).encode("ascii")
-        connection.sendall(request)
-        response = self._read_http_headers(connection)
-        status_line, *header_lines = response.split("\r\n")
-        if not status_line.startswith("HTTP/1.1 101 "):
-            connection.close()
-            raise DebuggerBridgeError(
-                f"Debugger WebSocket rejected the connection: {status_line}"
-            )
-        headers = {}
-        for line in header_lines:
-            if ":" not in line:
-                continue
-            name, value = line.split(":", 1)
-            headers[name.strip().lower()] = value.strip()
-        expected = base64.b64encode(
-            hashlib.sha1(
-                (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
-            ).digest()
-        ).decode("ascii")
-        if (
-            headers.get("sec-websocket-accept") != expected
-            or headers.get("upgrade", "").lower() != "websocket"
-            or "upgrade"
-            not in {
-                token.strip()
-                for token in headers.get("connection", "").lower().split(",")
-            }
-        ):
-            connection.close()
-            raise DebuggerBridgeError(
-                "Debugger WebSocket returned an invalid handshake"
-            )
-        connection.settimeout(None)
-        self._connection = connection
+                "Native debugger transport is unavailable; run make debugger-transport"
+        )
         self._send_lock = threading.Lock()
         self._closed = False
-
-    @staticmethod
-    def _read_http_headers(connection: socket.socket) -> str:
-        response = bytearray()
-        while b"\r\n\r\n" not in response:
-            chunk = connection.recv(4_096)
-            if not chunk:
-                raise DebuggerBridgeError("Debugger WebSocket closed during handshake")
-            response.extend(chunk)
-            if len(response) > 64 * 1024:
-                raise DebuggerBridgeError("Debugger WebSocket handshake is oversized")
-        header, remainder = bytes(response).split(b"\r\n\r\n", 1)
-        if remainder:
-            raise DebuggerBridgeError("Debugger WebSocket sent data during handshake")
-        return header.decode("iso-8859-1")
+        try:
+            self._process = subprocess.Popen(
+                [str(resolved_binary), "--url", url],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+                close_fds=True,
+            )
+        except OSError as exception:
+            raise DebuggerBridgeError(
+                f"Native debugger transport could not start: {exception}"
+            ) from exception
+        try:
+            if self._process.stdin is None or self._process.stdout is None:
+                raise DebuggerBridgeError(
+                    "Native debugger transport pipes are unavailable"
+                )
+            os.set_blocking(self._process.stdin.fileno(), False)
+            ready = self._read_control_message(
+                NATIVE_TRANSPORT_STARTUP_TIMEOUT_SECONDS
+            )
+            if ready is None:
+                raise DebuggerBridgeError(
+                    "Native debugger transport startup timed out"
+                )
+            if ready:
+                raise DebuggerBridgeError(
+                    "Native debugger transport returned a malformed startup frame"
+                )
+        except BaseException:
+            self.close()
+            raise
 
     def send_json(self, value: dict[str, Any]) -> None:
         body = json.dumps(value, separators=(",", ":")).encode("utf-8")
         if len(body) > 16 * 1024 * 1024:
             raise DebuggerBridgeError("Debugger command is oversized")
+        frame = (
+            NATIVE_TRANSPORT_PROTOCOL_HEADER + struct.pack("!I", len(body)) + body
+        )
         with self._send_lock:
-            if self._closed:
+            if self._closed or self._process.stdin is None:
                 raise WebSocketClosed("Debugger WebSocket is closed")
-            self._connection.sendall(self._encode_frame(0x1, body))
+            try:
+                self._write_exact(self._process.stdin.fileno(), frame)
+            except TimeoutError as exception:
+                raise WebSocketClosed(str(exception)) from exception
+            except OSError as exception:
+                raise WebSocketClosed(self._failure_detail()) from exception
 
     def receive_json(self, timeout: float = 0.5) -> Optional[dict[str, Any]]:
-        while True:
-            ready, _, _ = select.select([self._connection], [], [], timeout)
-            if not ready:
-                return None
-            opcode, payload = self._receive_frame()
-            if opcode == 0x8:
-                raise WebSocketClosed("Debugger WebSocket closed")
-            if opcode == 0x9:
-                with self._send_lock:
-                    self._connection.sendall(self._encode_frame(0xA, payload))
-                continue
-            if opcode == 0xA:
-                continue
-            if opcode != 0x1:
-                raise DebuggerBridgeError("Debugger WebSocket sent a non-text message")
-            try:
-                value = json.loads(payload.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError) as exception:
-                raise DebuggerBridgeError(
-                    "Debugger WebSocket sent malformed JSON"
-                ) from exception
-            if not isinstance(value, dict):
-                raise DebuggerBridgeError(
-                    "Debugger WebSocket sent a non-object message"
-                )
-            return value
+        payload = self._read_control_message(timeout)
+        if payload is None:
+            return None
+        try:
+            value = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exception:
+            raise DebuggerBridgeError(
+                "Debugger WebSocket sent malformed JSON"
+            ) from exception
+        if not isinstance(value, dict):
+            raise DebuggerBridgeError("Debugger WebSocket sent a non-object message")
+        return value
 
     def close(self) -> None:
         with self._send_lock:
             if self._closed:
                 return
             self._closed = True
+            process = self._process
+            if process.stdin is not None:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+        try:
+            process.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            process.terminate()
             try:
-                self._connection.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            self._connection.close()
+                process.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=0.5)
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
 
-    @staticmethod
-    def _encode_frame(opcode: int, payload: bytes) -> bytes:
-        length = len(payload)
-        if length < 126:
-            header = struct.pack("!BB", 0x80 | opcode, 0x80 | length)
-        elif length < 2**16:
-            header = struct.pack("!BBH", 0x80 | opcode, 0x80 | 126, length)
-        else:
-            header = struct.pack("!BBQ", 0x80 | opcode, 0x80 | 127, length)
-        mask = os.urandom(4)
-        masked = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
-        return header + mask + masked
-
-    def _receive_frame(self) -> tuple[int, bytes]:
-        first, second = self._receive_exact(2)
-        final = (first & 0x80) != 0
-        opcode = first & 0x0F
-        masked = (second & 0x80) != 0
-        length = second & 0x7F
-        if not final or opcode == 0x0:
-            raise DebuggerBridgeError("Fragmented debugger messages are not supported")
-        if masked:
-            raise DebuggerBridgeError("Debugger server sent a masked frame")
-        if length == 126:
-            length = struct.unpack("!H", self._receive_exact(2))[0]
-        elif length == 127:
-            length = struct.unpack("!Q", self._receive_exact(8))[0]
+    def _read_control_message(self, timeout: float) -> Optional[bytes]:
+        if self._process.stdout is None:
+            raise WebSocketClosed("Debugger WebSocket is closed")
+        ready, _, _ = select.select([self._process.stdout], [], [], max(0.0, timeout))
+        if not ready:
+            return None
+        header = self._read_exact(self._process.stdout.fileno(), 8)
+        if header[:4] != NATIVE_TRANSPORT_PROTOCOL_HEADER:
+            raise ProtocolError(
+                "Native debugger transport returned an invalid protocol header"
+            )
+        length = struct.unpack("!I", header[4:])[0]
         if length > 64 * 1024 * 1024:
             raise DebuggerBridgeError("Debugger WebSocket message is oversized")
-        return opcode, self._receive_exact(length)
+        return self._read_exact(self._process.stdout.fileno(), length)
 
-    def _receive_exact(self, length: int) -> bytes:
+    def _read_exact(self, descriptor: int, length: int) -> bytes:
         body = bytearray()
         while len(body) < length:
-            chunk = self._connection.recv(length - len(body))
+            chunk = os.read(descriptor, length - len(body))
             if not chunk:
-                raise WebSocketClosed("Debugger WebSocket closed")
+                raise WebSocketClosed(self._failure_detail())
             body.extend(chunk)
         return bytes(body)
+
+    @staticmethod
+    def _write_exact(descriptor: int, body: bytes) -> None:
+        deadline = time.monotonic() + NATIVE_TRANSPORT_WRITE_TIMEOUT_SECONDS
+        offset = 0
+        while offset < len(body):
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "Native debugger transport command pipe timed out"
+                )
+            try:
+                written = os.write(descriptor, body[offset:])
+            except InterruptedError:
+                continue
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "Native debugger transport command pipe timed out"
+                    )
+                _, writable, _ = select.select([], [descriptor], [], remaining)
+                if not writable:
+                    raise TimeoutError(
+                        "Native debugger transport command pipe timed out"
+                    )
+                continue
+            if written == 0:
+                raise BrokenPipeError("Native debugger transport pipe closed")
+            offset += written
+
+    def _failure_detail(self) -> str:
+        fallback = "Debugger WebSocket closed"
+        if self._process.stderr is None:
+            return fallback
+        ready, _, _ = select.select([self._process.stderr], [], [], 0.1)
+        if not ready:
+            return fallback
+        try:
+            body = os.read(
+                self._process.stderr.fileno(), MAX_NATIVE_TRANSPORT_ERROR_BYTES + 1
+            )
+        except OSError:
+            return fallback
+        detail = body[:MAX_NATIVE_TRANSPORT_ERROR_BYTES].decode(
+            "utf-8", errors="replace"
+        )
+        return detail.strip() or fallback
 
 
 class ActionScopeTargetSession:
@@ -984,12 +975,15 @@ class ActionScopeTargetSession:
         target: dict[str, str],
         event_handler: Any,
         close_handler: Any,
+        debugger_transport_binary: Path,
     ) -> None:
         self.target = dict(target)
         self.target_id = target["id"]
         self._event_handler = event_handler
         self._close_handler = close_handler
-        self._connection = WebSocketClient(target["web_socket_url"])
+        self._connection = NativeDebuggerConnection(
+            target["web_socket_url"], debugger_transport_binary
+        )
         self._lock = threading.RLock()
         self._pending: dict[int, PendingCommand] = {}
         self._next_command_id = 1
@@ -1138,17 +1132,23 @@ class DebuggerBridge:
         self,
         active_port_path: Optional[Path] = None,
         heap_snapshot_binary: Optional[Path] = None,
+        debugger_transport_binary: Optional[Path] = None,
     ) -> None:
         self.active_port_path = active_port_path
         self.heap_snapshot_binary = heap_snapshot_binary or (
             Path(__file__).resolve().parents[2] / "build" / "reb-heap-snapshot"
+        )
+        self.debugger_transport_binary = debugger_transport_binary or (
+            Path(__file__).resolve().parents[2]
+            / "build"
+            / "reb-debugger-transport"
         )
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._reader_thread: Optional[threading.Thread] = None
-        self._connection: Optional[WebSocketClient] = None
+        self._connection: Optional[NativeDebuggerConnection] = None
         self._pending: dict[int, PendingCommand] = {}
         self._next_command_id = 1
         self._generation = 0
@@ -6718,6 +6718,7 @@ class DebuggerBridge:
                     target,
                     self._on_action_scope_event,
                     self._on_action_scope_session_closed,
+                    self.debugger_transport_binary,
                 )
                 session.start()
                 self._configure_action_scope_session(session)
@@ -8848,7 +8849,9 @@ class DebuggerBridge:
         self, method: str, params: Optional[dict[str, Any]] = None
     ) -> dict[str, Any]:
         _, browser_url = self._devtools_endpoint()
-        connection = WebSocketClient(browser_url)
+        connection = NativeDebuggerConnection(
+            browser_url, self.debugger_transport_binary
+        )
         try:
             connection.send_json({"id": 1, "method": method, "params": params or {}})
             deadline = time.monotonic() + 5.0
@@ -8929,7 +8932,9 @@ class DebuggerBridge:
 
     def _serve_target(self, target: dict[str, str]) -> None:
         self._set_state("connecting", None)
-        connection = WebSocketClient(target["web_socket_url"])
+        connection = NativeDebuggerConnection(
+            target["web_socket_url"], self.debugger_transport_binary
+        )
         public_target = {key: target[key] for key in ("id", "type", "title", "url")}
         with self._lock:
             self._connection = connection
@@ -9097,7 +9102,7 @@ class DebuggerBridge:
             if clear_heap_baseline:
                 self._clear_heap_diff_baseline()
 
-    def _read_messages(self, connection: WebSocketClient) -> None:
+    def _read_messages(self, connection: NativeDebuggerConnection) -> None:
         error: Optional[BaseException] = None
         try:
             while not self._stop.is_set():

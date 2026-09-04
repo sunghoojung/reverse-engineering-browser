@@ -9,6 +9,7 @@ repository_root="$(cd "${script_dir}/.." && pwd)"
 readonly repository_root
 readonly broker_binary="${repository_root}/build/reb-event-broker"
 readonly artifact_receiver_binary="${repository_root}/build/reb-artifact-receiver"
+readonly debugger_transport_binary="${repository_root}/build/reb-debugger-transport"
 readonly vm_analyzer="${REB_VM_ANALYZER:-${repository_root}/apps/research-ui/vm_analyzer.py}"
 readonly origin_trace_app="${REB_ORIGIN_TRACE_APP:-${repository_root}/build/Origin Trace.app}"
 session_id="$(od -An -N8 -tu8 /dev/urandom | tr -d '[:space:]')"
@@ -67,6 +68,10 @@ if [[ ! -x "${broker_binary}" ]]; then
 fi
 if [[ ! -x "${artifact_receiver_binary}" ]]; then
   echo "Artifact receiver is missing. Run: make artifact-receiver" >&2
+  exit 1
+fi
+if [[ "${native_quiet_mode}" == 0 && ! -x "${debugger_transport_binary}" ]]; then
+  echo "Debugger transport is missing. Run: make debugger-transport" >&2
   exit 1
 fi
 if [[ ! -d "${origin_trace_app}" ]]; then
@@ -195,7 +200,10 @@ ui_arguments=(
   --socket "${socket_path}"
 )
 if [[ "${native_quiet_mode}" == 0 ]]; then
-  ui_arguments+=(--devtools-active-port "${devtools_active_port}")
+  ui_arguments+=(
+    --devtools-active-port "${devtools_active_port}"
+    --debugger-transport "${debugger_transport_binary}"
+  )
 fi
 python3 -u "${repository_root}/apps/research-ui/server.py" \
   "${ui_arguments[@]}" \

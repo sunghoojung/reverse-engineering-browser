@@ -50,6 +50,7 @@ frame, artifact, event, and parent identifiers.
 | Native capture foundation | C++20 fixed-size events, bounded shared-memory queues, disabled fast paths, and explicit drop accounting |
 | Broker and evidence | Authenticated local sockets, validation, correlation, sequence-gap detection, JSONL evidence, and versioned contracts |
 | Artifact capture | Acknowledged, bounded transfer of immutable JavaScript and WebAssembly blobs with SHA-256 manifests |
+| Debugger transport | Dependency-free C++20 loopback WebSocket transport with bounded, versioned private pipes to the Python state adapter |
 | Origin Trace | Native macOS application plus a browser-only development path for request-first evidence inspection, sources, memory analysis, and experiments |
 | Brave integration | Reproducible overlays and ordered patches pinned to specific Brave and Chromium revisions |
 | Verification | Native unit tests, socket and application end-to-end tests, sanitizers, repository hygiene checks, and macOS bundle verification in CI |
@@ -110,6 +111,11 @@ native probe target:
 make brave-doctor
 make brave-probe-check
 ```
+
+Normal live sessions route the browser-facing DevTools WebSocket through the
+bounded C++ debugger transport. Python retains the existing HTTP contracts,
+CDP interpretation, and debugger state.
+
 For a capture that must not attach DevTools to the live page, start native
 quiet mode:
 

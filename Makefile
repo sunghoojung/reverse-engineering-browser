@@ -50,6 +50,7 @@ LIB_OBJECTS := \
 	$(BUILD_DIR)/src/vm_finding.o
 HEAP_SNAPSHOT_OBJECT := $(BUILD_DIR)/src/heap_snapshot.o
 DECODER_OBJECT := $(BUILD_DIR)/src/decoder.o
+DEBUGGER_TRANSPORT_OBJECT := $(BUILD_DIR)/src/debugger_transport.o
 DEMO_BINARY := $(BUILD_DIR)/reb-event-demo
 PRODUCER_BINARY := $(BUILD_DIR)/reb-event-producer
 BROKER_BINARY := $(BUILD_DIR)/reb-event-broker
@@ -57,10 +58,12 @@ ARTIFACT_PRODUCER_BINARY := $(BUILD_DIR)/reb-artifact-producer
 ARTIFACT_RECEIVER_BINARY := $(BUILD_DIR)/reb-artifact-receiver
 HEAP_SNAPSHOT_BINARY := $(BUILD_DIR)/reb-heap-snapshot
 DECODER_BINARY := $(BUILD_DIR)/reb-decoder
+DEBUGGER_TRANSPORT_BINARY := $(BUILD_DIR)/reb-debugger-transport
 VM_ANALYZER := apps/research-ui/vm_analyzer.py
 TEST_BINARIES := \
 	$(BUILD_DIR)/tests/artifact_test \
 	$(BUILD_DIR)/tests/decoder_test \
+	$(BUILD_DIR)/tests/debugger_transport_test \
 	$(BUILD_DIR)/tests/event_test \
 	$(BUILD_DIR)/tests/event_broker_test \
 	$(BUILD_DIR)/tests/heap_snapshot_test \
@@ -71,9 +74,9 @@ TEST_BINARIES := \
 	$(BUILD_DIR)/tests/spsc_ring_test \
 	$(BUILD_DIR)/tests/vm_finding_test
 
-.PHONY: all app app-build artifact-producer artifact-receiver artifact-socket-e2e bootstrap-brave bootstrap-test brave-doctor brave-probe-check browser-sync browser-sync-test broker check clean decoder demo e2e format format-check heap-snapshot lint live producer python-check repository-check sanitize shellcheck socket-e2e test ui ui-test workflow-check workspace-check
+.PHONY: all app app-build artifact-producer artifact-receiver artifact-socket-e2e bootstrap-brave bootstrap-test brave-doctor brave-probe-check browser-sync browser-sync-test broker check clean debugger-transport decoder demo e2e format format-check heap-snapshot lint live producer python-check repository-check sanitize shellcheck socket-e2e test ui ui-test workflow-check workspace-check
 
-all: demo producer broker artifact-producer artifact-receiver heap-snapshot decoder
+all: demo producer broker artifact-producer artifact-receiver heap-snapshot decoder debugger-transport
 
 check: workspace-check bootstrap-test browser-sync-test test ui-test
 
@@ -114,7 +117,9 @@ heap-snapshot: $(HEAP_SNAPSHOT_BINARY)
 
 decoder: $(DECODER_BINARY)
 
-e2e: producer broker artifact-producer artifact-receiver
+debugger-transport: $(DEBUGGER_TRANSPORT_BINARY)
+
+e2e: producer broker artifact-producer artifact-receiver debugger-transport
 	@mkdir -p $(BUILD_DIR)/sessions
 	$(PRODUCER_BINARY) | $(BROKER_BINARY) \
 		--store $(BUILD_DIR)/sessions/demo.jsonl \
@@ -165,7 +170,7 @@ app: app-build
 		--signal-store "$(CURDIR)/$(BUILD_DIR)/sessions/request-signals.jsonl" \
 		--artifacts "$(CURDIR)/$(BUILD_DIR)/sessions/artifacts"
 
-live: app-build broker artifact-receiver
+live: app-build broker artifact-receiver debugger-transport
 	./scripts/run-live-session.sh
 
 $(BUILD_DIR)/src/%.o: src/%.cpp $(NATIVE_HEADERS)
@@ -200,6 +205,10 @@ $(DECODER_BINARY): apps/reb-decoder/main.cpp $(DECODER_OBJECT) $(NATIVE_HEADERS)
 	@mkdir -p $(@D)
 	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cpp %.o,$^) $(LDFLAGS) $(ZLIB_LIBS) -o $@
 
+$(DEBUGGER_TRANSPORT_BINARY): apps/reb-debugger-transport/main.cpp $(DEBUGGER_TRANSPORT_OBJECT) $(NATIVE_HEADERS)
+	@mkdir -p $(@D)
+	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cpp %.o,$^) $(LDFLAGS) -o $@
+
 $(BUILD_DIR)/tests/heap_snapshot_test: tests/heap_snapshot_test.cpp $(HEAP_SNAPSHOT_OBJECT) $(NATIVE_HEADERS)
 	@mkdir -p $(@D)
 	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cpp %.o,$^) $(LDFLAGS) -o $@
@@ -207,6 +216,10 @@ $(BUILD_DIR)/tests/heap_snapshot_test: tests/heap_snapshot_test.cpp $(HEAP_SNAPS
 $(BUILD_DIR)/tests/decoder_test: tests/decoder_test.cpp $(DECODER_OBJECT) $(NATIVE_HEADERS)
 	@mkdir -p $(@D)
 	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cpp %.o,$^) $(LDFLAGS) $(ZLIB_LIBS) -o $@
+
+$(BUILD_DIR)/tests/debugger_transport_test: tests/debugger_transport_test.cpp $(DEBUGGER_TRANSPORT_OBJECT) $(NATIVE_HEADERS)
+	@mkdir -p $(@D)
+	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) $(filter %.cpp %.o,$^) $(LDFLAGS) -o $@
 
 $(BUILD_DIR)/tests/%: tests/%.cpp $(LIB_OBJECTS) $(NATIVE_HEADERS) $(TRACKED_BROWSER_PROTOCOL_HEADERS) $(NATIVE_PROBE_QUEUE_SOURCE)
 	@mkdir -p $(@D)
@@ -218,7 +231,7 @@ test: $(TEST_BINARIES)
 		$$test_binary; \
 	done
 
-ui-test: heap-snapshot decoder
+ui-test: heap-snapshot decoder debugger-transport
 	python3 -m unittest discover -s apps/research-ui -p 'test_*.py'
 
 sanitize:

@@ -45,6 +45,15 @@ authenticates to the event broker with a session identifier and a mode-0600
 token file, then sends exact fixed-size records over a Unix socket. A bounded
 browser-process queue keeps those socket writes off the capture paths.
 
+Native quiet mode is an explicit launch-time option. Its Chromium patch adds a
+disabled-by-default V8 flag that returns from the shared debugger-statement
+runtime handler before Inspector pause handling. Because compiled `debugger;`
+statements from normal scripts, `eval`, functions, frames, and workers all use
+that V8 handler, the rule does not depend on source rewriting or CDP. The live
+launcher also omits the remote-debugging endpoint in this mode. Ordinary V8
+behavior remains unchanged unless the session passes
+`--js-flags=--reb-ignore-debugger-statements`.
+
 When the Artifact category is authorized, the browser process recognizes
 JavaScript and WebAssembly responses, removes URL credentials, queries, and
 fragments from stored metadata, and asynchronously tees at most 16 MiB per

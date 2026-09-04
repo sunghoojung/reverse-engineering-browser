@@ -110,6 +110,20 @@ native probe target:
 make brave-doctor
 make brave-probe-check
 ```
+For a capture that must not attach DevTools to the live page, start native
+quiet mode:
+
+```sh
+REB_NATIVE_QUIET_MODE=1 make live
+```
+
+This mode does not open a remote-debugging endpoint or start the CDP debugger
+bridge. The patched V8 runtime treats page-authored `debugger;` statements as
+no-ops before Inspector handling, while the native evidence probes and captured
+Sources remain available. Live Page sources, breakpoints, stepping, watches,
+and the console are intentionally unavailable in this mode. This removes the
+debugger attachment and pause signals; it does not promise that arbitrary code
+cannot fingerprint the custom browser or measure instrumentation overhead.
 
 Initialization needs at least 150 GiB of free space; 200 to 250 GiB is the
 practical recommendation. The default shallow-history mode avoids unnecessary

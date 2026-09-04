@@ -26,6 +26,8 @@ bounded evidence architecture. Matching a panel name is not sufficient.
 | Breakpoint-driven origin trace | Implemented | [Memory Origin Trace v1](./memory-origin-trace-v1.md) adds bounded click-driven temporal heap probing and source-function mapping. |
 | Expose or patch a live object | Implemented | [Live Object Experiment v1](./live-object-experiment-v1.md) adds bounded live-object search and confirmed typed own-property set/delete operations inside the disposable Experiment BrowserContext, with metadata-only audit records and no arbitrary code execution. |
 | Runtime hooks and return overrides | Implemented | [Runtime Hooks v1](./runtime-hooks-v1.md) adds bounded function-entry and synchronous-return hooks, local binding capture, conditional logic, and typed return replacement inside the disposable Experiment BrowserContext. |
+| Expose or patch a live object | Missing | Must be restricted to a visibly isolated Experiment session with explicit mutation audit records. |
+| Runtime hooks and return overrides | Partial | REB has breakpoints and logpoints. Function-call hooks, argument capture, injected logic, and synchronous return overrides remain. |
 
 ## Network workflow
 
@@ -35,6 +37,9 @@ bounded evidence architecture. Matching a panel name is not sufficient.
 | Request interception | Implemented | [Request Interception v1](./request-interception-v1.md) provides continue, block, drop, bounded request rewrite, and bounded synthetic-response rules only inside a disposable credential-free BrowserContext, with a metadata-only mutation audit. |
 | Repeater | Implemented | [Repeater v1](./repeater-v1.md) adds editable credential-free requests, immediate cancellation, bounded session history, scoped variables, resolved-request copying, and response comparison inside the disposable request-lab BrowserContext. |
 | API Collection | Implemented | [API Collection v1](./api-collection-v1.md) adds atomic local persistence, a bounded folder tree, inherited root/folder/request variables, safe Traffic import, editable saved requests, and execution history scoped through the isolated Repeater context. |
+| Request interception | Missing | Continue, block, drop, request rewrite, and synthetic response controls must be Experiment-only and auditable. |
+| Repeater | Missing | Editable requests, cancellation, bounded history, scoped variables, and response comparison remain. |
+| API Collection | Missing | Folders, scoped variables, saved requests, and execution history remain. |
 
 ## Automation and tools
 

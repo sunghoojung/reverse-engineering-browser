@@ -51,7 +51,11 @@ bounded structurally. Both native bridges enforce a two-second wall-clock
 timeout and serialize operations through one worker lock.
 
 The C++ engine uses zlib for streaming compression and decompression. It stops
-before retaining output over the configured cap. SHA-256, SHA-384, SHA-512,
+before retaining output over the configured cap. Gzip decoding consumes all
+concatenated members under one shared output cap and reuses the inflater state
+between members. Zlib and raw-deflate decoding accept exactly one stream.
+Trailing garbage, corrupt members, and truncated members fail without returning
+partial output. SHA-256, SHA-384, SHA-512,
 and HMAC are implemented without a runtime service or network dependency, are
 covered by independent reference vectors, and compare signatures without an
 early byte mismatch exit.

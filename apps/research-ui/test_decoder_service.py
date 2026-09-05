@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 
 from decoder_service import (
@@ -71,6 +72,44 @@ class DecoderServiceTest(unittest.TestCase):
 
         with self.assertRaisesRegex(DecoderProtocolError, "byte limit"):
             self.transform("gzip-decompress", gzip.compress(b"A" * ((1 << 20) + 1)))
+
+    def test_gzip_decodes_all_members_with_one_output_limit(self) -> None:
+        empty = gzip.compress(b"")
+        first = b"first\x00" * 100
+        second = b"second" * 100
+        encoded = empty + gzip.compress(first) + empty + gzip.compress(second) + empty
+        decoded = self.transform("gzip-decompress", encoded)
+        self.assertEqual(base64.b64decode(decoded["output_base64"]), first + second)
+
+        half = gzip.compress(b"A" * (1 << 19))
+        at_limit = self.transform("gzip-decompress", half + half + empty)
+        self.assertEqual(base64.b64decode(at_limit["output_base64"]), b"A" * (1 << 20))
+        with self.assertRaisesRegex(DecoderProtocolError, "byte limit"):
+            self.transform("gzip-decompress", half + half + gzip.compress(b"B"))
+
+    def test_compressed_trailing_data_is_rejected(self) -> None:
+        raw = zlib.compressobj(wbits=-15)
+        streams = {
+            "gzip-decompress": gzip.compress(b"first"),
+            "zlib-decompress": zlib.compress(b"first"),
+            "deflate-decompress": raw.compress(b"first") + raw.flush(),
+        }
+        for operation, encoded in streams.items():
+            with self.subTest(operation=operation):
+                with self.assertRaisesRegex(DecoderError, "malformed|trailing"):
+                    self.transform(operation, encoded + b"garbage")
+                if operation != "gzip-decompress":
+                    with self.assertRaisesRegex(DecoderError, "trailing"):
+                        self.transform(operation, encoded + encoded)
+
+    def test_gzip_rejects_malformed_later_members(self) -> None:
+        first = gzip.compress(b"first")
+        second = gzip.compress(b"second")
+        corrupt = second[:-1] + bytes([second[-1] ^ 1])
+        for suffix in (second[:1], second[:-3], corrupt, zlib.compress(b"second")):
+            with self.subTest(suffix=suffix):
+                with self.assertRaisesRegex(DecoderError, "malformed"):
+                    self.transform("gzip-decompress", first + suffix)
 
     def test_transform_rejects_malformed_and_non_allowlisted_actions(self) -> None:
         with self.assertRaisesRegex(DecoderError, "shape"):

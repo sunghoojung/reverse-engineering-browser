@@ -434,6 +434,20 @@ DecoderResult ZlibTransform(std::span<const std::uint8_t> input,
     }
     output.insert(output.end(), chunk.begin(),
                   chunk.begin() + static_cast<std::ptrdiff_t>(produced));
+    if (!compress && status == Z_STREAM_END && stream.avail_in != 0) {
+      if (window_bits != MAX_WBITS + 16) {
+        inflateEnd(&stream);
+        return Failure(DecoderStatus::kInvalidInput, "Compressed input contains trailing data");
+      }
+      // Gzip permits concatenated members. Reuse the inflater's allocation,
+      // retaining unread input and the aggregate output budget across members.
+      status = inflateReset(&stream);
+      if (status != Z_OK) {
+        inflateEnd(&stream);
+        return Failure(DecoderStatus::kInternalError,
+                       "Compression engine could not reset for the next gzip member");
+      }
+    }
     if (status == Z_BUF_ERROR && produced == 0) {
       break;
     }

@@ -92,6 +92,39 @@ int main() {
     CHECK(Text(decompressed) == repeated);
     CHECK(reb::TransformBytes(pair.second, compressed.output, 1'024).status ==
           reb::DecoderStatus::kOutputLimit);
+
+    auto trailing = compressed.output;
+    trailing.push_back(0);
+    const auto rejected_trailing = reb::TransformBytes(pair.second, trailing);
+    CHECK(rejected_trailing.status == reb::DecoderStatus::kInvalidInput);
+    CHECK(rejected_trailing.output.empty());
+
+    auto concatenated = compressed.output;
+    concatenated.insert(concatenated.end(), compressed.output.begin(), compressed.output.end());
+    const auto members = reb::TransformBytes(pair.second, concatenated, repeated.size() * 2);
+    if (pair.second == reb::DecoderOperation::kGzipDecompress) {
+      CHECK(members.status == reb::DecoderStatus::kOk);
+      CHECK(Text(members) == repeated + repeated);
+      const auto over_limit =
+          reb::TransformBytes(pair.second, concatenated, repeated.size() * 2 - 1);
+      CHECK(over_limit.status == reb::DecoderStatus::kOutputLimit);
+      CHECK(over_limit.output.empty());
+
+      const auto empty = Transform(pair.first, "");
+      CHECK(empty.status == reb::DecoderStatus::kOk);
+      concatenated.insert(concatenated.end(), empty.output.begin(), empty.output.end());
+      const auto empty_tail = reb::TransformBytes(pair.second, concatenated, repeated.size() * 2);
+      CHECK(empty_tail.status == reb::DecoderStatus::kOk);
+      CHECK(Text(empty_tail) == repeated + repeated);
+    } else {
+      CHECK(members.status == reb::DecoderStatus::kInvalidInput);
+      CHECK(members.output.empty());
+    }
+
+    concatenated.pop_back();
+    const auto truncated = reb::TransformBytes(pair.second, concatenated);
+    CHECK(truncated.status == reb::DecoderStatus::kInvalidInput);
+    CHECK(truncated.output.empty());
   }
   CHECK(Transform(reb::DecoderOperation::kGzipDecompress, "not gzip").status ==
         reb::DecoderStatus::kInvalidInput);

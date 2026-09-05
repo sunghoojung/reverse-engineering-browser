@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <array>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -56,6 +58,31 @@ int main() {
     rejected_unknown_category_bit = true;
   }
   CHECK(rejected_unknown_category_bit);
+
+  // Exercise partial, full, and wrapped retention with arbitrary capacities.
+  for (const std::size_t capacity : std::array<std::size_t, 4>{1, 2, 3, 17}) {
+    reb::EventBroker retention_broker(capacity);
+    CHECK(retention_broker.Snapshot(10).empty());
+    for (std::uint64_t sequence = 1; sequence <= capacity * 5; ++sequence) {
+      CHECK(retention_broker.IngestAt(Event(sequence), 1) == reb::IngestStatus::kAccepted);
+      const std::size_t retained = std::min(static_cast<std::size_t>(sequence), capacity);
+      CHECK(retention_broker.Size() == retained);
+      CHECK(retention_broker.Stats().evicted == sequence - retained);
+      for (std::size_t limit = 0; limit <= capacity + 1; ++limit) {
+        const auto latest = retention_broker.Snapshot(limit);
+        const std::size_t count = std::min(limit, retained);
+        CHECK(latest.size() == count);
+        for (std::size_t index = 0; index < count; ++index) {
+          CHECK(latest[index].header.sequence_number == sequence - count + index + 1);
+          CHECK(reb::IsValidEvent(latest[index]));
+        }
+      }
+    }
+    reb::EventRecord rejected = Event(999);
+    rejected.header.protocol_version = 99;
+    CHECK(retention_broker.IngestAt(rejected, 1) == reb::IngestStatus::kInvalid);
+    CHECK(retention_broker.Snapshot(1).front().header.sequence_number == capacity * 5);
+  }
 
   reb::EventBroker broker(2);
   CHECK(broker.Ingest(Event(1)) == reb::IngestStatus::kAccepted);

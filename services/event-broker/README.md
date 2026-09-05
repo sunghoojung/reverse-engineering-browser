@@ -19,6 +19,11 @@ fields, enforces an immutable category allowlist and monotonic expiration,
 detects sequence gaps, retains a bounded snapshot, and writes a
 versioned JSONL evidence store. Sequence tracking is bounded by the broker
 capacity, and tracker evictions are reported explicitly in broker stats.
+Retention uses contiguous storage reserved once at construction. Accepted
+records fill the slots, then overwrite the oldest slot without allocating or
+moving the other records. Snapshots copy the newest requested suffix in arrival
+order across at most two contiguous ranges. Stream tracking reserves its hash
+buckets up front; newly observed streams still allocate tracking entries.
 Standard-input replays buffer store writes until the replay ends. Live socket
 captures use bounded reads of up to 256 records and flush after every received
 batch. This keeps low-volume evidence visible promptly while reducing socket

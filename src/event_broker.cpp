@@ -39,6 +39,8 @@ EventBroker::EventBroker(const std::size_t capacity, const SessionPolicy policy)
   if (!policy.IsValid()) {
     throw std::invalid_argument("EventBroker session policy is invalid");
   }
+  events_.reserve(capacity);
+  stream_high_water_marks_.reserve(capacity);
 }
 
 IngestStatus EventBroker::Ingest(const EventRecord& event) {
@@ -87,10 +89,14 @@ IngestStatus EventBroker::IngestAt(const EventRecord& event, const std::uint64_t
   }
 
   if (events_.size() == capacity_) {
-    events_.pop_front();
+    events_[next_event_] = event;
     ++stats_.evicted;
+  } else {
+    events_.push_back(event);
   }
-  events_.push_back(event);
+  if (++next_event_ == capacity_) {
+    next_event_ = 0;
+  }
   ++stats_.accepted;
   return IngestStatus::kAccepted;
 }
@@ -98,8 +104,20 @@ IngestStatus EventBroker::IngestAt(const EventRecord& event, const std::uint64_t
 std::vector<EventRecord> EventBroker::Snapshot(const std::size_t limit) const {
   std::scoped_lock lock(mutex_);
   const std::size_t count = std::min(limit, events_.size());
-  const auto begin = events_.end() - static_cast<std::ptrdiff_t>(count);
-  return std::vector<EventRecord>(begin, events_.end());
+  std::vector<EventRecord> snapshot;
+  snapshot.reserve(count);
+  if (count == 0) {
+    return snapshot;
+  }
+  // The newest suffix spans at most two contiguous ranges, even after wrap.
+  const std::size_t start =
+      next_event_ >= count ? next_event_ - count : events_.size() - (count - next_event_);
+  const std::size_t first_count = std::min(count, events_.size() - start);
+  const auto begin = events_.begin() + static_cast<std::ptrdiff_t>(start);
+  snapshot.insert(snapshot.end(), begin, begin + static_cast<std::ptrdiff_t>(first_count));
+  snapshot.insert(snapshot.end(), events_.begin(),
+                  events_.begin() + static_cast<std::ptrdiff_t>(count - first_count));
+  return snapshot;
 }
 
 BrokerStats EventBroker::Stats() const {

@@ -82,7 +82,9 @@ class EventBroker final {
   const std::size_t capacity_;
   const SessionPolicy policy_;
   mutable std::mutex mutex_;
-  std::deque<EventRecord> events_;
+  // Slots grow into reserved storage, then overwrite the oldest retained event.
+  std::vector<EventRecord> events_;
+  std::size_t next_event_ = 0;
   BrokerStats stats_;
   std::unordered_map<StreamKey, std::uint64_t, StreamKeyHash> stream_high_water_marks_;
   std::deque<StreamKey> stream_insertion_order_;

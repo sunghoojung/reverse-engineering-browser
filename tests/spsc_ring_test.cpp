@@ -131,6 +131,50 @@ bool ConcurrentTest() {
   return ordered && expected == kCount + 1 && ring.SizeApprox() == 0;
 }
 
+bool ConcurrentSizeTest() {
+  // A small queue cycles quickly while a third thread samples its occupancy.
+  constexpr std::uint64_t kCount = 250'000;
+  reb::SpscRing<std::uint64_t, 2> ring;
+  std::atomic<bool> consumer_done{false};
+  std::atomic<bool> stop_requested{false};
+  bool ordered = true;
+
+  std::thread producer([&] {
+    for (std::uint64_t value = 1; value <= kCount; ++value) {
+      while (!ring.TryPush(value)) {
+        if (stop_requested.load(std::memory_order_relaxed)) {
+          return;
+        }
+        std::this_thread::yield();
+      }
+    }
+  });
+  std::thread consumer([&] {
+    for (std::uint64_t expected = 1; expected <= kCount; ++expected) {
+      std::uint64_t value = 0;
+      while (!ring.TryPop(value)) {
+        std::this_thread::yield();
+      }
+      if (value != expected) {
+        ordered = false;
+        stop_requested.store(true, std::memory_order_relaxed);
+        break;
+      }
+    }
+    consumer_done.store(true, std::memory_order_release);
+  });
+
+  bool bounded = true;
+  while (!consumer_done.load(std::memory_order_acquire)) {
+    if (ring.SizeApprox() > ring.CapacityValue()) {
+      bounded = false;
+    }
+  }
+  producer.join();
+  consumer.join();
+  return bounded && ordered && ring.SizeApprox() == 0;
+}
+
 }  // namespace
 
 int main() {
@@ -138,6 +182,7 @@ int main() {
   CHECK(FullRingTest());
   CHECK(WraparoundTest());
   CHECK(ConcurrentTest());
+  CHECK(ConcurrentSizeTest());
 
   std::cout << "spsc_ring_test passed\n";
   return 0;

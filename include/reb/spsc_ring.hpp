@@ -31,6 +31,7 @@ class SpscRing final {
     }
 
     slots_[static_cast<std::size_t>(head) & kIndexMask] = value;
+    // Publish the initialized slot to the consumer's acquire load of head_.
     head_.store(head + 1, std::memory_order_release);
     return true;
   }
@@ -44,14 +45,20 @@ class SpscRing final {
     }
 
     value = slots_[static_cast<std::size_t>(tail) & kIndexMask];
+    // Finish reading the slot before the producer can reuse it.
     tail_.store(tail + 1, std::memory_order_release);
     return true;
   }
 
   [[nodiscard]] std::size_t SizeApprox() const noexcept {
-    const std::uint64_t head = head_.load(std::memory_order_acquire);
+    // Acquiring tail first also observes the head that let the consumer advance.
+    // Reading head first could instead subtract a newer tail and underflow.
     const std::uint64_t tail = tail_.load(std::memory_order_acquire);
-    return static_cast<std::size_t>(head - tail);
+    const std::uint64_t head = head_.load(std::memory_order_acquire);
+    // Both threads can advance between loads. This is a bounded estimate, not
+    // a coherent snapshot or permission to access a slot.
+    const std::uint64_t size = head - tail;
+    return size > Capacity ? Capacity : static_cast<std::size_t>(size);
   }
 
   [[nodiscard]] constexpr std::size_t CapacityValue() const noexcept { return Capacity; }

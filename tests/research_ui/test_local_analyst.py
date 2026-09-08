@@ -19,11 +19,12 @@ from local_analyst import (
     normalize_analyst_result,
     normalize_analyst_run_request,
 )
+from ui_test_support import UI_DIRECTORY
 
 
 class LocalAnalystTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.directory = Path(__file__).parent
+        self.directory = UI_DIRECTORY
 
     @staticmethod
     def replacement(generation: int, folders: list, files: list) -> dict:

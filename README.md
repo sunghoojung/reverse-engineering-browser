@@ -163,7 +163,8 @@ malicious activity.
 apps/                   demos, producers, and the Origin Trace interface
 browser/                pinned Brave integration and ignored upstream checkout
 docs/                   architecture, product direction, and feature designs
-include/ and src/       dependency-free native event foundation
+include/ and src/       public native interfaces and implementations by subsystem
+mk/                    native build rules, workflows, and quality checks
 protocol/               versioned event, trace, and command contracts
 services/               local event broker and artifact receiver
 tests/                  native, socket, integration, and UI tests
@@ -171,6 +172,9 @@ tools/                  offline validation and analysis utilities
 ```
 
 ## Development
+
+See the [native implementation guide](./src/README.md) for component ownership
+and the [build guide](./mk/README.md) for target dependencies and build settings.
 
 Run the complete local quality gate before handing off a change:
 

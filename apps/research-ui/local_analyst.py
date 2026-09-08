@@ -15,6 +15,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from durable_files import atomic_write_private
+
 ANALYST_CONTRACT_VERSION = 1
 ANALYST_DOCUMENT_KIND = "local-analyst-workspace"
 ANALYST_ROOT_ID = 1
@@ -381,25 +383,7 @@ class LocalAnalystStore:
         encoded = (json.dumps(document, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
         if len(encoded) > MAX_ANALYST_DOCUMENT_BYTES:
             raise LocalAnalystError("Analyst workspace store exceeds 1 MiB")
-        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        descriptor, temporary_path = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}.")
-        try:
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(encoded)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary_path, self.path)
-            directory = os.open(self.path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        finally:
-            try:
-                os.unlink(temporary_path)
-            except FileNotFoundError:
-                pass
+        atomic_write_private(self.path, encoded)
 
 
 def _validate_json_value(value: Any, depth: int = 0, entries: Optional[list[int]] = None) -> None:

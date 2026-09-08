@@ -24,6 +24,7 @@ skills under `.agents/skills/`.
 - [System architecture diagram](./architecture/system-architecture.svg)
 - [Artifact transfer channel](./architecture/artifact-transfer-channel.md)
 - [Shared protocol](../protocol/README.md)
+- [Origin Trace behavior and limits](./product/origin-trace-reference.md)
 
 ## Product direction
 

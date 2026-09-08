@@ -17,6 +17,7 @@ from api_collection import (
     normalize_api_collection,
 )
 from server import ResearchHandler
+from ui_test_support import UI_DIRECTORY
 
 
 def request_record(
@@ -166,7 +167,7 @@ class ApiCollectionHttpTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             previous_store = ResearchHandler.api_collection_store
-            ResearchHandler.ui_directory = Path(__file__).parent
+            ResearchHandler.ui_directory = UI_DIRECTORY
             ResearchHandler.event_store = root / "events.jsonl"
             ResearchHandler.trace_store = root / "origin-trace.jsonl"
             ResearchHandler.signal_store = root / "request-signals.jsonl"

@@ -19,10 +19,14 @@
 #include <string_view>
 #include <utility>
 
+#include "../local_resources.hpp"
 #include "reb/artifact.hpp"
 #include "reb/local_ipc.hpp"
 
 namespace {
+
+using reb::services::ScopedDescriptor;
+using reb::services::ScopedSocketPath;
 
 constexpr std::uint64_t kDefaultMaxArtifactBytes = 16ULL * 1024ULL * 1024ULL;
 constexpr std::uint64_t kDefaultMaxStoreBytes = 256ULL * 1024ULL * 1024ULL;
@@ -38,39 +42,6 @@ struct Options final {
   std::uint64_t max_artifacts = reb::kDefaultMaxStoredArtifacts;
   std::uint64_t max_manifest_bytes = reb::kDefaultMaxManifestBytes;
   bool allow_sensitive = false;
-};
-
-class ScopedDescriptor final {
- public:
-  explicit ScopedDescriptor(const int descriptor = -1) : descriptor_(descriptor) {}
-  ScopedDescriptor(const ScopedDescriptor&) = delete;
-  ScopedDescriptor& operator=(const ScopedDescriptor&) = delete;
-  ~ScopedDescriptor() {
-    if (descriptor_ >= 0) {
-      close(descriptor_);
-    }
-  }
-
-  [[nodiscard]] int get() const noexcept { return descriptor_; }
-  [[nodiscard]] bool is_valid() const noexcept { return descriptor_ >= 0; }
-
- private:
-  int descriptor_;
-};
-
-class ScopedSocketPath final {
- public:
-  explicit ScopedSocketPath(std::string path) : path_(std::move(path)) {}
-  ScopedSocketPath(const ScopedSocketPath&) = delete;
-  ScopedSocketPath& operator=(const ScopedSocketPath&) = delete;
-  ~ScopedSocketPath() {
-    if (!path_.empty()) {
-      unlink(path_.c_str());
-    }
-  }
-
- private:
-  std::string path_;
 };
 
 class DescriptorStreamBuffer final : public std::streambuf {
@@ -159,37 +130,6 @@ bool ParseOptions(const int argc, char* argv[], Options& options) {
       !options.socket_path.empty() && !options.token_path.empty() && options.session_id != 0;
   return !options.store_path.empty() && options.max_artifact_bytes <= options.max_store_bytes &&
          (!any_socket_option || all_socket_options);
-}
-
-int ListenOnUnixSocket(const std::string& path) {
-  sockaddr_un address{};
-  if (path.empty() || path.size() >= sizeof(address.sun_path)) {
-    std::cerr << "Artifact socket path is invalid or too long\n";
-    return -1;
-  }
-
-  struct stat existing {};
-  if (lstat(path.c_str(), &existing) == 0 || errno != ENOENT) {
-    std::cerr << "Artifact socket path already exists: " << path << '\n';
-    return -1;
-  }
-
-  const int descriptor = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (descriptor < 0) {
-    std::cerr << "Unable to create artifact socket: " << std::strerror(errno) << '\n';
-    return -1;
-  }
-  address.sun_family = AF_UNIX;
-  std::copy(path.begin(), path.end(), address.sun_path);
-  if (bind(descriptor, reinterpret_cast<const sockaddr*>(&address),
-           static_cast<socklen_t>(sizeof(address))) != 0 ||
-      chmod(path.c_str(), 0600) != 0 || listen(descriptor, 1) != 0) {
-    std::cerr << "Unable to prepare artifact socket: " << std::strerror(errno) << '\n';
-    close(descriptor);
-    unlink(path.c_str());
-    return -1;
-  }
-  return descriptor;
 }
 
 bool PeerIsCurrentUser(const int descriptor) noexcept {
@@ -303,8 +243,9 @@ int main(const int argc, char* argv[]) {
         std::cerr << error << '\n';
         return 1;
       }
-      const ScopedDescriptor listener(ListenOnUnixSocket(options.socket_path));
+      const ScopedDescriptor listener(reb::ListenOnLocalSocket(options.socket_path, error));
       if (!listener.is_valid()) {
+        std::cerr << error << '\n';
         return 1;
       }
       const ScopedSocketPath socket_path(options.socket_path);

@@ -4,12 +4,13 @@ import json
 import shutil
 import subprocess
 import unittest
-from pathlib import Path
+
+from ui_test_support import read_ui_sources
 
 
 class DecoderUiTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        self.html = read_ui_sources()
 
     def test_tools_ui_exposes_bounded_explicit_decoder_and_jwt_flows(self) -> None:
         for marker in (

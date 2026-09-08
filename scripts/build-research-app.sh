@@ -31,7 +31,9 @@ fi
 
 mkdir -p "${macos_path}" "${resources_path}"
 cp "${repo_root}/apps/research-ui/macos/Info.plist" "${contents_path}/Info.plist"
-cp "${repo_root}/apps/research-ui/index.html" "${resources_path}/index.html"
+for asset in index.html app.css app_state.js evidence_models.js app.js; do
+  cp "${repo_root}/apps/research-ui/${asset}" "${resources_path}/${asset}"
+done
 cp "${analyst_runner_core}" "${resources_path}/analyst_runner_core.js"
 cp "${decoder_binary}" "${macos_path}/OriginTraceDecoder"
 chmod 755 "${macos_path}/OriginTraceDecoder"

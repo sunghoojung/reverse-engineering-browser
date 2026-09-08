@@ -24,6 +24,8 @@ contract.
 ## Local development
 
 The core workspace requires a C++20 compiler, Python 3, zlib, and Make.
+The full lint gate also requires Node.js, clang-format, Ruff, ShellCheck, and
+actionlint. CI pins the linter versions in `.github/workflows/ci.yml`.
 
 ```sh
 make check

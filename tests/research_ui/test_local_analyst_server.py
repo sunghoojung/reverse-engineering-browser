@@ -12,6 +12,7 @@ from pathlib import Path
 
 from local_analyst import LocalAnalystRunner, LocalAnalystStore
 from server import ResearchHandler
+from ui_test_support import UI_DIRECTORY
 
 
 class LocalAnalystServerTest(unittest.TestCase):
@@ -20,10 +21,10 @@ class LocalAnalystServerTest(unittest.TestCase):
             root = Path(temporary)
             previous_store = ResearchHandler.local_analyst_store
             previous_runner = ResearchHandler.local_analyst_runner
-            runner = LocalAnalystRunner(Path(__file__).parent)
+            runner = LocalAnalystRunner(UI_DIRECTORY)
             if not runner.available():
                 self.skipTest("Node.js 22 or newer is not installed")
-            ResearchHandler.ui_directory = Path(__file__).parent
+            ResearchHandler.ui_directory = UI_DIRECTORY
             ResearchHandler.local_analyst_store = LocalAnalystStore(
                 root / "workspace.json"
             )

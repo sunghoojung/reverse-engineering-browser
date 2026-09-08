@@ -7,13 +7,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from ui_test_support import UI_DIRECTORY
+
 
 class LocalAnalystNativeRunnerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         if platform.system() != "Darwin":
             raise unittest.SkipTest("The native analyst runner requires macOS")
-        cls.directory = Path(__file__).resolve().parent
+        cls.directory = UI_DIRECTORY
         cls.temporary = tempfile.TemporaryDirectory()
         cls.runner = Path(cls.temporary.name) / "OriginTraceAnalystRunner"
         subprocess.run(

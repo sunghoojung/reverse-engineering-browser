@@ -1,0 +1,383 @@
+# Origin Trace reference
+
+The research UI is the human-facing investigation workspace.
+
+## Design goals
+
+- Start from a captured request and let the researcher choose a header, cookie,
+  or body field to investigate.
+- Show a backward evidence graph through serialization, transforms, runtime
+  values, browser inputs, and native probe evidence.
+- Keep observed, correlated, and unknown relationships visually distinct.
+- Show correlated requests, scripts, frames, API probes, WASM modules, and artifacts.
+- Start and stop explicitly authorized research sessions.
+- Display dropped-event counts and evidence gaps instead of hiding them.
+- Work from the event broker's versioned API.
+
+## Boundary
+
+The UI does not inject hooks into a page and does not communicate directly with
+a renderer. It reads evidence through the local event broker so capture and
+presentation remain separate.
+
+## Run the application
+
+On macOS, build and open the native application window:
+
+```sh
+make app
+```
+
+The application uses a native WebKit shell and reads its bundled local evidence
+store directly. It has no browser address bar and does not require a localhost
+server. The build output is `build/Origin Trace.app`.
+
+For a live custom-Brave capture, run:
+
+```sh
+make live
+```
+
+The launcher passes the broker evidence store and Unix-socket path to Origin
+Trace. The application continues to show the last valid evidence if the broker
+disconnects or the session expires and marks the capture as offline. Raw
+browser records stay on the Brave-to-broker socket; the UI reads the broker's
+normalized store. Live sessions enable Canvas, Web Audio, Network, and Artifact
+for one hour by default with category mask `1285`;
+`REB_CAPTURE_CATEGORY_MASK` and `REB_CAPTURE_DURATION_SECONDS` change those
+low-level startup limits.
+
+Set `REB_NATIVE_QUIET_MODE=1` for a live capture with no DevTools endpoint or
+CDP connection to the page. The custom V8 runtime then ignores page-authored
+`debugger;` statements before Inspector handling. Native evidence capture and
+the Captured Sources catalog continue to work, while live Page debugging,
+stepping, watches, and the console remain disconnected by design. The mode
+removes those direct debugger signals but is not a general browser-fingerprint
+spoofing guarantee.
+
+For development, the same interface can still run in a browser:
+
+```sh
+make ui
+```
+
+Open `http://127.0.0.1:7319`. The dependency-free local server reads the same
+JSONL evidence store written by the native broker. The network workspace groups
+lifecycle events by request and provides request filters plus Headers, Payload,
+Preview, Response, Initiator, Timing, and Signals inspectors. Signals presents
+the bounded Canvas, WebGL, Web Audio, Navigator, Permissions, Storage, and
+WebRTC evidence profile for one exact live request. Loading, empty,
+disconnected, malformed-event, and sequence-gap states remain visible. The
+timeline shows each Web Audio event's fixed operation name, while Signals keeps
+only its bounded category count, relation, confidence, and event references.
+The trace workspace builds a live request-level origin chain from the broker's
+versioned edge sidecar. Structured request fields are not required. It selects
+one exact request-start event, shows observed and correlated links separately,
+and makes missing retained evidence visible as named gaps.
+
+The event endpoint reads backward from the append-only JSONL store and parses
+only its requested, bounded tail window. UI refresh cost therefore follows the
+visible event count instead of the total capture size. Offline evidence-store
+validation still scans the complete file through `tools/validate-evidence-store.py`.
+The reader rejects JSONL records larger than 4 KiB, which is safely above the
+current fixed event contract and keeps malformed-record work bounded.
+Event and artifact polling also sends explicit entity tags. When neither store
+nor broker connectivity changed, the server returns an empty `304` response and
+the UI skips JSON parsing and DOM reconstruction.
+
+The Sources workspace separates the live Page tree from Captured evidence.
+Captured reads the artifact manifest and immutable blobs created by
+`reb-artifact-receiver`. Page reads scripts reported by the authorized live
+Brave debugger. Both use the DevTools origin, directory, and file organization.
+Captured runtime-generated entries show their dynamic JavaScript or WebAssembly
+API origin and stable execution-context identifier alongside existing frame and
+creator correlation fields.
+The center editor provides tabs, line numbers, `Command+P` or `Control+P`
+open-file navigation, `Command+F` or `Control+F` search, original and
+readable-derived views, and WASM display. A dependency-free, stateful syntax
+layer applies VS Code-inspired dark and light palettes to JavaScript, JSON,
+HTML, CSS, and WebAssembly hex while preserving source as inert text. Coloring
+is capped at 50,000 token spans and visibly falls back to plain text after the
+limit without truncating source content.
+
+During `make live`, the debugger sidebar uses Chromium's Debugger, Runtime,
+Log, and DOMDebugger protocol domains. It supports line breakpoints, pause,
+resume, step over, step into async continuations, step out, frame restart,
+synchronous and async call stacks, bounded local, closure, and global scopes,
+watch expressions, pause-on-exception modes, XHR/fetch and selected event
+listener breakpoints, multiple page target selection, and a bounded console
+drawer. Watch evaluation requests `throwOnSideEffect` with a 500 ms timeout.
+Arbitrary protocol commands, interactive console evaluation, variable edits,
+and live source edits are not exposed in Baseline mode.
+
+The browser-facing DevTools WebSocket runs in `build/reb-debugger-transport`, a
+dependency-free C++20 helper. It validates the loopback endpoint and handshake,
+enforces command and message bounds, handles WebSocket control frames, and
+passes versioned, length-prefixed JSON records over private process pipes.
+Python remains the HTTP and debugger-state adapter, so the public UI routes and
+response contracts do not depend on the native transport protocol.
+
+The Memory workspace uses the same authorized live target for bounded,
+read-only object discovery. A search can combine an own-property name,
+primitive value, class name, regular expression, and JSON structural shape.
+Structural matching compares bounded property-and-type tokens and can
+optionally include primitive values. Each request examines at most 25,000
+candidates for 750 milliseconds, searches at most 256 own properties per
+candidate, returns at most 50 objects, and previews at most 16 own properties
+per result. Accessor properties remain visible as accessors, but their getters
+are never invoked. Object references are released after every search, results
+remain ephemeral, and the evidence store is not changed. Candidate, property,
+result, and time limits are reported as partial coverage instead of being
+hidden.
+
+Heap Snapshot mode is an explicit, read-only action because V8 pauses the target
+while it captures the heap. The debugger bridge streams at most 256 MiB to a
+user-only temporary file, then runs `build/reb-heap-snapshot`. The
+dependency-free C++20 indexer reads at most 2,000,000 nodes, 8,000,000 edges,
+2,000,000 strings, and 64 MiB of retained string text. It returns at most 50
+matching nodes with shortest non-weak retaining paths capped at 12 steps. Every
+match is classified as root-reachable or unreachable. The native index returns
+at most 12 prioritized incoming references per result, ordering internal and
+hidden edges before weak and ordinary references while preserving the full
+incoming count. The UI can scope a search to all, root-reachable, or unreachable
+nodes. Every limit is visible in the response, and the temporary snapshot is
+deleted after each search. See
+[Heap Reference Inspection v2](./heap-reference-inspection-v2.md)
+for the graph and response contract.
+
+Heap Diff mode captures an explicit baseline, lets the researcher perform page
+activity, and compares a later snapshot with the same bounded native C++20
+analyzer. It groups count and self-size changes by bounded V8 node type and
+name, then ranks individual objects by exact retained-size change using
+dominators over reachable non-weak edges. Baseline and current snapshots are
+parsed sequentially through read-only, sequentially advised file mappings.
+Completed raw edge data and dominator work arrays are released before the
+compact 32-byte node summaries are materialized. Changed groups and dominators
+use bounded top-result heaps, so ranking never allocates or sorts an unbounded
+result list. The response reports baseline and current coverage, result
+truncation, signature aggregation limits, and size counter saturation. The
+baseline remains in user-only temporary storage until reset, target change,
+disconnect, or shutdown. Each current snapshot is deleted immediately after
+comparison.
+
+Origin Trace mode arms a temporary click breakpoint and samples the V8 heap at
+bounded function-return pauses. It retains at most eight steps before the first
+match and sixteen after it, with a hard limit of 32 sampled pauses and five
+minutes. Each snapshot is deleted immediately after the native C++ probe. The
+`all`-scope probe stops at the first match without allocating a reachability or
+incoming-reference index; reachable and unreachable scopes build only a compact
+one-byte reachability map and 32-bit traversal queue. The UI highlights the
+first sampled appearance, shows the surrounding function locations and explicit
+coverage, and can open the candidate source. See
+[Memory Origin Trace v1](./memory-origin-trace-v1.md).
+
+The Request Interception Lab creates a new disposable DevTools BrowserContext
+and page for each experiment. Action Scope can add up to eight credential-free
+pages and apply interception to all connected pages or one exact page. It
+refuses overflow and disconnected matches instead of silently applying a
+partial global rule. It never arms Fetch interception on the baseline
+target and never shares that target's cookies or storage. One URL-pattern rule
+can continue, block, drop, rewrite, or fulfill a request. Requests always use
+`credentials: omit`, and credential, cookie, connection, host, and framing
+headers are rejected. Rules and explicit requests are limited to 64 headers,
+16 KiB total header text, and 64 KiB bodies. At most 16 paused requests are
+processed concurrently; overflow requests continue unchanged and create a
+visible audit record. Results are capped at 64 KiB, while the 128-entry audit
+stores only redacted URLs and mutation metadata. Disposal deletes the complete
+BrowserContext before the ephemeral result can be cleared. See
+[Request Interception v1](./request-interception-v1.md).
+The shared target policy is specified by
+[Action Scope Policy v1](./action-scope-policy-v1.md).
+
+Object Lab shares the disposable Experiment BrowserContext but never the
+baseline target. It opens one explicit credential-free HTTP or HTTPS page,
+then applies the existing bounded live-object search without invoking accessors.
+Results retain references only for the current navigation and search. A
+researcher can explicitly confirm a typed JSON own-property set or a safe
+configurable own-property delete. The fixed operation rejects accessors,
+prototype-related names, inherited setters, non-writable properties, and
+non-extensible targets. It exposes no arbitrary evaluation, function calls, or
+prototype mutation. Values are capped at 16 KiB, depth eight, 256 JSON entries,
+and 4 KiB per string. Each session allows 256 attempts and keeps at most 128
+metadata-only audit records containing the operation, target class, before and
+after types, redacted URL, byte count, and value digest. Disposal erases object
+references, previews, submitted values, and the audit with the BrowserContext.
+See [Live Object Experiment v1](./live-object-experiment-v1.md).
+
+Runtime Hook Studio shares that disposable Experiment BrowserContext and can
+instrument only its isolated page. Select a live JavaScript source and function
+location, add up to eight entry or synchronous-return hooks, then explicitly
+confirm page mutation before arming. A hook can inspect at most 32 own local
+data properties without invoking accessors, run a bounded condition and phase
+action, and replace a synchronous return with typed JSON or a frame expression.
+V8 resolution is capped at 32 return points per definition and 64 active points
+per session. Every handled pause resumes automatically. Navigation, target
+detach, disposal, the 512-hit ceiling, or a processing failure removes the hook
+points; disposal also erases definitions and the 128-entry ephemeral hit log.
+Promise returns are reported and preserved rather than overridden. Hook data
+never enters the evidence store. See
+[Runtime Hooks v1](./runtime-hooks-v1.md).
+
+Automation Studio also shares the disposable Experiment BrowserContext. Its
+process-local library holds up to 16 bounded browser-context recipes. Manual
+runs require confirmation, while created, before-load, and after-load triggers
+remain inert until explicitly armed for all matched pages. An automatic run
+ceiling, a two-second timeout, a sixteen-entry cross-page trigger queue,
+cancellation, visible drops, and deterministic page reload recovery bound execution. Variables
+remain private to the bridge, and logs and results are text-only previews.
+Recipe definitions survive disposable-context recreation, while variables,
+runs, and active target state are erased on disposal. See
+[Automation Recipes v1](./automation-recipes-v1.md).
+
+Repeater shares that disposable request-lab context and sends one editable,
+credential-free request at a time. It supports immediate cancellation, a
+100-millisecond to 30-second timeout, 32 session-scoped `{{name}}` variables,
+copying the fully resolved explicit request, a 24-entry and 512-KiB history, and
+response comparison across status, duration, retained-body digest and size, and
+changed header names. Expanded requests are validated after variable
+substitution, and disposal erases variables, request bodies, responses, history,
+and comparisons. Traffic prefills only the selected method and URL without query,
+headers, cookies, or body content. See
+[Repeater v1](./repeater-v1.md).
+
+API Collection persists up to 128 credential-free request templates in 32
+folders with four bounded hierarchy levels. Root, ancestor-folder,
+selected-folder, and request variables resolve in that order before the
+existing Repeater validator runs the request inside the disposable Request Lab
+context. Traffic import copies only method and URL with query and fragment
+removed. It never copies captured headers, cookies, request bodies, or
+credentials. The versioned document is capped at 2 MiB, uses generation-based
+conflict rejection, and is atomically replaced with user-only permissions.
+Saved templates persist, while the associated 24-entry and 512-KiB Repeater
+history remains ephemeral and is erased with the Request Lab context. The
+browser development server defaults to
+`build/sessions/api-collection-v1.json`; the native app defaults to
+`Application Support/Origin Trace/api-collection-v1.json`. Pass
+`--api-collection /path/to/api-collection-v1.json` to override either path. See
+[API Collection v1](./api-collection-v1.md).
+
+Local Analyst Workspace persists up to 64 reusable files in 32 folders with a
+four-level hierarchy. JavaScript analyst scripts run only after saving and
+explicit confirmation; JavaScript, JSON, Markdown, and plain-text scratchpads
+never execute. Each run receives a frozen, explicitly selected evidence
+snapshot and private variables through `WB.Node.Evidence` and `WB.Node.Utils`.
+It starts a fresh restricted helper process, caps execution at two seconds,
+supports cancellation, and retains only 64 bounded text results in ephemeral UI
+history. The development server defaults to
+`build/sessions/local-analyst-workspace-v1.json`; the native app defaults to
+`Application Support/Origin Trace/local-analyst-workspace-v1.json`. Pass
+`--local-analyst /path/to/local-analyst-workspace-v1.json` to override either
+path. See
+[Local Analyst Workspace v1](./local-analyst-workspace-v1.md).
+
+Decoder Lab runs explicit byte transforms in the same bounded C++20 helper in
+the development server and packaged application. Chains retain at most 16
+steps and 4 MiB, while every input and output is capped at 1 MiB. Binary output
+stays inspectable as UTF-8, a hex dump, or Base64. JWT inspection is separate
+from explicit HS256, HS384, or HS512 verification; successful signature checks
+do not hide expiration or not-before claim warnings. HMAC secrets are sent over
+standard input to the one-shot helper and cleared from password fields after
+each action. See [Decoder Tools v1](./decoder-tools-v1.md).
+
+The Traffic workspace can pivot a selected request value into Memory. The pivot
+only prefills an ephemeral query. It does not persist the selected value or
+begin a heap capture without a separate user action.
+
+The live debugger is ephemeral. Brave uses a private profile inside the
+session directory and chooses a random loopback debugging port. The research
+server validates the browser endpoint, exposes only allowlisted actions,
+rejects cross-site requests, caps scripts, frames, properties, messages,
+expressions, and source bytes, and never writes runtime scope or console values
+to the evidence store. Closing the session stops the bridge.
+
+Debugger state delivery is generation-tagged and change-driven. A conditional
+request can wait for up to 25 seconds, and an unchanged request reads only the
+generation counter instead of copying the bounded debugger snapshot. The UI
+coalesces update bursts, reuses console rows, skips unchanged debugger panes,
+and updates source decorations without rebuilding the source editor.
+
+During `make live`, Brave captures authorized JavaScript and WASM response
+bodies through the separate authenticated artifact socket. The catalog refreshes
+while the session runs, so acknowledged artifacts appear without restarting
+Origin Trace. Capture and transfer failures remain inspectable in the evidence
+timeline as `artifact_capture_failed` events.
+
+Artifact content responses are capped at 2 MiB and use attachment, `nosniff`,
+and sandbox headers. The editor renders at most 20,000 lines and inserts all
+captured content as text. The catalog keeps original byte size and SHA-256
+visible even when the viewer shows a bounded preview.
+
+Pass `--socket /path/to/broker.sock` to the development server when it should
+also report live broker connectivity.
+
+Pass `--devtools-active-port /path/to/DevToolsActivePort` to enable the live
+debugger bridge. This path must belong to an explicitly authorized browser
+launched with `--remote-debugging-port=0` and an isolated user-data directory.
+Pass `--debugger-transport /path/to/reb-debugger-transport` to override the
+native helper built by `make debugger-transport`. Native quiet mode deliberately
+omits both options and does not start the helper.
+
+Pass `--trace-store /path/to/origin-trace.jsonl` when the edge sidecar is not
+next to the default demo store. The origin-trace endpoint reads at most 10,000
+events, 30,000 edges, and 10,000 artifact records, rejects oversized or
+malformed records, traverses at most 32 steps, and supports entity-tag
+revalidation. The native application
+uses the same limits and contract without a localhost server.
+
+Pass `--signal-store /path/to/request-signals.jsonl` when the request signal
+profile sidecar is not next to the default demo store. The endpoint selects an
+exact session, request, process, and sequence root, reads at most 10,000
+profiles, rejects records larger than 8 KiB, and supports entity-tag
+revalidation. Observed parent chains and correlated same-context activity stay
+visibly distinct.
+
+Captured JavaScript and WebAssembly artifacts are analyzed automatically on
+the cold path. The UI reads `/api/analysis/vm` for the automatic scan and
+`/api/analysis/vm?request_id=ID` for request-first correlation. Analysis is
+bounded, deterministic, and stored at
+`ARTIFACT_STORE/analysis/vm-analysis-v1.json`. A failed or malformed analysis
+does not hide the last valid timeline evidence. The native live-session
+launcher runs the same analyzer when its event or artifact inputs change.
+Manifest and event JSONL reads have explicit line and record limits. Invalid
+canonical identifiers, digests, or artifact paths become named failure or
+partial-coverage records before content is read. Cached analysis is served only
+after its profile and document digests are verified. JavaScript function-region
+count and cumulative region work are also bounded; exhausting either limit
+produces a named partial-coverage omission.
+
+The WebAssembly frontend decodes bounded function bodies and instruction
+immediates. It scores dispatch only when a decoded branch table or indirect
+call occurs inside a decoded loop, and reports the function and body range for
+each observation. Raw immediate bytes and the data-count section are not
+treated as opcodes or guest byte data. JavaScript signals must occur within one
+function region before they can combine into a likely-VM result.
+
+The analyzer never runs in the renderer probe, artifact receiver, event broker,
+or browser-process capture path.
+
+The VM Lab combines versioned `vm_finding` timeline records with the cold-path
+analysis document. It separates interpreter, guest program, invocation, host
+binding, hypothesis, and coverage evidence, and shows runtime, two-tier
+confidence, decomposed scores, rule evidence, related requests, artifact
+ranges, residual unknowns, and partial coverage without inventing missing
+semantics. Empty, disconnected, malformed-analysis, malformed-finding, and
+sequence-gap states remain visible. Unlike the request backtrace demonstration,
+VM Lab does not populate sample findings in standalone preview mode.
+
+The UI validates the broker envelope and every returned event before replacing
+the last known-good view. Protocol v2 transports 64-bit identifiers,
+timestamps, and transfer sizes as canonical decimal strings so browser-side
+correlation and timing calculations remain exact. Browser network events also
+carry both 64-bit halves of the BrowserContext token, which keeps
+BrowserContext-local request identifiers distinct. Development stores written
+before those token fields were added remain readable when both fields are
+absent. Legacy v1 numeric records remain readable when their integer values are
+within JavaScript's exact range.
+
+The current broker does not capture structured request fields or arbitrary
+JavaScript data flow. Request Origin Trace follows event relationships, not
+field-level value provenance. The UI must not promote identifier or timing
+correlation to exact causality.
+
+Evidence values are inserted with DOM text nodes, never HTML, so captured page
+content cannot become executable UI markup.

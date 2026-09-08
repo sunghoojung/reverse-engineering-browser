@@ -60,6 +60,42 @@ bool TestSecureTokenFile() {
   return passed;
 }
 
+bool TestLocalListenerOwnership() {
+  std::array<char, 32> directory_template{};
+  const std::string prefix = "/tmp/reb-listener-XXXXXX";
+  std::copy(prefix.begin(), prefix.end(), directory_template.begin());
+  char* directory = mkdtemp(directory_template.data());
+  if (directory == nullptr) {
+    return false;
+  }
+  const std::string path = std::string(directory) + "/listener.sock";
+  std::string error;
+  const int listener = reb::ListenOnLocalSocket(path, error);
+  struct stat metadata {};
+  bool passed = listener >= 0 && lstat(path.c_str(), &metadata) == 0 &&
+                S_ISSOCK(metadata.st_mode) && (metadata.st_mode & 0777) == 0600;
+  const int duplicate = reb::ListenOnLocalSocket(path, error);
+  passed = passed && duplicate < 0 && lstat(path.c_str(), &metadata) == 0;
+  if (duplicate >= 0) {
+    close(duplicate);
+  }
+  const int empty = reb::ListenOnLocalSocket("", error);
+  const int oversized = reb::ListenOnLocalSocket(std::string(1024, 'x'), error);
+  passed = passed && empty < 0 && oversized < 0;
+  if (empty >= 0) {
+    close(empty);
+  }
+  if (oversized >= 0) {
+    close(oversized);
+  }
+  if (listener >= 0) {
+    close(listener);
+  }
+  unlink(path.c_str());
+  rmdir(directory);
+  return passed;
+}
+
 bool TestHelloFraming() {
   int descriptors[2] = {-1, -1};
   if (socketpair(AF_UNIX, SOCK_STREAM, 0, descriptors) != 0) {
@@ -90,7 +126,8 @@ bool TestHelloFraming() {
 }  // namespace
 
 int main() {
-  if (!TestTokenEncoding() || !TestSecureTokenFile() || !TestHelloFraming()) {
+  if (!TestTokenEncoding() || !TestSecureTokenFile() || !TestHelloFraming() ||
+      !TestLocalListenerOwnership()) {
     std::cerr << "local_ipc_test failed\n";
     return 1;
   }

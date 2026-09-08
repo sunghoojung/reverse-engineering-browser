@@ -76,6 +76,16 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       switch requestURL.path {
       case "", "/", "/index.html":
         response = (try Data(contentsOf: indexURL), "text/html; charset=utf-8", 200, [:])
+      case "/app.css":
+        response = (
+          try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent("app.css")),
+          "text/css; charset=utf-8", 200, [:]
+        )
+      case "/app.js", "/app_state.js", "/evidence_models.js":
+        response = (
+          try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
+          "text/javascript; charset=utf-8", 200, [:]
+        )
       case "/api/health":
         response = (try healthResponse(), "application/json; charset=utf-8", 200, [:])
       case "/api/decoder":

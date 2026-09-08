@@ -40,6 +40,10 @@ static_assert(alignof(LocalIpcHello) == 8);
 
 [[nodiscard]] bool ConstantTimeTokenEquals(const LocalIpcToken& left,
                                            const LocalIpcToken& right) noexcept;
+// Creates a user-only listener without replacing an existing path. The caller
+// owns closing the returned descriptor and unlinking the path after success.
+[[nodiscard]] int ListenOnLocalSocket(const std::string& path, std::string& error);
+
 [[nodiscard]] int ConnectAuthenticatedLocalIpc(const std::string& socket_path,
                                                const std::string& token_path,
                                                std::uint64_t session_id,

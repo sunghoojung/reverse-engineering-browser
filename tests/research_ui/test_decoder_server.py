@@ -12,6 +12,7 @@ from pathlib import Path
 
 from decoder_service import DecoderService
 from server import ResearchHandler
+from ui_test_support import UI_DIRECTORY
 
 
 class DecoderServerTest(unittest.TestCase):
@@ -19,7 +20,7 @@ class DecoderServerTest(unittest.TestCase):
         previous_service = ResearchHandler.decoder_service
         root = Path(__file__).resolve().parents[2]
         ResearchHandler.decoder_service = DecoderService(root / "build/reb-decoder")
-        ResearchHandler.ui_directory = Path(__file__).parent
+        ResearchHandler.ui_directory = UI_DIRECTORY
         server = ThreadingHTTPServer(("127.0.0.1", 0), ResearchHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()

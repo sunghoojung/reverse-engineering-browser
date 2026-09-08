@@ -173,6 +173,39 @@ bool ConstantTimeTokenEquals(const LocalIpcToken& left, const LocalIpcToken& rig
   return difference == 0;
 }
 
+int ListenOnLocalSocket(const std::string& path, std::string& error) {
+  sockaddr_un address{};
+  if (path.empty() || path.size() >= sizeof(address.sun_path)) {
+    error = "Local socket path is invalid or too long";
+    return -1;
+  }
+  struct stat existing {};
+  if (lstat(path.c_str(), &existing) == 0 || errno != ENOENT) {
+    error = "Local socket path already exists or is inaccessible: " + path;
+    return -1;
+  }
+  const int descriptor = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (descriptor < 0) {
+    error = "Unable to create local socket: " + std::string(std::strerror(errno));
+    return -1;
+  }
+  address.sun_family = AF_UNIX;
+  std::copy(path.begin(), path.end(), address.sun_path);
+  if (bind(descriptor, reinterpret_cast<const sockaddr*>(&address),
+           static_cast<socklen_t>(sizeof(address))) != 0) {
+    error = "Unable to bind local socket: " + std::string(std::strerror(errno));
+    close(descriptor);
+    return -1;
+  }
+  if (chmod(path.c_str(), 0600) != 0 || listen(descriptor, 1) != 0) {
+    error = "Unable to prepare local socket: " + std::string(std::strerror(errno));
+    close(descriptor);
+    unlink(path.c_str());
+    return -1;
+  }
+  return descriptor;
+}
+
 int ConnectAuthenticatedLocalIpc(const std::string& socket_path,
                                  const std::string& token_path,
                                  const std::uint64_t session_id,

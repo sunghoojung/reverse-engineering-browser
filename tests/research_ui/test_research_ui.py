@@ -12,12 +12,16 @@ from http import HTTPStatus
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from server import (
+from evidence_store import (
     JSONL_TAIL_CHUNK_BYTES,
+    is_request_signal_profile,
+)
+from server import (
     MAX_EVENT_JSON_BYTES,
     LoopbackThreadingHTTPServer,
     ResearchHandler,
 )
+from ui_test_support import UI_DIRECTORY, read_ui_sources
 
 
 class ResearchUiTests(unittest.TestCase):
@@ -193,7 +197,7 @@ class ResearchUiTests(unittest.TestCase):
             store.write_text('{"sequence_number":"1"}\n', encoding="utf-8")
             artifact_store = root / "artifacts"
             artifact_store.mkdir()
-            ResearchHandler.ui_directory = Path(__file__).parent
+            ResearchHandler.ui_directory = UI_DIRECTORY
             ResearchHandler.event_store = store
             ResearchHandler.artifact_store = artifact_store
             ResearchHandler.broker_socket = None
@@ -267,7 +271,7 @@ class ResearchUiTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            ResearchHandler.ui_directory = Path(__file__).parent
+            ResearchHandler.ui_directory = UI_DIRECTORY
             ResearchHandler.event_store = root / "events.jsonl"
             ResearchHandler.trace_store = root / "origin-trace.jsonl"
             ResearchHandler.signal_store = root / "request-signals.jsonl"
@@ -399,21 +403,21 @@ class ResearchUiTests(unittest.TestCase):
                 "count_saturated": False,
             },
         }
-        self.assertTrue(ResearchHandler.is_request_signal_profile(profile))
+        self.assertTrue(is_request_signal_profile(profile))
         wrong_process = json.loads(json.dumps(profile))
         wrong_process["signals"][0]["last_event"]["process_id"] = 11
-        self.assertFalse(ResearchHandler.is_request_signal_profile(wrong_process))
+        self.assertFalse(is_request_signal_profile(wrong_process))
         false_saturation = json.loads(json.dumps(profile))
         false_saturation["coverage"]["count_saturated"] = True
-        self.assertFalse(ResearchHandler.is_request_signal_profile(false_saturation))
+        self.assertFalse(is_request_signal_profile(false_saturation))
         saturated = json.loads(json.dumps(false_saturation))
         saturated["signals"][0]["event_count"] = str(2**64 - 1)
-        self.assertTrue(ResearchHandler.is_request_signal_profile(saturated))
+        self.assertTrue(is_request_signal_profile(saturated))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             signal_store = root / "request-signals.jsonl"
             signal_store.write_text(json.dumps(profile) + "\n", encoding="utf-8")
-            ResearchHandler.ui_directory = Path(__file__).parent
+            ResearchHandler.ui_directory = UI_DIRECTORY
             ResearchHandler.event_store = root / "events.jsonl"
             ResearchHandler.trace_store = root / "origin-trace.jsonl"
             ResearchHandler.signal_store = signal_store
@@ -538,7 +542,7 @@ class ResearchUiTests(unittest.TestCase):
             (root / "manifest.jsonl").write_text(
                 json.dumps(artifact) + "\n", encoding="utf-8"
             )
-            ResearchHandler.ui_directory = Path(__file__).parent
+            ResearchHandler.ui_directory = UI_DIRECTORY
             ResearchHandler.event_store = root / "events.jsonl"
             ResearchHandler.artifact_store = root
             server = ThreadingHTTPServer(("127.0.0.1", 0), ResearchHandler)
@@ -643,7 +647,7 @@ class ResearchUiTests(unittest.TestCase):
             event_store.write_text(
                 "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
             )
-            ResearchHandler.ui_directory = Path(__file__).parent
+            ResearchHandler.ui_directory = UI_DIRECTORY
             ResearchHandler.event_store = event_store
             ResearchHandler.artifact_store = artifact_store
             ResearchHandler.broker_socket = None
@@ -794,7 +798,7 @@ class ResearchUiTests(unittest.TestCase):
                 listener.close()
 
     def test_ui_keeps_captured_values_out_of_html_injection_paths(self) -> None:
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
 
         self.assertIn("Request Origin Trace", html)
         self.assertIn("Trace origin", html)
@@ -815,7 +819,7 @@ class ResearchUiTests(unittest.TestCase):
     def test_network_workspace_exposes_baseline_inspection_and_health_states(
         self,
     ) -> None:
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
 
         for label in (
             "Headers",
@@ -855,7 +859,7 @@ class ResearchUiTests(unittest.TestCase):
         if node is None:
             self.skipTest("Node.js is not installed")
 
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
         start = html.index("      function isPlainObject")
         end = html.index("      function legacyBrowserRequestKey")
         model = """
@@ -949,7 +953,7 @@ process.stdout.write(JSON.stringify({
         )
 
     def test_sources_workspace_matches_the_devtools_navigation_model(self) -> None:
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
 
         self.assertIn('data-screen="sources">Sources</button>', html)
         self.assertIn('aria-label="Sources navigator"', html)
@@ -1005,7 +1009,7 @@ process.stdout.write(JSON.stringify({
         if node is None:
             self.skipTest("Node.js is not installed")
 
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
         start = html.index("      const SOURCE_HIGHLIGHT_TOKEN_LIMIT")
         end = html.index("      function appendSourceSyntax")
         model = html[start:end]
@@ -1073,7 +1077,7 @@ process.stdout.write(JSON.stringify({
         if node is None:
             self.skipTest("Node.js is not installed")
 
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
         start = html.index("      function sourceRuntimeLine")
         end = html.index("      function renderSourceContent")
         model = html[start:end]
@@ -1119,7 +1123,7 @@ process.stdout.write(JSON.stringify({
         if node is None:
             self.skipTest("Node.js is not installed")
 
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
         start = html.index("      function isPlainObject")
         end = html.index("      function isOriginTraceResponse")
         model = html[start:end]
@@ -1588,7 +1592,7 @@ process.stdout.write(JSON.stringify({
         )
 
     def test_memory_workspace_exposes_live_snapshot_diff_and_origin_trace(self) -> None:
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
 
         self.assertIn('data-screen="memory">Memory</button>', html)
         self.assertIn('id="screen-memory"', html)
@@ -1626,7 +1630,7 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("expose_live_object", html)
 
     def test_experiment_workspace_exposes_isolated_request_interception(self) -> None:
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
 
         self.assertIn("Request Interception Lab", html)
         self.assertIn('id="experiment-create"', html)
@@ -1643,7 +1647,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn("64 KiB", html)
 
     def test_experiment_action_scope_is_bounded_responsive_and_target_aware(self) -> None:
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
 
         self.assertIn('aria-label="Mutable action scope"', html)
         self.assertIn('id="action-scope-global"', html)
@@ -1661,7 +1665,7 @@ process.stdout.write(JSON.stringify({
         )
 
     def test_object_lab_exposes_bounded_confirmed_disposable_mutation(self) -> None:
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
 
         self.assertIn('data-experiment-mode="object"', html)
         self.assertIn('id="object-workspace"', html)
@@ -1682,7 +1686,7 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("expose_live_object", html)
 
     def test_runtime_hooks_expose_bounded_isolated_synchronous_control(self) -> None:
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
 
         self.assertIn('data-experiment-mode="hooks"', html)
         self.assertIn('id="hooks-workspace"', html)
@@ -1705,7 +1709,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn("!url.startsWith('pptr:')", html)
 
     def test_automation_recipes_expose_bounded_wirebrowser_page_scripts(self) -> None:
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
 
         self.assertIn('data-experiment-mode="automation"', html)
         self.assertIn('id="automation-workspace"', html)
@@ -1727,7 +1731,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn("Variable values are never returned in public session state", html)
 
     def test_repeater_exposes_bounded_edit_cancel_history_variables_and_comparison(self) -> None:
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
 
         self.assertIn('data-experiment-mode="repeater"', html)
         self.assertIn('id="request-repeater-pivot"', html)
@@ -1748,7 +1752,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn("History is ephemeral and never enters the evidence store", html)
 
     def test_api_collection_exposes_atomic_hierarchy_scopes_import_and_execution(self) -> None:
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
 
         self.assertIn('data-screen="api-collection"', html)
         self.assertIn('id="request-collection-pivot"', html)
@@ -1771,7 +1775,7 @@ process.stdout.write(JSON.stringify({
         node = shutil.which("node")
         if node is None:
             self.skipTest("Node.js is not installed")
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
         start = html.index("      function isPlainObject")
         end = html.index("      function isRepeaterResult")
         model = html[start:end]
@@ -1822,7 +1826,7 @@ process.stdout.write(JSON.stringify({
         if node is None:
             self.skipTest("Node.js is not installed")
 
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
         start = html.index("      function isPlainObject")
         end = html.index("      function legacyBrowserRequestKey")
         model = """
@@ -1893,7 +1897,7 @@ process.stdout.write(JSON.stringify({
         )
 
     def test_tab_controls_have_keyboard_and_panel_relationships(self) -> None:
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
 
         self.assertIn('role="tabpanel" aria-labelledby="inspector-tab-payload"', html)
         self.assertIn('aria-controls="request-inspector"', html)
@@ -1914,7 +1918,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn("selectedRow ?? elements.requestFilter", html)
 
     def test_vm_lab_exposes_typed_evidence_and_failure_states(self) -> None:
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
 
         self.assertIn('data-screen="vm">VM Lab</button>', html)
         self.assertIn('id="screen-vm"', html)
@@ -1955,7 +1959,7 @@ process.stdout.write(JSON.stringify({
         if node is None:
             self.skipTest("Node.js is not installed")
 
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
         start = html.index("      function retainVmAnalysisOnFailure")
         end = html.index("      async function refreshVmAnalysis", start)
         helper = html[start:end]
@@ -2001,7 +2005,7 @@ console.log(JSON.stringify({
         if node is None:
             self.skipTest("Node.js is not installed")
 
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
         start = html.index("      const eventCategories")
         end = html.index("      function setNetworkNotice")
         model = html[start:end]
@@ -2219,7 +2223,7 @@ process.stdout.write(JSON.stringify({
         if node is None:
             self.skipTest("Node.js is not installed")
 
-        html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+        html = read_ui_sources()
         start = html.index("      const eventCategories")
         end = html.index("      function setNetworkNotice")
         model = html[start:end]
@@ -2342,7 +2346,7 @@ process.stdout.write(JSON.stringify({
         )
 
     def test_native_application_uses_the_packaged_icon(self) -> None:
-        macos_directory = Path(__file__).parent / "macos"
+        macos_directory = UI_DIRECTORY / "macos"
         application = (macos_directory / "OriginTraceApp.swift").read_text(
             encoding="utf-8"
         )

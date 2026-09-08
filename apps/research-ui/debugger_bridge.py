@@ -4,1127 +4,174 @@ import base64
 import copy
 import hashlib
 import json
-import math
 import os
-import re
-import select
-import struct
 import subprocess
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse, urlunparse
 from urllib.request import Request, urlopen
 
-MAX_TARGETS = 128
-MAX_SCRIPTS = 5_000
-MAX_BREAKPOINTS = 1_000
-MAX_BREAKPOINT_LOCATIONS = 256
-MAX_WATCHES = 100
-MAX_WATCH_EXPRESSION_BYTES = 4_096
-MAX_CONSOLE_ENTRIES = 500
-MAX_CONSOLE_ARGUMENTS = 32
-MAX_CALL_FRAMES = 64
-MAX_ASYNC_STACK_DEPTH = 32
-MAX_SCOPES_PER_FRAME = 12
-MAX_SCOPE_PROPERTIES = 100
-MAX_TOTAL_SCOPE_PROPERTIES = 2_000
-MAX_SCRIPT_SOURCE_BYTES = 2 * 1024 * 1024
-MAX_BREAKPOINT_TEXT_BYTES = 4_096
-MAX_XHR_BREAKPOINTS = 100
-MAX_EVENT_BREAKPOINTS = 256
-MAX_LIVE_OBJECT_RESULTS = 50
-MAX_LIVE_OBJECT_SCAN = 25_000
-MAX_LIVE_OBJECT_QUERY_BYTES = 512
-MAX_LIVE_OBJECT_SHAPE_BYTES = 4_096
-MAX_LIVE_OBJECT_PREVIEW_PROPERTIES = 16
-MAX_LIVE_OBJECT_SEARCH_PROPERTIES = 256
-LIVE_OBJECT_SEARCH_TIMEOUT_MS = 750
-MAX_HEAP_SNAPSHOT_BYTES = 256 * 1024 * 1024
-MAX_HEAP_SNAPSHOT_CHUNK_BYTES = 8 * 1024 * 1024
-MAX_HEAP_SNAPSHOT_RESULTS = 50
-MAX_HEAP_RETAINING_PATH = 12
-MAX_HEAP_INCOMING_REFERENCES = 12
-HEAP_SNAPSHOT_CAPTURE_TIMEOUT_SECONDS = 60.0
-HEAP_SNAPSHOT_SEARCH_TIMEOUT_SECONDS = 20.0
-HEAP_SNAPSHOT_DIFF_TIMEOUT_SECONDS = 60.0
-HEAP_SNAPSHOT_PROBE_TIMEOUT_SECONDS = 20.0
-MAX_MEMORY_ORIGIN_TRACE_STEPS = 32
-MAX_MEMORY_ORIGIN_TRACE_BEFORE_STEPS = 8
-MAX_MEMORY_ORIGIN_TRACE_AFTER_STEPS = 16
-MEMORY_ORIGIN_TRACE_IDLE_TIMEOUT_SECONDS = 2.5
-MEMORY_ORIGIN_TRACE_TIMEOUT_SECONDS = 5 * 60.0
-MAX_ACTIVE_PORT_BYTES = 4_096
-MAX_TARGET_LIST_BYTES = 2 * 1024 * 1024
-MAX_TARGET_ID_BYTES = 4_096
-MAX_TARGET_TYPE_BYTES = 128
-MAX_TARGET_URL_BYTES = 64 * 1024
-MAX_REMOTE_TEXT_BYTES = 4_096
-MAX_NATIVE_TRANSPORT_ERROR_BYTES = 4_096
-NATIVE_TRANSPORT_STARTUP_TIMEOUT_SECONDS = 3.0
-NATIVE_TRANSPORT_WRITE_TIMEOUT_SECONDS = 5.0
-NATIVE_TRANSPORT_PROTOCOL_HEADER = b"REB\x01"
-MAX_INTERCEPTION_URL_BYTES = 8 * 1024
-MAX_INTERCEPTION_PATTERN_BYTES = 2 * 1024
-MAX_INTERCEPTION_METHOD_BYTES = 32
-MAX_INTERCEPTION_HEADERS = 64
-MAX_INTERCEPTION_HEADER_NAME_BYTES = 128
-MAX_INTERCEPTION_HEADER_VALUE_BYTES = 2 * 1024
-MAX_INTERCEPTION_HEADER_BYTES = 16 * 1024
-MAX_INTERCEPTION_BODY_BYTES = 64 * 1024
-MAX_INTERCEPTION_RESPONSE_BYTES = 64 * 1024
-MAX_INTERCEPTION_AUDIT_ENTRIES = 128
-MAX_INTERCEPTION_PENDING_REQUESTS = 16
-INTERCEPTION_RUN_TIMEOUT_SECONDS = 15.0
-MAX_REPEATER_HISTORY_ENTRIES = 24
-MAX_REPEATER_HISTORY_BYTES = 512 * 1024
-MAX_REPEATER_VARIABLES = 32
-MAX_REPEATER_VARIABLE_NAME_BYTES = 64
-MAX_REPEATER_VARIABLE_VALUE_BYTES = 4 * 1024
-MAX_REPEATER_VARIABLE_BYTES = 32 * 1024
-MAX_REPEATER_TEMPLATE_METHOD_BYTES = 256
-MIN_REPEATER_TIMEOUT_MS = 100
-MAX_REPEATER_TIMEOUT_MS = 30_000
-MAX_OBJECT_EXPERIMENT_AUDIT_ENTRIES = 128
-MAX_OBJECT_EXPERIMENT_MUTATIONS = 256
-MAX_OBJECT_EXPERIMENT_PROPERTY_BYTES = 256
-MAX_OBJECT_EXPERIMENT_VALUE_BYTES = 16 * 1024
-MAX_OBJECT_EXPERIMENT_VALUE_DEPTH = 8
-MAX_OBJECT_EXPERIMENT_VALUE_ENTRIES = 256
-MAX_OBJECT_EXPERIMENT_STRING_BYTES = 4 * 1024
-OBJECT_EXPERIMENT_NAVIGATION_TIMEOUT_SECONDS = 15.0
-MAX_RUNTIME_HOOKS = 8
-MAX_RUNTIME_HOOK_BREAKPOINTS = 64
-MAX_RUNTIME_HOOK_RETURN_POINTS = 32
-MAX_RUNTIME_HOOK_HITS = 512
-MAX_RUNTIME_HOOK_RETAINED_HITS = 128
-MAX_RUNTIME_HOOK_BINDINGS = 32
-MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES = 512
-MAX_RUNTIME_HOOK_LABEL_BYTES = 128
-MAX_RUNTIME_HOOK_CONDITION_BYTES = 1024
-MAX_RUNTIME_HOOK_LOGIC_BYTES = 8 * 1024
-MAX_RUNTIME_HOOK_RETURN_BYTES = 8 * 1024
-RUNTIME_HOOK_EVALUATION_TIMEOUT_MS = 100
-MAX_AUTOMATION_RECIPES = 16
-MAX_AUTOMATION_AUTO_RECIPES = 8
-MAX_AUTOMATION_RECIPE_SOURCE_BYTES = 16 * 1024
-MAX_AUTOMATION_TOTAL_SOURCE_BYTES = 64 * 1024
-MAX_AUTOMATION_LABEL_BYTES = 128
-MAX_AUTOMATION_VARIABLES = 32
-MAX_AUTOMATION_VARIABLE_NAME_BYTES = 128
-MAX_AUTOMATION_VARIABLE_VALUE_BYTES = 4 * 1024
-MAX_AUTOMATION_VARIABLE_BYTES = 16 * 1024
-MAX_AUTOMATION_RUNS = 256
-MAX_AUTOMATION_AUTO_RUNS = 64
-MAX_AUTOMATION_RETAINED_RUNS = 64
-MAX_AUTOMATION_LOGS = 32
-MAX_AUTOMATION_LOG_BYTES = 1024
-MAX_AUTOMATION_RESULT_BYTES = 16 * 1024
-MAX_AUTOMATION_BINDING_REPORT_BYTES = 8 * 1024
-AUTOMATION_EXECUTION_TIMEOUT_MS = 2_000
-AUTOMATION_WATCHDOG_GRACE_SECONDS = 0.25
-MAX_ACTION_SCOPE_TARGETS = 8
-MAX_ACTION_SCOPE_PENDING_TRIGGERS = 16
-
-REPEATER_VARIABLE_TOKEN = re.compile(r"\{\{(=)?([^{}]+)\}\}")
-REPEATER_VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
-
-
-AUTOMATION_RECIPE_FUNCTION = r"""async function(config) {
-  const started = Date.now();
-  const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
-  const boundedText = (value, limit) => {
-    let text;
-    try { text = String(value); } catch { text = "<unavailable>"; }
-    const encoded = encoder.encode(text);
-    if (encoded.length <= limit) return text;
-    text = decoder.decode(encoded.subarray(0, limit));
-    while (text && encoder.encode(text).length > limit) text = text.slice(0, -1);
-    return text;
-  };
-  const serialize = (value, limit) => {
-    const seen = new WeakSet();
-    let entries = 0;
-    let truncated = false;
-    const clone = (candidate, depth) => {
-      if (candidate === null || typeof candidate === "boolean" || typeof candidate === "number") return candidate;
-      if (typeof candidate === "string") {
-        const result = boundedText(candidate, Math.min(limit, 4096));
-        if (result !== candidate) truncated = true;
-        return result;
-      }
-      if (typeof candidate === "bigint") return `${candidate}n`;
-      if (typeof candidate === "undefined") return "[undefined]";
-      if (typeof candidate === "symbol") return boundedText(candidate, 256);
-      if (typeof candidate === "function") return `[Function ${boundedText(candidate.name || "anonymous", 128)}]`;
-      if (depth >= 8) { truncated = true; return "[MaxDepth]"; }
-      if (seen.has(candidate)) return "[Circular]";
-      seen.add(candidate);
-      let keys;
-      try { keys = Reflect.ownKeys(candidate); } catch { return "[Uninspectable]"; }
-      const output = Array.isArray(candidate) ? [] : {};
-      for (const rawKey of keys) {
-        if (entries >= 256) { truncated = true; break; }
-        entries += 1;
-        const key = boundedText(rawKey, 256);
-        let descriptor;
-        try { descriptor = Object.getOwnPropertyDescriptor(candidate, rawKey); } catch { descriptor = null; }
-        if (!descriptor) output[key] = "[Unavailable]";
-        else if (!("value" in descriptor)) output[key] = "[Accessor not invoked]";
-        else output[key] = clone(descriptor.value, depth + 1);
-      }
-      return output;
-    };
-    let text;
-    try { text = JSON.stringify(clone(value, 0)); } catch { text = '"[Unserializable]"'; }
-    if (text === undefined) text = '"[undefined]"';
-    const byteLength = encoder.encode(text).length;
-    return {text: boundedText(text, limit), truncated: truncated || byteLength > limit};
-  };
-  const safeJsonStringify = value => serialize(value, config.resultLimit).text;
-  function* iterate(value) {
-    if (value == null) return;
-    let count = 0;
-    if (value instanceof Map) {
-      for (const entry of value.entries()) { if (count++ >= 256) return; yield entry; }
-      return;
-    }
-    if (value instanceof Set || Array.isArray(value) || ArrayBuffer.isView(value) ||
-        (typeof NodeList !== "undefined" && value instanceof NodeList) ||
-        (typeof HTMLCollection !== "undefined" && value instanceof HTMLCollection)) {
-      for (const item of value) { if (count >= 256) return; yield [count++, item]; }
-      return;
-    }
-    let keys;
-    try { keys = Object.keys(value); } catch { return; }
-    for (const key of keys) {
-      if (count++ >= 256) return;
-      let descriptor;
-      try { descriptor = Object.getOwnPropertyDescriptor(value, key); } catch { descriptor = null; }
-      if (descriptor && "value" in descriptor) yield [key, descriptor.value];
-    }
-  }
-  const variables = Object.freeze({...config.variables});
-  const Utils = Object.freeze({
-    getVar: name => typeof name === "string" ? variables[name] : undefined,
-    safeJsonStringify,
-    iterate
-  });
-  const WB = Object.freeze({Browser: Object.freeze({Utils})});
-  const logs = [];
-  let logsTruncated = false;
-  const capture = (level, values) => {
-    if (logs.length >= config.logLimit) { logsTruncated = true; return; }
-    const text = boundedText(values.map(value => safeJsonStringify(value)).join(" "), config.logBytes);
-    logs.push({level, text});
-  };
-  const recipeConsole = Object.freeze({
-    log: (...values) => capture("log", values),
-    info: (...values) => capture("info", values),
-    warn: (...values) => capture("warn", values),
-    error: (...values) => capture("error", values)
-  });
-  const timeoutToken = Object.freeze({});
-  let timeoutId = null;
-  try {
-    const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
-    const run = new AsyncFunction(
-      "WB", "Utils", "console",
-      `"use strict";\n${config.source}\n//# sourceURL=reb-automation-recipe.js`
-    );
-    const execution = run(WB, Utils, recipeConsole);
-    const timeout = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => reject(timeoutToken), config.timeoutMs);
-    });
-    const result = await Promise.race([execution, timeout]);
-    const serialized = serialize(result, config.resultLimit);
-    return {
-      protocolVersion: 1,
-      ok: true,
-      resultType: result === null ? "null" : typeof result,
-      resultText: serialized.text,
-      resultTruncated: serialized.truncated,
-      logs,
-      logsTruncated,
-      elapsedMs: Math.max(0, Date.now() - started),
-      timedOut: false
-    };
-  } catch (error) {
-    const timedOut = error === timeoutToken;
-    return {
-      protocolVersion: 1,
-      ok: false,
-      resultType: "error",
-      resultText: "",
-      resultTruncated: false,
-      logs,
-      logsTruncated,
-      elapsedMs: Math.max(0, Date.now() - started),
-      error: timedOut ? "Recipe exceeded the 2 second execution limit" : boundedText(error && error.message ? error.message : error, 512),
-      timedOut
-    };
-  } finally {
-    if (timeoutId !== null) clearTimeout(timeoutId);
-  }
-}"""
-
-SENSITIVE_INTERCEPTION_HEADERS = {
-    "authorization",
-    "cookie",
-    "proxy-authorization",
-    "set-cookie",
-}
-
-FORBIDDEN_OBJECT_EXPERIMENT_PROPERTIES = {
-    "__proto__",
-    "constructor",
-    "prototype",
-}
-
-MEMORY_ORIGIN_TRACE_FRAMEWORK_PATTERNS = (
-    "/node_modules/",
-    "react",
-    "react-dom",
-    "redux",
-    "vue",
-    "angular",
-    "jquery",
-    "lodash",
-    "rxjs",
-    "core-js",
-    "regenerator-runtime",
-    "polyfill",
-    "webpack",
-    "vite",
-    "rollup",
-    "parcel",
-    "zone.js",
+from debugger.automation import (
+    automation_failure_result,
+    automation_recipe_id,
+    automation_runner_config,
+    normalize_automation_recipe,
+    normalize_automation_result,
+    normalize_automation_variables,
+    normalize_runtime_hook_json,
+    runtime_hook_source_label,
+    runtime_hook_text,
 )
-
-MEMORY_ORIGIN_TRACE_FRAMEWORK_PATTERNS = (
-    "/node_modules/",
-    "react",
-    "react-dom",
-    "redux",
-    "vue",
-    "angular",
-    "jquery",
-    "lodash",
-    "rxjs",
-    "core-js",
-    "regenerator-runtime",
-    "polyfill",
-    "webpack",
-    "vite",
-    "rollup",
-    "parcel",
-    "zone.js",
+from debugger.errors import (
+    DebuggerBridgeError,
+    ProtocolError,
+    WebSocketClosed,
 )
-
-
-# V8's side-effect checker rejects this inspector's local arrays and counters.
-# Safety instead comes from fixed source that reads own descriptors, never values
-# behind accessors, and returns only bounded by-value metadata.
-LIVE_OBJECT_SEARCH_FUNCTION = r"""function(criteria) {
-  const started = Date.now();
-  const deadline = started + criteria.timeoutMs;
-  let propertyLimitReached = false;
-  const hasQuery = value => typeof value === "string" && value.length > 0;
-  const compile = value => {
-    if (!hasQuery(value)) return null;
-    if (!criteria.regex) {
-      const needle = criteria.caseSensitive ? value : value.toLowerCase();
-      return input => {
-        const text = criteria.caseSensitive ? String(input) : String(input).toLowerCase();
-        return text.includes(needle);
-      };
-    }
-    const expression = new RegExp(value, criteria.caseSensitive ? "" : "i");
-    return input => expression.test(String(input));
-  };
-  const propertyMatches = compile(criteria.propertyQuery);
-  const valueMatches = compile(criteria.valueQuery);
-  const classMatches = compile(criteria.classQuery);
-  const boundedText = value => {
-    let text;
-    try { text = String(value); } catch { return "<unavailable>"; }
-    return text.length > 160 ? `${text.slice(0, 160)}...` : text;
-  };
-  const className = value => {
-    if (Array.isArray(value)) return "Array";
-    try {
-      const prototype = Object.getPrototypeOf(value);
-      const descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, "constructor");
-      const name = descriptor && "value" in descriptor && descriptor.value && descriptor.value.name;
-      return typeof name === "string" && name ? name.slice(0, 160) : "Object";
-    } catch { return "Object"; }
-  };
-  const primitiveType = value => value === null ? "null" : typeof value;
-  const tokenSet = (root, includeValues) => {
-    const tokens = [];
-    const seen = new WeakSet();
-    const walk = (value, path, depth) => {
-      if (tokens.length >= 256 || depth > 3) {
-        propertyLimitReached = true;
-        return;
-      }
-      if ((typeof value !== "object" && typeof value !== "function") || value === null) {
-        const type = primitiveType(value);
-        tokens.push(includeValues ? `${path}:${type}=${boundedText(value)}` : `${path}:${type}`);
-        return;
-      }
-      if (seen.has(value)) {
-        tokens.push(`${path}:circular`);
-        return;
-      }
-      seen.add(value);
-      let names;
-      try { names = Object.getOwnPropertyNames(value); } catch { return; }
-      if (names.length > 96) propertyLimitReached = true;
-      names = names.slice(0, 96).sort();
-      if (names.length === 0) tokens.push(`${path}:empty`);
-      for (const name of names) {
-        if (tokens.length >= 256) break;
-        let descriptor;
-        try { descriptor = Object.getOwnPropertyDescriptor(value, name); } catch { continue; }
-        if (name.length > 160) propertyLimitReached = true;
-        const boundedName = name.slice(0, 160);
-        const childPath = path ? `${path}.${boundedName}` : boundedName;
-        if (!descriptor || !("value" in descriptor)) {
-          tokens.push(`${childPath}:accessor`);
-          continue;
-        }
-        walk(descriptor.value, childPath, depth + 1);
-      }
-    };
-    walk(root, "", 0);
-    return new Set(tokens);
-  };
-  const shapeTokens = criteria.shape === null
-    ? null
-    : tokenSet(criteria.shape, criteria.includeShapeValues);
-  const similarity = candidate => {
-    if (shapeTokens === null) return null;
-    const candidateTokens = tokenSet(candidate, criteria.includeShapeValues);
-    let intersection = 0;
-    for (const token of candidateTokens) if (shapeTokens.has(token)) intersection += 1;
-    const union = candidateTokens.size + shapeTokens.size - intersection;
-    return union === 0 ? 1 : intersection / union;
-  };
-  const preview = (candidate, names) => names.slice(0, criteria.previewProperties).map(name => {
-    let descriptor;
-    try { descriptor = Object.getOwnPropertyDescriptor(candidate, name); } catch {}
-    if (!descriptor || !("value" in descriptor)) {
-      return {name: name.slice(0, 256), type: "accessor", value: "<getter not invoked>"};
-    }
-    const value = descriptor.value;
-    const type = primitiveType(value);
-    if ((typeof value === "object" && value !== null) || typeof value === "function") {
-      return {name: name.slice(0, 256), type, value: `[${className(value)}]`};
-    }
-    return {name: name.slice(0, 256), type, value: boundedText(value)};
-  });
-
-  let totalObjects = 0;
-  try { totalObjects = Number(this.length) || 0; } catch { totalObjects = 0; }
-  const scanLimit = Math.min(totalObjects, criteria.scanLimit);
-  const results = [];
-  let analyzed = 0;
-  let visited = 0;
-  let timedOut = false;
-  for (let index = 0; index < scanLimit; index += 1) {
-    if (Date.now() >= deadline) {
-      timedOut = true;
-      break;
-    }
-    visited += 1;
-    let candidate;
-    let names;
-    try {
-      candidate = this[index];
-      if ((typeof candidate !== "object" && typeof candidate !== "function") || candidate === null) continue;
-      names = Object.getOwnPropertyNames(candidate);
-    } catch { continue; }
-    analyzed += 1;
-    if (names.length > criteria.propertyScanLimit) propertyLimitReached = true;
-    const inspectedNames = names.slice(0, criteria.propertyScanLimit);
-    const candidateClass = className(candidate);
-    if (propertyMatches && !inspectedNames.some(name => {
-      if (name.length > 512) propertyLimitReached = true;
-      return propertyMatches(name.slice(0, 512));
-    })) continue;
-    if (classMatches && !classMatches(candidateClass)) continue;
-    if (valueMatches && !inspectedNames.some(name => {
-      let descriptor;
-      try { descriptor = Object.getOwnPropertyDescriptor(candidate, name); } catch { return false; }
-      if (!descriptor || !("value" in descriptor)) return false;
-      const value = descriptor.value;
-      if ((typeof value === "object" && value !== null) || typeof value === "function") return false;
-      return valueMatches(boundedText(value));
-    })) continue;
-    const score = similarity(candidate);
-    if (score !== null && score < criteria.similarityThreshold) continue;
-    results.push({
-      id: String(index),
-      className: candidateClass,
-      propertyCount: names.length,
-      propertiesTruncated: names.length > criteria.previewProperties,
-      similarity: score,
-      preview: preview(candidate, inspectedNames)
-    });
-    if (results.length >= criteria.resultLimit) break;
-  }
-  return {
-    protocolVersion: 2,
-    analyzed,
-    totalObjects,
-    results,
-    resultLimit: criteria.resultLimit,
-    resultLimitReached: results.length >= criteria.resultLimit,
-    scanLimitReached: totalObjects > scanLimit || visited < scanLimit,
-    propertyLimitReached,
-    timedOut,
-    durationMs: Math.max(0, Date.now() - started)
-  };
-}"""
-
-OBJECT_EXPERIMENT_MUTATE_FUNCTION = r"""function(config) {
-  const boundedText = value => {
-    let text;
-    try { text = String(value); } catch { return "<unavailable>"; }
-    return text.length > 160 ? `${text.slice(0, 160)}...` : text;
-  };
-  const valueType = value => value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
-  const className = value => {
-    if (Array.isArray(value)) return "Array";
-    try {
-      const prototype = Object.getPrototypeOf(value);
-      const descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, "constructor");
-      const name = descriptor && "value" in descriptor && descriptor.value && descriptor.value.name;
-      return typeof name === "string" && name ? name.slice(0, 160) : "Object";
-    } catch { return "Object"; }
-  };
-  const descriptorSummary = descriptor => {
-    if (!descriptor) return {exists: false, type: "missing", className: "", writable: false, configurable: false};
-    if (!("value" in descriptor)) {
-      return {exists: true, type: "accessor", className: "", writable: false, configurable: descriptor.configurable === true};
-    }
-    const value = descriptor.value;
-    const type = valueType(value);
-    return {
-      exists: true,
-      type,
-      className: (type === "object" || type === "array" || type === "function") && value !== null ? className(value) : "",
-      writable: descriptor.writable === true,
-      configurable: descriptor.configurable === true,
-      preview: (type === "object" || type === "array" || type === "function") && value !== null
-        ? `[${className(value)}]`
-        : boundedText(value)
-    };
-  };
-  const inspect = candidate => {
-    let names;
-    try { names = Object.getOwnPropertyNames(candidate).sort(); }
-    catch { names = []; }
-    const preview = [];
-    for (const name of names.slice(0, config.previewProperties)) {
-      let descriptor;
-      try { descriptor = Object.getOwnPropertyDescriptor(candidate, name); } catch {}
-      if (!descriptor || !("value" in descriptor)) {
-        preview.push({name: name.slice(0, 256), type: "accessor", value: "<getter not invoked>"});
-        continue;
-      }
-      const value = descriptor.value;
-      const type = value === null ? "null" : typeof value;
-      preview.push({
-        name: name.slice(0, 256),
-        type,
-        value: ((typeof value === "object" && value !== null) || typeof value === "function")
-          ? `[${className(value)}]`
-          : boundedText(value)
-      });
-    }
-    return {
-      id: config.resultId,
-      className: className(candidate),
-      propertyCount: names.length,
-      propertiesTruncated: names.length > config.previewProperties,
-      similarity: config.similarity,
-      preview
-    };
-  };
-
-  try {
-    const beforeDescriptor = Object.getOwnPropertyDescriptor(this, config.property);
-    const before = descriptorSummary(beforeDescriptor);
-    let outcome;
-    if (beforeDescriptor && !("value" in beforeDescriptor)) {
-      return {protocolVersion: 1, ok: false, error: "Accessor properties cannot be patched", outcome: "accessor", before, after: before, object: inspect(this)};
-    }
-    if (config.operation === "delete") {
-      if (!beforeDescriptor) {
-        return {protocolVersion: 1, ok: false, error: "The selected own property does not exist", outcome: "missing", before, after: before, object: inspect(this)};
-      }
-      if (!beforeDescriptor.configurable) {
-        return {protocolVersion: 1, ok: false, error: "The selected own property is not configurable", outcome: "non_configurable", before, after: before, object: inspect(this)};
-      }
-      if (!Reflect.deleteProperty(this, config.property)) {
-        return {protocolVersion: 1, ok: false, error: "The selected own property could not be deleted", outcome: "rejected", before, after: before, object: inspect(this)};
-      }
-      outcome = "deleted";
-    } else {
-      if (beforeDescriptor && !beforeDescriptor.writable) {
-        return {protocolVersion: 1, ok: false, error: "The selected own property is not writable", outcome: "non_writable", before, after: before, object: inspect(this)};
-      }
-      if (!beforeDescriptor && !Object.isExtensible(this)) {
-        return {protocolVersion: 1, ok: false, error: "The selected object is not extensible", outcome: "non_extensible", before, after: before, object: inspect(this)};
-      }
-      const descriptor = beforeDescriptor
-        ? {...beforeDescriptor, value: config.value}
-        : {value: config.value, writable: true, enumerable: true, configurable: true};
-      Object.defineProperty(this, config.property, descriptor);
-      outcome = beforeDescriptor ? "updated" : "created";
-    }
-    const after = descriptorSummary(Object.getOwnPropertyDescriptor(this, config.property));
-    return {protocolVersion: 1, ok: true, error: null, outcome, before, after, object: inspect(this)};
-  } catch (error) {
-    return {
-      protocolVersion: 1,
-      ok: false,
-      error: boundedText(error && error.message ? error.message : error),
-      outcome: "error",
-      before: {exists: false, type: "unknown", className: "", writable: false, configurable: false},
-      after: {exists: false, type: "unknown", className: "", writable: false, configurable: false},
-      object: null
-    };
-  }
-}"""
-
-REQUEST_INTERCEPTION_FUNCTION = r"""async function(config) {
-  const started = performance.now();
-  const registry = config.controllerRegistryKey
-    ? globalThis[config.controllerRegistryKey]
-    : null;
-  const controller = registry instanceof Map
-    ? registry.get(config.executionId)
-    : new AbortController();
-  if (!(controller instanceof AbortController)) {
-    return {
-      protocolVersion: 1,
-      ok: false,
-      error: "Request controller is unavailable",
-      durationMs: 0,
-      cancelled: false,
-      timedOut: false
-    };
-  }
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, config.timeoutMs);
-  try {
-    const options = {
-      method: config.method,
-      headers: config.headers,
-      credentials: "omit",
-      cache: "no-store",
-      redirect: "follow",
-      referrerPolicy: "no-referrer",
-      signal: controller.signal
-    };
-    if (config.body !== "") options.body = config.body;
-    const response = await fetch(config.url, options);
-    const decoder = new TextDecoder();
-    const bodyParts = [];
-    let bodyBytes = 0;
-    let bodyTruncated = false;
-    if (response.body) {
-      const reader = response.body.getReader();
-      while (true) {
-        const {done, value} = await reader.read();
-        if (done) break;
-        const remaining = Math.max(0, config.responseByteLimit - bodyBytes);
-        if (value.byteLength > remaining) {
-          if (remaining > 0) {
-            bodyParts.push(decoder.decode(value.subarray(0, remaining), {stream: true}));
-            bodyBytes += remaining;
-          }
-          bodyTruncated = true;
-          try { await reader.cancel(); } catch {}
-          break;
-        }
-        bodyParts.push(decoder.decode(value, {stream: true}));
-        bodyBytes += value.byteLength;
-        if (bodyBytes === config.responseByteLimit) {
-          const next = await reader.read();
-          if (!next.done) {
-            bodyTruncated = true;
-            try { await reader.cancel(); } catch {}
-          }
-          break;
-        }
-      }
-      bodyParts.push(decoder.decode());
-    }
-    const headers = [];
-    const headerEncoder = new TextEncoder();
-    let headerBytes = 0;
-    let headersTruncated = false;
-    for (const [name, value] of response.headers.entries()) {
-      if (["set-cookie", "set-cookie2"].includes(name.toLowerCase())) continue;
-      if (headers.length >= config.headerLimit) {
-        headersTruncated = true;
-        break;
-      }
-      const encodedValue = headerEncoder.encode(value);
-      const boundedValue = encodedValue.byteLength <= config.headerValueLimit
-        ? value
-        : new TextDecoder().decode(encodedValue.subarray(0, config.headerValueLimit));
-      const entryBytes = headerEncoder.encode(name).byteLength + headerEncoder.encode(boundedValue).byteLength;
-      if (headerBytes + entryBytes > config.headerTotalLimit) {
-        headersTruncated = true;
-        break;
-      }
-      headerBytes += entryBytes;
-      headers.push({name, value: boundedValue});
-      if (encodedValue.byteLength > config.headerValueLimit) headersTruncated = true;
-    }
-    return {
-      protocolVersion: 1,
-      ok: true,
-      status: response.status,
-      statusText: response.statusText.slice(0, 256),
-      url: response.url,
-      headers,
-      headersTruncated,
-      body: bodyParts.join(""),
-      bodyTruncated,
-      durationMs: Math.max(0, Math.round(performance.now() - started)),
-      cancelled: false,
-      timedOut: false
-    };
-  } catch (error) {
-    let message = "Request failed";
-    try { message = String(error && error.message ? error.message : error); } catch {}
-    const cancelled = controller.signal.aborted && !timedOut;
-    return {
-      protocolVersion: 1,
-      ok: false,
-      error: (timedOut ? "Request timed out" : cancelled ? "Request cancelled" : message).slice(0, 512),
-      durationMs: Math.max(0, Math.round(performance.now() - started)),
-      cancelled,
-      timedOut
-    };
-  } finally {
-    clearTimeout(timer);
-    if (registry instanceof Map) {
-      registry.delete(config.executionId);
-      if (registry.size === 0) {
-        try { delete globalThis[config.controllerRegistryKey]; } catch {}
-      }
-    }
-  }
-}"""
-
-
-class DebuggerBridgeError(RuntimeError):
-    pass
-
-
-class ProtocolError(DebuggerBridgeError):
-    pass
-
-
-class WebSocketClosed(DebuggerBridgeError):
-    pass
-
-
-@dataclass
-class PendingCommand:
-    event: threading.Event
-    response: Optional[dict[str, Any]] = None
-    error: Optional[BaseException] = None
-
-
-@dataclass
-class HeapSnapshotCollector:
-    path: Path
-    stream: Any
-    byte_count: int = 0
-    chunk_count: int = 0
-    error: Optional[str] = None
-
-    def append(self, chunk: Any) -> None:
-        if self.error is not None:
-            return
-        if not isinstance(chunk, str):
-            self.error = "Debugger returned a malformed heap snapshot chunk"
-            return
-        encoded = chunk.encode("utf-8")
-        if len(encoded) > MAX_HEAP_SNAPSHOT_CHUNK_BYTES:
-            self.error = "Debugger returned an oversized heap snapshot chunk"
-            return
-        if self.byte_count + len(encoded) > MAX_HEAP_SNAPSHOT_BYTES:
-            self.error = "Heap snapshot exceeds the 256 MiB capture limit"
-            return
-        try:
-            self.stream.write(encoded)
-        except OSError:
-            self.error = "Heap snapshot could not be written to local temporary storage"
-            return
-        self.byte_count += len(encoded)
-        self.chunk_count += 1
-
-    def close(self) -> None:
-        try:
-            self.stream.close()
-        except OSError:
-            if self.error is None:
-                self.error = "Heap snapshot temporary storage could not be closed"
-
-
-@dataclass(frozen=True)
-class HeapSnapshotCapture:
-    path: Path
-    target_id: str
-    byte_count: int
-    captured_at_ms: int
-
-
-class NativeDebuggerConnection:
-    def __init__(self, url: str, binary: Path) -> None:
-        resolved_binary = binary.resolve()
-        if not resolved_binary.is_file() or not os.access(resolved_binary, os.X_OK):
-            raise DebuggerBridgeError(
-                "Native debugger transport is unavailable; run make debugger-transport"
-        )
-        self._send_lock = threading.Lock()
-        self._closed = False
-        try:
-            self._process = subprocess.Popen(
-                [str(resolved_binary), "--url", url],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0,
-                close_fds=True,
-            )
-        except OSError as exception:
-            raise DebuggerBridgeError(
-                f"Native debugger transport could not start: {exception}"
-            ) from exception
-        try:
-            if self._process.stdin is None or self._process.stdout is None:
-                raise DebuggerBridgeError(
-                    "Native debugger transport pipes are unavailable"
-                )
-            os.set_blocking(self._process.stdin.fileno(), False)
-            ready = self._read_control_message(
-                NATIVE_TRANSPORT_STARTUP_TIMEOUT_SECONDS
-            )
-            if ready is None:
-                raise DebuggerBridgeError(
-                    "Native debugger transport startup timed out"
-                )
-            if ready:
-                raise DebuggerBridgeError(
-                    "Native debugger transport returned a malformed startup frame"
-                )
-        except BaseException:
-            self.close()
-            raise
-
-    def send_json(self, value: dict[str, Any]) -> None:
-        body = json.dumps(value, separators=(",", ":")).encode("utf-8")
-        if len(body) > 16 * 1024 * 1024:
-            raise DebuggerBridgeError("Debugger command is oversized")
-        frame = (
-            NATIVE_TRANSPORT_PROTOCOL_HEADER + struct.pack("!I", len(body)) + body
-        )
-        with self._send_lock:
-            if self._closed or self._process.stdin is None:
-                raise WebSocketClosed("Debugger WebSocket is closed")
-            try:
-                self._write_exact(self._process.stdin.fileno(), frame)
-            except TimeoutError as exception:
-                raise WebSocketClosed(str(exception)) from exception
-            except OSError as exception:
-                raise WebSocketClosed(self._failure_detail()) from exception
-
-    def receive_json(self, timeout: float = 0.5) -> Optional[dict[str, Any]]:
-        payload = self._read_control_message(timeout)
-        if payload is None:
-            return None
-        try:
-            value = json.loads(payload.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exception:
-            raise DebuggerBridgeError(
-                "Debugger WebSocket sent malformed JSON"
-            ) from exception
-        if not isinstance(value, dict):
-            raise DebuggerBridgeError("Debugger WebSocket sent a non-object message")
-        return value
-
-    def close(self) -> None:
-        with self._send_lock:
-            if self._closed:
-                return
-            self._closed = True
-            process = self._process
-            if process.stdin is not None:
-                try:
-                    process.stdin.close()
-                except OSError:
-                    pass
-        try:
-            process.wait(timeout=0.5)
-        except subprocess.TimeoutExpired:
-            process.terminate()
-            try:
-                process.wait(timeout=0.5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=0.5)
-        for stream in (process.stdout, process.stderr):
-            if stream is not None:
-                stream.close()
-
-    def _read_control_message(self, timeout: float) -> Optional[bytes]:
-        if self._process.stdout is None:
-            raise WebSocketClosed("Debugger WebSocket is closed")
-        ready, _, _ = select.select([self._process.stdout], [], [], max(0.0, timeout))
-        if not ready:
-            return None
-        header = self._read_exact(self._process.stdout.fileno(), 8)
-        if header[:4] != NATIVE_TRANSPORT_PROTOCOL_HEADER:
-            raise ProtocolError(
-                "Native debugger transport returned an invalid protocol header"
-            )
-        length = struct.unpack("!I", header[4:])[0]
-        if length > 64 * 1024 * 1024:
-            raise DebuggerBridgeError("Debugger WebSocket message is oversized")
-        return self._read_exact(self._process.stdout.fileno(), length)
-
-    def _read_exact(self, descriptor: int, length: int) -> bytes:
-        body = bytearray()
-        while len(body) < length:
-            chunk = os.read(descriptor, length - len(body))
-            if not chunk:
-                raise WebSocketClosed(self._failure_detail())
-            body.extend(chunk)
-        return bytes(body)
-
-    @staticmethod
-    def _write_exact(descriptor: int, body: bytes) -> None:
-        deadline = time.monotonic() + NATIVE_TRANSPORT_WRITE_TIMEOUT_SECONDS
-        offset = 0
-        while offset < len(body):
-            if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    "Native debugger transport command pipe timed out"
-                )
-            try:
-                written = os.write(descriptor, body[offset:])
-            except InterruptedError:
-                continue
-            except BlockingIOError:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError(
-                        "Native debugger transport command pipe timed out"
-                    )
-                _, writable, _ = select.select([], [descriptor], [], remaining)
-                if not writable:
-                    raise TimeoutError(
-                        "Native debugger transport command pipe timed out"
-                    )
-                continue
-            if written == 0:
-                raise BrokenPipeError("Native debugger transport pipe closed")
-            offset += written
-
-    def _failure_detail(self) -> str:
-        fallback = "Debugger WebSocket closed"
-        if self._process.stderr is None:
-            return fallback
-        ready, _, _ = select.select([self._process.stderr], [], [], 0.1)
-        if not ready:
-            return fallback
-        try:
-            body = os.read(
-                self._process.stderr.fileno(), MAX_NATIVE_TRANSPORT_ERROR_BYTES + 1
-            )
-        except OSError:
-            return fallback
-        detail = body[:MAX_NATIVE_TRANSPORT_ERROR_BYTES].decode(
-            "utf-8", errors="replace"
-        )
-        return detail.strip() or fallback
-
-
-class ActionScopeTargetSession:
-    """One bounded CDP client for mutable rules on an isolated page target."""
-
-    def __init__(
-        self,
-        target: dict[str, str],
-        event_handler: Any,
-        close_handler: Any,
-        debugger_transport_binary: Path,
-    ) -> None:
-        self.target = dict(target)
-        self.target_id = target["id"]
-        self._event_handler = event_handler
-        self._close_handler = close_handler
-        self._connection = NativeDebuggerConnection(
-            target["web_socket_url"], debugger_transport_binary
-        )
-        self._lock = threading.RLock()
-        self._pending: dict[int, PendingCommand] = {}
-        self._next_command_id = 1
-        self._closed = False
-        self._ready = False
-        self._reader = threading.Thread(
-            target=self._read_messages,
-            name=f"reb-action-scope-{self.target_id[:12]}",
-            daemon=True,
-        )
-
-    def start(self) -> None:
-        self._reader.start()
-        try:
-            self.command("Runtime.enable")
-            self.command("Page.enable")
-        except BaseException:
-            self.close()
-            raise
-        with self._lock:
-            if self._closed:
-                raise DebuggerBridgeError("Action-scope target disconnected during setup")
-            self._ready = True
-
-    def ready(self) -> bool:
-        with self._lock:
-            return self._ready and not self._closed
-
-    def command(
-        self,
-        method: str,
-        params: Optional[dict[str, Any]] = None,
-        timeout: float = 3.0,
-    ) -> dict[str, Any]:
-        with self._lock:
-            if self._closed:
-                raise DebuggerBridgeError("Action-scope target is disconnected")
-            command_id = self._next_command_id
-            self._next_command_id += 1
-            pending = PendingCommand(threading.Event())
-            self._pending[command_id] = pending
-        try:
-            self._connection.send_json(
-                {"id": command_id, "method": method, "params": params or {}}
-            )
-        except BaseException:
-            with self._lock:
-                self._pending.pop(command_id, None)
-            raise
-        if not pending.event.wait(timeout):
-            with self._lock:
-                self._pending.pop(command_id, None)
-            raise DebuggerBridgeError(f"Action-scope command timed out: {method}")
-        if pending.error is not None:
-            raise DebuggerBridgeError(str(pending.error))
-        response = pending.response or {}
-        error = response.get("error")
-        if isinstance(error, dict):
-            message = error.get("message")
-            raise ProtocolError(
-                message
-                if isinstance(message, str)
-                else f"Action-scope command failed: {method}"
-            )
-        result = response.get("result", {})
-        if not isinstance(result, dict):
-            raise ProtocolError(
-                f"Action-scope target returned malformed output: {method}"
-            )
-        return result
-
-    def command_without_wait(
-        self, method: str, params: Optional[dict[str, Any]] = None
-    ) -> bool:
-        with self._lock:
-            if self._closed:
-                return False
-            command_id = self._next_command_id
-            self._next_command_id += 1
-        try:
-            self._connection.send_json(
-                {"id": command_id, "method": method, "params": params or {}}
-            )
-        except DebuggerBridgeError:
-            return False
-        return True
-
-    def close(self) -> None:
-        with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            self._ready = False
-            pending = list(self._pending.values())
-            self._pending.clear()
-        error = WebSocketClosed("Action-scope target disconnected")
-        for command in pending:
-            command.error = error
-            command.event.set()
-        self._connection.close()
-        if threading.current_thread() is not self._reader:
-            self._reader.join(timeout=1.0)
-
-    def _read_messages(self) -> None:
-        error: Optional[BaseException] = None
-        try:
-            while True:
-                with self._lock:
-                    if self._closed:
-                        return
-                message = self._connection.receive_json()
-                if message is None:
-                    continue
-                command_id = message.get("id")
-                if isinstance(command_id, int):
-                    with self._lock:
-                        pending = self._pending.pop(command_id, None)
-                    if pending is not None:
-                        pending.response = message
-                        pending.event.set()
-                    continue
-                method = message.get("method")
-                params = message.get("params", {})
-                if isinstance(method, str) and isinstance(params, dict):
-                    self._event_handler(self, method, params)
-        except (OSError, DebuggerBridgeError, json.JSONDecodeError) as exception:
-            error = exception
-        finally:
-            with self._lock:
-                already_closed = self._closed
-                self._closed = True
-                self._ready = False
-                pending = list(self._pending.values())
-                self._pending.clear()
-            failure = error or WebSocketClosed("Action-scope target disconnected")
-            for command in pending:
-                command.error = failure
-                command.event.set()
-            self._connection.close()
-            if not already_closed:
-                self._close_handler(self.target_id, failure)
+from debugger.heap_snapshot import (
+    HeapSnapshotCapture,
+    HeapSnapshotCollector,
+)
+from debugger.limits import (
+    AUTOMATION_EXECUTION_TIMEOUT_MS,
+    AUTOMATION_WATCHDOG_GRACE_SECONDS,
+    FORBIDDEN_OBJECT_EXPERIMENT_PROPERTIES,
+    HEAP_SNAPSHOT_CAPTURE_TIMEOUT_SECONDS,
+    HEAP_SNAPSHOT_DIFF_TIMEOUT_SECONDS,
+    HEAP_SNAPSHOT_PROBE_TIMEOUT_SECONDS,
+    HEAP_SNAPSHOT_SEARCH_TIMEOUT_SECONDS,
+    INTERCEPTION_RUN_TIMEOUT_SECONDS,
+    LIVE_OBJECT_SEARCH_TIMEOUT_MS,
+    MAX_ACTION_SCOPE_PENDING_TRIGGERS,
+    MAX_ACTION_SCOPE_TARGETS,
+    MAX_ACTIVE_PORT_BYTES,
+    MAX_ASYNC_STACK_DEPTH,
+    MAX_AUTOMATION_AUTO_RECIPES,
+    MAX_AUTOMATION_AUTO_RUNS,
+    MAX_AUTOMATION_BINDING_REPORT_BYTES,
+    MAX_AUTOMATION_LOG_BYTES,
+    MAX_AUTOMATION_LOGS,
+    MAX_AUTOMATION_RECIPE_SOURCE_BYTES,
+    MAX_AUTOMATION_RECIPES,
+    MAX_AUTOMATION_RESULT_BYTES,
+    MAX_AUTOMATION_RETAINED_RUNS,
+    MAX_AUTOMATION_RUNS,
+    MAX_AUTOMATION_TOTAL_SOURCE_BYTES,
+    MAX_AUTOMATION_VARIABLE_BYTES,
+    MAX_AUTOMATION_VARIABLE_VALUE_BYTES,
+    MAX_AUTOMATION_VARIABLES,
+    MAX_BREAKPOINT_LOCATIONS,
+    MAX_BREAKPOINT_TEXT_BYTES,
+    MAX_BREAKPOINTS,
+    MAX_CALL_FRAMES,
+    MAX_CONSOLE_ARGUMENTS,
+    MAX_CONSOLE_ENTRIES,
+    MAX_EVENT_BREAKPOINTS,
+    MAX_HEAP_INCOMING_REFERENCES,
+    MAX_HEAP_RETAINING_PATH,
+    MAX_HEAP_SNAPSHOT_BYTES,
+    MAX_HEAP_SNAPSHOT_RESULTS,
+    MAX_INTERCEPTION_AUDIT_ENTRIES,
+    MAX_INTERCEPTION_BODY_BYTES,
+    MAX_INTERCEPTION_HEADER_BYTES,
+    MAX_INTERCEPTION_HEADER_VALUE_BYTES,
+    MAX_INTERCEPTION_HEADERS,
+    MAX_INTERCEPTION_METHOD_BYTES,
+    MAX_INTERCEPTION_PENDING_REQUESTS,
+    MAX_INTERCEPTION_RESPONSE_BYTES,
+    MAX_INTERCEPTION_URL_BYTES,
+    MAX_LIVE_OBJECT_PREVIEW_PROPERTIES,
+    MAX_LIVE_OBJECT_RESULTS,
+    MAX_LIVE_OBJECT_SCAN,
+    MAX_MEMORY_ORIGIN_TRACE_AFTER_STEPS,
+    MAX_MEMORY_ORIGIN_TRACE_BEFORE_STEPS,
+    MAX_MEMORY_ORIGIN_TRACE_STEPS,
+    MAX_OBJECT_EXPERIMENT_AUDIT_ENTRIES,
+    MAX_OBJECT_EXPERIMENT_MUTATIONS,
+    MAX_OBJECT_EXPERIMENT_PROPERTY_BYTES,
+    MAX_OBJECT_EXPERIMENT_STRING_BYTES,
+    MAX_OBJECT_EXPERIMENT_VALUE_BYTES,
+    MAX_OBJECT_EXPERIMENT_VALUE_DEPTH,
+    MAX_OBJECT_EXPERIMENT_VALUE_ENTRIES,
+    MAX_REMOTE_TEXT_BYTES,
+    MAX_REPEATER_HISTORY_BYTES,
+    MAX_REPEATER_HISTORY_ENTRIES,
+    MAX_REPEATER_TIMEOUT_MS,
+    MAX_REPEATER_VARIABLE_BYTES,
+    MAX_REPEATER_VARIABLES,
+    MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES,
+    MAX_RUNTIME_HOOK_BINDINGS,
+    MAX_RUNTIME_HOOK_BREAKPOINTS,
+    MAX_RUNTIME_HOOK_CONDITION_BYTES,
+    MAX_RUNTIME_HOOK_HITS,
+    MAX_RUNTIME_HOOK_LABEL_BYTES,
+    MAX_RUNTIME_HOOK_LOGIC_BYTES,
+    MAX_RUNTIME_HOOK_RETAINED_HITS,
+    MAX_RUNTIME_HOOK_RETURN_BYTES,
+    MAX_RUNTIME_HOOK_RETURN_POINTS,
+    MAX_RUNTIME_HOOKS,
+    MAX_SCOPE_PROPERTIES,
+    MAX_SCOPES_PER_FRAME,
+    MAX_SCRIPT_SOURCE_BYTES,
+    MAX_SCRIPTS,
+    MAX_TARGET_ID_BYTES,
+    MAX_TARGET_LIST_BYTES,
+    MAX_TARGET_TYPE_BYTES,
+    MAX_TARGET_URL_BYTES,
+    MAX_TARGETS,
+    MAX_TOTAL_SCOPE_PROPERTIES,
+    MAX_WATCH_EXPRESSION_BYTES,
+    MAX_WATCHES,
+    MAX_XHR_BREAKPOINTS,
+    MEMORY_ORIGIN_TRACE_FRAMEWORK_PATTERNS,
+    MEMORY_ORIGIN_TRACE_IDLE_TIMEOUT_SECONDS,
+    MEMORY_ORIGIN_TRACE_TIMEOUT_SECONDS,
+    OBJECT_EXPERIMENT_NAVIGATION_TIMEOUT_SECONDS,
+    RUNTIME_HOOK_EVALUATION_TIMEOUT_MS,
+)
+from debugger.memory import (
+    empty_object_experiment_descriptor,
+    live_object_search_criteria,
+    normalize_heap_snapshot_probe,
+    normalize_object_experiment_descriptor,
+    normalize_object_experiment_value,
+    optional_search_text,
+)
+from debugger.requests import (
+    compare_repeater_entries,
+    default_request_interception_rule,
+    normalize_repeater_result,
+    normalize_repeater_template,
+    normalize_repeater_variables,
+    normalize_request_interception_request,
+    normalize_request_interception_result,
+    normalize_request_interception_rule,
+    redacted_request_url,
+    request_interception_preflight_headers,
+    resolve_repeater_request,
+    validate_request_interception_url,
+)
+from debugger.runtime_scripts import (
+    AUTOMATION_RECIPE_FUNCTION,
+    LIVE_OBJECT_SEARCH_FUNCTION,
+    OBJECT_EXPERIMENT_MUTATE_FUNCTION,
+    REQUEST_INTERCEPTION_FUNCTION,
+)
+from debugger.transport import (
+    ActionScopeTargetSession,
+    NativeDebuggerConnection,
+    PendingCommand,
+)
+from debugger.validation import (
+    bounded_integer,
+    is_finite_protocol_number,
+    required_protocol_identifier,
+    required_text,
+    runtime_result_object_id,
+    truncate_text,
+)
 
 
 class DebuggerBridge:
@@ -1183,7 +230,7 @@ class DebuggerBridge:
         self._next_request_interception_id = 1
         self._next_request_interception_audit_id = 1
         self._request_interception = self._empty_request_interception()
-        self._request_interception_rule = self._default_request_interception_rule()
+        self._request_interception_rule = default_request_interception_rule()
         self._request_interception_configured = False
         self._request_interception_context_id: Optional[str] = None
         self._request_interception_return_target_id: Optional[str] = None
@@ -1404,14 +451,14 @@ class DebuggerBridge:
         elif action == "step_out":
             self._command("Debugger.stepOut")
         elif action == "restart_frame":
-            frame_id = self._required_text(request, "call_frame_id", 4_096)
+            frame_id = required_text(request, "call_frame_id", 4_096)
             self._command(
                 "Debugger.restartFrame", {"callFrameId": frame_id, "mode": "StepInto"}
             )
         elif action == "set_breakpoint":
             return self._set_breakpoint(request)
         elif action == "remove_breakpoint":
-            breakpoint_id = self._required_text(
+            breakpoint_id = required_text(
                 request, "breakpoint_id", MAX_BREAKPOINT_TEXT_BYTES
             )
             self._command("Debugger.removeBreakpoint", {"breakpointId": breakpoint_id})
@@ -1419,7 +466,7 @@ class DebuggerBridge:
                 self._breakpoints.pop(breakpoint_id, None)
                 self._changed()
         elif action == "update_breakpoint":
-            breakpoint_id = self._required_text(
+            breakpoint_id = required_text(
                 request, "breakpoint_id", MAX_BREAKPOINT_TEXT_BYTES
             )
             with self._lock:
@@ -1459,7 +506,7 @@ class DebuggerBridge:
                 self._pause_on_exceptions = mode
                 self._changed()
         elif action == "add_watch":
-            expression = self._required_text(
+            expression = required_text(
                 request, "expression", MAX_WATCH_EXPRESSION_BYTES
             )
             with self._lock:
@@ -1478,14 +525,14 @@ class DebuggerBridge:
             if watch_frame_id is not None:
                 self._evaluate_watches_async(watch_frame_id)
         elif action == "remove_watch":
-            watch_id = self._required_text(request, "watch_id", 32)
+            watch_id = required_text(request, "watch_id", 32)
             with self._lock:
                 self._watches = [
                     watch for watch in self._watches if watch["id"] != watch_id
                 ]
                 self._changed()
         elif action == "evaluate_watches":
-            frame_id = self._required_text(request, "call_frame_id", 4_096)
+            frame_id = required_text(request, "call_frame_id", 4_096)
             with self._lock:
                 valid_frame = self._paused is not None and any(
                     frame["id"] == frame_id for frame in self._paused["call_frames"]
@@ -1498,7 +545,7 @@ class DebuggerBridge:
         elif action == "set_xhr_breakpoint":
             self._set_xhr_breakpoint(request)
         elif action == "remove_xhr_breakpoint":
-            pattern = self._required_text(
+            pattern = required_text(
                 request, "pattern", MAX_BREAKPOINT_TEXT_BYTES, allow_empty=True
             )
             self._command("DOMDebugger.removeXHRBreakpoint", {"url": pattern})
@@ -1508,7 +555,7 @@ class DebuggerBridge:
                 ]
                 self._changed()
         elif action == "set_event_breakpoint":
-            event_name = self._required_text(request, "event_name", 256)
+            event_name = required_text(request, "event_name", 256)
             with self._lock:
                 if (
                     event_name not in self._event_breakpoints
@@ -1523,7 +570,7 @@ class DebuggerBridge:
                     self._event_breakpoints.append(event_name)
                 self._changed()
         elif action == "remove_event_breakpoint":
-            event_name = self._required_text(request, "event_name", 256)
+            event_name = required_text(request, "event_name", 256)
             self._command(
                 "DOMDebugger.removeEventListenerBreakpoint", {"eventName": event_name}
             )
@@ -1533,7 +580,7 @@ class DebuggerBridge:
                 ]
                 self._changed()
         elif action == "select_target":
-            target_id = self._required_text(request, "target_id", 4_096)
+            target_id = required_text(request, "target_id", 4_096)
             with self._lock:
                 if not any(target["id"] == target_id for target in self._targets):
                     raise DebuggerBridgeError("Debugger target is unavailable")
@@ -1659,7 +706,7 @@ class DebuggerBridge:
         }
 
     def _search_live_objects(self, request: dict[str, Any]) -> dict[str, Any]:
-        criteria = self._live_object_search_criteria(request)
+        criteria = live_object_search_criteria(request)
         prototype_id: Optional[str] = None
         objects_id: Optional[str] = None
         try:
@@ -1671,11 +718,11 @@ class DebuggerBridge:
                     "silent": True,
                 },
             )
-            prototype_id = self._runtime_result_object_id(prototype, "prototype")
+            prototype_id = runtime_result_object_id(prototype, "prototype")
             objects = self._command(
                 "Runtime.queryObjects", {"prototypeObjectId": prototype_id}, timeout=5.0
             )
-            objects_id = self._runtime_result_object_id(
+            objects_id = runtime_result_object_id(
                 objects, "object collection", field="objects"
             )
             evaluated = self._command(
@@ -1707,83 +754,6 @@ class DebuggerBridge:
         document = remote.get("value") if isinstance(remote, dict) else None
         return self._normalize_live_object_search(document)
 
-    def _live_object_search_criteria(
-        self, request: dict[str, Any]
-    ) -> dict[str, Any]:
-        property_query = self._optional_search_text(request, "property_query")
-        value_query = self._optional_search_text(request, "value_query")
-        class_query = self._optional_search_text(request, "class_query")
-        regex = request.get("regex", False)
-        case_sensitive = request.get("case_sensitive", False)
-        include_shape_values = request.get("include_shape_values", False)
-        if not all(
-            isinstance(value, bool)
-            for value in (regex, case_sensitive, include_shape_values)
-        ):
-            raise DebuggerBridgeError("Live object search options must be boolean")
-
-        shape_text = request.get("shape", "")
-        if not isinstance(shape_text, str):
-            raise DebuggerBridgeError("Live object shape must be JSON text")
-        if len(shape_text.encode("utf-8")) > MAX_LIVE_OBJECT_SHAPE_BYTES:
-            raise DebuggerBridgeError("Live object shape exceeds the 4 KiB limit")
-        shape: Optional[Any] = None
-        if shape_text.strip():
-            try:
-                shape = json.loads(shape_text)
-            except json.JSONDecodeError as exception:
-                raise DebuggerBridgeError(
-                    "Live object shape must be valid JSON"
-                ) from exception
-            if not isinstance(shape, (dict, list)):
-                raise DebuggerBridgeError("Live object shape must be an object or array")
-
-        threshold = request.get("similarity_threshold", 0.75)
-        if (
-            not self._is_finite_protocol_number(threshold)
-            or isinstance(threshold, bool)
-            or threshold < 0
-            or threshold > 1
-        ):
-            raise DebuggerBridgeError(
-                "Live object similarity threshold must be between 0 and 1"
-            )
-        if not any((property_query, value_query, class_query, shape is not None)):
-            raise DebuggerBridgeError("Live object search requires at least one criterion")
-
-        return {
-            "propertyQuery": property_query,
-            "valueQuery": value_query,
-            "classQuery": class_query,
-            "regex": regex,
-            "caseSensitive": case_sensitive,
-            "shape": shape,
-            "includeShapeValues": include_shape_values,
-            "similarityThreshold": float(threshold),
-            "resultLimit": MAX_LIVE_OBJECT_RESULTS,
-            "scanLimit": MAX_LIVE_OBJECT_SCAN,
-            "previewProperties": MAX_LIVE_OBJECT_PREVIEW_PROPERTIES,
-            "propertyScanLimit": MAX_LIVE_OBJECT_SEARCH_PROPERTIES,
-            "timeoutMs": LIVE_OBJECT_SEARCH_TIMEOUT_MS,
-        }
-
-    def _optional_search_text(self, request: dict[str, Any], field: str) -> str:
-        value = request.get(field, "")
-        if not isinstance(value, str):
-            raise DebuggerBridgeError("Live object search criteria must be text")
-        if len(value.encode("utf-8")) > MAX_LIVE_OBJECT_QUERY_BYTES:
-            raise DebuggerBridgeError("Live object search criterion exceeds 512 bytes")
-        return value
-
-    @staticmethod
-    def _runtime_result_object_id(
-        result: dict[str, Any], label: str, *, field: str = "result"
-    ) -> str:
-        remote = result.get(field)
-        object_id = remote.get("objectId") if isinstance(remote, dict) else None
-        if not isinstance(object_id, str) or not object_id:
-            raise ProtocolError(f"Debugger returned a malformed {label}")
-        return object_id
 
     def _normalize_live_object_search(self, value: Any) -> dict[str, Any]:
         if not isinstance(value, dict) or value.get("protocolVersion") != 2:
@@ -1836,7 +806,7 @@ class DebuggerBridge:
                 or (
                     similarity is not None
                     and (
-                        not self._is_finite_protocol_number(similarity)
+                        not is_finite_protocol_number(similarity)
                         or isinstance(similarity, bool)
                         or similarity < 0
                         or similarity > 1
@@ -1857,15 +827,15 @@ class DebuggerBridge:
                     )
                 properties.append(
                     {
-                        "name": self._truncate_text(raw_property["name"]),
-                        "type": self._truncate_text(raw_property["type"], 128),
-                        "value": self._truncate_text(raw_property["value"]),
+                        "name": truncate_text(raw_property["name"]),
+                        "type": truncate_text(raw_property["type"], 128),
+                        "value": truncate_text(raw_property["value"]),
                     }
                 )
             results.append(
                 {
-                    "id": self._truncate_text(result_id, 128),
-                    "class_name": self._truncate_text(class_name, 256),
+                    "id": truncate_text(result_id, 128),
+                    "class_name": truncate_text(class_name, 256),
                     "property_count": property_count,
                     "properties_truncated": properties_truncated,
                     "similarity": float(similarity)
@@ -1959,10 +929,10 @@ class DebuggerBridge:
     def _navigate_object_experiment(
         self, request: dict[str, Any]
     ) -> dict[str, Any]:
-        url = self._required_text(
+        url = required_text(
             request, "url", MAX_INTERCEPTION_URL_BYTES
         ).strip()
-        self._validate_request_interception_url(url)
+        validate_request_interception_url(url)
         with self._lock:
             self._require_object_experiment_target_locked(require_navigation=False)
             stale_group = self._clear_object_experiment_search_locked()
@@ -1970,7 +940,7 @@ class DebuggerBridge:
             self._next_object_experiment_navigation_id += 1
             self._object_experiment["state"] = "navigating"
             self._object_experiment["navigation_id"] = navigation_id
-            self._object_experiment["url"] = self._redacted_request_url(url)
+            self._object_experiment["url"] = redacted_request_url(url)
             self._object_experiment["message"] = (
                 "Opening one credential-free page inside the disposable context."
             )
@@ -1984,7 +954,7 @@ class DebuggerBridge:
             error_text = navigation.get("errorText")
             if isinstance(error_text, str) and error_text:
                 raise DebuggerBridgeError(
-                    self._truncate_text(f"Object Lab navigation failed: {error_text}", 512)
+                    truncate_text(f"Object Lab navigation failed: {error_text}", 512)
                 )
             deadline = time.monotonic() + OBJECT_EXPERIMENT_NAVIGATION_TIMEOUT_SECONDS
             loaded_url = url
@@ -2023,12 +993,12 @@ class DebuggerBridge:
                     pass
                 time.sleep(0.05)
             final_url = urlunparse(urlparse(loaded_url)._replace(fragment=""))
-            self._validate_request_interception_url(final_url)
+            validate_request_interception_url(final_url)
         except DebuggerBridgeError as exception:
             with self._lock:
                 if self._object_experiment["navigation_id"] == navigation_id:
                     self._object_experiment["state"] = "error"
-                    self._object_experiment["message"] = self._truncate_text(
+                    self._object_experiment["message"] = truncate_text(
                         str(exception), 512
                     )
                     self._changed()
@@ -2038,7 +1008,7 @@ class DebuggerBridge:
             if self._object_experiment["navigation_id"] != navigation_id:
                 raise DebuggerBridgeError("Object Lab navigation became stale")
             self._object_experiment["state"] = "loaded"
-            self._object_experiment["url"] = self._redacted_request_url(loaded_url)
+            self._object_experiment["url"] = redacted_request_url(loaded_url)
             self._object_experiment["message"] = (
                 "Isolated page loaded. Run a bounded live-object search."
             )
@@ -2053,7 +1023,7 @@ class DebuggerBridge:
     def _search_object_experiment(
         self, request: dict[str, Any]
     ) -> dict[str, Any]:
-        criteria = self._live_object_search_criteria(request)
+        criteria = live_object_search_criteria(request)
         with self._lock:
             self._require_object_experiment_target_locked(require_navigation=True)
             stale_group = self._clear_object_experiment_search_locked()
@@ -2081,13 +1051,13 @@ class DebuggerBridge:
                     "silent": True,
                 },
             )
-            prototype_id = self._runtime_result_object_id(prototype, "prototype")
+            prototype_id = runtime_result_object_id(prototype, "prototype")
             objects = self._command(
                 "Runtime.queryObjects",
                 {"prototypeObjectId": prototype_id, "objectGroup": group},
                 timeout=5.0,
             )
-            objects_id = self._runtime_result_object_id(
+            objects_id = runtime_result_object_id(
                 objects, "object collection", field="objects"
             )
             evaluated = self._command(
@@ -2128,7 +1098,7 @@ class DebuggerBridge:
                     and self._object_experiment["navigation_id"] == navigation_id
                 ):
                     self._object_experiment["state"] = "error"
-                    self._object_experiment["message"] = self._truncate_text(
+                    self._object_experiment["message"] = truncate_text(
                         str(exception), 512
                     )
                     self._changed()
@@ -2190,11 +1160,11 @@ class DebuggerBridge:
             or search_id > 2**53 - 1
         ):
             raise DebuggerBridgeError("Object Lab search identifier is invalid")
-        result_id = self._required_text(request, "result_id", 128)
+        result_id = required_text(request, "result_id", 128)
         if not result_id.isdigit():
             raise DebuggerBridgeError("Object Lab result identifier is invalid")
         result_index = int(result_id)
-        property_name = self._required_text(
+        property_name = required_text(
             request, "property", MAX_OBJECT_EXPERIMENT_PROPERTY_BYTES
         )
         if (
@@ -2209,7 +1179,7 @@ class DebuggerBridge:
         if operation == "set":
             if "value" not in request:
                 raise DebuggerBridgeError("Object Lab set requires a JSON value")
-            value, canonical = self._normalize_object_experiment_value(request["value"])
+            value, canonical = normalize_object_experiment_value(request["value"])
             value_bytes = len(canonical)
             value_digest = hashlib.sha256(canonical).hexdigest()
         elif "value" in request:
@@ -2275,7 +1245,7 @@ class DebuggerBridge:
             )
             if isinstance(candidate.get("exceptionDetails"), dict):
                 raise DebuggerBridgeError("Object Lab result is no longer available")
-            candidate_id = self._runtime_result_object_id(candidate, "object result")
+            candidate_id = runtime_result_object_id(candidate, "object result")
             config: dict[str, Any] = {
                 "operation": operation,
                 "property": property_name,
@@ -2308,9 +1278,9 @@ class DebuggerBridge:
             mutation = {
                 "ok": False,
                 "outcome": "error",
-                "error": self._truncate_text(str(exception), 512),
-                "before": self._empty_object_experiment_descriptor("unknown"),
-                "after": self._empty_object_experiment_descriptor("unknown"),
+                "error": truncate_text(str(exception), 512),
+                "before": empty_object_experiment_descriptor("unknown"),
+                "after": empty_object_experiment_descriptor("unknown"),
                 "object": None,
             }
         finally:
@@ -2374,112 +1344,6 @@ class DebuggerBridge:
             "generation": self.generation(),
         }
 
-    def _normalize_object_experiment_value(
-        self, value: Any
-    ) -> tuple[Any, bytes]:
-        entries = 0
-
-        def validate(candidate: Any, depth: int) -> None:
-            nonlocal entries
-            if depth > MAX_OBJECT_EXPERIMENT_VALUE_DEPTH:
-                raise DebuggerBridgeError("Object Lab JSON value exceeds depth 8")
-            if candidate is None or isinstance(candidate, bool):
-                return
-            if isinstance(candidate, int):
-                if abs(candidate) > 2**53 - 1:
-                    raise DebuggerBridgeError(
-                        "Object Lab integer exceeds JavaScript's exact range"
-                    )
-                return
-            if isinstance(candidate, float):
-                if not math.isfinite(candidate):
-                    raise DebuggerBridgeError("Object Lab number must be finite")
-                return
-            if isinstance(candidate, str):
-                if len(candidate.encode("utf-8")) > MAX_OBJECT_EXPERIMENT_STRING_BYTES:
-                    raise DebuggerBridgeError("Object Lab JSON string exceeds 4 KiB")
-                return
-            if isinstance(candidate, list):
-                entries += len(candidate)
-                if entries > MAX_OBJECT_EXPERIMENT_VALUE_ENTRIES:
-                    raise DebuggerBridgeError("Object Lab JSON value exceeds 256 entries")
-                for item in candidate:
-                    validate(item, depth + 1)
-                return
-            if isinstance(candidate, dict):
-                entries += len(candidate)
-                if entries > MAX_OBJECT_EXPERIMENT_VALUE_ENTRIES:
-                    raise DebuggerBridgeError("Object Lab JSON value exceeds 256 entries")
-                for key, item in candidate.items():
-                    if (
-                        not isinstance(key, str)
-                        or len(key.encode("utf-8"))
-                        > MAX_OBJECT_EXPERIMENT_STRING_BYTES
-                    ):
-                        raise DebuggerBridgeError(
-                            "Object Lab JSON object key exceeds 4 KiB"
-                        )
-                    validate(item, depth + 1)
-                return
-            raise DebuggerBridgeError("Object Lab set value must be JSON data")
-
-        validate(value, 0)
-        try:
-            canonical = json.dumps(
-                value,
-                allow_nan=False,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-        except (TypeError, ValueError) as exception:
-            raise DebuggerBridgeError("Object Lab set value must be valid JSON") from exception
-        if len(canonical) > MAX_OBJECT_EXPERIMENT_VALUE_BYTES:
-            raise DebuggerBridgeError("Object Lab JSON value exceeds 16 KiB")
-        return value, canonical
-
-    @staticmethod
-    def _empty_object_experiment_descriptor(value_type: str) -> dict[str, Any]:
-        return {
-            "exists": False,
-            "type": value_type,
-            "class_name": "",
-            "writable": False,
-            "configurable": False,
-            "preview": None,
-        }
-
-    def _normalize_object_experiment_descriptor(self, value: Any) -> dict[str, Any]:
-        if not isinstance(value, dict):
-            raise ProtocolError("Object Lab returned a malformed property descriptor")
-        exists = value.get("exists")
-        value_type = value.get("type")
-        class_name = value.get("className", "")
-        writable = value.get("writable")
-        configurable = value.get("configurable")
-        preview = value.get("preview")
-        if (
-            not isinstance(exists, bool)
-            or not isinstance(value_type, str)
-            or not value_type
-            or len(value_type.encode("utf-8")) > 128
-            or not isinstance(class_name, str)
-            or len(class_name.encode("utf-8")) > 256
-            or not isinstance(writable, bool)
-            or not isinstance(configurable, bool)
-            or (preview is not None and not isinstance(preview, str))
-        ):
-            raise ProtocolError("Object Lab returned an invalid property descriptor")
-        return {
-            "exists": exists,
-            "type": value_type,
-            "class_name": class_name,
-            "writable": writable,
-            "configurable": configurable,
-            "preview": self._truncate_text(preview, 512)
-            if isinstance(preview, str)
-            else None,
-        }
 
     def _normalize_object_experiment_mutation(self, value: Any) -> dict[str, Any]:
         outcomes = {
@@ -2508,8 +1372,8 @@ class DebuggerBridge:
             raise ProtocolError("Object Lab returned an invalid mutation error")
         if value["ok"] != (error is None):
             raise ProtocolError("Object Lab returned an inconsistent mutation result")
-        before = self._normalize_object_experiment_descriptor(value.get("before"))
-        after = self._normalize_object_experiment_descriptor(value.get("after"))
+        before = normalize_object_experiment_descriptor(value.get("before"))
+        after = normalize_object_experiment_descriptor(value.get("after"))
         raw_object = value.get("object")
         normalized_object = None
         if raw_object is not None:
@@ -2560,7 +1424,7 @@ class DebuggerBridge:
             "result_id": result_id,
             "operation": operation,
             "property": property_name,
-            "target_class": self._truncate_text(target_class, 256),
+            "target_class": truncate_text(target_class, 256),
             "outcome": mutation["outcome"],
             "success": mutation["ok"],
             "before_type": mutation["before"]["type"],
@@ -2596,102 +1460,16 @@ class DebuggerBridge:
         if self._runtime_hook_processing:
             raise DebuggerBridgeError("Runtime Hooks is handling a function call")
 
-    @staticmethod
-    def _runtime_hook_text(
-        request: dict[str, Any], field: str, limit: int
-    ) -> str:
-        value = request.get(field, "")
-        if not isinstance(value, str) or len(value.encode("utf-8")) > limit:
-            raise DebuggerBridgeError(
-                f"Runtime Hooks {field.replace('_', ' ')} is invalid or oversized"
-            )
-        return value
-
-    @classmethod
-    def _runtime_hook_source_label(cls, url: str) -> str:
-        if not url:
-            return "(anonymous script)"
-        try:
-            parsed = urlparse(url)
-        except ValueError:
-            return "(anonymous script)"
-        if parsed.scheme in {"http", "https"}:
-            return cls._redacted_request_url(url) or "(anonymous script)"
-        if parsed.scheme == "data":
-            return "data:(inline script)"
-        return cls._truncate_text(
-            urlunparse(parsed._replace(query="", fragment="")),
-            MAX_INTERCEPTION_URL_BYTES,
-        )
-
-    @staticmethod
-    def _normalize_runtime_hook_json(value: Any) -> tuple[Any, bytes]:
-        entries = 0
-
-        def validate(candidate: Any, depth: int) -> None:
-            nonlocal entries
-            if depth > MAX_OBJECT_EXPERIMENT_VALUE_DEPTH:
-                raise DebuggerBridgeError("Runtime Hooks JSON exceeds depth 8")
-            if candidate is None or isinstance(candidate, bool):
-                return
-            if isinstance(candidate, int):
-                if abs(candidate) > 2**53 - 1:
-                    raise DebuggerBridgeError(
-                        "Runtime Hooks integer exceeds JavaScript's exact range"
-                    )
-                return
-            if isinstance(candidate, float):
-                if not math.isfinite(candidate):
-                    raise DebuggerBridgeError("Runtime Hooks number must be finite")
-                return
-            if isinstance(candidate, str):
-                if len(candidate.encode("utf-8")) > MAX_RUNTIME_HOOK_RETURN_BYTES:
-                    raise DebuggerBridgeError("Runtime Hooks JSON string exceeds 8 KiB")
-                return
-            if isinstance(candidate, list):
-                entries += len(candidate)
-                if entries > MAX_OBJECT_EXPERIMENT_VALUE_ENTRIES:
-                    raise DebuggerBridgeError("Runtime Hooks JSON exceeds 256 entries")
-                for item in candidate:
-                    validate(item, depth + 1)
-                return
-            if isinstance(candidate, dict):
-                entries += len(candidate)
-                if entries > MAX_OBJECT_EXPERIMENT_VALUE_ENTRIES:
-                    raise DebuggerBridgeError("Runtime Hooks JSON exceeds 256 entries")
-                for key, item in candidate.items():
-                    if not isinstance(key, str) or len(key.encode("utf-8")) > 4096:
-                        raise DebuggerBridgeError("Runtime Hooks JSON key is invalid")
-                    validate(item, depth + 1)
-                return
-            raise DebuggerBridgeError("Runtime Hooks replacement must be JSON data")
-
-        validate(value, 0)
-        try:
-            canonical = json.dumps(
-                value,
-                allow_nan=False,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-        except (TypeError, ValueError) as exception:
-            raise DebuggerBridgeError(
-                "Runtime Hooks replacement must be valid JSON"
-            ) from exception
-        if len(canonical) > MAX_RUNTIME_HOOK_RETURN_BYTES:
-            raise DebuggerBridgeError("Runtime Hooks replacement exceeds 8 KiB")
-        return value, canonical
 
     def _normalize_runtime_hook_definition(
         self, request: dict[str, Any]
     ) -> dict[str, Any]:
-        label = self._runtime_hook_text(
+        label = runtime_hook_text(
             request, "label", MAX_RUNTIME_HOOK_LABEL_BYTES
         ).strip()
         if not label:
             raise DebuggerBridgeError("Runtime Hooks label is required")
-        script_id = self._required_text(request, "script_id", MAX_TARGET_ID_BYTES)
+        script_id = required_text(request, "script_id", MAX_TARGET_ID_BYTES)
         line = request.get("line")
         column = request.get("column", 0)
         if not all(
@@ -2705,13 +1483,13 @@ class DebuggerBridge:
             raise DebuggerBridgeError("Runtime Hooks phases must be boolean")
         if not entry_enabled and not return_enabled:
             raise DebuggerBridgeError("Runtime Hooks requires an entry or return phase")
-        condition = self._runtime_hook_text(
+        condition = runtime_hook_text(
             request, "condition", MAX_RUNTIME_HOOK_CONDITION_BYTES
         )
-        entry_logic = self._runtime_hook_text(
+        entry_logic = runtime_hook_text(
             request, "entry_logic", MAX_RUNTIME_HOOK_LOGIC_BYTES
         )
-        return_logic = self._runtime_hook_text(
+        return_logic = runtime_hook_text(
             request, "return_logic", MAX_RUNTIME_HOOK_LOGIC_BYTES
         )
         return_mode = request.get("return_mode", "none")
@@ -2721,7 +1499,7 @@ class DebuggerBridge:
         return_value: Any = None
         return_value_bytes = 0
         if return_mode == "expression":
-            return_expression = self._runtime_hook_text(
+            return_expression = runtime_hook_text(
                 request, "return_expression", MAX_RUNTIME_HOOK_RETURN_BYTES
             ).strip()
             if not return_expression:
@@ -2731,7 +1509,7 @@ class DebuggerBridge:
         elif return_mode == "json":
             if "return_value" not in request:
                 raise DebuggerBridgeError("Runtime Hooks JSON replacement is required")
-            return_value, canonical = self._normalize_runtime_hook_json(
+            return_value, canonical = normalize_runtime_hook_json(
                 request["return_value"]
             )
             return_value_bytes = len(canonical)
@@ -2749,7 +1527,7 @@ class DebuggerBridge:
                 raise DebuggerBridgeError(
                     "Runtime Hooks location is outside the selected script"
                 )
-            source_url = self._runtime_hook_source_label(script["url"])
+            source_url = runtime_hook_source_label(script["url"])
         return {
             "id": 0,
             "label": label,
@@ -2999,7 +1777,7 @@ class DebuggerBridge:
                         }
                     },
                 )
-                breakpoint_id = self._required_protocol_identifier(
+                breakpoint_id = required_protocol_identifier(
                     result.get("breakpointId"), "runtime hook breakpoint"
                 )
                 installed[breakpoint_id] = spec
@@ -3019,7 +1797,7 @@ class DebuggerBridge:
                     self._runtime_hook_points.clear()
                     self._runtime_hooks["active_points"] = 0
                     self._runtime_hooks["state"] = "disarmed"
-                    self._runtime_hooks["last_failure"] = self._truncate_text(
+                    self._runtime_hooks["last_failure"] = truncate_text(
                         str(exception), 512
                     )
                     self._runtime_hooks["message"] = (
@@ -3271,7 +2049,7 @@ class DebuggerBridge:
         for item in raw_properties[:MAX_RUNTIME_HOOK_BINDINGS]:
             if not isinstance(item, dict) or not isinstance(item.get("name"), str):
                 continue
-            name = self._truncate_text(item["name"], 256)
+            name = truncate_text(item["name"], 256)
             if isinstance(item.get("value"), dict):
                 preview = self._runtime_hook_remote_preview(item["value"])
                 accessor = False
@@ -3309,12 +2087,12 @@ class DebuggerBridge:
                 or len(original.encode("utf-8"))
                 > MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES
             )
-            remote["value"] = self._truncate_text(
+            remote["value"] = truncate_text(
                 original, MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES
             )
         for field in ("description", "unserializable_value", "class_name"):
             if isinstance(remote.get(field), str):
-                remote[field] = self._truncate_text(
+                remote[field] = truncate_text(
                     remote[field], MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES
                 )
         return remote
@@ -3355,8 +2133,8 @@ class DebuggerBridge:
             "hook_id": hook["id"],
             "target_id": self._runtime_hooks["target_id"],
             "label": hook["label"],
-            "source": self._truncate_text(hook["url"], MAX_INTERCEPTION_URL_BYTES),
-            "function": self._truncate_text(function_name, 256)
+            "source": truncate_text(hook["url"], MAX_INTERCEPTION_URL_BYTES),
+            "function": truncate_text(function_name, 256)
             if isinstance(function_name, str) and function_name
             else "(anonymous)",
             "category": phase,
@@ -3367,7 +2145,7 @@ class DebuggerBridge:
             "bindings_truncated": bindings_truncated,
             "original_return": original_return,
             "replacement_return": replacement_return,
-            "error": self._truncate_text(error, 512) if error else None,
+            "error": truncate_text(error, 512) if error else None,
         }
         self._next_runtime_hook_hit_id += 1
         self._runtime_hooks["total_hits"] += 1
@@ -3492,7 +2270,7 @@ class DebuggerBridge:
                                     ),
                                     "subtype": None,
                                     "class_name": None,
-                                    "description": self._truncate_text(
+                                    "description": truncate_text(
                                         json.dumps(
                                             hook["return_value"],
                                             ensure_ascii=False,
@@ -3561,7 +2339,7 @@ class DebuggerBridge:
                 if auto_disarm:
                     break
         except DebuggerBridgeError as exception:
-            fatal_error = self._truncate_text(str(exception), 512)
+            fatal_error = truncate_text(str(exception), 512)
             auto_disarm = True
         finally:
             try:
@@ -3571,7 +2349,7 @@ class DebuggerBridge:
             try:
                 self._command("Debugger.resume")
             except DebuggerBridgeError as exception:
-                fatal_error = self._truncate_text(str(exception), 512)
+                fatal_error = truncate_text(str(exception), 512)
                 auto_disarm = True
             deferred: Optional[dict[str, Any]] = None
             with self._lock:
@@ -3617,7 +2395,7 @@ class DebuggerBridge:
                     ).start()
                     return
                 except RuntimeError as exception:
-                    fatal_error = self._truncate_text(
+                    fatal_error = truncate_text(
                         f"Runtime Hooks worker could not continue: {exception}", 512
                     )
                     auto_disarm = True
@@ -3641,7 +2419,7 @@ class DebuggerBridge:
                 self._remove_runtime_hook_points(reason, expected_epoch=epoch)
 
     def _search_heap_snapshot(self, request: dict[str, Any]) -> dict[str, Any]:
-        query = self._optional_search_text(request, "query").strip()
+        query = optional_search_text(request, "query").strip()
         case_sensitive = request.get("case_sensitive", False)
         scope = request.get("scope", "all")
         if not query:
@@ -3718,7 +2496,7 @@ class DebuggerBridge:
             timer.cancel()
 
     def _start_memory_origin_trace(self, request: dict[str, Any]) -> dict[str, Any]:
-        query = self._optional_search_text(request, "query").strip()
+        query = optional_search_text(request, "query").strip()
         scope = request.get("scope", "all")
         case_sensitive = request.get("case_sensitive", False)
         before_steps = request.get("before_steps", 3)
@@ -3797,7 +2575,7 @@ class DebuggerBridge:
             self._complete_memory_origin_trace(
                 trace_id,
                 "error",
-                self._truncate_text(str(exception), 512),
+                truncate_text(str(exception), 512),
                 resume=False,
             )
             raise
@@ -3877,7 +2655,7 @@ class DebuggerBridge:
                 HEAP_SNAPSHOT_PROBE_TIMEOUT_SECONDS,
                 "probe",
             )
-            probe = self._normalize_heap_snapshot_probe(document)
+            probe = normalize_heap_snapshot_probe(document)
             if probe["scope"] != trace["scope"]:
                 raise ProtocolError(
                     "Native heap snapshot probe returned an unexpected scope"
@@ -3890,7 +2668,7 @@ class DebuggerBridge:
                 "aborted" if stopped else "error",
                 "Trace stopped."
                 if stopped
-                else self._truncate_text(str(exception), 512),
+                else truncate_text(str(exception), 512),
             )
             return
         finally:
@@ -4008,7 +2786,7 @@ class DebuggerBridge:
                 self._complete_memory_origin_trace(
                     trace_id,
                     "error",
-                    self._truncate_text(str(exception), 512),
+                    truncate_text(str(exception), 512),
                     resume=False,
                 )
                 return
@@ -4089,7 +2867,7 @@ class DebuggerBridge:
             self._memory_origin_trace_processing = False
             self._memory_origin_trace_stop_requested = False
             self._memory_origin_trace["state"] = state
-            self._memory_origin_trace["message"] = self._truncate_text(message, 512)
+            self._memory_origin_trace["message"] = truncate_text(message, 512)
             self._memory_origin_trace["elapsed_ms"] = max(
                 0,
                 int((time.monotonic() - self._memory_origin_trace_started) * 1_000),
@@ -4160,8 +2938,8 @@ class DebuggerBridge:
                 url = script["url"]
         return {
             "script_id": location["script_id"],
-            "url": self._truncate_text(url, MAX_TARGET_URL_BYTES),
-            "function_name": self._truncate_text(
+            "url": truncate_text(url, MAX_TARGET_URL_BYTES),
+            "function_name": truncate_text(
                 selected.get("function_name", "(anonymous)"), 512
             ),
             "line": location["line"],
@@ -4204,10 +2982,10 @@ class DebuggerBridge:
                 {
                     "id": target_id,
                     "type": target["type"],
-                    "title": self._truncate_text(target["title"], 512),
-                    "url": self._redacted_request_url(target["url"])
+                    "title": truncate_text(target["title"], 512),
+                    "url": redacted_request_url(target["url"])
                     if target["url"].startswith(("http://", "https://"))
-                    else self._truncate_text(target["url"], MAX_TARGET_URL_BYTES),
+                    else truncate_text(target["url"], MAX_TARGET_URL_BYTES),
                     "connected": session is not None and session.ready(),
                     "matched": self._action_scope_mode == "global"
                     or self._action_scope_target_id == target_id,
@@ -4268,7 +3046,7 @@ class DebuggerBridge:
             "matched_target_count": len(matched_targets),
             "connected_target_count": len(connected_targets),
             "target_overflow": self._action_scope_target_overflow,
-            "message": self._truncate_text(message, 512),
+            "message": truncate_text(message, 512),
             "rule_families": ["request_interception", "automation_recipes"],
             "target_only_families": [
                 "object_experiment",
@@ -4333,20 +3111,6 @@ class DebuggerBridge:
             return self._command_without_wait(method, params)
         return session.command_without_wait(method, params)
 
-    @staticmethod
-    def _default_request_interception_rule() -> dict[str, Any]:
-        return {
-            "mode": "continue",
-            "url_pattern": "*",
-            "method_filter": "",
-            "rewrite_url": "",
-            "rewrite_method": "",
-            "rewrite_headers": [],
-            "rewrite_body": "",
-            "response_code": 200,
-            "response_headers": [],
-            "response_body": "",
-        }
 
     @classmethod
     def _public_request_interception_rule(cls, rule: dict[str, Any]) -> dict[str, Any]:
@@ -4354,7 +3118,7 @@ class DebuggerBridge:
             "mode": rule["mode"],
             "url_pattern": rule["url_pattern"],
             "method_filter": rule["method_filter"],
-            "rewrite_url": cls._redacted_request_url(rule["rewrite_url"])
+            "rewrite_url": redacted_request_url(rule["rewrite_url"])
             if rule["rewrite_url"]
             else "",
             "rewrite_method": rule["rewrite_method"],
@@ -4376,7 +3140,7 @@ class DebuggerBridge:
             "created_at_ms": 0,
             "disposed_at_ms": 0,
             "rule": cls._public_request_interception_rule(
-                cls._default_request_interception_rule()
+                default_request_interception_rule()
             ),
             "last_request": None,
             "result": None,
@@ -4673,137 +3437,11 @@ class DebuggerBridge:
             and self._repeater["state"] in {"ready", "error"}
         )
 
-    @staticmethod
-    def _normalize_repeater_variables(value: Any) -> list[dict[str, str]]:
-        if not isinstance(value, dict) or len(value) > MAX_REPEATER_VARIABLES:
-            raise DebuggerBridgeError("Repeater variables must be a bounded object")
-        total_bytes = 0
-        variables = []
-        for name, variable_value in sorted(value.items()):
-            if not isinstance(name, str) or not isinstance(variable_value, str):
-                raise DebuggerBridgeError("Repeater variable names and values must be text")
-            name_bytes = len(name.encode("utf-8"))
-            value_bytes = len(variable_value.encode("utf-8"))
-            if (
-                not REPEATER_VARIABLE_NAME.fullmatch(name)
-                or name_bytes > MAX_REPEATER_VARIABLE_NAME_BYTES
-                or value_bytes > MAX_REPEATER_VARIABLE_VALUE_BYTES
-            ):
-                raise DebuggerBridgeError("Repeater variable is invalid or oversized")
-            total_bytes += name_bytes + value_bytes
-            if total_bytes > MAX_REPEATER_VARIABLE_BYTES:
-                raise DebuggerBridgeError("Repeater variables exceed 32 KiB")
-            variables.append({"name": name, "value": variable_value})
-        return variables
-
-    @classmethod
-    def _resolve_repeater_text(
-        cls, value: str, variables: dict[str, str]
-    ) -> tuple[str, set[str]]:
-        used: set[str] = set()
-        missing: set[str] = set()
-
-        def replace(match: re.Match[str]) -> str:
-            escaped = match.group(1) == "="
-            name = match.group(2)
-            if (
-                not REPEATER_VARIABLE_NAME.fullmatch(name)
-                or len(name.encode("utf-8")) > MAX_REPEATER_VARIABLE_NAME_BYTES
-            ):
-                raise DebuggerBridgeError("Repeater request contains an invalid variable")
-            if escaped:
-                return "{{" + name + "}}"
-            used.add(name)
-            if name not in variables:
-                missing.add(name)
-                return match.group(0)
-            return variables[name]
-
-        resolved = REPEATER_VARIABLE_TOKEN.sub(replace, value)
-        if missing:
-            names = ", ".join(sorted(missing)[:8])
-            raise DebuggerBridgeError(f"Unresolved Repeater variables: {names}")
-        return resolved, used
-
-    def _normalize_repeater_template(self, request: dict[str, Any]) -> dict[str, Any]:
-        url = self._required_text(request, "url", MAX_INTERCEPTION_URL_BYTES).strip()
-        if any(ord(character) < 0x20 or ord(character) == 0x7F for character in url):
-            raise DebuggerBridgeError("Repeater request URL is invalid")
-        method = request.get("method", "GET")
-        if (
-            not isinstance(method, str)
-            or not method.strip()
-            or len(method.strip().encode("utf-8")) > MAX_REPEATER_TEMPLATE_METHOD_BYTES
-            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in method)
-        ):
-            raise DebuggerBridgeError("Repeater request method template is invalid")
-        headers = self._normalize_request_interception_headers(
-            request.get("headers", {}), "Repeater request"
-        )
-        body = request.get("body", "")
-        if (
-            not isinstance(body, str)
-            or len(body.encode("utf-8")) > MAX_INTERCEPTION_BODY_BYTES
-        ):
-            raise DebuggerBridgeError("Repeater request body exceeds 64 KiB")
-        timeout_ms = request.get("timeout_ms", MAX_REPEATER_TIMEOUT_MS)
-        if (
-            not isinstance(timeout_ms, int)
-            or isinstance(timeout_ms, bool)
-            or timeout_ms < MIN_REPEATER_TIMEOUT_MS
-            or timeout_ms > MAX_REPEATER_TIMEOUT_MS
-        ):
-            raise DebuggerBridgeError("Repeater timeout must be between 100 and 30000 ms")
-        collection_request_id = request.get("collection_request_id")
-        if collection_request_id is not None and (
-            not isinstance(collection_request_id, int)
-            or isinstance(collection_request_id, bool)
-            or collection_request_id <= 0
-            or collection_request_id > 2**53 - 1
-        ):
-            raise DebuggerBridgeError("Repeater collection request ID is invalid")
-        return {
-            "url": url,
-            "method": method.strip(),
-            "headers": headers,
-            "body": body,
-            "timeout_ms": timeout_ms,
-            "collection_request_id": collection_request_id,
-        }
-
-    def _resolve_repeater_request(
-        self, template: dict[str, Any], variables: list[dict[str, str]]
-    ) -> tuple[dict[str, Any], list[str]]:
-        variable_map = {entry["name"]: entry["value"] for entry in variables}
-        url, used = self._resolve_repeater_text(template["url"], variable_map)
-        method, method_used = self._resolve_repeater_text(
-            template["method"], variable_map
-        )
-        used.update(method_used)
-        body, body_used = self._resolve_repeater_text(template["body"], variable_map)
-        used.update(body_used)
-        resolved_headers: dict[str, str] = {}
-        for header in template["headers"]:
-            header_value, header_used = self._resolve_repeater_text(
-                header["value"], variable_map
-            )
-            used.update(header_used)
-            resolved_headers[header["name"]] = header_value
-        resolved = self._normalize_request_interception_request(
-            {
-                "url": url,
-                "method": method,
-                "headers": resolved_headers,
-                "body": body,
-            }
-        )
-        resolved["timeout_ms"] = template["timeout_ms"]
-        return resolved, sorted(used)
 
     def _configure_repeater_variables(
         self, request: dict[str, Any]
     ) -> dict[str, Any]:
-        variables = self._normalize_repeater_variables(request.get("variables", {}))
+        variables = normalize_repeater_variables(request.get("variables", {}))
         with self._lock:
             if not self._repeater_context_ready_locked():
                 raise DebuggerBridgeError("The isolated Repeater target is not ready")
@@ -4849,10 +3487,10 @@ class DebuggerBridge:
             raise DebuggerBridgeError("Repeater could not reserve a request controller")
 
     def _run_repeater_request(self, request: dict[str, Any]) -> dict[str, Any]:
-        template = self._normalize_repeater_template(request)
+        template = normalize_repeater_template(request)
         with self._lock:
             variables = copy.deepcopy(self._repeater["variables"])
-        resolved, variable_names = self._resolve_repeater_request(template, variables)
+        resolved, variable_names = resolve_repeater_request(template, variables)
         with self._lock:
             if not self._repeater_context_ready_locked():
                 raise DebuggerBridgeError("The isolated Repeater target is not ready")
@@ -4869,7 +3507,7 @@ class DebuggerBridge:
                 "execution_id": execution_id,
                 "started_at_ms": started_at_ms,
                 "request": copy.deepcopy(template),
-                "resolved_url": self._redacted_request_url(resolved["url"]),
+                "resolved_url": redacted_request_url(resolved["url"]),
                 "resolved_method": resolved["method"],
                 "variable_names": variable_names,
                 "collection_request_id": template["collection_request_id"],
@@ -4887,7 +3525,7 @@ class DebuggerBridge:
                     self._repeater_active_execution_id = None
                     self._repeater["active_execution"] = None
                     self._repeater["state"] = "error"
-                    self._repeater["message"] = self._truncate_text(str(exception), 512)
+                    self._repeater["message"] = truncate_text(str(exception), 512)
                     self._changed()
             raise
 
@@ -4916,7 +3554,7 @@ class DebuggerBridge:
                     self._repeater_active_execution_id = None
                     self._repeater["active_execution"] = None
                     self._repeater["state"] = "error"
-                    self._repeater["message"] = self._truncate_text(
+                    self._repeater["message"] = truncate_text(
                         f"Repeater worker could not start: {exception}", 512
                     )
                     self._changed()
@@ -4972,7 +3610,7 @@ class DebuggerBridge:
                 )
             remote = evaluated.get("result")
             document = remote.get("value") if isinstance(remote, dict) else None
-            result = self._normalize_repeater_result(document)
+            result = normalize_repeater_result(document)
         except BaseException as exception:
             with self._lock:
                 cancelled = (
@@ -4990,7 +3628,7 @@ class DebuggerBridge:
                 "headers_truncated": False,
                 "body": "",
                 "body_truncated": False,
-                "error": self._truncate_text(
+                "error": truncate_text(
                     "Request cancelled" if cancelled else str(exception), 512
                 ),
                 "duration_ms": duration_ms,
@@ -5008,33 +3646,6 @@ class DebuggerBridge:
             result,
         )
 
-    def _normalize_repeater_result(self, value: Any) -> dict[str, Any]:
-        result = self._normalize_request_interception_result(value)
-        duration_ms = value.get("durationMs") if isinstance(value, dict) else None
-        cancelled = value.get("cancelled") if isinstance(value, dict) else None
-        timed_out = value.get("timedOut") if isinstance(value, dict) else None
-        if (
-            not isinstance(duration_ms, int)
-            or isinstance(duration_ms, bool)
-            or duration_ms < 0
-            or duration_ms > MAX_REPEATER_TIMEOUT_MS + 5_000
-            or not isinstance(cancelled, bool)
-            or not isinstance(timed_out, bool)
-            or (cancelled and timed_out)
-            or (result["ok"] and (cancelled or timed_out))
-        ):
-            raise ProtocolError("Debugger returned a malformed Repeater result")
-        result.update(
-            {
-                "duration_ms": duration_ms,
-                "cancelled": cancelled,
-                "timed_out": timed_out,
-                "body_sha256": hashlib.sha256(
-                    result["body"].encode("utf-8")
-                ).hexdigest(),
-            }
-        )
-        return result
 
     def _complete_repeater_execution(
         self,
@@ -5099,7 +3710,7 @@ class DebuggerBridge:
                 item for item in self._repeater["history"] if item["response"]["ok"]
             ]
             if len(successful) >= 2:
-                self._repeater["comparison"] = self._compare_repeater_entries(
+                self._repeater["comparison"] = compare_repeater_entries(
                     successful[-2], successful[-1]
                 )
             self._changed()
@@ -5196,59 +3807,6 @@ class DebuggerBridge:
             repeater = copy.deepcopy(self._repeater)
         return {"ok": True, "repeater": repeater, "generation": self.generation()}
 
-    @staticmethod
-    def _compare_repeater_entries(
-        baseline: dict[str, Any], current: dict[str, Any]
-    ) -> dict[str, Any]:
-        baseline_response = baseline["response"]
-        current_response = current["response"]
-
-        def header_map(response: dict[str, Any]) -> dict[str, str]:
-            return {
-                header["name"].lower(): header["value"]
-                for header in response["headers"]
-            }
-
-        before_headers = header_map(baseline_response)
-        after_headers = header_map(current_response)
-        before_names = set(before_headers)
-        after_names = set(after_headers)
-        changed = sorted(
-            name
-            for name in before_names & after_names
-            if before_headers[name] != after_headers[name]
-        )
-        baseline_body_bytes = len(baseline_response["body"].encode("utf-8"))
-        current_body_bytes = len(current_response["body"].encode("utf-8"))
-        return {
-            "protocol_version": 1,
-            "baseline_id": baseline["id"],
-            "current_id": current["id"],
-            "baseline_status": baseline_response["status"],
-            "current_status": current_response["status"],
-            "status_changed": baseline_response["status"]
-            != current_response["status"],
-            "duration_delta_ms": current_response["duration_ms"]
-            - baseline_response["duration_ms"],
-            "baseline_body_bytes": baseline_body_bytes,
-            "current_body_bytes": current_body_bytes,
-            "body_bytes_delta": current_body_bytes - baseline_body_bytes,
-            "baseline_body_sha256": baseline_response["body_sha256"],
-            "current_body_sha256": current_response["body_sha256"],
-            "body_changed": baseline_response["body_sha256"]
-            != current_response["body_sha256"],
-            "headers_added": sorted(after_names - before_names),
-            "headers_removed": sorted(before_names - after_names),
-            "headers_changed": changed,
-            "partial": any(
-                (
-                    baseline_response["headers_truncated"],
-                    baseline_response["body_truncated"],
-                    current_response["headers_truncated"],
-                    current_response["body_truncated"],
-                )
-            ),
-        }
 
     def _compare_repeater_history(
         self, request: dict[str, Any]
@@ -5278,7 +3836,7 @@ class DebuggerBridge:
                 raise DebuggerBridgeError(
                     "Repeater comparison requires two retained successful responses"
                 )
-            self._repeater["comparison"] = self._compare_repeater_entries(
+            self._repeater["comparison"] = compare_repeater_entries(
                 baseline, current
             )
             self._repeater["message"] = (
@@ -5322,47 +3880,9 @@ class DebuggerBridge:
                 "Disarm or finish Automation Recipes before editing the recipe library"
             )
 
-    def _normalize_automation_recipe(
-        self, request: dict[str, Any]
-    ) -> dict[str, Any]:
-        label = self._required_text(
-            request, "label", MAX_AUTOMATION_LABEL_BYTES
-        ).strip()
-        if not label:
-            raise DebuggerBridgeError("Automation recipe label is required")
-        source = self._required_text(
-            request, "source", MAX_AUTOMATION_RECIPE_SOURCE_BYTES
-        )
-        if not source.strip():
-            raise DebuggerBridgeError("Automation recipe source is required")
-        trigger = request.get("trigger", "manual")
-        if trigger not in {"manual", "created", "before-load", "after-load"}:
-            raise DebuggerBridgeError("Automation recipe trigger is invalid")
-        enabled = request.get("enabled", True)
-        if not isinstance(enabled, bool):
-            raise DebuggerBridgeError("Automation recipe enabled state must be boolean")
-        return {
-            "label": label,
-            "trigger": trigger,
-            "enabled": enabled,
-            "source": source,
-            "source_bytes": len(source.encode("utf-8")),
-        }
-
-    @staticmethod
-    def _automation_recipe_id(request: dict[str, Any]) -> int:
-        recipe_id = request.get("recipe_id")
-        if (
-            not isinstance(recipe_id, int)
-            or isinstance(recipe_id, bool)
-            or recipe_id <= 0
-            or recipe_id > 2**53 - 1
-        ):
-            raise DebuggerBridgeError("Automation recipe identifier is invalid")
-        return recipe_id
 
     def _add_automation_recipe(self, request: dict[str, Any]) -> dict[str, Any]:
-        normalized = self._normalize_automation_recipe(request)
+        normalized = normalize_automation_recipe(request)
         with self._lock:
             self._require_automation_library_editable_locked()
             if len(self._automation_recipes) >= MAX_AUTOMATION_RECIPES:
@@ -5395,8 +3915,8 @@ class DebuggerBridge:
         }
 
     def _update_automation_recipe(self, request: dict[str, Any]) -> dict[str, Any]:
-        recipe_id = self._automation_recipe_id(request)
-        normalized = self._normalize_automation_recipe(request)
+        recipe_id = automation_recipe_id(request)
+        normalized = normalize_automation_recipe(request)
         with self._lock:
             self._require_automation_library_editable_locked()
             index = next(
@@ -5436,7 +3956,7 @@ class DebuggerBridge:
         }
 
     def _remove_automation_recipe(self, request: dict[str, Any]) -> dict[str, Any]:
-        recipe_id = self._automation_recipe_id(request)
+        recipe_id = automation_recipe_id(request)
         with self._lock:
             self._require_automation_library_editable_locked()
             recipe = next(
@@ -5465,42 +3985,6 @@ class DebuggerBridge:
             "generation": self.generation(),
         }
 
-    def _normalize_automation_variables(
-        self, request: dict[str, Any]
-    ) -> tuple[dict[str, str], int]:
-        raw_variables = request.get("variables", {})
-        if not isinstance(raw_variables, dict):
-            raise DebuggerBridgeError("Automation variables must be a JSON object")
-        if len(raw_variables) > MAX_AUTOMATION_VARIABLES:
-            raise DebuggerBridgeError("Automation variable limit reached")
-        variables: dict[str, str] = {}
-        total_bytes = 0
-        for raw_name, raw_value in raw_variables.items():
-            if (
-                not isinstance(raw_name, str)
-                or REPEATER_VARIABLE_NAME.fullmatch(raw_name) is None
-                or not raw_name
-                or len(raw_name.encode("utf-8"))
-                > MAX_AUTOMATION_VARIABLE_NAME_BYTES
-            ):
-                raise DebuggerBridgeError("Automation variable name is invalid")
-            if (
-                not isinstance(raw_value, str)
-                or len(raw_value.encode("utf-8"))
-                > MAX_AUTOMATION_VARIABLE_VALUE_BYTES
-            ):
-                raise DebuggerBridgeError(
-                    "Automation variable values must be strings no larger than 4 KiB"
-                )
-            total_bytes += len(raw_name.encode("utf-8")) + len(
-                raw_value.encode("utf-8")
-            )
-            if total_bytes > MAX_AUTOMATION_VARIABLE_BYTES:
-                raise DebuggerBridgeError(
-                    "Automation variables exceed the 16 KiB session limit"
-                )
-            variables[raw_name] = raw_value
-        return variables, total_bytes
 
     def _require_automation_target_locked(
         self,
@@ -5535,18 +4019,6 @@ class DebuggerBridge:
             raise DebuggerBridgeError("Automation recipe is unavailable")
         return copy.deepcopy(recipe)
 
-    @staticmethod
-    def _automation_runner_config(
-        recipe: dict[str, Any], variables: dict[str, str], binding: bool = False
-    ) -> dict[str, Any]:
-        return {
-            "source": recipe["source"],
-            "variables": variables,
-            "resultLimit": 4 * 1024 if binding else MAX_AUTOMATION_RESULT_BYTES,
-            "logLimit": 4 if binding else MAX_AUTOMATION_LOGS,
-            "logBytes": 512 if binding else MAX_AUTOMATION_LOG_BYTES,
-            "timeoutMs": AUTOMATION_EXECUTION_TIMEOUT_MS,
-        }
 
     def _automation_before_load_source(
         self,
@@ -5557,7 +4029,7 @@ class DebuggerBridge:
         configs = [
             {
                 "recipeId": recipe["id"],
-                "config": self._automation_runner_config(
+                "config": automation_runner_config(
                     recipe, variables, binding=True
                 ),
             }
@@ -5603,16 +4075,16 @@ class DebuggerBridge:
             if target is not None:
                 source = target.get("url", "")
                 return (
-                    self._redacted_request_url(source)
+                    redacted_request_url(source)
                     if source.startswith(("http://", "https://"))
-                    else self._truncate_text(source, MAX_TARGET_URL_BYTES)
+                    else truncate_text(source, MAX_TARGET_URL_BYTES)
                     if source
                     else "about:blank"
                 )
         source = self._object_experiment.get("url", "")
         if not source and self._target is not None:
             source = self._target.get("url", "")
-        return self._redacted_request_url(source) if source else "about:blank"
+        return redacted_request_url(source) if source else "about:blank"
 
     def _start_automation_run_locked(
         self,
@@ -5668,65 +4140,6 @@ class DebuggerBridge:
         self._changed()
         return run_id
 
-    def _normalize_automation_result(self, value: Any) -> dict[str, Any]:
-        if not isinstance(value, dict) or value.get("protocolVersion") != 1:
-            raise ProtocolError("Debugger returned a malformed automation result")
-        ok = value.get("ok")
-        result_type = value.get("resultType")
-        result_text = value.get("resultText")
-        result_truncated = value.get("resultTruncated")
-        logs_truncated = value.get("logsTruncated")
-        elapsed_ms = value.get("elapsedMs")
-        timed_out = value.get("timedOut")
-        raw_logs = value.get("logs")
-        if (
-            not isinstance(ok, bool)
-            or not isinstance(result_type, str)
-            or len(result_type.encode("utf-8")) > 64
-            or not isinstance(result_text, str)
-            or len(result_text.encode("utf-8")) > MAX_AUTOMATION_RESULT_BYTES
-            or not isinstance(result_truncated, bool)
-            or not isinstance(logs_truncated, bool)
-            or not isinstance(elapsed_ms, int)
-            or isinstance(elapsed_ms, bool)
-            or elapsed_ms < 0
-            or elapsed_ms > AUTOMATION_EXECUTION_TIMEOUT_MS + 5_000
-            or not isinstance(timed_out, bool)
-            or not isinstance(raw_logs, list)
-            or len(raw_logs) > MAX_AUTOMATION_LOGS
-        ):
-            raise ProtocolError("Debugger returned a malformed automation result")
-        logs = []
-        for raw_log in raw_logs:
-            if not isinstance(raw_log, dict):
-                raise ProtocolError("Debugger returned a malformed automation log")
-            level = raw_log.get("level")
-            text = raw_log.get("text")
-            if (
-                level not in {"log", "info", "warn", "error"}
-                or not isinstance(text, str)
-                or len(text.encode("utf-8")) > MAX_AUTOMATION_LOG_BYTES
-            ):
-                raise ProtocolError("Debugger returned a malformed automation log")
-            logs.append({"level": level, "text": text})
-        error = value.get("error", "")
-        if (
-            not isinstance(error, str)
-            or len(error.encode("utf-8")) > 512
-            or (not ok and not error)
-        ):
-            raise ProtocolError("Debugger returned a malformed automation result")
-        return {
-            "ok": ok,
-            "result_type": result_type,
-            "result_text": result_text,
-            "result_truncated": result_truncated,
-            "logs": logs,
-            "logs_truncated": logs_truncated,
-            "elapsed_ms": elapsed_ms,
-            "timed_out": timed_out,
-            "error": error,
-        }
 
     def _finish_automation_run_locked(
         self,
@@ -5796,18 +4209,6 @@ class DebuggerBridge:
         self._changed()
         return copy.deepcopy(run)
 
-    def _automation_failure_result(self, message: str) -> dict[str, Any]:
-        return {
-            "ok": False,
-            "result_type": "error",
-            "result_text": "",
-            "result_truncated": False,
-            "logs": [],
-            "logs_truncated": False,
-            "elapsed_ms": 0,
-            "timed_out": False,
-            "error": self._truncate_text(message, 512),
-        }
 
     def _execute_automation_recipe(
         self,
@@ -5838,7 +4239,7 @@ class DebuggerBridge:
                 session=session,
             )
             variables = dict(self._automation_variables)
-        configuration = self._automation_runner_config(recipe, variables)
+        configuration = automation_runner_config(recipe, variables)
         expression = (
             f"({AUTOMATION_RECIPE_FUNCTION})"
             f"({json.dumps(configuration, separators=(',', ':'))})"
@@ -5869,7 +4270,7 @@ class DebuggerBridge:
                 )
             remote = evaluated.get("result")
             document = remote.get("value") if isinstance(remote, dict) else None
-            result = self._normalize_automation_result(document)
+            result = normalize_automation_result(document)
             if result["timed_out"]:
                 outcome = "timed_out"
         except BaseException as exception:
@@ -5883,7 +4284,7 @@ class DebuggerBridge:
             elif "timed out" in message.lower() or "terminated" in message.lower():
                 outcome = "timed_out"
                 message = "Recipe exceeded the 2 second execution limit"
-            result = self._automation_failure_result(message)
+            result = automation_failure_result(message)
         with self._lock:
             run = self._finish_automation_run_locked(run_id, result, outcome)
         timed_out = result["timed_out"] or outcome == "timed_out"
@@ -5924,8 +4325,8 @@ class DebuggerBridge:
             raise DebuggerBridgeError(
                 "Confirm manual page-context code execution before running a recipe"
             )
-        recipe_id = self._automation_recipe_id(request)
-        variables, variable_bytes = self._normalize_automation_variables(request)
+        recipe_id = automation_recipe_id(request)
+        variables, variable_bytes = normalize_automation_variables(request)
         with self._lock:
             sessions = self._require_automation_target_locked()
             if self._automation_recipes_state["auto_armed"]:
@@ -6009,7 +4410,7 @@ class DebuggerBridge:
             with self._lock:
                 if epoch == self._automation_epoch:
                     self._automation_processing = False
-                    message = self._truncate_text(
+                    message = truncate_text(
                         f"Automation worker could not start: {exception}", 512
                     )
                     self._automation_recipes_state["state"] = "error"
@@ -6060,7 +4461,7 @@ class DebuggerBridge:
         except BaseException as exception:
             with self._lock:
                 if epoch == self._automation_epoch:
-                    message = self._truncate_text(str(exception), 512)
+                    message = truncate_text(str(exception), 512)
                     self._automation_recipes_state["last_failure"] = message
                     self._automation_recipes_state["message"] = message
                     self._automation_recipes_state["state"] = (
@@ -6088,7 +4489,7 @@ class DebuggerBridge:
             raise DebuggerBridgeError(
                 "Confirm automatic page-context code execution before arming recipes"
             )
-        variables, variable_bytes = self._normalize_automation_variables(request)
+        variables, variable_bytes = normalize_automation_variables(request)
         with self._lock:
             sessions = self._require_automation_target_locked()
             if self._automation_recipes_state["auto_armed"]:
@@ -6178,7 +4579,7 @@ class DebuggerBridge:
                 except DebuggerBridgeError:
                     pass
             with self._lock:
-                message = self._truncate_text(str(exception), 512)
+                message = truncate_text(str(exception), 512)
                 self._automation_recipes_state["state"] = "error"
                 self._automation_recipes_state["last_failure"] = message
                 self._automation_recipes_state["message"] = message
@@ -6291,11 +4692,11 @@ class DebuggerBridge:
             self._automation_recipes_state["variable_count"] = 0
             self._automation_recipes_state["variable_bytes"] = 0
             if active is not None and self._automation_active_run_id == active:
-                result = self._automation_failure_result("Recipe cancelled")
+                result = automation_failure_result("Recipe cancelled")
                 self._finish_automation_run_locked(active, result, "cancelled")
             self._automation_recipes_state["state"] = "error" if errors else "ready"
             self._automation_recipes_state["message"] = (
-                self._truncate_text("; ".join(errors), 512) if errors else reason
+                truncate_text("; ".join(errors), 512) if errors else reason
             )
             if errors:
                 self._automation_recipes_state["last_failure"] = (
@@ -6479,7 +4880,7 @@ class DebuggerBridge:
                     return
                 self._cancel_automation_watchdog_locked()
                 try:
-                    result = self._normalize_automation_result(value.get("result"))
+                    result = normalize_automation_result(value.get("result"))
                     timed_out = result["timed_out"]
                     self._finish_automation_run_locked(
                         active["id"], result, "timed_out" if timed_out else None
@@ -6488,7 +4889,7 @@ class DebuggerBridge:
                         self._automation_pending_triggers = []
                 except ProtocolError as exception:
                     malformed = True
-                    result = self._automation_failure_result(str(exception))
+                    result = automation_failure_result(str(exception))
                     self._finish_automation_run_locked(
                         active["id"], result, "failed"
                     )
@@ -6564,7 +4965,7 @@ class DebuggerBridge:
                 return
             session = self._automation_active_session
             self._automation_auto_watchdog = None
-            result = self._automation_failure_result(
+            result = automation_failure_result(
                 "Before-load recipe exceeded the 2 second execution limit"
             )
             self._finish_automation_run_locked(run_id, result, "timed_out")
@@ -6622,7 +5023,7 @@ class DebuggerBridge:
                 self._request_interception_context_id is not None
                 and target_id in self._action_scope_targets
             ):
-                self._action_scope_last_error = self._truncate_text(
+                self._action_scope_last_error = truncate_text(
                     f"Disposable page target disconnected: {error}", 512
                 )
             automation_armed = self._automation_recipes_state["auto_armed"]
@@ -6742,7 +5143,7 @@ class DebuggerBridge:
             if self._request_interception_context_id != context_id:
                 return
             self._action_scope_last_error = (
-                self._truncate_text("; ".join(failures), 512) if failures else None
+                truncate_text("; ".join(failures), 512) if failures else None
             )
             if self._public_action_scope_locked() != previous_public:
                 self._changed()
@@ -6809,7 +5210,7 @@ class DebuggerBridge:
             raise DebuggerBridgeError("Disposable page URL is invalid")
         url = url.strip() or "about:blank"
         if url != "about:blank":
-            self._validate_request_interception_url(url)
+            validate_request_interception_url(url)
         with self._lock:
             context_id = self._request_interception_context_id
             if context_id is None:
@@ -6835,7 +5236,7 @@ class DebuggerBridge:
                 "background": True,
             },
         )
-        target_id = self._required_protocol_identifier(
+        target_id = required_protocol_identifier(
             target_result.get("targetId"), "experiment target"
         )
         try:
@@ -6852,7 +5253,7 @@ class DebuggerBridge:
         }
 
     def _close_experiment_page(self, request: dict[str, Any]) -> dict[str, Any]:
-        target_id = self._required_text(request, "target_id", MAX_TARGET_ID_BYTES)
+        target_id = required_text(request, "target_id", MAX_TARGET_ID_BYTES)
         with self._lock:
             if self._request_interception_context_id is None:
                 raise DebuggerBridgeError("No isolated Experiment context exists")
@@ -6908,7 +5309,7 @@ class DebuggerBridge:
                     "message": "Creating a disposable browser context with no shared cookies or storage.",
                 }
             )
-            self._request_interception_rule = self._default_request_interception_rule()
+            self._request_interception_rule = default_request_interception_rule()
             self._request_interception_configured = False
             self._request_interception_return_target_id = return_target_id
             self._action_scope_mode = "global"
@@ -6926,7 +5327,7 @@ class DebuggerBridge:
         context_id: Optional[str] = None
         try:
             context_result = self._browser_command("Target.createBrowserContext")
-            context_id = self._required_protocol_identifier(
+            context_id = required_protocol_identifier(
                 context_result.get("browserContextId"), "browser context"
             )
             target_result = self._browser_command(
@@ -6937,7 +5338,7 @@ class DebuggerBridge:
                     "background": True,
                 },
             )
-            target_id = self._required_protocol_identifier(
+            target_id = required_protocol_identifier(
                 target_result.get("targetId"), "experiment target"
             )
         except BaseException as exception:
@@ -6962,23 +5363,23 @@ class DebuggerBridge:
                     )
                 else:
                     message = str(exception)
-                self._request_interception["message"] = self._truncate_text(
+                self._request_interception["message"] = truncate_text(
                     message, 512
                 )
                 self._repeater["state"] = "error"
-                self._repeater["message"] = self._truncate_text(message, 512)
+                self._repeater["message"] = truncate_text(message, 512)
                 self._object_experiment["state"] = "error"
                 self._object_experiment["isolated"] = cleanup_error is not None
-                self._object_experiment["message"] = self._truncate_text(message, 512)
+                self._object_experiment["message"] = truncate_text(message, 512)
                 self._runtime_hooks["state"] = "error"
                 self._runtime_hooks["isolated"] = cleanup_error is not None
-                self._runtime_hooks["message"] = self._truncate_text(message, 512)
+                self._runtime_hooks["message"] = truncate_text(message, 512)
                 self._automation_recipes_state["state"] = "error"
                 self._automation_recipes_state["isolated"] = cleanup_error is not None
-                self._automation_recipes_state["last_failure"] = self._truncate_text(
+                self._automation_recipes_state["last_failure"] = truncate_text(
                     message, 512
                 )
-                self._automation_recipes_state["message"] = self._truncate_text(
+                self._automation_recipes_state["message"] = truncate_text(
                     message, 512
                 )
                 self._changed()
@@ -7015,7 +5416,7 @@ class DebuggerBridge:
             self._refresh_action_scope_targets()
         except DebuggerBridgeError as exception:
             with self._lock:
-                self._action_scope_last_error = self._truncate_text(str(exception), 512)
+                self._action_scope_last_error = truncate_text(str(exception), 512)
                 self._changed()
         with self._lock:
             action_scope = self._public_action_scope_locked()
@@ -7033,7 +5434,7 @@ class DebuggerBridge:
     def _configure_request_interception(
         self, request: dict[str, Any]
     ) -> dict[str, Any]:
-        rule = self._normalize_request_interception_rule(request)
+        rule = normalize_request_interception_rule(request)
         with self._lock:
             if (
                 self._request_interception_context_id is None
@@ -7114,7 +5515,7 @@ class DebuggerBridge:
         return {"ok": True, "experiment": experiment, "generation": self.generation()}
 
     def _run_request_interception(self, request: dict[str, Any]) -> dict[str, Any]:
-        replay = self._normalize_request_interception_request(request)
+        replay = normalize_request_interception_request(request)
         with self._lock:
             if (
                 self._request_interception_context_id is None
@@ -7156,7 +5557,7 @@ class DebuggerBridge:
             self._request_interception["result"] = None
             self._request_interception["last_request"] = {
                 "target_id": target_id,
-                "url": self._redacted_request_url(replay["url"]),
+                "url": redacted_request_url(replay["url"]),
                 "method": replay["method"],
                 "header_count": len(replay["headers"]),
                 "body_bytes": len(replay["body"].encode("utf-8")),
@@ -7203,11 +5604,11 @@ class DebuggerBridge:
                 )
             remote = evaluated.get("result")
             document = remote.get("value") if isinstance(remote, dict) else None
-            result = self._normalize_request_interception_result(document)
+            result = normalize_request_interception_result(document)
         except BaseException as exception:
             with self._lock:
                 self._request_interception["state"] = "error"
-                self._request_interception["message"] = self._truncate_text(
+                self._request_interception["message"] = truncate_text(
                     str(exception), 512
                 )
                 self._changed()
@@ -7255,7 +5656,7 @@ class DebuggerBridge:
                 if not preserve_result:
                     self._request_interception = self._empty_request_interception()
                     self._request_interception_rule = (
-                        self._default_request_interception_rule()
+                        default_request_interception_rule()
                     )
                     self._request_interception_pending.clear()
                     self._request_interception_configured = False
@@ -7347,7 +5748,7 @@ class DebuggerBridge:
         except DebuggerBridgeError as exception:
             with self._lock:
                 self._request_interception["state"] = "error"
-                self._request_interception["message"] = self._truncate_text(
+                self._request_interception["message"] = truncate_text(
                     f"The disposable context could not be confirmed as deleted: {exception}",
                     512,
                 )
@@ -7380,7 +5781,7 @@ class DebuggerBridge:
             self._action_scope_target_id = None
             self._action_scope_revision += 1
             self._preferred_target_id = return_target_id
-            self._request_interception_rule = self._default_request_interception_rule()
+            self._request_interception_rule = default_request_interception_rule()
             if preserve_result:
                 self._request_interception["state"] = "disposed"
                 self._request_interception["isolated"] = False
@@ -7436,7 +5837,7 @@ class DebuggerBridge:
                     "Dispose the isolated context before clearing its result"
                 )
             self._request_interception = self._empty_request_interception()
-            self._request_interception_rule = self._default_request_interception_rule()
+            self._request_interception_rule = default_request_interception_rule()
             self._request_interception_pending.clear()
             self._request_interception_configured = False
             self._action_scope_mode = "global"
@@ -7479,330 +5880,6 @@ class DebuggerBridge:
             self._changed()
         return {"ok": True, "generation": self.generation()}
 
-    def _normalize_request_interception_rule(
-        self, request: dict[str, Any]
-    ) -> dict[str, Any]:
-        mode = request.get("mode")
-        if mode not in {"continue", "block", "drop", "rewrite", "fulfill"}:
-            raise DebuggerBridgeError("Request interception mode is invalid")
-        pattern = self._required_text(
-            request, "url_pattern", MAX_INTERCEPTION_PATTERN_BYTES
-        )
-        if any(ord(character) < 0x20 or ord(character) > 0x7E for character in pattern):
-            raise DebuggerBridgeError("Request interception URL pattern is invalid")
-        if pattern != "*" and not pattern.startswith(("http://", "https://")):
-            raise DebuggerBridgeError(
-                "Request interception URL pattern must use HTTP, HTTPS, or *"
-            )
-        method_filter = request.get("method_filter", "")
-        if not isinstance(method_filter, str):
-            raise DebuggerBridgeError("Request interception method filter is invalid")
-        method_filter = method_filter.strip().upper()
-        if method_filter:
-            self._validate_request_interception_method(method_filter)
-
-        rule = self._default_request_interception_rule()
-        rule.update(
-            {"mode": mode, "url_pattern": pattern, "method_filter": method_filter}
-        )
-        if mode == "rewrite":
-            rewrite_url = request.get("rewrite_url", "")
-            if not isinstance(rewrite_url, str):
-                raise DebuggerBridgeError("Request rewrite URL is invalid")
-            rewrite_url = rewrite_url.strip()
-            if rewrite_url:
-                self._validate_request_interception_url(rewrite_url)
-            rewrite_method = request.get("rewrite_method", "")
-            if not isinstance(rewrite_method, str):
-                raise DebuggerBridgeError("Request rewrite method is invalid")
-            rewrite_method = rewrite_method.strip().upper()
-            if rewrite_method:
-                self._validate_request_interception_method(rewrite_method)
-            rewrite_headers = self._normalize_request_interception_headers(
-                request.get("rewrite_headers", {}), "rewrite"
-            )
-            rewrite_body = request.get("rewrite_body", "")
-            if (
-                not isinstance(rewrite_body, str)
-                or len(rewrite_body.encode("utf-8")) > MAX_INTERCEPTION_BODY_BYTES
-            ):
-                raise DebuggerBridgeError("Request rewrite body exceeds 64 KiB")
-            if not any((rewrite_url, rewrite_method, rewrite_headers, rewrite_body)):
-                raise DebuggerBridgeError(
-                    "Request rewrite requires at least one bounded override"
-                )
-            rule.update(
-                {
-                    "rewrite_url": rewrite_url,
-                    "rewrite_method": rewrite_method,
-                    "rewrite_headers": rewrite_headers,
-                    "rewrite_body": rewrite_body,
-                }
-            )
-        elif mode == "fulfill":
-            response_code = request.get("response_code", 200)
-            if (
-                not isinstance(response_code, int)
-                or isinstance(response_code, bool)
-                or response_code < 100
-                or response_code > 599
-            ):
-                raise DebuggerBridgeError("Synthetic response status is invalid")
-            response_headers = self._normalize_request_interception_headers(
-                request.get("response_headers", {}), "response"
-            )
-            response_body = request.get("response_body", "")
-            if (
-                not isinstance(response_body, str)
-                or len(response_body.encode("utf-8")) > MAX_INTERCEPTION_RESPONSE_BYTES
-            ):
-                raise DebuggerBridgeError("Synthetic response body exceeds 64 KiB")
-            if not response_headers:
-                response_headers = [
-                    {"name": "content-type", "value": "text/plain; charset=utf-8"},
-                ]
-            if not any(
-                header["name"].lower() == "access-control-allow-origin"
-                for header in response_headers
-            ):
-                if len(response_headers) >= MAX_INTERCEPTION_HEADERS:
-                    raise DebuggerBridgeError(
-                        "Synthetic response headers must include access-control-allow-origin at the 64-header limit"
-                    )
-                response_headers.append(
-                    {"name": "access-control-allow-origin", "value": "*"}
-                )
-            rule.update(
-                {
-                    "response_code": response_code,
-                    "response_headers": response_headers,
-                    "response_body": response_body,
-                }
-            )
-        return rule
-
-    def _normalize_request_interception_request(
-        self, request: dict[str, Any]
-    ) -> dict[str, Any]:
-        url = self._required_text(request, "url", MAX_INTERCEPTION_URL_BYTES).strip()
-        self._validate_request_interception_url(url)
-        method = request.get("method", "GET")
-        if not isinstance(method, str):
-            raise DebuggerBridgeError("Experiment request method is invalid")
-        method = method.strip().upper()
-        self._validate_request_interception_method(method)
-        headers = self._normalize_request_interception_headers(
-            request.get("headers", {}), "request"
-        )
-        body = request.get("body", "")
-        if (
-            not isinstance(body, str)
-            or len(body.encode("utf-8")) > MAX_INTERCEPTION_BODY_BYTES
-        ):
-            raise DebuggerBridgeError("Experiment request body exceeds 64 KiB")
-        if method in {"GET", "HEAD"} and body:
-            raise DebuggerBridgeError(
-                "GET and HEAD experiment requests cannot include a body"
-            )
-        return {"url": url, "method": method, "headers": headers, "body": body}
-
-    @staticmethod
-    def _validate_request_interception_url(url: str) -> None:
-        try:
-            parsed = urlparse(url)
-            _ = parsed.port
-        except ValueError as exception:
-            raise DebuggerBridgeError(
-                "Experiment request URL is invalid"
-            ) from exception
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.fragment
-        ):
-            raise DebuggerBridgeError(
-                "Experiment request URL must be credential-free HTTP or HTTPS"
-            )
-
-    @staticmethod
-    def _validate_request_interception_method(method: str) -> None:
-        allowed = frozenset(
-            "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        )
-        if (
-            not method
-            or len(method.encode("ascii", errors="ignore"))
-            != len(method.encode("utf-8"))
-            or len(method) > MAX_INTERCEPTION_METHOD_BYTES
-            or method[0] not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-            or any(character not in allowed for character in method)
-        ):
-            raise DebuggerBridgeError("Experiment request method is invalid")
-
-    @staticmethod
-    def _normalize_request_interception_headers(
-        value: Any, label: str
-    ) -> list[dict[str, str]]:
-        if not isinstance(value, dict) or len(value) > MAX_INTERCEPTION_HEADERS:
-            raise DebuggerBridgeError(
-                f"Request interception {label} headers are invalid"
-            )
-        token_characters = frozenset(
-            "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-        )
-        forbidden = SENSITIVE_INTERCEPTION_HEADERS | {
-            "connection",
-            "content-length",
-            "host",
-            "transfer-encoding",
-        }
-        total_bytes = 0
-        headers = []
-        for name, header_value in value.items():
-            if not isinstance(name, str) or not isinstance(header_value, str):
-                raise DebuggerBridgeError(
-                    f"Request interception {label} headers must be text"
-                )
-            name_bytes = len(name.encode("utf-8"))
-            value_bytes = len(header_value.encode("utf-8"))
-            if (
-                not name
-                or name_bytes > MAX_INTERCEPTION_HEADER_NAME_BYTES
-                or value_bytes > MAX_INTERCEPTION_HEADER_VALUE_BYTES
-                or any(character not in token_characters for character in name)
-                or any(
-                    ord(character) < 0x20 or ord(character) == 0x7F
-                    for character in header_value
-                )
-                or name.lower() in forbidden
-            ):
-                raise DebuggerBridgeError(
-                    f"Request interception {label} header is forbidden or invalid"
-                )
-            total_bytes += name_bytes + value_bytes
-            if total_bytes > MAX_INTERCEPTION_HEADER_BYTES:
-                raise DebuggerBridgeError(
-                    f"Request interception {label} headers exceed 16 KiB"
-                )
-            headers.append({"name": name, "value": header_value})
-        return headers
-
-    def _normalize_request_interception_result(self, value: Any) -> dict[str, Any]:
-        if not isinstance(value, dict) or value.get("protocolVersion") != 1:
-            raise ProtocolError("Debugger returned a malformed experiment result")
-        ok = value.get("ok")
-        if not isinstance(ok, bool):
-            raise ProtocolError("Debugger returned a malformed experiment result")
-        if not ok:
-            error = value.get("error")
-            if not isinstance(error, str):
-                raise ProtocolError("Debugger returned a malformed experiment error")
-            return {
-                "protocol_version": 1,
-                "ok": False,
-                "status": 0,
-                "status_text": "",
-                "url": "",
-                "headers": [],
-                "headers_truncated": False,
-                "body": "",
-                "body_truncated": False,
-                "error": self._truncate_text(error, 512),
-            }
-        status = value.get("status")
-        status_text = value.get("statusText")
-        response_url = value.get("url")
-        raw_headers = value.get("headers")
-        headers_truncated = value.get("headersTruncated")
-        body = value.get("body")
-        body_truncated = value.get("bodyTruncated")
-        if (
-            not isinstance(status, int)
-            or isinstance(status, bool)
-            or status < 0
-            or status > 599
-            or not isinstance(status_text, str)
-            or not isinstance(response_url, str)
-            or not isinstance(raw_headers, list)
-            or len(raw_headers) > MAX_INTERCEPTION_HEADERS
-            or not isinstance(headers_truncated, bool)
-            or not isinstance(body, str)
-            or not isinstance(body_truncated, bool)
-        ):
-            raise ProtocolError("Debugger returned a malformed experiment result")
-        headers = []
-        header_bytes = 0
-        for header in raw_headers:
-            if (
-                not isinstance(header, dict)
-                or not isinstance(header.get("name"), str)
-                or not isinstance(header.get("value"), str)
-                or header["name"].lower() in SENSITIVE_INTERCEPTION_HEADERS
-            ):
-                raise ProtocolError("Debugger returned malformed experiment headers")
-            headers_truncated = headers_truncated or (
-                len(header["name"].encode("utf-8"))
-                > MAX_INTERCEPTION_HEADER_NAME_BYTES
-                or len(header["value"].encode("utf-8"))
-                > MAX_INTERCEPTION_HEADER_VALUE_BYTES
-            )
-            name = self._truncate_text(
-                header["name"], MAX_INTERCEPTION_HEADER_NAME_BYTES
-            )
-            header_value = self._truncate_text(
-                header["value"], MAX_INTERCEPTION_HEADER_VALUE_BYTES
-            )
-            header_bytes += len(name.encode("utf-8")) + len(
-                header_value.encode("utf-8")
-            )
-            if header_bytes > MAX_INTERCEPTION_HEADER_BYTES:
-                raise ProtocolError("Debugger returned oversized experiment headers")
-            headers.append({"name": name, "value": header_value})
-        encoded_body = body.encode("utf-8")
-        truncated_by_bridge = len(encoded_body) > MAX_INTERCEPTION_RESPONSE_BYTES
-        return {
-            "protocol_version": 1,
-            "ok": True,
-            "status": status,
-            "status_text": self._truncate_text(status_text, 256),
-            "url": self._redacted_request_url(response_url),
-            "headers": headers,
-            "headers_truncated": headers_truncated,
-            "body": self._truncate_text(body, MAX_INTERCEPTION_RESPONSE_BYTES),
-            "body_truncated": body_truncated or truncated_by_bridge,
-            "error": None,
-        }
-
-    @staticmethod
-    def _required_protocol_identifier(value: Any, label: str) -> str:
-        if (
-            not isinstance(value, str)
-            or not value
-            or len(value.encode("utf-8")) > MAX_TARGET_ID_BYTES
-        ):
-            raise ProtocolError(f"Browser returned an invalid {label} identifier")
-        return value
-
-    @classmethod
-    def _redacted_request_url(cls, url: str) -> str:
-        if not url:
-            return ""
-        try:
-            parsed = urlparse(url)
-            _ = parsed.port
-        except ValueError:
-            return ""
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            return ""
-        host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
-        netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
-        path = parsed.path or "/"
-        return cls._truncate_text(
-            urlunparse((parsed.scheme, netloc, path, "", "", "")),
-            MAX_INTERCEPTION_URL_BYTES,
-        )
 
     def _handle_request_interception_pause_async(
         self,
@@ -7927,7 +6004,7 @@ class DebuggerBridge:
                 request,
                 params.get("resourceType"),
                 "error",
-                self._truncate_text(
+                truncate_text(
                     f"Interception worker could not start: {exception}. "
                     f"Request {'continued unchanged' if continued else 'could not be resumed'}.",
                     512,
@@ -7954,7 +6031,7 @@ class DebuggerBridge:
         detail = "Request continued unchanged."
         command = "Fetch.continueRequest"
         command_params: dict[str, Any] = {"requestId": request_id}
-        preflight_headers = self._request_interception_preflight_headers(request, rule)
+        preflight_headers = request_interception_preflight_headers(request, rule)
         if preflight_headers is not None:
             command = "Fetch.fulfillRequest"
             command_params.update(
@@ -8009,7 +6086,7 @@ class DebuggerBridge:
             self._scoped_command(session, command, command_params, timeout=3.0)
         except DebuggerBridgeError as exception:
             outcome = "error"
-            detail = self._truncate_text(str(exception), 512)
+            detail = truncate_text(str(exception), 512)
             try:
                 self._scoped_command(
                     session,
@@ -8030,65 +6107,6 @@ class DebuggerBridge:
                 )
                 self._changed()
 
-    @classmethod
-    def _request_interception_preflight_headers(
-        cls, request: dict[str, Any], rule: dict[str, Any]
-    ) -> Optional[list[dict[str, str]]]:
-        if rule["mode"] != "fulfill" or request.get("method") != "OPTIONS":
-            return None
-        headers = request.get("headers")
-        if not isinstance(headers, dict):
-            return None
-        requested_method = headers.get("Access-Control-Request-Method")
-        if not isinstance(requested_method, str):
-            requested_method = headers.get("access-control-request-method")
-        if not isinstance(requested_method, str):
-            return None
-        requested_method = requested_method.strip().upper()
-        try:
-            cls._validate_request_interception_method(requested_method)
-        except DebuggerBridgeError:
-            return None
-        if rule["method_filter"] and requested_method != rule["method_filter"]:
-            return None
-
-        requested_headers = headers.get("Access-Control-Request-Headers")
-        if not isinstance(requested_headers, str):
-            requested_headers = headers.get("access-control-request-headers", "")
-        if not isinstance(requested_headers, str) or len(
-            requested_headers.encode("utf-8")
-        ) > MAX_INTERCEPTION_HEADER_VALUE_BYTES:
-            return None
-        token_characters = frozenset(
-            "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-        )
-        header_names = (
-            [name.strip().lower() for name in requested_headers.split(",")]
-            if requested_headers.strip()
-            else []
-        )
-        if any(
-            not name
-            or any(character not in token_characters for character in name)
-            or name in SENSITIVE_INTERCEPTION_HEADERS
-            for name in header_names
-        ) or len(header_names) > MAX_INTERCEPTION_HEADERS:
-            return None
-        response_headers = [
-            {"name": "access-control-allow-origin", "value": "*"},
-            {
-                "name": "access-control-allow-methods",
-                "value": requested_method,
-            },
-        ]
-        if requested_headers:
-            response_headers.append(
-                {
-                    "name": "access-control-allow-headers",
-                    "value": ", ".join(header_names),
-                }
-            )
-        return response_headers
 
     def _append_request_interception_audit(
         self,
@@ -8110,117 +6128,29 @@ class DebuggerBridge:
                 {
                     "id": self._next_request_interception_audit_id,
                     "occurred_at_ms": int(time.time() * 1_000),
-                    "request_id": self._truncate_text(request_id, 256),
-                    "target_id": self._truncate_text(
+                    "request_id": truncate_text(request_id, 256),
+                    "target_id": truncate_text(
                         target_id
                         or self._request_interception.get("target_id")
                         or "",
                         MAX_TARGET_ID_BYTES,
                     ),
-                    "method": self._truncate_text(
+                    "method": truncate_text(
                         method, MAX_INTERCEPTION_METHOD_BYTES
                     ),
-                    "url": self._redacted_request_url(raw_url),
-                    "resource_type": self._truncate_text(
+                    "url": redacted_request_url(raw_url),
+                    "resource_type": truncate_text(
                         resource_type if isinstance(resource_type, str) else "Other",
                         128,
                     ),
                     "rule_mode": self._request_interception_rule["mode"],
                     "outcome": outcome,
-                    "detail": self._truncate_text(detail, 512),
+                    "detail": truncate_text(detail, 512),
                 }
             )
             self._next_request_interception_audit_id += 1
             self._changed()
 
-    def _normalize_heap_snapshot_probe(self, value: Any) -> dict[str, Any]:
-        if not isinstance(value, dict) or value.get("protocol_version") != 1:
-            raise ProtocolError("Native heap snapshot probe returned malformed output")
-        integer_fields = (
-            "file_bytes",
-            "total_nodes",
-            "analyzed_nodes",
-            "reachable_nodes",
-            "total_edges",
-            "indexed_edges",
-            "total_strings",
-            "duration_ms",
-        )
-        if any(
-            not isinstance(value.get(field), int)
-            or isinstance(value.get(field), bool)
-            or value[field] < 0
-            or value[field] > 2**53 - 1
-            for field in integer_fields
-        ):
-            raise ProtocolError("Native heap snapshot probe returned invalid counts")
-        boolean_fields = (
-            "match_found",
-            "reachability_indexed",
-            "node_limit_reached",
-            "edge_limit_reached",
-            "string_limit_reached",
-        )
-        if any(not isinstance(value.get(field), bool) for field in boolean_fields):
-            raise ProtocolError("Native heap snapshot probe returned invalid limits")
-        scope = value.get("scope")
-        if (
-            scope not in {"all", "reachable", "unreachable"}
-            or value["file_bytes"] > MAX_HEAP_SNAPSHOT_BYTES
-            or value["analyzed_nodes"] > value["total_nodes"]
-            or value["reachable_nodes"] > value["total_nodes"]
-            or value["indexed_edges"] > value["total_edges"]
-            or (value["match_found"] and value["analyzed_nodes"] == 0)
-            or (
-                not value["match_found"]
-                and not value["node_limit_reached"]
-                and value["analyzed_nodes"] != value["total_nodes"]
-            )
-            or (
-                scope == "all"
-                and (
-                    value["reachability_indexed"]
-                    or value["reachable_nodes"] != 0
-                    or value["indexed_edges"] != 0
-                )
-            )
-            or (scope != "all" and not value["reachability_indexed"])
-        ):
-            raise ProtocolError("Native heap snapshot probe returned invalid coverage")
-        raw_match = value.get("match")
-        if value["match_found"] != isinstance(raw_match, dict):
-            raise ProtocolError("Native heap snapshot probe returned a malformed match")
-        match = None
-        if isinstance(raw_match, dict):
-            match_id = raw_match.get("id")
-            self_size = raw_match.get("self_size")
-            if (
-                not isinstance(match_id, str)
-                or not match_id.isascii()
-                or not match_id.isdigit()
-                or (len(match_id) > 1 and match_id.startswith("0"))
-                or len(match_id) > 20
-                or not isinstance(raw_match.get("type"), str)
-                or not isinstance(raw_match.get("name"), str)
-                or not isinstance(self_size, int)
-                or isinstance(self_size, bool)
-                or self_size < 0
-                or self_size > 2**53 - 1
-            ):
-                raise ProtocolError("Native heap snapshot probe returned a malformed match")
-            match = {
-                "id": match_id,
-                "type": self._truncate_text(raw_match["type"], 64),
-                "name": self._truncate_text(raw_match["name"], 256),
-                "self_size": self_size,
-            }
-        return {
-            "protocol_version": 1,
-            **{field: value[field] for field in integer_fields},
-            **{field: value[field] for field in boolean_fields},
-            "scope": scope,
-            "match": match,
-        }
 
     def _heap_snapshot_binary(self) -> Path:
         binary = self.heap_snapshot_binary.resolve()
@@ -8303,7 +6233,7 @@ class DebuggerBridge:
                 f"Native heap snapshot {operation} exceeded its {int(timeout)} second limit"
             ) from exception
         if completed.returncode != 0:
-            detail = self._truncate_text(completed.stderr.strip(), 512)
+            detail = truncate_text(completed.stderr.strip(), 512)
             raise DebuggerBridgeError(
                 detail or f"Native heap snapshot {operation} rejected the snapshot"
             )
@@ -8533,10 +6463,10 @@ class DebuggerBridge:
                     )
                 retaining_path.append(
                     {
-                        "edge": self._truncate_text(raw_step["edge"], 128),
-                        "edge_type": self._truncate_text(raw_step["edge_type"], 32),
-                        "type": self._truncate_text(raw_step["type"], 64),
-                        "name": self._truncate_text(raw_step["name"], 256),
+                        "edge": truncate_text(raw_step["edge"], 128),
+                        "edge_type": truncate_text(raw_step["edge_type"], 32),
+                        "type": truncate_text(raw_step["type"], 64),
+                        "name": truncate_text(raw_step["name"], 256),
                     }
                 )
             incoming_references = []
@@ -8567,17 +6497,17 @@ class DebuggerBridge:
                 incoming_references.append(
                     {
                         "source_id": source_id,
-                        "edge_type": self._truncate_text(raw_reference["edge_type"], 32),
-                        "edge": self._truncate_text(raw_reference["edge"], 128),
-                        "source_type": self._truncate_text(raw_reference["source_type"], 64),
-                        "source_name": self._truncate_text(raw_reference["source_name"], 256),
+                        "edge_type": truncate_text(raw_reference["edge_type"], 32),
+                        "edge": truncate_text(raw_reference["edge"], 128),
+                        "source_type": truncate_text(raw_reference["source_type"], 64),
+                        "source_name": truncate_text(raw_reference["source_name"], 256),
                     }
                 )
             results.append(
                 {
                     "id": result_id,
-                    "type": self._truncate_text(node_type, 64),
-                    "name": self._truncate_text(node_name, 256),
+                    "type": truncate_text(node_type, 64),
+                    "name": truncate_text(node_name, 256),
                     "self_size": self_size,
                     "reachable": reachable,
                     "incoming_reference_count": incoming_reference_count,
@@ -8709,8 +6639,8 @@ class DebuggerBridge:
                 )
             groups.append(
                 {
-                    "type": self._truncate_text(node_type, 64),
-                    "name": self._truncate_text(node_name, 256),
+                    "type": truncate_text(node_type, 64),
+                    "name": truncate_text(node_name, 256),
                     "baseline_count": baseline_count,
                     "current_count": current_count,
                     "count_delta": count_delta,
@@ -8764,8 +6694,8 @@ class DebuggerBridge:
             dominators.append(
                 {
                     "id": node_id,
-                    "type": self._truncate_text(node_type, 64),
-                    "name": self._truncate_text(node_name, 256),
+                    "type": truncate_text(node_type, 64),
+                    "name": truncate_text(node_name, 256),
                     "baseline_retained_size": baseline_size,
                     "current_retained_size": current_size,
                     "retained_size_delta": size_delta,
@@ -8865,7 +6795,7 @@ class DebuggerBridge:
                 if isinstance(error, dict):
                     message = error.get("message")
                     raise DebuggerBridgeError(
-                        self._truncate_text(
+                        truncate_text(
                             message
                             if isinstance(message, str)
                             else f"Browser command {method} failed",
@@ -9003,7 +6933,7 @@ class DebuggerBridge:
                         json.JSONDecodeError,
                     ) as exception:
                         with self._lock:
-                            self._action_scope_last_error = self._truncate_text(
+                            self._action_scope_last_error = truncate_text(
                                 str(exception), 512
                             )
                             self._changed()
@@ -9312,7 +7242,7 @@ class DebuggerBridge:
     def _set_breakpoint(
         self, request: dict[str, Any], replacing: Optional[str] = None
     ) -> dict[str, Any]:
-        url = self._required_text(
+        url = required_text(
             request, "url", MAX_BREAKPOINT_TEXT_BYTES, allow_empty=True
         )
         script_id_value = request.get("script_id")
@@ -9320,7 +7250,7 @@ class DebuggerBridge:
         if script_id_value == "" and url:
             script_id_value = None
         if script_id_value is not None:
-            script_id = self._required_text(request, "script_id", MAX_TARGET_ID_BYTES)
+            script_id = required_text(request, "script_id", MAX_TARGET_ID_BYTES)
         if not url and script_id is None:
             raise DebuggerBridgeError("Breakpoint URL or script ID is required")
         line = request.get("line")
@@ -9429,7 +7359,7 @@ class DebuggerBridge:
         }
 
     def _set_xhr_breakpoint(self, request: dict[str, Any]) -> None:
-        pattern = self._required_text(
+        pattern = required_text(
             request, "pattern", MAX_BREAKPOINT_TEXT_BYTES, allow_empty=True
         )
         with self._lock:
@@ -9588,18 +7518,18 @@ class DebuggerBridge:
         return {
             "script_id": script_id,
             "url": url,
-            "start_line": self._bounded_integer(params.get("startLine")),
-            "start_column": self._bounded_integer(params.get("startColumn")),
-            "end_line": self._bounded_integer(params.get("endLine")),
-            "end_column": self._bounded_integer(params.get("endColumn")),
-            "execution_context_id": self._bounded_integer(
+            "start_line": bounded_integer(params.get("startLine")),
+            "start_column": bounded_integer(params.get("startColumn")),
+            "end_line": bounded_integer(params.get("endLine")),
+            "end_column": bounded_integer(params.get("endColumn")),
+            "execution_context_id": bounded_integer(
                 params.get("executionContextId")
             ),
             "hash": script_hash,
             "source_map_url": source_map_url,
             "has_source_url": params.get("hasSourceURL") is True,
             "is_module": params.get("isModule") is True,
-            "length": self._bounded_integer(params.get("length")),
+            "length": bounded_integer(params.get("length")),
             "language": params.get("scriptLanguage")
             if params.get("scriptLanguage") in {"JavaScript", "WebAssembly"}
             else "JavaScript",
@@ -9617,13 +7547,13 @@ class DebuggerBridge:
         reason = (
             params.get("reason") if isinstance(params.get("reason"), str) else "other"
         )
-        reason = self._truncate_text(reason, 256)
+        reason = truncate_text(reason, 256)
         description = None
         data = params.get("data")
         if isinstance(data, dict):
             raw_description = data.get("description") or data.get("message")
             if isinstance(raw_description, str):
-                description = self._truncate_text(raw_description)
+                description = truncate_text(raw_description)
         async_stack = self._parse_async_stack(params.get("asyncStackTrace"))
         hit_breakpoints = params.get("hitBreakpoints", [])
         if not isinstance(hit_breakpoints, list):
@@ -9682,8 +7612,8 @@ class DebuggerBridge:
                     continue
                 scopes.append(
                     {
-                        "type": self._truncate_text(scope_type, 256),
-                        "name": self._truncate_text(raw_scope.get("name"))
+                        "type": truncate_text(scope_type, 256),
+                        "name": truncate_text(raw_scope.get("name"))
                         if isinstance(raw_scope.get("name"), str)
                         else "",
                         "object": parsed_object,
@@ -9695,8 +7625,8 @@ class DebuggerBridge:
                 )
         return {
             "id": frame_id,
-            "function_name": self._truncate_text(function_name) or "(anonymous)",
-            "url": self._truncate_text(url, MAX_TARGET_URL_BYTES),
+            "function_name": truncate_text(function_name) or "(anonymous)",
+            "url": truncate_text(url, MAX_TARGET_URL_BYTES),
             "location": location,
             "function_location": self._parse_location(value.get("functionLocation")),
             "this": self._remote_object(value.get("this")),
@@ -9713,7 +7643,7 @@ class DebuggerBridge:
                 if isinstance(value.get("description"), str)
                 else "Async"
             )
-            description = self._truncate_text(description)
+            description = truncate_text(description)
             raw_frames = value.get("callFrames")
             frames = []
             if isinstance(raw_frames, list):
@@ -9742,9 +7672,9 @@ class DebuggerBridge:
                     ):
                         frames.append(
                             {
-                                "function_name": self._truncate_text(function_name)
+                                "function_name": truncate_text(function_name)
                                 or "(anonymous)",
-                                "url": self._truncate_text(url, MAX_TARGET_URL_BYTES),
+                                "url": truncate_text(url, MAX_TARGET_URL_BYTES),
                                 "location": {
                                     "script_id": script_id,
                                     "line": line,
@@ -9893,7 +7823,7 @@ class DebuggerBridge:
         if not isinstance(value, dict) or not isinstance(value.get("name"), str):
             return None
         return {
-            "name": self._truncate_text(value["name"]),
+            "name": truncate_text(value["name"]),
             "value": self._remote_object(value.get("value")),
             "get": self._remote_object(value.get("get")),
             "set": self._remote_object(value.get("set")),
@@ -9916,17 +7846,17 @@ class DebuggerBridge:
             object_id = None
         result = {
             "type": value_type,
-            "subtype": self._truncate_text(value.get("subtype"), 256)
+            "subtype": truncate_text(value.get("subtype"), 256)
             if isinstance(value.get("subtype"), str)
             else None,
-            "class_name": self._truncate_text(value.get("className"))
+            "class_name": truncate_text(value.get("className"))
             if isinstance(value.get("className"), str)
             else None,
-            "description": self._truncate_text(value.get("description"))
+            "description": truncate_text(value.get("description"))
             if isinstance(value.get("description"), str)
             else None,
             "object_id": object_id,
-            "unserializable_value": self._truncate_text(
+            "unserializable_value": truncate_text(
                 value.get("unserializableValue")
             )
             if isinstance(value.get("unserializableValue"), str)
@@ -9939,15 +7869,15 @@ class DebuggerBridge:
             result["value_truncated"] = (
                 len(primitive.encode("utf-8")) > MAX_REMOTE_TEXT_BYTES
             )
-            result["value"] = self._truncate_text(primitive)
+            result["value"] = truncate_text(primitive)
         elif primitive is None or isinstance(primitive, bool):
             result["value"] = primitive
-        elif self._is_finite_protocol_number(primitive):
+        elif is_finite_protocol_number(primitive):
             result["value"] = primitive
         preview = value.get("preview")
         if isinstance(preview, dict):
             result["preview"] = {
-                "description": self._truncate_text(preview.get("description"))
+                "description": truncate_text(preview.get("description"))
                 if isinstance(preview.get("description"), str)
                 else None,
                 "overflow": preview.get("overflow") is True,
@@ -9989,9 +7919,9 @@ class DebuggerBridge:
                 ):
                     frames.append(
                         {
-                            "function_name": self._truncate_text(function_name)
+                            "function_name": truncate_text(function_name)
                             or "(anonymous)",
-                            "url": self._truncate_text(url, MAX_TARGET_URL_BYTES),
+                            "url": truncate_text(url, MAX_TARGET_URL_BYTES),
                             "line": line,
                             "column": column,
                         }
@@ -10001,7 +7931,7 @@ class DebuggerBridge:
                 "id": str(self._next_console_id),
                 "type": entry_type[:64],
                 "timestamp": timestamp
-                if self._is_finite_protocol_number(timestamp)
+                if is_finite_protocol_number(timestamp)
                 else None,
                 "arguments": arguments,
                 "stack": frames,
@@ -10031,41 +7961,3 @@ class DebuggerBridge:
     def _changed(self) -> None:
         self._generation += 1
         self._condition.notify_all()
-
-    @staticmethod
-    def _bounded_integer(value: Any) -> int:
-        if (
-            isinstance(value, int)
-            and not isinstance(value, bool)
-            and 0 <= value < 2**53
-        ):
-            return value
-        return 0
-
-    @staticmethod
-    def _is_finite_protocol_number(value: Any) -> bool:
-        if isinstance(value, bool):
-            return False
-        if isinstance(value, int):
-            return abs(value) <= 2**53
-        return isinstance(value, float) and math.isfinite(value)
-
-    @staticmethod
-    def _truncate_text(value: str, max_bytes: int = MAX_REMOTE_TEXT_BYTES) -> str:
-        encoded = value.encode("utf-8")
-        if len(encoded) <= max_bytes:
-            return value
-        return encoded[:max_bytes].decode("utf-8", errors="ignore")
-
-    @staticmethod
-    def _required_text(
-        request: dict[str, Any], field: str, max_bytes: int, allow_empty: bool = False
-    ) -> str:
-        value = request.get(field)
-        if (
-            not isinstance(value, str)
-            or (not allow_empty and not value)
-            or len(value.encode("utf-8")) > max_bytes
-        ):
-            raise DebuggerBridgeError(f"Debugger {field.replace('_', ' ')} is invalid")
-        return value

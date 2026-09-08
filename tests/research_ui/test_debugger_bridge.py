@@ -14,21 +14,48 @@ from pathlib import Path
 from typing import Optional
 from unittest import mock
 
-from debugger_bridge import (
-    ActionScopeTargetSession,
-    AUTOMATION_RECIPE_FUNCTION,
-    LIVE_OBJECT_SEARCH_FUNCTION,
-    MAX_HEAP_SNAPSHOT_BYTES,
-    OBJECT_EXPERIMENT_MUTATE_FUNCTION,
-    REQUEST_INTERCEPTION_FUNCTION,
-    DebuggerBridge,
+from debugger.automation import (
+    normalize_automation_variables,
+    normalize_runtime_hook_json,
+)
+from debugger.errors import (
     DebuggerBridgeError,
-    HeapSnapshotCapture,
-    HeapSnapshotCollector,
-    NativeDebuggerConnection,
     ProtocolError,
 )
-
+from debugger.heap_snapshot import (
+    HeapSnapshotCapture,
+    HeapSnapshotCollector,
+)
+from debugger.limits import (
+    MAX_HEAP_SNAPSHOT_BYTES,
+)
+from debugger.memory import (
+    normalize_heap_snapshot_probe,
+    normalize_object_experiment_value,
+)
+from debugger.requests import (
+    normalize_repeater_template,
+    normalize_repeater_variables,
+    normalize_request_interception_request,
+    normalize_request_interception_result,
+    normalize_request_interception_rule,
+    redacted_request_url,
+    resolve_repeater_request,
+    validate_request_interception_url,
+)
+from debugger.runtime_scripts import (
+    AUTOMATION_RECIPE_FUNCTION,
+    LIVE_OBJECT_SEARCH_FUNCTION,
+    OBJECT_EXPERIMENT_MUTATE_FUNCTION,
+    REQUEST_INTERCEPTION_FUNCTION,
+)
+from debugger.transport import (
+    ActionScopeTargetSession,
+    NativeDebuggerConnection,
+)
+from debugger_bridge import (
+    DebuggerBridge,
+)
 
 HEAP_SNAPSHOT_FIXTURE = """{
   "snapshot":{"meta":{
@@ -1177,20 +1204,20 @@ process.stdout.write(JSON.stringify({{
                 "self_size": 24,
             },
         }
-        normalized = bridge._normalize_heap_snapshot_probe(valid)
+        normalized = normalize_heap_snapshot_probe(valid)
         self.assertTrue(normalized["match_found"])
         self.assertEqual(normalized["match"]["id"], "5")
 
         with self.assertRaisesRegex(ProtocolError, "invalid coverage"):
-            bridge._normalize_heap_snapshot_probe(
+            normalize_heap_snapshot_probe(
                 dict(valid, reachability_indexed=True, indexed_edges=3)
             )
         with self.assertRaisesRegex(ProtocolError, "malformed match"):
-            bridge._normalize_heap_snapshot_probe(
+            normalize_heap_snapshot_probe(
                 dict(valid, match={**valid["match"], "id": "05"})
             )
         with self.assertRaisesRegex(ProtocolError, "malformed match"):
-            bridge._normalize_heap_snapshot_probe(
+            normalize_heap_snapshot_probe(
                 dict(
                     valid,
                     match_found=False,
@@ -1199,7 +1226,7 @@ process.stdout.write(JSON.stringify({{
                 )
             )
         with self.assertRaisesRegex(ProtocolError, "invalid coverage"):
-            bridge._normalize_heap_snapshot_probe(
+            normalize_heap_snapshot_probe(
                 dict(
                     valid,
                     match_found=False,
@@ -1562,13 +1589,13 @@ process.stdout.write(JSON.stringify({{
     def test_request_interception_rejects_credentials_and_unbounded_rules(self) -> None:
         bridge = DebuggerBridge()
         self.assertEqual(
-            bridge._redacted_request_url(
+            redacted_request_url(
                 "https://user:password@[2001:db8::1]:8443/private?token=secret"
             ),
             "https://[2001:db8::1]:8443/private",
         )
         self.assertEqual(
-            bridge._normalize_request_interception_request(
+            normalize_request_interception_request(
                 {"url": "https://example.test/", "method": "CUSTOM_METHOD"}
             )["method"],
             "CUSTOM_METHOD",
@@ -1581,7 +1608,7 @@ process.stdout.write(JSON.stringify({{
             }
         )
         self.assertEqual(bridge.snapshot()["request_interception"]["audit"], [])
-        fulfill_rule = bridge._normalize_request_interception_rule(
+        fulfill_rule = normalize_request_interception_rule(
             {
                 "mode": "fulfill",
                 "url_pattern": "*",
@@ -1594,14 +1621,14 @@ process.stdout.write(JSON.stringify({{
             fulfill_rule["response_headers"],
         )
         with self.assertRaisesRegex(DebuggerBridgeError, "credential-free"):
-            bridge._normalize_request_interception_request(
+            normalize_request_interception_request(
                 {
                     "url": "https://user:password@example.test/",
                     "method": "GET",
                 }
             )
         with self.assertRaisesRegex(DebuggerBridgeError, "forbidden"):
-            bridge._normalize_request_interception_request(
+            normalize_request_interception_request(
                 {
                     "url": "https://example.test/",
                     "method": "GET",
@@ -1609,7 +1636,7 @@ process.stdout.write(JSON.stringify({{
                 }
             )
         with self.assertRaisesRegex(DebuggerBridgeError, "64 KiB"):
-            bridge._normalize_request_interception_rule(
+            normalize_request_interception_rule(
                 {
                     "mode": "fulfill",
                     "url_pattern": "*",
@@ -1617,11 +1644,11 @@ process.stdout.write(JSON.stringify({{
                 }
             )
         with self.assertRaisesRegex(DebuggerBridgeError, "at least one"):
-            bridge._normalize_request_interception_rule(
+            normalize_request_interception_rule(
                 {"mode": "rewrite", "url_pattern": "*"}
             )
         with self.assertRaisesRegex(ProtocolError, "malformed"):
-            bridge._normalize_request_interception_result(
+            normalize_request_interception_result(
                 {
                     "protocolVersion": 1,
                     "ok": True,
@@ -1925,9 +1952,8 @@ process.stdout.write(JSON.stringify({{
         self.assertEqual(disposed["history"], [])
 
     def test_repeater_rejects_unresolved_sensitive_and_expanded_inputs(self) -> None:
-        bridge = DebuggerBridge()
-        variables = bridge._normalize_repeater_variables({"large": "x" * 4096})
-        template = bridge._normalize_repeater_template(
+        variables = normalize_repeater_variables({"large": "x" * 4096})
+        template = normalize_repeater_template(
             {
                 "url": "https://example.test/{{missing}}",
                 "method": "GET",
@@ -1937,8 +1963,8 @@ process.stdout.write(JSON.stringify({{
             }
         )
         with self.assertRaisesRegex(DebuggerBridgeError, "Unresolved"):
-            bridge._resolve_repeater_request(template, variables)
-        literal_template = bridge._normalize_repeater_template(
+            resolve_repeater_request(template, variables)
+        literal_template = normalize_repeater_template(
             {
                 "url": "https://example.test/",
                 "method": "POST",
@@ -1947,13 +1973,13 @@ process.stdout.write(JSON.stringify({{
                 "timeout_ms": 100,
             }
         )
-        literal, literal_variables = bridge._resolve_repeater_request(
+        literal, literal_variables = resolve_repeater_request(
             literal_template, variables
         )
         self.assertEqual(literal["body"], "{{large}}")
         self.assertEqual(literal_variables, [])
         with self.assertRaisesRegex(DebuggerBridgeError, "forbidden"):
-            bridge._normalize_repeater_template(
+            normalize_repeater_template(
                 {
                     "url": "https://example.test/",
                     "method": "GET",
@@ -1962,7 +1988,7 @@ process.stdout.write(JSON.stringify({{
                     "timeout_ms": 100,
                 }
             )
-        expanded = bridge._normalize_repeater_template(
+        expanded = normalize_repeater_template(
             {
                 "url": "https://example.test/",
                 "method": "POST",
@@ -1972,9 +1998,9 @@ process.stdout.write(JSON.stringify({{
             }
         )
         with self.assertRaisesRegex(DebuggerBridgeError, "64 KiB"):
-            bridge._resolve_repeater_request(expanded, variables)
+            resolve_repeater_request(expanded, variables)
         with self.assertRaisesRegex(DebuggerBridgeError, "100 and 30000"):
-            bridge._normalize_repeater_template(
+            normalize_repeater_template(
                 {
                     "url": "https://example.test/",
                     "method": "GET",
@@ -2206,9 +2232,9 @@ process.stdout.write(JSON.stringify({{
             float("inf"),
         ):
             with self.assertRaises(DebuggerBridgeError):
-                bridge._normalize_object_experiment_value(invalid)
+                normalize_object_experiment_value(invalid)
         with self.assertRaisesRegex(DebuggerBridgeError, "credential-free"):
-            bridge._validate_request_interception_url(
+            validate_request_interception_url(
                 "https://user:secret@example.test/"
             )
 
@@ -2473,11 +2499,10 @@ process.stdout.write(JSON.stringify({{
         self.assertEqual(erased["definitions"], [])
 
     def test_runtime_hooks_reject_promises_bounds_and_partial_arming(self) -> None:
-        bridge = DebuggerBridge()
         with self.assertRaisesRegex(DebuggerBridgeError, "8 KiB"):
-            bridge._normalize_runtime_hook_json("x" * (8 * 1024 + 1))
+            normalize_runtime_hook_json("x" * (8 * 1024 + 1))
         with self.assertRaisesRegex(DebuggerBridgeError, "depth 8"):
-            bridge._normalize_runtime_hook_json([[[[[[[[[True]]]]]]]]])
+            normalize_runtime_hook_json([[[[[[[[[True]]]]]]]]])
 
         class PartialArmBridge(DebuggerBridge):
             def __init__(self) -> None:
@@ -2822,7 +2847,7 @@ process.stdout.write(JSON.stringify({{
         )
         self.assertEqual(bridge.snapshot()["automation_recipes"]["recipes"], [])
         with self.assertRaisesRegex(DebuggerBridgeError, "4 KiB"):
-            bridge._normalize_automation_variables(
+            normalize_automation_variables(
                 {"variables": {"oversized": "x" * (4 * 1024 + 1)}}
             )
         with self.assertRaisesRegex(DebuggerBridgeError, "source limit"):

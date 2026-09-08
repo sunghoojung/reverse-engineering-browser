@@ -10,6 +10,7 @@ from pathlib import Path
 
 from origin_trace import OriginTraceError, build_origin_trace
 from server import ResearchHandler
+from ui_test_support import UI_DIRECTORY
 
 
 def event(
@@ -184,7 +185,7 @@ class OriginTraceTests(unittest.TestCase):
                 json.dumps(edge(3, 2)) + "\n" + json.dumps(edge(2, 1)) + "\n",
                 encoding="utf-8",
             )
-            ResearchHandler.ui_directory = Path(__file__).parent
+            ResearchHandler.ui_directory = UI_DIRECTORY
             ResearchHandler.event_store = event_store
             ResearchHandler.trace_store = trace_store
             ResearchHandler.artifact_store = artifact_store

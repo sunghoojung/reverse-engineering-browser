@@ -248,7 +248,7 @@
           empty.textContent = 'No requests match the current filters.';
           elements.requestRows.removeAttribute('role');
           elements.requestRows.replaceChildren(empty);
-          elements.sidebarCount.textContent = String(state.requests.length);
+          elements.requestCount.textContent = String(state.requests.length);
           return;
         }
         elements.requestRows.setAttribute('role', 'listbox');
@@ -287,7 +287,7 @@
           row.addEventListener('keydown', moveRequestSelection);
           return row;
         }));
-        elements.sidebarCount.textContent = String(state.requests.length);
+        elements.requestCount.textContent = String(state.requests.length);
       }
 
       function updateSelectionSummary(request) {
@@ -6429,8 +6429,6 @@
         const screenName = name === 'backtraces' ? 'backtrace' : name;
         if (screenName === 'backtrace' && !traceIsAvailable()) return;
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
-        elements.workspace.classList.toggle('sources-active', screenName === 'sources');
-        elements.workspace.classList.toggle('experiments-active', screenName === 'experiments');
         document.querySelectorAll('.nav-button').forEach(button => {
           const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence');
           if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
@@ -6637,9 +6635,6 @@
       enableTabKeyboardNavigation('.inspector-tab');
       enableTabKeyboardNavigation('.field-tab');
       enableTabKeyboardNavigation('.source-side-tab:not(:disabled)');
-      document.querySelectorAll('.view-switch button').forEach(button => button.addEventListener('click', () => {
-        document.querySelectorAll('.view-switch button').forEach(candidate => candidate.setAttribute('aria-pressed', String(candidate === button)));
-      }));
       elements.requestFilter.addEventListener('input', renderRequests);
       elements.traceButton.addEventListener('click', async () => {
         showScreen('backtrace', elements.traceButton);

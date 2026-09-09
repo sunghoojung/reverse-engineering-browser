@@ -12,10 +12,8 @@
     <div class="app">
       <header class="titlebar">
         <div class="window-dots" aria-hidden="true"><span class="window-dot"></span><span class="window-dot"></span><span class="window-dot"></span></div>
-        <span class="brand-mark" aria-hidden="true">R:B</span>
-        <span class="brand-name">ORIGIN TRACE</span>
-        <span class="poc-badge">Proof of concept</span>
-        <span class="title-meta">session_007f3 · checkout.acme.test</span>
+        <span class="brand-name">Origin Trace</span>
+        <span class="preview-label">Preview</span>
       </header>
 
       <div class="toolbar">
@@ -32,31 +30,11 @@
           <button class="nav-button" data-screen="tools">Tools</button>
         </nav>
         <div class="toolbar-actions">
-          <span class="authorization">◇ authorized baseline</span>
           <button id="theme-toggle" class="icon-button" type="button" aria-label="Switch color theme" title="Switch color theme">◐</button>
         </div>
       </div>
 
       <div id="workspace" class="workspace">
-        <aside class="sidebar" aria-label="Session structure">
-          <div class="sidebar-heading"><span class="session-icon" aria-hidden="true"></span>Working session <span id="sidebar-count" class="sidebar-count">12</span></div>
-          <div class="tree">
-            <div class="tree-label">Pinned</div>
-            <button class="tree-row selected" type="button"><span class="tree-glyph">⌁</span><span>checkout.acme.test</span><span class="tree-number">4</span></button>
-            <button class="tree-row indent" type="button"><span class="tree-glyph">□</span><span>/cart</span><span class="tree-number">2</span></button>
-            <button class="tree-row indent" type="button"><span class="tree-glyph">□</span><span>/api</span><span class="tree-number">2</span></button>
-            <div class="tree-label">Domains</div>
-            <button class="tree-row" type="button"><span class="tree-glyph">◎</span><span>api.acme.test</span><span class="tree-number">5</span></button>
-            <button class="tree-row" type="button"><span class="tree-glyph">◎</span><span>metrics.acme.test</span><span class="tree-number">3</span></button>
-            <div class="tree-label">Context</div>
-            <button class="tree-row" type="button"><span class="tree-glyph">▣</span><span>Chromium</span><span class="tree-number">tab 7</span></button>
-          </div>
-          <div class="view-switch" aria-label="Request organization">
-            <button type="button" aria-pressed="true">Structure</button>
-            <button type="button" aria-pressed="false">Sequence</button>
-          </div>
-        </aside>
-
         <main class="main">
           <section id="screen-traffic" class="screen" aria-label="Traffic">
             <div class="traffic-grid">
@@ -95,7 +73,6 @@
                   <span id="selected-status" class="status-pill">201</span>
                   <span id="selected-url" class="selection-url">https://checkout.acme.test/cart</span>
                   <button id="request-collection-pivot" class="secondary-button" type="button">Save to Collection</button>
-                  <span class="selection-more" aria-hidden="true">•••</span>
                 </div>
                 <div class="inspector-tabs" role="tablist" aria-label="Request inspector">
                   <button id="inspector-tab-headers" class="inspector-tab" type="button" role="tab" data-inspector-tab="headers" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Headers</button>
@@ -1012,6 +989,7 @@
 
       <footer class="statusbar">
         <span id="broker-status" class="broker-status">connecting to broker</span>
+        <span><span id="request-count">0</span> requests</span>
         <span id="sample-status">sample request values enabled</span>
         <span id="gap-status">0 sequence gaps</span>
         <span id="updated-status">waiting for evidence</span>

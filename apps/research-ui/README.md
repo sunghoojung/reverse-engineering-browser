@@ -77,3 +77,12 @@ build and signature verification when packaging changes.
 See the [Origin Trace reference](../../docs/product/origin-trace-reference.md)
 for workspace behavior, limits, command-line options, and evidence guarantees.
 Versioned wire and storage contracts belong in [`protocol/`](../../protocol/).
+
+### Interface styling
+
+The shared shell uses DevTools-style neutral surfaces, thin pane dividers, and
+blue selection accents in both themes. Evidence owns the available width;
+Traffic stacks its request list above the inspector below 900 px. Session
+counts come from loaded requests, and sample evidence stays visibly labeled.
+Keep labels at least 10 px and reserve stronger color for selection, connection
+state, errors, and evidence confidence.

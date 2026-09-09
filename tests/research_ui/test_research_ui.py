@@ -1658,11 +1658,6 @@ process.stdout.write(JSON.stringify({
         self.assertIn("action: 'create_experiment_page'", html)
         self.assertIn("action: 'close_experiment_page'", html)
         self.assertIn("16-trigger queue", html)
-        self.assertIn(".workspace.experiments-active > .sidebar { display: none; }", html)
-        self.assertIn(
-            "elements.workspace.classList.toggle('experiments-active', screenName === 'experiments')",
-            html,
-        )
 
     def test_object_lab_exposes_bounded_confirmed_disposable_mutation(self) -> None:
         html = read_ui_sources()

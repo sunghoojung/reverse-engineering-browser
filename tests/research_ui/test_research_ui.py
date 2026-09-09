@@ -1,4 +1,5 @@
 import hashlib
+import http.client
 import json
 import shutil
 import socket
@@ -361,13 +362,20 @@ class ResearchUiTests(unittest.TestCase):
                     urllib.request.urlopen(malformed_origin)
                 self.assertEqual(forbidden.exception.code, HTTPStatus.FORBIDDEN)
 
-                malformed_host = urllib.request.Request(
-                    f"{base_url}/api/debugger",
-                    headers={"Host": "127.0.0.1:not-a-port"},
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", server.server_port
                 )
-                with self.assertRaises(urllib.error.HTTPError) as forbidden:
-                    urllib.request.urlopen(malformed_host)
-                self.assertEqual(forbidden.exception.code, HTTPStatus.FORBIDDEN)
+                try:
+                    connection.request(
+                        "GET",
+                        "/api/debugger",
+                        headers={"Host": "127.0.0.1:not-a-port"},
+                    )
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, HTTPStatus.FORBIDDEN)
+                    response.read()
+                finally:
+                    connection.close()
             finally:
                 server.shutdown()
                 server.server_close()
@@ -800,10 +808,9 @@ class ResearchUiTests(unittest.TestCase):
     def test_ui_keeps_captured_values_out_of_html_injection_paths(self) -> None:
         html = read_ui_sources()
 
-        self.assertIn("Request Origin Trace", html)
+        self.assertIn("Backtraces", html)
         self.assertIn("Trace origin", html)
-        self.assertIn("Evidence gap", html)
-        self.assertIn("Unknown", html)
+        self.assertIn("Missing event", html)
         self.assertIn("width: 100%", html)
         self.assertIn("height: 100vh", html)
         self.assertIn("standalone preview", html)
@@ -959,8 +966,8 @@ process.stdout.write(JSON.stringify({
         self.assertIn('aria-label="Sources navigator"', html)
         self.assertIn(">Page</button>", html)
         self.assertIn(">Captured</button>", html)
-        self.assertIn(">Workspace</button>", html)
-        self.assertIn(">Overrides</button>", html)
+        self.assertNotIn(">Workspace</button>", html)
+        self.assertNotIn(">Overrides</button>", html)
         self.assertIn('aria-label="Source editor"', html)
         self.assertIn('aria-label="Debugger sidebar"', html)
         for pane in (
@@ -1002,6 +1009,48 @@ process.stdout.write(JSON.stringify({
             "function toggleLineBreakpoint(source, line, column, breakpoint)", html
         )
 
+    def test_source_sidebar_follows_connection_and_user_selection(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+        source = read_ui_sources()
+        start = source.index("      function renderSourceSidebar()")
+        end = source.index("      function renderDebuggerState()", start)
+        exercise = r"""
+const screen = {dataset: {}};
+const document = {querySelector: () => screen};
+const state = {debuggerSession: {state: 'unavailable'}, sourceSidebarOpen: null};
+const elements = {sourceSidebar: {dataset: {}}, sourceSidebarToggle: {setAttribute(key, value) { this[key] = value; }}};
+const results = [];
+function capture() {
+  renderSourceSidebar();
+  results.push([elements.sourceSidebar.hidden, elements.sourceSidebar.dataset.attached,
+    elements.sourceSidebarToggle['aria-expanded'], elements.sourceSidebarToggle.textContent]);
+}
+capture();
+state.sourceSidebarOpen = true; capture();
+state.sourceSidebarOpen = null; state.debuggerSession.state = 'running'; capture();
+state.sourceSidebarOpen = false; capture();
+state.debuggerSession.state = 'unavailable'; capture();
+process.stdout.write(JSON.stringify(results));
+"""
+        result = subprocess.run(
+            [node, "-e", source[start:end] + exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(result.stdout),
+            [
+                [True, "false", "false", "Details"],
+                [False, "false", "true", "Details"],
+                [False, "true", "true", "Debugger"],
+                [True, "true", "false", "Debugger"],
+                [True, "false", "false", "Details"],
+            ],
+        )
+
     def test_source_syntax_highlighter_is_bounded_stateful_and_text_preserving(
         self,
     ) -> None:
@@ -1009,12 +1058,8 @@ process.stdout.write(JSON.stringify({
         if node is None:
             self.skipTest("Node.js is not installed")
 
-        html = read_ui_sources()
-        start = html.index("      const SOURCE_HIGHLIGHT_TOKEN_LIMIT")
-        end = html.index("      function appendSourceSyntax")
-        model = html[start:end]
+        model = (UI_DIRECTORY / "source_syntax.js").read_text(encoding="utf-8")
         exercise = r"""
-function sourceName(source) { return source.url?.split('/').at(-1) || ''; }
 const javascriptSource = {kind: 'javascript', mime_type: 'text/javascript', url: 'app.js'};
 const javascript = createSourceTokenizer(javascriptSource);
 const javascriptLines = [
@@ -1632,12 +1677,18 @@ process.stdout.write(JSON.stringify({
     def test_experiment_workspace_exposes_isolated_request_interception(self) -> None:
         html = read_ui_sources()
 
-        self.assertIn("Request Interception Lab", html)
+        self.assertIn('id="experiment-title">Interceptor', html)
         self.assertIn('id="experiment-create"', html)
         self.assertIn('id="experiment-rule-form"', html)
         self.assertIn('id="experiment-request-form"', html)
         self.assertIn("function isRequestInterception(experiment)", html)
         self.assertIn("function renderExperiment()", html)
+        self.assertIn('class="experiment-mode-tabs"', html)
+        self.assertIn('class="experiment-scope"', html)
+        self.assertIn('class="experiment-session-details"', html)
+        self.assertIn('class="experiment-help"', html)
+        self.assertIn('class="experiment-card experiment-disclosure"', html)
+        self.assertIn("elements.actionScopePanel.hidden = !sharedMode", html)
         self.assertIn("action: 'create_request_interception_experiment'", html)
         self.assertIn("action: 'configure_request_interception'", html)
         self.assertIn("action: 'run_request_interception'", html)
@@ -1658,11 +1709,6 @@ process.stdout.write(JSON.stringify({
         self.assertIn("action: 'create_experiment_page'", html)
         self.assertIn("action: 'close_experiment_page'", html)
         self.assertIn("16-trigger queue", html)
-        self.assertIn(".workspace.experiments-active > .sidebar { display: none; }", html)
-        self.assertIn(
-            "elements.workspace.classList.toggle('experiments-active', screenName === 'experiments')",
-            html,
-        )
 
     def test_object_lab_exposes_bounded_confirmed_disposable_mutation(self) -> None:
         html = read_ui_sources()
@@ -1698,7 +1744,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn("function isRuntimeHooks(hooks)", html)
         self.assertIn("function renderRuntimeHooks()", html)
         self.assertIn("function pivotSourceToRuntimeHooks()", html)
-        self.assertIn("#screen-experiments:not([hidden]) { grid-template-rows: auto auto", html)
+        self.assertIn("#screen-experiments:not([hidden]) { display: flex", html)
         self.assertIn("action: 'add_runtime_hook'", html)
         self.assertIn("action: 'arm_runtime_hooks'", html)
         self.assertIn("action: 'disarm_runtime_hooks'", html)
@@ -1740,15 +1786,22 @@ process.stdout.write(JSON.stringify({
         self.assertIn('id="repeater-history"', html)
         self.assertIn('id="repeater-variable-form"', html)
         self.assertIn('id="repeater-comparison"', html)
+        self.assertIn('class="repeater-compose-bar"', html)
+        self.assertIn('class="repeater-split"', html)
+        self.assertIn('data-repeater-editor-tab="headers"', html)
+        self.assertIn('data-repeater-editor-tab="body"', html)
+        self.assertIn('data-repeater-editor-tab="settings"', html)
         self.assertIn("function isRepeater(repeater)", html)
         self.assertIn("function renderRepeater()", html)
         self.assertIn("function renderRepeaterVariableStatus()", html)
+        self.assertIn("function setRepeaterEditorTab", html)
+        self.assertIn("function setRepeaterResponseTab", html)
         self.assertIn("action: 'configure_repeater_variables'", html)
         self.assertIn("action: 'run_repeater_request'", html)
         self.assertIn("action: 'cancel_repeater_request'", html)
         self.assertIn("action: 'compare_repeater_history'", html)
         self.assertIn("action: 'clear_repeater_history'", html)
-        self.assertIn("24 runs / 512 KiB", html)
+        self.assertIn("0 / 512 KiB", html)
         self.assertIn("History is ephemeral and never enters the evidence store", html)
 
     def test_api_collection_exposes_atomic_hierarchy_scopes_import_and_execution(self) -> None:
@@ -1909,7 +1962,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn("row.setAttribute('role', 'option')", html)
         self.assertIn("row.setAttribute('aria-pressed'", html)
         self.assertIn('aria-label="Filter requests"', html)
-        self.assertIn("button.disabled = !traceIsAvailable()", html)
+        self.assertIn('aria-label="Request to trace"', html)
         self.assertNotIn("screenName === 'experiments' && !state.selectedField", html)
         self.assertIn("enableTabKeyboardNavigation('.experiment-mode-tab')", html)
         self.assertIn("select.id = 'debugger-target-select'", html)
@@ -1920,7 +1973,8 @@ process.stdout.write(JSON.stringify({
     def test_vm_lab_exposes_typed_evidence_and_failure_states(self) -> None:
         html = read_ui_sources()
 
-        self.assertIn('data-screen="vm">VM Lab</button>', html)
+        self.assertNotIn('id="nav-vm"', html)
+        self.assertIn('<h1>VM findings</h1>', html)
         self.assertIn('id="screen-vm"', html)
         self.assertIn('role="listbox" aria-label="Captured VM findings"', html)
         for evidence_kind in (
@@ -2382,6 +2436,9 @@ process.stdout.write(JSON.stringify({
         self.assertIn("runtimeHooksAvailable: state.debuggerSession?.runtime_hooks?.protocol_version === 1", application)
         self.assertIn("automationRecipesAvailable: state.debuggerSession?.automation_recipes?.protocol_version === 1", application)
         self.assertIn("repeaterAvailable: state.debuggerSession?.repeater?.protocol_version === 1", application)
+        self.assertIn("setExperimentMode('repeater')", application)
+        self.assertIn("repeaterSplitColumns", application)
+        self.assertIn("repeaterWorkspaceHeight", application)
         self.assertIn("apiCollectionContractValid: isApiCollection(state.apiCollection)", application)
         self.assertIn("REB_APP_SMOKE_API_COLLECTION_WRITE", application)
         self.assertIn("apiCollectionWriteExercised", application)

@@ -74,7 +74,7 @@
           const card = document.createElement('article'); card.className = 'vm-detail-card';
           const head = document.createElement('header'); head.className = 'vm-detail-head';
           const title = document.createElement('div');
-          title.append(textElement('h2', '', selected.label), textElement('p', '', `${selected.hostRuntime} · profile anti-bot-vm-detection-v1`));
+          title.append(textElement('h2', '', 'VM patterns in source'), textElement('p', '', `${selected.hostRuntime} · code analysis · artifact ${selected.sourceArtifactId}`));
           const actions = document.createElement('div'); actions.className = 'vm-detail-actions';
           actions.append(textElement('span', 'vm-confidence', selected.confidence));
           const sourceArtifact = state.artifacts.find(artifact => artifact.artifact_id === selected.sourceArtifactId);
@@ -122,7 +122,7 @@
         const coveragePercent = coverage ? Math.round(coverage.observedCount * 100 / coverage.totalCount) : null;
         const summary = document.createElement('div'); summary.className = 'vm-summary';
         [
-          ['findings', investigation.length],
+          ['investigation findings', investigation.length],
           ['interpreters', investigation.filter(finding => finding.kind === 'interpreter').length],
           ['guest programs', investigation.filter(finding => finding.kind === 'guest program').length],
           ['coverage', coveragePercent === null ? 'unknown' : `${coveragePercent}%`]
@@ -206,9 +206,9 @@
           row.setAttribute('aria-selected', String(finding.findingId === state.selectedVmFindingId));
           row.tabIndex = finding.findingId === state.selectedVmFindingId || !selectedExists && index === 0 ? 0 : -1;
           row.append(
-            textElement('span', 'vm-row-title', finding.label),
-            textElement('span', 'vm-kind', finding.kind),
-            textElement('span', 'vm-row-meta', finding.analysis ? `cold-path derived analysis · artifact ${finding.sourceArtifactId}` : `t ${finding.monotonicTimeNs} ns · source p${finding.processId}:t${finding.threadId} · category vm`),
+            textElement('span', 'vm-row-title', finding.analysis ? 'VM patterns in source' : finding.label),
+            textElement('span', 'vm-kind', finding.analysis ? 'Code analysis' : finding.kind),
+            textElement('span', 'vm-row-meta', finding.analysis ? `Code analysis · artifact ${finding.sourceArtifactId}` : `t ${finding.monotonicTimeNs} ns · source p${finding.processId}:t${finding.threadId} · category vm`),
             textElement('span', 'vm-row-correlation', `operation ${finding.kind} · finding ${finding.findingId} · investigation ${finding.investigationId} · ${finding.hostRuntime} · ${finding.confidence}`)
           );
           row.addEventListener('click', () => {
@@ -248,7 +248,7 @@
           empty.textContent = 'No requests match the current filters.';
           elements.requestRows.removeAttribute('role');
           elements.requestRows.replaceChildren(empty);
-          elements.sidebarCount.textContent = String(state.requests.length);
+          elements.requestCount.textContent = String(state.requests.length);
           return;
         }
         elements.requestRows.setAttribute('role', 'listbox');
@@ -287,7 +287,7 @@
           row.addEventListener('keydown', moveRequestSelection);
           return row;
         }));
-        elements.sidebarCount.textContent = String(state.requests.length);
+        elements.requestCount.textContent = String(state.requests.length);
       }
 
       function updateSelectionSummary(request) {
@@ -307,6 +307,7 @@
         if (!request) return;
         state.selectedRequestId = id;
         state.originTrace = null;
+        state.selectedTraceRow = null;
         state.originTraceStatus = 'idle';
         state.originTraceError = null;
         state.originTraceKey = null;
@@ -655,11 +656,8 @@
       }
 
       function renderEvidence() {
-        document.querySelectorAll('.nav-button[data-screen="backtrace"]')
-          .forEach(button => { button.disabled = !traceIsAvailable(); });
         document.querySelectorAll('.nav-button[data-screen="experiments"]')
           .forEach(button => { button.disabled = !state.selectedField; });
-        elements.traceBranchExperiment.disabled = !state.selectedField;
         const documentSteps = state.originTrace?.steps ?? [];
         const firstTime = documentSteps.length ? BigInt(documentSteps[documentSteps.length - 1].monotonic_time_ns) : 0n;
         const tracedEvidence = documentSteps.map(step => ({
@@ -691,6 +689,7 @@
         }));
         elements.evidenceCount.textContent = `${evidence.length} trace records`;
         elements.evidenceLinkCount.textContent = String(evidence.length);
+        if (!document.querySelector('#screen-backtrace').hidden) renderBacktrace();
       }
 
       function originTraceSelection() {
@@ -751,66 +750,122 @@
         renderEvidence();
       }
 
+      function traceStepDetails(model) {
+        const panel = elements.traceStepDetails;
+        panel.replaceChildren(textElement('h3', '', model.title), textElement('p', 'trace-detail-relation', model.kind));
+        if (!model.step) {
+          panel.append(textElement('p', 'trace-detail-message', model.meta));
+          return;
+        }
+        const step = model.step;
+        const facts = document.createElement('dl'); facts.className = 'trace-facts';
+        [
+          ['Relationship', step.relation.replaceAll('_', ' ')],
+          ['Link type', step.confidence === 'observed' ? 'Recorded event link' : 'Matched by shared identifiers'],
+          ['Time (monotonic ns)', step.monotonic_time_ns],
+          ['Session', step.event.session_id], ['Process', step.event.process_id],
+          ['Event', step.event.sequence_number], ['Frame', step.frame_id],
+          ['Request', step.request_id], ['Artifact', step.artifact_id]
+        ].forEach(([label, value]) => facts.append(textElement('dt', '', label), textElement('dd', '', String(value))));
+        panel.append(facts);
+        if (step.value) panel.append(textElement('h4', '', 'Captured value'), textElement('pre', 'trace-value', step.value));
+        const artifact = state.artifacts.find(candidate => candidate.artifact_id === step.artifact_id);
+        if (artifact) {
+          const open = textElement('button', 'secondary-button', 'Open source'); open.type = 'button';
+          open.addEventListener('click', () => { showScreen('sources', open); selectArtifact(artifact.artifact_id); });
+          panel.append(open);
+        }
+      }
+
       function traceStepElement(model) {
-        const item = document.createElement('li');
-        item.className = `trace-step${model.gap ? ' gap' : ''}${model.correlated ? ' correlated' : ''}`;
-        const index = document.createElement('span'); index.className = 'step-index'; index.textContent = model.index;
-        const card = document.createElement('div'); card.className = `step-card${model.gap ? ' gap-card' : ''}`;
-        const copy = document.createElement('span');
-        const kind = document.createElement('span'); kind.className = 'step-kind'; kind.textContent = model.kind;
-        const title = document.createElement('span'); title.className = 'step-title'; title.textContent = model.title;
-        const meta = document.createElement('span'); meta.className = 'step-meta'; meta.textContent = model.meta;
-        const confidence = document.createElement('span');
-        confidence.className = `confidence ${model.style}`; confidence.textContent = model.confidence;
-        copy.append(kind, title, meta); card.append(copy, confidence); item.append(index, card);
-        return item;
+        const item = document.createElement('li'); item.className = `trace-step${model.gap ? ' gap' : ''}`;
+        const row = document.createElement('button'); row.type = 'button'; row.className = 'trace-row';
+        row.dataset.traceKey = model.key;
+        row.setAttribute('aria-pressed', String(state.selectedTraceRow === model.key));
+        row.tabIndex = state.selectedTraceRow === model.key ? 0 : -1;
+        const copy = document.createElement('span'); copy.className = 'trace-row-copy';
+        copy.append(textElement('span', 'step-title', model.title), textElement('span', 'step-kind', model.kind));
+        row.append(textElement('span', 'step-index', model.index), copy,
+          textElement('span', `trace-link-type ${model.style}`, model.confidence));
+        row.addEventListener('click', () => {
+          state.selectedTraceRow = model.key;
+          elements.backtraceSteps.querySelectorAll('.trace-row').forEach(candidate => {
+            const active = candidate === row;
+            candidate.setAttribute('aria-pressed', String(active)); candidate.tabIndex = active ? 0 : -1;
+          });
+          traceStepDetails(model);
+        });
+        row.addEventListener('keydown', event => {
+          if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+          event.preventDefault();
+          const rows = [...elements.backtraceSteps.querySelectorAll('.trace-row')];
+          const current = rows.indexOf(row);
+          const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
+            : (current + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
+          rows[next].click(); rows[next].focus();
+        });
+        item.append(row); return item;
       }
 
       function renderBacktrace() {
         const selection = originTraceSelection();
-        const request = selection?.request ?? state.requests.find(candidate => candidate.id === state.selectedRequestId);
-        const models = [];
-        if (state.originTraceStatus === 'loading' && !state.originTrace) {
-          models.push({ index: '…', kind: 'Loading evidence', title: 'Building the bounded origin trace', meta: 'Reading normalized broker evidence', confidence: 'Pending', style: 'unknown', gap: true });
-        } else if (state.originTraceStatus === 'error' && !state.originTrace) {
-          models.push({ index: '?', kind: 'Trace unavailable', title: state.originTraceError || 'No broker-backed trace loaded', meta: 'Select a live request and run Trace origin', confidence: 'Unknown', style: 'unknown', gap: true });
-        } else if (state.originTrace) {
-          const relationLabels = {
-            trace_target: 'Trace target', parent_event: 'Observed parent', request_initiator: 'Request initiator',
-            request_lifecycle: 'Request lifecycle', artifact_request: 'Artifact correlation'
-          };
-          state.originTrace.steps.forEach((step, index) => {
-            models.push({
-              index: String(index + 1).padStart(2, '0'),
-              kind: relationLabels[step.relation] || step.relation,
-              title: `${step.category} · ${step.operation}`,
-              meta: `process ${step.event.process_id} · event ${step.event.sequence_number}${step.value ? ` · ${step.value}` : ''}`,
-              confidence: step.confidence === 'observed' ? 'Observed' : 'Correlated',
-              style: step.confidence === 'observed' ? 'exact' : 'correlation',
-              correlated: step.confidence === 'correlated'
-            });
-            state.originTrace.gaps.filter(gap => gap.after_step === index).forEach(gap => {
-              models.push({ index: '?', kind: 'Evidence gap', title: gap.reason.replaceAll('_', ' '), meta: gap.detail, confidence: 'Unknown', style: 'unknown', gap: true });
-            });
-          });
-          if (!state.originTrace.steps.length) {
-            const gap = state.originTrace.gaps[0];
-            models.push({ index: '?', kind: 'No retained origin', title: state.originTrace.status, meta: gap?.detail || 'No matching request evidence is retained.', confidence: 'Unknown', style: 'unknown', gap: true });
-          }
-          if (state.originTraceStatus === 'loading') {
-            models.unshift({ index: '…', kind: 'Refreshing evidence', title: 'Last valid trace remains visible', meta: 'Checking the bounded stores for new relationships', confidence: 'Pending', style: 'unknown', gap: true });
-          } else if (state.originTraceStatus === 'error') {
-            models.push({ index: '!', kind: 'Refresh unavailable', title: 'Last valid trace retained', meta: state.originTraceError, confidence: 'Unknown', style: 'unknown', gap: true });
-          }
-        } else {
-          models.push({ index: '?', kind: 'Trace unavailable', title: state.originTraceError || 'No broker-backed trace loaded', meta: 'Select a live request and run Trace origin', confidence: 'Unknown', style: 'unknown', gap: true });
+        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        const captured = state.requests.filter(candidate => requestTraceRoot(candidate));
+        const choices = request && !requestTraceRoot(request) ? [request, ...captured] : captured;
+        const choiceKey = JSON.stringify(choices.map(candidate => [candidate.id, candidate.method, candidate.path]));
+        if (elements.traceRequest.dataset.choices !== choiceKey) {
+          elements.traceRequest.replaceChildren(...choices.map(candidate => {
+          const option = document.createElement('option'); option.value = candidate.id;
+          option.textContent = `${candidate.method} ${candidate.path}${requestTraceRoot(candidate) ? '' : candidate.origin === 'sample' ? ' (sample, no trace)' : ' (no request identifier)'}`;
+          option.selected = candidate.id === state.selectedRequestId;
+          return option;
+          }));
+          elements.traceRequest.dataset.choices = choiceKey;
         }
+        elements.traceRequest.value = state.selectedRequestId || '';
+        elements.traceRequest.disabled = !choices.length;
+        elements.traceLoad.disabled = !selection || state.originTraceStatus === 'loading';
+        elements.traceLoad.textContent = state.originTrace ? 'Refresh trace' : 'Load trace';
+        elements.backtraceSubtitle.textContent = selection
+          ? `${request.method} ${request.path}` : 'Request events and their recorded predecessors';
+        const trace = selection ? state.originTrace : null;
+        const hasSteps = Boolean(trace?.steps.length);
+        elements.traceContent.hidden = !hasSteps;
+        elements.traceEmpty.hidden = hasSteps;
+        elements.traceEvidence.hidden = !hasSteps;
+        elements.traceFirstRequest.hidden = Boolean(selection) || !captured.length;
+        const loading = state.originTraceStatus === 'loading';
+        const failed = state.originTraceStatus === 'error';
+        elements.traceNotice.hidden = !hasSteps || !(loading || failed);
+        elements.traceNotice.textContent = loading ? 'Refreshing trace…' : `Refresh failed. Showing the previous trace. ${state.originTraceError || ''}`;
+        elements.traceEmptyTitle.textContent = loading ? 'Loading trace…' : failed ? 'Could not load this trace'
+          : !selection ? (request?.origin === 'sample' ? 'This sample request has no trace' : request ? 'This event has no request identifier' : 'No captured requests yet') : trace ? 'No earlier events were retained' : 'Ready to load';
+        elements.traceEmptyMessage.textContent = loading ? 'Reading the recorded events for this request.'
+          : failed ? (state.originTraceError || 'Try loading the trace again.')
+          : !selection ? (captured.length ? 'Choose a captured request above, or open the first one below.' : 'Capture a request in a live session, then return here to inspect its events.')
+          : trace ? (trace.gaps[0]?.detail || 'The capture does not contain a predecessor for this request.') : 'Choose Load trace to inspect this request.';
+        const models = [];
+        const labels = {trace_target: 'Selected request', parent_event: 'Previous event', request_initiator: 'Request initiator', request_lifecycle: 'Request lifecycle', artifact_request: 'Related artifact'};
+        (trace?.steps ?? []).forEach((step, index) => {
+          models.push({key: `${step.event.process_id}:${step.event.sequence_number}`, index: String(index + 1),
+            title: `${step.category} · ${step.operation}`, kind: labels[step.relation] || step.relation,
+            confidence: step.confidence === 'observed' ? 'Recorded link' : 'Shared identifiers',
+            style: step.confidence === 'observed' ? 'exact' : 'correlation', step});
+          trace.gaps.filter(gap => gap.after_step === index).forEach((gap, gapIndex) => models.push({
+            key: `gap:${index}:${gapIndex}`, index: '!', title: gap.reason.replaceAll('_', ' '),
+            kind: 'Missing event', confidence: 'Gap', style: 'unknown', meta: gap.detail, gap: true
+          }));
+        });
+        if (!models.some(model => model.key === state.selectedTraceRow)) state.selectedTraceRow = models[0]?.key ?? null;
+        const focusedKey = document.activeElement?.dataset?.traceKey;
         elements.backtraceSteps.replaceChildren(...models.map(traceStepElement));
-        const coverage = state.originTrace?.coverage?.percent ?? 0;
-        elements.summaryTargetPath.textContent = selection ? `request ${selection.requestID}` : 'No live request target';
-        elements.summaryTargetRequest.textContent = request ? `${request.method} ${request.path} · identifiers only` : 'Observed identifiers only';
-        elements.coverageValue.textContent = `${coverage}%`;
-        elements.coverageBar.style.width = `${coverage}%`;
+        if (focusedKey) {
+          [...elements.backtraceSteps.querySelectorAll('.trace-row')]
+            .find(row => row.dataset.traceKey === focusedKey)?.focus({preventScroll: true});
+        }
+        const active = models.find(model => model.key === state.selectedTraceRow);
+        if (active) traceStepDetails(active); else elements.traceStepDetails.replaceChildren();
+        elements.coverageValue.textContent = hasSteps ? `${trace.coverage.percent}% coverage` : '';
       }
 
       function requestInterception() {
@@ -863,6 +918,7 @@
         const scope = actionScopeState();
         const experiment = requestInterception();
         const sharedMode = ['interceptor', 'automation'].includes(state.experimentMode);
+        elements.actionScopePanel.hidden = !sharedMode;
         const busy = state.experimentPending || state.debuggerActionPending ||
           (experiment?.pending_requests ?? 0) > 0 || experiment?.state === 'running' ||
           automationRecipesState()?.auto_armed ||
@@ -1106,6 +1162,35 @@
         }
       }
 
+      function setRepeaterEditorTab(tab, focus = false) {
+        if (!['headers', 'body', 'settings'].includes(tab)) return;
+        state.repeaterEditorTab = tab;
+        elements.repeaterEditorTabs.forEach(button => {
+          const selected = button.dataset.repeaterEditorTab === tab;
+          button.setAttribute('aria-selected', String(selected));
+          button.tabIndex = selected ? 0 : -1;
+          if (selected && focus) button.focus();
+        });
+        elements.repeaterEditorPanels.forEach(panel => {
+          panel.hidden = panel.dataset.repeaterEditorPanel !== tab;
+        });
+      }
+
+      function setRepeaterResponseTab(tab, focus = false) {
+        if (!['body', 'headers'].includes(tab)) return;
+        state.repeaterResponseTab = tab;
+        const buttons = [...elements.repeaterResponse.querySelectorAll('[data-repeater-response-tab]')];
+        buttons.forEach(button => {
+          const selected = button.dataset.repeaterResponseTab === tab;
+          button.setAttribute('aria-selected', String(selected));
+          button.tabIndex = selected ? 0 : -1;
+          if (selected && focus) button.focus();
+        });
+        elements.repeaterResponse.querySelectorAll('[data-repeater-response-panel]').forEach(panel => {
+          panel.hidden = panel.dataset.repeaterResponsePanel !== tab;
+        });
+      }
+
       function renderRepeaterVariableStatus() {
         let variables = {};
         let invalidVariables = false;
@@ -1206,7 +1291,11 @@
           experimentFact('Duration', `${response.duration_ms} ms`),
           experimentFact('Body', `${utf8ByteLength(response.body)} bytes${response.body_truncated ? ' · truncated' : ''}`)
         );
-        const headers = document.createElement('div'); headers.className = 'repeater-response-headers';
+        const headers = document.createElement('div');
+        headers.id = 'repeater-response-headers-panel';
+        headers.className = 'repeater-response-headers repeater-response-panel';
+        headers.dataset.repeaterResponsePanel = 'headers';
+        headers.setAttribute('role', 'tabpanel');
         if (response.headers.length) {
           headers.append(...response.headers.map(header => {
             const row = document.createElement('div'); row.className = 'repeater-response-header';
@@ -1214,9 +1303,41 @@
             return row;
           }));
         } else headers.append(textElement('div', 'experiment-empty', 'No response headers.'));
+        const bodyPanel = document.createElement('div');
+        bodyPanel.id = 'repeater-response-body-panel';
+        bodyPanel.className = 'repeater-response-panel';
+        bodyPanel.dataset.repeaterResponsePanel = 'body';
+        bodyPanel.setAttribute('role', 'tabpanel');
         const body = document.createElement('pre'); body.className = 'experiment-result-body';
         body.textContent = response.ok ? response.body || '(empty response body)' : response.error;
-        elements.repeaterResponse.replaceChildren(summary, headers, body);
+        bodyPanel.append(body);
+        const tabs = document.createElement('div');
+        tabs.className = 'repeater-response-tabs';
+        tabs.setAttribute('role', 'tablist');
+        tabs.setAttribute('aria-label', 'Response inspector');
+        [['body', 'Body'], ['headers', `Headers (${response.headers.length})`]].forEach(([tab, label]) => {
+          const button = textElement('button', 'repeater-response-tab', label);
+          button.type = 'button';
+          button.dataset.repeaterResponseTab = tab;
+          button.setAttribute('role', 'tab');
+          button.setAttribute('aria-controls', `repeater-response-${tab}-panel`);
+          button.addEventListener('click', () => setRepeaterResponseTab(tab));
+          button.addEventListener('keydown', event => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const responseTabs = [...tabs.querySelectorAll('[data-repeater-response-tab]')];
+            const current = responseTabs.indexOf(button);
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? responseTabs.length - 1
+              : (current + (event.key === 'ArrowRight' ? 1 : -1) + responseTabs.length) % responseTabs.length;
+            responseTabs[next].click();
+            responseTabs[next].focus();
+          });
+          tabs.append(button);
+        });
+        const view = document.createElement('div'); view.className = 'repeater-response-view';
+        view.append(bodyPanel, headers);
+        elements.repeaterResponse.replaceChildren(summary, tabs, view);
+        setRepeaterResponseTab(state.repeaterResponseTab);
         elements.repeaterResponseMeta.textContent = `run ${entry.id} · ${entry.resolved_request.method} ${entry.resolved_request.url} · ${response.headers.length} headers${response.headers_truncated ? ' · truncated' : ''}`;
         elements.repeaterResponseBadge.dataset.kind = response.ok ? '' : 'error';
         elements.repeaterResponseBadge.textContent = response.ok ? 'Complete' : entry.state.replaceAll('_', ' ');
@@ -1322,7 +1443,9 @@
         elements.repeaterVariableBadge.dataset.kind = contextReady ? '' : 'offline';
         elements.repeaterApplyVariables.disabled = !contextReady || active || working || state.debuggerActionPending;
         elements.repeaterVariables.disabled = !contextReady || active || working;
-        elements.repeaterRequestForm.querySelectorAll('input, textarea').forEach(field => { field.disabled = !contextReady || active || working; });
+        [elements.repeaterRequestUrl, elements.repeaterRequestMethod, elements.repeaterRequestTimeout,
+          elements.repeaterRequestHeaders, elements.repeaterRequestBody]
+          .forEach(field => { field.disabled = !contextReady || active || working; });
         elements.repeaterSend.disabled = !contextReady || active || working || state.debuggerActionPending;
         elements.repeaterCancel.disabled = !active || repeater?.state === 'cancelling';
         elements.repeaterRequestBadge.dataset.kind = active ? '' : contextReady ? '' : 'offline';
@@ -1330,7 +1453,8 @@
           : repeater?.state === 'running' ? 'Running' : 'Draft';
         elements.repeaterActiveRequest.textContent = repeater?.active_execution
           ? `run ${repeater.active_execution.execution_id} · ${repeater.active_execution.resolved_method} ${repeater.active_execution.resolved_url}`
-          : 'None';
+          : 'No active request';
+        setRepeaterEditorTab(state.repeaterEditorTab);
         renderRepeaterVariableStatus();
         renderRepeaterHistory(repeater);
         renderRepeaterResponse(repeater);
@@ -1475,8 +1599,8 @@
         const selected = selectedObjectExperimentResult(objectExperiment);
         const canDispose = experiment?.isolated && experiment.pending_requests === 0 &&
           !['running', 'cancelling'].includes(repeater?.state) && !objectBusy && !hookBusy && !automationBusy;
-        elements.experimentTitle.textContent = 'Live Object Lab';
-        elements.experimentSubtitle.textContent = 'Disposable page · typed own-property patches · immutable baseline evidence';
+        elements.experimentTitle.textContent = 'Objects';
+        elements.experimentSubtitle.textContent = 'Find an object, inspect its properties, and test a change on a disposable page.';
 
         if (state.experimentError) setExperimentNotice('error', state.experimentError);
         else if (!experiment || !objectExperiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
@@ -1623,8 +1747,8 @@
         elements.hooksScript.replaceChildren(...options);
         if (scripts.some(script => script.script_id === selectedScript)) elements.hooksScript.value = selectedScript;
 
-        elements.experimentTitle.textContent = 'Runtime Hook Studio';
-        elements.experimentSubtitle.textContent = 'Disposable page · function entry and synchronous return control · automatic resume';
+        elements.experimentTitle.textContent = 'Runtime Hooks';
+        elements.experimentSubtitle.textContent = 'Observe function calls or test return values on a disposable page.';
         if (state.experimentError) setExperimentNotice('error', state.experimentError);
         else if (!experiment || !hooks || !objectExperiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
         else if (contextWorking || ['arming', 'handling', 'stopping'].includes(hooks.state)) setExperimentNotice('working', hooks.message);
@@ -1819,8 +1943,8 @@
         const canDispose = experiment?.isolated && experiment.pending_requests === 0 && !autoBusy && !otherBusy;
         const automaticRecipes = automation?.recipes.filter(recipe => recipe.enabled && recipe.trigger !== 'manual').length ?? 0;
 
-        elements.experimentTitle.textContent = 'Automation Recipe Studio';
-        elements.experimentSubtitle.textContent = 'Disposable page · WireBrowser-compatible helpers · bounded automatic triggers';
+        elements.experimentTitle.textContent = 'Automation';
+        elements.experimentSubtitle.textContent = 'Run a page script once or on a chosen trigger. Review each run and its logs.';
         if (state.experimentError) setExperimentNotice('error', state.experimentError);
         else if (!experiment || !automation || !objectExperiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
         else if (working) setExperimentNotice('working', automation.message);
@@ -1892,7 +2016,7 @@
           renderAutomationRecipes();
           return;
         }
-        elements.experimentTitle.textContent = 'Request Interception Lab';
+        elements.experimentTitle.textContent = 'Interceptor';
         prefillExperimentRequest();
         setExperimentRuleVisibility();
         const experiment = requestInterception();
@@ -3938,7 +4062,13 @@
       }
 
       function setToolsTab(tab) {
-        state.toolsTab = tab === 'jwt' ? 'jwt' : 'decoder';
+        const next = tab === 'jwt' ? 'jwt' : 'decoder';
+        if (next !== state.toolsTab && !state.decoderPending && !state.jwtPending && state.decoderEngine.available) {
+          setToolsNotice('ready', next === 'jwt'
+            ? 'Paste a JWT to inspect its claims. Verify its signature separately before trusting them.'
+            : 'Enter a value, choose a transformation, then inspect the result or add another step.');
+        }
+        state.toolsTab = next;
         renderTools();
       }
 
@@ -4243,16 +4373,6 @@
         return state.artifacts.map(artifact => ({ ...artifact, source_type: 'artifact', key: `artifact:${artifact.artifact_id}` }));
       }
 
-      function sourceName(source) {
-        if (!source.url) return source.source_type === 'script' ? `(anonymous ${source.script_id})` : `artifact-${source.artifact_id}`;
-        try {
-          const path = new URL(source.url).pathname;
-          return path.split('/').filter(Boolean).at(-1) || source.url;
-        } catch {
-          return source.url.split('/').filter(Boolean).at(-1) || source.url;
-        }
-      }
-
       function sourceOrigin(source) {
         try { return source.url ? new URL(source.url).origin : '(anonymous)'; } catch { return '(generated)'; }
       }
@@ -4426,444 +4546,6 @@
           list.append(term, detail);
         });
         elements.artifactFacts.replaceChildren(list);
-      }
-
-      function formatByteSize(bytes) {
-        if (bytes < 1024) return `${bytes} bytes`;
-        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-      }
-
-      function formatWasmHex(buffer) {
-        const bytes = new Uint8Array(buffer);
-        const rows = [];
-        for (let offset = 0; offset < bytes.length; offset += 16) {
-          const chunk = bytes.slice(offset, offset + 16);
-          const address = offset.toString(16).padStart(8, '0');
-          const hex = [...chunk].map(byte => byte.toString(16).padStart(2, '0')).join(' ').padEnd(47, ' ');
-          const printable = [...chunk].map(byte => byte >= 32 && byte < 127 ? String.fromCharCode(byte) : '.').join('');
-          rows.push(`${address}  ${hex}  |${printable}|`);
-        }
-        return rows.join('\n');
-      }
-
-      function formatJavaScript(source) {
-        if (source.split('\n').length > 5) return source;
-        let output = '';
-        let indent = 0;
-        let quote = '';
-        let escaped = false;
-        let lineComment = false;
-        let blockComment = false;
-        const newline = () => { output = `${output.trimEnd()}\n${'  '.repeat(indent)}`; };
-        for (let index = 0; index < source.length; index += 1) {
-          const character = source[index];
-          const next = source[index + 1] ?? '';
-          if (lineComment) {
-            output += character;
-            if (character === '\n') { lineComment = false; output += '  '.repeat(indent); }
-            continue;
-          }
-          if (blockComment) {
-            output += character;
-            if (character === '*' && next === '/') { output += next; index += 1; blockComment = false; }
-            continue;
-          }
-          if (quote) {
-            output += character;
-            if (escaped) escaped = false;
-            else if (character === '\\') escaped = true;
-            else if (character === quote) quote = '';
-            continue;
-          }
-          if (character === '/' && next === '/') { output += '//'; index += 1; lineComment = true; continue; }
-          if (character === '/' && next === '*') { output += '/*'; index += 1; blockComment = true; continue; }
-          if (character === '"' || character === "'" || character === '`') { quote = character; output += character; continue; }
-          if (character === '{') { output += ' {'; indent += 1; newline(); continue; }
-          if (character === '}') { indent = Math.max(0, indent - 1); newline(); output += '}'; if (next && next !== ';' && next !== ',' && next !== ')') newline(); continue; }
-          if (character === ';') { output += ';'; newline(); continue; }
-          if (character === ',') { output += ', '; continue; }
-          if (/\s/.test(character)) {
-            if (output && !/\s$/.test(output)) output += ' ';
-            continue;
-          }
-          output += character;
-        }
-        return output.trim();
-      }
-
-      const SOURCE_HIGHLIGHT_TOKEN_LIMIT = 50000;
-      const SOURCE_CONTROL_WORDS = new Set([
-        'break', 'case', 'catch', 'continue', 'debugger', 'default', 'do', 'else',
-        'finally', 'for', 'if', 'return', 'switch', 'throw', 'try', 'while', 'with',
-        'yield', 'await'
-      ]);
-      const SOURCE_KEYWORDS = new Set([
-        'as', 'async', 'class', 'const', 'delete', 'enum', 'export', 'extends',
-        'from', 'function', 'get', 'implements', 'import', 'in', 'instanceof',
-        'interface', 'let', 'new', 'of', 'package', 'private', 'protected', 'public',
-        'set', 'static', 'super', 'this', 'typeof', 'var', 'void'
-      ]);
-      const SOURCE_LITERALS = new Set([
-        'false', 'Infinity', 'NaN', 'null', 'true', 'undefined'
-      ]);
-      const SOURCE_NUMBER_PATTERN = /(?:0[xX][\da-fA-F]+|0[bB][01]+|0[oO][0-7]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?n?)/y;
-      const SOURCE_IDENTIFIER_PATTERN = /[A-Za-z_$][\w$]*/y;
-      const SOURCE_CSS_COLOR_PATTERN = /#[\da-fA-F]{3,8}\b/y;
-      const SOURCE_CSS_NUMBER_PATTERN = /(?:\d+\.?\d*|\.\d+)(?:[a-z%]+)?/iy;
-      const SOURCE_CSS_IDENTIFIER_PATTERN = /@?-{0,2}[A-Za-z_][\w-]*/y;
-      const SOURCE_MARKUP_IDENTIFIER_PATTERN = /[A-Za-z_:][\w:.-]*/y;
-      const SOURCE_WASM_VALUE_PATTERN = /(?:[\da-fA-F]{8}|[\da-fA-F]{2})(?=\s|$)/y;
-      const SOURCE_WASM_IDENTIFIER_PATTERN = /\$?[A-Za-z_][\w.$-]*/y;
-
-      function sourceMatchAt(pattern, value, index) {
-        pattern.lastIndex = index;
-        return pattern.exec(value)?.[0] ?? null;
-      }
-
-      function sourceNextSignificant(value, index) {
-        while (/\s/.test(value[index] ?? '')) index += 1;
-        return value[index] ?? '';
-      }
-
-      function sourcePreviousSignificant(value, index) {
-        for (let previous = index - 1; previous >= 0; previous -= 1) {
-          if (!/\s/.test(value[previous])) return value[previous];
-        }
-        return '';
-      }
-
-      function sourceIdentifierStart(character) {
-        const code = character.charCodeAt(0);
-        return character === '$' || character === '_' ||
-          (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
-      }
-
-      function sourceDigit(character) {
-        const code = character.charCodeAt(0);
-        return code >= 48 && code <= 57;
-      }
-
-      function sourceCodeTokenStart(value, index, json) {
-        const character = value[index] ?? '';
-        const next = value[index + 1] ?? '';
-        return sourceIdentifierStart(character) || sourceDigit(character) ||
-          (character === '.' && sourceDigit(next)) || character === '/' ||
-          character === '"' || character === "'" || (!json && character === '`');
-      }
-
-      function sourceCssTokenStart(value, index) {
-        const character = value[index] ?? '';
-        const next = value[index + 1] ?? '';
-        return sourceIdentifierStart(character) || sourceDigit(character) ||
-          (character === '.' && sourceDigit(next)) ||
-          ['#', '/', '"', "'", '@', '-'].includes(character);
-      }
-
-      function sourceSyntaxLanguage(source) {
-        if (!source) return 'text';
-        const mime = String(source.mime_type ?? '').toLowerCase().split(';', 1)[0];
-        const name = sourceName(source).toLowerCase();
-        if (source.kind === 'wasm' || mime === 'application/wasm') return 'wasm';
-        if (source.kind === 'javascript' || /(?:java|ecma)script/.test(mime) || /\.[cm]?jsx?$/.test(name)) return 'javascript';
-        if (source.kind === 'source_map' || /json/.test(mime) || /\.(?:json|map)$/.test(name)) return 'json';
-        if (/css/.test(mime) || /\.css$/.test(name)) return 'css';
-        if (/(?:html|xml|svg)/.test(mime) || /\.(?:html?|xml|svg)$/.test(name)) return 'markup';
-        return 'text';
-      }
-
-      function sourceSyntaxLabel(language) {
-        return {javascript: 'JavaScript', json: 'JSON', css: 'CSS', markup: 'HTML', wasm: 'WebAssembly hex', text: 'Plain text'}[language];
-      }
-
-      function createSourceTokenizer(source) {
-        return {
-          language: sourceSyntaxLanguage(source),
-          state: 'code',
-          coloredTokens: 0,
-          truncated: false
-        };
-      }
-
-      function pushSourceToken(tokens, tokenizer, type, text) {
-        if (!text) return;
-        let boundedType = type;
-        if (type !== 'plain') {
-          if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
-            boundedType = 'plain';
-            tokenizer.truncated = true;
-          } else {
-            tokenizer.coloredTokens += 1;
-          }
-        }
-        const previous = tokens.at(-1);
-        if (previous?.type === boundedType) previous.text += text;
-        else tokens.push({type: boundedType, text});
-      }
-
-      function quotedSourceEnd(line, start, quote) {
-        let escaped = false;
-        for (let index = start + 1; index < line.length; index += 1) {
-          const character = line[index];
-          if (escaped) escaped = false;
-          else if (character === '\\') escaped = true;
-          else if (character === quote) return index + 1;
-        }
-        return line.length;
-      }
-
-      function regexpSourceEnd(line, start) {
-        let escaped = false;
-        let characterClass = false;
-        for (let index = start + 1; index < line.length; index += 1) {
-          const character = line[index];
-          if (escaped) { escaped = false; continue; }
-          if (character === '\\') { escaped = true; continue; }
-          if (character === '[') { characterClass = true; continue; }
-          if (character === ']') { characterClass = false; continue; }
-          if (character === '/' && !characterClass) {
-            let end = index + 1;
-            while (/[a-z]/i.test(line[end] ?? '')) end += 1;
-            return end;
-          }
-        }
-        return start + 1;
-      }
-
-      function tokenizeCodeSourceLine(line, tokenizer) {
-        const tokens = [];
-        const json = tokenizer.language === 'json';
-        let index = 0;
-        while (index < line.length) {
-          if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
-            tokenizer.truncated = true;
-            pushSourceToken(tokens, tokenizer, 'plain', line.slice(index));
-            break;
-          }
-          if (tokenizer.state === 'block-comment') {
-            const end = line.indexOf('*/', index);
-            if (end === -1) { pushSourceToken(tokens, tokenizer, 'comment', line.slice(index)); break; }
-            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 2));
-            tokenizer.state = 'code'; index = end + 2; continue;
-          }
-          if (tokenizer.state === 'template') {
-            const end = quotedSourceEnd(line, index - 1, '`');
-            pushSourceToken(tokens, tokenizer, 'string', line.slice(index, end));
-            if (end < line.length || line[end - 1] === '`') tokenizer.state = 'code';
-            index = end; continue;
-          }
-          const character = line[index];
-          const next = line[index + 1] ?? '';
-          if (character === '/' && next === '/') {
-            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index)); break;
-          }
-          if (character === '/' && next === '*') {
-            const end = line.indexOf('*/', index + 2);
-            if (end === -1) {
-              pushSourceToken(tokens, tokenizer, 'comment', line.slice(index));
-              tokenizer.state = 'block-comment'; break;
-            }
-            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 2));
-            index = end + 2; continue;
-          }
-          if (character === '"' || character === "'" || (!json && character === '`')) {
-            const end = quotedSourceEnd(line, index, character);
-            const nextSignificant = sourceNextSignificant(line, end);
-            const type = json && nextSignificant === ':' ? 'property' : 'string';
-            pushSourceToken(tokens, tokenizer, type, line.slice(index, end));
-            if (character === '`' && line[end - 1] !== '`') tokenizer.state = 'template';
-            index = end; continue;
-          }
-          if (!sourceCodeTokenStart(line, index, json)) {
-            const start = index;
-            do { index += 1; } while (index < line.length && !sourceCodeTokenStart(line, index, json));
-            pushSourceToken(tokens, tokenizer, 'plain', line.slice(start, index));
-            continue;
-          }
-          const number = sourceMatchAt(SOURCE_NUMBER_PATTERN, line, index);
-          if (number) {
-            pushSourceToken(tokens, tokenizer, 'number', number); index += number.length; continue;
-          }
-          const identifier = sourceMatchAt(SOURCE_IDENTIFIER_PATTERN, line, index);
-          if (identifier) {
-            const following = sourceNextSignificant(line, index + identifier.length);
-            const type = SOURCE_CONTROL_WORDS.has(identifier) ? 'control'
-              : SOURCE_KEYWORDS.has(identifier) ? 'keyword'
-                : SOURCE_LITERALS.has(identifier) ? 'number'
-                    : following === '(' ? 'function'
-                      : /^[A-Z]/.test(identifier) ? 'type'
-                        : 'property';
-            pushSourceToken(tokens, tokenizer, type, identifier);
-            index += identifier.length; continue;
-          }
-          const previous = sourcePreviousSignificant(line, index);
-          if (!json && character === '/' && next && !/[/\s]/.test(next) &&
-              (!previous || /[([{=,:;!&|?+\-*%^~<>]/.test(previous))) {
-            const end = regexpSourceEnd(line, index);
-            if (end > index + 1) {
-              pushSourceToken(tokens, tokenizer, 'regexp', line.slice(index, end));
-              index = end; continue;
-            }
-          }
-          pushSourceToken(tokens, tokenizer, 'plain', character);
-          index += 1;
-        }
-        return tokens;
-      }
-
-      function tokenizeCssSourceLine(line, tokenizer) {
-        const tokens = [];
-        let index = 0;
-        while (index < line.length) {
-          if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
-            tokenizer.truncated = true;
-            pushSourceToken(tokens, tokenizer, 'plain', line.slice(index));
-            break;
-          }
-          if (tokenizer.state === 'block-comment') {
-            const end = line.indexOf('*/', index);
-            if (end === -1) { pushSourceToken(tokens, tokenizer, 'comment', line.slice(index)); break; }
-            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 2));
-            tokenizer.state = 'code'; index = end + 2; continue;
-          }
-          if (line.startsWith('/*', index)) {
-            const end = line.indexOf('*/', index + 2);
-            if (end === -1) {
-              pushSourceToken(tokens, tokenizer, 'comment', line.slice(index));
-              tokenizer.state = 'block-comment'; break;
-            }
-            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 2));
-            index = end + 2; continue;
-          }
-          const character = line[index];
-          if (character === '"' || character === "'") {
-            const end = quotedSourceEnd(line, index, character);
-            pushSourceToken(tokens, tokenizer, 'string', line.slice(index, end));
-            index = end; continue;
-          }
-          if (!sourceCssTokenStart(line, index)) {
-            const start = index;
-            do { index += 1; } while (index < line.length && !sourceCssTokenStart(line, index));
-            pushSourceToken(tokens, tokenizer, 'plain', line.slice(start, index));
-            continue;
-          }
-          const color = sourceMatchAt(SOURCE_CSS_COLOR_PATTERN, line, index);
-          const number = sourceMatchAt(SOURCE_CSS_NUMBER_PATTERN, line, index);
-          if (color || number) {
-            const value = color || number;
-            pushSourceToken(tokens, tokenizer, 'number', value); index += value.length; continue;
-          }
-          const identifier = sourceMatchAt(SOURCE_CSS_IDENTIFIER_PATTERN, line, index);
-          if (identifier) {
-            const following = sourceNextSignificant(line, index + identifier.length);
-            pushSourceToken(tokens, tokenizer, identifier.startsWith('@') ? 'keyword' : following === ':' ? 'property' : 'type', identifier);
-            index += identifier.length; continue;
-          }
-          pushSourceToken(tokens, tokenizer, 'plain', character); index += 1;
-        }
-        return tokens;
-      }
-
-      function tokenizeMarkupTag(text, tokenizer, tokens) {
-        let index = 0;
-        let tagSeen = false;
-        while (index < text.length) {
-          if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
-            tokenizer.truncated = true;
-            pushSourceToken(tokens, tokenizer, 'plain', text.slice(index));
-            break;
-          }
-          const character = text[index];
-          if (character === '"' || character === "'") {
-            const end = quotedSourceEnd(text, index, character);
-            pushSourceToken(tokens, tokenizer, 'string', text.slice(index, end));
-            index = end; continue;
-          }
-          const identifier = sourceMatchAt(SOURCE_MARKUP_IDENTIFIER_PATTERN, text, index);
-          if (identifier) {
-            pushSourceToken(tokens, tokenizer, tagSeen ? 'attribute' : 'tag', identifier);
-            tagSeen = true; index += identifier.length; continue;
-          }
-          pushSourceToken(tokens, tokenizer, 'plain', character); index += 1;
-        }
-      }
-
-      function tokenizeMarkupSourceLine(line, tokenizer) {
-        const tokens = [];
-        let index = 0;
-        while (index < line.length) {
-          if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
-            tokenizer.truncated = true;
-            pushSourceToken(tokens, tokenizer, 'plain', line.slice(index));
-            break;
-          }
-          if (tokenizer.state === 'markup-comment') {
-            const end = line.indexOf('-->', index);
-            if (end === -1) { pushSourceToken(tokens, tokenizer, 'comment', line.slice(index)); break; }
-            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 3));
-            tokenizer.state = 'code'; index = end + 3; continue;
-          }
-          const tag = line.indexOf('<', index);
-          if (tag === -1) {
-            pushSourceToken(tokens, tokenizer, 'plain', line.slice(index)); break;
-          }
-          pushSourceToken(tokens, tokenizer, 'plain', line.slice(index, tag));
-          if (line.startsWith('<!--', tag)) {
-            const end = line.indexOf('-->', tag + 4);
-            if (end === -1) {
-              pushSourceToken(tokens, tokenizer, 'comment', line.slice(tag));
-              tokenizer.state = 'markup-comment'; break;
-            }
-            pushSourceToken(tokens, tokenizer, 'comment', line.slice(tag, end + 3));
-            index = end + 3; continue;
-          }
-          const end = line.indexOf('>', tag + 1);
-          if (end === -1) {
-            tokenizeMarkupTag(line.slice(tag), tokenizer, tokens); break;
-          }
-          tokenizeMarkupTag(line.slice(tag, end + 1), tokenizer, tokens);
-          index = end + 1;
-        }
-        return tokens;
-      }
-
-      function tokenizeWasmSourceLine(line, tokenizer) {
-        const tokens = [];
-        let index = 0;
-        while (index < line.length) {
-          if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
-            tokenizer.truncated = true;
-            pushSourceToken(tokens, tokenizer, 'plain', line.slice(index));
-            break;
-          }
-          if (line.startsWith(';;', index)) {
-            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index)); break;
-          }
-          if (line[index] === '|') {
-            pushSourceToken(tokens, tokenizer, 'string', line.slice(index)); break;
-          }
-          const value = sourceMatchAt(SOURCE_WASM_VALUE_PATTERN, line, index);
-          const identifier = sourceMatchAt(SOURCE_WASM_IDENTIFIER_PATTERN, line, index);
-          if (value) {
-            pushSourceToken(tokens, tokenizer, 'number', value); index += value.length; continue;
-          }
-          if (identifier) {
-            pushSourceToken(tokens, tokenizer, /^(?:i32|i64|f32|f64|v128|funcref|externref)$/.test(identifier) ? 'type' : 'keyword', identifier);
-            index += identifier.length; continue;
-          }
-          pushSourceToken(tokens, tokenizer, 'plain', line[index]); index += 1;
-        }
-        return tokens;
-      }
-
-      function sourceSyntaxTokens(line, tokenizer) {
-        if (!line) return [{type: 'plain', text: ' '}];
-        if (tokenizer.truncated) return [{type: 'plain', text: line}];
-        if (tokenizer.language === 'javascript' || tokenizer.language === 'json') return tokenizeCodeSourceLine(line, tokenizer);
-        if (tokenizer.language === 'css') return tokenizeCssSourceLine(line, tokenizer);
-        if (tokenizer.language === 'markup') return tokenizeMarkupSourceLine(line, tokenizer);
-        if (tokenizer.language === 'wasm') return tokenizeWasmSourceLine(line, tokenizer);
-        return [{type: 'plain', text: line}];
       }
 
       function appendSourceSyntax(container, tokens) {
@@ -5511,7 +5193,7 @@
         elements.memorySearchForm.querySelectorAll('.memory-origin-only').forEach(element => {
           element.hidden = !originMode;
         });
-        elements.memoryValueCaption.textContent = originMode ? 'Value or node name to trace' : snapshotMode ? 'Snapshot value or node name' : 'Primitive value';
+        elements.memoryValueCaption.textContent = originMode ? 'Value or node name to trace' : snapshotMode ? 'Snapshot value or node name' : 'Value';
         elements.memoryValueQuery.placeholder = snapshotMode || originMode ? 'value from a request, closure, or unreachable object' : 'exact text or pattern';
         elements.memorySearchHelp.textContent = diffMode
           ? 'The baseline stays in local temporary storage until reset, target change, or shutdown. Current captures are deleted after native comparison.'
@@ -5593,7 +5275,7 @@
                 : 'No objects matched. Broaden one criterion or lower the similarity threshold.'
             : state.memorySearchStatus === 'error'
               ? 'The last search did not replace any retained results.'
-              : diffMode ? 'No heap comparison results yet.' : originMode ? 'No temporal trace steps yet.' : snapshotMode ? 'No heap snapshot search results yet.' : 'No live object search results yet.');
+              : diffMode ? 'Capture a baseline, use the page, then compare a second snapshot to see what grew.' : originMode ? 'Enter the value to trace, arm the trace, then perform the page action that creates it.' : snapshotMode ? 'Enter a value, then capture a snapshot to find matching objects and references.' : 'Start with a property name or value, then choose Search live objects.');
           elements.memoryResults.removeAttribute('role');
           elements.memoryResults.replaceChildren(empty);
           renderMemoryDetail();
@@ -5972,7 +5654,19 @@
         );
       }
 
+      function renderSourceSidebar() {
+        const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
+        const open = state.sourceSidebarOpen ?? attached;
+        elements.sourceSidebar.dataset.attached = String(attached);
+        elements.sourceSidebar.hidden = !open;
+        document.querySelector('#screen-sources').dataset.sidebarOpen = String(open);
+        elements.sourceSidebarToggle.setAttribute('aria-expanded', String(open));
+        elements.sourceSidebarToggle.textContent = attached ? 'Debugger' : 'Details';
+        elements.sourceSidebarToggle.title = attached ? 'Toggle debugger sidebar' : 'Source details and debugger connection status';
+      }
+
       function renderDebuggerState() {
+        renderSourceSidebar();
         const session = state.debuggerSession;
         const originTraceActive = memoryOriginTraceActive();
         const stateLabels = {
@@ -6427,21 +6121,12 @@
 
       function showScreen(name, trigger = null) {
         const screenName = name === 'backtraces' ? 'backtrace' : name;
-        if (screenName === 'backtrace' && !traceIsAvailable()) return;
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
-        elements.workspace.classList.toggle('sources-active', screenName === 'sources');
-        elements.workspace.classList.toggle('experiments-active', screenName === 'experiments');
         document.querySelectorAll('.nav-button').forEach(button => {
-          const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence');
+          const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence') || (button.dataset.screen === 'traffic' && screenName === 'vm');
           if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
         });
-        if (screenName === 'backtrace') {
-          const selection = originTraceSelection();
-          elements.backtraceSubtitle.textContent = selection
-            ? `${selection.request.method} ${selection.request.path} · request ${selection.requestID}`
-            : `request-${state.selectedRequestId} · sample data has no broker trace`;
-          renderBacktrace();
-        }
+        if (screenName === 'backtrace') renderBacktrace();
         if (screenName === 'experiments') renderExperiment();
         if (screenName === 'api-collection') {
           renderApiCollection();
@@ -6637,9 +6322,18 @@
       enableTabKeyboardNavigation('.inspector-tab');
       enableTabKeyboardNavigation('.field-tab');
       enableTabKeyboardNavigation('.source-side-tab:not(:disabled)');
-      document.querySelectorAll('.view-switch button').forEach(button => button.addEventListener('click', () => {
-        document.querySelectorAll('.view-switch button').forEach(candidate => candidate.setAttribute('aria-pressed', String(candidate === button)));
-      }));
+      elements.traceRequest.addEventListener('change', async () => {
+        selectRequest(elements.traceRequest.value);
+        await refreshOriginTrace();
+      });
+      elements.traceLoad.addEventListener('click', refreshOriginTrace);
+      elements.traceFirstRequest.addEventListener('click', async () => {
+        const first = state.requests.find(candidate => requestTraceRoot(candidate));
+        if (!first) return;
+        selectRequest(first.id);
+        await refreshOriginTrace();
+        elements.backtraceSteps.querySelector('.trace-row')?.focus();
+      });
       elements.requestFilter.addEventListener('input', renderRequests);
       elements.traceButton.addEventListener('click', async () => {
         showScreen('backtrace', elements.traceButton);
@@ -6755,6 +6449,10 @@
         elements.sourcesEditor.classList.toggle('console-open', open);
         elements.consoleToggle.setAttribute('aria-pressed', String(open));
       };
+      elements.sourceSidebarToggle.addEventListener('click', () => {
+        state.sourceSidebarOpen = elements.sourceSidebar.hidden;
+        renderSourceSidebar();
+      });
       elements.consoleToggle.addEventListener('click', () => setConsoleOpen(!state.consoleOpen));
       elements.consoleClear.addEventListener('click', () => debuggerAction({ action: 'clear_console' }));
       elements.debugResume.addEventListener('click', () => debuggerAction({ action: 'resume' }));
@@ -6843,6 +6541,10 @@
         setExperimentMode(button.dataset.experimentMode);
       }));
       enableTabKeyboardNavigation('.experiment-mode-tab');
+      elements.repeaterEditorTabs.forEach(button => button.addEventListener('click', () => {
+        setRepeaterEditorTab(button.dataset.repeaterEditorTab);
+      }));
+      enableTabKeyboardNavigation('.repeater-editor-tab');
       elements.objectCreate.addEventListener('click', () => runExperimentAction({
         action: 'create_request_interception_experiment'
       }));
@@ -7027,7 +6729,8 @@
         state.experimentError = null;
         renderRepeaterVariableStatus();
       });
-      elements.repeaterRequestForm.querySelectorAll('input, textarea').forEach(field => field.addEventListener('input', () => {
+      [elements.repeaterRequestUrl, elements.repeaterRequestMethod, elements.repeaterRequestTimeout,
+        elements.repeaterRequestHeaders, elements.repeaterRequestBody].forEach(field => field.addEventListener('input', () => {
         state.repeaterDraftDirty = true;
         state.experimentError = null;
         renderRepeaterVariableStatus();

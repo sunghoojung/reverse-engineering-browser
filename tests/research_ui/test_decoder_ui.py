@@ -63,6 +63,47 @@ class DecoderUiTest(unittest.TestCase):
         self.assertIn("toolsElements.jwtSecret.value = '';", self.html)
         self.assertIn("toolsElements.jwtCreateSecret.value = '';", self.html)
 
+    def test_switching_tools_replaces_stale_notices_without_losing_results(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+        start = self.html.index("      function setToolsTab(tab)")
+        end = self.html.index("\n      }", start) + len("\n      }")
+        exercise = r"""
+const state = {toolsTab: 'decoder', decoderPending: false, jwtPending: false,
+  decoderEngine: {available: true}, decoderSteps: [{id: 1}], jwtResult: {ok: true}};
+let notice = 'base64 decode completed';
+let renders = 0;
+const setToolsNotice = (kind, message) => { notice = message; };
+const renderTools = () => { renders += 1; };
+setToolsTab('jwt');
+const jwtNotice = notice;
+setToolsTab('decoder');
+const decoderNotice = notice;
+state.decoderPending = true;
+notice = 'Transformation running';
+setToolsTab('jwt');
+const pendingNotice = notice;
+state.decoderPending = false;
+state.decoderEngine.available = false;
+notice = 'Engine unavailable';
+setToolsTab('decoder');
+process.stdout.write(JSON.stringify({jwtNotice, decoderNotice, pendingNotice,
+  offlineNotice: notice, steps: state.decoderSteps.length, result: state.jwtResult.ok, renders}));
+"""
+        result = subprocess.run(
+            [node, "-e", self.html[start:end] + exercise],
+            check=True, capture_output=True, text=True,
+        )
+        actual = json.loads(result.stdout)
+        self.assertIn("JWT", actual["jwtNotice"])
+        self.assertIn("transformation", actual["decoderNotice"])
+        self.assertEqual(actual["pendingNotice"], "Transformation running")
+        self.assertEqual(actual["offlineNotice"], "Engine unavailable")
+        self.assertEqual(actual["steps"], 1)
+        self.assertTrue(actual["result"])
+        self.assertEqual(actual["renders"], 4)
+
     def test_browser_contract_accepts_native_null_errors_and_rejects_mismatches(
         self,
     ) -> None:

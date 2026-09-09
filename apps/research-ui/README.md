@@ -86,3 +86,9 @@ Traffic stacks its request list above the inspector below 900 px. Session
 counts come from loaded requests, and sample evidence stays visibly labeled.
 Keep labels at least 10 px and reserve stronger color for selection, connection
 state, errors, and evidence confidence.
+
+Tool workspaces put the next action before implementation details. Decoder
+controls follow input, transformation, and result order; chain editing stays
+beside the step list. JWT test-token creation is an optional disclosure below
+inspection. Use the interface font for instructions and labels, and monospace
+for captured values, code, and identifiers. Empty states explain how to begin.

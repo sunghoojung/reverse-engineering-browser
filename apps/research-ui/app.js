@@ -122,7 +122,7 @@
         const coveragePercent = coverage ? Math.round(coverage.observedCount * 100 / coverage.totalCount) : null;
         const summary = document.createElement('div'); summary.className = 'vm-summary';
         [
-          ['findings', investigation.length],
+          ['investigation findings', investigation.length],
           ['interpreters', investigation.filter(finding => finding.kind === 'interpreter').length],
           ['guest programs', investigation.filter(finding => finding.kind === 'guest program').length],
           ['coverage', coveragePercent === null ? 'unknown' : `${coveragePercent}%`]
@@ -160,7 +160,15 @@
           actions.append(openSource);
         }
         head.append(title, actions);
-        card.append(head, fields);
+        const explanations = {
+          interpreter: 'An interpreter candidate executes a guest program. Inspect the source before treating it as confirmed.',
+          'guest program': 'A guest program is data or bytecode consumed by the interpreter.',
+          invocation: 'An invocation links a guest program to a recorded execution.',
+          'host binding': 'A host binding connects guest execution to a browser or JavaScript operation.',
+          hypothesis: 'This is an interpretation of the evidence. Follow its event and source links to check it.',
+          coverage: 'Coverage describes the observed portion of this investigation, not proof that all behavior was captured.'
+        };
+        card.append(head, textElement('p', 'vm-explanation', explanations[selected.kind] || 'Inspect the linked events and source to understand this finding.'), fields);
         if (coverage) {
           const coveragePanel = document.createElement('div'); coveragePanel.className = 'vm-coverage';
           const line = document.createElement('div'); line.className = 'vm-coverage-line';
@@ -1476,7 +1484,7 @@
         const canDispose = experiment?.isolated && experiment.pending_requests === 0 &&
           !['running', 'cancelling'].includes(repeater?.state) && !objectBusy && !hookBusy && !automationBusy;
         elements.experimentTitle.textContent = 'Live Object Lab';
-        elements.experimentSubtitle.textContent = 'Disposable page · typed own-property patches · immutable baseline evidence';
+        elements.experimentSubtitle.textContent = 'Find an object, inspect its properties, and test a change on a disposable page.';
 
         if (state.experimentError) setExperimentNotice('error', state.experimentError);
         else if (!experiment || !objectExperiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
@@ -1624,7 +1632,7 @@
         if (scripts.some(script => script.script_id === selectedScript)) elements.hooksScript.value = selectedScript;
 
         elements.experimentTitle.textContent = 'Runtime Hook Studio';
-        elements.experimentSubtitle.textContent = 'Disposable page · function entry and synchronous return control · automatic resume';
+        elements.experimentSubtitle.textContent = 'Observe function calls or test return values on a disposable page.';
         if (state.experimentError) setExperimentNotice('error', state.experimentError);
         else if (!experiment || !hooks || !objectExperiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
         else if (contextWorking || ['arming', 'handling', 'stopping'].includes(hooks.state)) setExperimentNotice('working', hooks.message);
@@ -1820,7 +1828,7 @@
         const automaticRecipes = automation?.recipes.filter(recipe => recipe.enabled && recipe.trigger !== 'manual').length ?? 0;
 
         elements.experimentTitle.textContent = 'Automation Recipe Studio';
-        elements.experimentSubtitle.textContent = 'Disposable page · WireBrowser-compatible helpers · bounded automatic triggers';
+        elements.experimentSubtitle.textContent = 'Run a page script once or on a chosen trigger. Review each run and its logs.';
         if (state.experimentError) setExperimentNotice('error', state.experimentError);
         else if (!experiment || !automation || !objectExperiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
         else if (working) setExperimentNotice('working', automation.message);
@@ -3938,7 +3946,13 @@
       }
 
       function setToolsTab(tab) {
-        state.toolsTab = tab === 'jwt' ? 'jwt' : 'decoder';
+        const next = tab === 'jwt' ? 'jwt' : 'decoder';
+        if (next !== state.toolsTab && !state.decoderPending && !state.jwtPending && state.decoderEngine.available) {
+          setToolsNotice('ready', next === 'jwt'
+            ? 'Paste a JWT to inspect its claims. Verify its signature separately before trusting them.'
+            : 'Enter a value, choose a transformation, then inspect the result or add another step.');
+        }
+        state.toolsTab = next;
         renderTools();
       }
 
@@ -5511,7 +5525,7 @@
         elements.memorySearchForm.querySelectorAll('.memory-origin-only').forEach(element => {
           element.hidden = !originMode;
         });
-        elements.memoryValueCaption.textContent = originMode ? 'Value or node name to trace' : snapshotMode ? 'Snapshot value or node name' : 'Primitive value';
+        elements.memoryValueCaption.textContent = originMode ? 'Value or node name to trace' : snapshotMode ? 'Snapshot value or node name' : 'Value';
         elements.memoryValueQuery.placeholder = snapshotMode || originMode ? 'value from a request, closure, or unreachable object' : 'exact text or pattern';
         elements.memorySearchHelp.textContent = diffMode
           ? 'The baseline stays in local temporary storage until reset, target change, or shutdown. Current captures are deleted after native comparison.'
@@ -5593,7 +5607,7 @@
                 : 'No objects matched. Broaden one criterion or lower the similarity threshold.'
             : state.memorySearchStatus === 'error'
               ? 'The last search did not replace any retained results.'
-              : diffMode ? 'No heap comparison results yet.' : originMode ? 'No temporal trace steps yet.' : snapshotMode ? 'No heap snapshot search results yet.' : 'No live object search results yet.');
+              : diffMode ? 'Capture a baseline, use the page, then compare a second snapshot to see what grew.' : originMode ? 'Enter the value to trace, arm the trace, then perform the page action that creates it.' : snapshotMode ? 'Enter a value, then capture a snapshot to find matching objects and references.' : 'Start with a property name or value, then choose Search live objects.');
           elements.memoryResults.removeAttribute('role');
           elements.memoryResults.replaceChildren(empty);
           renderMemoryDetail();

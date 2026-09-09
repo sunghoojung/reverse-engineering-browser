@@ -172,7 +172,7 @@
 
           <section id="screen-memory" class="screen" aria-label="Memory investigation" hidden>
             <header class="screen-head">
-              <div><h1>Memory Explorer</h1><div class="screen-subtitle">Live objects, native snapshots, temporal origins, and retained-memory comparisons</div></div>
+              <div><h1>Memory Explorer</h1><div class="screen-subtitle">Find objects, inspect what retains them, and compare memory over time.</div></div>
               <div class="screen-head-actions"><span class="memory-readonly">Local analysis</span></div>
             </header>
             <div id="memory-notice" class="memory-notice" data-kind="offline" role="status" aria-live="polite">Run a live session to attach an authorized browser target.</div>
@@ -186,16 +186,21 @@
                     <button class="memory-mode-button" type="button" data-memory-mode="origin" aria-pressed="false">Origin trace</button>
                   </div>
                   <label class="memory-live-only">Property name<input id="memory-property-query" type="text" placeholder="token, config, fingerprint" maxlength="512" autocomplete="off" /></label>
-                  <label class="memory-search-only memory-value-field"><span id="memory-value-caption">Primitive value</span><input id="memory-value-query" type="text" placeholder="exact text or pattern" maxlength="512" autocomplete="off" /></label>
+                  <label class="memory-search-only memory-value-field"><span id="memory-value-caption">Value</span><input id="memory-value-query" type="text" placeholder="exact text or pattern" maxlength="512" autocomplete="off" /></label>
                   <label class="memory-reference-only" hidden>Reference scope<select id="memory-reference-scope"><option value="all">All matching nodes</option><option value="reachable">Root-reachable only</option><option value="unreachable">Unreachable only</option></select></label>
-                  <label class="memory-live-only">Class name<input id="memory-class-query" type="text" placeholder="Object, Array, CartState" maxlength="512" autocomplete="off" /></label>
-                  <label class="memory-live-only memory-shape-field">Structural shape<textarea id="memory-shape-query" placeholder='{"device":{"fingerprint":""}}' maxlength="4096" spellcheck="false"></textarea></label>
-                  <label class="memory-live-only">Similarity threshold<input id="memory-similarity-threshold" type="number" min="0" max="1" step="0.05" value="0.75" /></label>
-                  <div class="memory-options memory-live-only">
-                    <label class="memory-check"><input id="memory-regex" type="checkbox" /> Regular expression</label>
-                    <label class="memory-check"><input id="memory-case-sensitive" type="checkbox" /> Case sensitive</label>
-                    <label class="memory-check"><input id="memory-shape-values" type="checkbox" /> Match shape values</label>
-                  </div>
+                  <details class="memory-live-only memory-advanced">
+                    <summary>Additional filters</summary>
+                    <div class="memory-advanced-fields">
+                      <label class="memory-live-only">Class name<input id="memory-class-query" type="text" placeholder="Object, Array, CartState" maxlength="512" autocomplete="off" /></label>
+                      <label class="memory-live-only memory-shape-field">Structural shape<textarea id="memory-shape-query" placeholder='{"device":{"fingerprint":""}}' maxlength="4096" spellcheck="false"></textarea></label>
+                      <label class="memory-live-only">Similarity threshold<input id="memory-similarity-threshold" type="number" min="0" max="1" step="0.05" value="0.75" /></label>
+                      <div class="memory-options memory-live-only">
+                        <label class="memory-check"><input id="memory-regex" type="checkbox" /> Regular expression</label>
+                        <label class="memory-check"><input id="memory-case-sensitive" type="checkbox" /> Case sensitive</label>
+                        <label class="memory-check"><input id="memory-shape-values" type="checkbox" /> Match shape values</label>
+                      </div>
+                    </div>
+                  </details>
                   <button id="memory-search-button" class="trace-button memory-search-button memory-search-only" type="submit" disabled>Search live objects</button>
                   <div class="memory-origin-only" hidden>
                     <div class="memory-origin-window">
@@ -234,7 +239,7 @@
 
           <section id="screen-vm" class="screen" aria-label="Virtual machine investigation" hidden>
             <header class="screen-head">
-              <div><h1>VM Lab</h1><div class="screen-subtitle">Interpreter, guest program, invocation, binding, hypothesis, and coverage evidence</div></div>
+              <div><h1>VM Lab</h1><div class="screen-subtitle">Select a finding to inspect its evidence. Hypotheses are leads, not confirmed behavior.</div></div>
             </header>
             <div id="vm-notice" class="vm-notice" data-kind="loading" role="status" aria-live="polite">Waiting for VM findings from the local evidence broker.</div>
             <div class="vm-grid">
@@ -748,13 +753,13 @@
           <section id="screen-api-collection" class="screen" aria-label="API Collection" hidden>
             <header class="screen-head">
               <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
-              <div><h1>API Collection</h1><div class="screen-subtitle">Saved credential-free request templates with scoped variables</div></div>
+              <div><h1>API Collection</h1><div class="screen-subtitle">Save request templates, then run them in an isolated browser context.</div></div>
               <div class="screen-head-actions"><span id="collection-generation" class="memory-readonly">Generation 0</span><span class="memory-readonly">Local only</span></div>
             </header>
             <div id="collection-notice" class="collection-notice" data-kind="loading" role="status" aria-live="polite">Loading the local API Collection…</div>
             <div class="collection-grid">
               <aside class="collection-pane" aria-label="Collection tree">
-                <div class="collection-pane-head"><div><h2>Saved requests</h2><p>Folders and requests stay in one bounded, atomic local document.</p></div><span id="collection-count" class="experiment-card-badge">0</span></div>
+                <div class="collection-pane-head"><div><h2>Saved requests</h2><p>Reusable requests saved on this device.</p></div><span id="collection-count" class="experiment-card-badge">0</span></div>
                 <div class="collection-pane-actions">
                   <button id="collection-new-folder" class="secondary-button" type="button">New folder</button>
                   <button id="collection-new-request" class="secondary-button" type="button">New request</button>
@@ -777,7 +782,7 @@
 
               <section class="collection-pane" aria-label="Saved request editor">
                 <div class="collection-pane-head"><div><h2>Request editor</h2><p>Templates are validated again when saved and resolved only inside the disposable Request Lab.</p></div><span id="collection-request-badge" class="experiment-card-badge" data-kind="offline">No request</span></div>
-                <div id="collection-editor-empty" class="collection-editor-empty">Create or select a saved request to edit it.</div>
+                <div id="collection-editor-empty" class="collection-editor-empty">Choose New request to start, or select a request from Saved requests. You can also import a method and URL from Traffic.</div>
                 <form id="collection-request-form" class="collection-form" hidden>
                   <div class="collection-form-row"><label>Name<input id="collection-request-name" type="text" maxlength="128" autocomplete="off" /></label><label>Folder<select id="collection-request-folder"></select></label></div>
                   <label>Request URL<input id="collection-request-url" type="text" maxlength="8192" placeholder="https://{{host}}/path/{{id}}" autocomplete="off" /></label>
@@ -793,7 +798,7 @@
 
               <aside class="collection-pane collection-run-pane" aria-label="Collection execution">
                 <article class="collection-run-card">
-                  <header><div><h2>Isolated execution</h2><p id="collection-context-message">No disposable request-lab context exists.</p></div><span id="collection-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span></header>
+                  <header><div><h2>Run request</h2><p id="collection-context-message">No disposable request-lab context exists.</p></div><span id="collection-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span></header>
                   <div class="collection-form-actions collection-form"><button id="collection-create-context" class="trace-button collection-primary" type="button">Create isolated context</button><button id="collection-run" class="secondary-button" type="button" disabled>Run selected</button><button id="collection-cancel" class="secondary-button" type="button" disabled>Cancel active</button></div>
                 </article>
                 <article class="collection-run-card">
@@ -805,7 +810,7 @@
                   <div id="collection-response" class="repeater-response experiment-empty">Run the selected request to inspect its bounded response.</div>
                 </article>
                 <article class="collection-run-card">
-                  <header><div><h2>Storage and limits</h2><p>Predictable local persistence without evidence-store mutation.</p></div><span class="experiment-card-badge">Contract v1</span></header>
+                  <header><div><h2>Storage and limits</h2><p>Saved locally, separate from captured evidence.</p></div><span class="experiment-card-badge">Contract v1</span></header>
                   <div class="experiment-context-facts"><div class="experiment-context-fact"><span>Collection</span><strong>32 folders / 128 requests</strong></div><div class="experiment-context-fact"><span>Document</span><strong>2 MiB atomic file</strong></div></div>
                   <div class="experiment-context-facts"><div class="experiment-context-fact"><span>Variables</span><strong>32 / 32 KiB per scope</strong></div><div class="experiment-context-fact"><span>Bodies</span><strong>64 KiB</strong></div></div>
                   <p class="collection-storage-note">The store is user-owned and permission-restricted. Runs stay in ephemeral Repeater memory and never enter captured evidence.</p>
@@ -817,13 +822,13 @@
           <section id="screen-analyst" class="screen" aria-label="Local Analyst Workspace" hidden>
             <header class="screen-head">
               <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
-              <div><h1>Local Analyst Workspace</h1><div class="screen-subtitle">Reusable evidence scripts and scratchpads in a bounded local sandbox</div></div>
+              <div><h1>Local Analyst Workspace</h1><div class="screen-subtitle">Write notes or run JavaScript against a local copy of captured evidence.</div></div>
               <div class="screen-head-actions"><span id="analyst-generation" class="memory-readonly">Generation 0</span><span id="analyst-runner-badge" class="memory-readonly">Runner checking</span></div>
             </header>
             <div id="analyst-notice" class="analyst-notice" data-kind="loading" role="status" aria-live="polite">Loading the local analyst workspace…</div>
             <div class="analyst-grid">
               <aside class="analyst-pane" aria-label="Analyst library">
-                <div class="analyst-pane-head"><div><h2>Library</h2><p>Folders, scripts, and notes persist in one permission-restricted local document.</p></div><span id="analyst-file-count" class="experiment-card-badge">0 / 64</span></div>
+                <div class="analyst-pane-head"><div><h2>Library</h2><p>Your saved scripts and notes. Nothing runs until you choose Run.</p></div><span id="analyst-file-count" class="experiment-card-badge">0 / 64</span></div>
                 <div class="analyst-actions">
                   <button id="analyst-new-folder" class="secondary-button" type="button">New folder</button>
                   <button id="analyst-new-script" class="secondary-button" type="button">New script</button>
@@ -850,8 +855,8 @@
               </aside>
 
               <section class="analyst-pane" aria-label="Analyst file editor">
-                <div class="analyst-pane-head"><div><h2>Editor</h2><p>Save before running. Scratchpads are intentionally non-executable.</p></div><span id="analyst-editor-badge" class="experiment-card-badge" data-kind="offline">No file</span></div>
-                <div id="analyst-editor-empty" class="analyst-empty">Create or select a script or scratchpad.</div>
+                <div class="analyst-pane-head"><div><h2>Editor</h2><p>Save a script before running it. Notes are never executed.</p></div><span id="analyst-editor-badge" class="experiment-card-badge" data-kind="offline">No file</span></div>
+                <div id="analyst-editor-empty" class="analyst-empty">Choose New script to analyze captured evidence with JavaScript, or New note to keep a scratchpad.</div>
                 <form id="analyst-editor-form" class="analyst-form analyst-editor-form" hidden>
                   <div class="analyst-form-row"><label>Name<input id="analyst-name" type="text" maxlength="128" autocomplete="off" /></label><label>Folder<select id="analyst-folder"></select></label></div>
                   <div class="analyst-form-row"><label>Type<select id="analyst-kind"><option value="analyst-script">Analyst script</option><option value="scratchpad">Scratchpad</option></select></label><label>Language<select id="analyst-language"><option value="javascript">JavaScript</option><option value="json">JSON</option><option value="markdown">Markdown</option><option value="text">Plain text</option></select></label></div>
@@ -863,9 +868,9 @@
 
               <aside class="analyst-pane analyst-run-pane" aria-label="Analyst execution">
                 <article class="analyst-card">
-                  <header><div><h2>Evidence snapshot</h2><p>A frozen, bounded copy is passed to a fresh helper process for each run.</p></div><span id="analyst-snapshot-badge" class="experiment-card-badge">0 records</span></header>
+                  <header><div><h2>Evidence snapshot</h2><p>Choose which captured evidence the script can read. Each run gets a separate local copy.</p></div><span id="analyst-snapshot-badge" class="experiment-card-badge">0 records</span></header>
                   <form id="analyst-run-form" class="analyst-form">
-                    <label>Private variables (JSON object)<textarea id="analyst-variables" maxlength="16384" spellcheck="false" placeholder='{"seed":"verified"}'></textarea></label>
+                    <label>Script variables (JSON object)<textarea id="analyst-variables" maxlength="16384" spellcheck="false" placeholder='{"seed":"verified"}'></textarea></label>
                     <div class="analyst-options">
                       <label class="analyst-check"><input id="analyst-include-events" type="checkbox" checked /> Events</label>
                       <label class="analyst-check"><input id="analyst-include-artifacts" type="checkbox" checked /> Artifact metadata</label>
@@ -899,7 +904,7 @@
           <section id="screen-tools" class="screen" aria-label="Decoder and JWT tools" hidden>
             <header class="screen-head">
               <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
-              <div><h1>Decoder Lab</h1><div class="screen-subtitle">Bounded local transformations and explicit JWT signature verification</div></div>
+              <div><h1>Local tools</h1><div class="screen-subtitle">Decode values or inspect JWTs. Inputs and results stay on this device.</div></div>
               <div class="screen-head-actions"><span id="decoder-engine-badge" class="memory-readonly">Engine checking</span><span class="memory-readonly">No network</span></div>
             </header>
             <div id="tools-notice" class="tools-notice" data-kind="loading" role="status" aria-live="polite">Checking the native decoder engine…</div>
@@ -913,34 +918,34 @@
                 <div class="decoder-grid">
                   <section class="decoder-column" aria-label="Decoder pipeline">
                     <article class="decoder-card">
-                      <header><div><h2>Input bytes</h2><p>Paste text or an encoded byte representation. Nothing runs automatically.</p></div><span id="decoder-input-badge" class="experiment-card-badge">0 B</span></header>
+                      <header><div><h2>1. Input</h2><p>Paste a value, then choose the transformation to apply.</p></div><span id="decoder-input-badge" class="experiment-card-badge">0 B</span></header>
                       <form id="decoder-form" class="decoder-form">
-                        <div class="decoder-form-row">
-                          <label>Representation<select id="decoder-input-encoding"><option value="text">UTF-8 text</option><option value="base64">Base64 bytes</option><option value="hex">Hex bytes</option></select></label>
-                          <label>Next transform<select id="decoder-operation">
+                        <label>Input format<select id="decoder-input-encoding"><option value="text">UTF-8 text</option><option value="base64">Base64 bytes</option><option value="hex">Hex bytes</option></select></label>
+                        <label>Input<textarea id="decoder-input" maxlength="1398110" spellcheck="false" placeholder="Paste a value, token segment, encoded string, or byte representation"></textarea></label>
+                        <div class="decoder-input-actions"><button id="decoder-use-field" class="secondary-button" type="button">Use selected request value</button></div>
+                        <label>2. Transformation<select id="decoder-operation">
                             <optgroup label="Base64"><option value="base64-decode">Base64 decode</option><option value="base64-encode">Base64 encode</option><option value="base64url-decode">Base64URL decode</option><option value="base64url-encode">Base64URL encode</option></optgroup>
                             <optgroup label="Bytes and text"><option value="hex-decode">Hex decode</option><option value="hex-encode">Hex encode</option><option value="url-decode">URL component decode</option><option value="url-encode">URL component encode</option><option value="html-decode">HTML entity decode</option><option value="html-encode">HTML entity encode</option><option value="base36-decode">Base36 to decimal</option><option value="base36-encode">Decimal to Base36</option></optgroup>
                             <optgroup label="Compression"><option value="gzip-decompress">Gzip decompress</option><option value="gzip-compress">Gzip compress</option><option value="zlib-decompress">Zlib decompress</option><option value="zlib-compress">Zlib compress</option><option value="deflate-decompress">Raw deflate decompress</option><option value="deflate-compress">Raw deflate compress</option></optgroup>
                             <optgroup label="Structured data"><option value="json-pretty">JSON pretty print</option><option value="json-minify">JSON minify</option></optgroup>
                           </select></label>
-                        </div>
-                        <label>Input<textarea id="decoder-input" maxlength="1398110" spellcheck="false" placeholder="Paste a value, token segment, encoded string, or byte representation"></textarea></label>
-                        <div class="decoder-actions"><button id="decoder-append" class="secondary-button decoder-primary" type="submit">Append transform</button><button id="decoder-use-field" class="secondary-button" type="button">Use selected request value</button><button id="decoder-remove-after" class="secondary-button" type="button">Remove selected and later</button><button id="decoder-reset" class="secondary-button" type="button">Reset chain</button></div>
+                        <div class="decoder-actions"><button id="decoder-append" class="secondary-button decoder-primary" type="submit">Run transformation</button></div>
                         <p class="experiment-privacy">At most 16 explicit steps, 1 MiB per input or output, and 4 MiB retained. Decompression stops at the output cap.</p>
                       </form>
                     </article>
                     <article class="decoder-card">
-                      <header><div><h2>Transformation chain</h2><p>Select any step to inspect it or branch a new chain from that output.</p></div><span id="decoder-pipeline-badge" class="experiment-card-badge">0 / 16</span></header>
+                      <header><div><h2>Steps</h2><p>Select a step to see its output. The next transformation starts from that step.</p></div><span id="decoder-pipeline-badge" class="experiment-card-badge">0 / 16</span></header>
                       <div id="decoder-pipeline" class="decoder-pipeline" role="listbox" aria-label="Decoder transformation steps"><div class="analyst-empty">Enter input and append the first transform.</div></div>
+                      <div class="decoder-chain-actions"><button id="decoder-remove-after" class="secondary-button" type="button">Remove from selected step</button><button id="decoder-reset" class="secondary-button" type="button">Reset chain</button></div>
                     </article>
                   </section>
 
                   <aside class="decoder-column" aria-label="Decoded output">
                     <article class="decoder-card">
-                      <header><div><h2>Selected bytes</h2><p id="decoder-output-meta">Input has not been parsed.</p></div><span id="decoder-output-badge" class="experiment-card-badge" data-kind="offline">No output</span></header>
+                      <header><div><h2>3. Result</h2><p id="decoder-output-meta">Input has not been parsed.</p></div><span id="decoder-output-badge" class="experiment-card-badge" data-kind="offline">No output</span></header>
                       <div class="decoder-output">
                         <div class="decoder-view-tabs" role="group" aria-label="Output representation"><button class="secondary-button" type="button" data-decoder-view="text" aria-pressed="true">UTF-8</button><button class="secondary-button" type="button" data-decoder-view="hex" aria-pressed="false">Hex dump</button><button class="secondary-button" type="button" data-decoder-view="base64" aria-pressed="false">Base64</button></div>
-                        <pre id="decoder-output" tabindex="0">No bytes selected.</pre>
+                        <pre id="decoder-output" tabindex="0" data-empty-label="No bytes to display. Enter input to begin.">No bytes selected.</pre>
                         <div class="decoder-actions"><button id="decoder-copy-output" class="secondary-button" type="button" disabled>Copy visible output</button></div>
                       </div>
                       <div class="decoder-facts"><div class="decoder-fact"><span>Selected bytes</span><strong id="decoder-selected-bytes">0 B</strong></div><div class="decoder-fact"><span>Retained</span><strong id="decoder-retained-bytes">0 B / 4 MiB</strong></div><div class="decoder-fact"><span>Engine time</span><strong id="decoder-duration">Not run</strong></div><div class="decoder-fact"><span>Execution</span><strong>Explicit only</strong></div></div>
@@ -953,14 +958,15 @@
                 <div class="jwt-grid">
                   <section class="jwt-column" aria-label="JWT input and creation">
                     <article class="decoder-card">
-                      <header><div><h2>Inspect compact JWT</h2><p>Decoding is not verification. Add a secret only when explicitly verifying an HMAC signature.</p></div><span class="experiment-card-badge">64 KiB max</span></header>
+                      <header><div><h2>Inspect a token</h2><p>Decoding is not verification. Add a secret only when explicitly verifying an HMAC signature.</p></div><span class="experiment-card-badge">64 KiB max</span></header>
                       <form id="jwt-inspect-form" class="decoder-form">
-                        <label>JWT compact serialization<textarea id="jwt-token" maxlength="65536" spellcheck="false" placeholder="header.payload.signature"></textarea></label>
-                        <label>HMAC secret for explicit verification<input id="jwt-secret" class="jwt-secret" type="password" maxlength="4096" autocomplete="off" /></label>
+                        <label>JSON Web Token (JWT)<textarea id="jwt-token" maxlength="65536" spellcheck="false" placeholder="header.payload.signature"></textarea></label>
+                        <label>Verification secret (HMAC only)<input id="jwt-secret" class="jwt-secret" type="password" maxlength="4096" autocomplete="off" /></label>
                         <div class="decoder-actions"><button id="jwt-inspect" class="secondary-button decoder-primary" type="submit">Inspect without verifying</button><button id="jwt-verify" class="secondary-button" type="button">Verify HMAC signature</button><button id="jwt-clear" class="secondary-button" type="button">Clear</button></div>
                       </form>
                     </article>
-                    <article class="decoder-card">
+                    <details class="tool-disclosure">
+                      <summary>Create a test token</summary>
                       <header><div><h2>Create test JWT</h2><p>Create a local HS256, HS384, HS512, or explicitly confirmed unsigned test token.</p></div><span class="experiment-card-badge">Ephemeral</span></header>
                       <form id="jwt-create-form" class="decoder-form">
                         <label>Payload JSON<textarea id="jwt-payload" maxlength="57344" spellcheck="false">{}</textarea></label>
@@ -969,7 +975,7 @@
                         <label id="jwt-unsigned-row" class="analyst-check analyst-sensitive jwt-unsigned" hidden><input id="jwt-confirm-unsigned" type="checkbox" /> I understand this creates an unsigned token with no authenticity</label>
                         <div class="decoder-actions"><button id="jwt-create" class="secondary-button decoder-primary" type="submit">Create test token</button></div>
                       </form>
-                    </article>
+                    </details>
                   </section>
 
                   <aside class="jwt-column" aria-label="JWT inspection result">

@@ -40,6 +40,14 @@
         return element;
       }
 
+      function emptyListboxOption(className, value) {
+        const element = textElement('div', className, value);
+        element.setAttribute('role', 'option');
+        element.setAttribute('aria-disabled', 'true');
+        element.setAttribute('aria-selected', 'false');
+        return element;
+      }
+
       function setVmNotice(kind, message) {
         elements.vmNotice.dataset.kind = kind;
         elements.vmNotice.textContent = message;
@@ -966,8 +974,8 @@
           elements.actionScopeBadge.dataset.kind = ['error', 'partial'].includes(scope?.state) ? 'error'
             : scope?.state === 'ready' ? '' : 'offline';
           elements.actionScopeBadge.textContent = scope?.state === 'ready'
-            ? `${scope.matched_target_count} ${scope.matched_target_count === 1 ? 'page' : 'pages'}`
-            : scope?.state ?? 'No scope';
+            ? scope.mode === 'target' ? 'One page' : 'All pages'
+            : scope?.state === 'error' ? 'Error' : 'Not set';
           elements.actionScopeMessage.textContent = scope?.message ?? 'Create an isolated context to choose action scope.';
         }
         elements.actionScopeTargets.replaceChildren(...(targets.length ? targets.map(target => {
@@ -1109,6 +1117,167 @@
         return Object.fromEntries(headers.map(header => [header.name, header.value]));
       }
 
+      function parseRepeaterHeaderRows(value) {
+        if (!value.trim()) return [];
+        try {
+          const headers = JSON.parse(value);
+          if (!headers || typeof headers !== 'object' || Array.isArray(headers)) return [];
+          return Object.entries(headers)
+            .filter(([, headerValue]) => typeof headerValue === 'string')
+            .map(([key, headerValue]) => ({key, value: headerValue, enabled: true}));
+        } catch { return []; }
+      }
+
+      function serializeRepeaterHeaderRows(rows) {
+        const headers = Object.fromEntries(rows
+          .filter(row => row.enabled && row.key.trim())
+          .map(row => [row.key.trim(), row.value]));
+        return Object.keys(headers).length ? JSON.stringify(headers, null, 2) : '';
+      }
+
+      function decodeRepeaterQueryComponent(value) {
+        try { return decodeURIComponent(value.replaceAll('+', ' ')); }
+        catch { return value; }
+      }
+
+      function encodeRepeaterQueryComponent(value) {
+        return encodeURIComponent(value).replaceAll('%7B', '{').replaceAll('%7D', '}');
+      }
+
+      function repeaterUrlParts(value) {
+        const hashIndex = value.indexOf('#');
+        const fragment = hashIndex < 0 ? '' : value.slice(hashIndex);
+        const withoutFragment = hashIndex < 0 ? value : value.slice(0, hashIndex);
+        const queryIndex = withoutFragment.indexOf('?');
+        return {
+          base: queryIndex < 0 ? withoutFragment : withoutFragment.slice(0, queryIndex),
+          query: queryIndex < 0 ? '' : withoutFragment.slice(queryIndex + 1),
+          fragment
+        };
+      }
+
+      function parseRepeaterQueryRows(value) {
+        const {query} = repeaterUrlParts(value);
+        if (!query) return [];
+        return query.split('&').filter(Boolean).map(parameter => {
+          const separator = parameter.indexOf('=');
+          return {
+            key: decodeRepeaterQueryComponent(separator < 0 ? parameter : parameter.slice(0, separator)),
+            value: decodeRepeaterQueryComponent(separator < 0 ? '' : parameter.slice(separator + 1)),
+            enabled: true
+          };
+        });
+      }
+
+      function repeaterUrlWithQuery(value, rows) {
+        const {base, fragment} = repeaterUrlParts(value);
+        const query = rows.filter(row => row.enabled && row.key.trim()).map(row =>
+          `${encodeRepeaterQueryComponent(row.key.trim())}=${encodeRepeaterQueryComponent(row.value)}`
+        ).join('&');
+        return `${base}${query ? `?${query}` : ''}${fragment}`;
+      }
+
+      function repeaterEditorRowValues(container) {
+        return [...container.querySelectorAll('.repeater-kv-row:not([data-new-row="true"])')].map(row => ({
+          key: row.querySelector('[data-repeater-kv-key]').value,
+          value: row.querySelector('[data-repeater-kv-value]').value,
+          enabled: row.querySelector('[data-repeater-kv-enabled]').checked
+        }));
+      }
+
+      function markRepeaterDraftChanged() {
+        state.repeaterDraftDirty = true;
+        state.experimentError = null;
+        renderRepeaterVariableStatus();
+      }
+
+      function syncRepeaterStructuredEditor(kind) {
+        const container = kind === 'headers' ? elements.repeaterHeaderRows : elements.repeaterQueryRows;
+        const rows = repeaterEditorRowValues(container);
+        if (kind === 'headers') {
+          elements.repeaterRequestHeaders.value = serializeRepeaterHeaderRows(rows);
+          state.repeaterHeadersSource = elements.repeaterRequestHeaders.value;
+        } else {
+          elements.repeaterRequestUrl.value = repeaterUrlWithQuery(elements.repeaterRequestUrl.value, rows);
+          state.repeaterQuerySource = elements.repeaterRequestUrl.value;
+        }
+        markRepeaterDraftChanged();
+      }
+
+      function createRepeaterEditorRow(kind, entry = {key: '', value: '', enabled: true}, newRow = false) {
+        const row = document.createElement('div');
+        row.className = 'repeater-kv-row';
+        row.dataset.newRow = String(newRow);
+        row.dataset.enabled = String(entry.enabled);
+        row.setAttribute('role', 'row');
+        const toggle = document.createElement('label'); toggle.className = 'repeater-kv-toggle';
+        const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = entry.enabled;
+        checkbox.name = `${kind}-enabled`; checkbox.dataset.repeaterKvEnabled = '';
+        const key = document.createElement('input'); key.type = 'text'; key.className = 'repeater-kv-input';
+        key.value = entry.key; key.placeholder = newRow ? 'New key' : '';
+        key.name = `${kind}-key`; key.autocomplete = 'off'; key.spellcheck = false;
+        key.maxLength = kind === 'headers' ? 256 : 2048; key.dataset.repeaterKvKey = '';
+        key.setAttribute('aria-label', `${kind === 'headers' ? 'Header' : 'Query parameter'} name`);
+        const keyCell = document.createElement('span'); keyCell.className = 'repeater-kv-cell';
+        keyCell.setAttribute('role', 'cell'); keyCell.append(key);
+        const value = document.createElement('input'); value.type = 'text'; value.className = 'repeater-kv-input';
+        value.value = entry.value; value.placeholder = newRow ? 'New value' : '';
+        value.name = `${kind}-value`; value.autocomplete = 'off'; value.spellcheck = false;
+        value.maxLength = kind === 'headers' ? 16384 : 8192; value.dataset.repeaterKvValue = '';
+        value.setAttribute('aria-label', `${kind === 'headers' ? 'Header' : 'Query parameter'} value`);
+        const valueCell = document.createElement('span'); valueCell.className = 'repeater-kv-cell';
+        valueCell.setAttribute('role', 'cell'); valueCell.append(value);
+        const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'repeater-kv-remove';
+        remove.textContent = '×'; remove.setAttribute('aria-label', `Remove ${kind === 'headers' ? 'header' : 'query parameter'}`);
+        const removeCell = document.createElement('span'); removeCell.className = 'repeater-kv-remove-cell';
+        removeCell.setAttribute('role', 'cell'); removeCell.append(remove);
+        toggle.setAttribute('role', 'cell'); toggle.append(checkbox); row.append(toggle, keyCell, valueCell, removeCell);
+
+        const updateToggleLabel = () => checkbox.setAttribute('aria-label',
+          `${checkbox.checked ? 'Disable' : 'Enable'} ${key.value || (kind === 'headers' ? 'header' : 'query parameter')}`);
+        const promote = () => {
+          if (row.dataset.newRow !== 'true' || (!key.value && !value.value)) return;
+          row.dataset.newRow = 'false';
+          checkbox.disabled = state.repeaterStructuredEditorsDisabled;
+          remove.disabled = state.repeaterStructuredEditorsDisabled;
+          row.parentElement.append(createRepeaterEditorRow(kind, undefined, true));
+        };
+        [key, value].forEach(input => input.addEventListener('input', () => {
+          promote(); updateToggleLabel(); syncRepeaterStructuredEditor(kind);
+        }));
+        checkbox.addEventListener('change', () => {
+          row.dataset.enabled = String(checkbox.checked); updateToggleLabel(); syncRepeaterStructuredEditor(kind);
+        });
+        remove.addEventListener('click', () => { row.remove(); syncRepeaterStructuredEditor(kind); });
+        updateToggleLabel();
+        [checkbox, key, value, remove].forEach(control => { control.disabled = state.repeaterStructuredEditorsDisabled; });
+        return row;
+      }
+
+      function renderRepeaterStructuredEditor(kind, rows) {
+        const container = kind === 'headers' ? elements.repeaterHeaderRows : elements.repeaterQueryRows;
+        container.replaceChildren(...rows.map(row => createRepeaterEditorRow(kind, row)),
+          createRepeaterEditorRow(kind, undefined, true));
+      }
+
+      function refreshRepeaterStructuredEditors(force = false) {
+        if (force || state.repeaterHeadersSource !== elements.repeaterRequestHeaders.value) {
+          state.repeaterHeadersSource = elements.repeaterRequestHeaders.value;
+          renderRepeaterStructuredEditor('headers', parseRepeaterHeaderRows(elements.repeaterRequestHeaders.value));
+        }
+        if (force || state.repeaterQuerySource !== elements.repeaterRequestUrl.value) {
+          state.repeaterQuerySource = elements.repeaterRequestUrl.value;
+          renderRepeaterStructuredEditor('query', parseRepeaterQueryRows(elements.repeaterRequestUrl.value));
+        }
+      }
+
+      function setRepeaterStructuredEditorsDisabled(disabled) {
+        state.repeaterStructuredEditorsDisabled = disabled;
+        [elements.repeaterHeaderRows, elements.repeaterQueryRows].forEach(container => {
+          container.querySelectorAll('input, button').forEach(control => { control.disabled = disabled; });
+        });
+      }
+
       function prefillRepeaterVariables(repeater) {
         const variables = Object.fromEntries((repeater?.variables ?? []).map(item => [item.name, item.value]));
         const key = JSON.stringify(variables);
@@ -1130,7 +1299,6 @@
         }
         try {
           const parsed = new URL(requestUrl);
-          parsed.search = '';
           parsed.hash = '';
           elements.repeaterRequestUrl.value = parsed.toString();
         } catch { elements.repeaterRequestUrl.value = ''; }
@@ -1140,6 +1308,7 @@
         elements.repeaterRequestHeaders.value = '';
         elements.repeaterRequestBody.value = '';
         state.repeaterDraftDirty = false;
+        refreshRepeaterStructuredEditors(true);
         renderRepeaterVariableStatus();
       }
 
@@ -1154,6 +1323,7 @@
           ? JSON.stringify(repeaterHeaderObject(entry.request.headers), null, 2) : '';
         elements.repeaterRequestBody.value = entry.request.body;
         state.repeaterDraftDirty = false;
+        refreshRepeaterStructuredEditors(true);
         renderRepeaterVariableStatus();
         renderRepeater();
         if (focus) {
@@ -1163,7 +1333,8 @@
       }
 
       function setRepeaterEditorTab(tab, focus = false) {
-        if (!['headers', 'body', 'settings'].includes(tab)) return;
+        if (!['headers', 'query', 'body', 'settings'].includes(tab)) return;
+        refreshRepeaterStructuredEditors();
         state.repeaterEditorTab = tab;
         elements.repeaterEditorTabs.forEach(button => {
           const selected = button.dataset.repeaterEditorTab === tab;
@@ -1217,7 +1388,7 @@
           if (!resolved) chip.dataset.kind = 'missing';
           chips.push(chip);
         });
-        if (!chips.length) chips.push(textElement('span', 'repeater-variable-chip', 'No variables used'));
+        elements.repeaterVariableStatus.hidden = chips.length === 0;
         elements.repeaterVariableStatus.replaceChildren(...chips);
       }
 
@@ -1239,7 +1410,7 @@
         elements.repeaterHistoryBytes.textContent = `${Math.ceil((repeater?.history_bytes ?? 0) / 1024)} / 512 KiB`;
         elements.repeaterHistoryUsage.textContent = `${history.length} / ${repeater?.limits?.history_entries ?? 24}`;
         if (!history.length) {
-          elements.repeaterHistory.replaceChildren(textElement('div', 'experiment-empty', 'No Repeater requests yet.'));
+          elements.repeaterHistory.replaceChildren(emptyListboxOption('experiment-empty', 'No Repeater requests yet.'));
           elements.repeaterHistoryPrev.disabled = true;
           elements.repeaterHistoryNext.disabled = true;
           return;
@@ -1275,6 +1446,8 @@
       function renderRepeaterResponse(repeater) {
         const entry = selectedRepeaterEntry(repeater);
         elements.repeaterCopyResolved.disabled = !entry || ['running', 'cancelling'].includes(repeater?.state) || state.experimentPending;
+        elements.repeaterCopyResolved.hidden = !entry;
+        elements.repeaterResponseBadge.hidden = !entry;
         if (!entry) {
           elements.repeaterResponse.className = 'repeater-response experiment-empty';
           elements.repeaterResponse.textContent = 'Send a request or choose one from history.';
@@ -1397,6 +1570,7 @@
 
       function renderRepeater() {
         prefillRepeaterRequest();
+        refreshRepeaterStructuredEditors();
         const experiment = requestInterception();
         const repeater = repeaterState();
         const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
@@ -1420,7 +1594,7 @@
         else if (active || working) setExperimentNotice('working', repeater.message);
         else if (repeater.state === 'error') setExperimentNotice('error', repeater.message);
         else if (contextReady || repeater.state === 'disposed') setExperimentNotice('ready', repeater.message);
-        else if (!attached) setExperimentNotice('idle', 'Attach an authorized browser target before creating a Repeater session.');
+        else if (!attached) setExperimentNotice('idle', 'Connect a browser target to send requests.');
         else setExperimentNotice('idle', repeater.message);
 
         elements.repeaterContextBadge.dataset.kind = repeater?.state === 'error' ? 'error' : experiment?.isolated ? '' : 'offline';
@@ -1431,10 +1605,13 @@
         elements.repeaterContextMessage.textContent = repeater?.state === 'error' ? repeater.message
           : contextReady ? 'Disposable page attached. Repeater has no baseline cookies or storage.'
             : repeater?.message ?? 'No disposable request-lab context exists.';
+        elements.repeaterSessionBar.hidden = !attached && !experiment?.isolated;
         elements.repeaterStorageState.textContent = experiment?.isolated ? 'Ephemeral and isolated'
           : repeater?.state === 'disposed' ? 'Deleted and erased' : 'Not allocated';
         elements.repeaterCreate.disabled = !attached || Boolean(experiment?.isolated) || working || state.debuggerActionPending;
         elements.repeaterDispose.disabled = !canDispose || working || state.debuggerActionPending;
+        elements.repeaterCreate.hidden = Boolean(experiment?.isolated);
+        elements.repeaterDispose.hidden = !experiment?.isolated;
         elements.repeaterClearHistory.disabled = !repeater?.history.length || active || working || state.debuggerActionPending;
 
         prefillRepeaterVariables(repeater);
@@ -1443,19 +1620,26 @@
         elements.repeaterVariableBadge.dataset.kind = contextReady ? '' : 'offline';
         elements.repeaterApplyVariables.disabled = !contextReady || active || working || state.debuggerActionPending;
         elements.repeaterVariables.disabled = !contextReady || active || working;
+        const requestDisabled = !contextReady || active || working;
         [elements.repeaterRequestUrl, elements.repeaterRequestMethod, elements.repeaterRequestTimeout,
           elements.repeaterRequestHeaders, elements.repeaterRequestBody]
-          .forEach(field => { field.disabled = !contextReady || active || working; });
+          .forEach(field => { field.disabled = requestDisabled; });
+        setRepeaterStructuredEditorsDisabled(requestDisabled);
         elements.repeaterSend.disabled = !contextReady || active || working || state.debuggerActionPending;
         elements.repeaterCancel.disabled = !active || repeater?.state === 'cancelling';
+        elements.repeaterSend.hidden = active;
+        elements.repeaterCancel.hidden = !active;
         elements.repeaterRequestBadge.dataset.kind = active ? '' : contextReady ? '' : 'offline';
         elements.repeaterRequestBadge.textContent = repeater?.state === 'cancelling' ? 'Cancelling'
           : repeater?.state === 'running' ? 'Running' : 'Draft';
+        elements.repeaterRequestBadge.hidden = !active;
         elements.repeaterActiveRequest.textContent = repeater?.active_execution
           ? `run ${repeater.active_execution.execution_id} · ${repeater.active_execution.resolved_method} ${repeater.active_execution.resolved_url}`
           : 'No active request';
+        elements.repeaterActiveRequest.hidden = !repeater?.active_execution;
         setRepeaterEditorTab(state.repeaterEditorTab);
         renderRepeaterVariableStatus();
+        elements.repeaterRequestFooter.hidden = elements.repeaterVariableStatus.hidden && elements.repeaterActiveRequest.hidden;
         renderRepeaterHistory(repeater);
         renderRepeaterResponse(repeater);
         renderRepeaterComparison(repeater);
@@ -1486,7 +1670,7 @@
         elements.objectResultCount.textContent = `${results.length} ${results.length === 1 ? 'match' : 'matches'}`;
         elements.objectResultCount.dataset.kind = results.length > 0 ? '' : 'offline';
         if (results.length === 0) {
-          elements.objectResults.replaceChildren(textElement('div', 'experiment-empty',
+          elements.objectResults.replaceChildren(emptyListboxOption('experiment-empty',
             experiment?.search ? 'No objects matched within the visible limits.' : 'No retained object references.'));
         } else {
           elements.objectResults.replaceChildren(...results.map(result => {
@@ -1607,7 +1791,7 @@
         else if (contextBusy) setExperimentNotice('working', objectExperiment.message);
         else if (objectExperiment.state === 'error' || objectExperiment.last_mutation?.ok === false) setExperimentNotice('error', objectExperiment.message);
         else if (pageReady || objectExperiment.state === 'disposed') setExperimentNotice('ready', objectExperiment.message);
-        else if (!attached) setExperimentNotice('idle', 'Attach an authorized browser target before creating Object Lab.');
+        else if (!attached) setExperimentNotice('idle', 'Connect a browser target to inspect live objects.');
         else setExperimentNotice('idle', objectExperiment.message);
 
         elements.objectContextBadge.dataset.kind = objectExperiment?.state === 'error' ? 'error' : objectExperiment?.isolated ? '' : 'offline';
@@ -1754,7 +1938,7 @@
         else if (contextWorking || ['arming', 'handling', 'stopping'].includes(hooks.state)) setExperimentNotice('working', hooks.message);
         else if (hooks.last_failure) setExperimentNotice('error', hooks.last_failure);
         else if (hooks.state === 'armed' || contextReady || hooks.state === 'disposed') setExperimentNotice('ready', hooks.message);
-        else if (!attached) setExperimentNotice('idle', 'Attach an authorized browser target before creating Hook Studio.');
+        else if (!attached) setExperimentNotice('idle', 'Connect a browser target to configure hooks.');
         else setExperimentNotice('idle', hooks.message);
 
         elements.hooksContextBadge.dataset.kind = hooks?.state === 'error' ? 'error' : hooks?.isolated ? '' : 'offline';
@@ -1883,7 +2067,7 @@
           ? `${automation.total_runs} total · ${automation.automatic_runs} automatic · ${automation.run_evictions} evicted · ${automation.dropped_triggers} trigger batches dropped`
           : 'Time, source, trigger, outcome, and correlation IDs for every retained run.';
         if (!runs.length) {
-          elements.automationRuns.replaceChildren(textElement('div', 'experiment-empty', 'Run a recipe to see its bounded result and logs.'));
+          elements.automationRuns.replaceChildren(emptyListboxOption('experiment-empty', 'Run a recipe to see its bounded result and logs.'));
         } else {
           elements.automationRuns.replaceChildren(...[...runs].reverse().map(run => {
             const row = document.createElement('button'); row.type = 'button'; row.className = 'automation-run-row';
@@ -1950,7 +2134,7 @@
         else if (working) setExperimentNotice('working', automation.message);
         else if (automation.last_failure) setExperimentNotice('error', automation.last_failure);
         else if (automation.auto_armed || contextReady || automation.state === 'disposed') setExperimentNotice('ready', automation.message);
-        else if (!attached) setExperimentNotice('idle', 'Attach an authorized browser target before creating Automation Studio.');
+        else if (!attached) setExperimentNotice('idle', 'Connect a browser target to run automations.');
         else setExperimentNotice('idle', automation.message);
 
         elements.automationContextBadge.dataset.kind = automation?.state === 'error' ? 'error' : automation?.isolated ? '' : 'offline';
@@ -2039,7 +2223,7 @@
         else if (experiment.state === 'error' || experiment.result?.ok === false) setExperimentNotice('error', experiment.message);
         else if (contextReady) setExperimentNotice('ready', experiment.message);
         else if (experiment.state === 'disposed') setExperimentNotice('ready', experiment.message);
-        else if (!attached) setExperimentNotice('idle', 'Attach an authorized browser target before creating an experiment.');
+        else if (!attached) setExperimentNotice('idle', 'Connect a browser target to intercept requests.');
         else setExperimentNotice('idle', experiment.message);
 
         const contextKind = experiment?.state === 'error' ? 'error' : experiment?.isolated ? '' : 'offline';
@@ -2892,7 +3076,7 @@
         elements.collectionHistoryBadge.textContent = `${history.length} ${history.length === 1 ? 'run' : 'runs'}`;
         elements.collectionHistoryBadge.dataset.kind = history.length ? '' : 'offline';
         if (!history.length) elements.collectionHistory.replaceChildren(
-          textElement('div', 'experiment-empty', collectionRequest() ? 'No executions for this request.' : 'Select a saved request.')
+          emptyListboxOption('experiment-empty', collectionRequest() ? 'No executions for this request.' : 'Select a saved request.')
         );
         else elements.collectionHistory.replaceChildren(...[...history].reverse().map(entry => {
           const row = document.createElement('button'); row.type = 'button'; row.className = 'collection-history-row';
@@ -3632,7 +3816,7 @@
         analystElements.historyBadge.textContent = `${state.analystRuns.length} / 64`;
         analystElements.historyBadge.dataset.kind = state.analystRuns.length ? '' : 'offline';
         if (!state.analystRuns.length) analystElements.history.replaceChildren(
-          textElement('div', 'analyst-empty', state.analystHistoryEvictions
+          emptyListboxOption('analyst-empty', state.analystHistoryEvictions
             ? `${state.analystHistoryEvictions} older runs were evicted; history is now clear.`
             : 'Run a saved script to see results and logs.')
         );
@@ -6731,10 +6915,12 @@
       });
       [elements.repeaterRequestUrl, elements.repeaterRequestMethod, elements.repeaterRequestTimeout,
         elements.repeaterRequestHeaders, elements.repeaterRequestBody].forEach(field => field.addEventListener('input', () => {
-        state.repeaterDraftDirty = true;
-        state.experimentError = null;
-        renderRepeaterVariableStatus();
+        if (field === elements.repeaterRequestUrl) state.repeaterQuerySource = null;
+        markRepeaterDraftChanged();
       }));
+      elements.repeaterRequestUrl.addEventListener('change', () => {
+        if (state.repeaterEditorTab === 'query') refreshRepeaterStructuredEditors();
+      });
       elements.repeaterRequestForm.addEventListener('submit', event => {
         event.preventDefault();
         runRepeaterRequest();

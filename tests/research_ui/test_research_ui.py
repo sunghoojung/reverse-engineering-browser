@@ -1744,7 +1744,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn("function isRuntimeHooks(hooks)", html)
         self.assertIn("function renderRuntimeHooks()", html)
         self.assertIn("function pivotSourceToRuntimeHooks()", html)
-        self.assertIn("#screen-experiments:not([hidden]) { display: flex", html)
+        self.assertIn("#screen-experiments:not([hidden]) { display: grid; grid-template-columns: auto minmax(240px, 1fr)", html)
         self.assertIn("action: 'add_runtime_hook'", html)
         self.assertIn("action: 'arm_runtime_hooks'", html)
         self.assertIn("action: 'disarm_runtime_hooks'", html)
@@ -1787,13 +1787,18 @@ process.stdout.write(JSON.stringify({
         self.assertIn('id="repeater-variable-form"', html)
         self.assertIn('id="repeater-comparison"', html)
         self.assertIn('class="repeater-compose-bar"', html)
+        self.assertIn('class="repeater-command-bar"', html)
         self.assertIn('class="repeater-split"', html)
         self.assertIn('data-repeater-editor-tab="headers"', html)
+        self.assertIn('data-repeater-editor-tab="query"', html)
         self.assertIn('data-repeater-editor-tab="body"', html)
         self.assertIn('data-repeater-editor-tab="settings"', html)
+        self.assertIn('id="repeater-header-rows"', html)
+        self.assertIn('id="repeater-query-rows"', html)
         self.assertIn("function isRepeater(repeater)", html)
         self.assertIn("function renderRepeater()", html)
         self.assertIn("function renderRepeaterVariableStatus()", html)
+        self.assertIn("function renderRepeaterStructuredEditor", html)
         self.assertIn("function setRepeaterEditorTab", html)
         self.assertIn("function setRepeaterResponseTab", html)
         self.assertIn("action: 'configure_repeater_variables'", html)
@@ -1803,6 +1808,51 @@ process.stdout.write(JSON.stringify({
         self.assertIn("action: 'clear_repeater_history'", html)
         self.assertIn("0 / 512 KiB", html)
         self.assertIn("History is ephemeral and never enters the evidence store", html)
+
+    def test_repeater_structured_editors_preserve_query_and_header_semantics(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+        source = read_ui_sources()
+        start = source.index("      function parseRepeaterHeaderRows")
+        end = source.index("      function repeaterEditorRowValues")
+        model = source[start:end]
+        exercise = r"""
+const parsedHeaders = parseRepeaterHeaderRows('{"Accept":"application/json","Count":4}');
+const serializedHeaders = serializeRepeaterHeaderRows([
+  {key: 'Accept', value: 'application/json', enabled: true},
+  {key: 'X-Skip', value: 'no', enabled: false},
+  {key: ' X-Run ', value: '{{id}}', enabled: true}
+]);
+const parsedQuery = parseRepeaterQueryRows('https://example.test/path?a=one+two&a=three&token={{id}}#result');
+const rebuiltUrl = repeaterUrlWithQuery('https://{{host}}/path?old=1#result', [
+  {key: 'search', value: 'one two', enabled: true},
+  {key: 'skip', value: 'no', enabled: false},
+  {key: 'token', value: '{{id}}', enabled: true}
+]);
+process.stdout.write(JSON.stringify({parsedHeaders, serializedHeaders, parsedQuery, rebuiltUrl}));
+"""
+        completed = subprocess.run(
+            [node, "-e", model + exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "parsedHeaders": [
+                    {"key": "Accept", "value": "application/json", "enabled": True}
+                ],
+                "serializedHeaders": '{\n  "Accept": "application/json",\n  "X-Run": "{{id}}"\n}',
+                "parsedQuery": [
+                    {"key": "a", "value": "one two", "enabled": True},
+                    {"key": "a", "value": "three", "enabled": True},
+                    {"key": "token", "value": "{{id}}", "enabled": True},
+                ],
+                "rebuiltUrl": "https://{{host}}/path?search=one%20two&token={{id}}#result",
+            },
+        )
 
     def test_api_collection_exposes_atomic_hierarchy_scopes_import_and_execution(self) -> None:
         html = read_ui_sources()

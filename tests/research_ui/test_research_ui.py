@@ -2270,7 +2270,8 @@ process.stdout.write(JSON.stringify({
 }));
 """
         completed = subprocess.run(
-            [node, "-e", model + exercise],
+            [node, "-"],
+            input=model + exercise,
             check=True,
             capture_output=True,
             text=True,
@@ -2417,7 +2418,8 @@ process.stdout.write(JSON.stringify({
 }));
 """
         completed = subprocess.run(
-            [node, "-e", model + exercise],
+            [node, "-"],
+            input=model + exercise,
             check=True,
             capture_output=True,
             text=True,

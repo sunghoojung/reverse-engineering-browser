@@ -437,12 +437,22 @@
                   </header>
                   <div class="repeater-editor-tabs" role="tablist" aria-label="Request editor">
                     <button class="repeater-editor-tab" type="button" role="tab" aria-selected="true" aria-controls="repeater-headers-panel" data-repeater-editor-tab="headers">Headers</button>
+                    <button class="repeater-editor-tab" type="button" role="tab" aria-selected="false" aria-controls="repeater-query-panel" data-repeater-editor-tab="query" tabindex="-1">Query</button>
                     <button class="repeater-editor-tab" type="button" role="tab" aria-selected="false" aria-controls="repeater-body-panel" data-repeater-editor-tab="body" tabindex="-1">Body</button>
                     <button class="repeater-editor-tab" type="button" role="tab" aria-selected="false" aria-controls="repeater-settings-panel" data-repeater-editor-tab="settings" tabindex="-1">Settings</button>
                   </div>
-                  <div id="repeater-headers-panel" class="repeater-editor-panel" role="tabpanel" data-repeater-editor-panel="headers">
-                    <label class="repeater-editor-label" for="repeater-request-headers">Request headers as JSON</label>
-                    <textarea id="repeater-request-headers" form="repeater-request-form" maxlength="20000" spellcheck="false" aria-label="Request headers as JSON" placeholder='{"accept":"application/json","x-run":"{{id}}"}'></textarea>
+                  <div id="repeater-headers-panel" class="repeater-editor-panel repeater-kv-editor" role="tabpanel" data-repeater-editor-panel="headers">
+                    <div class="repeater-kv-table" role="table" aria-label="Request headers">
+                      <div class="repeater-kv-head" role="row"><span aria-hidden="true"></span><span role="columnheader">Key</span><span role="columnheader">Value</span><span aria-hidden="true"></span></div>
+                      <div id="repeater-header-rows" class="repeater-kv-rows" role="rowgroup"></div>
+                    </div>
+                    <textarea id="repeater-request-headers" form="repeater-request-form" maxlength="20000" spellcheck="false" aria-label="Serialized request headers" hidden></textarea>
+                  </div>
+                  <div id="repeater-query-panel" class="repeater-editor-panel repeater-kv-editor" role="tabpanel" data-repeater-editor-panel="query" hidden>
+                    <div class="repeater-kv-table" role="table" aria-label="Query parameters">
+                      <div class="repeater-kv-head" role="row"><span aria-hidden="true"></span><span role="columnheader">Key</span><span role="columnheader">Value</span><span aria-hidden="true"></span></div>
+                      <div id="repeater-query-rows" class="repeater-kv-rows" role="rowgroup"></div>
+                    </div>
                   </div>
                   <div id="repeater-body-panel" class="repeater-editor-panel" role="tabpanel" data-repeater-editor-panel="body" hidden>
                     <label class="repeater-editor-label" for="repeater-request-body">Request body</label>

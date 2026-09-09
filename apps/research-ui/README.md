@@ -118,3 +118,6 @@ stack the results below the forms. Page scope, session metadata, resource
 limits, request restrictions, response comparison, and advanced object search
 use native disclosures. Switching tools preserves form drafts and disclosure
 state. Page scope is shown only for Interceptor and Automation, which support it.
+Repeater keeps method and URL controls above a persistent request-response split.
+Headers and query parameters use compact key-value rows with per-row enable and
+remove controls; query rows preserve duplicate names and update the request URL.

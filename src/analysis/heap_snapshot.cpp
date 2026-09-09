@@ -46,7 +46,7 @@ class ReadOnlyFileMapping final {
       error = "Heap snapshot file could not be opened";
       return false;
     }
-    struct stat metadata{};
+    struct stat metadata {};
     const bool valid_metadata =
         fstat(descriptor, &metadata) == 0 && S_ISREG(metadata.st_mode) && metadata.st_size > 0 &&
         static_cast<std::uintmax_t>(metadata.st_size) <= kHeapSnapshotMaxFileBytes &&

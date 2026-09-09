@@ -138,7 +138,7 @@ bool PeerIsCurrentUser(const int descriptor) noexcept {
   gid_t group_id = 0;
   return getpeereid(descriptor, &user_id, &group_id) == 0 && user_id == geteuid();
 #elif defined(__linux__)
-  struct ucred credentials{};
+  struct ucred credentials {};
   socklen_t size = sizeof(credentials);
   return getsockopt(descriptor, SOL_SOCKET, SO_PEERCRED, &credentials, &size) == 0 &&
          size == sizeof(credentials) && credentials.uid == geteuid();

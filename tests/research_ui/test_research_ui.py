@@ -1952,7 +1952,8 @@ process.stdout.write(JSON.stringify({
     def test_vm_lab_exposes_typed_evidence_and_failure_states(self) -> None:
         html = read_ui_sources()
 
-        self.assertIn('data-screen="vm">VM Lab</button>', html)
+        self.assertNotIn('id="nav-vm"', html)
+        self.assertIn('<h1>VM findings</h1>', html)
         self.assertIn('id="screen-vm"', html)
         self.assertIn('role="listbox" aria-label="Captured VM findings"', html)
         for evidence_kind in (

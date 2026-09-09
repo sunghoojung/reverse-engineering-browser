@@ -108,3 +108,6 @@ Workspace and Overrides tabs are omitted until they provide a usable workflow.
 The Sources sidebar starts closed without an attached debugger. Details opens
 source metadata and connection status; attached sessions show debugger controls
 by default. The toggle remains available at narrow window sizes.
+
+VM analysis is a secondary Traffic view, reached through Related VM candidates
+for a selected request. It has a Back to traffic control and no primary tab.

@@ -447,4 +447,3 @@
         if (tokenizer.language === 'wasm') return tokenizeWasmSourceLine(line, tokenizer);
         return [{type: 'plain', text: line}];
       }
-

@@ -22,7 +22,6 @@
           <button class="nav-button" data-screen="traffic" aria-current="page">Traffic</button>
           <button class="nav-button" data-screen="sources">Sources</button>
           <button id="nav-memory" class="nav-button" data-screen="memory">Memory</button>
-          <button id="nav-vm" class="nav-button" data-screen="vm">VM Lab</button>
           <button class="nav-button" data-screen="backtrace">Backtraces</button>
           <button class="nav-button" data-screen="experiments">Experiments</button>
           <button class="nav-button" data-screen="api-collection">Collection</button>
@@ -238,7 +237,8 @@
 
           <section id="screen-vm" class="screen" aria-label="Virtual machine investigation" hidden>
             <header class="screen-head">
-              <div><h1>VM Lab</h1></div>
+              <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
+              <div><h1>VM findings</h1></div>
             </header>
             <div id="vm-notice" class="vm-notice" data-kind="loading" role="status" aria-live="polite">Waiting for VM findings from the local evidence broker.</div>
             <div class="vm-grid">

@@ -6054,7 +6054,7 @@
         const screenName = name === 'backtraces' ? 'backtrace' : name;
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
         document.querySelectorAll('.nav-button').forEach(button => {
-          const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence');
+          const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence') || (button.dataset.screen === 'traffic' && screenName === 'vm');
           if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
         });
         if (screenName === 'backtrace') renderBacktrace();

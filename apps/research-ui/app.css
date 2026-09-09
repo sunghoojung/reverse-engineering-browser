@@ -515,141 +515,46 @@
       }
       .screen-head-actions { margin-left: auto; display: flex; gap: 7px; }
 
-      .trace-layout {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) 275px;
-        height: calc(100% - 60px);
-        min-height: 0;
-      }
-      .graph-panel {
-        position: relative;
-        padding: 20px 24px 30px;
-        overflow: auto;
-        background-image:
-          linear-gradient(color-mix(in srgb, var(--line) 45%, transparent) 1px, transparent 1px),
-          linear-gradient(90deg, color-mix(in srgb, var(--line) 45%, transparent) 1px, transparent 1px);
-        background-size: 22px 22px;
-      }
-      .graph-kicker {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        margin-bottom: 14px;
-        color: var(--muted);
-        font: 10px var(--mono);
-        text-transform: uppercase;
-        letter-spacing: normal;
-      }
-      .graph-kicker::before { content: ""; width: 18px; height: 1px; background: var(--cyan); }
-      .backtrace {
-        width: min(650px, 100%);
-        margin: 0;
-        padding: 0;
-        list-style: none;
-      }
-      .trace-step { position: relative; padding: 0 0 24px 38px; }
-      .trace-step:not(:last-child)::before {
-        content: "";
-        position: absolute;
-        left: 12px;
-        top: 25px;
-        bottom: -1px;
-        width: 1px;
-        background: linear-gradient(var(--accent), var(--cyan));
-      }
-      .trace-step.gap::before, .trace-step.correlated::before {
-        background: repeating-linear-gradient(to bottom, var(--amber) 0 4px, transparent 4px 8px);
-      }
-      .step-index {
-        position: absolute;
-        left: 0;
-        top: 11px;
-        z-index: 1;
-        width: 25px;
-        height: 25px;
-        display: grid;
-        place-items: center;
-        border: 1px solid var(--accent);
-        border-radius: 50%;
-        color: var(--accent);
-        background: var(--panel);
-        font: 10px var(--mono);
-      }
-      .gap .step-index { border-style: dashed; border-color: var(--amber); color: var(--amber); }
-      .step-card {
-        width: 100%;
-        min-height: 58px;
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        align-items: center;
-        gap: 12px;
-        padding: 10px 12px;
-        border: 1px solid var(--line);
-        border-radius: 5px;
-        background: color-mix(in srgb, var(--panel) 94%, transparent);
-        box-shadow: 0 8px 30px color-mix(in srgb, var(--shadow) 45%, transparent);
-      }
-      .step-card:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
-      .step-card.gap-card { border-style: dashed; border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); }
-      .step-kind { color: var(--muted); font-size: 10px; }
-      .step-title { margin-top: 4px; font: 11px var(--mono); }
-      .step-meta { margin-top: 5px; color: var(--faint); font: 10px var(--mono); }
-      .step-kind, .step-title, .step-meta { display: block; }
-      .confidence {
-        display: inline-flex;
-        align-items: center;
-        gap: 5px;
-        padding: 4px 6px;
-        border: 1px solid currentColor;
-        border-radius: 3px;
-        font: 650 10px var(--mono);
-        text-transform: uppercase;
-      }
-      .confidence::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+      #screen-backtrace:not([hidden]) { display: flex; flex-direction: column; }
+      .trace-toolbar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+      .trace-toolbar label { color: var(--muted); }
+      .trace-toolbar select { flex: 1; min-width: 0; height: 30px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 2px; background: var(--panel); }
+      .trace-toolbar button { flex-shrink: 0; }
+      .trace-notice { padding: 8px 12px; border-bottom: 1px solid var(--line); color: var(--muted); background: var(--panel-2); }
+      .trace-empty { align-self: center; width: min(100%, 560px); padding: 56px 24px; text-align: center; }
+      .trace-empty h2 { margin: 0 0 10px; font-size: 15px; font-weight: 500; }
+      .trace-empty p { margin: 0 0 20px; color: var(--muted); line-height: 1.6; }
+      .trace-empty button { margin: 0; }
+      .trace-layout { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 38%); min-height: 0; }
+      .trace-list-pane { min-width: 0; min-height: 0; overflow: auto; }
+      .trace-list-heading { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--panel-2); color: var(--muted); font-size: 11px; }
+      .backtrace { margin: 0; padding: 0; list-style: none; }
+      .trace-row { width: 100%; display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 12px; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; text-align: left; }
+      .trace-row:hover { background: var(--panel-2); }
+      .trace-row[aria-pressed="true"] { background: var(--accent-soft); }
+      .step-index { color: var(--faint); font: 11px var(--mono); }
+      .trace-row-copy { min-width: 0; }
+      .step-title { display: block; font: 12px var(--mono); overflow-wrap: anywhere; }
+      .step-kind { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; }
+      .trace-link-type { font-size: 10px; }
       .exact { color: var(--green); }
-      .matched { color: var(--blue); }
-      .differential { color: var(--cyan); }
       .correlation { color: var(--amber); }
       .unknown { color: var(--red); }
-
-      .trace-inspector {
-        padding: 16px;
-        overflow: auto;
-        border-left: 1px solid var(--line);
-        background: var(--chrome);
-      }
-      .inspector-label {
-        margin: 0 0 9px;
-        color: var(--faint);
-        font: 650 10px var(--sans);
-        letter-spacing: normal;
-        text-transform: uppercase;
-      }
-      .target-card { padding: 11px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); }
-      .target-path { color: var(--accent); font: 11px var(--mono); word-break: break-word; }
-      .target-request { margin-top: 6px; color: var(--muted); font: 10px var(--mono); }
-      .coverage {
-        display: grid;
-        grid-template-columns: 1fr auto;
-        gap: 7px;
-        margin: 14px 0;
-        color: var(--muted);
-        font: 10px var(--mono);
-      }
-      .coverage-bar { grid-column: 1 / -1; height: 4px; background: var(--panel-3); }
-      .coverage-bar span { display: block; width: 68%; height: 100%; background: linear-gradient(90deg, var(--accent), var(--cyan)); }
-      .legend { display: grid; gap: 8px; margin: 12px 0 18px; }
-      .legend-row { display: grid; grid-template-columns: 65px 1fr; gap: 8px; align-items: baseline; color: var(--muted); font-size: 10px; }
-      .legend-row strong { font: 650 10px var(--mono); text-transform: uppercase; }
-      .inspector-actions { display: grid; gap: 7px; }
-      .inspector-actions button { width: 100%; }
-      .evidence-link {
-        min-height: 31px;
-        border: 0;
-        background: transparent;
-        color: var(--cyan);
-        text-align: left;
-        font: 11px var(--mono);
+      .trace-inspector { min-width: 0; overflow: auto; border-left: 1px solid var(--line); padding: 16px; }
+      .trace-inspector h2 { margin: 0 0 18px; color: var(--muted); font-size: 11px; font-weight: 500; }
+      .trace-inspector h3 { margin: 0; font: 12px var(--mono); overflow-wrap: anywhere; }
+      .trace-inspector h4 { margin-bottom: 8px; font-size: 11px; font-weight: 500; }
+      .trace-detail-relation { margin: 6px 0 18px; color: var(--muted); }
+      .trace-detail-message { line-height: 1.6; overflow-wrap: anywhere; }
+      .trace-facts { display: grid; grid-template-columns: minmax(90px, .7fr) minmax(0, 1fr); gap: 10px 12px; margin: 0 0 18px; font-size: 11px; }
+      .trace-facts dt { color: var(--muted); }
+      .trace-facts dd { margin: 0; overflow-wrap: anywhere; font-family: var(--mono); }
+      .trace-value { padding: 10px; border: 1px solid var(--line-soft); white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--mono); }
+      @media (max-width: 800px) {
+        .trace-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(130px, 40%) minmax(0, 1fr); }
+        .trace-inspector { border-left: 0; border-top: 1px solid var(--line); }
+        .trace-toolbar { flex-wrap: wrap; }
+        .trace-toolbar select { min-width: 180px; }
       }
 
       .evidence-tools {
@@ -1650,7 +1555,6 @@
       .vm-metric { padding: 10px; border: 1px solid var(--line); background: var(--panel-2); }
       .vm-metric span { display: block; color: var(--faint); font: 10px var(--mono); text-transform: uppercase; }
       .vm-metric strong { display: block; margin-top: 6px; font: 500 18px var(--mono); }
-      .vm-explanation { margin: 0; padding: 12px 13px; border-bottom: 1px solid var(--line-soft); color: var(--muted); font: 12px/1.5 var(--sans); }
       .vm-detail-card { border: 1px solid var(--line); background: var(--panel-2); }
       .vm-detail-head { display: flex; align-items: flex-start; gap: 10px; padding: 13px; border-bottom: 1px solid var(--line); }
       .vm-detail-head > :first-child { min-width: 0; flex: 1; }
@@ -1732,12 +1636,6 @@
         .collection-pane:last-child { grid-column: 1 / -1; border-top: 1px solid var(--line); }
         .collection-run-pane { grid-template-columns: 1fr 1fr; }
       }
-      @media (max-width: 880px) {
-        .trace-layout { grid-template-columns: minmax(0, 1fr); }
-        .trace-inspector { border-top: 1px solid var(--line); border-left: 0; }
-        .legend { grid-template-columns: 1fr 1fr; }
-        .inspector-actions { grid-template-columns: 1fr 1fr; }
-      }
       @media (max-width: 650px) {
         .app { width: 100%; height: 100vh; min-height: 0; margin: 0; border: 0; border-radius: 0; }
         .toolbar { gap: 5px; padding: 0 7px; overflow-x: auto; }
@@ -1755,9 +1653,6 @@
         .request-inspector { padding: 13px 12px; }
         .trace-dock { align-items: stretch; flex-direction: column; }
         .trace-button { width: 100%; margin-left: 0; }
-        .graph-panel { padding: 17px 12px 24px; }
-        .step-card { grid-template-columns: 1fr; }
-        .confidence { justify-self: start; }
         .screen-head { padding: 9px 10px; }
         .screen-head-actions .secondary-button { display: none; }
         #screen-experiments:not([hidden]) { grid-template-rows: auto auto auto minmax(0, 1fr); }

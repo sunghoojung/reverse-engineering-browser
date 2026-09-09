@@ -6,8 +6,8 @@ The research UI is the human-facing investigation workspace.
 
 - Start from a captured request and let the researcher choose a header, cookie,
   or body field to investigate.
-- Show a backward evidence graph through serialization, transforms, runtime
-  values, browser inputs, and native probe evidence.
+- List a request’s recorded predecessor events and expose each event’s
+  identifiers, captured value, and source artifact.
 - Keep observed, correlated, and unknown relationships visually distinct.
 - Show correlated requests, scripts, frames, API probes, WASM modules, and artifacts.
 - Start and stop explicitly authorized research sessions.
@@ -19,6 +19,17 @@ The research UI is the human-facing investigation workspace.
 The UI does not inject hooks into a page and does not communicate directly with
 a renderer. It reads evidence through the local event broker so capture and
 presentation remain separate.
+
+## Backtraces
+
+Choose a captured request from the request picker. Loading its trace shows
+ordered event rows, with details for the selected row. Up/Down and Home/End
+move between rows. Source links open the matching captured artifact.
+
+Recorded event links and matches based on shared identifiers have separate row
+labels. Missing events remain selectable gap rows. A failed refresh preserves
+the previous trace and shows the failure above it. Sample requests have no
+recorded trace and offer a shortcut to a captured request when one is available.
 
 ## Run the application
 

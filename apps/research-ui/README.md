@@ -92,3 +92,9 @@ controls follow input, transformation, and result order; chain editing stays
 beside the step list. JWT test-token creation is an optional disclosure below
 inspection. Use the interface font for instructions and labels, and monospace
 for captured values, code, and identifiers. Empty states explain how to begin.
+
+Backtraces lets the researcher select a captured request, load its recorded
+predecessors, and select a row to inspect event identifiers, values, and source.
+Empty traces show a next action rather than a graph or coverage meter. Gaps and
+shared-identifier matches remain explicit. Refresh failures retain the previous
+trace, and arrow keys move between trace rows.

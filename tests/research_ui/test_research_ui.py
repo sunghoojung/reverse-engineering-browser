@@ -800,10 +800,9 @@ class ResearchUiTests(unittest.TestCase):
     def test_ui_keeps_captured_values_out_of_html_injection_paths(self) -> None:
         html = read_ui_sources()
 
-        self.assertIn("Request Origin Trace", html)
+        self.assertIn("Backtraces", html)
         self.assertIn("Trace origin", html)
-        self.assertIn("Evidence gap", html)
-        self.assertIn("Unknown", html)
+        self.assertIn("Missing event", html)
         self.assertIn("width: 100%", html)
         self.assertIn("height: 100vh", html)
         self.assertIn("standalone preview", html)
@@ -1904,7 +1903,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn("row.setAttribute('role', 'option')", html)
         self.assertIn("row.setAttribute('aria-pressed'", html)
         self.assertIn('aria-label="Filter requests"', html)
-        self.assertIn("button.disabled = !traceIsAvailable()", html)
+        self.assertIn('aria-label="Request to trace"', html)
         self.assertNotIn("screenName === 'experiments' && !state.selectedField", html)
         self.assertIn("enableTabKeyboardNavigation('.experiment-mode-tab')", html)
         self.assertIn("select.id = 'debugger-target-select'", html)

@@ -74,7 +74,7 @@
           const card = document.createElement('article'); card.className = 'vm-detail-card';
           const head = document.createElement('header'); head.className = 'vm-detail-head';
           const title = document.createElement('div');
-          title.append(textElement('h2', '', selected.label), textElement('p', '', `${selected.hostRuntime} · profile anti-bot-vm-detection-v1`));
+          title.append(textElement('h2', '', 'VM patterns in source'), textElement('p', '', `${selected.hostRuntime} · code analysis · artifact ${selected.sourceArtifactId}`));
           const actions = document.createElement('div'); actions.className = 'vm-detail-actions';
           actions.append(textElement('span', 'vm-confidence', selected.confidence));
           const sourceArtifact = state.artifacts.find(artifact => artifact.artifact_id === selected.sourceArtifactId);
@@ -160,15 +160,7 @@
           actions.append(openSource);
         }
         head.append(title, actions);
-        const explanations = {
-          interpreter: 'An interpreter candidate executes a guest program. Inspect the source before treating it as confirmed.',
-          'guest program': 'A guest program is data or bytecode consumed by the interpreter.',
-          invocation: 'An invocation links a guest program to a recorded execution.',
-          'host binding': 'A host binding connects guest execution to a browser or JavaScript operation.',
-          hypothesis: 'This is an interpretation of the evidence. Follow its event and source links to check it.',
-          coverage: 'Coverage describes the observed portion of this investigation, not proof that all behavior was captured.'
-        };
-        card.append(head, textElement('p', 'vm-explanation', explanations[selected.kind] || 'Inspect the linked events and source to understand this finding.'), fields);
+        card.append(head, fields);
         if (coverage) {
           const coveragePanel = document.createElement('div'); coveragePanel.className = 'vm-coverage';
           const line = document.createElement('div'); line.className = 'vm-coverage-line';
@@ -214,9 +206,9 @@
           row.setAttribute('aria-selected', String(finding.findingId === state.selectedVmFindingId));
           row.tabIndex = finding.findingId === state.selectedVmFindingId || !selectedExists && index === 0 ? 0 : -1;
           row.append(
-            textElement('span', 'vm-row-title', finding.label),
-            textElement('span', 'vm-kind', finding.kind),
-            textElement('span', 'vm-row-meta', finding.analysis ? `cold-path derived analysis · artifact ${finding.sourceArtifactId}` : `t ${finding.monotonicTimeNs} ns · source p${finding.processId}:t${finding.threadId} · category vm`),
+            textElement('span', 'vm-row-title', finding.analysis ? 'VM patterns in source' : finding.label),
+            textElement('span', 'vm-kind', finding.analysis ? 'Code analysis' : finding.kind),
+            textElement('span', 'vm-row-meta', finding.analysis ? `Code analysis · artifact ${finding.sourceArtifactId}` : `t ${finding.monotonicTimeNs} ns · source p${finding.processId}:t${finding.threadId} · category vm`),
             textElement('span', 'vm-row-correlation', `operation ${finding.kind} · finding ${finding.findingId} · investigation ${finding.investigationId} · ${finding.hostRuntime} · ${finding.confidence}`)
           );
           row.addEventListener('click', () => {
@@ -315,6 +307,7 @@
         if (!request) return;
         state.selectedRequestId = id;
         state.originTrace = null;
+        state.selectedTraceRow = null;
         state.originTraceStatus = 'idle';
         state.originTraceError = null;
         state.originTraceKey = null;
@@ -663,11 +656,8 @@
       }
 
       function renderEvidence() {
-        document.querySelectorAll('.nav-button[data-screen="backtrace"]')
-          .forEach(button => { button.disabled = !traceIsAvailable(); });
         document.querySelectorAll('.nav-button[data-screen="experiments"]')
           .forEach(button => { button.disabled = !state.selectedField; });
-        elements.traceBranchExperiment.disabled = !state.selectedField;
         const documentSteps = state.originTrace?.steps ?? [];
         const firstTime = documentSteps.length ? BigInt(documentSteps[documentSteps.length - 1].monotonic_time_ns) : 0n;
         const tracedEvidence = documentSteps.map(step => ({
@@ -699,6 +689,7 @@
         }));
         elements.evidenceCount.textContent = `${evidence.length} trace records`;
         elements.evidenceLinkCount.textContent = String(evidence.length);
+        if (!document.querySelector('#screen-backtrace').hidden) renderBacktrace();
       }
 
       function originTraceSelection() {
@@ -759,66 +750,122 @@
         renderEvidence();
       }
 
+      function traceStepDetails(model) {
+        const panel = elements.traceStepDetails;
+        panel.replaceChildren(textElement('h3', '', model.title), textElement('p', 'trace-detail-relation', model.kind));
+        if (!model.step) {
+          panel.append(textElement('p', 'trace-detail-message', model.meta));
+          return;
+        }
+        const step = model.step;
+        const facts = document.createElement('dl'); facts.className = 'trace-facts';
+        [
+          ['Relationship', step.relation.replaceAll('_', ' ')],
+          ['Link type', step.confidence === 'observed' ? 'Recorded event link' : 'Matched by shared identifiers'],
+          ['Time (monotonic ns)', step.monotonic_time_ns],
+          ['Session', step.event.session_id], ['Process', step.event.process_id],
+          ['Event', step.event.sequence_number], ['Frame', step.frame_id],
+          ['Request', step.request_id], ['Artifact', step.artifact_id]
+        ].forEach(([label, value]) => facts.append(textElement('dt', '', label), textElement('dd', '', String(value))));
+        panel.append(facts);
+        if (step.value) panel.append(textElement('h4', '', 'Captured value'), textElement('pre', 'trace-value', step.value));
+        const artifact = state.artifacts.find(candidate => candidate.artifact_id === step.artifact_id);
+        if (artifact) {
+          const open = textElement('button', 'secondary-button', 'Open source'); open.type = 'button';
+          open.addEventListener('click', () => { showScreen('sources', open); selectArtifact(artifact.artifact_id); });
+          panel.append(open);
+        }
+      }
+
       function traceStepElement(model) {
-        const item = document.createElement('li');
-        item.className = `trace-step${model.gap ? ' gap' : ''}${model.correlated ? ' correlated' : ''}`;
-        const index = document.createElement('span'); index.className = 'step-index'; index.textContent = model.index;
-        const card = document.createElement('div'); card.className = `step-card${model.gap ? ' gap-card' : ''}`;
-        const copy = document.createElement('span');
-        const kind = document.createElement('span'); kind.className = 'step-kind'; kind.textContent = model.kind;
-        const title = document.createElement('span'); title.className = 'step-title'; title.textContent = model.title;
-        const meta = document.createElement('span'); meta.className = 'step-meta'; meta.textContent = model.meta;
-        const confidence = document.createElement('span');
-        confidence.className = `confidence ${model.style}`; confidence.textContent = model.confidence;
-        copy.append(kind, title, meta); card.append(copy, confidence); item.append(index, card);
-        return item;
+        const item = document.createElement('li'); item.className = `trace-step${model.gap ? ' gap' : ''}`;
+        const row = document.createElement('button'); row.type = 'button'; row.className = 'trace-row';
+        row.dataset.traceKey = model.key;
+        row.setAttribute('aria-pressed', String(state.selectedTraceRow === model.key));
+        row.tabIndex = state.selectedTraceRow === model.key ? 0 : -1;
+        const copy = document.createElement('span'); copy.className = 'trace-row-copy';
+        copy.append(textElement('span', 'step-title', model.title), textElement('span', 'step-kind', model.kind));
+        row.append(textElement('span', 'step-index', model.index), copy,
+          textElement('span', `trace-link-type ${model.style}`, model.confidence));
+        row.addEventListener('click', () => {
+          state.selectedTraceRow = model.key;
+          elements.backtraceSteps.querySelectorAll('.trace-row').forEach(candidate => {
+            const active = candidate === row;
+            candidate.setAttribute('aria-pressed', String(active)); candidate.tabIndex = active ? 0 : -1;
+          });
+          traceStepDetails(model);
+        });
+        row.addEventListener('keydown', event => {
+          if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+          event.preventDefault();
+          const rows = [...elements.backtraceSteps.querySelectorAll('.trace-row')];
+          const current = rows.indexOf(row);
+          const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
+            : (current + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
+          rows[next].click(); rows[next].focus();
+        });
+        item.append(row); return item;
       }
 
       function renderBacktrace() {
         const selection = originTraceSelection();
-        const request = selection?.request ?? state.requests.find(candidate => candidate.id === state.selectedRequestId);
-        const models = [];
-        if (state.originTraceStatus === 'loading' && !state.originTrace) {
-          models.push({ index: '…', kind: 'Loading evidence', title: 'Building the bounded origin trace', meta: 'Reading normalized broker evidence', confidence: 'Pending', style: 'unknown', gap: true });
-        } else if (state.originTraceStatus === 'error' && !state.originTrace) {
-          models.push({ index: '?', kind: 'Trace unavailable', title: state.originTraceError || 'No broker-backed trace loaded', meta: 'Select a live request and run Trace origin', confidence: 'Unknown', style: 'unknown', gap: true });
-        } else if (state.originTrace) {
-          const relationLabels = {
-            trace_target: 'Trace target', parent_event: 'Observed parent', request_initiator: 'Request initiator',
-            request_lifecycle: 'Request lifecycle', artifact_request: 'Artifact correlation'
-          };
-          state.originTrace.steps.forEach((step, index) => {
-            models.push({
-              index: String(index + 1).padStart(2, '0'),
-              kind: relationLabels[step.relation] || step.relation,
-              title: `${step.category} · ${step.operation}`,
-              meta: `process ${step.event.process_id} · event ${step.event.sequence_number}${step.value ? ` · ${step.value}` : ''}`,
-              confidence: step.confidence === 'observed' ? 'Observed' : 'Correlated',
-              style: step.confidence === 'observed' ? 'exact' : 'correlation',
-              correlated: step.confidence === 'correlated'
-            });
-            state.originTrace.gaps.filter(gap => gap.after_step === index).forEach(gap => {
-              models.push({ index: '?', kind: 'Evidence gap', title: gap.reason.replaceAll('_', ' '), meta: gap.detail, confidence: 'Unknown', style: 'unknown', gap: true });
-            });
-          });
-          if (!state.originTrace.steps.length) {
-            const gap = state.originTrace.gaps[0];
-            models.push({ index: '?', kind: 'No retained origin', title: state.originTrace.status, meta: gap?.detail || 'No matching request evidence is retained.', confidence: 'Unknown', style: 'unknown', gap: true });
-          }
-          if (state.originTraceStatus === 'loading') {
-            models.unshift({ index: '…', kind: 'Refreshing evidence', title: 'Last valid trace remains visible', meta: 'Checking the bounded stores for new relationships', confidence: 'Pending', style: 'unknown', gap: true });
-          } else if (state.originTraceStatus === 'error') {
-            models.push({ index: '!', kind: 'Refresh unavailable', title: 'Last valid trace retained', meta: state.originTraceError, confidence: 'Unknown', style: 'unknown', gap: true });
-          }
-        } else {
-          models.push({ index: '?', kind: 'Trace unavailable', title: state.originTraceError || 'No broker-backed trace loaded', meta: 'Select a live request and run Trace origin', confidence: 'Unknown', style: 'unknown', gap: true });
+        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        const captured = state.requests.filter(candidate => requestTraceRoot(candidate));
+        const choices = request && !requestTraceRoot(request) ? [request, ...captured] : captured;
+        const choiceKey = JSON.stringify(choices.map(candidate => [candidate.id, candidate.method, candidate.path]));
+        if (elements.traceRequest.dataset.choices !== choiceKey) {
+          elements.traceRequest.replaceChildren(...choices.map(candidate => {
+          const option = document.createElement('option'); option.value = candidate.id;
+          option.textContent = `${candidate.method} ${candidate.path}${requestTraceRoot(candidate) ? '' : candidate.origin === 'sample' ? ' (sample, no trace)' : ' (no request identifier)'}`;
+          option.selected = candidate.id === state.selectedRequestId;
+          return option;
+          }));
+          elements.traceRequest.dataset.choices = choiceKey;
         }
+        elements.traceRequest.value = state.selectedRequestId || '';
+        elements.traceRequest.disabled = !choices.length;
+        elements.traceLoad.disabled = !selection || state.originTraceStatus === 'loading';
+        elements.traceLoad.textContent = state.originTrace ? 'Refresh trace' : 'Load trace';
+        elements.backtraceSubtitle.textContent = selection
+          ? `${request.method} ${request.path}` : 'Request events and their recorded predecessors';
+        const trace = selection ? state.originTrace : null;
+        const hasSteps = Boolean(trace?.steps.length);
+        elements.traceContent.hidden = !hasSteps;
+        elements.traceEmpty.hidden = hasSteps;
+        elements.traceEvidence.hidden = !hasSteps;
+        elements.traceFirstRequest.hidden = Boolean(selection) || !captured.length;
+        const loading = state.originTraceStatus === 'loading';
+        const failed = state.originTraceStatus === 'error';
+        elements.traceNotice.hidden = !hasSteps || !(loading || failed);
+        elements.traceNotice.textContent = loading ? 'Refreshing trace…' : `Refresh failed. Showing the previous trace. ${state.originTraceError || ''}`;
+        elements.traceEmptyTitle.textContent = loading ? 'Loading trace…' : failed ? 'Could not load this trace'
+          : !selection ? (request?.origin === 'sample' ? 'This sample request has no trace' : request ? 'This event has no request identifier' : 'No captured requests yet') : trace ? 'No earlier events were retained' : 'Ready to load';
+        elements.traceEmptyMessage.textContent = loading ? 'Reading the recorded events for this request.'
+          : failed ? (state.originTraceError || 'Try loading the trace again.')
+          : !selection ? (captured.length ? 'Choose a captured request above, or open the first one below.' : 'Capture a request in a live session, then return here to inspect its events.')
+          : trace ? (trace.gaps[0]?.detail || 'The capture does not contain a predecessor for this request.') : 'Choose Load trace to inspect this request.';
+        const models = [];
+        const labels = {trace_target: 'Selected request', parent_event: 'Previous event', request_initiator: 'Request initiator', request_lifecycle: 'Request lifecycle', artifact_request: 'Related artifact'};
+        (trace?.steps ?? []).forEach((step, index) => {
+          models.push({key: `${step.event.process_id}:${step.event.sequence_number}`, index: String(index + 1),
+            title: `${step.category} · ${step.operation}`, kind: labels[step.relation] || step.relation,
+            confidence: step.confidence === 'observed' ? 'Recorded link' : 'Shared identifiers',
+            style: step.confidence === 'observed' ? 'exact' : 'correlation', step});
+          trace.gaps.filter(gap => gap.after_step === index).forEach((gap, gapIndex) => models.push({
+            key: `gap:${index}:${gapIndex}`, index: '!', title: gap.reason.replaceAll('_', ' '),
+            kind: 'Missing event', confidence: 'Gap', style: 'unknown', meta: gap.detail, gap: true
+          }));
+        });
+        if (!models.some(model => model.key === state.selectedTraceRow)) state.selectedTraceRow = models[0]?.key ?? null;
+        const focusedKey = document.activeElement?.dataset?.traceKey;
         elements.backtraceSteps.replaceChildren(...models.map(traceStepElement));
-        const coverage = state.originTrace?.coverage?.percent ?? 0;
-        elements.summaryTargetPath.textContent = selection ? `request ${selection.requestID}` : 'No live request target';
-        elements.summaryTargetRequest.textContent = request ? `${request.method} ${request.path} · identifiers only` : 'Observed identifiers only';
-        elements.coverageValue.textContent = `${coverage}%`;
-        elements.coverageBar.style.width = `${coverage}%`;
+        if (focusedKey) {
+          [...elements.backtraceSteps.querySelectorAll('.trace-row')]
+            .find(row => row.dataset.traceKey === focusedKey)?.focus({preventScroll: true});
+        }
+        const active = models.find(model => model.key === state.selectedTraceRow);
+        if (active) traceStepDetails(active); else elements.traceStepDetails.replaceChildren();
+        elements.coverageValue.textContent = hasSteps ? `${trace.coverage.percent}% coverage` : '';
       }
 
       function requestInterception() {
@@ -6441,19 +6488,12 @@
 
       function showScreen(name, trigger = null) {
         const screenName = name === 'backtraces' ? 'backtrace' : name;
-        if (screenName === 'backtrace' && !traceIsAvailable()) return;
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
         document.querySelectorAll('.nav-button').forEach(button => {
           const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence');
           if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
         });
-        if (screenName === 'backtrace') {
-          const selection = originTraceSelection();
-          elements.backtraceSubtitle.textContent = selection
-            ? `${selection.request.method} ${selection.request.path} · request ${selection.requestID}`
-            : `request-${state.selectedRequestId} · sample data has no broker trace`;
-          renderBacktrace();
-        }
+        if (screenName === 'backtrace') renderBacktrace();
         if (screenName === 'experiments') renderExperiment();
         if (screenName === 'api-collection') {
           renderApiCollection();
@@ -6649,6 +6689,18 @@
       enableTabKeyboardNavigation('.inspector-tab');
       enableTabKeyboardNavigation('.field-tab');
       enableTabKeyboardNavigation('.source-side-tab:not(:disabled)');
+      elements.traceRequest.addEventListener('change', async () => {
+        selectRequest(elements.traceRequest.value);
+        await refreshOriginTrace();
+      });
+      elements.traceLoad.addEventListener('click', refreshOriginTrace);
+      elements.traceFirstRequest.addEventListener('click', async () => {
+        const first = state.requests.find(candidate => requestTraceRoot(candidate));
+        if (!first) return;
+        selectRequest(first.id);
+        await refreshOriginTrace();
+        elements.backtraceSteps.querySelector('.trace-row')?.focus();
+      });
       elements.requestFilter.addEventListener('input', renderRequests);
       elements.traceButton.addEventListener('click', async () => {
         showScreen('backtrace', elements.traceButton);

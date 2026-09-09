@@ -239,7 +239,7 @@
 
           <section id="screen-vm" class="screen" aria-label="Virtual machine investigation" hidden>
             <header class="screen-head">
-              <div><h1>VM Lab</h1><div class="screen-subtitle">Select a finding to inspect its evidence. Hypotheses are leads, not confirmed behavior.</div></div>
+              <div><h1>VM Lab</h1></div>
             </header>
             <div id="vm-notice" class="vm-notice" data-kind="loading" role="status" aria-live="polite">Waiting for VM findings from the local evidence broker.</div>
             <div class="vm-grid">
@@ -253,29 +253,29 @@
 
           <section id="screen-backtrace" class="screen" aria-label="Request origin trace" hidden>
             <header class="screen-head">
-              <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
-              <div><h1>Request Origin Trace</h1><div id="backtrace-subtitle" class="screen-subtitle">Select a live request to trace its observed origin</div></div>
-              <div class="screen-head-actions"><button class="secondary-button" type="button" data-screen="evidence">Supporting evidence</button></div>
+              <div><h1>Backtraces</h1><div id="backtrace-subtitle" class="screen-subtitle">Request events and their recorded predecessors</div></div>
+              <div class="screen-head-actions"><button class="secondary-button" type="button" data-screen="traffic">View traffic</button></div>
             </header>
-            <div class="trace-layout">
-              <div class="graph-panel">
-                <div class="graph-kicker">Working backward from what left the browser</div>
-                <ol id="backtrace-steps" class="backtrace" aria-live="polite"></ol>
-              </div>
-              <aside class="trace-inspector" aria-label="Trace summary">
-                <h2 class="inspector-label">Trace target</h2>
-                <div class="target-card"><div id="summary-target-path" class="target-path">No request selected</div><div id="summary-target-request" class="target-request">Observed identifiers only</div></div>
-                <div class="coverage"><span>Evidence coverage</span><strong id="coverage-value">0%</strong><div class="coverage-bar"><span id="coverage-bar" style="width:0"></span></div></div>
-                <h2 class="inspector-label">Confidence</h2>
-                <div class="legend">
-                  <div class="legend-row"><strong class="exact">Observed</strong><span>Explicit event relationship</span></div>
-                  <div class="legend-row"><strong class="correlation">Correlated</strong><span>Shared identifiers, not causality</span></div>
-                  <div class="legend-row"><strong class="unknown">Unknown</strong><span>Evidence missing</span></div>
-                </div>
-                <div class="inspector-actions">
-                  <button id="trace-branch-experiment" class="trace-button" type="button" data-screen="experiments">Branch experiment</button>
-                  <button class="evidence-link" type="button" data-screen="evidence">Open supporting evidence · <span id="evidence-link-count">5</span> events →</button>
-                </div>
+            <div class="trace-toolbar">
+              <label for="trace-request">Request</label>
+              <select id="trace-request" aria-label="Request to trace"></select>
+              <button id="trace-load" class="secondary-button" type="button">Load trace</button>
+              <button id="trace-evidence" class="secondary-button" type="button" data-screen="evidence" hidden>View events · <span id="evidence-link-count">0</span></button>
+            </div>
+            <div id="trace-notice" class="trace-notice" role="status" aria-live="polite" hidden></div>
+            <div id="trace-empty" class="trace-empty">
+              <h2 id="trace-empty-title">Choose a captured request</h2>
+              <p id="trace-empty-message">Select a request above to inspect its recorded events.</p>
+              <button id="trace-first-request" class="trace-button" type="button" hidden>Trace a captured request</button>
+            </div>
+            <div id="trace-content" class="trace-layout" hidden>
+              <section class="trace-list-pane" aria-label="Trace events">
+                <div class="trace-list-heading"><span>Request → earlier events</span><span id="coverage-value"></span></div>
+                <ol id="backtrace-steps" class="backtrace" aria-label="Trace steps"></ol>
+              </section>
+              <aside class="trace-inspector" aria-label="Selected trace step">
+                <h2>Event details</h2>
+                <div id="trace-step-details"></div>
               </aside>
             </div>
           </section>

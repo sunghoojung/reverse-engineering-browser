@@ -1143,29 +1143,33 @@
         overflow: hidden;
         background: var(--panel);
       }
-      .repeater-session-bar { min-height: 38px; flex: 0 0 auto; display: flex; align-items: center; gap: 7px; padding: 5px 10px; border-bottom: 1px solid var(--line); background: var(--chrome); }
-      .repeater-session-state { display: inline-flex; align-items: center; gap: 6px; margin-right: auto; color: var(--green); font: 11px var(--sans); white-space: nowrap; }
+      .repeater-command-bar { min-height: 50px; flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--panel-2); }
+      .repeater-session-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 7px; }
+      .repeater-session-state { display: inline-flex; align-items: center; gap: 6px; color: var(--green); font: 11px var(--sans); white-space: nowrap; }
       .repeater-session-state::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
       .repeater-session-state[data-kind="offline"] { color: var(--faint); }
       .repeater-session-state[data-kind="error"] { color: var(--red); }
       .repeater-session-message { display: none; }
       .repeater-session-bar button { min-height: 27px; padding: 4px 9px; font-size: 10px; }
-      .repeater-compose-bar { min-height: 52px; flex: 0 0 auto; display: grid; grid-template-columns: 92px minmax(220px, 1fr) auto auto; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--panel-2); }
+      .repeater-compose-bar { min-width: 0; flex: 1; display: grid; grid-template-columns: 82px minmax(220px, 1fr) auto; gap: 0; align-items: center; }
       .repeater-compose-bar label { min-width: 0; }
       .repeater-compose-bar label > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-      .repeater-compose-bar input { width: 100%; min-height: 34px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); font: 12px var(--mono); }
-      .repeater-method-field input { color: var(--green); font-weight: 700; text-align: center; text-transform: uppercase; }
-      .repeater-compose-bar button { min-height: 34px; padding: 0 14px; }
+      .repeater-compose-bar input { width: 100%; min-height: 34px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 0; background: var(--panel); color: var(--text); font: 12px var(--mono); }
+      .repeater-method-field input { border-radius: 4px 0 0 4px; color: var(--green); font-weight: 700; text-align: center; text-transform: uppercase; }
+      .repeater-url-field input { margin-left: -1px; border-radius: 0 4px 4px 0; }
+      .repeater-compose-bar button { min-height: 34px; margin-left: 8px; padding: 0 14px; }
       .repeater-compose-bar .repeater-send { min-width: 76px; margin: 0; border-color: var(--accent); background: var(--accent); color: var(--panel); font-weight: 700; }
       .repeater-compose-bar .repeater-send:disabled { border-color: var(--line); background: var(--panel-3); color: var(--faint); }
       .repeater-split { min-width: 0; min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
       .repeater-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--panel); }
       .repeater-request-pane { border-right: 1px solid var(--line); }
-      .repeater-pane-head { min-height: 54px; display: flex; align-items: flex-start; gap: 9px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--chrome); }
-      .repeater-pane-head > div { min-width: 0; flex: 1; }
+      .repeater-pane-head { min-height: 38px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid var(--line); background: var(--chrome); }
+      .repeater-pane-head > div { min-width: 0; }
+      .repeater-pane-head > div:first-child { flex: 0 0 auto; }
       .repeater-pane-head h2 { margin: 0; font-size: 12px; }
-      .repeater-pane-head p { margin: 3px 0 0; overflow: hidden; color: var(--muted); font: 10px var(--sans); text-overflow: ellipsis; white-space: nowrap; }
+      .repeater-pane-head p { display: none; }
       .repeater-editor-tabs, .repeater-response-tabs { min-height: 34px; display: flex; align-items: end; gap: 2px; padding: 0 9px; border-bottom: 1px solid var(--line); background: var(--panel-2); }
+      .repeater-editor-tabs { flex: 1; min-height: 37px; padding: 0 4px; border: 0; background: transparent; }
       .repeater-editor-tab, .repeater-response-tab { min-height: 33px; padding: 0 10px; border: 0; border-radius: 0; background: transparent; color: var(--muted); font: 11px var(--sans); }
       .repeater-editor-tab:hover, .repeater-editor-tab:focus, .repeater-response-tab:hover, .repeater-response-tab:focus { color: var(--text); background: var(--panel-3); }
       .repeater-editor-tab[aria-selected="true"], .repeater-response-tab[aria-selected="true"] { color: var(--text); box-shadow: inset 0 -2px var(--accent); }
@@ -1807,29 +1811,29 @@
       .sources-debugger[data-attached="false"] { grid-template-rows: auto minmax(0, 1fr); }
 
       /* Experiment tools share setup, editor, and result panes. */
-      #screen-experiments:not([hidden]) { display: flex; flex-direction: column; }
-      #screen-experiments > .screen-head { flex-shrink: 0; min-height: 54px; padding: 9px 12px; }
-      #screen-experiments > .experiment-mode-tabs { flex-shrink: 0; gap: 0; padding: 0 8px; min-height: 34px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: var(--chrome); }
-      #screen-experiments .experiment-mode-tab { flex-shrink: 0; min-height: 34px; padding: 0 14px; border-radius: 0; font: 12px var(--sans); text-transform: none; }
+      #screen-experiments:not([hidden]) { display: grid; grid-template-columns: auto minmax(240px, 1fr); grid-template-rows: 40px auto minmax(0, 1fr); overflow: hidden; }
+      #screen-experiments > .screen-head { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); }
+      #screen-experiments > .experiment-mode-tabs { grid-column: 1; grid-row: 1; gap: 0; min-width: 0; min-height: 40px; padding: 0 8px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: var(--chrome); }
+      #screen-experiments .experiment-mode-tab { flex-shrink: 0; min-height: 40px; padding: 0 14px; border-radius: 0; font: 12px var(--sans); text-transform: none; }
       #screen-experiments .experiment-mode-tab[aria-selected="true"] { background: transparent; }
-      #screen-experiments .experiment-notice { flex-shrink: 0; min-height: 30px; padding: 6px 12px; }
-      .experiment-scope { flex-shrink: 0; max-height: 30%; overflow: auto; border-bottom: 1px solid var(--line); }
+      #screen-experiments .experiment-notice { grid-column: 2; grid-row: 1; justify-content: flex-end; min-width: 0; min-height: 40px; padding: 0 12px; overflow: hidden; border-left: 1px solid var(--line-soft); background: var(--chrome); text-overflow: ellipsis; white-space: nowrap; }
+      .experiment-scope { grid-column: 1 / -1; grid-row: 2; max-height: 30%; overflow: auto; border-bottom: 1px solid var(--line); }
       .experiment-scope > summary { padding: 8px 12px; color: var(--muted); cursor: pointer; font-size: 11px; }
       .experiment-scope .action-scope-badge { margin-left: 8px; padding: 0; border: 0; border-radius: 0; font: 11px var(--sans); text-transform: none; }
       .experiment-scope .action-scope-panel { border: 0; background: var(--panel); }
-      #screen-experiments .experiment-workspace { flex: 1; min-height: 0; grid-template-columns: minmax(240px, .75fr) minmax(310px, 1.2fr) minmax(260px, 1fr); gap: 0; padding: 0; overflow: hidden; }
-      #screen-experiments .repeater-workspace { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+      #screen-experiments .experiment-workspace { grid-column: 1 / -1; grid-row: 3; min-height: 0; grid-template-columns: minmax(250px, .78fr) minmax(330px, 1.25fr) minmax(280px, 1fr); gap: 0; padding: 0; overflow: hidden; }
+      #screen-experiments .repeater-workspace { grid-column: 1 / -1; grid-row: 3; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
       #screen-experiments .experiment-column { min-height: 0; gap: 0; overflow: auto; border-right: 1px solid var(--line); background: var(--panel); }
       #screen-experiments .experiment-column:last-child { border-right: 0; }
       #screen-experiments .experiment-card { border: 0; border-bottom: 1px solid var(--line); }
-      #screen-experiments .experiment-card > header { padding: 12px; border-bottom: 0; }
-      #screen-experiments .experiment-card h2 { font-size: 12px; font-weight: 600; }
-      #screen-experiments .experiment-card header p { line-height: 1.5; }
+      #screen-experiments .experiment-card > header { padding: 13px 14px 9px; border-bottom: 0; }
+      #screen-experiments .experiment-card h2 { font-size: 13px; font-weight: 600; }
+      #screen-experiments .experiment-card header p { font-size: 11px; line-height: 1.5; }
       #screen-experiments .experiment-card-badge { padding: 0; border: 0; color: var(--muted); font: 11px var(--sans); text-transform: none; }
       #screen-experiments .experiment-card-badge[data-kind="error"] { color: var(--red); }
-      #screen-experiments .experiment-body { padding: 0 12px 12px; }
+      #screen-experiments .experiment-body { padding: 0 14px 14px; }
       #screen-experiments .experiment-form label { font: 11px var(--sans); text-transform: none; }
-      #screen-experiments .experiment-form input, #screen-experiments .experiment-form select { min-height: 30px; }
+      #screen-experiments .experiment-form input, #screen-experiments .experiment-form select { min-height: 32px; }
       #screen-experiments .experiment-form textarea { min-height: 66px; }
       #screen-experiments .experiment-empty { min-height: 84px; padding: 18px 12px; font: 12px/1.6 var(--sans); }
       #screen-experiments .object-results-card, #screen-experiments .hook-hits-card { min-height: 0; }
@@ -1843,6 +1847,11 @@
       .experiment-advanced > .experiment-form { padding-top: 10px; }
       .experiment-help .experiment-privacy { padding-top: 4px; line-height: 1.6; }
       @media (max-width: 1000px) {
+        #screen-experiments:not([hidden]) { grid-template-columns: 1fr; grid-template-rows: 40px 30px auto minmax(0, 1fr); }
+        #screen-experiments > .experiment-mode-tabs { grid-column: 1; }
+        #screen-experiments .experiment-notice { grid-column: 1; grid-row: 2; justify-content: flex-start; min-height: 30px; padding: 0 12px; border-left: 0; }
+        #screen-experiments .experiment-scope { grid-row: 3; }
+        #screen-experiments .experiment-workspace, #screen-experiments .repeater-workspace { grid-row: 4; }
         #screen-experiments .experiment-workspace { grid-template-columns: minmax(240px, .8fr) minmax(320px, 1.2fr); overflow: auto; align-content: start; }
         #screen-experiments .experiment-column { overflow: visible; }
         #screen-experiments .experiment-column:last-child { grid-column: 1 / -1; display: block; border-top: 1px solid var(--line); }
@@ -1853,9 +1862,9 @@
         #screen-experiments .experiment-workspace { display: block; }
         #screen-experiments .experiment-column { border-right: 0; }
         #screen-experiments .repeater-workspace { display: flex; }
-        #screen-experiments .repeater-session-bar { flex-wrap: wrap; }
-        #screen-experiments .repeater-compose-bar { grid-template-columns: 78px minmax(160px, 1fr) auto; }
-        #screen-experiments .repeater-compose-bar #repeater-cancel { display: none; }
+        #screen-experiments .repeater-command-bar { display: grid; gap: 7px; }
+        #screen-experiments .repeater-session-bar { justify-content: flex-end; }
+        #screen-experiments .repeater-compose-bar { width: 100%; grid-template-columns: 78px minmax(160px, 1fr) auto; }
         #screen-experiments .repeater-split { display: block; min-height: 0; }
         #screen-experiments .repeater-pane { min-height: 390px; overflow: visible; }
         #screen-experiments .repeater-request-pane { border-right: 0; border-bottom: 1px solid var(--line); }

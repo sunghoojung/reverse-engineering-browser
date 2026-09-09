@@ -302,12 +302,12 @@
               <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="interceptor" aria-selected="true">Interceptor</button>
               <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="repeater" aria-selected="false" tabindex="-1">Repeater</button>
               <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="object" aria-selected="false" tabindex="-1">Objects</button>
-              <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="hooks" aria-selected="false" tabindex="-1">Runtime Hooks</button>
+              <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="hooks" aria-selected="false" tabindex="-1">Hooks</button>
               <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="automation" aria-selected="false" tabindex="-1">Automation</button>
             </div>
             <div id="experiment-notice" class="experiment-notice" data-kind="idle" role="status" aria-live="polite">Create an isolated experiment to configure request interception.</div>
             <details id="action-scope-panel" class="experiment-scope" aria-label="Mutable action scope">
-              <summary>Page scope <span id="action-scope-badge" class="action-scope-badge" data-kind="offline">No scope</span></summary>
+              <summary>Scope <span id="action-scope-badge" class="action-scope-badge" data-kind="offline">Not set</span></summary>
               <div class="action-scope-panel">
                 <div class="action-scope-summary">
                   <h2>Action scope</h2>
@@ -414,33 +414,34 @@
               </div>
             </div>
             <div id="repeater-workspace" class="repeater-workspace" role="region" aria-label="Repeater workspace" hidden>
-              <div class="repeater-session-bar">
-                <span id="repeater-context-badge" class="repeater-session-state" data-kind="offline">Not created</span>
-                <span id="repeater-context-message" class="repeater-session-message">No disposable request-lab context exists.</span>
-                <button id="repeater-create" class="secondary-button" type="button">Create session</button>
-                <button id="repeater-dispose" class="secondary-button" type="button" disabled>End session</button>
-                <button id="repeater-copy-resolved" class="secondary-button" type="button" disabled>Copy resolved</button>
+              <div class="repeater-command-bar">
+                <form id="repeater-request-form" class="repeater-compose-bar">
+                  <label class="repeater-method-field"><span>Method</span><input id="repeater-request-method" type="text" value="GET" maxlength="256" autocomplete="off" aria-label="Request method" /></label>
+                  <label class="repeater-url-field"><span>URL</span><input id="repeater-request-url" type="text" maxlength="8192" placeholder="https://{{host}}/path/{{id}}" autocomplete="off" aria-label="Request URL" /></label>
+                  <button id="repeater-cancel" class="secondary-button" type="button" disabled>Cancel</button>
+                  <button id="repeater-send" class="trace-button repeater-send" type="submit" disabled>Send</button>
+                </form>
+                <div class="repeater-session-bar">
+                  <span id="repeater-context-badge" class="repeater-session-state" data-kind="offline">Not created</span>
+                  <span id="repeater-context-message" class="repeater-session-message">No disposable request-lab context exists.</span>
+                  <button id="repeater-create" class="secondary-button" type="button">Start session</button>
+                  <button id="repeater-dispose" class="secondary-button" type="button" disabled>End session</button>
+                  <button id="repeater-copy-resolved" class="secondary-button" type="button" disabled>Copy resolved</button>
+                </div>
               </div>
-
-              <form id="repeater-request-form" class="repeater-compose-bar">
-                <label class="repeater-method-field"><span>Method</span><input id="repeater-request-method" type="text" value="GET" maxlength="256" autocomplete="off" aria-label="Request method" /></label>
-                <label class="repeater-url-field"><span>URL</span><input id="repeater-request-url" type="text" maxlength="8192" placeholder="https://{{host}}/path/{{id}}" autocomplete="off" aria-label="Request URL" /></label>
-                <button id="repeater-cancel" class="secondary-button" type="button" disabled>Cancel</button>
-                <button id="repeater-send" class="trace-button repeater-send" type="submit" disabled>Send</button>
-              </form>
 
               <div class="repeater-split">
                 <section class="repeater-pane repeater-request-pane" aria-labelledby="repeater-request-heading">
                   <header class="repeater-pane-head">
                     <div><h2 id="repeater-request-heading">Request</h2><p>Credential-free values sent from the isolated page.</p></div>
-                    <span id="repeater-request-badge" class="experiment-card-badge" data-kind="offline">Draft</span>
+                    <div class="repeater-editor-tabs" role="tablist" aria-label="Request editor">
+                      <button class="repeater-editor-tab" type="button" role="tab" aria-selected="true" aria-controls="repeater-headers-panel" data-repeater-editor-tab="headers">Headers</button>
+                      <button class="repeater-editor-tab" type="button" role="tab" aria-selected="false" aria-controls="repeater-query-panel" data-repeater-editor-tab="query" tabindex="-1">Query</button>
+                      <button class="repeater-editor-tab" type="button" role="tab" aria-selected="false" aria-controls="repeater-body-panel" data-repeater-editor-tab="body" tabindex="-1">Body</button>
+                      <button class="repeater-editor-tab" type="button" role="tab" aria-selected="false" aria-controls="repeater-settings-panel" data-repeater-editor-tab="settings" tabindex="-1">Settings</button>
+                    </div>
+                    <span id="repeater-request-badge" class="experiment-card-badge" data-kind="offline" hidden>Draft</span>
                   </header>
-                  <div class="repeater-editor-tabs" role="tablist" aria-label="Request editor">
-                    <button class="repeater-editor-tab" type="button" role="tab" aria-selected="true" aria-controls="repeater-headers-panel" data-repeater-editor-tab="headers">Headers</button>
-                    <button class="repeater-editor-tab" type="button" role="tab" aria-selected="false" aria-controls="repeater-query-panel" data-repeater-editor-tab="query" tabindex="-1">Query</button>
-                    <button class="repeater-editor-tab" type="button" role="tab" aria-selected="false" aria-controls="repeater-body-panel" data-repeater-editor-tab="body" tabindex="-1">Body</button>
-                    <button class="repeater-editor-tab" type="button" role="tab" aria-selected="false" aria-controls="repeater-settings-panel" data-repeater-editor-tab="settings" tabindex="-1">Settings</button>
-                  </div>
                   <div id="repeater-headers-panel" class="repeater-editor-panel repeater-kv-editor" role="tabpanel" data-repeater-editor-panel="headers">
                     <div class="repeater-kv-table" role="table" aria-label="Request headers">
                       <div class="repeater-kv-head" role="row"><span aria-hidden="true"></span><span role="columnheader">Key</span><span role="columnheader">Value</span><span aria-hidden="true"></span></div>
@@ -500,7 +501,7 @@
                   <button id="repeater-history-next" class="repeater-icon-button" type="button" aria-label="Next Repeater request" title="Next request" disabled>→</button>
                   <button id="repeater-clear-history" class="secondary-button" type="button" disabled>Clear</button>
                 </div>
-                <div id="repeater-history" class="repeater-history" role="listbox" aria-label="Repeater request history"><div class="experiment-empty">No Repeater requests yet.</div></div>
+                <div id="repeater-history" class="repeater-history" role="listbox" aria-label="Repeater request history"><div class="experiment-empty" role="option" aria-disabled="true" aria-selected="false">No Repeater requests yet.</div></div>
               </details>
             </div>
             <div id="object-workspace" class="experiment-workspace" hidden>
@@ -555,7 +556,7 @@
               <div class="experiment-column">
                 <article class="experiment-card object-results-card">
                   <header><div><h2>Matches</h2><p id="object-search-meta">Open a page and run one bounded search.</p></div><span id="object-result-count" class="experiment-card-badge" data-kind="offline">0 matches</span></header>
-                  <div id="object-results" class="object-result-list" role="listbox" aria-label="Object Lab live matches"><div class="experiment-empty">No retained object references.</div></div>
+                  <div id="object-results" class="object-result-list" role="listbox" aria-label="Object Lab live matches"><div class="experiment-empty" role="option" aria-disabled="true" aria-selected="false">No retained object references.</div></div>
                 </article>
               </div>
               <div class="experiment-column">
@@ -741,7 +742,7 @@
               <div class="experiment-column">
                 <article class="experiment-card">
                   <header><div><h2>Run timeline</h2><p id="automation-run-meta">Time, source, trigger, outcome, and correlation IDs for every retained run.</p></div><span id="automation-run-count" class="experiment-card-badge" data-kind="offline">0 / 64</span></header>
-                  <div id="automation-runs" class="automation-run-list" role="listbox" aria-label="Automation recipe runs"><div class="experiment-empty">Run a recipe to see its bounded result and logs.</div></div>
+                  <div id="automation-runs" class="automation-run-list" role="listbox" aria-label="Automation recipe runs"><div class="experiment-empty" role="option" aria-disabled="true" aria-selected="false">Run a recipe to see its bounded result and logs.</div></div>
                 </article>
                 <article class="experiment-card">
                   <header><div><h2>Selected result</h2><p id="automation-result-meta">Select a completed run.</p></div><span id="automation-result-badge" class="experiment-card-badge" data-kind="offline">No result</span></header>
@@ -809,7 +810,7 @@
                 </article>
                 <article class="collection-run-card">
                   <header><div><h2>Execution history</h2><p>Ephemeral, bounded, and erased with the isolated context.</p></div><span id="collection-history-badge" class="experiment-card-badge" data-kind="offline">0 runs</span></header>
-                  <div id="collection-history" class="collection-run-history" role="listbox" aria-label="Selected request execution history"><div class="experiment-empty">No executions for this request.</div></div>
+                  <div id="collection-history" class="collection-run-history" role="listbox" aria-label="Selected request execution history"><div class="experiment-empty" role="option" aria-disabled="true" aria-selected="false">No executions for this request.</div></div>
                 </article>
                 <article class="collection-run-card">
                   <header><div><h2>Response</h2><p id="collection-response-meta">Select a completed execution.</p></div><span id="collection-response-badge" class="experiment-card-badge" data-kind="offline">No response</span></header>
@@ -897,7 +898,7 @@
                 </article>
                 <article class="analyst-card">
                   <header><div><h2>Run history</h2><p>Ephemeral results with source, outcome, time, and correlation IDs.</p></div><span id="analyst-history-badge" class="experiment-card-badge" data-kind="offline">0 / 64</span></header>
-                  <div id="analyst-history" class="analyst-history" role="listbox" aria-label="Analyst script runs"><div class="analyst-empty">Run a saved script to see results and logs.</div></div>
+                  <div id="analyst-history" class="analyst-history" role="listbox" aria-label="Analyst script runs"><div class="analyst-empty" role="option" aria-disabled="true" aria-selected="false">Run a saved script to see results and logs.</div></div>
                 </article>
                 <article class="analyst-card">
                   <header><div><h2>Selected result</h2><p id="analyst-result-meta">Select a completed run.</p></div><span id="analyst-result-badge" class="experiment-card-badge" data-kind="offline">No result</span></header>
@@ -941,7 +942,7 @@
                     </article>
                     <article class="decoder-card">
                       <header><div><h2>Steps</h2><p>Select a step to see its output. The next transformation starts from that step.</p></div><span id="decoder-pipeline-badge" class="experiment-card-badge">0 / 16</span></header>
-                      <div id="decoder-pipeline" class="decoder-pipeline" role="listbox" aria-label="Decoder transformation steps"><div class="analyst-empty">Enter input and append the first transform.</div></div>
+                      <div id="decoder-pipeline" class="decoder-pipeline" role="listbox" aria-label="Decoder transformation steps"><div class="analyst-empty" role="option" aria-disabled="true" aria-selected="false">Enter input and append the first transform.</div></div>
                       <div class="decoder-chain-actions"><button id="decoder-remove-after" class="secondary-button" type="button">Remove from selected step</button><button id="decoder-reset" class="secondary-button" type="button">Reset chain</button></div>
                     </article>
                   </section>

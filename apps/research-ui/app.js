@@ -40,6 +40,14 @@
         return element;
       }
 
+      function emptyListboxOption(className, value) {
+        const element = textElement('div', className, value);
+        element.setAttribute('role', 'option');
+        element.setAttribute('aria-disabled', 'true');
+        element.setAttribute('aria-selected', 'false');
+        return element;
+      }
+
       function setVmNotice(kind, message) {
         elements.vmNotice.dataset.kind = kind;
         elements.vmNotice.textContent = message;
@@ -966,8 +974,8 @@
           elements.actionScopeBadge.dataset.kind = ['error', 'partial'].includes(scope?.state) ? 'error'
             : scope?.state === 'ready' ? '' : 'offline';
           elements.actionScopeBadge.textContent = scope?.state === 'ready'
-            ? `${scope.matched_target_count} ${scope.matched_target_count === 1 ? 'page' : 'pages'}`
-            : scope?.state ?? 'No scope';
+            ? scope.mode === 'target' ? 'One page' : 'All pages'
+            : scope?.state === 'error' ? 'Error' : 'Not set';
           elements.actionScopeMessage.textContent = scope?.message ?? 'Create an isolated context to choose action scope.';
         }
         elements.actionScopeTargets.replaceChildren(...(targets.length ? targets.map(target => {
@@ -1380,7 +1388,7 @@
           if (!resolved) chip.dataset.kind = 'missing';
           chips.push(chip);
         });
-        if (!chips.length) chips.push(textElement('span', 'repeater-variable-chip', 'No variables used'));
+        elements.repeaterVariableStatus.hidden = chips.length === 0;
         elements.repeaterVariableStatus.replaceChildren(...chips);
       }
 
@@ -1402,7 +1410,7 @@
         elements.repeaterHistoryBytes.textContent = `${Math.ceil((repeater?.history_bytes ?? 0) / 1024)} / 512 KiB`;
         elements.repeaterHistoryUsage.textContent = `${history.length} / ${repeater?.limits?.history_entries ?? 24}`;
         if (!history.length) {
-          elements.repeaterHistory.replaceChildren(textElement('div', 'experiment-empty', 'No Repeater requests yet.'));
+          elements.repeaterHistory.replaceChildren(emptyListboxOption('experiment-empty', 'No Repeater requests yet.'));
           elements.repeaterHistoryPrev.disabled = true;
           elements.repeaterHistoryNext.disabled = true;
           return;
@@ -1438,6 +1446,8 @@
       function renderRepeaterResponse(repeater) {
         const entry = selectedRepeaterEntry(repeater);
         elements.repeaterCopyResolved.disabled = !entry || ['running', 'cancelling'].includes(repeater?.state) || state.experimentPending;
+        elements.repeaterCopyResolved.hidden = !entry;
+        elements.repeaterResponseBadge.hidden = !entry;
         if (!entry) {
           elements.repeaterResponse.className = 'repeater-response experiment-empty';
           elements.repeaterResponse.textContent = 'Send a request or choose one from history.';
@@ -1584,7 +1594,7 @@
         else if (active || working) setExperimentNotice('working', repeater.message);
         else if (repeater.state === 'error') setExperimentNotice('error', repeater.message);
         else if (contextReady || repeater.state === 'disposed') setExperimentNotice('ready', repeater.message);
-        else if (!attached) setExperimentNotice('idle', 'Attach an authorized browser target before creating a Repeater session.');
+        else if (!attached) setExperimentNotice('idle', 'Connect a browser target to send requests.');
         else setExperimentNotice('idle', repeater.message);
 
         elements.repeaterContextBadge.dataset.kind = repeater?.state === 'error' ? 'error' : experiment?.isolated ? '' : 'offline';
@@ -1595,10 +1605,13 @@
         elements.repeaterContextMessage.textContent = repeater?.state === 'error' ? repeater.message
           : contextReady ? 'Disposable page attached. Repeater has no baseline cookies or storage.'
             : repeater?.message ?? 'No disposable request-lab context exists.';
+        elements.repeaterSessionBar.hidden = !attached && !experiment?.isolated;
         elements.repeaterStorageState.textContent = experiment?.isolated ? 'Ephemeral and isolated'
           : repeater?.state === 'disposed' ? 'Deleted and erased' : 'Not allocated';
         elements.repeaterCreate.disabled = !attached || Boolean(experiment?.isolated) || working || state.debuggerActionPending;
         elements.repeaterDispose.disabled = !canDispose || working || state.debuggerActionPending;
+        elements.repeaterCreate.hidden = Boolean(experiment?.isolated);
+        elements.repeaterDispose.hidden = !experiment?.isolated;
         elements.repeaterClearHistory.disabled = !repeater?.history.length || active || working || state.debuggerActionPending;
 
         prefillRepeaterVariables(repeater);
@@ -1614,14 +1627,19 @@
         setRepeaterStructuredEditorsDisabled(requestDisabled);
         elements.repeaterSend.disabled = !contextReady || active || working || state.debuggerActionPending;
         elements.repeaterCancel.disabled = !active || repeater?.state === 'cancelling';
+        elements.repeaterSend.hidden = active;
+        elements.repeaterCancel.hidden = !active;
         elements.repeaterRequestBadge.dataset.kind = active ? '' : contextReady ? '' : 'offline';
         elements.repeaterRequestBadge.textContent = repeater?.state === 'cancelling' ? 'Cancelling'
           : repeater?.state === 'running' ? 'Running' : 'Draft';
+        elements.repeaterRequestBadge.hidden = !active;
         elements.repeaterActiveRequest.textContent = repeater?.active_execution
           ? `run ${repeater.active_execution.execution_id} · ${repeater.active_execution.resolved_method} ${repeater.active_execution.resolved_url}`
           : 'No active request';
+        elements.repeaterActiveRequest.hidden = !repeater?.active_execution;
         setRepeaterEditorTab(state.repeaterEditorTab);
         renderRepeaterVariableStatus();
+        elements.repeaterRequestFooter.hidden = elements.repeaterVariableStatus.hidden && elements.repeaterActiveRequest.hidden;
         renderRepeaterHistory(repeater);
         renderRepeaterResponse(repeater);
         renderRepeaterComparison(repeater);
@@ -1652,7 +1670,7 @@
         elements.objectResultCount.textContent = `${results.length} ${results.length === 1 ? 'match' : 'matches'}`;
         elements.objectResultCount.dataset.kind = results.length > 0 ? '' : 'offline';
         if (results.length === 0) {
-          elements.objectResults.replaceChildren(textElement('div', 'experiment-empty',
+          elements.objectResults.replaceChildren(emptyListboxOption('experiment-empty',
             experiment?.search ? 'No objects matched within the visible limits.' : 'No retained object references.'));
         } else {
           elements.objectResults.replaceChildren(...results.map(result => {
@@ -1773,7 +1791,7 @@
         else if (contextBusy) setExperimentNotice('working', objectExperiment.message);
         else if (objectExperiment.state === 'error' || objectExperiment.last_mutation?.ok === false) setExperimentNotice('error', objectExperiment.message);
         else if (pageReady || objectExperiment.state === 'disposed') setExperimentNotice('ready', objectExperiment.message);
-        else if (!attached) setExperimentNotice('idle', 'Attach an authorized browser target before creating Object Lab.');
+        else if (!attached) setExperimentNotice('idle', 'Connect a browser target to inspect live objects.');
         else setExperimentNotice('idle', objectExperiment.message);
 
         elements.objectContextBadge.dataset.kind = objectExperiment?.state === 'error' ? 'error' : objectExperiment?.isolated ? '' : 'offline';
@@ -1920,7 +1938,7 @@
         else if (contextWorking || ['arming', 'handling', 'stopping'].includes(hooks.state)) setExperimentNotice('working', hooks.message);
         else if (hooks.last_failure) setExperimentNotice('error', hooks.last_failure);
         else if (hooks.state === 'armed' || contextReady || hooks.state === 'disposed') setExperimentNotice('ready', hooks.message);
-        else if (!attached) setExperimentNotice('idle', 'Attach an authorized browser target before creating Hook Studio.');
+        else if (!attached) setExperimentNotice('idle', 'Connect a browser target to configure hooks.');
         else setExperimentNotice('idle', hooks.message);
 
         elements.hooksContextBadge.dataset.kind = hooks?.state === 'error' ? 'error' : hooks?.isolated ? '' : 'offline';
@@ -2049,7 +2067,7 @@
           ? `${automation.total_runs} total · ${automation.automatic_runs} automatic · ${automation.run_evictions} evicted · ${automation.dropped_triggers} trigger batches dropped`
           : 'Time, source, trigger, outcome, and correlation IDs for every retained run.';
         if (!runs.length) {
-          elements.automationRuns.replaceChildren(textElement('div', 'experiment-empty', 'Run a recipe to see its bounded result and logs.'));
+          elements.automationRuns.replaceChildren(emptyListboxOption('experiment-empty', 'Run a recipe to see its bounded result and logs.'));
         } else {
           elements.automationRuns.replaceChildren(...[...runs].reverse().map(run => {
             const row = document.createElement('button'); row.type = 'button'; row.className = 'automation-run-row';
@@ -2116,7 +2134,7 @@
         else if (working) setExperimentNotice('working', automation.message);
         else if (automation.last_failure) setExperimentNotice('error', automation.last_failure);
         else if (automation.auto_armed || contextReady || automation.state === 'disposed') setExperimentNotice('ready', automation.message);
-        else if (!attached) setExperimentNotice('idle', 'Attach an authorized browser target before creating Automation Studio.');
+        else if (!attached) setExperimentNotice('idle', 'Connect a browser target to run automations.');
         else setExperimentNotice('idle', automation.message);
 
         elements.automationContextBadge.dataset.kind = automation?.state === 'error' ? 'error' : automation?.isolated ? '' : 'offline';
@@ -2205,7 +2223,7 @@
         else if (experiment.state === 'error' || experiment.result?.ok === false) setExperimentNotice('error', experiment.message);
         else if (contextReady) setExperimentNotice('ready', experiment.message);
         else if (experiment.state === 'disposed') setExperimentNotice('ready', experiment.message);
-        else if (!attached) setExperimentNotice('idle', 'Attach an authorized browser target before creating an experiment.');
+        else if (!attached) setExperimentNotice('idle', 'Connect a browser target to intercept requests.');
         else setExperimentNotice('idle', experiment.message);
 
         const contextKind = experiment?.state === 'error' ? 'error' : experiment?.isolated ? '' : 'offline';
@@ -3058,7 +3076,7 @@
         elements.collectionHistoryBadge.textContent = `${history.length} ${history.length === 1 ? 'run' : 'runs'}`;
         elements.collectionHistoryBadge.dataset.kind = history.length ? '' : 'offline';
         if (!history.length) elements.collectionHistory.replaceChildren(
-          textElement('div', 'experiment-empty', collectionRequest() ? 'No executions for this request.' : 'Select a saved request.')
+          emptyListboxOption('experiment-empty', collectionRequest() ? 'No executions for this request.' : 'Select a saved request.')
         );
         else elements.collectionHistory.replaceChildren(...[...history].reverse().map(entry => {
           const row = document.createElement('button'); row.type = 'button'; row.className = 'collection-history-row';
@@ -3798,7 +3816,7 @@
         analystElements.historyBadge.textContent = `${state.analystRuns.length} / 64`;
         analystElements.historyBadge.dataset.kind = state.analystRuns.length ? '' : 'offline';
         if (!state.analystRuns.length) analystElements.history.replaceChildren(
-          textElement('div', 'analyst-empty', state.analystHistoryEvictions
+          emptyListboxOption('analyst-empty', state.analystHistoryEvictions
             ? `${state.analystHistoryEvictions} older runs were evicted; history is now clear.`
             : 'Run a saved script to see results and logs.')
         );

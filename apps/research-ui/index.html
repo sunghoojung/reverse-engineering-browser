@@ -296,47 +296,45 @@
 
           <section id="screen-experiments" class="screen" aria-label="Experiments" hidden>
             <header class="screen-head">
-              <button class="back-button" type="button" data-screen="backtrace" aria-label="Back to trace">←</button>
-              <div><h1 id="experiment-title">Request Interception Lab</h1><div id="experiment-subtitle" class="screen-subtitle">Disposable context · no baseline cookies, storage, or credentials</div></div>
-              <div class="screen-head-actions">
-                <div class="experiment-mode-tabs" role="tablist" aria-label="Experiment mode">
-                  <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="interceptor" aria-selected="true">Interceptor</button>
-                  <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="repeater" aria-selected="false" tabindex="-1">Repeater</button>
-                  <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="object" aria-selected="false" tabindex="-1">Object Lab</button>
-                  <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="hooks" aria-selected="false" tabindex="-1">Runtime Hooks</button>
-                  <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="automation" aria-selected="false" tabindex="-1">Automation</button>
-                </div>
-                <span class="memory-readonly">Experiment only</span>
-              </div>
+              <div><h1 id="experiment-title">Interceptor</h1><div id="experiment-subtitle" class="screen-subtitle">Disposable context · no baseline cookies, storage, or credentials</div></div>
             </header>
+            <div class="experiment-mode-tabs" role="tablist" aria-label="Experiment mode">
+              <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="interceptor" aria-selected="true">Interceptor</button>
+              <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="repeater" aria-selected="false" tabindex="-1">Repeater</button>
+              <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="object" aria-selected="false" tabindex="-1">Objects</button>
+              <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="hooks" aria-selected="false" tabindex="-1">Runtime Hooks</button>
+              <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="automation" aria-selected="false" tabindex="-1">Automation</button>
+            </div>
             <div id="experiment-notice" class="experiment-notice" data-kind="idle" role="status" aria-live="polite">Create an isolated experiment to configure request interception.</div>
-            <section id="action-scope-panel" class="action-scope-panel" aria-label="Mutable action scope">
-              <div class="action-scope-summary">
-                <span id="action-scope-badge" class="action-scope-badge" data-kind="offline">No scope</span>
-                <h2>Action scope</h2>
-                <p id="action-scope-message">Create an isolated context to choose all pages or one exact page.</p>
-              </div>
-              <div class="action-scope-controls">
-                <div class="action-scope-toggle" role="group" aria-label="Action scope mode">
-                  <button id="action-scope-global" type="button" aria-pressed="true">All pages</button>
-                  <button id="action-scope-targeted" type="button" aria-pressed="false">One page</button>
+            <details id="action-scope-panel" class="experiment-scope" aria-label="Mutable action scope">
+              <summary>Page scope <span id="action-scope-badge" class="action-scope-badge" data-kind="offline">No scope</span></summary>
+              <div class="action-scope-panel">
+                <div class="action-scope-summary">
+                  <h2>Action scope</h2>
+                  <p id="action-scope-message">Create an isolated context to choose all pages or one exact page.</p>
                 </div>
-                <select id="action-scope-target" aria-label="Target disposable page" disabled><option value="">No disposable pages</option></select>
-                <button id="action-scope-apply" class="secondary-button" type="button" disabled>Apply scope</button>
+                <div class="action-scope-controls">
+                  <div class="action-scope-toggle" role="group" aria-label="Action scope mode">
+                    <button id="action-scope-global" type="button" aria-pressed="true">All pages</button>
+                    <button id="action-scope-targeted" type="button" aria-pressed="false">One page</button>
+                  </div>
+                  <select id="action-scope-target" aria-label="Target disposable page" disabled><option value="">No disposable pages</option></select>
+                  <button id="action-scope-apply" class="secondary-button" type="button" disabled>Apply scope</button>
+                </div>
+                <div class="action-scope-pages">
+                  <form id="action-scope-add-form" class="action-scope-add">
+                    <input id="action-scope-new-url" type="url" maxlength="8192" placeholder="https://app.example.test/page" autocomplete="off" aria-label="New disposable page URL" />
+                    <button id="action-scope-add" class="secondary-button" type="submit" disabled>Add page</button>
+                  </form>
+                  <div id="action-scope-targets" class="action-scope-targets" aria-label="Disposable pages"><span class="experiment-empty">No disposable pages.</span></div>
+                </div>
               </div>
-              <div class="action-scope-pages">
-                <form id="action-scope-add-form" class="action-scope-add">
-                  <input id="action-scope-new-url" type="url" maxlength="8192" placeholder="https://app.example.test/page" autocomplete="off" aria-label="New disposable page URL" />
-                  <button id="action-scope-add" class="secondary-button" type="submit" disabled>Add page</button>
-                </form>
-                <div id="action-scope-targets" class="action-scope-targets" aria-label="Disposable pages"><span class="experiment-empty">No disposable pages.</span></div>
-              </div>
-            </section>
+            </details>
             <div id="interception-workspace" class="experiment-workspace">
               <div class="experiment-column">
                 <article class="experiment-card">
                   <header>
-                    <div><h2>Disposable context</h2><p id="experiment-context-message">No isolated browser context exists.</p></div>
+                    <div><h2>Session</h2><p id="experiment-context-message">No isolated browser context exists.</p></div>
                     <span id="experiment-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span>
                   </header>
                   <div class="experiment-body">
@@ -346,13 +344,15 @@
                       <button id="experiment-clear" class="secondary-button" type="button" disabled>Clear result</button>
                     </div>
                   </div>
+                  <details class="experiment-session-details"><summary>Session details</summary>
                   <div class="experiment-context-facts">
                     <div class="experiment-context-fact"><span>Storage</span><strong id="experiment-storage-state">Not allocated</strong></div>
                     <div class="experiment-context-fact"><span>Pending</span><strong id="experiment-pending-count">0 / 16</strong></div>
                   </div>
+                  </details>
                 </article>
                 <article class="experiment-card">
-                  <header><div><h2>Interception rule</h2><p>One bounded Fetch-domain rule scoped to the disposable page.</p></div><span id="experiment-rule-badge" class="experiment-card-badge" data-kind="offline">Unarmed</span></header>
+                  <header><div><h2>Interception rule</h2><p>Choose which requests to match and what to change.</p></div><span id="experiment-rule-badge" class="experiment-card-badge" data-kind="offline">Unarmed</span></header>
                   <div class="experiment-body">
                     <form id="experiment-rule-form" class="experiment-form">
                       <label>URL pattern<input id="experiment-url-pattern" type="text" value="*" maxlength="2048" autocomplete="off" /></label>
@@ -378,7 +378,7 @@
               </div>
               <div class="experiment-column">
                 <article class="experiment-card">
-                  <header><div><h2>Credential-free request</h2><p>Send one explicit request through the isolated rule.</p></div><span class="experiment-card-badge">Ephemeral</span></header>
+                  <header><div><h2>Request</h2><p>Send one explicit request through the isolated rule.</p></div></header>
                   <div class="experiment-body">
                     <form id="experiment-request-form" class="experiment-form">
                       <label>Request URL<input id="experiment-request-url" type="url" maxlength="8192" placeholder="https://api.example.test/path" autocomplete="off" /></label>
@@ -386,22 +386,22 @@
                       <label>Headers (JSON)<textarea id="experiment-request-headers" maxlength="20000" spellcheck="false" placeholder='{"accept":"application/json"}'></textarea></label>
                       <label>Body<textarea id="experiment-request-body" maxlength="65536" spellcheck="false" placeholder="Optional for non-GET requests"></textarea></label>
                       <button id="experiment-run" class="trace-button" type="submit" disabled>Run isolated request</button>
-                      <p class="experiment-privacy">Credentials are always omitted. Authorization, Cookie, Set-Cookie, Host, Content-Length, connection, and transfer-encoding headers are rejected before DevTools receives the command.</p>
+                      <details class="experiment-help"><summary>Restrictions</summary><p class="experiment-privacy">Credentials are always omitted. Authorization, Cookie, Set-Cookie, Host, Content-Length, connection, and transfer-encoding headers are rejected before DevTools receives the command.</p></details>
                     </form>
                   </div>
-                </article>
-                <article class="experiment-card">
-                  <header><div><h2>Response</h2><p id="experiment-result-meta">No experiment request has run.</p></div><span id="experiment-result-badge" class="experiment-card-badge" data-kind="offline">No result</span></header>
-                  <div id="experiment-result" class="experiment-empty">Create a context, arm a rule, then run a request.</div>
                 </article>
               </div>
               <div class="experiment-column">
                 <article class="experiment-card">
-                  <header><div><h2>Mutation audit</h2><p>Metadata only. Query strings, headers, and bodies are not retained.</p></div><span id="experiment-audit-count" class="experiment-card-badge" data-kind="offline">0 entries</span></header>
-                  <div id="experiment-audit" class="experiment-audit"><div class="experiment-empty">No intercepted requests yet.</div></div>
+                  <header><div><h2>Response</h2><p id="experiment-result-meta">No experiment request has run.</p></div><span id="experiment-result-badge" class="experiment-card-badge" data-kind="offline">No result</span></header>
+                  <div id="experiment-result" class="experiment-empty">Create a context, arm a rule, then run a request.</div>
                 </article>
                 <article class="experiment-card">
-                  <header><div><h2>Hard limits</h2><p>Visible boundaries keep the control plane predictable.</p></div><span class="experiment-card-badge">Protocol v1</span></header>
+                  <header><div><h2>Activity</h2><p>Metadata only. Query strings, headers, and bodies are not retained.</p></div><span id="experiment-audit-count" class="experiment-card-badge" data-kind="offline">0 entries</span></header>
+                  <div id="experiment-audit" class="experiment-audit"><div class="experiment-empty">No intercepted requests yet.</div></div>
+                </article>
+                <details class="experiment-card experiment-disclosure">
+                  <summary>Limits</summary>
                   <div class="experiment-context-facts">
                     <div class="experiment-context-fact"><span>Audit</span><strong>128 entries</strong></div>
                     <div class="experiment-context-fact"><span>Bodies</span><strong>64 KiB</strong></div>
@@ -410,14 +410,14 @@
                     <div class="experiment-context-fact"><span>Headers</span><strong>64 / 16 KiB</strong></div>
                     <div class="experiment-context-fact"><span>Concurrent</span><strong>16 requests</strong></div>
                   </div>
-                </article>
+                </details>
               </div>
             </div>
             <div id="repeater-workspace" class="repeater-workspace" hidden>
               <div class="repeater-column">
                 <article class="experiment-card">
                   <header>
-                    <div><h2>Isolated session</h2><p id="repeater-context-message">No disposable request-lab context exists.</p></div>
+                    <div><h2>Session</h2><p id="repeater-context-message">No disposable request-lab context exists.</p></div>
                     <span id="repeater-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span>
                   </header>
                   <div class="experiment-body">
@@ -427,13 +427,15 @@
                       <button id="repeater-clear-history" class="secondary-button" type="button" disabled>Clear history</button>
                     </div>
                   </div>
+                  <details class="experiment-session-details"><summary>Session details</summary>
                   <div class="experiment-context-facts">
                     <div class="experiment-context-fact"><span>Storage</span><strong id="repeater-storage-state">Not allocated</strong></div>
                     <div class="experiment-context-fact"><span>History</span><strong id="repeater-history-usage">0 / 24</strong></div>
                   </div>
+                  </details>
                 </article>
                 <article class="experiment-card">
-                  <header><div><h2>Request history</h2><p>Keyboard-selectable, bounded, and erased with the session.</p></div><span id="repeater-history-badge" class="experiment-card-badge" data-kind="offline">0 runs</span></header>
+                  <header><div><h2>Request history</h2><p>Select a previous request to load it.</p></div><span id="repeater-history-badge" class="experiment-card-badge" data-kind="offline">0 runs</span></header>
                   <div class="repeater-history-toolbar">
                     <span id="repeater-history-bytes">0 / 512 KiB</span>
                     <button id="repeater-history-prev" class="repeater-icon-button" type="button" aria-label="Previous Repeater request" title="Previous request" disabled>←</button>
@@ -441,19 +443,19 @@
                   </div>
                   <div id="repeater-history" class="repeater-history" role="listbox" aria-label="Repeater request history"><div class="experiment-empty">No Repeater requests yet.</div></div>
                 </article>
-                <article class="experiment-card">
-                  <header><div><h2>Session variables</h2><p>Use {{name}} in URLs, methods, header values, or bodies. Use {{=name}} for a literal token.</p></div><span id="repeater-variable-badge" class="experiment-card-badge" data-kind="offline">0 variables</span></header>
+                <details class="experiment-card experiment-disclosure">
+                  <summary>Session variables</summary><header><div><p>Use {{name}} in URLs, methods, header values, or bodies. Use {{=name}} for a literal token.</p></div><span id="repeater-variable-badge" class="experiment-card-badge" data-kind="offline">0 variables</span></header>
                   <div class="experiment-body">
                     <form id="repeater-variable-form" class="experiment-form">
                       <label>Variables (JSON)<textarea id="repeater-variables" maxlength="40000" spellcheck="false" placeholder='{"host":"api.example.test","id":"42"}'></textarea></label>
                       <button id="repeater-apply-variables" class="secondary-button" type="submit" disabled>Apply session variables</button>
                     </form>
                   </div>
-                </article>
+                </details>
               </div>
               <div class="repeater-column">
                 <article class="experiment-card">
-                  <header><div><h2>Editable request</h2><p>Only explicit credential-free values are sent through the disposable page.</p></div><span id="repeater-request-badge" class="experiment-card-badge" data-kind="offline">Draft</span></header>
+                  <header><div><h2>Request</h2><p>Only explicit credential-free values are sent through the disposable page.</p></div><span id="repeater-request-badge" class="experiment-card-badge" data-kind="offline">Draft</span></header>
                   <div class="experiment-body">
                     <form id="repeater-request-form" class="experiment-form">
                       <label>Request URL<input id="repeater-request-url" type="text" maxlength="8192" placeholder="https://{{host}}/path/{{id}}" autocomplete="off" /></label>
@@ -469,7 +471,7 @@
                         <button id="repeater-cancel" class="secondary-button" type="button" disabled>Cancel active</button>
                         <button id="repeater-copy-resolved" class="secondary-button" type="button" disabled>Copy resolved</button>
                       </div>
-                      <p class="experiment-privacy">Credentials are omitted and browser storage is isolated. Sensitive and transport-owned headers are rejected. History is ephemeral and never enters the evidence store.</p>
+                      <details class="experiment-help"><summary>Restrictions</summary><p class="experiment-privacy">Credentials are omitted and browser storage is isolated. Sensitive and transport-owned headers are rejected. History is ephemeral and never enters the evidence store.</p></details>
                     </form>
                   </div>
                   <div class="repeater-active-strip"><span>Active execution</span><strong id="repeater-active-request">None</strong></div>
@@ -480,8 +482,8 @@
                   <header><div><h2>Response</h2><p id="repeater-response-meta">Select a completed run to inspect its bounded response.</p></div><span id="repeater-response-badge" class="experiment-card-badge" data-kind="offline">No response</span></header>
                   <div id="repeater-response" class="repeater-response experiment-empty">Send a request or choose one from history.</div>
                 </article>
-                <article class="experiment-card">
-                  <header><div><h2>Response comparison</h2><p>Status, latency, body digest, size, and response-header names.</p></div><span id="repeater-comparison-badge" class="experiment-card-badge" data-kind="offline">No comparison</span></header>
+                <details class="experiment-card experiment-disclosure">
+                  <summary>Response comparison</summary><header><div><p>Status, latency, body digest, size, and response-header names.</p></div><span id="repeater-comparison-badge" class="experiment-card-badge" data-kind="offline">No comparison</span></header>
                   <div class="experiment-body">
                     <div class="repeater-compare-controls experiment-form">
                       <label>Baseline<select id="repeater-compare-baseline"></select></label>
@@ -490,9 +492,9 @@
                     </div>
                   </div>
                   <div id="repeater-comparison" class="experiment-empty">Complete two requests to compare their responses.</div>
-                </article>
-                <article class="experiment-card">
-                  <header><div><h2>Hard limits</h2><p>Bounded state keeps repeated testing predictable.</p></div><span class="experiment-card-badge">Protocol v1</span></header>
+                </details>
+                <details class="experiment-card experiment-disclosure">
+                  <summary>Limits</summary>
                   <div class="experiment-context-facts">
                     <div class="experiment-context-fact"><span>History</span><strong>24 runs / 512 KiB</strong></div>
                     <div class="experiment-context-fact"><span>Variables</span><strong>32 / 32 KiB</strong></div>
@@ -501,14 +503,14 @@
                     <div class="experiment-context-fact"><span>Bodies</span><strong>64 KiB each</strong></div>
                     <div class="experiment-context-fact"><span>Runtime</span><strong>30 seconds</strong></div>
                   </div>
-                </article>
+                </details>
               </div>
             </div>
             <div id="object-workspace" class="experiment-workspace" hidden>
               <div class="experiment-column">
                 <article class="experiment-card">
                   <header>
-                    <div><h2>Isolated Object Lab</h2><p id="object-context-message">No disposable Experiment context exists.</p></div>
+                    <div><h2>Session</h2><p id="object-context-message">No disposable Experiment context exists.</p></div>
                     <span id="object-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span>
                   </header>
                   <div class="experiment-body">
@@ -517,10 +519,12 @@
                       <button id="object-dispose" class="secondary-button" type="button" disabled>Dispose and erase</button>
                     </div>
                   </div>
+                  <details class="experiment-session-details"><summary>Session details</summary>
                   <div class="experiment-context-facts">
                     <div class="experiment-context-fact"><span>Storage</span><strong id="object-storage-state">Not allocated</strong></div>
                     <div class="experiment-context-fact"><span>Page</span><strong id="object-page-state">Not opened</strong></div>
                   </div>
+                  </details>
                 </article>
                 <article class="experiment-card">
                   <header><div><h2>Disposable page</h2><p>Open one explicit URL with no baseline cookies or storage.</p></div><span id="object-page-badge" class="experiment-card-badge" data-kind="offline">No page</span></header>
@@ -528,22 +532,24 @@
                     <form id="object-navigation-form" class="experiment-form">
                       <label>Page URL<input id="object-page-url" type="url" maxlength="8192" placeholder="https://app.example.test/lab" autocomplete="off" /></label>
                       <button id="object-navigate" class="secondary-button" type="submit" disabled>Open isolated page</button>
-                      <p class="experiment-privacy">HTTP and HTTPS only. URL credentials and fragments are rejected. Query text is never retained in the audit.</p>
+                      <details class="experiment-help"><summary>Restrictions</summary><p class="experiment-privacy">HTTP and HTTPS only. URL credentials and fragments are rejected. Query text is never retained in the audit.</p></details>
                     </form>
                   </div>
                 </article>
                 <article class="experiment-card">
-                  <header><div><h2>Bounded live search</h2><p>Own properties are inspected without invoking getters.</p></div><span id="object-search-badge" class="experiment-card-badge" data-kind="offline">No search</span></header>
+                  <header><div><h2>Find objects</h2><p>Own properties are inspected without invoking getters.</p></div><span id="object-search-badge" class="experiment-card-badge" data-kind="offline">No search</span></header>
                   <div class="experiment-body">
                     <form id="object-search-form" class="experiment-form">
                       <label>Property name<input id="object-property-query" type="text" maxlength="512" placeholder="ready, config, featureFlag" autocomplete="off" /></label>
                       <label>Primitive value<input id="object-value-query" type="text" maxlength="512" placeholder="Optional exact text or pattern" autocomplete="off" /></label>
+                      <details class="experiment-advanced"><summary>Advanced search</summary><div class="experiment-form">
                       <label>Class name<input id="object-class-query" type="text" maxlength="512" placeholder="Object, Array, CheckoutState" autocomplete="off" /></label>
                       <label>Structural shape<textarea id="object-shape-query" maxlength="4096" spellcheck="false" placeholder='{"ready":false}'></textarea></label>
                       <div class="experiment-form-row">
                         <label>Similarity<input id="object-similarity-threshold" type="number" min="0" max="1" step="0.05" value="0.75" /></label>
                         <div class="object-search-options"><label class="memory-check"><input id="object-regex" type="checkbox" /> Regular expression</label><label class="memory-check"><input id="object-case-sensitive" type="checkbox" /> Case sensitive</label><label class="memory-check"><input id="object-shape-values" type="checkbox" /> Match shape values</label></div>
                       </div>
+                      </div></details>
                       <button id="object-search" class="trace-button" type="submit" disabled>Search isolated page</button>
                     </form>
                   </div>
@@ -551,11 +557,13 @@
               </div>
               <div class="experiment-column">
                 <article class="experiment-card object-results-card">
-                  <header><div><h2>Live object matches</h2><p id="object-search-meta">Open a page and run one bounded search.</p></div><span id="object-result-count" class="experiment-card-badge" data-kind="offline">0 matches</span></header>
+                  <header><div><h2>Matches</h2><p id="object-search-meta">Open a page and run one bounded search.</p></div><span id="object-result-count" class="experiment-card-badge" data-kind="offline">0 matches</span></header>
                   <div id="object-results" class="object-result-list" role="listbox" aria-label="Object Lab live matches"><div class="experiment-empty">No retained object references.</div></div>
                 </article>
+              </div>
+              <div class="experiment-column">
                 <article class="experiment-card">
-                  <header><div><h2>Confirmed property patch</h2><p id="object-selection-meta">Select one retained object result.</p></div><span id="object-mutation-badge" class="experiment-card-badge" data-kind="offline">Locked</span></header>
+                  <header><div><h2>Edit selected object</h2><p id="object-selection-meta">Select one retained object result.</p></div><span id="object-mutation-badge" class="experiment-card-badge" data-kind="offline">Locked</span></header>
                   <div class="experiment-body">
                     <div id="object-preview" class="object-property-preview"><div class="experiment-empty">No object selected.</div></div>
                     <form id="object-mutation-form" class="experiment-form">
@@ -566,19 +574,17 @@
                       <label id="object-value-field">JSON value<textarea id="object-mutation-value" maxlength="16384" spellcheck="false" placeholder='{"enabled":true}'></textarea></label>
                       <label class="object-confirm"><input id="object-confirm" type="checkbox" /> I confirm this will mutate only the disposable Experiment page.</label>
                       <button id="object-mutate" class="trace-button" type="submit" disabled>Apply confirmed patch</button>
-                      <p class="experiment-privacy">No arbitrary code, function calls, prototype changes, getters, or setters. The baseline page and evidence store are never modified.</p>
+                      <details class="experiment-help"><summary>Restrictions</summary><p class="experiment-privacy">No arbitrary code, function calls, prototype changes, getters, or setters. The baseline page and evidence store are never modified.</p></details>
                     </form>
                   </div>
                   <div id="object-mutation-result" class="object-mutation-summary">No mutation attempted.</div>
                 </article>
-              </div>
-              <div class="experiment-column">
                 <article class="experiment-card">
-                  <header><div><h2>Object mutation audit</h2><p>Metadata and value digest only. Set values and page content are not retained.</p></div><span id="object-audit-count" class="experiment-card-badge" data-kind="offline">0 entries</span></header>
+                  <header><div><h2>Activity</h2><p>Metadata and value digest only. Set values and page content are not retained.</p></div><span id="object-audit-count" class="experiment-card-badge" data-kind="offline">0 entries</span></header>
                   <div id="object-audit" class="experiment-audit"><div class="experiment-empty">No object mutations attempted.</div></div>
                 </article>
-                <article class="experiment-card">
-                  <header><div><h2>Hard limits</h2><p>Every reference and mutation stays session-scoped and bounded.</p></div><span class="experiment-card-badge">Protocol v1</span></header>
+                <details class="experiment-card experiment-disclosure">
+                  <summary>Limits</summary>
                   <div class="experiment-context-facts">
                     <div class="experiment-context-fact"><span>Search</span><strong>25,000 objects / 750 ms</strong></div>
                     <div class="experiment-context-fact"><span>Matches</span><strong>50 / 16 properties</strong></div>
@@ -587,14 +593,14 @@
                     <div class="experiment-context-fact"><span>Mutations</span><strong>256 attempts / 128 audit</strong></div>
                     <div class="experiment-context-fact"><span>JSON value</span><strong>16 KiB / depth 8</strong></div>
                   </div>
-                </article>
+                </details>
               </div>
             </div>
             <div id="hooks-workspace" class="experiment-workspace" hidden>
               <div class="experiment-column">
                 <article class="experiment-card">
                   <header>
-                    <div><h2>Isolated Hook Studio</h2><p id="hooks-context-message">No disposable Experiment context exists.</p></div>
+                    <div><h2>Session</h2><p id="hooks-context-message">No disposable Experiment context exists.</p></div>
                     <span id="hooks-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span>
                   </header>
                   <div class="experiment-body">
@@ -604,10 +610,12 @@
                       <button id="hooks-clear" class="secondary-button" type="button" disabled>Clear hit records</button>
                     </div>
                   </div>
+                  <details class="experiment-session-details"><summary>Session details</summary>
                   <div class="experiment-context-facts">
                     <div class="experiment-context-fact"><span>Storage</span><strong id="hooks-storage-state">Not allocated</strong></div>
                     <div class="experiment-context-fact"><span>Active points</span><strong id="hooks-point-usage">0 / 64</strong></div>
                   </div>
+                  </details>
                 </article>
                 <article class="experiment-card">
                   <header><div><h2>Disposable page</h2><p>Open one credential-free page, then choose one of its live functions.</p></div><span id="hooks-page-badge" class="experiment-card-badge" data-kind="offline">No page</span></header>
@@ -615,7 +623,7 @@
                     <form id="hooks-navigation-form" class="experiment-form">
                       <label>Page URL<input id="hooks-page-url" type="url" maxlength="8192" placeholder="https://app.example.test/lab" autocomplete="off" /></label>
                       <button id="hooks-navigate" class="secondary-button" type="submit" disabled>Open isolated page</button>
-                      <p class="experiment-privacy">Navigation invalidates script identifiers and safely clears all hook definitions.</p>
+                      <details class="experiment-help"><summary>Restrictions</summary><p class="experiment-privacy">Navigation invalidates script identifiers and safely clears all hook definitions.</p></details>
                     </form>
                   </div>
                 </article>
@@ -627,7 +635,7 @@
                       <button id="hooks-arm" class="trace-button" type="button" disabled>Arm all hooks</button>
                       <button id="hooks-disarm" class="secondary-button" type="button" disabled>Disarm</button>
                     </div>
-                    <p class="experiment-privacy">A hook pause is handled internally and always resumes. Promise return replacement is rejected.</p>
+                    <details class="experiment-help"><summary>Restrictions</summary><p class="experiment-privacy">A hook pause is handled internally and always resumes. Promise return replacement is rejected.</p></details>
                   </div>
                 </article>
               </div>
@@ -659,18 +667,18 @@
                   <header><div><h2>Function hits</h2><p id="hooks-hit-meta">Entry bindings and return outcomes stay in ephemeral session memory.</p></div><span id="hooks-hit-count" class="experiment-card-badge" data-kind="offline">0 / 512</span></header>
                   <div id="hooks-hits" class="hook-hit-list" role="log" aria-live="polite"><div class="experiment-empty">Arm a hook, then exercise the isolated page.</div></div>
                 </article>
-                <article class="experiment-card">
-                  <header><div><h2>Hard limits</h2><p>Cold-path debugger control with deterministic cleanup.</p></div><span class="experiment-card-badge">Protocol v1</span></header>
+                <details class="experiment-card experiment-disclosure">
+                  <summary>Limits</summary>
                   <div class="experiment-context-facts"><div class="experiment-context-fact"><span>Definitions</span><strong>8 / 64 points</strong></div><div class="experiment-context-fact"><span>Returns</span><strong>32 per function</strong></div></div>
                   <div class="experiment-context-facts"><div class="experiment-context-fact"><span>Hits</span><strong>512 / 128 retained</strong></div><div class="experiment-context-fact"><span>Handler</span><strong>100 ms / 32 bindings</strong></div></div>
-                </article>
+                </details>
               </div>
             </div>
             <div id="automation-workspace" class="experiment-workspace" hidden>
               <div class="experiment-column">
                 <article class="experiment-card">
                   <header>
-                    <div><h2>Isolated Automation Studio</h2><p id="automation-context-message">Recipe definitions stay local; execution requires a disposable context.</p></div>
+                    <div><h2>Session</h2><p id="automation-context-message">Recipe definitions stay local; execution requires a disposable context.</p></div>
                     <span id="automation-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span>
                   </header>
                   <div class="experiment-body">
@@ -680,10 +688,12 @@
                       <button id="automation-clear" class="secondary-button" type="button" disabled>Clear run history</button>
                     </div>
                   </div>
+                  <details class="experiment-session-details"><summary>Session details</summary>
                   <div class="experiment-context-facts">
                     <div class="experiment-context-fact"><span>Storage</span><strong id="automation-storage-state">Definitions in memory</strong></div>
                     <div class="experiment-context-fact"><span>Runs</span><strong id="automation-run-usage">0 / 256</strong></div>
                   </div>
+                  </details>
                 </article>
                 <article class="experiment-card">
                   <header><div><h2>Disposable page</h2><p>Open one explicit credential-free page for manual and automatic recipes.</p></div><span id="automation-page-badge" class="experiment-card-badge" data-kind="offline">No page</span></header>
@@ -704,7 +714,7 @@
                       <button id="automation-disarm" class="secondary-button" type="button" disabled>Disarm</button>
                       <button id="automation-cancel" class="secondary-button" type="button" disabled>Cancel active run</button>
                     </div>
-                    <p class="experiment-privacy">Variable values are never returned in public session state. A new explicit snapshot is required for each arm or manual run.</p>
+                    <details class="experiment-help"><summary>Restrictions</summary><p class="experiment-privacy">Variable values are never returned in public session state. A new explicit snapshot is required for each arm or manual run.</p></details>
                   </div>
                 </article>
               </div>
@@ -740,11 +750,11 @@
                   <header><div><h2>Selected result</h2><p id="automation-result-meta">Select a completed run.</p></div><span id="automation-result-badge" class="experiment-card-badge" data-kind="offline">No result</span></header>
                   <div id="automation-result" class="automation-result"><div class="experiment-empty">No run selected.</div></div>
                 </article>
-                <article class="experiment-card">
-                  <header><div><h2>Hard limits</h2><p>Cold-path debugger execution with visible drops and deterministic cleanup.</p></div><span class="experiment-card-badge">Protocol v1</span></header>
+                <details class="experiment-card experiment-disclosure">
+                  <summary>Limits</summary>
                   <div class="experiment-context-facts"><div class="experiment-context-fact"><span>Recipes</span><strong>16 / 64 KiB total</strong></div><div class="experiment-context-fact"><span>Automatic</span><strong>8 recipes / 64 runs</strong></div></div>
                   <div class="experiment-context-facts"><div class="experiment-context-fact"><span>Runtime</span><strong>2 seconds each</strong></div><div class="experiment-context-fact"><span>Output</span><strong>16 KiB / 32 logs</strong></div></div>
-                </article>
+                </details>
               </div>
             </div>
           </section>

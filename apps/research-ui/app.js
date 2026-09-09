@@ -918,6 +918,7 @@
         const scope = actionScopeState();
         const experiment = requestInterception();
         const sharedMode = ['interceptor', 'automation'].includes(state.experimentMode);
+        elements.actionScopePanel.hidden = !sharedMode;
         const busy = state.experimentPending || state.debuggerActionPending ||
           (experiment?.pending_requests ?? 0) > 0 || experiment?.state === 'running' ||
           automationRecipesState()?.auto_armed ||
@@ -1530,7 +1531,7 @@
         const selected = selectedObjectExperimentResult(objectExperiment);
         const canDispose = experiment?.isolated && experiment.pending_requests === 0 &&
           !['running', 'cancelling'].includes(repeater?.state) && !objectBusy && !hookBusy && !automationBusy;
-        elements.experimentTitle.textContent = 'Live Object Lab';
+        elements.experimentTitle.textContent = 'Objects';
         elements.experimentSubtitle.textContent = 'Find an object, inspect its properties, and test a change on a disposable page.';
 
         if (state.experimentError) setExperimentNotice('error', state.experimentError);
@@ -1678,7 +1679,7 @@
         elements.hooksScript.replaceChildren(...options);
         if (scripts.some(script => script.script_id === selectedScript)) elements.hooksScript.value = selectedScript;
 
-        elements.experimentTitle.textContent = 'Runtime Hook Studio';
+        elements.experimentTitle.textContent = 'Runtime Hooks';
         elements.experimentSubtitle.textContent = 'Observe function calls or test return values on a disposable page.';
         if (state.experimentError) setExperimentNotice('error', state.experimentError);
         else if (!experiment || !hooks || !objectExperiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
@@ -1874,7 +1875,7 @@
         const canDispose = experiment?.isolated && experiment.pending_requests === 0 && !autoBusy && !otherBusy;
         const automaticRecipes = automation?.recipes.filter(recipe => recipe.enabled && recipe.trigger !== 'manual').length ?? 0;
 
-        elements.experimentTitle.textContent = 'Automation Recipe Studio';
+        elements.experimentTitle.textContent = 'Automation';
         elements.experimentSubtitle.textContent = 'Run a page script once or on a chosen trigger. Review each run and its logs.';
         if (state.experimentError) setExperimentNotice('error', state.experimentError);
         else if (!experiment || !automation || !objectExperiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
@@ -1947,7 +1948,7 @@
           renderAutomationRecipes();
           return;
         }
-        elements.experimentTitle.textContent = 'Request Interception Lab';
+        elements.experimentTitle.textContent = 'Interceptor';
         prefillExperimentRequest();
         setExperimentRuleVisibility();
         const experiment = requestInterception();

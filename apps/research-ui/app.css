@@ -1739,3 +1739,48 @@
       .sources-debugger[data-attached="false"] .debug-controls,
       .sources-debugger[data-attached="false"] .debug-panes > :not(#artifact-details) { display: none; }
       .sources-debugger[data-attached="false"] { grid-template-rows: auto minmax(0, 1fr); }
+
+      /* Experiment tools share setup, editor, and result panes. */
+      #screen-experiments:not([hidden]) { display: flex; flex-direction: column; }
+      #screen-experiments > .screen-head { flex-shrink: 0; min-height: 54px; padding: 9px 12px; }
+      #screen-experiments > .experiment-mode-tabs { flex-shrink: 0; gap: 0; padding: 0 8px; min-height: 34px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: var(--chrome); }
+      #screen-experiments .experiment-mode-tab { flex-shrink: 0; min-height: 34px; padding: 0 14px; border-radius: 0; font: 12px var(--sans); text-transform: none; }
+      #screen-experiments .experiment-mode-tab[aria-selected="true"] { background: transparent; }
+      #screen-experiments .experiment-notice { flex-shrink: 0; min-height: 30px; padding: 6px 12px; }
+      .experiment-scope { flex-shrink: 0; max-height: 30%; overflow: auto; border-bottom: 1px solid var(--line); }
+      .experiment-scope > summary { padding: 8px 12px; color: var(--muted); cursor: pointer; font-size: 11px; }
+      .experiment-scope .action-scope-badge { margin-left: 8px; padding: 0; border: 0; border-radius: 0; font: 11px var(--sans); text-transform: none; }
+      .experiment-scope .action-scope-panel { border: 0; background: var(--panel); }
+      #screen-experiments .experiment-workspace, #screen-experiments .repeater-workspace { flex: 1; min-height: 0; grid-template-columns: minmax(240px, .75fr) minmax(310px, 1.2fr) minmax(260px, 1fr); gap: 0; padding: 0; overflow: hidden; }
+      #screen-experiments .experiment-column, #screen-experiments .repeater-column { min-height: 0; gap: 0; overflow: auto; border-right: 1px solid var(--line); background: var(--panel); }
+      #screen-experiments .experiment-column:last-child, #screen-experiments .repeater-column:last-child { border-right: 0; }
+      #screen-experiments .experiment-card { border: 0; border-bottom: 1px solid var(--line); }
+      #screen-experiments .experiment-card > header { padding: 12px; border-bottom: 0; }
+      #screen-experiments .experiment-card h2 { font-size: 12px; font-weight: 600; }
+      #screen-experiments .experiment-card header p { line-height: 1.5; }
+      #screen-experiments .experiment-card-badge { padding: 0; border: 0; color: var(--muted); font: 11px var(--sans); text-transform: none; }
+      #screen-experiments .experiment-card-badge[data-kind="error"] { color: var(--red); }
+      #screen-experiments .experiment-body { padding: 0 12px 12px; }
+      #screen-experiments .experiment-form label { font: 11px var(--sans); text-transform: none; }
+      #screen-experiments .experiment-form input, #screen-experiments .experiment-form select { min-height: 30px; }
+      #screen-experiments .experiment-form textarea { min-height: 66px; }
+      #screen-experiments .experiment-empty { min-height: 84px; padding: 18px 12px; font: 12px/1.6 var(--sans); }
+      #screen-experiments .object-results-card, #screen-experiments .hook-hits-card { min-height: 0; }
+      #screen-experiments .experiment-actions { display: flex; flex-wrap: wrap; }
+      #screen-experiments .experiment-actions .experiment-primary { flex: 1 0 100%; margin: 0; }
+      #screen-experiments .experiment-actions .secondary-button { flex: 1; font-size: 11px; }
+      .experiment-disclosure > summary, .experiment-session-details > summary { padding: 10px 12px; cursor: pointer; color: var(--muted); font-size: 11px; }
+      .experiment-disclosure > header { padding-top: 0 !important; }
+      .experiment-disclosure > header h2 { display: none; }
+      .experiment-advanced > summary, .experiment-help > summary { padding: 5px 0; color: var(--muted); cursor: pointer; font: 11px var(--sans); }
+      .experiment-advanced > .experiment-form { padding-top: 10px; }
+      .experiment-help .experiment-privacy { padding-top: 4px; line-height: 1.6; }
+      @media (max-width: 1000px) {
+        #screen-experiments .experiment-workspace, #screen-experiments .repeater-workspace { grid-template-columns: minmax(240px, .8fr) minmax(320px, 1.2fr); overflow: auto; align-content: start; }
+        #screen-experiments .experiment-column, #screen-experiments .repeater-column { overflow: visible; }
+        #screen-experiments .experiment-column:last-child, #screen-experiments .repeater-column:last-child { grid-column: 1 / -1; display: block; border-top: 1px solid var(--line); }
+      }
+      @media (max-width: 650px) {
+        #screen-experiments .experiment-workspace, #screen-experiments .repeater-workspace { display: block; }
+        #screen-experiments .experiment-column, #screen-experiments .repeater-column { border-right: 0; }
+      }

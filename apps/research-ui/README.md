@@ -111,3 +111,10 @@ by default. The toggle remains available at narrow window sizes.
 
 VM analysis is a secondary Traffic view, reached through Related VM candidates
 for a selected request. It has a Back to traffic control and no primary tab.
+
+Experiments uses a shared tab row and three panes for session setup, editing,
+and results. Each pane scrolls independently on wide windows; narrow windows
+stack the results below the forms. Page scope, session metadata, resource
+limits, request restrictions, response comparison, and advanced object search
+use native disclosures. Switching tools preserves form drafts and disclosure
+state. Page scope is shown only for Interceptor and Automation, which support it.

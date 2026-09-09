@@ -170,7 +170,7 @@ export async function checkout(cart, fingerprint) {
         memoryDiffBaseline: null,
         memoryTargetId: null,
         selectedRequestId: '81',
-        inspectorTab: 'payload',
+        inspectorTab: 'exchange',
         fieldTab: 'body',
         selectedField: fieldSets.body.find(field => field.traceable),
         requestType: 'all',

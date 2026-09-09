@@ -15,6 +15,7 @@ def read_ui_sources() -> str:
             "app_state.js",
             "evidence_models.js",
             "source_syntax.js",
+            "traffic_view.js",
             "app.js",
         )
     )

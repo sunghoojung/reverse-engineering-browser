@@ -71,18 +71,19 @@
                   <span id="selected-method" class="method-pill">POST</span>
                   <span id="selected-status" class="status-pill">201</span>
                   <span id="selected-url" class="selection-url">https://checkout.acme.test/cart</span>
+                  <button id="request-evidence-toggle" class="secondary-button" type="button" aria-expanded="false">Evidence</button>
                   <button id="request-collection-pivot" class="secondary-button" type="button">Save to Collection</button>
                 </div>
                 <div class="inspector-tabs" role="tablist" aria-label="Request inspector">
+                  <button id="inspector-tab-exchange" class="inspector-tab" type="button" role="tab" data-inspector-tab="exchange" aria-controls="exchange-inspector" aria-selected="true">Request / Response</button>
                   <button id="inspector-tab-headers" class="inspector-tab" type="button" role="tab" data-inspector-tab="headers" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Headers</button>
-                  <button id="inspector-tab-payload" class="inspector-tab" type="button" role="tab" data-inspector-tab="payload" aria-controls="request-inspector" aria-selected="true">Payload</button>
+                  <button id="inspector-tab-payload" class="inspector-tab" type="button" role="tab" data-inspector-tab="payload" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Payload</button>
                   <button id="inspector-tab-signals" class="inspector-tab" type="button" role="tab" data-inspector-tab="signals" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Signals</button>
-                  <button id="inspector-tab-preview" class="inspector-tab" type="button" role="tab" data-inspector-tab="preview" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Preview</button>
-                  <button id="inspector-tab-response" class="inspector-tab" type="button" role="tab" data-inspector-tab="response" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Response</button>
                   <button id="inspector-tab-initiator" class="inspector-tab" type="button" role="tab" data-inspector-tab="initiator" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Initiator</button>
                   <button id="inspector-tab-timing" class="inspector-tab" type="button" role="tab" data-inspector-tab="timing" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Timing</button>
                 </div>
-                <div id="request-inspector" class="request-inspector" role="tabpanel" aria-labelledby="inspector-tab-payload" tabindex="0">
+                <div id="exchange-inspector" class="exchange-inspector" role="tabpanel" aria-labelledby="inspector-tab-exchange"></div>
+                <div hidden id="request-inspector" class="request-inspector" role="tabpanel" aria-labelledby="inspector-tab-payload" tabindex="0">
                   <h1 id="request-prompt">Choose a request value and trace where it came from.</h1>
                   <div id="field-tabs" class="field-tabs" role="tablist" aria-label="Request values">
                     <button id="field-tab-body" class="field-tab" type="button" role="tab" data-field-tab="body" aria-controls="field-tree" aria-selected="true">Body</button>
@@ -1013,6 +1014,7 @@
     <script src="app_state.js"></script>
     <script src="evidence_models.js"></script>
     <script src="source_syntax.js"></script>
+    <script src="traffic_view.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

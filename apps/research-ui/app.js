@@ -1989,7 +1989,6 @@
       }
 
       function renderExperiment() {
-        elements.experimentNotice.hidden = state.experimentMode === 'repeater' && !state.experimentError;
         elements.experimentModeButtons.forEach(button => {
           const selected = button.dataset.experimentMode === state.experimentMode;
           button.setAttribute('aria-selected', String(selected));

@@ -1144,11 +1144,11 @@
         background: var(--panel);
       }
       .repeater-session-bar { min-height: 38px; flex: 0 0 auto; display: flex; align-items: center; gap: 7px; padding: 5px 10px; border-bottom: 1px solid var(--line); background: var(--chrome); }
-      .repeater-session-state { display: inline-flex; align-items: center; gap: 6px; color: var(--green); font: 11px var(--sans); white-space: nowrap; }
+      .repeater-session-state { display: inline-flex; align-items: center; gap: 6px; margin-right: auto; color: var(--green); font: 11px var(--sans); white-space: nowrap; }
       .repeater-session-state::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
       .repeater-session-state[data-kind="offline"] { color: var(--faint); }
       .repeater-session-state[data-kind="error"] { color: var(--red); }
-      .repeater-session-message { min-width: 0; flex: 1; overflow: hidden; color: var(--muted); font: 11px var(--sans); text-overflow: ellipsis; white-space: nowrap; }
+      .repeater-session-message { display: none; }
       .repeater-session-bar button { min-height: 27px; padding: 4px 9px; font-size: 10px; }
       .repeater-compose-bar { min-height: 52px; flex: 0 0 auto; display: grid; grid-template-columns: 92px minmax(220px, 1fr) auto auto; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--panel-2); }
       .repeater-compose-bar label { min-width: 0; }
@@ -1834,7 +1834,6 @@
         #screen-experiments .experiment-column { border-right: 0; }
         #screen-experiments .repeater-workspace { display: flex; }
         #screen-experiments .repeater-session-bar { flex-wrap: wrap; }
-        #screen-experiments .repeater-session-message { flex-basis: calc(100% - 90px); }
         #screen-experiments .repeater-compose-bar { grid-template-columns: 78px minmax(160px, 1fr) auto; }
         #screen-experiments .repeater-compose-bar #repeater-cancel { display: none; }
         #screen-experiments .repeater-split { display: block; min-height: 0; }

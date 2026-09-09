@@ -831,8 +831,7 @@ class ResearchUiTests(unittest.TestCase):
         for label in (
             "Headers",
             "Payload",
-            "Preview",
-            "Response",
+            "Request / Response",
             "Initiator",
             "Timing",
             "Signals",
@@ -843,7 +842,7 @@ class ResearchUiTests(unittest.TestCase):
             self.assertIn(f"'{state}'", html)
         self.assertIn("Fetch/XHR", html)
         self.assertIn("No live requests yet", html)
-        self.assertIn("Response body capture is disabled", html)
+        self.assertIn("body was not captured", html)
         self.assertGreaterEqual(html.count("'If-None-Match'"), 2)
         self.assertGreaterEqual(html.count("response.status === 304"), 2)
         self.assertIn("`${integerText(event, 'session_id')}:${event.process_id}`", html)
@@ -2271,7 +2270,8 @@ process.stdout.write(JSON.stringify({
 }));
 """
         completed = subprocess.run(
-            [node, "-e", model + exercise],
+            [node, "-"],
+            input=model + exercise,
             check=True,
             capture_output=True,
             text=True,
@@ -2418,7 +2418,8 @@ process.stdout.write(JSON.stringify({
 }));
 """
         completed = subprocess.run(
-            [node, "-e", model + exercise],
+            [node, "-"],
+            input=model + exercise,
             check=True,
             capture_output=True,
             text=True,

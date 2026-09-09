@@ -520,6 +520,26 @@
           tab.setAttribute('aria-selected', String(selected));
           tab.tabIndex = selected ? 0 : -1;
         });
+        const exchangeInspector = document.querySelector('#exchange-inspector');
+        const showingExchange = state.inspectorTab === 'exchange';
+        exchangeInspector.hidden = !showingExchange;
+        const evidenceToggle = document.querySelector('#request-evidence-toggle');
+        evidenceToggle.textContent = showingExchange ? 'Evidence' : 'Request / Response';
+        evidenceToggle.setAttribute('aria-expanded', String(!showingExchange));
+        elements.requestInspector.hidden = showingExchange;
+        document.querySelector('.detail-pane').classList.toggle('showing-exchange', showingExchange);
+        if (showingExchange) {
+          const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+          renderTrafficExchange(exchangeInspector, request, value => {
+            resetDecoderChain('Value copied from the request inspector.');
+            toolsElements.inputEncoding.value = 'text';
+            toolsElements.input.value = value;
+            showScreen('tools');
+            setToolsTab('decoder');
+            requestAnimationFrame(() => toolsElements.input.focus({preventScroll: true}));
+          });
+          return;
+        }
         elements.requestInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
         if (state.inspectorTab !== 'payload') {
           elements.fieldTree.removeAttribute('role');
@@ -653,14 +673,7 @@
           return;
         }
 
-        const messages = {
-          preview: 'No safe preview is available for this response.',
-          response: 'Response body capture is disabled for this session.'
-        };
-        elements.prompt.textContent = state.inspectorTab[0].toUpperCase() + state.inspectorTab.slice(1);
-        elements.fieldTabs.hidden = true;
-        elements.traceDock.hidden = true;
-        renderInspectorMessage(messages[state.inspectorTab] || 'No captured data is available.');
+
       }
 
       function renderEvidence() {
@@ -6503,6 +6516,10 @@
         renderEvidence();
         if (state.inspectorTab === 'signals') refreshRequestSignalProfile();
       }));
+      document.querySelector('#request-evidence-toggle').addEventListener('click', () => {
+        state.inspectorTab = state.inspectorTab === 'exchange' ? 'payload' : 'exchange';
+        renderInspector();
+      });
       enableTabKeyboardNavigation('.inspector-tab');
       enableTabKeyboardNavigation('.field-tab');
       enableTabKeyboardNavigation('.source-side-tab:not(:disabled)');

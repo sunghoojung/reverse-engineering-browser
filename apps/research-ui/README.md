@@ -40,6 +40,7 @@ disconnected. It does not guarantee that the custom browser is undetectable.
 | --- | --- |
 | `index.html`, `app.css` | Document structure and visual layout |
 | `app_state.js`, `evidence_models.js`, `app.js` | Initial state and DOM bindings, evidence validation and projection, interaction and rendering |
+| `traffic_view.js` | Bounded request/response body views, explicit missing-data states, and labeled sample exchanges |
 | `source_syntax.js` | Source names, display formatting, and bounded tokenization without DOM or application state |
 | `server.py`, `evidence_store.py` | HTTP routing and responses, bounded evidence reads and validation |
 | `debugger_bridge.py`, `debugger/` | Session orchestration, transport, request validation, limits, and fixed runtime programs |
@@ -83,9 +84,12 @@ Versioned wire and storage contracts belong in [`protocol/`](../../protocol/).
 
 ### Interface styling
 
-The shared shell uses DevTools-style neutral surfaces, thin pane dividers, and
-blue selection accents in both themes. Evidence owns the available width;
-Traffic stacks its request list above the inspector below 900 px. Session
+The shared shell uses neutral charcoal surfaces, thin pane dividers, and
+blue selection accents in both themes. Traffic places a full-width, striped
+request table above the inspector, with independently scrolling panes. Compact
+resource filters share the search row on wide windows and wrap below it on
+narrow windows. Selected-field actions sit beside the evidence on wide windows
+and below it on narrow windows. Session
 counts come from loaded requests, and sample evidence stays visibly labeled.
 Keep labels at least 10 px and reserve stronger color for selection, connection
 state, errors, and evidence confidence.
@@ -126,3 +130,19 @@ connected. Request tabs share the pane header, while idle badges and footers sta
 hidden until they contain useful state. Headers and query parameters use compact
 key-value rows with per-row enable and remove controls; query rows preserve
 duplicate names and update the request URL.
+
+Traffic opens directly to inline Request and Response tabs: independently scrolling bodies on wide
+windows, and a Request/Response switch below 900 px. Body shows syntax-colored, line-numbered JSON; Raw body preserves captured text.
+The pane menu offers JSON tree, Find, Wrap, and Copy. Text, JavaScript, XML, and
+HTML remain inert text, and binary records use hex. Headers and query parameters
+have separate views. Search filters visible fields or lines; selecting a leaf
+reveals its complete retained value with Copy and Decode actions. Evidence opens the existing Payload, Signals, Initiator, and Timing tools.
+
+The viewer distinguishes uncaptured, redacted, loading, failed, explicitly
+empty, and truncated bodies. Its local preview is bounded to 128 KiB, 1,000 JSON
+nodes, 24 levels, and 2,000 displayed text lines; limits are visible and raw/copy
+operate on the retained preview. Sample exchanges are labeled in both panes.
+Live network metadata currently supplies no request/response header or body
+bytes, so the viewer reports them as not captured. It does not join unrelated
+artifacts by URL or enable sensitive capture. Default host-only metadata cannot
+establish whether query parameters were absent.

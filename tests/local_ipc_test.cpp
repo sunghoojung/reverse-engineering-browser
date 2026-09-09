@@ -45,7 +45,7 @@ bool TestSecureTokenFile() {
   passed = passed && reb::LoadLocalIpcToken(path, loaded, error) &&
            reb::ConstantTimeTokenEquals(created, loaded);
 
-  struct stat status {};
+  struct stat status{};
   passed = passed && stat(path.c_str(), &status) == 0 && (status.st_mode & 0777) == 0600;
 
   if (chmod(path.c_str(), 0644) != 0) {
@@ -71,7 +71,7 @@ bool TestLocalListenerOwnership() {
   const std::string path = std::string(directory) + "/listener.sock";
   std::string error;
   const int listener = reb::ListenOnLocalSocket(path, error);
-  struct stat metadata {};
+  struct stat metadata{};
   bool passed = listener >= 0 && lstat(path.c_str(), &metadata) == 0 &&
                 S_ISSOCK(metadata.st_mode) && (metadata.st_mode & 0777) == 0600;
   const int duplicate = reb::ListenOnLocalSocket(path, error);

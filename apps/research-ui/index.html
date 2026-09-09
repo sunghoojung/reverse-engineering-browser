@@ -414,97 +414,84 @@
               </div>
             </div>
             <div id="repeater-workspace" class="repeater-workspace" hidden>
-              <div class="repeater-column">
-                <article class="experiment-card">
-                  <header>
-                    <div><h2>Session</h2><p id="repeater-context-message">No disposable request-lab context exists.</p></div>
-                    <span id="repeater-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span>
+              <div class="repeater-session-bar">
+                <span id="repeater-context-badge" class="repeater-session-state" data-kind="offline">Not created</span>
+                <span id="repeater-context-message" class="repeater-session-message">No disposable request-lab context exists.</span>
+                <button id="repeater-create" class="secondary-button" type="button">Create session</button>
+                <button id="repeater-dispose" class="secondary-button" type="button" disabled>End session</button>
+                <button id="repeater-copy-resolved" class="secondary-button" type="button" disabled>Copy resolved</button>
+              </div>
+
+              <form id="repeater-request-form" class="repeater-compose-bar">
+                <label class="repeater-method-field"><span>Method</span><input id="repeater-request-method" type="text" value="GET" maxlength="256" autocomplete="off" aria-label="Request method" /></label>
+                <label class="repeater-url-field"><span>URL</span><input id="repeater-request-url" type="text" maxlength="8192" placeholder="https://{{host}}/path/{{id}}" autocomplete="off" aria-label="Request URL" /></label>
+                <button id="repeater-cancel" class="secondary-button" type="button" disabled>Cancel</button>
+                <button id="repeater-send" class="trace-button repeater-send" type="submit" disabled>Send</button>
+              </form>
+
+              <div class="repeater-split">
+                <section class="repeater-pane repeater-request-pane" aria-labelledby="repeater-request-heading">
+                  <header class="repeater-pane-head">
+                    <div><h2 id="repeater-request-heading">Request</h2><p>Credential-free values sent from the isolated page.</p></div>
+                    <span id="repeater-request-badge" class="experiment-card-badge" data-kind="offline">Draft</span>
                   </header>
-                  <div class="experiment-body">
-                    <div class="experiment-actions">
-                      <button id="repeater-create" class="trace-button experiment-primary" type="button">Create isolated context</button>
-                      <button id="repeater-dispose" class="secondary-button" type="button" disabled>Dispose and erase</button>
-                      <button id="repeater-clear-history" class="secondary-button" type="button" disabled>Clear history</button>
-                    </div>
+                  <div class="repeater-editor-tabs" role="tablist" aria-label="Request editor">
+                    <button class="repeater-editor-tab" type="button" role="tab" aria-selected="true" aria-controls="repeater-headers-panel" data-repeater-editor-tab="headers">Headers</button>
+                    <button class="repeater-editor-tab" type="button" role="tab" aria-selected="false" aria-controls="repeater-body-panel" data-repeater-editor-tab="body" tabindex="-1">Body</button>
+                    <button class="repeater-editor-tab" type="button" role="tab" aria-selected="false" aria-controls="repeater-settings-panel" data-repeater-editor-tab="settings" tabindex="-1">Settings</button>
                   </div>
-                  <details class="experiment-session-details"><summary>Session details</summary>
-                  <div class="experiment-context-facts">
-                    <div class="experiment-context-fact"><span>Storage</span><strong id="repeater-storage-state">Not allocated</strong></div>
-                    <div class="experiment-context-fact"><span>History</span><strong id="repeater-history-usage">0 / 24</strong></div>
+                  <div id="repeater-headers-panel" class="repeater-editor-panel" role="tabpanel" data-repeater-editor-panel="headers">
+                    <label class="repeater-editor-label" for="repeater-request-headers">Request headers as JSON</label>
+                    <textarea id="repeater-request-headers" form="repeater-request-form" maxlength="20000" spellcheck="false" aria-label="Request headers as JSON" placeholder='{"accept":"application/json","x-run":"{{id}}"}'></textarea>
                   </div>
-                  </details>
-                </article>
-                <article class="experiment-card">
-                  <header><div><h2>Request history</h2><p>Select a previous request to load it.</p></div><span id="repeater-history-badge" class="experiment-card-badge" data-kind="offline">0 runs</span></header>
-                  <div class="repeater-history-toolbar">
-                    <span id="repeater-history-bytes">0 / 512 KiB</span>
-                    <button id="repeater-history-prev" class="repeater-icon-button" type="button" aria-label="Previous Repeater request" title="Previous request" disabled>←</button>
-                    <button id="repeater-history-next" class="repeater-icon-button" type="button" aria-label="Next Repeater request" title="Next request" disabled>→</button>
+                  <div id="repeater-body-panel" class="repeater-editor-panel" role="tabpanel" data-repeater-editor-panel="body" hidden>
+                    <label class="repeater-editor-label" for="repeater-request-body">Request body</label>
+                    <textarea id="repeater-request-body" form="repeater-request-form" maxlength="65536" spellcheck="false" aria-label="Request body" placeholder='{"id":"{{id}}"}'></textarea>
                   </div>
-                  <div id="repeater-history" class="repeater-history" role="listbox" aria-label="Repeater request history"><div class="experiment-empty">No Repeater requests yet.</div></div>
-                </article>
-                <details class="experiment-card experiment-disclosure">
-                  <summary>Session variables</summary><header><div><p>Use {{name}} in URLs, methods, header values, or bodies. Use {{=name}} for a literal token.</p></div><span id="repeater-variable-badge" class="experiment-card-badge" data-kind="offline">0 variables</span></header>
-                  <div class="experiment-body">
+                  <div id="repeater-settings-panel" class="repeater-editor-panel repeater-settings-panel" role="tabpanel" data-repeater-editor-panel="settings" hidden>
+                    <label>Timeout (ms)<input id="repeater-request-timeout" form="repeater-request-form" type="number" value="15000" min="100" max="30000" step="100" /></label>
                     <form id="repeater-variable-form" class="experiment-form">
+                      <div class="repeater-settings-heading"><div><strong>Session variables</strong><span>Use {{name}} in the request or {{=name}} for a literal token.</span></div><span id="repeater-variable-badge" class="experiment-card-badge" data-kind="offline">0 variables</span></div>
                       <label>Variables (JSON)<textarea id="repeater-variables" maxlength="40000" spellcheck="false" placeholder='{"host":"api.example.test","id":"42"}'></textarea></label>
-                      <button id="repeater-apply-variables" class="secondary-button" type="submit" disabled>Apply session variables</button>
+                      <button id="repeater-apply-variables" class="secondary-button" type="submit" disabled>Apply variables</button>
                     </form>
+                    <details class="experiment-help"><summary>Request restrictions</summary><p class="experiment-privacy">Credentials are omitted and browser storage is isolated. Sensitive and transport-owned headers are rejected. History is ephemeral and never enters the evidence store.</p></details>
                   </div>
-                </details>
-              </div>
-              <div class="repeater-column">
-                <article class="experiment-card">
-                  <header><div><h2>Request</h2><p>Only explicit credential-free values are sent through the disposable page.</p></div><span id="repeater-request-badge" class="experiment-card-badge" data-kind="offline">Draft</span></header>
-                  <div class="experiment-body">
-                    <form id="repeater-request-form" class="experiment-form">
-                      <label>Request URL<input id="repeater-request-url" type="text" maxlength="8192" placeholder="https://{{host}}/path/{{id}}" autocomplete="off" /></label>
-                      <div class="experiment-form-row">
-                        <label>Method<input id="repeater-request-method" type="text" value="GET" maxlength="256" autocomplete="off" /></label>
-                        <label>Timeout (ms)<input id="repeater-request-timeout" type="number" value="15000" min="100" max="30000" step="100" /></label>
-                      </div>
-                      <label>Headers (JSON)<textarea id="repeater-request-headers" maxlength="20000" spellcheck="false" placeholder='{"accept":"application/json","x-run":"{{id}}"}'></textarea></label>
-                      <label>Body<textarea id="repeater-request-body" maxlength="65536" spellcheck="false" placeholder='{"id":"{{id}}"}'></textarea></label>
-                      <div id="repeater-variable-status" class="repeater-variable-status" role="status" aria-live="polite"><span class="repeater-variable-chip">No variables used</span></div>
-                      <div class="repeater-request-actions">
-                        <button id="repeater-send" class="trace-button repeater-send" type="submit" disabled>Send request</button>
-                        <button id="repeater-cancel" class="secondary-button" type="button" disabled>Cancel active</button>
-                        <button id="repeater-copy-resolved" class="secondary-button" type="button" disabled>Copy resolved</button>
-                      </div>
-                      <details class="experiment-help"><summary>Restrictions</summary><p class="experiment-privacy">Credentials are omitted and browser storage is isolated. Sensitive and transport-owned headers are rejected. History is ephemeral and never enters the evidence store.</p></details>
-                    </form>
-                  </div>
-                  <div class="repeater-active-strip"><span>Active execution</span><strong id="repeater-active-request">None</strong></div>
-                </article>
-              </div>
-              <div class="repeater-column">
-                <article class="experiment-card">
-                  <header><div><h2>Response</h2><p id="repeater-response-meta">Select a completed run to inspect its bounded response.</p></div><span id="repeater-response-badge" class="experiment-card-badge" data-kind="offline">No response</span></header>
+                  <footer class="repeater-request-footer">
+                    <div id="repeater-variable-status" class="repeater-variable-status" role="status" aria-live="polite"><span class="repeater-variable-chip">No variables used</span></div>
+                    <span id="repeater-active-request" class="repeater-active-request">No active request</span>
+                  </footer>
+                </section>
+
+                <section class="repeater-pane repeater-response-pane" aria-labelledby="repeater-response-heading">
+                  <header class="repeater-pane-head">
+                    <div><h2 id="repeater-response-heading">Response</h2><p id="repeater-response-meta">Select a completed run to inspect its bounded response.</p></div>
+                    <span id="repeater-response-badge" class="experiment-card-badge" data-kind="offline">No response</span>
+                  </header>
                   <div id="repeater-response" class="repeater-response experiment-empty">Send a request or choose one from history.</div>
-                </article>
-                <details class="experiment-card experiment-disclosure">
-                  <summary>Response comparison</summary><header><div><p>Status, latency, body digest, size, and response-header names.</p></div><span id="repeater-comparison-badge" class="experiment-card-badge" data-kind="offline">No comparison</span></header>
-                  <div class="experiment-body">
+                  <details class="repeater-comparison-drawer">
+                    <summary><span>Compare responses</span><span id="repeater-comparison-badge" class="experiment-card-badge" data-kind="offline">No comparison</span></summary>
                     <div class="repeater-compare-controls experiment-form">
                       <label>Baseline<select id="repeater-compare-baseline"></select></label>
                       <label>Current<select id="repeater-compare-current"></select></label>
-                      <button id="repeater-compare" class="secondary-button" type="button" disabled>Compare responses</button>
+                      <button id="repeater-compare" class="secondary-button" type="button" disabled>Compare</button>
                     </div>
-                  </div>
-                  <div id="repeater-comparison" class="experiment-empty">Complete two requests to compare their responses.</div>
-                </details>
-                <details class="experiment-card experiment-disclosure">
-                  <summary>Limits</summary>
-                  <div class="experiment-context-facts">
-                    <div class="experiment-context-fact"><span>History</span><strong>24 runs / 512 KiB</strong></div>
-                    <div class="experiment-context-fact"><span>Variables</span><strong>32 / 32 KiB</strong></div>
-                  </div>
-                  <div class="experiment-context-facts">
-                    <div class="experiment-context-fact"><span>Bodies</span><strong>64 KiB each</strong></div>
-                    <div class="experiment-context-fact"><span>Runtime</span><strong>30 seconds</strong></div>
-                  </div>
-                </details>
+                    <div id="repeater-comparison" class="experiment-empty">Complete two requests to compare their responses.</div>
+                  </details>
+                </section>
               </div>
+
+              <details class="repeater-history-drawer">
+                <summary><span>History</span><span id="repeater-history-badge" class="experiment-card-badge" data-kind="offline">0 runs</span><span id="repeater-history-bytes">0 / 512 KiB</span></summary>
+                <div class="repeater-history-toolbar">
+                  <div><span>Session storage</span><strong id="repeater-storage-state">Not allocated</strong></div>
+                  <div><span>Retained</span><strong id="repeater-history-usage">0 / 24</strong></div>
+                  <button id="repeater-history-prev" class="repeater-icon-button" type="button" aria-label="Previous Repeater request" title="Previous request" disabled>←</button>
+                  <button id="repeater-history-next" class="repeater-icon-button" type="button" aria-label="Next Repeater request" title="Next request" disabled>→</button>
+                  <button id="repeater-clear-history" class="secondary-button" type="button" disabled>Clear</button>
+                </div>
+                <div id="repeater-history" class="repeater-history" role="listbox" aria-label="Repeater request history"><div class="experiment-empty">No Repeater requests yet.</div></div>
+              </details>
             </div>
             <div id="object-workspace" class="experiment-workspace" hidden>
               <div class="experiment-column">

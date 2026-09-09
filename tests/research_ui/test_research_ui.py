@@ -1,4 +1,5 @@
 import hashlib
+import http.client
 import json
 import shutil
 import socket
@@ -361,13 +362,20 @@ class ResearchUiTests(unittest.TestCase):
                     urllib.request.urlopen(malformed_origin)
                 self.assertEqual(forbidden.exception.code, HTTPStatus.FORBIDDEN)
 
-                malformed_host = urllib.request.Request(
-                    f"{base_url}/api/debugger",
-                    headers={"Host": "127.0.0.1:not-a-port"},
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", server.server_port
                 )
-                with self.assertRaises(urllib.error.HTTPError) as forbidden:
-                    urllib.request.urlopen(malformed_host)
-                self.assertEqual(forbidden.exception.code, HTTPStatus.FORBIDDEN)
+                try:
+                    connection.request(
+                        "GET",
+                        "/api/debugger",
+                        headers={"Host": "127.0.0.1:not-a-port"},
+                    )
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, HTTPStatus.FORBIDDEN)
+                    response.read()
+                finally:
+                    connection.close()
             finally:
                 server.shutdown()
                 server.server_close()
@@ -1778,15 +1786,22 @@ process.stdout.write(JSON.stringify({
         self.assertIn('id="repeater-history"', html)
         self.assertIn('id="repeater-variable-form"', html)
         self.assertIn('id="repeater-comparison"', html)
+        self.assertIn('class="repeater-compose-bar"', html)
+        self.assertIn('class="repeater-split"', html)
+        self.assertIn('data-repeater-editor-tab="headers"', html)
+        self.assertIn('data-repeater-editor-tab="body"', html)
+        self.assertIn('data-repeater-editor-tab="settings"', html)
         self.assertIn("function isRepeater(repeater)", html)
         self.assertIn("function renderRepeater()", html)
         self.assertIn("function renderRepeaterVariableStatus()", html)
+        self.assertIn("function setRepeaterEditorTab", html)
+        self.assertIn("function setRepeaterResponseTab", html)
         self.assertIn("action: 'configure_repeater_variables'", html)
         self.assertIn("action: 'run_repeater_request'", html)
         self.assertIn("action: 'cancel_repeater_request'", html)
         self.assertIn("action: 'compare_repeater_history'", html)
         self.assertIn("action: 'clear_repeater_history'", html)
-        self.assertIn("24 runs / 512 KiB", html)
+        self.assertIn("0 / 512 KiB", html)
         self.assertIn("History is ephemeral and never enters the evidence store", html)
 
     def test_api_collection_exposes_atomic_hierarchy_scopes_import_and_execution(self) -> None:

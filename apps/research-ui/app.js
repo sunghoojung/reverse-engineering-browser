@@ -1162,6 +1162,35 @@
         }
       }
 
+      function setRepeaterEditorTab(tab, focus = false) {
+        if (!['headers', 'body', 'settings'].includes(tab)) return;
+        state.repeaterEditorTab = tab;
+        elements.repeaterEditorTabs.forEach(button => {
+          const selected = button.dataset.repeaterEditorTab === tab;
+          button.setAttribute('aria-selected', String(selected));
+          button.tabIndex = selected ? 0 : -1;
+          if (selected && focus) button.focus();
+        });
+        elements.repeaterEditorPanels.forEach(panel => {
+          panel.hidden = panel.dataset.repeaterEditorPanel !== tab;
+        });
+      }
+
+      function setRepeaterResponseTab(tab, focus = false) {
+        if (!['body', 'headers'].includes(tab)) return;
+        state.repeaterResponseTab = tab;
+        const buttons = [...elements.repeaterResponse.querySelectorAll('[data-repeater-response-tab]')];
+        buttons.forEach(button => {
+          const selected = button.dataset.repeaterResponseTab === tab;
+          button.setAttribute('aria-selected', String(selected));
+          button.tabIndex = selected ? 0 : -1;
+          if (selected && focus) button.focus();
+        });
+        elements.repeaterResponse.querySelectorAll('[data-repeater-response-panel]').forEach(panel => {
+          panel.hidden = panel.dataset.repeaterResponsePanel !== tab;
+        });
+      }
+
       function renderRepeaterVariableStatus() {
         let variables = {};
         let invalidVariables = false;
@@ -1262,7 +1291,11 @@
           experimentFact('Duration', `${response.duration_ms} ms`),
           experimentFact('Body', `${utf8ByteLength(response.body)} bytes${response.body_truncated ? ' · truncated' : ''}`)
         );
-        const headers = document.createElement('div'); headers.className = 'repeater-response-headers';
+        const headers = document.createElement('div');
+        headers.id = 'repeater-response-headers-panel';
+        headers.className = 'repeater-response-headers repeater-response-panel';
+        headers.dataset.repeaterResponsePanel = 'headers';
+        headers.setAttribute('role', 'tabpanel');
         if (response.headers.length) {
           headers.append(...response.headers.map(header => {
             const row = document.createElement('div'); row.className = 'repeater-response-header';
@@ -1270,9 +1303,41 @@
             return row;
           }));
         } else headers.append(textElement('div', 'experiment-empty', 'No response headers.'));
+        const bodyPanel = document.createElement('div');
+        bodyPanel.id = 'repeater-response-body-panel';
+        bodyPanel.className = 'repeater-response-panel';
+        bodyPanel.dataset.repeaterResponsePanel = 'body';
+        bodyPanel.setAttribute('role', 'tabpanel');
         const body = document.createElement('pre'); body.className = 'experiment-result-body';
         body.textContent = response.ok ? response.body || '(empty response body)' : response.error;
-        elements.repeaterResponse.replaceChildren(summary, headers, body);
+        bodyPanel.append(body);
+        const tabs = document.createElement('div');
+        tabs.className = 'repeater-response-tabs';
+        tabs.setAttribute('role', 'tablist');
+        tabs.setAttribute('aria-label', 'Response inspector');
+        [['body', 'Body'], ['headers', `Headers (${response.headers.length})`]].forEach(([tab, label]) => {
+          const button = textElement('button', 'repeater-response-tab', label);
+          button.type = 'button';
+          button.dataset.repeaterResponseTab = tab;
+          button.setAttribute('role', 'tab');
+          button.setAttribute('aria-controls', `repeater-response-${tab}-panel`);
+          button.addEventListener('click', () => setRepeaterResponseTab(tab));
+          button.addEventListener('keydown', event => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const responseTabs = [...tabs.querySelectorAll('[data-repeater-response-tab]')];
+            const current = responseTabs.indexOf(button);
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? responseTabs.length - 1
+              : (current + (event.key === 'ArrowRight' ? 1 : -1) + responseTabs.length) % responseTabs.length;
+            responseTabs[next].click();
+            responseTabs[next].focus();
+          });
+          tabs.append(button);
+        });
+        const view = document.createElement('div'); view.className = 'repeater-response-view';
+        view.append(bodyPanel, headers);
+        elements.repeaterResponse.replaceChildren(summary, tabs, view);
+        setRepeaterResponseTab(state.repeaterResponseTab);
         elements.repeaterResponseMeta.textContent = `run ${entry.id} · ${entry.resolved_request.method} ${entry.resolved_request.url} · ${response.headers.length} headers${response.headers_truncated ? ' · truncated' : ''}`;
         elements.repeaterResponseBadge.dataset.kind = response.ok ? '' : 'error';
         elements.repeaterResponseBadge.textContent = response.ok ? 'Complete' : entry.state.replaceAll('_', ' ');
@@ -1378,7 +1443,9 @@
         elements.repeaterVariableBadge.dataset.kind = contextReady ? '' : 'offline';
         elements.repeaterApplyVariables.disabled = !contextReady || active || working || state.debuggerActionPending;
         elements.repeaterVariables.disabled = !contextReady || active || working;
-        elements.repeaterRequestForm.querySelectorAll('input, textarea').forEach(field => { field.disabled = !contextReady || active || working; });
+        [elements.repeaterRequestUrl, elements.repeaterRequestMethod, elements.repeaterRequestTimeout,
+          elements.repeaterRequestHeaders, elements.repeaterRequestBody]
+          .forEach(field => { field.disabled = !contextReady || active || working; });
         elements.repeaterSend.disabled = !contextReady || active || working || state.debuggerActionPending;
         elements.repeaterCancel.disabled = !active || repeater?.state === 'cancelling';
         elements.repeaterRequestBadge.dataset.kind = active ? '' : contextReady ? '' : 'offline';
@@ -1386,7 +1453,8 @@
           : repeater?.state === 'running' ? 'Running' : 'Draft';
         elements.repeaterActiveRequest.textContent = repeater?.active_execution
           ? `run ${repeater.active_execution.execution_id} · ${repeater.active_execution.resolved_method} ${repeater.active_execution.resolved_url}`
-          : 'None';
+          : 'No active request';
+        setRepeaterEditorTab(state.repeaterEditorTab);
         renderRepeaterVariableStatus();
         renderRepeaterHistory(repeater);
         renderRepeaterResponse(repeater);
@@ -1921,6 +1989,7 @@
       }
 
       function renderExperiment() {
+        elements.experimentNotice.hidden = state.experimentMode === 'repeater' && !state.experimentError;
         elements.experimentModeButtons.forEach(button => {
           const selected = button.dataset.experimentMode === state.experimentMode;
           button.setAttribute('aria-selected', String(selected));
@@ -6473,6 +6542,10 @@
         setExperimentMode(button.dataset.experimentMode);
       }));
       enableTabKeyboardNavigation('.experiment-mode-tab');
+      elements.repeaterEditorTabs.forEach(button => button.addEventListener('click', () => {
+        setRepeaterEditorTab(button.dataset.repeaterEditorTab);
+      }));
+      enableTabKeyboardNavigation('.repeater-editor-tab');
       elements.objectCreate.addEventListener('click', () => runExperimentAction({
         action: 'create_request_interception_experiment'
       }));
@@ -6657,7 +6730,8 @@
         state.experimentError = null;
         renderRepeaterVariableStatus();
       });
-      elements.repeaterRequestForm.querySelectorAll('input, textarea').forEach(field => field.addEventListener('input', () => {
+      [elements.repeaterRequestUrl, elements.repeaterRequestMethod, elements.repeaterRequestTimeout,
+        elements.repeaterRequestHeaders, elements.repeaterRequestBody].forEach(field => field.addEventListener('input', () => {
         state.repeaterDraftDirty = true;
         state.experimentError = null;
         renderRepeaterVariableStatus();

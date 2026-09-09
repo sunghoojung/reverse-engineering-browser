@@ -958,8 +958,8 @@ process.stdout.write(JSON.stringify({
         self.assertIn('aria-label="Sources navigator"', html)
         self.assertIn(">Page</button>", html)
         self.assertIn(">Captured</button>", html)
-        self.assertIn(">Workspace</button>", html)
-        self.assertIn(">Overrides</button>", html)
+        self.assertNotIn(">Workspace</button>", html)
+        self.assertNotIn(">Overrides</button>", html)
         self.assertIn('aria-label="Source editor"', html)
         self.assertIn('aria-label="Debugger sidebar"', html)
         for pane in (
@@ -1001,6 +1001,48 @@ process.stdout.write(JSON.stringify({
             "function toggleLineBreakpoint(source, line, column, breakpoint)", html
         )
 
+    def test_source_sidebar_follows_connection_and_user_selection(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+        source = read_ui_sources()
+        start = source.index("      function renderSourceSidebar()")
+        end = source.index("      function renderDebuggerState()", start)
+        exercise = r"""
+const screen = {dataset: {}};
+const document = {querySelector: () => screen};
+const state = {debuggerSession: {state: 'unavailable'}, sourceSidebarOpen: null};
+const elements = {sourceSidebar: {dataset: {}}, sourceSidebarToggle: {setAttribute(key, value) { this[key] = value; }}};
+const results = [];
+function capture() {
+  renderSourceSidebar();
+  results.push([elements.sourceSidebar.hidden, elements.sourceSidebar.dataset.attached,
+    elements.sourceSidebarToggle['aria-expanded'], elements.sourceSidebarToggle.textContent]);
+}
+capture();
+state.sourceSidebarOpen = true; capture();
+state.sourceSidebarOpen = null; state.debuggerSession.state = 'running'; capture();
+state.sourceSidebarOpen = false; capture();
+state.debuggerSession.state = 'unavailable'; capture();
+process.stdout.write(JSON.stringify(results));
+"""
+        result = subprocess.run(
+            [node, "-e", source[start:end] + exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(result.stdout),
+            [
+                [True, "false", "false", "Details"],
+                [False, "false", "true", "Details"],
+                [False, "true", "true", "Debugger"],
+                [True, "true", "false", "Debugger"],
+                [True, "false", "false", "Details"],
+            ],
+        )
+
     def test_source_syntax_highlighter_is_bounded_stateful_and_text_preserving(
         self,
     ) -> None:
@@ -1008,12 +1050,8 @@ process.stdout.write(JSON.stringify({
         if node is None:
             self.skipTest("Node.js is not installed")
 
-        html = read_ui_sources()
-        start = html.index("      const SOURCE_HIGHLIGHT_TOKEN_LIMIT")
-        end = html.index("      function appendSourceSyntax")
-        model = html[start:end]
+        model = (UI_DIRECTORY / "source_syntax.js").read_text(encoding="utf-8")
         exercise = r"""
-function sourceName(source) { return source.url?.split('/').at(-1) || ''; }
 const javascriptSource = {kind: 'javascript', mime_type: 'text/javascript', url: 'app.js'};
 const javascript = createSourceTokenizer(javascriptSource);
 const javascriptLines = [

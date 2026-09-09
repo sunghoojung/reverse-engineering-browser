@@ -719,6 +719,8 @@
         font: 11px var(--mono);
       }
       .source-tool {
+        flex-shrink: 0;
+        white-space: nowrap;
         min-width: 25px;
         height: 24px;
         padding: 0 6px;
@@ -1726,3 +1728,14 @@
       .memory-advanced { border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
       .memory-advanced > summary { padding: 10px 0; cursor: pointer; color: var(--muted); }
       .memory-advanced-fields { display: grid; gap: 10px; padding-bottom: 12px; }
+
+      #screen-sources[data-sidebar-open="false"]:not([hidden]) { grid-template-columns: 252px minmax(0, 1fr); }
+      @media (max-width: 900px) {
+        #screen-sources:not([hidden]) { position: relative; grid-template-columns: 180px minmax(0, 1fr); }
+        #screen-sources[data-sidebar-open="false"]:not([hidden]) { grid-template-columns: 180px minmax(0, 1fr); }
+        .sources-debugger:not([hidden]) { display: grid; position: absolute; z-index: 4; top: 68px; right: 0; bottom: 0; width: min(340px, 100%); border-left: 1px solid var(--line); }
+      }
+
+      .sources-debugger[data-attached="false"] .debug-controls,
+      .sources-debugger[data-attached="false"] .debug-panes > :not(#artifact-details) { display: none; }
+      .sources-debugger[data-attached="false"] { grid-template-rows: auto minmax(0, 1fr); }

@@ -9,5 +9,12 @@ def read_ui_sources() -> str:
     directory = UI_DIRECTORY
     return "\n".join(
         (directory / name).read_text(encoding="utf-8")
-        for name in ("index.html", "app.css", "app_state.js", "evidence_models.js", "app.js")
+        for name in (
+            "index.html",
+            "app.css",
+            "app_state.js",
+            "evidence_models.js",
+            "source_syntax.js",
+            "app.js",
+        )
     )

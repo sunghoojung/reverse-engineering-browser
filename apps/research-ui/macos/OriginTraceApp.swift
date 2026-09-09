@@ -81,7 +81,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent("app.css")),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/app.js", "/app_state.js", "/evidence_models.js":
+      case "/app.js", "/app_state.js", "/evidence_models.js", "/source_syntax.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]

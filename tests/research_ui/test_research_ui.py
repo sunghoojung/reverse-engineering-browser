@@ -2673,6 +2673,26 @@ process.stdout.write(JSON.stringify({
         self.assertIn(
             "configureApplicationIcon(resourcesURL: resourcesURL)", application
         )
+        self.assertIn("launchBraveBrowser()", application)
+        self.assertIn(
+            'withBundleIdentifier: "com.brave.Browser"', application
+        )
+        self.assertIn(
+            "configuration.activates = true",
+            application,
+        )
+        self.assertIn(
+            "NSWorkspace.shared.openApplication(at: braveURL, configuration: configuration)",
+            application,
+        )
+        self.assertIn(
+            "runningApplication.activate(options: [.activateAllWindows])",
+            application,
+        )
+        self.assertIn(
+            "if !smokeTest {\n      NSApp.activate(ignoringOtherApps: true)\n      launchBraveBrowser()",
+            application,
+        )
         self.assertIn('appendingPathComponent("OriginTrace.icns")', application)
         self.assertIn("NSApp.applicationIconImage = icon", application)
         self.assertNotIn("makeApplicationIcon", application)

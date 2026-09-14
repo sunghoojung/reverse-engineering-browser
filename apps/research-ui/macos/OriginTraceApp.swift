@@ -2533,6 +2533,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     NSApp.setActivationPolicy(.regular)
     if !smokeTest {
       NSApp.activate(ignoringOtherApps: true)
+      launchBraveBrowser()
     }
     let localApplicationURL = URL(string: "reb://app/index.html?native=1")!
     let requestedUIURL = configuredUIURL()
@@ -2545,6 +2546,32 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
     true
+  }
+
+  private func launchBraveBrowser() {
+    guard let braveURL = NSWorkspace.shared.urlForApplication(
+      withBundleIdentifier: "com.brave.Browser"
+    ) else {
+      NSLog("Origin Trace could not launch Brave Browser because it is not installed.")
+      return
+    }
+
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.activates = true
+    NSWorkspace.shared.openApplication(at: braveURL, configuration: configuration) {
+      runningApplication, error in
+      if let error {
+        NSLog("Origin Trace could not launch Brave Browser: \(error.localizedDescription)")
+        return
+      }
+      guard let runningApplication else {
+        NSLog("Origin Trace could not launch Brave Browser.")
+        return
+      }
+      if !runningApplication.activate(options: [.activateAllWindows]) {
+        NSLog("Origin Trace could not bring Brave Browser to the foreground.")
+      }
+    }
   }
 
   func webView(

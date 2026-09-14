@@ -1,7 +1,36 @@
-# Reverse Engineering Browser
+<h1 align="center">Reverse Engineering Browser</h1>
 
-Reverse Engineering Browser is a local-first research browser and macOS
-workspace for inspecting authorized web applications.
+<p align="center">
+  <strong>See the browser evidence behind fingerprints, requests, scripts, and runtime behavior.</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/sunghoojung/reverse-engineering-browser/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/sunghoojung/reverse-engineering-browser/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/sunghoojung/reverse-engineering-browser/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/sunghoojung/reverse-engineering-browser?label=release"></a>
+  <a href="#build-the-custom-brave-browser-for-the-first-time"><img alt="Platform: macOS on Apple silicon" src="https://img.shields.io/badge/platform-macOS%20%7C%20Apple%20silicon-007AFF"></a>
+</p>
+
+<p align="center">
+  A local-first research browser and macOS workspace for inspecting authorized
+  web applications.
+</p>
+
+## v0.1.3 released
+
+Origin Trace now opens as a clean production workspace with no bundled demo
+evidence. Demo rendering is limited to explicit development and test paths.
+
+[Download Origin Trace v0.1.3](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.3/Origin-Trace-v0.1.3-macos.zip)
+· [Release notes](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.1.3)
+· [Full changelog](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.1.2...v0.1.3)
+
+### Feature changelog
+
+- **v0.1.3:** removed sample requests, events, and Canvas output from the
+  production app bundle so every session starts with real captured evidence.
+- **v0.1.2:** added the Fingerprinting workspace with Canvas image output, a
+  local replay preview, captured drawing functions, fingerprint activity, event
+  details, filters, and request correlation.
 
 ## Features
 
@@ -34,9 +63,10 @@ workspace for inspecting authorized web applications.
 
 ### Download the compiled macOS apps
 
-1. Download `Brave-Browser-Development-v0.1.1-macos-arm64.zip` and
-   `Origin-Trace-v0.1.1-macos.zip` from
-   [GitHub Releases](https://github.com/sunghoojung/reverse-engineering-browser/releases/latest).
+1. Download
+   [Origin Trace v0.1.3](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.3/Origin-Trace-v0.1.3-macos.zip)
+   and the
+   [Brave Browser Development preview](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/brave-build-20260914/Brave-Browser-Development-brave-build-20260914-macos-arm64.zip).
 2. Unzip both files.
 3. Use the compiled Brave executable as `REB_BRAVE_BINARY` when starting a live
    session from the repository, as shown below.

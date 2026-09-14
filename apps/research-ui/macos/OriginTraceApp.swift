@@ -21,6 +21,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let analystRunnerCoreURL: URL
   private let decoderService: NativeDecoderService
   private let brokerSocketURL: URL?
+  private let demoEvidenceEnabled: Bool
   private let apiCollectionLock = NSLock()
   private let localAnalystLock = NSLock()
   private let analystRunnerLock = NSLock()
@@ -39,7 +40,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     analystRunnerURL: URL,
     analystRunnerCoreURL: URL,
     decoderExecutableURL: URL,
-    brokerSocketURL: URL?
+    brokerSocketURL: URL?,
+    demoEvidenceEnabled: Bool
   ) {
     self.indexURL = indexURL
     self.eventStoreURL = eventStoreURL
@@ -52,6 +54,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     self.analystRunnerCoreURL = analystRunnerCoreURL
     decoderService = NativeDecoderService(executableURL: decoderExecutableURL)
     self.brokerSocketURL = brokerSocketURL
+    self.demoEvidenceEnabled = demoEvidenceEnabled
   }
 
   deinit {
@@ -2419,7 +2422,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
 
   private func captureMode() -> String {
     if brokerSocketURL != nil { return "live" }
-    return FileManager.default.fileExists(atPath: eventStoreURL.path) ? "demo" : "idle"
+    if demoEvidenceEnabled { return "demo" }
+    return FileManager.default.fileExists(atPath: eventStoreURL.path) ? "live" : "idle"
   }
 
   private func sendError(_ message: String, status: Int, to task: WKURLSchemeTask) {
@@ -2502,7 +2506,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       analystRunnerURL: analystRunnerURL,
       analystRunnerCoreURL: analystRunnerCoreURL,
       decoderExecutableURL: decoderExecutableURL,
-      brokerSocketURL: configuredBrokerSocket()
+      brokerSocketURL: configuredBrokerSocket(),
+      demoEvidenceEnabled: CommandLine.arguments.contains("--demo-evidence")
     )
     contentHandler = handler
 

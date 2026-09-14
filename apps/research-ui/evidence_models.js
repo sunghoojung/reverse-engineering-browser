@@ -55,6 +55,14 @@
         'unknown', 'network_response', 'dynamic_javascript', 'webassembly_compile',
         'webassembly_module', 'webassembly_instantiate'
       ]);
+      const canvasReplayProperties = new Set([
+        'fillStyle', 'strokeStyle', 'font', 'textBaseline', 'textAlign',
+        'globalAlpha', 'lineWidth', 'lineCap', 'lineJoin'
+      ]);
+      const canvasReplayMethods = new Set([
+        'fillRect', 'strokeRect', 'clearRect', 'fillText', 'strokeText',
+        'beginPath', 'closePath', 'moveTo', 'lineTo', 'arc', 'rect', 'fill', 'stroke'
+      ]);
       const artifactIdentifierFields = [
         'artifact_id', 'session_id', 'navigation_id', 'frame_id', 'parent_artifact_id', 'creator_event_id'
       ];
@@ -202,7 +210,38 @@
           body.count === body.events.length &&
           (body.capture_mode === undefined || ['live', 'demo', 'idle'].includes(body.capture_mode)) &&
           (body.broker_connected === undefined || typeof body.broker_connected === 'boolean') &&
+          (body.canvas_render_captures === undefined ||
+            (body.capture_mode === 'demo' &&
+              Array.isArray(body.canvas_render_captures) &&
+              body.canvas_render_captures.length <= 16 &&
+              body.canvas_render_captures.every(isCanvasRenderCapture))) &&
           body.events.every(isBrokerEvent);
+      }
+
+      function isCanvasRenderArgument(value) {
+        return (typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 1_000_000) ||
+          isBoundedText(value, 1024);
+      }
+
+      function isCanvasRenderCall(call) {
+        if (!isPlainObject(call) || !Array.isArray(call.arguments) || call.arguments.length > 8 ||
+            !call.arguments.every(isCanvasRenderArgument) ||
+            (call.property !== undefined && typeof call.property !== 'boolean')) return false;
+        if (call.property === true) {
+          return canvasReplayProperties.has(call.name) && call.arguments.length === 1;
+        }
+        return canvasReplayMethods.has(call.name);
+      }
+
+      function isCanvasRenderCapture(capture) {
+        return isPlainObject(capture) && isBoundedText(capture.id, 128) &&
+          capture.context === '2D' && isSafeIntegerInRange(capture.width, 1, 4096) &&
+          isSafeIntegerInRange(capture.height, 1, 4096) &&
+          capture.width * capture.height <= 16 * 1024 * 1024 &&
+          isBoundedText(capture.readback, 64) &&
+          (capture.operationHash === null || /^[0-9a-f]{8,64}$/.test(capture.operationHash)) &&
+          Array.isArray(capture.calls) && capture.calls.length <= 128 &&
+          capture.calls.every(isCanvasRenderCall);
       }
 
       function isArtifact(artifact) {

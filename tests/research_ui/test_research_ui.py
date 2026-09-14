@@ -18,6 +18,7 @@ from evidence_store import (
     is_request_signal_profile,
 )
 from server import (
+    DEMO_CANVAS_RENDER_CAPTURES,
     MAX_EVENT_JSON_BYTES,
     LoopbackThreadingHTTPServer,
     ResearchHandler,
@@ -225,6 +226,7 @@ class ResearchUiTests(unittest.TestCase):
             ResearchHandler.event_store = store
             ResearchHandler.artifact_store = artifact_store
             ResearchHandler.broker_socket = None
+            ResearchHandler.demo_evidence = False
             server = ThreadingHTTPServer(("127.0.0.1", 0), ResearchHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -233,7 +235,8 @@ class ResearchUiTests(unittest.TestCase):
                 with urllib.request.urlopen(url) as response:
                     body = json.load(response)
                     self.assertEqual(body["count"], 1)
-                    self.assertEqual(body["capture_mode"], "demo")
+                    self.assertEqual(body["capture_mode"], "idle")
+                    self.assertNotIn("canvas_render_captures", body)
                     etag = response.headers["ETag"]
 
                 request = urllib.request.Request(url, headers={"If-None-Match": etag})
@@ -259,6 +262,32 @@ class ResearchUiTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join()
+
+    def test_demo_evidence_is_explicit_and_served_outside_the_app_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = root / "events.jsonl"
+            store.write_text('{"sequence_number":"1"}\n', encoding="utf-8")
+            ResearchHandler.ui_directory = UI_DIRECTORY
+            ResearchHandler.event_store = store
+            ResearchHandler.broker_socket = None
+            ResearchHandler.demo_evidence = True
+            server = ThreadingHTTPServer(("127.0.0.1", 0), ResearchHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                url = f"http://127.0.0.1:{server.server_port}/api/events?limit=10"
+                with urllib.request.urlopen(url) as response:
+                    body = json.load(response)
+                self.assertEqual(body["capture_mode"], "demo")
+                self.assertEqual(
+                    body["canvas_render_captures"], DEMO_CANVAS_RENDER_CAPTURES
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+                ResearchHandler.demo_evidence = False
 
     def test_debugger_api_exposes_only_the_bounded_bridge_surface(self) -> None:
         class FakeDebugger:
@@ -2440,6 +2469,18 @@ const legacyV2 = (overrides = {}) => {
   return event;
 };
 const v3 = (overrides = {}) => ({...v2(), protocol_version: 3, tab_id: 17, ...overrides});
+const demoCapture = {
+  id: 'canvas#1', context: '2D', width: 240, height: 60, readback: 'toDataURL',
+  operationHash: 'a87c19e4',
+  calls: [{name: 'fillRect', arguments: [1, 2, 3, 4]}]
+};
+const demoResponse = {
+  count: 1,
+  events: [v2({category: 'canvas', type: 'api_call', payload_size: 9, payload: '746f4461746155524c'})],
+  capture_mode: 'demo',
+  broker_connected: true,
+  canvas_render_captures: [demoCapture]
+};
 const oneSidedContext = legacyV2();
 oneSidedContext.browser_context_id_high = "1";
 const v1 = (overrides = {}) => ({
@@ -2544,6 +2585,12 @@ process.stdout.write(JSON.stringify({
   unsupportedFlagsRejected: !isBrokerEvent(v2({flags: 8})),
   v1Accepted: isBrokerEvent(v1()),
   unsafeV1Rejected: !isBrokerEvent(v1({session_id: 9007199254740992})),
+  demoRenderAccepted: isBrokerResponse(demoResponse),
+  liveDemoRenderRejected: !isBrokerResponse({...demoResponse, capture_mode: 'live'}),
+  unsafeDemoMethodRejected: !isBrokerResponse({...demoResponse,
+    canvas_render_captures: [{...demoCapture, calls: [{name: 'drawImage', arguments: ['secret']}]}]}),
+  oversizedDemoCanvasRejected: !isBrokerResponse({...demoResponse,
+    canvas_render_captures: [{...demoCapture, width: 4097}]}),
   requestIds: requests.map(request => request.id),
   status: requests[0].status,
   resourceType: requests[0].type,
@@ -2610,6 +2657,10 @@ process.stdout.write(JSON.stringify({
                 "unsupportedFlagsRejected": True,
                 "v1Accepted": True,
                 "unsafeV1Rejected": True,
+                "demoRenderAccepted": True,
+                "liveDemoRenderRejected": True,
+                "unsafeDemoMethodRejected": True,
+                "oversizedDemoCanvasRejected": True,
                 "requestIds": ["S1:R10:81", "S2:R10:81"],
                 "status": 200,
                 "resourceType": "xhr",
@@ -2781,7 +2832,11 @@ process.stdout.write(JSON.stringify({
         build_script = (
             Path(__file__).parents[2] / "scripts" / "build-research-app.sh"
         ).read_text(encoding="utf-8")
+        workflows = (Path(__file__).parents[2] / "mk" / "workflows.mk").read_text(
+            encoding="utf-8"
+        )
         app_state = (UI_DIRECTORY / "app_state.js").read_text(encoding="utf-8")
+        app_script = (UI_DIRECTORY / "app.js").read_text(encoding="utf-8")
 
         self.assertIn(
             "configureApplicationIcon(resourcesURL: resourcesURL)", application
@@ -2899,12 +2954,22 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn('"${resources_path}/request-signals.jsonl"', build_script)
         self.assertIn('return resourcesURL.appendingPathComponent("events.jsonl")', application)
         self.assertIn('return "live"', application)
-        self.assertIn('? "demo" : "idle"', application)
+        self.assertIn('CommandLine.arguments.contains("--demo-evidence")', application)
+        self.assertIn('if demoEvidenceEnabled { return "demo" }', application)
         self.assertIn("const sampleRequests = [];", app_state)
         self.assertIn("const sampleEvidence = [];", app_state)
         self.assertIn("const sampleArtifacts = [];", app_state)
         self.assertNotIn("checkout.acme.test", app_state)
         self.assertNotIn("sample-preview-not-stored", app_state)
+        self.assertNotIn("Cwm fjordbank", app_script)
+        app_recipe = workflows.split("\napp: app-build\n", 1)[1].split("\n\n", 1)[0]
+        demo_recipe = workflows.split("\napp-demo: app-build e2e\n", 1)[1].split(
+            "\n\n", 1
+        )[0]
+        self.assertNotIn("--store", app_recipe)
+        self.assertNotIn("--demo-evidence", app_recipe)
+        self.assertIn("--demo-evidence", demo_recipe)
+        self.assertIn("--store", demo_recipe)
         self.assertIn('"${trace_document_source}"', build_script)
         self.assertIn("iconutil -c icns", build_script)
 

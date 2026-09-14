@@ -39,9 +39,14 @@ On macOS, build and open the native application window:
 make app
 ```
 
-The application uses a native WebKit shell and reads its bundled local evidence
-store directly. It has no browser address bar and does not require a localhost
-server. The build output is `build/Origin Trace.app`.
+The application uses a native WebKit shell and reads configured local evidence
+directly. It has no browser address bar, does not require a localhost server,
+and ships with no evidence records or Canvas demo fixture. The build output is
+`build/Origin Trace.app`.
+
+Use `make app-demo` only when deterministic development evidence is wanted.
+That target supplies generated stores and drawing fixtures outside the packaged
+application.
 
 For a live custom-Brave capture, run:
 
@@ -81,9 +86,9 @@ Preview, Response, Initiator, Timing, and Signals inspectors. The first-class
 Fingerprinting workspace presents Canvas, WebGL, Web Audio, Navigator,
 Permissions, Storage, and WebRTC activity. It opens to compact Canvas render
 cards with image comparison, deterministic local replay, ordered drawing
-functions, and stable evidence identity. The demo draws both previews from its
-visible bounded call sequence; live readback-only evidence explicitly reports
-that pixels and earlier calls were not retained.
+functions, and stable evidence identity. The explicit development demo draws
+both previews from its visible bounded call sequence; live readback-only
+evidence explicitly reports that pixels and earlier calls were not retained.
 
 Activity presents up to 500 matching native operations newest first with
 per-family filters and detailed identifiers behind a disclosure. Request link

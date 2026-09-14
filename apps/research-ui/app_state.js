@@ -71,6 +71,7 @@
 
       const state = {
         events: [],
+        canvasRenderCaptures: [],
         nativeRequests: [],
         requests: standalonePreview ? [...sampleRequests] : [],
         artifacts: standalonePreview ? [...sampleArtifacts] : [],

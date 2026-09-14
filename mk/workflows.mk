@@ -72,15 +72,20 @@ artifact-socket-e2e: artifact-producer artifact-receiver
 
 ui: e2e heap-snapshot decoder
 	python3 apps/research-ui/server.py \
+		--demo-evidence \
 		--store $(BUILD_DIR)/sessions/demo.jsonl \
 		--trace-store $(BUILD_DIR)/sessions/origin-trace.jsonl \
 		--signal-store $(BUILD_DIR)/sessions/request-signals.jsonl
 
-app-build: e2e heap-snapshot decoder
+app-build: heap-snapshot decoder
 	./scripts/build-research-app.sh
 
 app: app-build
+	open "$(CURDIR)/$(BUILD_DIR)/Origin Trace.app"
+
+app-demo: app-build e2e
 	open "$(CURDIR)/$(BUILD_DIR)/Origin Trace.app" --args \
+		--demo-evidence \
 		--store "$(CURDIR)/$(BUILD_DIR)/sessions/demo.jsonl" \
 		--trace-store "$(CURDIR)/$(BUILD_DIR)/sessions/origin-trace.jsonl" \
 		--signal-store "$(CURDIR)/$(BUILD_DIR)/sessions/request-signals.jsonl" \

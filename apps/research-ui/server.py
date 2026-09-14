@@ -89,6 +89,45 @@ PUBLIC_ARTIFACT_FIELDS = (
     "sha256",
     "sensitive",
 )
+DEMO_CANVAS_RENDER_CAPTURES = [
+    {
+        "id": "canvas#1",
+        "context": "2D",
+        "width": 240,
+        "height": 60,
+        "readback": "toDataURL",
+        "operationHash": "a87c19e4",
+        "calls": [
+            {"name": "fillStyle", "arguments": ["#f60"], "property": True},
+            {"name": "fillRect", "arguments": [125, 1, 62, 20]},
+            {"name": "fillStyle", "arguments": ["#069"], "property": True},
+            {
+                "name": "font",
+                "arguments": ["11pt Times New Roman"],
+                "property": True,
+            },
+            {
+                "name": "textBaseline",
+                "arguments": ["alphabetic"],
+                "property": True,
+            },
+            {
+                "name": "fillText",
+                "arguments": ["Cwm fjordbank gly 😃", 2, 15],
+            },
+            {
+                "name": "fillStyle",
+                "arguments": ["rgba(102, 204, 0, 0.7)"],
+                "property": True,
+            },
+            {"name": "font", "arguments": ["18pt Arial"], "property": True},
+            {
+                "name": "fillText",
+                "arguments": ["Cwm fjordbank gly 😃", 4, 45],
+            },
+        ],
+    }
+]
 
 
 class LoopbackThreadingHTTPServer(ThreadingHTTPServer):
@@ -116,6 +155,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
     )
     local_analyst_runner = LocalAnalystRunner(Path(__file__).resolve().parent)
     decoder_service = DecoderService(Path("build/reb-decoder").resolve())
+    demo_evidence = False
     broker_socket: Optional[Path] = None
     artifact_socket: Optional[Path] = None
     debugger: Optional[DebuggerBridge] = None
@@ -153,7 +193,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     "local_analyst_runner_available": self.local_analyst_runner.available(),
                     "decoder_available": self.decoder_service.available(),
                     "broker_connected": self.broker_connected(),
-                    "capture_mode": "live" if self.broker_socket is not None else "demo",
+                    "capture_mode": self.capture_mode(),
                     "debugger_state": self.debugger_state(),
                 }
             )
@@ -408,8 +448,10 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             try:
                 limit = max(1, min(int(query.get("limit", ["500"])[0]), 5000))
                 broker_connected = self.broker_connected()
+                capture_mode = self.capture_mode()
                 etag = self.resource_etag(
-                    self.event_store, f"{int(broker_connected)}-{limit}"
+                    self.event_store,
+                    f"{int(broker_connected)}-{capture_mode}-{limit}",
                 )
                 if self.send_not_modified(etag):
                     return
@@ -419,15 +461,15 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     {"error": str(exception)}, HTTPStatus.INTERNAL_SERVER_ERROR
                 )
                 return
-            self.send_json(
-                {
-                    "count": len(events),
-                    "events": events,
-                    "broker_connected": broker_connected,
-                    "capture_mode": "live" if self.broker_socket is not None else "demo",
-                },
-                etag=etag,
-            )
+            response = {
+                "count": len(events),
+                "events": events,
+                "broker_connected": broker_connected,
+                "capture_mode": capture_mode,
+            }
+            if capture_mode == "demo":
+                response["canvas_render_captures"] = DEMO_CANVAS_RENDER_CAPTURES
+            self.send_json(response, etag=etag)
             return
         if parsed.path == "/api/artifacts":
             query = parse_qs(parsed.query)
@@ -974,6 +1016,11 @@ class ResearchHandler(SimpleHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:
         return
 
+    def capture_mode(self) -> str:
+        if self.broker_socket is not None:
+            return "live"
+        return "demo" if self.demo_evidence else "idle"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the local REB research UI")
@@ -1009,6 +1056,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--devtools-active-port", type=Path)
     parser.add_argument("--debugger-transport", type=Path)
     parser.add_argument("--capture-network-content", action="store_true")
+    parser.add_argument("--demo-evidence", action="store_true")
     parser.add_argument("--endpoint-file", type=Path)
     return parser.parse_args()
 
@@ -1030,6 +1078,7 @@ def main() -> int:
         Path(__file__).resolve().parent
     )
     ResearchHandler.decoder_service = DecoderService(args.decoder.resolve())
+    ResearchHandler.demo_evidence = args.demo_evidence
     ResearchHandler.broker_socket = args.socket.resolve() if args.socket else None
     ResearchHandler.artifact_socket = (
         args.artifact_socket.resolve() if args.artifact_socket else None

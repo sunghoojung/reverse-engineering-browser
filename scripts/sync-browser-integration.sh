@@ -211,14 +211,16 @@ else
   brave_stack_refreshed=1
 fi
 chromium_stack_refreshed=0
-if preflight_patches "${chromium_directory}" "Chromium " "${chromium_patch_files[@]}"; then
-  :
-else
-  preflight_status=$?
-  if ((preflight_status != 10 && preflight_status != 11)); then
-    exit "${preflight_status}"
+if ((${#chromium_patch_files[@]} > 0)); then
+  if preflight_patches "${chromium_directory}" "Chromium " "${chromium_patch_files[@]}"; then
+    :
+  else
+    preflight_status=$?
+    if ((preflight_status != 10 && preflight_status != 11)); then
+      exit "${preflight_status}"
+    fi
+    chromium_stack_refreshed=1
   fi
-  chromium_stack_refreshed=1
 fi
 
 if [[ -d "${overlay_directory}" ]]; then
@@ -228,7 +230,7 @@ fi
 if ((brave_stack_refreshed == 0)); then
   apply_patches "${brave_directory}" "" "${brave_patch_files[@]}"
 fi
-if ((chromium_stack_refreshed == 0)); then
+if ((${#chromium_patch_files[@]} > 0 && chromium_stack_refreshed == 0)); then
   apply_patches "${chromium_directory}" "chromium/" "${chromium_patch_files[@]}"
 fi
 

@@ -10,7 +10,20 @@ readonly sync_script="${repository_root}/scripts/sync-browser-integration.sh"
 
 test_root="$(mktemp -d)"
 readonly test_root
-trap 'rm -rf "${test_root}"' EXIT
+cleanup() {
+  local status
+  local log_file
+  status="$1"
+  if ((status != 0)); then
+    while IFS= read -r log_file; do
+      echo "--- ${log_file#"${test_root}/"}" >&2
+      sed -n '1,160p' "${log_file}" >&2
+    done < <(find "${test_root}" -type f -name '*.err' -print | sort)
+  fi
+  rm -rf "${test_root}"
+  exit "${status}"
+}
+trap 'cleanup $?' EXIT
 git -C "${test_root}" init -q
 
 readonly brave_directory="${test_root}/src/brave"

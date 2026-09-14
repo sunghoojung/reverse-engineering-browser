@@ -13,6 +13,14 @@ make app
 This builds deterministic demo evidence, packages `build/Origin Trace.app`,
 and opens the native application. The bundle contains its UI assets and native
 helpers. It does not need the Python development server for stored evidence.
+Each normal Origin Trace launch, including reopening it from the Dock, also
+opens the custom Brave Browser Development app, then restores the Origin Trace
+window and keeps it in front. Origin Trace looks beside its own app bundle, in
+the local `browser/worktree/` build output, and among registered applications. A
+`REB_BRAVE_BINARY` override takes precedence. This does not start a live capture
+session. When custom Brave is already running, clicking Origin Trace leaves the
+browser untouched and brings Origin Trace forward once. Use `make live` for the
+pinned custom Brave capture workflow.
 
 For browser development:
 

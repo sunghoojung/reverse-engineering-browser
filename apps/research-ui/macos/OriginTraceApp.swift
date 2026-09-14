@@ -2532,7 +2532,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
 
     NSApp.setActivationPolicy(.regular)
     if !smokeTest {
-      NSApp.activate(ignoringOtherApps: true)
+      presentOriginTraceWindow()
+      launchCustomBraveBrowser()
     }
     let localApplicationURL = URL(string: "reb://app/index.html?native=1")!
     let requestedUIURL = configuredUIURL()
@@ -2545,6 +2546,121 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
     true
+  }
+
+  func applicationDidBecomeActive(_ notification: Notification) {
+    guard !smokeTest else { return }
+    presentOriginTraceWindow()
+  }
+
+  func applicationShouldHandleReopen(
+    _ sender: NSApplication,
+    hasVisibleWindows: Bool
+  ) -> Bool {
+    guard !smokeTest else { return true }
+    presentOriginTraceWindow()
+    launchCustomBraveBrowser()
+    return true
+  }
+
+  private let customBraveBundleIdentifier = "com.brave.Browser.development"
+  private let customBraveApplicationName = "Brave Browser Development.app"
+
+  private func launchCustomBraveBrowser() {
+    guard NSRunningApplication.runningApplications(
+      withBundleIdentifier: customBraveBundleIdentifier
+    ).isEmpty else {
+      return
+    }
+
+    guard let braveURL = customBraveApplicationURL() else {
+      NSLog(
+        "Origin Trace could not find Brave Browser Development. "
+          + "Place it beside Origin Trace or set REB_BRAVE_BINARY."
+      )
+      return
+    }
+
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.activates = false
+    NSWorkspace.shared.openApplication(at: braveURL, configuration: configuration) {
+      [weak self] _, error in
+      if let error {
+        NSLog(
+          "Origin Trace could not launch Brave Browser Development: "
+            + error.localizedDescription
+        )
+      }
+      DispatchQueue.main.async {
+        self?.presentOriginTraceWindow()
+      }
+    }
+  }
+
+  private func presentOriginTraceWindow() {
+    guard let window else { return }
+    if window.isMiniaturized {
+      window.deminiaturize(nil)
+    }
+    NSApp.activate(ignoringOtherApps: true)
+    window.makeKeyAndOrderFront(nil)
+  }
+
+  private func customBraveApplicationURL() -> URL? {
+    var candidates: [URL] = []
+    if let configuredBinary = ProcessInfo.processInfo.environment["REB_BRAVE_BINARY"],
+      !configuredBinary.isEmpty
+    {
+      let executableURL = URL(fileURLWithPath: configuredBinary).standardizedFileURL
+      candidates.append(
+        executableURL.deletingLastPathComponent()
+          .deletingLastPathComponent()
+          .deletingLastPathComponent()
+      )
+    }
+
+    let applicationDirectory = Bundle.main.bundleURL.deletingLastPathComponent()
+    let siblingApplication = applicationDirectory.appendingPathComponent(
+      customBraveApplicationName,
+      isDirectory: true
+    )
+    candidates.append(siblingApplication)
+
+    let repositoryRoot = applicationDirectory.deletingLastPathComponent()
+    candidates.append(
+      repositoryRoot.appendingPathComponent(
+        "browser/worktree/src/out/Component_arm64/\(customBraveApplicationName)",
+        isDirectory: true
+      )
+    )
+    candidates.append(
+      repositoryRoot.appendingPathComponent(
+        "build/releases/staging/\(customBraveApplicationName)",
+        isDirectory: true
+      )
+    )
+
+    for candidate in candidates where isCustomBraveApplication(candidate) {
+      return candidate
+    }
+
+    guard let registeredApplication = NSWorkspace.shared.urlForApplication(
+      withBundleIdentifier: customBraveBundleIdentifier
+    ), isCustomBraveApplication(registeredApplication) else {
+      return nil
+    }
+    return registeredApplication
+  }
+
+  private func isCustomBraveApplication(_ applicationURL: URL) -> Bool {
+    guard applicationURL.pathExtension == "app",
+      let bundle = Bundle(url: applicationURL),
+      bundle.bundleIdentifier == customBraveBundleIdentifier,
+      let executableURL = bundle.executableURL
+    else {
+      return false
+    }
+    return FileManager.default.isExecutableFile(atPath: executableURL.path)
   }
 
   func webView(

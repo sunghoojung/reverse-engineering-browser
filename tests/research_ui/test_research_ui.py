@@ -2673,6 +2673,60 @@ process.stdout.write(JSON.stringify({
         self.assertIn(
             "configureApplicationIcon(resourcesURL: resourcesURL)", application
         )
+        self.assertIn("launchCustomBraveBrowser()", application)
+        self.assertIn(
+            'customBraveBundleIdentifier = "com.brave.Browser.development"',
+            application,
+        )
+        self.assertNotIn('withBundleIdentifier: "com.brave.Browser"', application)
+        self.assertIn(
+            'customBraveApplicationName = "Brave Browser Development.app"',
+            application,
+        )
+        self.assertIn('environment["REB_BRAVE_BINARY"]', application)
+        self.assertIn(
+            '"browser/worktree/src/out/Component_arm64/\\(customBraveApplicationName)"',
+            application,
+        )
+        self.assertIn("isCustomBraveApplication(candidate)", application)
+        self.assertIn(
+            "configuration.activates = false",
+            application,
+        )
+        self.assertIn("private func presentOriginTraceWindow()", application)
+        self.assertIn("window.deminiaturize(nil)", application)
+        self.assertIn("window.makeKeyAndOrderFront(nil)", application)
+        self.assertIn("func applicationDidBecomeActive", application)
+        self.assertIn(
+            "NSWorkspace.shared.openApplication(at: braveURL, configuration: configuration)",
+            application,
+        )
+        self.assertNotIn("runningApplication.activate", application)
+        self.assertIn(
+            "if !smokeTest {\n      presentOriginTraceWindow()\n      launchCustomBraveBrowser()",
+            application,
+        )
+        self.assertIn("applicationShouldHandleReopen", application)
+        self.assertIn(
+            "guard !smokeTest else { return true }\n    presentOriginTraceWindow()\n    launchCustomBraveBrowser()",
+            application,
+        )
+        self.assertIn(
+            "DispatchQueue.main.async {\n        self?.presentOriginTraceWindow()",
+            application,
+        )
+        self.assertIn(
+            "NSRunningApplication.runningApplications(\n      withBundleIdentifier: customBraveBundleIdentifier",
+            application,
+        )
+        self.assertNotIn(
+            "restoreOriginTraceWindowAfterBrowserLaunch",
+            application,
+        )
+        self.assertNotIn(
+            "DispatchQueue.main.asyncAfter(deadline: .now() + 0.5)",
+            application,
+        )
         self.assertIn('appendingPathComponent("OriginTrace.icns")', application)
         self.assertIn("NSApp.applicationIconImage = icon", application)
         self.assertNotIn("makeApplicationIcon", application)

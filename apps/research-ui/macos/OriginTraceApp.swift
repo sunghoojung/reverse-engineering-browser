@@ -2532,7 +2532,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
 
     NSApp.setActivationPolicy(.regular)
     if !smokeTest {
-      NSApp.activate(ignoringOtherApps: true)
+      presentOriginTraceWindow()
       launchCustomBraveBrowser()
     }
     let localApplicationURL = URL(string: "reb://app/index.html?native=1")!
@@ -2548,11 +2548,17 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     true
   }
 
+  func applicationDidBecomeActive(_ notification: Notification) {
+    guard !smokeTest else { return }
+    presentOriginTraceWindow()
+  }
+
   func applicationShouldHandleReopen(
     _ sender: NSApplication,
     hasVisibleWindows: Bool
   ) -> Bool {
     guard !smokeTest else { return true }
+    presentOriginTraceWindow()
     launchCustomBraveBrowser()
     return true
   }
@@ -2572,14 +2578,33 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     let configuration = NSWorkspace.OpenConfiguration()
     configuration.activates = false
     NSWorkspace.shared.openApplication(at: braveURL, configuration: configuration) {
-      _, error in
+      [weak self] _, error in
       if let error {
         NSLog(
           "Origin Trace could not launch Brave Browser Development: "
             + error.localizedDescription
         )
       }
+      DispatchQueue.main.async {
+        self?.restoreOriginTraceWindowAfterBrowserLaunch()
+      }
     }
+  }
+
+  private func restoreOriginTraceWindowAfterBrowserLaunch() {
+    presentOriginTraceWindow()
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+      self?.presentOriginTraceWindow()
+    }
+  }
+
+  private func presentOriginTraceWindow() {
+    guard let window else { return }
+    if window.isMiniaturized {
+      window.deminiaturize(nil)
+    }
+    NSApp.activate(ignoringOtherApps: true)
+    window.makeKeyAndOrderFront(nil)
   }
 
   private func customBraveApplicationURL() -> URL? {

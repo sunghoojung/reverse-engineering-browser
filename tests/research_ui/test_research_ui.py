@@ -950,6 +950,119 @@ class ResearchUiTests(unittest.TestCase):
         self.assertIn("function isRequestSignalProfile(body)", html)
         self.assertIn("No fingerprint-relevant browser signals", html)
 
+    def test_fingerprint_workspace_exposes_session_activity_and_request_context(
+        self,
+    ) -> None:
+        html = read_ui_sources()
+
+        self.assertIn('data-screen="signals">Fingerprinting</button>', html)
+        self.assertIn('id="screen-signals"', html)
+        self.assertIn('aria-label="Fingerprint inspector"', html)
+        self.assertIn('data-signal-view="rendering"', html)
+        self.assertIn('data-signal-view="activity"', html)
+        self.assertIn('data-signal-view="request"', html)
+        self.assertIn('id="signal-render-list"', html)
+        self.assertIn('aria-label="Fingerprint event activity"', html)
+        self.assertIn('aria-label="Selected fingerprint event"', html)
+        for slug, category in (
+            ("canvas", "Canvas"),
+            ("webgl", "WebGL"),
+            ("web_audio", "Web Audio"),
+            ("navigator", "Navigator"),
+            ("permissions", "Permissions"),
+            ("storage", "Storage"),
+            ("webrtc", "WebRTC"),
+        ):
+            self.assertIn(f'data-signal-filter="{slug}"', html)
+            self.assertIn(f">{category}</button>", html)
+        self.assertIn("function fingerprintEventsFromEvents(events)", html)
+        self.assertIn("signalEventDisplayLimit = 500", html)
+        self.assertIn("function renderFingerprintActivity()", html)
+        self.assertIn("function renderFingerprintDetail", html)
+        self.assertIn("function replayCanvasCalls", html)
+        self.assertIn("function renderCanvasCapture", html)
+        self.assertIn("function renderFingerprintRendering", html)
+        self.assertIn("Drawing functions", html)
+        self.assertIn("fillRect", html)
+        self.assertIn("fillText", html)
+        self.assertIn("LOCAL REPLAY", html)
+        self.assertIn("live readback with metadata only remains blank", html.lower())
+        self.assertIn("state.broker === 'unavailable'", html)
+        self.assertIn("both Canvas images are reconstructed locally", html)
+        self.assertIn("does not prove that a value was transmitted", html)
+        self.assertIn("request?.origin === 'sample'", html)
+
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+        start = html.index("      const fingerprintSignalCategories")
+        end = html.index("      const eventTypes", start)
+        exercise = """
+const events = [
+  {category: 'network', id: 1},
+  {category: 'canvas', id: 2},
+  {category: 'vm', id: 3},
+  {category: 'web_audio', id: 4},
+  {category: 'navigator', id: 5}
+];
+process.stdout.write(JSON.stringify(fingerprintEventsFromEvents(events).map(event => event.id)));
+"""
+        completed = subprocess.run(
+            [node, "-e", html[start:end] + exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), [2, 4, 5])
+
+        root_start = html.index("      function requestSignalRoot")
+        root_end = html.index("      function signalEventKey", root_start)
+        root_exercise = """
+const integerText = (event, field) => String(event[field]);
+const events = [
+  {type: 'request_initiated', request_id: '81', sequence_number: '5'},
+  {type: 'request_started', request_id: '81', sequence_number: '6'}
+];
+process.stdout.write(JSON.stringify({
+  demo: requestSignalRoot({origin: 'demo', events})?.sequence_number,
+  live: requestSignalRoot({origin: 'live', events})?.sequence_number,
+  sample: requestSignalRoot({origin: 'sample', events})
+}));
+"""
+        roots = subprocess.run(
+            [node, "-e", html[root_start:root_end] + root_exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(roots.stdout),
+            {"demo": "6", "live": "6", "sample": None},
+        )
+
+        label_start = html.index("      function canvasCallLabel")
+        label_end = html.index("      function replayCanvasCalls", label_start)
+        label_exercise = r"""
+const calls = [
+  {name: 'fillRect', arguments: [125, 1, 62, 20]},
+  {name: 'fillText', arguments: ['<img onerror=alert(1)>', 2, 15]}
+];
+process.stdout.write(JSON.stringify(calls.map(canvasCallLabel)));
+"""
+        labels = subprocess.run(
+            [node, "-e", html[label_start:label_end] + label_exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(labels.stdout),
+            [
+                "fillRect(125, 1, 62, 20)",
+                'fillText("<img onerror=alert(1)>", 2, 15)',
+            ],
+        )
+
     def test_request_signal_profile_model_rejects_ambiguous_evidence(self) -> None:
         node = shutil.which("node")
         if node is None:

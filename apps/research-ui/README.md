@@ -128,6 +128,22 @@ Empty traces show a next action rather than a graph or coverage meter. Gaps and
 shared-identifier matches remain explicit. Refresh failures retain the previous
 trace, and arrow keys move between trace rows.
 
+Fingerprinting is a first-class session workspace for Canvas, WebGL, Web Audio,
+Navigator, Permissions, Storage, and WebRTC activity. Rendering is the primary
+view: each Canvas readback becomes a card for visual output, deterministic local
+replay, ordered drawing functions, and stable evidence identity. The bundled
+demo reconstructs both images locally from its visible, bounded call sequence;
+it does not present those pixels as a native capture. A live readback without
+retained render data shows an explicit unavailable preview instead of inventing
+an image.
+
+Activity keeps native probe operations newest first, renders at most 500
+matching operations, and moves detailed identifiers behind a disclosure. The
+Request link view separates observed parent chains from same-context
+correlation and exposes zero-count families instead of hiding coverage. The
+view never claims that an observed value was transmitted or that a particular
+fingerprinting vendor produced the activity.
+
 Sources navigation exposes Page and Captured collections. Unimplemented
 Workspace and Overrides tabs are omitted until they provide a usable workflow.
 

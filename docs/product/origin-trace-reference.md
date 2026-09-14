@@ -77,12 +77,22 @@ JSONL evidence store written by the native broker. The network workspace groups
 lifecycle events by request and first scopes them by browser tab, then by domain.
 Protocol v3 records the stable top-level tab identifier; protocol v2 evidence
 remains visible as Unattributed. The workspace provides request filters plus Headers, Payload,
-Preview, Response, Initiator, Timing, and Signals inspectors. Signals presents
-the bounded Canvas, WebGL, Web Audio, Navigator, Permissions, Storage, and
-WebRTC evidence profile for one exact live request. Loading, empty,
-disconnected, malformed-event, and sequence-gap states remain visible. The
-timeline shows each Web Audio event's fixed operation name, while Signals keeps
-only its bounded category count, relation, confidence, and event references.
+Preview, Response, Initiator, Timing, and Signals inspectors. The first-class
+Fingerprinting workspace presents Canvas, WebGL, Web Audio, Navigator,
+Permissions, Storage, and WebRTC activity. It opens to compact Canvas render
+cards with image comparison, deterministic local replay, ordered drawing
+functions, and stable evidence identity. The demo draws both previews from its
+visible bounded call sequence; live readback-only evidence explicitly reports
+that pixels and earlier calls were not retained.
+
+Activity presents up to 500 matching native operations newest first with
+per-family filters and detailed identifiers behind a disclosure. Request link
+shows exact selected-request profile context, including zero-count families and
+the distinction between observed parent chains and same-context correlation.
+Loading, empty, disconnected, malformed-event, and sequence-gap states remain
+visible. The timeline shows each Web Audio event's fixed operation name, while
+request profiles keep only bounded category counts, relationships, confidence,
+and event references.
 The trace workspace builds a live request-level origin chain from the broker's
 versioned edge sidecar. Structured request fields are not required. It selects
 one exact request-start event, shows observed and correlated links separately,

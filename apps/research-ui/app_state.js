@@ -121,6 +121,7 @@
         requestTabId: 'all',
         requestDomain: 'all',
         broker: 'connecting',
+        eventFailureKind: null,
         sessionMode: standalonePreview ? 'preview' : 'live',
         eventsLimited: false,
         lastUpdatedLabel: null,
@@ -224,7 +225,10 @@
         signalProfileError: null,
         signalProfileKey: null,
         signalProfileEtag: null,
-        signalProfileGeneration: 0
+        signalProfileGeneration: 0,
+        signalView: 'rendering',
+        signalCategoryFilter: 'all',
+        selectedSignalEventKey: null
       };
 
       const elements = {
@@ -245,6 +249,23 @@
         selectedMethod: document.querySelector('#selected-method'),
         selectedStatus: document.querySelector('#selected-status'),
         selectedUrl: document.querySelector('#selected-url'),
+        signalSessionBadge: document.querySelector('#signal-session-badge'),
+        signalNotice: document.querySelector('#signal-notice'),
+        signalFamilyCount: document.querySelector('#signal-family-count'),
+        signalEventCount: document.querySelector('#signal-event-count'),
+        signalLinkedCount: document.querySelector('#signal-linked-count'),
+        signalCoverage: document.querySelector('#signal-coverage'),
+        signalViewTabs: [...document.querySelectorAll('[data-signal-view]')],
+        signalPanels: [...document.querySelectorAll('[id^="signal-panel-"]')],
+        signalRenderCount: document.querySelector('#signal-render-count'),
+        signalActivityCount: document.querySelector('#signal-activity-count'),
+        signalRenderSummary: document.querySelector('#signal-render-summary'),
+        signalRenderList: document.querySelector('#signal-render-list'),
+        signalFilters: [...document.querySelectorAll('[data-signal-filter]')],
+        signalVisibleCount: document.querySelector('#signal-visible-count'),
+        signalRows: document.querySelector('#signal-rows'),
+        signalDetail: document.querySelector('#signal-detail'),
+        signalRequestProfile: document.querySelector('#signal-request-profile'),
         requestInspector: document.querySelector('#request-inspector'),
         prompt: document.querySelector('#request-prompt'),
         fieldTabs: document.querySelector('#field-tabs'),

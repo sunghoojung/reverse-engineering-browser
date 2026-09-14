@@ -5,6 +5,10 @@
       const fingerprintSignalCategories = new Set([
         'canvas', 'webgl', 'web_audio', 'navigator', 'permissions', 'storage', 'webrtc'
       ]);
+
+      function fingerprintEventsFromEvents(events) {
+        return events.filter(event => fingerprintSignalCategories.has(event.category));
+      }
       const eventTypes = {
         1: new Set([
           'unknown', 'api_call', 'property_read', 'module_compiled',

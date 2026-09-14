@@ -52,7 +52,16 @@ printf '%s\n' \
   '#!/usr/bin/env bash' \
   'printf "%s\\n" "$*" >"${BOOTSTRAP_TEST_LOG}"' \
   >"${fake_bin}/corepack"
-chmod +x "${fake_bin}/df" "${fake_bin}/corepack"
+# shellcheck disable=SC2016
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'if [[ "$1" == "-p" && "$2" == "process.versions.node" ]]; then' \
+  '  echo "24.16.0"' \
+  '  exit 0' \
+  'fi' \
+  'exit 1' \
+  >"${fake_bin}/node"
+chmod +x "${fake_bin}/df" "${fake_bin}/corepack" "${fake_bin}/node"
 
 run_bootstrap() {
   local checkout_name="$1"
@@ -66,7 +75,7 @@ run_bootstrap() {
 
 shallow_log="${test_root}/shallow.log"
 run_bootstrap shallow "${shallow_log}" --init >/dev/null
-grep -Fxq 'pnpm run init -- --no-history' "${shallow_log}"
+grep -Fxq 'pnpm run init --no-history' "${shallow_log}"
 mkdir -p "${test_root}/shallow/src/out"
 printf 'keep checkout\n' >"${test_root}/shallow/src/brave/local-marker"
 printf 'keep build\n' >"${test_root}/shallow/src/out/local-marker"

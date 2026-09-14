@@ -16,6 +16,7 @@
 #include "base/memory/unsafe_shared_memory_region.h"
 #include "base/no_destructor.h"
 #include "base/threading/thread_local.h"
+#include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h"
 #include "mojo/public/cpp/bindings/receiver.h"

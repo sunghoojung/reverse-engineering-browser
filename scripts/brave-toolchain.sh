@@ -62,6 +62,41 @@ configure_xcode() {
   fi
 }
 
+configure_node() {
+  local node_version
+  local node_major
+  local node_minor
+  local candidate
+  local candidates=()
+
+  if [[ -n "${REB_NODE_DIRECTORY:-}" ]]; then
+    candidates+=("${REB_NODE_DIRECTORY}/bin")
+  fi
+  candidates+=(/opt/homebrew/opt/node@24/bin /usr/local/opt/node@24/bin)
+
+  node_version="$(node -p 'process.versions.node' 2>/dev/null || true)"
+  IFS=. read -r node_major node_minor _ <<< "${node_version}"
+  if [[ "${node_major:-}" == 24 && "${node_minor:-0}" =~ ^[0-9]+$ &&
+        "${node_minor}" -ge 16 ]]; then
+    return
+  fi
+
+  for candidate in "${candidates[@]}"; do
+    if [[ -x "${candidate}/node" && -x "${candidate}/npm" ]]; then
+      export PATH="${candidate}:${PATH}"
+      node_version="$(node -p 'process.versions.node')"
+      IFS=. read -r node_major node_minor _ <<< "${node_version}"
+      if [[ "${node_major}" == 24 && "${node_minor}" =~ ^[0-9]+$ &&
+            "${node_minor}" -ge 16 ]]; then
+        return
+      fi
+    fi
+  done
+
+  echo "Brave requires Node.js >=24.16.0 and <25. Set REB_NODE_DIRECTORY or install node@24." >&2
+  exit 1
+}
+
 configure_brave_python() {
   local candidate
   local candidates=()
@@ -109,6 +144,7 @@ if [[ ! -d "${brave_directory}" ]]; then
 fi
 
 configure_xcode
+configure_node
 
 case "${command_name}" in
   doctor)

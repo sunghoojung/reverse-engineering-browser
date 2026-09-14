@@ -67,7 +67,7 @@ diff --git a/v8/src/wasm/wasm-js.cc b/v8/src/wasm/wasm-js.cc
 +void NotifyWasmModuleBytes(i::Isolate* isolate,
 +                           Local<Context> context,
 +                           const WasmModuleBytesOrigin origin,
-+                           const base::span<const uint8_t> bytes) {
++                           const base::Vector<const uint8_t> bytes) {
 +  WasmModuleBytesCallback callback = isolate->wasm_module_bytes_callback();
 +  if (!callback) {
 +    return;

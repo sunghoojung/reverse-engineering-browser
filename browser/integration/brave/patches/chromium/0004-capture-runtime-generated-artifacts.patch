@@ -1,7 +1,7 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-@@ -26,13 +26,19 @@
+@@ -26,13 +26,20 @@
  #include "third_party/blink/renderer/bindings/core/v8/v8_initializer.h"
  
  #include <algorithm>
@@ -9,6 +9,7 @@ diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/thi
 +#include <cstdint>
  #include <limits>
  #include <memory>
++#include <string>
 +#include <string_view>
  #include <utility>
 +#include <vector>
@@ -21,7 +22,7 @@ diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/thi
  #include "base/time/time.h"
 +#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
  #include "build/build_config.h"
-@@ -170,6 +176,78 @@ String ToBlinkString(v8::Local<v8::Context> context,
+@@ -170,6 +177,81 @@ String ToBlinkString(v8::Local<v8::Context> context,
    return result;
  }
  
@@ -50,7 +51,7 @@ diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/thi
 +  if (!execution_context) {
 +    return;
 +  }
-+  const CString source_url = execution_context->Url().GetString().Utf8();
++  const std::string source_url = execution_context->Url().GetString().Utf8();
 +  if (source_url.empty()) {
 +    return;
 +  }
@@ -66,7 +67,10 @@ diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/thi
 +  if (!sink.IsArtifactCaptureEnabled()) {
 +    return;
 +  }
-+  v8::Isolate* isolate = context->GetIsolate();
++  v8::Isolate* isolate = v8::Isolate::GetCurrent();
++  if (!isolate) {
++    return;
++  }
 +  const std::size_t utf8_size = source->Utf8Length(isolate);
 +  if (utf8_size == 0 || utf8_size > reb::kNativeArtifactMaxContentBytes) {
 +    return;
@@ -100,7 +104,7 @@ diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/thi
  // NOTE: when editing this, please also edit the error messages we throw when
  // the size is exceeded (see uses of the constant), which use the human-friendly
  // "8MB" text.
-@@ -597,13 +675,17 @@ V8Initializer::CodeGenerationCheckCallbackInMainThread(
+@@ -597,13 +678,17 @@ V8Initializer::CodeGenerationCheckCallbackInMainThread(
    }
  
    if (stringified_source.IsEmpty()) {
@@ -120,7 +124,7 @@ diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/thi
 +  CaptureDynamicJavaScript(context, checked_source);
    return {true, std::move(stringified_source)};
  }
-@@ -913,4 +995,5 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+@@ -913,4 +998,5 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
    isolate->SetWasmModuleCallback(WasmModuleOverride);
    isolate->SetWasmInstanceCallback(WasmInstanceOverride);
 +  isolate->SetWasmModuleBytesCallback(CaptureWasmModuleBytes);

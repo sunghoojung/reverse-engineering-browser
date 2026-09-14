@@ -2566,19 +2566,11 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     }
 
     let configuration = NSWorkspace.OpenConfiguration()
-    configuration.activates = true
+    configuration.activates = false
     NSWorkspace.shared.openApplication(at: braveURL, configuration: configuration) {
-      runningApplication, error in
+      _, error in
       if let error {
         NSLog("Origin Trace could not launch Brave Browser: \(error.localizedDescription)")
-        return
-      }
-      guard let runningApplication else {
-        NSLog("Origin Trace could not launch Brave Browser.")
-        return
-      }
-      if !runningApplication.activate(options: [.activateAllWindows]) {
-        NSLog("Origin Trace could not bring Brave Browser to the foreground.")
       }
     }
   }

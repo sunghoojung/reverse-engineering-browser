@@ -2678,17 +2678,14 @@ process.stdout.write(JSON.stringify({
             'withBundleIdentifier: "com.brave.Browser"', application
         )
         self.assertIn(
-            "configuration.activates = true",
+            "configuration.activates = false",
             application,
         )
         self.assertIn(
             "NSWorkspace.shared.openApplication(at: braveURL, configuration: configuration)",
             application,
         )
-        self.assertIn(
-            "runningApplication.activate(options: [.activateAllWindows])",
-            application,
-        )
+        self.assertNotIn("runningApplication.activate", application)
         self.assertIn(
             "if !smokeTest {\n      NSApp.activate(ignoringOtherApps: true)\n      launchBraveBrowser()",
             application,

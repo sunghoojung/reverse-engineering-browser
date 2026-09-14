@@ -58,6 +58,478 @@
         return origin === 'live' ? 'Live' : origin === 'demo' ? 'Demo' : 'Sample';
       }
 
+      const fingerprintSignalLabels = new Map([
+        ['canvas', 'Canvas'], ['webgl', 'WebGL'], ['web_audio', 'Web Audio'],
+        ['navigator', 'Navigator'], ['permissions', 'Permissions'],
+        ['storage', 'Storage'], ['webrtc', 'WebRTC']
+      ]);
+      const signalEventDisplayLimit = 500;
+      const demoCanvasRenderCaptures = Object.freeze([{
+        id: 'canvas#1', context: '2D', width: 240, height: 60, readback: 'toDataURL',
+        operationHash: 'a87c19e4',
+        calls: Object.freeze([
+          {name: 'fillStyle', arguments: ['#f60'], property: true},
+          {name: 'fillRect', arguments: [125, 1, 62, 20]},
+          {name: 'fillStyle', arguments: ['#069'], property: true},
+          {name: 'font', arguments: ['11pt Times New Roman'], property: true},
+          {name: 'textBaseline', arguments: ['alphabetic'], property: true},
+          {name: 'fillText', arguments: ['Cwm fjordbank gly 😃', 2, 15]},
+          {name: 'fillStyle', arguments: ['rgba(102, 204, 0, 0.7)'], property: true},
+          {name: 'font', arguments: ['18pt Arial'], property: true},
+          {name: 'fillText', arguments: ['Cwm fjordbank gly 😃', 4, 45]}
+        ])
+      }]);
+
+      function requestSignalRoot(request) {
+        if (!request || request.origin === 'sample') return null;
+        const candidates = request.events ?? [];
+        return candidates.find(event => event.type === 'request_started' && integerText(event, 'request_id') !== '0') ??
+          candidates.find(event => event.type === 'request_initiated' && integerText(event, 'request_id') !== '0') ??
+          candidates.find(event => integerText(event, 'request_id') !== '0') ?? null;
+      }
+
+      function signalEventKey(event) {
+        return `S${integerText(event, 'session_id')}:P${event.process_id}:E${integerText(event, 'sequence_number')}`;
+      }
+
+      function signalTypeLabel(type) {
+        return type.split('_').map(part => part[0].toUpperCase() + part.slice(1)).join(' ');
+      }
+
+      function formatSignalOffset(nanoseconds) {
+        return nanoseconds < 1000000n ? `+${nanoseconds} ns` : formatMilliseconds(nanoseconds, '+');
+      }
+
+      function matchingSignalProfileFamily(event) {
+        const profile = state.signalProfile;
+        if (!profile || integerText(event, 'session_id') !== profile.session_id ||
+            integerText(event, 'navigation_id') !== profile.navigation_id ||
+            integerText(event, 'frame_id') !== profile.frame_id) return null;
+        const sequence = integerValue(event, 'sequence_number');
+        return profile.signals.find(signal => signal.category === event.category && [
+          signal.first_event, signal.last_event
+        ].some(reference => event.process_id === reference.process_id &&
+          sequence === BigInt(reference.sequence_number))) ?? null;
+      }
+
+      function signalCoverageLabel() {
+        if (state.signalProfileStatus === 'loading') return 'Building profile';
+        if (state.signalProfileStatus === 'error') return 'Profile unavailable';
+        const coverage = state.signalProfile?.coverage;
+        if (!coverage) return 'No request profile';
+        return coverage.retention_truncated || coverage.parent_depth_limited || coverage.count_saturated
+          ? 'Partial' : 'Bounded';
+      }
+
+      function setSignalNotice(kind, message) {
+        elements.signalNotice.dataset.kind = kind;
+        elements.signalNotice.textContent = message;
+      }
+
+      function canvasCallLabel(call) {
+        const parameters = call.arguments.map(value => typeof value === 'string'
+          ? JSON.stringify(value) : String(value)).join(', ');
+        return `${call.name}(${parameters})`;
+      }
+
+      function replayCanvasCalls(canvas, calls) {
+        const context = canvas.getContext('2d');
+        if (!context) return;
+        context.clearRect(0, 0, canvas.width, canvas.height);
+        const safeProperties = new Set([
+          'fillStyle', 'strokeStyle', 'font', 'textBaseline', 'textAlign',
+          'globalAlpha', 'lineWidth', 'lineCap', 'lineJoin'
+        ]);
+        const safeMethods = new Set([
+          'fillRect', 'strokeRect', 'clearRect', 'fillText', 'strokeText',
+          'beginPath', 'closePath', 'moveTo', 'lineTo', 'arc', 'rect', 'fill', 'stroke'
+        ]);
+        calls.forEach(call => {
+          if (call.property && safeProperties.has(call.name) && call.arguments.length === 1) {
+            context[call.name] = call.arguments[0];
+          } else if (!call.property && safeMethods.has(call.name)) {
+            context[call.name](...call.arguments);
+          }
+        });
+      }
+
+      function canvasRenderCaptures(signalEvents) {
+        const readbacks = signalEvents.filter(event => event.category === 'canvas' &&
+          /(?:toDataURL|toBlob|getImageData)/.test(decodePayload(event)));
+        if (state.sessionMode === 'demo' && readbacks.length > 0) {
+          return demoCanvasRenderCaptures.map((capture, index) => ({
+            ...capture, evidenceEvent: readbacks[Math.min(index, readbacks.length - 1)], demo: true
+          }));
+        }
+        return readbacks.map((event, index) => ({
+          id: `canvas#${index + 1}`, context: '2D', width: null, height: null,
+          readback: decodePayload(event).split('.').at(-1) || 'readback',
+          operationHash: null, calls: [], evidenceEvent: event, demo: false
+        }));
+      }
+
+      function canvasPreview(capture, label, replayLabel) {
+        const preview = document.createElement('figure');
+        preview.className = 'signal-canvas-preview';
+        preview.append(textElement('figcaption', '', label));
+        const frame = document.createElement('div');
+        frame.className = 'signal-canvas-frame';
+        if (capture.calls.length === 0 || !capture.width || !capture.height) {
+          frame.classList.add('unavailable');
+          frame.append(
+            textElement('strong', '', 'Preview unavailable'),
+            textElement('span', '', 'This capture retained the readback call, but not pixels or earlier drawing calls.')
+          );
+        } else {
+          const canvas = document.createElement('canvas');
+          canvas.width = capture.width;
+          canvas.height = capture.height;
+          canvas.setAttribute('role', 'img');
+          canvas.setAttribute('aria-label', replayLabel);
+          frame.append(canvas);
+          requestAnimationFrame(() => replayCanvasCalls(canvas, capture.calls));
+        }
+        preview.append(frame);
+        return preview;
+      }
+
+      function renderCanvasCapture(capture) {
+        const card = document.createElement('article');
+        card.className = 'signal-render-card';
+        const header = document.createElement('header');
+        header.className = 'signal-render-card-head';
+        const title = document.createElement('div');
+        title.append(
+          textElement('span', 'signal-render-icon', '▱'),
+          textElement('h3', '', capture.id),
+          textElement('p', '', `${capture.context}${capture.width ? ` · ${capture.width} × ${capture.height}` : ''} · ${capture.readback} · ${capture.calls.length} drawing ${capture.calls.length === 1 ? 'call' : 'calls'}`)
+        );
+        const badges = document.createElement('div');
+        badges.className = 'signal-render-badges';
+        badges.append(textElement('span', capture.demo ? 'demo' : 'live', capture.demo ? 'DEMO REPLAY' : 'NATIVE EVENT'));
+        if (capture.operationHash) badges.append(textElement('span', 'match', 'OP SEQUENCE MATCH'));
+        header.append(title, badges);
+
+        const comparison = document.createElement('div');
+        comparison.className = 'signal-canvas-comparison';
+        comparison.append(
+          canvasPreview(capture, capture.demo ? 'DEMO OUTPUT' : 'CAPTURED OUTPUT', `${capture.id} rendered output`),
+          canvasPreview(capture, 'LOCAL REPLAY', `${capture.id} local replay`)
+        );
+
+        const body = document.createElement('div');
+        body.className = 'signal-render-body';
+        const calls = document.createElement('section');
+        calls.className = 'signal-draw-calls';
+        const callsHead = document.createElement('div');
+        callsHead.className = 'signal-draw-calls-head';
+        callsHead.append(
+          textElement('h4', '', 'Drawing functions'),
+          textElement('span', '', capture.calls.length ? `${capture.calls.length} retained in order` : 'Not retained')
+        );
+        calls.append(callsHead);
+        if (capture.calls.length) {
+          const list = document.createElement('ol');
+          capture.calls.forEach(call => {
+            const item = document.createElement('li');
+            item.append(textElement('code', '', canvasCallLabel(call)));
+            list.append(item);
+          });
+          calls.append(list);
+        } else {
+          calls.append(textElement(
+            'p', 'signal-draw-empty',
+            `${capture.readback} was observed. This event format does not retain the draw-call sequence.`
+          ));
+        }
+
+        const evidence = document.createElement('aside');
+        evidence.className = 'signal-render-evidence';
+        evidence.append(textElement('h4', '', 'Evidence'));
+        const profileFamily = matchingSignalProfileFamily(capture.evidenceEvent);
+        [
+          ['event', signalEventKey(capture.evidenceEvent)],
+          ['relationship', profileFamily?.confidence ?? 'not linked'],
+          ['readback', capture.readback],
+          ['operation hash', capture.operationHash ?? 'not retained']
+        ].forEach(([label, value]) => {
+          const row = document.createElement('div');
+          row.append(textElement('span', '', label), textElement('strong', '', value));
+          evidence.append(row);
+        });
+        if (capture.demo) evidence.append(textElement(
+          'p', '', 'The demo image is generated locally from the visible calls. A live readback with metadata only remains blank by design.'
+        ));
+        body.append(calls, evidence);
+        card.append(header, comparison, body);
+        return card;
+      }
+
+      function renderFingerprintRendering(signalEvents) {
+        const captures = canvasRenderCaptures(signalEvents);
+        elements.signalRenderCount.textContent = String(captures.length);
+        elements.signalRenderSummary.textContent = captures.length
+          ? `${captures.length} canvas ${captures.length === 1 ? 'readback' : 'readbacks'}`
+          : 'No canvas readbacks';
+        if (!captures.length) {
+          elements.signalRenderList.replaceChildren(textElement(
+            'div', 'signal-render-empty',
+            'No Canvas readback has been captured. Activity from other fingerprint-relevant surfaces remains available.'
+          ));
+          return;
+        }
+        elements.signalRenderList.replaceChildren(...captures.map(renderCanvasCapture));
+      }
+
+      function renderSignalRequestProfile() {
+        const selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
+        if (state.signalProfileStatus === 'loading') {
+          elements.signalRequestProfile.replaceChildren(textElement('div', 'signal-render-empty', 'Building the selected request profile...'));
+          return;
+        }
+        if (!state.signalProfile || !selectedRequest) {
+          elements.signalRequestProfile.replaceChildren(textElement(
+            'div', 'signal-render-empty', 'Select a captured request to inspect its fingerprint-surface relationships.'
+          ));
+          return;
+        }
+        const summary = document.createElement('article');
+        summary.className = 'signal-request-card';
+        const head = document.createElement('header');
+        const identity = document.createElement('div');
+        identity.append(
+          textElement('span', '', 'SELECTED REQUEST'),
+          textElement('h3', '', `${selectedRequest.method} ${selectedRequest.path}`),
+          textElement('p', '', `${state.signalProfile.signals.length} linked surface ${state.signalProfile.signals.length === 1 ? 'family' : 'families'} · ${signalCoverageLabel().toLowerCase()} coverage`)
+        );
+        const open = textElement('button', 'secondary-button', 'Open in Traffic');
+        open.type = 'button';
+        open.addEventListener('click', () => {
+          state.inspectorTab = 'signals';
+          showScreen('traffic', open);
+          renderInspector();
+        });
+        head.append(identity, open);
+        const grid = document.createElement('div');
+        grid.className = 'signal-request-grid';
+        fingerprintSignalLabels.forEach((label, category) => {
+          const family = state.signalProfile.signals.find(signal => signal.category === category);
+          const item = document.createElement('div');
+          item.className = 'signal-request-family';
+          item.dataset.present = String(Boolean(family));
+          item.append(
+            textElement('span', '', label),
+            textElement('strong', '', family ? family.event_count : '0'),
+            textElement('small', '', family
+              ? `${family.confidence} · ${family.relation === 'parent_chain' ? 'parent chain' : 'same context'}`
+              : 'not observed')
+          );
+          grid.append(item);
+        });
+        summary.append(head, grid);
+        elements.signalRequestProfile.replaceChildren(summary);
+      }
+
+      function renderFingerprintDetail(event) {
+        if (!event) {
+          elements.signalDetail.replaceChildren(textElement(
+            'div', 'signal-detail-empty',
+            'Select a captured operation to inspect its evidence identifiers and request context.'
+          ));
+          return;
+        }
+
+        const familyLabel = fingerprintSignalLabels.get(event.category) ?? event.category;
+        const payload = decodePayload(event) || signalTypeLabel(event.type);
+        const profileFamily = matchingSignalProfileFamily(event);
+        const selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
+        const eyebrow = textElement('div', 'signal-detail-eyebrow', 'Fingerprint-relevant surface');
+        const title = textElement('h2', '', payload);
+        const subtitle = textElement('p', 'signal-detail-subtitle', `${familyLabel} · ${signalTypeLabel(event.type)}`);
+        const badges = document.createElement('div');
+        badges.className = 'signal-detail-badges';
+        badges.append(textElement('span', '', 'Native event'));
+        if (event.payload_truncated) badges.append(textElement('span', 'correlated', 'Payload truncated'));
+        if (profileFamily) {
+          badges.append(textElement(
+            'span', profileFamily.confidence === 'observed' ? 'observed' : 'correlated',
+            `${profileFamily.confidence === 'observed' ? 'Observed' : 'Correlated'} request profile`
+          ));
+        }
+
+        const disclosure = document.createElement('details');
+        disclosure.className = 'signal-evidence-disclosure';
+        disclosure.append(textElement('summary', '', 'Evidence identifiers'));
+        const facts = document.createElement('dl');
+        facts.className = 'signal-facts';
+        [
+          ['event', signalEventKey(event)],
+          ['category', event.category],
+          ['operation', event.type],
+          ['monotonic time', `${integerText(event, 'monotonic_time_ns')} ns`],
+          ['navigation', integerText(event, 'navigation_id')],
+          ['frame', integerText(event, 'frame_id')],
+          ['thread', String(event.thread_id)],
+          ['artifact', integerText(event, 'artifact_id')],
+          ['parent event', integerText(event, 'parent_event_id')]
+        ].forEach(([label, value]) => {
+          facts.append(textElement('dt', '', label), textElement('dd', '', value));
+        });
+        disclosure.append(facts);
+
+        const content = [eyebrow, title, subtitle, badges, disclosure];
+        if (profileFamily && selectedRequest) {
+          const context = document.createElement('section');
+          context.className = 'signal-request-context';
+          context.append(
+            textElement('h3', '', 'Selected request profile'),
+            textElement('p', '', `${selectedRequest.method} ${selectedRequest.path} · ${profileFamily.event_count} ${familyLabel} event${profileFamily.event_count === '1' ? '' : 's'} · ${profileFamily.relation === 'parent_chain' ? 'explicit parent chain' : 'same browser context'}`)
+          );
+          const openRequest = textElement('button', 'secondary-button', 'Open request Signals');
+          openRequest.type = 'button';
+          openRequest.addEventListener('click', () => {
+            state.inspectorTab = 'signals';
+            showScreen('traffic', openRequest);
+            renderInspector();
+            refreshRequestSignalProfile();
+            requestAnimationFrame(() => document.querySelector('#inspector-tab-signals').focus({preventScroll: true}));
+          });
+          context.append(openRequest);
+          content.push(context);
+        }
+        content.push(textElement(
+          'p', 'signal-interpretation',
+          'This records access to a fingerprint-relevant browser surface. It does not prove that a value was transmitted or identify a particular fingerprinting vendor.'
+        ));
+        elements.signalDetail.replaceChildren(...content);
+      }
+
+      function renderFingerprintActivity() {
+        const signalEvents = fingerprintEventsFromEvents(state.events);
+        const familyCounts = new Map();
+        signalEvents.forEach(event => familyCounts.set(event.category, (familyCounts.get(event.category) ?? 0) + 1));
+        const visibleEvents = signalEvents.filter(event =>
+          state.signalCategoryFilter === 'all' || event.category === state.signalCategoryFilter);
+        const orderedEvents = [...visibleEvents].sort((left, right) => {
+          const delta = integerValue(right, 'monotonic_time_ns') - integerValue(left, 'monotonic_time_ns');
+          if (delta !== 0n) return delta < 0n ? -1 : 1;
+          const sequenceDelta = integerValue(right, 'sequence_number') - integerValue(left, 'sequence_number');
+          return sequenceDelta < 0n ? -1 : sequenceDelta > 0n ? 1 : 0;
+        }).slice(0, signalEventDisplayLimit);
+        if (!orderedEvents.some(event => signalEventKey(event) === state.selectedSignalEventKey)) {
+          state.selectedSignalEventKey = orderedEvents[0] ? signalEventKey(orderedEvents[0]) : null;
+        }
+
+        elements.signalFamilyCount.textContent = String(familyCounts.size);
+        elements.signalEventCount.textContent = String(signalEvents.length);
+        elements.signalActivityCount.textContent = String(signalEvents.length);
+        elements.signalLinkedCount.textContent = state.signalProfile
+          ? String(state.signalProfile.signals.length)
+          : state.signalProfileStatus === 'loading' ? '…' : '0';
+        elements.signalCoverage.textContent = `${signalCoverageLabel()} coverage`;
+        const displayLimited = visibleEvents.length > signalEventDisplayLimit;
+        elements.signalVisibleCount.textContent = displayLimited
+          ? `${orderedEvents.length} of ${visibleEvents.length} shown` : `${orderedEvents.length} shown`;
+        const offline = state.broker === 'unavailable' || state.eventFailureKind === 'disconnected';
+        elements.signalSessionBadge.textContent = offline ? (signalEvents.length ? 'Evidence retained' : 'Disconnected')
+          : state.sessionMode === 'demo' ? 'Demo evidence'
+            : state.sessionMode === 'live' ? 'Live native capture' : 'No capture';
+        elements.signalSessionBadge.dataset.kind = offline ? 'offline' : state.sessionMode;
+
+        elements.signalViewTabs.forEach(button => {
+          const selected = button.dataset.signalView === state.signalView;
+          button.setAttribute('aria-selected', String(selected));
+          button.tabIndex = selected ? 0 : -1;
+        });
+        elements.signalPanels.forEach(panel => {
+          panel.hidden = panel.id !== `signal-panel-${state.signalView}`;
+        });
+
+        const gapCount = countSequenceGaps(state.events);
+        if (state.eventFailureKind === 'malformed') {
+          setSignalNotice('error', signalEvents.length
+            ? 'The broker returned malformed event data. The last understandable fingerprint evidence remains visible.'
+            : 'The broker returned malformed event data. No fingerprint evidence is available.');
+        } else if (offline) {
+          setSignalNotice('disconnected', signalEvents.length
+            ? 'The broker is disconnected. The last understandable fingerprint evidence remains visible.'
+            : 'The broker is disconnected and no fingerprint evidence is available.');
+        } else if (state.signalProfileStatus === 'error') {
+          setSignalNotice('error', `${state.signalProfileError || 'The selected request profile is unavailable.'} Raw fingerprint events remain visible.`);
+        } else if (signalEvents.length === 0) {
+          setSignalNotice('empty', state.sessionMode === 'demo'
+            ? 'Deterministic fingerprint evidence is not available in this build.'
+            : 'No fingerprint-relevant browser activity has been captured yet.');
+        } else if (state.eventsLimited || displayLimited || gapCount > 0n) {
+          setSignalNotice('partial', `Fingerprint activity is visible, but coverage is partial${state.eventsLimited ? ' because the event window is capped' : ''}${displayLimited ? ` because only the newest ${signalEventDisplayLimit} matching events are rendered` : ''}${gapCount > 0n ? ` with ${gapCount} sequence ${gapCount === 1n ? 'gap' : 'gaps'}` : ''}.`);
+        } else if (state.sessionMode === 'demo') {
+          setSignalNotice('demo', 'Demo mode: both Canvas images are reconstructed locally from the visible calls. They are not native-captured pixels.');
+        } else {
+          setSignalNotice('live', 'Native fingerprint surface activity is streaming from the local browser capture.');
+        }
+
+        elements.signalFilters.forEach(button => {
+          const category = button.dataset.signalFilter;
+          const count = category === 'all' ? signalEvents.length : familyCounts.get(category) ?? 0;
+          const label = category === 'all' ? 'All' : fingerprintSignalLabels.get(category) ?? category;
+          button.textContent = `${label} ${count}`;
+          button.dataset.empty = String(count === 0);
+          button.setAttribute('aria-pressed', String(category === state.signalCategoryFilter));
+          button.setAttribute('aria-label', `${label}, ${count} ${count === 1 ? 'event' : 'events'}`);
+        });
+
+        renderFingerprintRendering(signalEvents);
+        renderSignalRequestProfile();
+
+        if (orderedEvents.length === 0) {
+          elements.signalRows.replaceChildren(emptyListboxOption(
+            'signal-empty', signalEvents.length
+              ? 'No captured operations match this surface filter.'
+              : 'Capture a page that reads Canvas, WebGL, Web Audio, Navigator, Permissions, Storage, or WebRTC.'
+          ));
+          renderFingerprintDetail(null);
+          return;
+        }
+
+        const firstTime = signalEvents.reduce((minimum, event) => {
+          const timestamp = integerValue(event, 'monotonic_time_ns');
+          return minimum === null || timestamp < minimum ? timestamp : minimum;
+        }, null);
+        const rows = orderedEvents.map(event => {
+          const row = document.createElement('button');
+          row.type = 'button';
+          row.className = 'signal-event-row';
+          row.dataset.signalEventKey = signalEventKey(event);
+          row.setAttribute('role', 'option');
+          row.setAttribute('aria-selected', String(row.dataset.signalEventKey === state.selectedSignalEventKey));
+          const primary = document.createElement('span');
+          primary.className = 'signal-event-primary';
+          primary.append(
+            textElement('span', 'signal-category-badge', fingerprintSignalLabels.get(event.category) ?? event.category),
+            textElement('span', 'signal-event-operation', decodePayload(event) || signalTypeLabel(event.type)),
+            textElement('span', 'signal-event-time', formatSignalOffset(integerValue(event, 'monotonic_time_ns') - firstTime))
+          );
+          const meta = document.createElement('span');
+          meta.className = 'signal-event-meta';
+          meta.append(textElement('span', '', `${signalTypeLabel(event.type)} · process ${event.process_id} · frame ${integerText(event, 'frame_id')} · event ${integerText(event, 'sequence_number')}`));
+          const profileFamily = matchingSignalProfileFamily(event);
+          if (profileFamily) {
+            meta.append(textElement(
+              'span', `signal-profile-relation${profileFamily.confidence === 'correlated' ? ' correlated' : ''}`,
+              `${profileFamily.confidence === 'observed' ? 'Observed' : 'Correlated'} to selected request`
+            ));
+          }
+          row.append(primary, meta);
+          row.addEventListener('click', () => {
+            state.selectedSignalEventKey = row.dataset.signalEventKey;
+            renderFingerprintActivity();
+          });
+          return row;
+        });
+        elements.signalRows.replaceChildren(...rows);
+        renderFingerprintDetail(orderedEvents.find(event => signalEventKey(event) === state.selectedSignalEventKey) ?? null);
+      }
+
       function rebuildTrafficRequests() {
         const cdpRequests = requestsFromDebuggerNetwork(
           state.debuggerSession?.network, state.nativeRequests
@@ -602,7 +1074,7 @@
 
       function requestSignalProfileSelection() {
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
-        const root = requestTraceRoot(request);
+        const root = requestSignalRoot(request);
         if (!request || !root) return null;
         return {
           request,
@@ -621,11 +1093,13 @@
           state.signalProfileStatus = 'empty';
           state.signalProfileError = null;
           if (state.inspectorTab === 'signals') renderInspector();
+          if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
           return;
         }
         state.signalProfileStatus = 'loading';
         state.signalProfileError = null;
         if (state.inspectorTab === 'signals') renderInspector();
+        if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
         try {
           const headers = state.signalProfileKey === selection.key && state.signalProfileEtag
             ? { 'If-None-Match': state.signalProfileEtag }
@@ -660,6 +1134,7 @@
           state.signalProfileError = error.message;
         }
         if (state.inspectorTab === 'signals') renderInspector();
+        if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
       }
 
       function traceIsAvailable() {
@@ -807,13 +1282,9 @@
           return;
         }
         if (state.inspectorTab === 'signals') {
-          elements.prompt.textContent = 'Request signal profile';
+          elements.prompt.textContent = 'Fingerprint activity before this request';
           elements.fieldTabs.hidden = true;
           elements.traceDock.hidden = !requestTraceRoot(request);
-          if (request?.origin !== 'live') {
-            renderInspectorMessage('Signal profiles are built from live broker evidence.');
-            return;
-          }
           if (state.signalProfileStatus === 'loading') {
             renderInspectorMessage('Building a bounded profile from retained browser-signal evidence.');
             return;
@@ -830,12 +1301,8 @@
             renderInspectorMessage('No fingerprint-relevant browser signals were retained for this request.');
             return;
           }
-          const labels = {
-            canvas: 'Canvas', webgl: 'WebGL', web_audio: 'Web Audio', navigator: 'Navigator',
-            permissions: 'Permissions', storage: 'Storage', webrtc: 'WebRTC'
-          };
           const details = state.signalProfile.signals.map(signal => ({
-            key: labels[signal.category],
+            key: fingerprintSignalLabels.get(signal.category) ?? signal.category,
             value: `${signal.event_count} event${signal.event_count === '1' ? '' : 's'} · process ${signal.last_event.process_id} · event ${signal.last_event.sequence_number}`,
             type: signal.confidence === 'observed' ? 'Observed' : 'Correlated'
           }));
@@ -6732,6 +7199,7 @@
           const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence') || (button.dataset.screen === 'traffic' && screenName === 'vm');
           if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
         });
+        if (screenName === 'signals') renderFingerprintActivity();
         if (screenName === 'backtrace') renderBacktrace();
         if (screenName === 'experiments') renderExperiment();
         if (screenName === 'api-collection') {
@@ -6811,6 +7279,7 @@
           }
           updateSelectionSummary(selectedRequest);
           state.broker = brokerConnected ? 'connected' : 'unavailable';
+          state.eventFailureKind = null;
           state.lastUpdatedLabel = brokerConnected
             ? state.sessionMode === 'live'
               ? `updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
@@ -6840,6 +7309,7 @@
           renderRequests();
           renderInspector();
           renderEvidence();
+          if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
           await refreshRequestSignalProfile();
           await refreshArtifacts();
           await refreshVmAnalysis();
@@ -6847,6 +7317,7 @@
         } catch (error) {
           state.broker = 'unavailable';
           const malformed = error instanceof TypeError && error.message === 'Malformed broker response';
+          state.eventFailureKind = malformed ? 'malformed' : 'disconnected';
           const retainedEvidence = state.events.length > 0;
           state.lastUpdatedLabel = retainedEvidence ? 'last valid evidence retained' : 'no live evidence';
           renderShellStatus();
@@ -6859,6 +7330,7 @@
           renderRequests();
           renderInspector();
           renderEvidence();
+          if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
           renderVmLab();
         } finally {
           state.refreshing = false;
@@ -6867,6 +7339,7 @@
 
       function useStandalonePreview() {
         state.broker = 'preview';
+        state.eventFailureKind = null;
         state.sessionMode = 'preview';
         state.events = [];
         state.eventsLimited = false;
@@ -6925,7 +7398,31 @@
       document.querySelectorAll('[data-screen]').forEach(button => button.addEventListener('click', async () => {
         showScreen(button.dataset.screen, button);
         if (button.dataset.screen === 'backtrace' && originTraceSelection()) await refreshOriginTrace();
+        if (button.dataset.screen === 'signals') await refreshRequestSignalProfile();
       }));
+      elements.signalFilters.forEach(button => button.addEventListener('click', () => {
+        state.signalCategoryFilter = button.dataset.signalFilter;
+        renderFingerprintActivity();
+        elements.signalRows.querySelector('.signal-event-row')?.focus({preventScroll: true});
+      }));
+      elements.signalViewTabs.forEach(button => button.addEventListener('click', () => {
+        state.signalView = button.dataset.signalView;
+        renderFingerprintActivity();
+      }));
+      enableTabKeyboardNavigation('[data-signal-view]');
+      elements.signalRows.addEventListener('keydown', event => {
+        if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+        const rows = [...elements.signalRows.querySelectorAll('.signal-event-row')];
+        if (!rows.length) return;
+        event.preventDefault();
+        const current = Math.max(0, rows.indexOf(document.activeElement));
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
+          : Math.max(0, Math.min(rows.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1)));
+        const targetKey = rows[next].dataset.signalEventKey;
+        rows[next].click();
+        [...elements.signalRows.querySelectorAll('.signal-event-row')]
+          .find(row => row.dataset.signalEventKey === targetKey)?.focus({preventScroll: true});
+      });
       document.querySelectorAll('.type-filter').forEach(button => button.addEventListener('click', () => {
         state.requestType = button.dataset.filter;
         state.requestDomain = 'all';

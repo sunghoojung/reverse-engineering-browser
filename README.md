@@ -45,6 +45,10 @@ The compiled apps are for Apple silicon Macs. Origin Trace contains no bundled
 sample evidence. The applications are ad-hoc signed but not notarized, so the
 first launch may require Control-clicking the app and choosing **Open**.
 
+Downloading the compiled Brave app does not require a 100+ GiB source checkout.
+Allow about 1 GiB to download and extract both apps, plus whatever space you
+want to retain for browser profiles and captured sessions.
+
 ### Run a live capture with an existing custom Brave build
 
 From the repository root:
@@ -65,7 +69,10 @@ cached, internal, or already-evicted response bodies may be unavailable.
 
 ### Build the custom Brave browser for the first time
 
-Requirements:
+These requirements apply only when compiling Brave from source. They do not
+apply when using the downloadable compiled Brave app.
+
+Source-build requirements:
 
 - macOS with full Xcode installed;
 - Node.js and pnpm;

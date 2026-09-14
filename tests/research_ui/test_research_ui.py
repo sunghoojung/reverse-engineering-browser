@@ -2693,6 +2693,11 @@ process.stdout.write(JSON.stringify({
             "if !smokeTest {\n      NSApp.activate(ignoringOtherApps: true)\n      launchBraveBrowser()",
             application,
         )
+        self.assertIn("applicationShouldHandleReopen", application)
+        self.assertIn(
+            "guard !smokeTest else { return true }\n    launchBraveBrowser()",
+            application,
+        )
         self.assertIn('appendingPathComponent("OriginTrace.icns")', application)
         self.assertIn("NSApp.applicationIconImage = icon", application)
         self.assertNotIn("makeApplicationIcon", application)

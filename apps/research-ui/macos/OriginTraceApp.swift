@@ -2548,6 +2548,15 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     true
   }
 
+  func applicationShouldHandleReopen(
+    _ sender: NSApplication,
+    hasVisibleWindows: Bool
+  ) -> Bool {
+    guard !smokeTest else { return true }
+    launchBraveBrowser()
+    return true
+  }
+
   private func launchBraveBrowser() {
     guard let braveURL = NSWorkspace.shared.urlForApplication(
       withBundleIdentifier: "com.brave.Browser"

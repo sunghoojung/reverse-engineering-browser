@@ -2673,10 +2673,22 @@ process.stdout.write(JSON.stringify({
         self.assertIn(
             "configureApplicationIcon(resourcesURL: resourcesURL)", application
         )
-        self.assertIn("launchBraveBrowser()", application)
+        self.assertIn("launchCustomBraveBrowser()", application)
         self.assertIn(
-            'withBundleIdentifier: "com.brave.Browser"', application
+            'customBraveBundleIdentifier = "com.brave.Browser.development"',
+            application,
         )
+        self.assertNotIn('withBundleIdentifier: "com.brave.Browser"', application)
+        self.assertIn(
+            'customBraveApplicationName = "Brave Browser Development.app"',
+            application,
+        )
+        self.assertIn('environment["REB_BRAVE_BINARY"]', application)
+        self.assertIn(
+            '"browser/worktree/src/out/Component_arm64/\\(customBraveApplicationName)"',
+            application,
+        )
+        self.assertIn("isCustomBraveApplication(candidate)", application)
         self.assertIn(
             "configuration.activates = false",
             application,
@@ -2687,12 +2699,12 @@ process.stdout.write(JSON.stringify({
         )
         self.assertNotIn("runningApplication.activate", application)
         self.assertIn(
-            "if !smokeTest {\n      NSApp.activate(ignoringOtherApps: true)\n      launchBraveBrowser()",
+            "if !smokeTest {\n      NSApp.activate(ignoringOtherApps: true)\n      launchCustomBraveBrowser()",
             application,
         )
         self.assertIn("applicationShouldHandleReopen", application)
         self.assertIn(
-            "guard !smokeTest else { return true }\n    launchBraveBrowser()",
+            "guard !smokeTest else { return true }\n    launchCustomBraveBrowser()",
             application,
         )
         self.assertIn('appendingPathComponent("OriginTrace.icns")', application)

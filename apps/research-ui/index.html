@@ -13,7 +13,7 @@
       <header class="titlebar">
         <div class="window-dots" aria-hidden="true"><span class="window-dot"></span><span class="window-dot"></span><span class="window-dot"></span></div>
         <span class="brand-name">Origin Trace</span>
-        <span class="preview-label">Preview</span>
+        <span id="session-mode" class="session-mode">Connecting</span>
       </header>
 
       <div class="toolbar">
@@ -59,6 +59,15 @@
                 </div>
 
                 <div id="network-notice" class="network-notice" data-kind="loading" role="status" aria-live="polite">Connecting to the local evidence broker…</div>
+
+                <div class="request-scope" aria-label="Captured request scope">
+                  <div id="request-tab-scopes" class="request-tab-scopes" role="tablist" aria-label="Browser tabs"></div>
+                  <label class="request-domain-filter">Domain
+                    <select id="request-domain" aria-label="Filter requests by domain">
+                      <option value="all">All domains</option>
+                    </select>
+                  </label>
+                </div>
 
                 <div class="request-table">
                   <div class="request-head" aria-hidden="true"><span>Name</span><span>Method</span><span>Status</span><span>Time</span><span>Waterfall</span></div>
@@ -111,6 +120,7 @@
                 <button id="source-tab-page" class="source-side-tab" type="button" role="tab" data-source-collection="page" aria-selected="false" aria-controls="source-tree" tabindex="-1">Page</button>
                 <button id="source-tab-captured" class="source-side-tab" type="button" role="tab" data-source-collection="captured" aria-selected="true" aria-controls="source-tree">Captured</button>
               </div>
+              <div id="source-health" class="source-health" data-kind="warning" role="status" aria-live="polite" hidden></div>
               <div id="source-tree" class="source-tree" role="tree" aria-labelledby="source-tab-captured"></div>
             </aside>
 
@@ -226,7 +236,7 @@
                   <p id="memory-search-help" class="memory-search-help">Accessors are reported without invoking getters. Results are ephemeral and are never added to the evidence store.</p>
                 </form>
               </aside>
-              <div class="memory-results-pane">
+              <div id="memory-results-pane" class="memory-results-pane">
                 <div class="memory-results-list">
                   <div class="memory-results-head"><span id="memory-result-label">Matches</span><span id="memory-result-count">0</span></div>
                   <div id="memory-results" role="listbox" aria-label="Live object matches"></div>
@@ -270,7 +280,7 @@
             </div>
             <div id="trace-content" class="trace-layout" hidden>
               <section class="trace-list-pane" aria-label="Trace events">
-                <div class="trace-list-heading"><span>Request → earlier events</span><span id="coverage-value"></span></div>
+                <div class="trace-list-heading"><span>Selected request → recorded predecessors</span><span id="coverage-value" aria-live="polite"></span></div>
                 <ol id="backtrace-steps" class="backtrace" aria-label="Trace steps"></ol>
               </section>
               <aside class="trace-inspector" aria-label="Selected trace step">
@@ -761,13 +771,13 @@
           <section id="screen-api-collection" class="screen" aria-label="API Collection" hidden>
             <header class="screen-head">
               <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
-              <div><h1>API Collection</h1><div class="screen-subtitle">Save request templates, then run them in an isolated browser context.</div></div>
+              <div><h1>Collection</h1><div class="screen-subtitle">Save a request, then run it in an isolated context.</div></div>
               <div class="screen-head-actions"><span id="collection-generation" class="memory-readonly">Generation 0</span><span class="memory-readonly">Local only</span></div>
             </header>
-            <div id="collection-notice" class="collection-notice" data-kind="loading" role="status" aria-live="polite">Loading the local API Collection…</div>
-            <div class="collection-grid">
+            <div id="collection-notice" class="collection-notice" data-kind="loading" role="status" aria-live="polite">Loading your local collection…</div>
+            <div id="collection-grid" class="collection-grid">
               <aside class="collection-pane" aria-label="Collection tree">
-                <div class="collection-pane-head"><div><h2>Saved requests</h2><p>Reusable requests saved on this device.</p></div><span id="collection-count" class="experiment-card-badge">0</span></div>
+                <div class="collection-pane-head"><div><h2>Saved requests</h2><p>Requests you can run again.</p></div><span id="collection-count" class="experiment-card-badge">0</span></div>
                 <div class="collection-pane-actions">
                   <button id="collection-new-folder" class="secondary-button" type="button">New folder</button>
                   <button id="collection-new-request" class="secondary-button" type="button">New request</button>
@@ -778,7 +788,7 @@
                 </div>
                 <div id="collection-tree" class="collection-tree" role="tree" aria-label="API Collection folders and requests"></div>
                 <article class="collection-scope-card">
-                  <header class="collection-pane-head"><div><h2>Folder scope</h2><p>Variables inherit from root through the selected folder.</p></div></header>
+                  <header class="collection-pane-head"><div><h2>Folder variables</h2><p>Variables apply to requests in this folder.</p></div></header>
                   <form id="collection-folder-form" class="collection-form">
                     <label>Name<input id="collection-folder-name" type="text" maxlength="128" autocomplete="off" /></label>
                     <label>Parent folder<select id="collection-folder-parent"></select></label>
@@ -789,8 +799,14 @@
               </aside>
 
               <section class="collection-pane" aria-label="Saved request editor">
-                <div class="collection-pane-head"><div><h2>Request editor</h2><p>Templates are validated again when saved and resolved only inside the disposable Request Lab.</p></div><span id="collection-request-badge" class="experiment-card-badge" data-kind="offline">No request</span></div>
-                <div id="collection-editor-empty" class="collection-editor-empty">Choose New request to start, or select a request from Saved requests. You can also import a method and URL from Traffic.</div>
+                <div class="collection-pane-head"><div><h2>Request</h2><p>Edit the method and URL, then save before running.</p></div><span id="collection-request-badge" class="experiment-card-badge" data-kind="offline">No request</span></div>
+                <div id="collection-editor-empty" class="collection-editor-empty">
+                  <h2>Start with a request</h2>
+                  <p>Create one here, or import a method and URL from Traffic.</p>
+                  <div class="collection-empty-actions">
+                    <button id="collection-empty-new-request" class="trace-button" type="button">New request</button>
+                  </div>
+                </div>
                 <form id="collection-request-form" class="collection-form" hidden>
                   <div class="collection-form-row"><label>Name<input id="collection-request-name" type="text" maxlength="128" autocomplete="off" /></label><label>Folder<select id="collection-request-folder"></select></label></div>
                   <label>Request URL<input id="collection-request-url" type="text" maxlength="8192" placeholder="https://{{host}}/path/{{id}}" autocomplete="off" /></label>
@@ -830,13 +846,13 @@
           <section id="screen-analyst" class="screen" aria-label="Local Analyst Workspace" hidden>
             <header class="screen-head">
               <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
-              <div><h1>Local Analyst Workspace</h1><div class="screen-subtitle">Write notes or run JavaScript against a local copy of captured evidence.</div></div>
+              <div><h1>Analyst</h1><div class="screen-subtitle">Save a script or note to inspect captured evidence locally.</div></div>
               <div class="screen-head-actions"><span id="analyst-generation" class="memory-readonly">Generation 0</span><span id="analyst-runner-badge" class="memory-readonly">Runner checking</span></div>
             </header>
-            <div id="analyst-notice" class="analyst-notice" data-kind="loading" role="status" aria-live="polite">Loading the local analyst workspace…</div>
-            <div class="analyst-grid">
+            <div id="analyst-notice" class="analyst-notice" data-kind="loading" role="status" aria-live="polite">Loading your local analyst workspace…</div>
+            <div id="analyst-grid" class="analyst-grid">
               <aside class="analyst-pane" aria-label="Analyst library">
-                <div class="analyst-pane-head"><div><h2>Library</h2><p>Your saved scripts and notes. Nothing runs until you choose Run.</p></div><span id="analyst-file-count" class="experiment-card-badge">0 / 64</span></div>
+                <div class="analyst-pane-head"><div><h2>Saved work</h2><p>Scripts run only when you choose Run; notes never execute.</p></div><span id="analyst-file-count" class="experiment-card-badge">0 / 64</span></div>
                 <div class="analyst-actions">
                   <button id="analyst-new-folder" class="secondary-button" type="button">New folder</button>
                   <button id="analyst-new-script" class="secondary-button" type="button">New script</button>
@@ -863,8 +879,15 @@
               </aside>
 
               <section class="analyst-pane" aria-label="Analyst file editor">
-                <div class="analyst-pane-head"><div><h2>Editor</h2><p>Save a script before running it. Notes are never executed.</p></div><span id="analyst-editor-badge" class="experiment-card-badge" data-kind="offline">No file</span></div>
-                <div id="analyst-editor-empty" class="analyst-empty">Choose New script to analyze captured evidence with JavaScript, or New note to keep a scratchpad.</div>
+                <div class="analyst-pane-head"><div><h2>Editor</h2><p>Select saved work to edit it.</p></div><span id="analyst-editor-badge" class="experiment-card-badge" data-kind="offline">No file</span></div>
+                <div id="analyst-editor-empty" class="analyst-empty analyst-editor-empty">
+                  <h2>Start with saved work</h2>
+                  <p>Create a script to inspect captured evidence, or a note to record a finding.</p>
+                  <div class="analyst-empty-actions">
+                    <button id="analyst-empty-new-script" class="trace-button" type="button">New script</button>
+                    <button id="analyst-empty-new-note" class="secondary-button" type="button">New note</button>
+                  </div>
+                </div>
                 <form id="analyst-editor-form" class="analyst-form analyst-editor-form" hidden>
                   <div class="analyst-form-row"><label>Name<input id="analyst-name" type="text" maxlength="128" autocomplete="off" /></label><label>Folder<select id="analyst-folder"></select></label></div>
                   <div class="analyst-form-row"><label>Type<select id="analyst-kind"><option value="analyst-script">Analyst script</option><option value="scratchpad">Scratchpad</option></select></label><label>Language<select id="analyst-language"><option value="javascript">JavaScript</option><option value="json">JSON</option><option value="markdown">Markdown</option><option value="text">Plain text</option></select></label></div>
@@ -876,7 +899,7 @@
 
               <aside class="analyst-pane analyst-run-pane" aria-label="Analyst execution">
                 <article class="analyst-card">
-                  <header><div><h2>Evidence snapshot</h2><p>Choose which captured evidence the script can read. Each run gets a separate local copy.</p></div><span id="analyst-snapshot-badge" class="experiment-card-badge">0 records</span></header>
+                  <header><div><h2>Evidence to read</h2><p>Choose the captured evidence a script may read. Each run gets a separate local copy.</p></div><span id="analyst-snapshot-badge" class="experiment-card-badge">0 records</span></header>
                   <form id="analyst-run-form" class="analyst-form">
                     <label>Script variables (JSON object)<textarea id="analyst-variables" maxlength="16384" spellcheck="false" placeholder='{"seed":"verified"}'></textarea></label>
                     <div class="analyst-options">
@@ -1002,9 +1025,9 @@
       </div>
 
       <footer class="statusbar">
-        <span id="broker-status" class="broker-status">connecting to broker</span>
-        <span><span id="request-count">0</span> requests</span>
-        <span id="sample-status">sample request values enabled</span>
+        <span id="broker-status" class="broker-status">connecting to evidence</span>
+        <span id="request-summary"><span id="request-count">0</span> <span id="request-count-label">requests loaded</span></span>
+        <span id="sample-status">Waiting for session mode</span>
         <span id="gap-status">0 sequence gaps</span>
         <span id="updated-status">waiting for evidence</span>
         <span class="local-only">local only</span>

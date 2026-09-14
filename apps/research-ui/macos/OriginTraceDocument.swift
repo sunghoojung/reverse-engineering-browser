@@ -208,7 +208,8 @@ enum OriginTraceDocumentBuilder {
   private static func eventStep(
     _ event: [String: Any], relation: String, confidence: String
   ) throws -> [String: Any] {
-    guard exactInteger(event["protocol_version"], equals: 2),
+    guard let protocolVersion = event["protocol_version"] as? Int,
+      Set([2, 3]).contains(protocolVersion),
       let category = event["category"] as? String,
       eventCategories.contains(category),
       let operation = event["type"] as? String,

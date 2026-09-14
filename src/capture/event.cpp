@@ -123,9 +123,8 @@ std::span<const std::byte> InlinePayload(const EventRecord& event) noexcept {
 bool IsValidEvent(const EventRecord& event) noexcept {
   return event.header.protocol_version == kEventProtocolVersion &&
          event.header.header_size == sizeof(EventHeader) &&
-         event.header.payload_size <= event.inline_payload.size() && event.header.reserved0 == 0 &&
-         event.header.reserved1 == 0 && IsKnownCategory(event.header.category) &&
-         IsKnownType(event.header.type) &&
+         event.header.payload_size <= event.inline_payload.size() && event.header.reserved1 == 0 &&
+         IsKnownCategory(event.header.category) && IsKnownType(event.header.type) &&
          (event.header.flags & static_cast<std::uint16_t>(~kKnownEventFlags)) == 0 &&
          std::ranges::all_of(event.reserved,
                              [](const std::byte value) { return value == std::byte{0}; });
@@ -149,6 +148,8 @@ std::string EventToJson(const EventRecord& event) {
   AppendInteger(output, event.header.process_id);
   output.append(",\"thread_id\":");
   AppendInteger(output, event.header.thread_id);
+  output.append(",\"tab_id\":");
+  AppendInteger(output, event.header.tab_id);
   output.append(",\"navigation_id\":\"");
   AppendInteger(output, event.header.navigation_id);
   output.append("\",\"frame_id\":\"");

@@ -11,7 +11,7 @@
 
 namespace reb {
 
-inline constexpr std::uint16_t kEventProtocolVersion = 2;
+inline constexpr std::uint16_t kEventProtocolVersion = 3;
 inline constexpr std::size_t kInlinePayloadSize = 128;
 inline constexpr std::size_t kEventRecordReservedSize = 48;
 
@@ -62,7 +62,9 @@ struct EventHeader final {
   EventCategory category = EventCategory::kUnknown;
   EventType type = EventType::kUnknown;
   std::uint32_t payload_size = 0;
-  std::uint32_t reserved0 = 0;
+  // Browser-global top-level FrameTreeNode identifier. Zero means the event
+  // could not be attributed to a browser tab.
+  std::uint32_t tab_id = 0;
   std::uint64_t sequence_number = 0;
   std::uint64_t monotonic_time_ns = 0;
   std::uint64_t session_id = 0;
@@ -105,7 +107,7 @@ REB_ASSERT_EVENT_HEADER_OFFSET(header_size, 2);
 REB_ASSERT_EVENT_HEADER_OFFSET(category, 4);
 REB_ASSERT_EVENT_HEADER_OFFSET(type, 6);
 REB_ASSERT_EVENT_HEADER_OFFSET(payload_size, 8);
-REB_ASSERT_EVENT_HEADER_OFFSET(reserved0, 12);
+REB_ASSERT_EVENT_HEADER_OFFSET(tab_id, 12);
 REB_ASSERT_EVENT_HEADER_OFFSET(sequence_number, 16);
 REB_ASSERT_EVENT_HEADER_OFFSET(monotonic_time_ns, 24);
 REB_ASSERT_EVENT_HEADER_OFFSET(session_id, 32);

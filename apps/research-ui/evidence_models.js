@@ -16,6 +16,13 @@
           'request_initiated', 'request_redirected', 'response_started',
           'request_completed', 'request_failed', 'vm_finding',
           'artifact_captured', 'artifact_capture_failed'
+        ]),
+        3: new Set([
+          'unknown', 'api_call', 'property_read', 'module_compiled',
+          'module_instantiated', 'request_started', 'response_completed', 'gap',
+          'request_initiated', 'request_redirected', 'response_started',
+          'request_completed', 'request_failed', 'vm_finding',
+          'artifact_captured', 'artifact_capture_failed'
         ])
       };
       const uint64Fields = [
@@ -88,7 +95,7 @@
       }
 
       function browserContextToken(event) {
-        if (event.protocol_version !== 2 ||
+        if (event.protocol_version < 2 ||
             !browserContextFields.every(field => Object.hasOwn(event, field)) ||
             browserContextFields.every(field => event[field] === '0')) {
           return null;
@@ -111,7 +118,7 @@
         const values = [];
         const payload = decodePayload(event);
         if (payload) values.push(payload);
-        if (event.protocol_version === 2) {
+        if (event.protocol_version >= 2) {
           if (event.status_code !== 0) values.push(`status ${event.status_code}`);
           if (event.error_code !== 0) values.push(`error ${event.error_code}`);
           if (event.encoded_data_length !== '0') values.push(`${event.encoded_data_length} encoded bytes`);
@@ -149,10 +156,11 @@
 
       function isBrokerEvent(event) {
         if (!isPlainObject(event) || !Number.isInteger(event.protocol_version)) return false;
-        const payloadLimit = event.protocol_version === 1 ? 48 : event.protocol_version === 2 ? 128 : null;
+        const payloadLimit = event.protocol_version === 1 ? 48
+          : event.protocol_version === 2 || event.protocol_version === 3 ? 128 : null;
         if (payloadLimit === null || !eventTypes[event.protocol_version]?.has(event.type)) return false;
         if (!eventCategories.has(event.category)) return false;
-        if (event.protocol_version === 2 && (event.category === 'unknown' || event.type === 'unknown')) return false;
+        if (event.protocol_version >= 2 && (event.category === 'unknown' || event.type === 'unknown')) return false;
         if (!isSafeIntegerInRange(event.payload_size, 0, payloadLimit)) return false;
         if (event.payload_encoding !== 'hex' || typeof event.payload !== 'string') return false;
         if (event.payload.length !== event.payload_size * 2 || !/^[0-9a-f]*$/i.test(event.payload)) return false;
@@ -167,6 +175,8 @@
         }
 
         if (!uint64Fields.every(field => isCanonicalInteger(event[field], 0n, uint64Max))) return false;
+        if (event.protocol_version === 3 && !isSafeIntegerInRange(event.tab_id, 0, 0xffffffff)) return false;
+        if (event.protocol_version === 2 && Object.hasOwn(event, 'tab_id')) return false;
         const contextFieldPresence = browserContextFields.map(field => Object.hasOwn(event, field));
         if (contextFieldPresence[0] !== contextFieldPresence[1]) return false;
         if (contextFieldPresence[0] &&
@@ -186,6 +196,7 @@
           Array.isArray(body.events) &&
           isSafeIntegerInRange(body.count, 0, 5000) &&
           body.count === body.events.length &&
+          (body.capture_mode === undefined || ['live', 'demo', 'idle'].includes(body.capture_mode)) &&
           (body.broker_connected === undefined || typeof body.broker_connected === 'boolean') &&
           body.events.every(isBrokerEvent);
       }
@@ -219,6 +230,8 @@
           Array.isArray(body.artifacts) &&
           isSafeIntegerInRange(body.count, 0, 5000) &&
           body.count === body.artifacts.length &&
+          (body.artifact_receiver_configured === undefined || typeof body.artifact_receiver_configured === 'boolean') &&
+          (body.artifact_receiver_connected === undefined || typeof body.artifact_receiver_connected === 'boolean') &&
           body.artifacts.every(isArtifact);
       }
 
@@ -302,6 +315,58 @@
           Array.isArray(entry.stack) && entry.stack.length <= 64 && entry.stack.every(frame =>
             isPlainObject(frame) && typeof frame.function_name === 'string' && typeof frame.url === 'string' &&
             isSafeIntegerInRange(frame.line, 0, 0x7fffffff) && isSafeIntegerInRange(frame.column, 0, 0x7fffffff));
+      }
+
+      function isDebuggerNetworkBody(body) {
+        if (!isPlainObject(body) || !['available', 'empty', 'missing', 'loading', 'error'].includes(body.state) ||
+            !isBoundedText(body.mime, 512) || !isBoundedText(body.text, 128 * 1024) ||
+            !isBoundedText(body.base64, 176 * 1024) || typeof body.truncated !== 'boolean' ||
+            !isBoundedText(body.reason, 512)) return false;
+        if (body.base64 && (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(body.base64) ||
+            body.base64.length > Math.ceil(128 * 1024 / 3) * 4)) return false;
+        if (body.state === 'available') return Boolean(body.text) !== Boolean(body.base64) || (!body.text && !body.base64);
+        return body.text === '' && body.base64 === '';
+      }
+
+      function isDebuggerNetworkHeaders(headers) {
+        return Array.isArray(headers) && headers.length <= 128 && headers.every(header =>
+          Array.isArray(header) && header.length === 2 && isBoundedText(header[0], 128) &&
+          isBoundedText(header[1], 8 * 1024));
+      }
+
+      function isDebuggerNetworkRequest(request) {
+        if (!isPlainObject(request) || !isBoundedText(request.id, 12 * 1024) || !request.id ||
+            !isBoundedText(request.protocol_request_id, 4 * 1024) || !request.protocol_request_id ||
+            !isBoundedText(request.target_id, 4 * 1024) || !isBoundedText(request.target_title, 64 * 1024) ||
+            !isBoundedText(request.url, 64 * 1024) || !request.url || typeof request.url_truncated !== 'boolean' ||
+            !isBoundedText(request.method, 32) || !request.method || typeof request.method_truncated !== 'boolean' ||
+            !isBoundedText(request.resource_type, 128) || !isBoundedText(request.document_url, 64 * 1024) ||
+            typeof request.started_monotonic_ms !== 'number' || !Number.isFinite(request.started_monotonic_ms) ||
+            request.started_monotonic_ms < 0 || !isSafeIntegerInRange(request.wall_time_ms, 0, Number.MAX_SAFE_INTEGER) ||
+            !['pending', 'complete', 'failed'].includes(request.state) ||
+            (request.status !== null && !isSafeIntegerInRange(request.status, 0, 999)) ||
+            !isBoundedText(request.status_text, 512) || !isBoundedText(request.protocol, 128) ||
+            !isBoundedText(request.mime_type, 512) ||
+            (request.duration_ms !== null && (typeof request.duration_ms !== 'number' ||
+              !Number.isFinite(request.duration_ms) || request.duration_ms < 0)) ||
+            !isSafeIntegerInRange(request.encoded_data_length, 0, Number.MAX_SAFE_INTEGER) ||
+            typeof request.from_disk_cache !== 'boolean' || typeof request.from_service_worker !== 'boolean' ||
+            !isBoundedText(request.error_text, 512) || !isPlainObject(request.request) ||
+            !isDebuggerNetworkHeaders(request.request.headers) || !isDebuggerNetworkBody(request.request.body) ||
+            !isPlainObject(request.response) || !isDebuggerNetworkHeaders(request.response.headers) ||
+            !isDebuggerNetworkBody(request.response.body)) return false;
+        return true;
+      }
+
+      function isDebuggerNetwork(network) {
+        return isPlainObject(network) && typeof network.capture_enabled === 'boolean' &&
+          (network.target_id === null || isBoundedText(network.target_id, 4 * 1024)) &&
+          Array.isArray(network.requests) && network.requests.length <= 1000 &&
+          network.requests.every(isDebuggerNetworkRequest) &&
+          isSafeIntegerInRange(network.dropped, 0, Number.MAX_SAFE_INTEGER) &&
+          isPlainObject(network.limits) && network.limits.requests === 1000 &&
+          network.limits.body_bytes === 128 * 1024 && network.limits.headers === 128 &&
+          network.limits.header_bytes === 64 * 1024;
       }
 
       function isMemoryOriginTraceStep(step) {
@@ -945,6 +1010,7 @@
             !Array.isArray(body.breakpoints) || body.breakpoints.length > 1000 || !body.breakpoints.every(isDebuggerBreakpoint) ||
             !Array.isArray(body.watches) || body.watches.length > 100 || !body.watches.every(isDebuggerWatch) ||
             !Array.isArray(body.console) || body.console.length > 500 || !body.console.every(isDebuggerConsoleEntry) ||
+            !isDebuggerNetwork(body.network) ||
             !isMemoryOriginTrace(body.memory_origin_trace) ||
             !isActionScope(body.action_scope) ||
             !isRequestInterception(body.request_interception) ||
@@ -1205,7 +1271,7 @@
       function buildBrowserRequestKeys(events) {
         const keys = new Map();
         for (const event of events) {
-          if (event.protocol_version !== 2 || integerText(event, 'request_id') === '0') continue;
+          if (event.protocol_version < 2 || integerText(event, 'request_id') === '0') continue;
           if (event.type === 'request_initiated') {
             const fallbackKey = legacyBrowserRequestKey(event);
             if (fallbackKey) keys.set(fallbackKey, rendererRequestIdentity(event));
@@ -1245,20 +1311,34 @@
 
       function resourceTypeFilter(event, previous, payload) {
         if (/^application\/wasm(?:;|$)/i.test(payload)) return 'wasm';
-        if (event.protocol_version === 2 && event.type === 'request_started') {
+        if (event.protocol_version >= 2 && event.type === 'request_started') {
           return resourceTypeFilters.get(event.resource_type) ?? 'other';
         }
         return previous?.type ?? 'other';
       }
 
-      function requestsFromEvents(events) {
+      function networkTargetFromPayload(payload, eventType) {
+        const source = payload.trim();
+        if (!source) return null;
+        const methodTarget = source.match(/^([A-Z][A-Z0-9!#$%&'*+.^_`|~-]{0,31})\s+(\S+)$/);
+        if (['request_initiated', 'request_started', 'request_redirected'].includes(eventType) && methodTarget) {
+          return {method: methodTarget[1], value: methodTarget[2], kind: 'host'};
+        }
+        // Network payloads intentionally retain only a destination host. A
+        // terminal event can arrive without its request-start event, so keep
+        // a host-only target when it is independently recognizable. Avoid
+        // treating status labels such as "completed" as destinations.
+        const host = source.match(/^(?:localhost|(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}|(?:\d{1,3}\.){3}\d{1,3})(?::\d{1,5})?$/)?.[0];
+        return host ? {method: null, value: host, kind: 'host'} : null;
+      }
+
+      function requestsFromEvents(events, origin = 'live') {
         const requests = new Map();
         const lifecycleEvents = events.filter(event => event.category === 'network' && networkLifecycleTypes.has(event.type));
         const browserRequestKeys = buildBrowserRequestKeys(lifecycleEvents);
         lifecycleEvents.forEach(event => {
           const payload = decodePayload(event);
-          const carriesRequestTarget = ['request_initiated', 'request_started', 'request_redirected'].includes(event.type);
-          const match = carriesRequestTarget ? payload.match(/^([A-Z]+)\s+(\S+)/) : null;
+          const target = networkTargetFromPayload(payload, event.type);
           const id = requestIdentity(event, browserRequestKeys);
           const previous = requests.get(id);
           const timestamp = integerValue(event, 'monotonic_time_ns');
@@ -1266,8 +1346,8 @@
           const lastTimestamp = previous && previous.lastTimestamp > timestamp ? previous.lastTimestamp : timestamp;
           const incomingRank = lifecycleRanks.get(event.type) ?? 0;
           const rank = Math.max(previous?.rank ?? 0, incomingRank);
-          const failed = previous?.failed || event.type === 'request_failed' || (event.protocol_version === 2 && event.error_code !== 0);
-          const numericStatus = event.protocol_version === 2 ? event.status_code : 0;
+          const failed = previous?.failed || event.type === 'request_failed' || (event.protocol_version >= 2 && event.error_code !== 0);
+          const numericStatus = event.protocol_version >= 2 ? event.status_code : 0;
           const previousStatusRank = previous?.statusRank ?? 0;
           const hasNewerStatus = numericStatus > 0 && incomingRank >= previousStatusRank;
           const status = failed
@@ -1275,19 +1355,21 @@
             : hasNewerStatus
               ? numericStatus
               : previous?.status ?? 'pending';
-          const targetRank = match && incomingRank >= (previous?.targetRank ?? 0)
+          const targetRank = target && incomingRank >= (previous?.targetRank ?? 0)
             ? incomingRank
             : previous?.targetRank ?? 0;
-          const updatesTarget = Boolean(match) && targetRank === incomingRank;
+          const updatesTarget = Boolean(target) && targetRank === incomingRank;
           const terminal = rank >= 5;
           requests.set(id, {
             id,
-            path: updatesTarget ? match[2] : previous?.path ?? 'network request',
-            method: updatesTarget ? match[1] : previous?.method ?? 'EVENT',
+            path: updatesTarget ? target.value : previous?.path ?? 'Unidentified network event',
+            method: updatesTarget && target.method ? target.method : previous?.method ?? 'EVENT',
             status,
             time: terminal ? formatMilliseconds(lastTimestamp - firstTimestamp) : 'pending',
             type: resourceTypeFilter(event, previous, payload),
-            origin: 'live',
+            origin: ['live', 'demo'].includes(origin) ? origin : 'live',
+            targetKind: updatesTarget ? target.kind : previous?.targetKind ?? 'unknown',
+            hostOnly: (updatesTarget ? target.kind : previous?.targetKind) === 'host',
             start: 8,
             mid: Math.min(80, 18 + rank * 11),
             end: Math.min(94, 30 + rank * 12),
@@ -1297,6 +1379,8 @@
             rank,
             statusRank: hasNewerStatus ? incomingRank : previousStatusRank,
             targetRank,
+            tabId: event.protocol_version === 3 && event.tab_id > 0
+              ? String(event.tab_id) : previous?.tabId ?? '0',
             operation: incomingRank >= (previous?.rank ?? 0) ? event.type : previous.operation,
             firstTimestamp,
             lastTimestamp
@@ -1305,8 +1389,83 @@
         return [...requests.values()];
       }
 
+      function networkBodyFromDebugger(body, headers) {
+        const record = {
+          state: body.state,
+          mime: body.mime,
+          headers,
+          text: body.text,
+          truncated: body.truncated,
+          reason: body.reason
+        };
+        if (body.base64) {
+          const decoded = atob(body.base64);
+          record.bytes = Uint8Array.from(decoded, character => character.charCodeAt(0));
+          delete record.text;
+        }
+        return record;
+      }
+
+      function requestsFromDebuggerNetwork(network, nativeRequests = []) {
+        if (!network?.capture_enabled) return [];
+        const domain = request => {
+          try { return new URL(String(request.path ?? '')).host; }
+          catch { return String(request.path ?? '').replace(/^\/\//, '').split('/')[0]; }
+        };
+        const typeMap = new Map([
+          ['Document', 'doc'], ['Stylesheet', 'css'], ['Script', 'js'], ['Image', 'img'],
+          ['Media', 'media'], ['Font', 'font'], ['XHR', 'xhr'], ['Fetch', 'xhr'],
+          ['WebSocket', 'socket'], ['Manifest', 'other'], ['Other', 'other']
+        ]);
+        const claimedNative = new Set();
+        return network.requests.map(record => {
+          let host = '';
+          try { host = new URL(record.url).host; } catch {}
+          const native = nativeRequests
+            .filter(candidate => !claimedNative.has(candidate.id) && candidate.method === record.method &&
+              domain(candidate) === host)
+            .sort((left, right) => Math.abs(Number(left.firstTimestamp) / 1e6 - record.started_monotonic_ms) -
+              Math.abs(Number(right.firstTimestamp) / 1e6 - record.started_monotonic_ms))[0];
+          if (native && Math.abs(Number(native.firstTimestamp) / 1e6 - record.started_monotonic_ms) <= 10_000) {
+            claimedNative.add(native.id);
+          }
+          const correlated = claimedNative.has(native?.id) ? native : null;
+          const terminal = record.state !== 'pending';
+          return {
+            id: record.id,
+            path: record.url,
+            method: record.method,
+            status: record.state === 'failed' ? 'failed' : record.status ?? 'pending',
+            time: terminal && record.duration_ms !== null ? record.duration_ms : 'pending',
+            type: typeMap.get(record.resource_type) ?? 'other',
+            origin: 'live',
+            targetKind: 'url',
+            hostOnly: false,
+            start: 8,
+            mid: terminal ? 72 : 42,
+            end: terminal ? 92 : 58,
+            event: correlated?.event ?? null,
+            events: correlated?.events ?? [],
+            failed: record.state === 'failed',
+            rank: terminal ? 5 : 2,
+            statusRank: terminal ? 5 : 2,
+            targetRank: 5,
+            tabId: record.target_id,
+            tabTitle: record.target_title,
+            operation: `cdp_${record.state}`,
+            firstTimestamp: BigInt(Math.max(0, Math.round(record.started_monotonic_ms * 1e6))),
+            lastTimestamp: BigInt(Math.max(0, Math.round((record.started_monotonic_ms + (record.duration_ms ?? 0)) * 1e6))),
+            protocolRequestId: record.protocol_request_id,
+            exchange: {
+              request: networkBodyFromDebugger(record.request.body, record.request.headers),
+              response: networkBodyFromDebugger(record.response.body, record.response.headers)
+            }
+          };
+        });
+      }
+
       function decodeVmFinding(event) {
-        if (event.protocol_version !== 2 || event.category !== 'vm' ||
+        if (event.protocol_version < 2 || event.category !== 'vm' ||
             event.type !== 'vm_finding' || event.payload_size !== 128 ||
             event.payload_truncated) return null;
         const bytes = bytesFromHex(event.payload);

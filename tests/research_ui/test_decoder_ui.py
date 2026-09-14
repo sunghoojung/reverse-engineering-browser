@@ -28,6 +28,10 @@ class DecoderUiTest(unittest.TestCase):
             "Decoding is not verification",
             "I understand this creates an unsigned token with no authenticity",
             "Native C++ decoder ready",
+            "scroll-padding-block: 12px",
+            "display: contents",
+            "order: 2",
+            "white-space: normal",
         ):
             self.assertIn(marker, self.html)
 

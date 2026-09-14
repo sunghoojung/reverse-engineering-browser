@@ -1,206 +1,103 @@
 # Reverse Engineering Browser
 
-Native browser observability for authorized reverse engineering.
+Reverse Engineering Browser is a local-first research browser and macOS
+workspace for inspecting authorized web applications.
 
-[![Continuous integration](https://github.com/sunghoojung/reverse-engineering-browser/actions/workflows/ci.yml/badge.svg)](https://github.com/sunghoojung/reverse-engineering-browser/actions/workflows/ci.yml)
+## Features
 
-Reverse Engineering Browser is a local-first research harness built around a
-custom Brave integration. Dormant native C++ probes capture selected browser
-behavior, move bounded records through the browser process, and persist
-normalized evidence for inspection in the Origin Trace macOS application.
+- **Live network traffic:** inspect request methods, full URLs, status codes,
+  timing, headers, request bodies, and response bodies captured through CDP.
+- **Tab and domain organization:** separate traffic by browser tab, then narrow
+  a tab to a specific destination domain or resource type.
+- **Native browser evidence:** record request initiation and lifecycle events,
+  Canvas and Web Audio activity, and correlated browser-process metadata from a
+  custom Brave build.
+- **Origin tracing:** follow a request backward through the observed events,
+  scripts, frames, execution contexts, and captured artifacts that contributed
+  to it.
+- **Source inspection and debugging:** browse page sources, set breakpoints,
+  pause and step through JavaScript, inspect scopes, evaluate watches, and use a
+  live console.
+- **Artifact capture:** retain bounded copies of network-delivered and
+  runtime-generated JavaScript and WebAssembly with hashes and provenance.
+- **Memory and backtrace tools:** inspect heap snapshots, live objects, decoded
+  stack frames, and VM-related findings.
+- **Research workflows:** save requests to collections, replay isolated
+  requests, run controlled experiments, and keep local analyst notes.
+- **Local and bounded capture:** evidence remains on the machine. Sensitive
+  request headers are redacted, bodies are capped at 128 KiB in CDP capture,
+  and native queues and artifact transfers have explicit limits.
+- **Native quiet mode:** run native evidence capture without attaching DevTools
+  when request and response content is not required.
 
-The project is an active research prototype. Its native event path, broker,
-evidence stores, artifact channel, deterministic producer, Origin Trace
-interface, and tracked Brave overlays are implemented and tested. The custom
-browser build remains an advanced workflow because it uses the full Brave and
-Chromium toolchain.
+## How to use it
 
-## Why this exists
+### Download the compiled macOS apps
 
-Page-level JavaScript hooks can miss browser-internal context and can change
-the environment being studied. This project observes selected native browser
-boundaries while keeping the capture path separate from interpretation.
+1. Download `Brave-Browser-Development-v0.1.1-macos-arm64.zip` and
+   `Origin-Trace-v0.1.1-macos.zip` from
+   [GitHub Releases](https://github.com/sunghoojung/reverse-engineering-browser/releases/latest).
+2. Unzip both files.
+3. Use the compiled Brave executable as `REB_BRAVE_BINARY` when starting a live
+   session from the repository, as shown below.
 
-The result is an evidence trail designed to answer questions such as:
+The compiled apps are for Apple silicon Macs. Origin Trace contains no bundled
+sample evidence. The applications are ad-hoc signed but not notarized, so the
+first launch may require Control-clicking the app and choosing **Open**.
 
-- Which script, frame, worker, or WebAssembly artifact caused an event?
-- Which browser signals contributed to a network request?
-- Where did a value originate, and what evidence supports that conclusion?
-- Can a hypothesis be tested in a disposable context without changing the
-  baseline capture?
+### Run a live capture with an existing custom Brave build
 
-## Architecture
-
-```text
-native probe -> bounded renderer transport -> browser-process bridge
-             -> local event broker -> evidence store -> Origin Trace
-```
-
-![Reverse Engineering Browser system architecture](./docs/architecture/system-architecture.svg)
-
-The design keeps renderer work bounded and non-blocking, preserves raw evidence
-alongside later interpretations, and makes dropped events and sequence gaps
-visible. Cross-process records are versioned and retain session, navigation,
-frame, artifact, event, and parent identifiers.
-
-## What is implemented
-
-| Area | Current proof point |
-| --- | --- |
-| Native capture foundation | C++20 fixed-size events, bounded shared-memory queues, disabled fast paths, and explicit drop accounting |
-| Broker and evidence | Authenticated local sockets, validation, correlation, sequence-gap detection, JSONL evidence, and versioned contracts |
-| Artifact capture | Acknowledged, bounded transfer of immutable JavaScript and WebAssembly blobs with SHA-256 manifests |
-| Debugger transport | Dependency-free C++20 loopback WebSocket transport with bounded, versioned private pipes to the Python state adapter |
-| Origin Trace | Native macOS application plus a browser-only development path for request-first evidence inspection, sources, memory analysis, and experiments |
-| Brave integration | Reproducible overlays and ordered patches pinned to specific Brave and Chromium revisions |
-| Verification | Native unit tests, socket and application end-to-end tests, sanitizers, repository hygiene checks, and macOS bundle verification in CI |
-
-The [feature roadmap](./docs/product/feature-list.md) separates the broader
-product direction from the currently proven vertical slices. Detailed design
-and subsystem contracts live in the [documentation index](./docs/README.md).
-
-## Quick start
-
-Requirements for the local foundation:
-
-- a C++20 compiler;
-- Python 3;
-- zlib headers and library;
-- GNU Make or a compatible `make` implementation.
-
-Build and run the test suite:
+From the repository root:
 
 ```sh
-make check
-make e2e
-./build/reb-event-demo
+REB_CDP_NETWORK_CAPTURE=1 \
+REB_BRAVE_BINARY="/path/to/Brave Browser Development.app/Contents/MacOS/Brave Browser Development" \
+make live
 ```
 
-On macOS, build demo evidence and open the native Origin Trace application:
+Origin Trace and the custom Brave browser open together. Browse in that Brave
+window and select requests in the **Traffic** tab. Close Brave to end the
+session. Captured evidence is stored under `build/sessions/live/`.
 
-```sh
-make app
-```
+CDP content capture is explicit because it can retain page content. It redacts
+authorization, cookie, proxy-authorization, and set-cookie headers. Streaming,
+cached, internal, or already-evicted response bodies may be unavailable.
 
-For browser-based UI development on any supported host:
+### Build the custom Brave browser for the first time
 
-```sh
-make ui
-```
+Requirements:
 
-Then open `http://127.0.0.1:7319`. The native application is the normal product
-path; the local server is a development convenience.
+- macOS with full Xcode installed;
+- Node.js and pnpm;
+- Python 3, a C++20 compiler, zlib, and Make;
+- at least 150 GiB free, with 200 to 250 GiB recommended.
 
-## Custom Brave integration
-
-Preparing and building Brave is optional for work on the native foundation,
-broker, evidence contracts, and deterministic UI path.
-
-Prepare the pinned upstream checkout without downloading Chromium:
-
-```sh
-./scripts/bootstrap-brave.sh
-```
-
-Initialize Chromium, apply the repository-owned integration, and verify the
-native probe target:
+Prepare the pinned checkout, apply the integration, verify it, and build Brave:
 
 ```sh
 ./scripts/bootstrap-brave.sh --init
 ./scripts/sync-browser-integration.sh
 make brave-doctor
 make brave-probe-check
+./scripts/brave-toolchain.sh build
 ```
 
-Normal live sessions route the browser-facing DevTools WebSocket through the
-bounded C++ debugger transport. Python retains the existing HTTP contracts,
-CDP interpretation, and debugger state.
+The first full build can take several hours. Later builds are incremental and
+normally reuse the existing checkout and compiled objects. After it completes,
+start live capture with the command from the previous section.
 
-For a capture that must not attach DevTools to the live page, start native
-quiet mode:
+### Run without CDP content capture
+
+For native metadata and artifact capture without a live DevTools attachment:
 
 ```sh
-REB_NATIVE_QUIET_MODE=1 make live
+REB_NATIVE_QUIET_MODE=1 \
+REB_BRAVE_BINARY="/path/to/Brave Browser Development.app/Contents/MacOS/Brave Browser Development" \
+make live
 ```
 
-This mode does not open a remote-debugging endpoint or start the CDP debugger
-bridge. The patched V8 runtime treats page-authored `debugger;` statements as
-no-ops before Inspector handling, while the native evidence probes and captured
-Sources remain available. Live Page sources, breakpoints, stepping, watches,
-and the console are intentionally unavailable in this mode. This removes the
-debugger attachment and pause signals; it does not promise that arbitrary code
-cannot fingerprint the custom browser or measure instrumentation overhead.
+Sources, breakpoints, stepping, watches, the console, full URLs, headers, and
+bodies are unavailable in native quiet mode.
 
-Initialization needs at least 150 GiB of free space; 200 to 250 GiB is the
-practical recommendation. The default shallow-history mode avoids unnecessary
-Git history. Use `--full-history` only when an investigation requires it.
-
-The generated upstream checkout lives under `browser/worktree/` and is never
-tracked. All project-owned Brave files live in mirrored overlays or minimal
-ordered patches under `browser/integration/brave/`.
-
-## Engineering principles
-
-- Local by default: services bind to loopback or user-only local sockets, and
-  captured evidence is never uploaded automatically.
-- Bounded by design: probe work, queues, payloads, searches, and experiments
-  have explicit limits and visible failure states.
-- Evidence before inference: raw observations remain available when later
-  analyzers assign meaning or confidence.
-- Privacy-aware capture: credentials, authorization headers, cookies, request
-  bodies, and personal content are excluded by default.
-- Reproducible integration: browser changes must apply cleanly to the pinned
-  upstream revisions from a clean checkout.
-
-This software is intended only for systems you own or are explicitly
-authorized to assess. It is not designed to bypass access controls or conceal
-malicious activity.
-
-## Repository map
-
-```text
-.agents/skills/         repository-specific agent validation workflows
-apps/                   demos, producers, and the Origin Trace interface
-browser/                pinned Brave integration and ignored upstream checkout
-docs/                   architecture, product direction, and feature designs
-include/ and src/       public native interfaces and implementations by subsystem
-mk/                    native build rules, workflows, and quality checks
-protocol/               versioned event, trace, and command contracts
-services/               local event broker and artifact receiver
-tests/                  native, socket, integration, and UI tests
-tools/                  offline validation and analysis utilities
-```
-
-## Development
-
-See the [native implementation guide](./src/README.md) for component ownership
-and the [build guide](./mk/README.md) for target dependencies and build settings.
-
-Run the complete local quality gate before handing off a change:
-
-```sh
-make lint
-make check
-make e2e
-make sanitize
-git diff --check
-```
-
-CI runs source formatting, shell, Python, workflow, repository hygiene, native,
-end-to-end, sanitizer, and macOS application checks. Version tags matching
-`v*` build a locally signed macOS archive and publish it through GitHub
-Releases.
-
-Start with [CONTRIBUTING.md](./CONTRIBUTING.md) before making a change. Coding
-agents should also read [AGENTS.md](./AGENTS.md) and use the repository skills
-under `.agents/skills/` for UI, Brave, and handoff validation.
-
-## Documentation
-
-- [Documentation index](./docs/README.md)
-- [Technical architecture](./docs/architecture/technical-architecture.md)
-- [System architecture](./docs/architecture/system-architecture.md)
-- [Feature roadmap](./docs/product/feature-list.md)
-- [Feature catalog](./docs/product/feature-catalog.md)
-- [Origin Trace application](./apps/research-ui/README.md)
-- [Brave workspace](./browser/README.md)
+Use this project only on systems you own or are explicitly authorized to
+inspect.

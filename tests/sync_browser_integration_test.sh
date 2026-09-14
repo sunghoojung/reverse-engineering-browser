@@ -64,4 +64,43 @@ grep -Fq 'Chromium checkout revision does not match the pin.' \
   "${test_root}/chromium-revision.err"
 test ! -e "${brave_directory}/components/reverse_engineering_browser"
 
+readonly overlap_root="${test_root}/overlap"
+readonly overlap_checkout="${overlap_root}/checkout"
+readonly overlap_integration="${overlap_root}/integration"
+mkdir -p "${overlap_checkout}" "${overlap_integration}/patches"
+git -C "${overlap_checkout}" init -q
+printf 'base\n' >"${overlap_checkout}/fixture.txt"
+git -C "${overlap_checkout}" add fixture.txt
+git -C "${overlap_checkout}" -c user.name='Sync Test' \
+  -c user.email='sync-test@example.invalid' commit -q -m fixture
+cat >"${overlap_integration}/patches/0001-first.patch" <<'PATCH'
+diff --git a/fixture.txt b/fixture.txt
+index df967b9..9c59e24 100644
+--- a/fixture.txt
++++ b/fixture.txt
+@@ -1 +1 @@
+-base
++first
+PATCH
+cat >"${overlap_integration}/patches/0002-overlap.patch" <<'PATCH'
+diff --git a/fixture.txt b/fixture.txt
+index 9c59e24..e019be0 100644
+--- a/fixture.txt
++++ b/fixture.txt
+@@ -1 +1 @@
+-first
++second
+PATCH
+
+for run_number in 1 2; do
+  REB_BRAVE_DIRECTORY="${overlap_checkout}" \
+    REB_BRAVE_INTEGRATION_DIRECTORY="${overlap_integration}" \
+    REB_BRAVE_CORE_REVISION=HEAD "${sync_script}" \
+    >"${overlap_root}/sync-${run_number}.out" \
+    2>"${overlap_root}/sync-${run_number}.err"
+  test "$(tr -d '\n' <"${overlap_checkout}/fixture.txt")" = 'second'
+done
+grep -Fq 'Already applied: patch stack' \
+  "${overlap_root}/sync-2.out"
+
 echo "sync_browser_integration_test passed"

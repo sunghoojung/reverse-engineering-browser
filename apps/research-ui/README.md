@@ -24,6 +24,20 @@ Open `http://127.0.0.1:7319`. For a live capture with the pinned custom Brave
 build, use `make live`. Follow the [browser setup](../../browser/README.md)
 before starting a live session.
 
+Native evidence capture retains host-level network metadata by default. Enable
+full CDP Traffic inspection for one live session with:
+
+```sh
+REB_CDP_NETWORK_CAPTURE=1 make live
+```
+
+This enables full URLs, request and response headers, available POST data, and
+response-body retrieval for the attached tab. Authorization, cookie,
+proxy-authorization, and set-cookie values are always redacted. Request and
+response bodies are retained only in memory by the local UI bridge, limited to
+128 KiB per side, and discarded when the live session ends. The Origin Trace
+title bar visibly changes to `Live content` while this mode is active.
+
 For a live capture without a DevTools connection:
 
 ```sh
@@ -133,6 +147,11 @@ duplicate names and update the request URL.
 
 Traffic opens directly to inline Request and Response tabs: independently scrolling bodies on wide
 windows, and a Request/Response switch below 900 px. Body shows syntax-colored, line-numbered JSON; Raw body preserves captured text.
+Live traffic is grouped by captured browser tab, with an All tabs scope and a
+domain selector inside the active scope. Protocol v3 events carry the stable
+top-level browser tab identifier; older evidence remains available under the
+Unattributed scope. The UI retains the newest 5,000 events per refresh while
+the complete append-only evidence remains on disk.
 The pane menu offers JSON tree, Find, Wrap, and Copy. Text, JavaScript, XML, and
 HTML remain inert text, and binary records use hex. Headers and query parameters
 have separate views. Search filters visible fields or lines; selecting a leaf
@@ -142,7 +161,9 @@ The viewer distinguishes uncaptured, redacted, loading, failed, explicitly
 empty, and truncated bodies. Its local preview is bounded to 128 KiB, 1,000 JSON
 nodes, 24 levels, and 2,000 displayed text lines; limits are visible and raw/copy
 operate on the retained preview. Sample exchanges are labeled in both panes.
-Live network metadata currently supplies no request/response header or body
-bytes, so the viewer reports them as not captured. It does not join unrelated
-artifacts by URL or enable sensitive capture. Default host-only metadata cannot
-establish whether query parameters were absent.
+Default native network metadata supplies no request/response header or body
+bytes, so the viewer reports them as not captured. Explicit CDP network capture
+projects the attached tab's full request lifecycle into Traffic and correlates
+it with matching native events when their host, method, and monotonic timing
+agree. CDP body retrieval can still report unavailable content for streaming,
+evicted, cached, or protocol-internal responses rather than inventing bytes.

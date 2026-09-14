@@ -64,6 +64,8 @@ assert.equal(live.response.state, 'missing');
 assert.equal(trafficExchange({origin: 'live', method: 'HEAD'}).response.state, 'empty');
 assert.equal(trafficExchange({origin: 'live', status: 304}).response.state, 'empty');
 assert.equal(trafficExchange({origin: 'sample', id: '__proto__'}).response.state, 'missing');
+const captured = {request: {state: 'available', text: '{}'}, response: {state: 'loading'}};
+assert.equal(trafficExchange({origin: 'live', exchange: captured}), captured);
 for (const state of ['missing', 'empty', 'redacted', 'loading', 'error']) {
   const model = trafficBodyModel({state, text: 'do not reveal'}, 'Response');
   assert.equal(model.text, undefined);
@@ -72,6 +74,10 @@ for (const state of ['missing', 'empty', 'redacted', 'loading', 'error']) {
 const pane = createTrafficPane('Request', live.request, {origin:'live', path:'example.test'}, () => {});
 view(pane, 'Query');
 assert.match(pane.textContent, /Query parameters were not captured/);
+const empty = new Node('div');
+renderTrafficExchange(empty, null, () => {});
+assert.match(empty.textContent, /Select a request to inspect its request and response/);
+assert.equal(empty.children.length, 1);
 """)
 
     def test_mime_parsing_binary_and_truncation(self) -> None:

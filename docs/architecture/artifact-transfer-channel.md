@@ -127,8 +127,10 @@ and emit a small gap or failure event through the normal event path.
 
 The standard-input receiver stops after a rejected frame because a pipe cannot
 safely resynchronize after an untrusted declared length. Socket mode closes
-the authenticated connection and ends the receiver process, making the failed
-artifact channel visible to the live-session supervisor.
+the authenticated connection and continues listening for a reconnect. The live
+session supervisor stops the listener explicitly when the browser session ends,
+and the listener path is the UI's artifact-channel health signal while the
+session is running.
 
 ## Storage layout
 

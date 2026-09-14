@@ -117,6 +117,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
     local_analyst_runner = LocalAnalystRunner(Path(__file__).resolve().parent)
     decoder_service = DecoderService(Path("build/reb-decoder").resolve())
     broker_socket: Optional[Path] = None
+    artifact_socket: Optional[Path] = None
     debugger: Optional[DebuggerBridge] = None
     analysis_lock = threading.Lock()
     analysis_signature: Optional[str] = None
@@ -143,6 +144,8 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     "signal_store_exists": self.signal_store.exists(),
                     "artifact_store": str(self.artifact_store),
                     "artifact_store_exists": self.artifact_store.exists(),
+                    "artifact_receiver_configured": self.artifact_receiver_configured(),
+                    "artifact_receiver_connected": self.artifact_receiver_connected(),
                     "api_collection_store": str(self.api_collection_store.path),
                     "api_collection_store_exists": self.api_collection_store.path.exists(),
                     "local_analyst_store": str(self.local_analyst_store.path),
@@ -150,6 +153,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     "local_analyst_runner_available": self.local_analyst_runner.available(),
                     "decoder_available": self.decoder_service.available(),
                     "broker_connected": self.broker_connected(),
+                    "capture_mode": "live" if self.broker_socket is not None else "demo",
                     "debugger_state": self.debugger_state(),
                 }
             )
@@ -420,6 +424,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     "count": len(events),
                     "events": events,
                     "broker_connected": broker_connected,
+                    "capture_mode": "live" if self.broker_socket is not None else "demo",
                 },
                 etag=etag,
             )
@@ -428,8 +433,11 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             query = parse_qs(parsed.query)
             try:
                 limit = max(1, min(int(query.get("limit", ["500"])[0]), 5000))
+                receiver_configured = self.artifact_receiver_configured()
+                receiver_connected = self.artifact_receiver_connected()
                 etag = self.resource_etag(
-                    self.artifact_store / "manifest.jsonl", str(limit)
+                    self.artifact_store / "manifest.jsonl",
+                    f"{limit}-{int(receiver_configured)}-{int(receiver_connected)}",
                 )
                 if self.send_not_modified(etag):
                     return
@@ -444,7 +452,12 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                 for artifact in artifacts
             ]
             self.send_json(
-                {"count": len(public_artifacts), "artifacts": public_artifacts},
+                {
+                    "count": len(public_artifacts),
+                    "artifacts": public_artifacts,
+                    "artifact_receiver_configured": receiver_configured,
+                    "artifact_receiver_connected": receiver_connected,
+                },
                 etag=etag,
             )
             return
@@ -790,6 +803,17 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         except OSError:
             return False
 
+    def artifact_receiver_configured(self) -> bool:
+        return self.artifact_socket is not None
+
+    def artifact_receiver_connected(self) -> bool:
+        if not self.artifact_receiver_configured():
+            return False
+        try:
+            return stat.S_ISSOCK(self.artifact_socket.stat().st_mode)
+        except OSError:
+            return False
+
     def debugger_snapshot(self) -> dict:
         if self.debugger is not None:
             return self.debugger.snapshot()
@@ -805,6 +829,18 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             "breakpoints": [],
             "watches": [],
             "console": [],
+            "network": {
+                "capture_enabled": False,
+                "target_id": None,
+                "requests": [],
+                "dropped": 0,
+                "limits": {
+                    "requests": 1000,
+                    "body_bytes": 128 * 1024,
+                    "headers": 128,
+                    "header_bytes": 64 * 1024,
+                },
+            },
             "heap_diff_baseline": None,
             "memory_origin_trace": DebuggerBridge._empty_memory_origin_trace(),
             "action_scope": DebuggerBridge._empty_action_scope(),
@@ -969,8 +1005,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--decoder", type=Path, default=Path("build/reb-decoder"))
     parser.add_argument("--socket", type=Path)
+    parser.add_argument("--artifact-socket", type=Path)
     parser.add_argument("--devtools-active-port", type=Path)
     parser.add_argument("--debugger-transport", type=Path)
+    parser.add_argument("--capture-network-content", action="store_true")
     parser.add_argument("--endpoint-file", type=Path)
     return parser.parse_args()
 
@@ -993,11 +1031,15 @@ def main() -> int:
     )
     ResearchHandler.decoder_service = DecoderService(args.decoder.resolve())
     ResearchHandler.broker_socket = args.socket.resolve() if args.socket else None
+    ResearchHandler.artifact_socket = (
+        args.artifact_socket.resolve() if args.artifact_socket else None
+    )
     debugger = DebuggerBridge(
         args.devtools_active_port.resolve() if args.devtools_active_port else None,
         debugger_transport_binary=(
             args.debugger_transport.resolve() if args.debugger_transport else None
         ),
+        capture_network_content=args.capture_network_content,
     )
     ResearchHandler.debugger = debugger
     server = LoopbackThreadingHTTPServer((args.host, args.port), ResearchHandler)
@@ -1015,6 +1057,8 @@ def main() -> int:
     print(f"Origin trace store: {ResearchHandler.trace_store}")
     print(f"Request signal profile store: {ResearchHandler.signal_store}")
     print(f"Artifact store: {ResearchHandler.artifact_store}")
+    if ResearchHandler.artifact_socket is not None:
+        print(f"Artifact receiver socket: {ResearchHandler.artifact_socket}")
     print(f"API Collection store: {ResearchHandler.api_collection_store.path}")
     print(f"Local analyst store: {ResearchHandler.local_analyst_store.path}")
     debugger.start()

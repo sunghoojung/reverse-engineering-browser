@@ -9,7 +9,7 @@ readonly repository_root
 readonly brave_directory="${REB_BRAVE_DIRECTORY:-${repository_root}/browser/worktree/src/brave}"
 chromium_directory="$(cd "${brave_directory}/.." 2>/dev/null && pwd)" || chromium_directory=""
 readonly chromium_directory
-readonly integration_directory="${repository_root}/browser/integration/brave"
+readonly integration_directory="${REB_BRAVE_INTEGRATION_DIRECTORY:-${repository_root}/browser/integration/brave}"
 readonly overlay_directory="${integration_directory}/overlay"
 readonly patches_directory="${integration_directory}/patches"
 readonly brave_revision="${REB_BRAVE_CORE_REVISION:-$(
@@ -93,11 +93,39 @@ if ((${#chromium_patch_files[@]} > 0)); then
   verify_revision "${chromium_directory}" "Chromium" "${chromium_revision}"
 fi
 
+patch_stack_is_applied() {
+  local checkout_directory="$1"
+  shift
+  local temporary_directory
+  local temporary_index
+  local -a patch_files=("$@")
+  local patch_index
+  temporary_directory="$(mktemp -d)"
+  temporary_index="${temporary_directory}/index"
+
+  if ! GIT_INDEX_FILE="${temporary_index}" git -C "${checkout_directory}" read-tree HEAD ||
+    ! GIT_INDEX_FILE="${temporary_index}" git -C "${checkout_directory}" add -u; then
+    rm -rf "${temporary_directory}"
+    return 1
+  fi
+  for ((patch_index = ${#patch_files[@]} - 1; patch_index >= 0; patch_index--)); do
+    if ! GIT_INDEX_FILE="${temporary_index}" git -C "${checkout_directory}" \
+      apply --cached --reverse --check "${patch_files[patch_index]}" 2>/dev/null; then
+      rm -rf "${temporary_directory}"
+      return 1
+    fi
+    GIT_INDEX_FILE="${temporary_index}" git -C "${checkout_directory}" \
+      apply --cached --reverse "${patch_files[patch_index]}"
+  done
+  rm -rf "${temporary_directory}"
+}
+
 preflight_patches() {
   local checkout_directory="$1"
   local patch_label="$2"
   shift 2
   local patch_file
+  local needs_stack_refresh=0
   for patch_file in "$@"; do
     if git -C "${checkout_directory}" apply --check "${patch_file}" 2>/dev/null; then
       continue
@@ -105,10 +133,53 @@ preflight_patches() {
       "${patch_file}" 2>/dev/null; then
       continue
     else
+      needs_stack_refresh=1
+      break
+    fi
+  done
+  if ((needs_stack_refresh == 0)); then
+    return
+  fi
+
+  if patch_stack_is_applied "${checkout_directory}" "$@"; then
+    echo "Already applied: ${patch_label}patch stack"
+    return 11
+  fi
+
+  # A later patch can deliberately edit lines introduced by an earlier one.
+  # In an already-synchronized checkout that makes the earlier patch neither
+  # forward- nor reverse-applicable. Remove the applied stack from newest to
+  # oldest, verify the complete stack can be applied again, and roll back if
+  # any patch is not reproducible.
+  local -a patch_files=("$@")
+  local -a reversed_patch_files=()
+  local -a reapplied_patch_files=()
+  local patch_index
+  for ((patch_index = ${#patch_files[@]} - 1; patch_index >= 0; patch_index--)); do
+    patch_file="${patch_files[patch_index]}"
+    if git -C "${checkout_directory}" apply --reverse --check "${patch_file}" 2>/dev/null; then
+      git -C "${checkout_directory}" apply --reverse "${patch_file}"
+      reversed_patch_files+=("${patch_file}")
+    fi
+  done
+
+  for patch_file in "${patch_files[@]}"; do
+    if ! git -C "${checkout_directory}" apply --check "${patch_file}" 2>/dev/null; then
+      for ((patch_index = ${#reapplied_patch_files[@]} - 1; patch_index >= 0; patch_index--)); do
+        git -C "${checkout_directory}" apply --reverse "${reapplied_patch_files[patch_index]}"
+      done
+      for ((patch_index = ${#reversed_patch_files[@]} - 1; patch_index >= 0; patch_index--)); do
+        git -C "${checkout_directory}" apply "${reversed_patch_files[patch_index]}"
+      done
       echo "${patch_label}patch does not apply cleanly: ${patch_file}" >&2
       exit 1
     fi
+    git -C "${checkout_directory}" apply "${patch_file}"
+    reapplied_patch_files+=("${patch_file}")
   done
+
+  echo "Refreshed ${patch_label}patch stack to preflight overlapping changes."
+  return 10
 }
 
 apply_patches() {
@@ -129,14 +200,36 @@ apply_patches() {
   done
 }
 
-preflight_patches "${brave_directory}" "" "${brave_patch_files[@]}"
-preflight_patches "${chromium_directory}" "Chromium " "${chromium_patch_files[@]}"
+brave_stack_refreshed=0
+if preflight_patches "${brave_directory}" "" "${brave_patch_files[@]}"; then
+  :
+else
+  preflight_status=$?
+  if ((preflight_status != 10 && preflight_status != 11)); then
+    exit "${preflight_status}"
+  fi
+  brave_stack_refreshed=1
+fi
+chromium_stack_refreshed=0
+if preflight_patches "${chromium_directory}" "Chromium " "${chromium_patch_files[@]}"; then
+  :
+else
+  preflight_status=$?
+  if ((preflight_status != 10 && preflight_status != 11)); then
+    exit "${preflight_status}"
+  fi
+  chromium_stack_refreshed=1
+fi
 
 if [[ -d "${overlay_directory}" ]]; then
   cp -R "${overlay_directory}/." "${brave_directory}/"
 fi
 
-apply_patches "${brave_directory}" "" "${brave_patch_files[@]}"
-apply_patches "${chromium_directory}" "chromium/" "${chromium_patch_files[@]}"
+if ((brave_stack_refreshed == 0)); then
+  apply_patches "${brave_directory}" "" "${brave_patch_files[@]}"
+fi
+if ((chromium_stack_refreshed == 0)); then
+  apply_patches "${chromium_directory}" "chromium/" "${chromium_patch_files[@]}"
+fi
 
 echo "Synchronized Brave integration (${#brave_patch_files[@]} Brave patch(es), ${#chromium_patch_files[@]} Chromium patch(es))."

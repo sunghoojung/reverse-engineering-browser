@@ -28,7 +28,7 @@ CHECK_WIRE_OFFSET(header_size);
 CHECK_WIRE_OFFSET(category);
 CHECK_WIRE_OFFSET(type);
 CHECK_WIRE_OFFSET(payload_size);
-CHECK_WIRE_OFFSET(reserved0);
+CHECK_WIRE_OFFSET(tab_id);
 CHECK_WIRE_OFFSET(sequence_number);
 CHECK_WIRE_OFFSET(monotonic_time_ns);
 CHECK_WIRE_OFFSET(session_id);
@@ -136,7 +136,7 @@ int main() {
   CHECK(event.header.monotonic_time_ns == 123456);
   CHECK(event.header.session_id == 7);
   CHECK(event.header.payload_size == 0);
-  CHECK(event.header.reserved0 == 0);
+  CHECK(event.header.tab_id == 0);
   CHECK(event.header.reserved1 == 0);
   CHECK(reb::EventCategoryName(event.header.category) == "canvas");
   CHECK(reb::EventTypeName(event.header.type) == "api_call");
@@ -170,8 +170,8 @@ int main() {
   malformed.header.flags = 1U << 15U;
   CHECK(!reb::IsValidEvent(malformed));
   malformed = event;
-  malformed.header.reserved0 = 1;
-  CHECK(!reb::IsValidEvent(malformed));
+  malformed.header.tab_id = std::numeric_limits<std::uint32_t>::max();
+  CHECK(reb::IsValidEvent(malformed));
   malformed = event;
   malformed.header.reserved1 = 1;
   CHECK(!reb::IsValidEvent(malformed));
@@ -210,6 +210,7 @@ int main() {
       reb::MakeEvent(reb::EventCategory::kNetwork, reb::EventType::kRequestCompleted, 2, 3, 4);
   serialized.header.process_id = 5;
   serialized.header.thread_id = 6;
+  serialized.header.tab_id = 21;
   serialized.header.navigation_id = 7;
   serialized.header.frame_id = 8;
   serialized.header.artifact_id = 9;
@@ -229,8 +230,8 @@ int main() {
   serialized.header.flags = static_cast<std::uint16_t>(reb::EventFlag::kPayloadTruncated) |
                             static_cast<std::uint16_t>(reb::EventFlag::kFromCache);
   CHECK(reb::EventToJson(serialized) ==
-        "{\"protocol_version\":2,\"session_id\":\"4\",\"sequence_number\":\"2\","
-        "\"monotonic_time_ns\":\"3\",\"process_id\":5,\"thread_id\":6,"
+        "{\"protocol_version\":3,\"session_id\":\"4\",\"sequence_number\":\"2\","
+        "\"monotonic_time_ns\":\"3\",\"process_id\":5,\"thread_id\":6,\"tab_id\":21,"
         "\"navigation_id\":\"7\",\"frame_id\":\"8\",\"artifact_id\":\"9\","
         "\"parent_event_id\":\"10\",\"request_id\":\"11\","
         "\"browser_context_id_high\":\"12\",\"browser_context_id_low\":\"13\","

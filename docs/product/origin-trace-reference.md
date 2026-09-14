@@ -74,7 +74,9 @@ make ui
 
 Open `http://127.0.0.1:7319`. The dependency-free local server reads the same
 JSONL evidence store written by the native broker. The network workspace groups
-lifecycle events by request and provides request filters plus Headers, Payload,
+lifecycle events by request and first scopes them by browser tab, then by domain.
+Protocol v3 records the stable top-level tab identifier; protocol v2 evidence
+remains visible as Unattributed. The workspace provides request filters plus Headers, Payload,
 Preview, Response, Initiator, Timing, and Signals inspectors. Signals presents
 the bounded Canvas, WebGL, Web Audio, Navigator, Permissions, Storage, and
 WebRTC evidence profile for one exact live request. Loading, empty,
@@ -87,8 +89,10 @@ one exact request-start event, shows observed and correlated links separately,
 and makes missing retained evidence visible as named gaps.
 
 The event endpoint reads backward from the append-only JSONL store and parses
-only its requested, bounded tail window. UI refresh cost therefore follows the
-visible event count instead of the total capture size. Offline evidence-store
+only its requested, bounded tail window. The live workspace retains the newest
+5,000 events per refresh and marks that limit when reached; older evidence stays
+in the append-only store. UI refresh cost therefore follows the visible event
+count instead of the total capture size. Offline evidence-store
 validation still scans the complete file through `tools/validate-evidence-store.py`.
 The reader rejects JSONL records larger than 4 KiB, which is safely above the
 current fixed event contract and keeps malformed-record work bounded.

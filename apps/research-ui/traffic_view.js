@@ -23,6 +23,7 @@ const sampleExchanges = {
 
 function trafficExchange(request) {
   if (request?.origin === 'sample' && Object.hasOwn(sampleExchanges, request.id)) return sampleExchanges[request.id];
+  if (request?.exchange) return request.exchange;
   const responseEmpty = request && (request.method === 'HEAD' || [204, 205, 304].includes(Number(request.status)));
   return {
     request: {state: 'missing'},
@@ -95,8 +96,16 @@ function trafficNode(tag, className, text) {
   return node;
 }
 
+function trafficOriginLabel(request) {
+  return request?.origin === 'sample' ? 'Sample data'
+    : request?.origin === 'demo' ? 'Demo evidence'
+      : request?.exchange ? 'Live CDP capture'
+        : request?.origin === 'live' ? 'Live metadata' : 'Local evidence';
+}
+
 function createTrafficPane(side, record, request, onDecode) {
   const pane = trafficNode('section', 'exchange-pane');
+  pane.dataset.origin = request?.origin ?? 'none';
   pane.setAttribute('aria-label', `${side} content`);
   const header = trafficNode('div', 'exchange-pane-head');
   header.append(trafficNode('strong', '', side));
@@ -192,15 +201,20 @@ function createTrafficPane(side, record, request, onDecode) {
     });
     copy.hidden = !['formatted', 'raw'].includes(mode.value);
     search.placeholder = mode.value === 'headers' ? 'Find header' : mode.value === 'query' ? 'Find parameter' : 'Find in body';
-    meta.textContent = model.message ? (request?.origin === 'sample' ? 'Sample data' : 'Local evidence') : `${request?.origin === 'sample' ? 'Sample · ' : ''}${model.mime} · ${model.bytes.toLocaleString()} bytes${model.binary ? ' · Hex view' : ''}${model.truncated ? ' · Truncated: showing first 128 KiB or retained prefix' : ''}${model.malformed ? ' · Invalid JSON: showing text' : ''}${model.formatted?.limited ? ' · Formatting limit: showing raw text' : ''}`;
-    function message(text) { content.append(trafficNode('div', 'exchange-empty', text)); }
+    meta.textContent = model.message ? trafficOriginLabel(request) : `${request?.origin === 'sample' ? 'Sample · ' : request?.origin === 'demo' ? 'Demo · ' : request?.origin === 'live' ? 'Live · ' : ''}${model.mime} · ${model.bytes.toLocaleString()} bytes${model.binary ? ' · Hex view' : ''}${model.truncated ? ' · Truncated: showing first 128 KiB or retained prefix' : ''}${model.malformed ? ' · Invalid JSON: showing text' : ''}${model.formatted?.limited ? ' · Formatting limit: showing raw text' : ''}`;
+    function message(text) {
+      const prefix = request?.exchange ? 'Live capture: '
+        : request?.origin === 'live' ? 'Live metadata only: '
+          : request?.origin === 'demo' ? 'Demo evidence: ' : '';
+      content.append(trafficNode('div', 'exchange-empty', `${prefix}${text}`));
+    }
     if (mode.value === 'headers' || mode.value === 'query') {
       let rows = record?.headers;
       if (mode.value === 'query') {
         // The live event contract retains the host only. Do not claim its query was empty.
         rows = request?.origin === 'sample' ? [...new URL(request.path, 'https://checkout.acme.test').searchParams] : undefined;
       }
-      meta.textContent = rows ? `${rows.length} ${mode.value === 'headers' ? 'headers' : 'parameters'} · ${request?.origin === 'sample' ? 'sample data' : 'captured'}` : 'Not captured';
+      meta.textContent = rows ? `${rows.length} ${mode.value === 'headers' ? 'headers' : 'parameters'} · ${request?.origin === 'sample' ? 'sample data' : request?.origin === 'demo' ? 'demo evidence' : request?.origin === 'live' ? 'live metadata' : 'captured'}` : 'Not captured';
       if (!rows) return message(`${mode.value === 'headers' ? side + ' headers were' : 'Query parameters were'} not captured.`);
       const matches = rows.filter(([key, value]) => `${key} ${value}`.toLowerCase().includes(query));
       for (const [key, value] of matches) {
@@ -267,9 +281,16 @@ function createTrafficPane(side, record, request, onDecode) {
 }
 
 function renderTrafficExchange(container, request, onDecode) {
-  const key = `${request?.origin}:${request?.id}:${request?.method}:${request?.status}`;
+  const key = `${request?.origin}:${request?.id}:${request?.method}:${request?.status}:` +
+    `${request?.exchange?.request?.state}:${request?.exchange?.request?.text?.length ?? request?.exchange?.request?.bytes?.length ?? 0}:` +
+    `${request?.exchange?.response?.state}:${request?.exchange?.response?.text?.length ?? request?.exchange?.response?.bytes?.length ?? 0}`;
   if (container.dataset.selection === key) return;
   container.dataset.selection = key;
+  if (!request) {
+    container.dataset.side = 'none';
+    container.replaceChildren(trafficNode('div', 'exchange-no-selection', 'Select a request to inspect its request and response.'));
+    return;
+  }
   const exchange = trafficExchange(request);
   const switcher = trafficNode('div', 'exchange-mobile-switch');
   switcher.setAttribute('role', 'group'); switcher.setAttribute('aria-label', 'Visible content pane');

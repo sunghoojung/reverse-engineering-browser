@@ -54,6 +54,103 @@
         elements.vmNotice.hidden = false;
       }
 
+      function requestOriginLabel(origin) {
+        return origin === 'live' ? 'Live' : origin === 'demo' ? 'Demo' : 'Sample';
+      }
+
+      function rebuildTrafficRequests() {
+        const cdpRequests = requestsFromDebuggerNetwork(
+          state.debuggerSession?.network, state.nativeRequests
+        );
+        if (state.sessionMode === 'live') {
+          state.requests = state.debuggerSession?.network?.capture_enabled
+            ? cdpRequests : state.nativeRequests;
+        } else {
+          state.requests = state.nativeRequests;
+        }
+      }
+
+      function renderShellStatus() {
+        const live = state.sessionMode === 'live';
+        const preview = state.sessionMode === 'preview';
+        const idle = state.sessionMode === 'idle';
+        const brokerOffline = live && state.broker === 'unavailable';
+        const artifactOffline = live && state.artifactReceiverConfigured &&
+          (!state.artifactReceiverConnected || state.artifactReceiverError);
+        const offline = brokerOffline;
+        const connecting = live && state.broker === 'connecting';
+        const contentCapture = live && state.debuggerSession?.network?.capture_enabled;
+        const modeLabel = live ? (offline ? 'Live offline' : artifactOffline ? 'Live degraded'
+          : contentCapture ? 'Live content' : 'Live session')
+          : idle ? 'Ready' : preview ? 'Preview' : 'Demo evidence';
+        const captureLabel = connecting ? 'Connecting' : offline ? 'Offline' : artifactOffline ? 'Artifacts offline'
+          : live ? 'Capturing' : idle ? 'No session' : preview ? 'Preview' : 'Demo';
+        elements.sessionMode.textContent = modeLabel;
+        elements.sessionMode.dataset.kind = state.sessionMode;
+        elements.sessionMode.title = live
+          ? contentCapture
+            ? 'CDP request and response content capture is enabled for this session. Sensitive headers are redacted and bodies are bounded.'
+            : 'Only live broker evidence is shown; sample rows are hidden.'
+          : idle
+            ? 'No evidence is bundled. Start a live capture to populate the workspace.'
+            : preview
+              ? 'No evidence is bundled. Start a live capture to populate the workspace.'
+              : 'Deterministic developer evidence is loaded.';
+        elements.capture.classList.toggle('offline', offline || artifactOffline);
+        elements.capture.classList.toggle('demo', state.sessionMode === 'demo');
+        elements.capture.classList.toggle('preview', preview);
+        elements.capture.querySelector('span:last-child').textContent = captureLabel;
+        elements.capture.setAttribute('aria-label', `${modeLabel}: ${captureLabel}`);
+        elements.broker.classList.toggle('offline', offline);
+        elements.broker.textContent = connecting ? 'connecting to evidence'
+          : offline ? 'broker unavailable'
+            : live ? 'broker connected' : idle ? 'no capture session'
+              : preview ? 'standalone preview' : 'demo evidence loaded';
+        elements.sampleStatus.textContent = live
+          ? offline
+            ? state.events.length ? 'last live evidence retained' : 'no live evidence'
+            : artifactOffline ? 'artifact capture offline'
+            : 'sample rows hidden'
+          : idle || preview ? 'no bundled evidence' : 'developer evidence';
+        if (!state.lastUpdatedLabel) {
+          elements.updated.textContent = connecting ? 'waiting for evidence'
+            : offline ? state.events.length ? 'last valid evidence retained' : 'no live evidence'
+              : artifactOffline ? 'artifact capture unavailable'
+              : live ? 'waiting for live evidence' : idle || preview ? 'start a live capture' : 'deterministic evidence loaded';
+        } else {
+          elements.updated.textContent = state.lastUpdatedLabel;
+        }
+        document.title = live ? 'Origin Trace - Live Session'
+          : idle ? 'Origin Trace' : preview ? 'Origin Trace - Preview' : 'Origin Trace - Demo Evidence';
+      }
+
+      function resetRequestSelection() {
+        state.selectedRequestId = null;
+        state.selectedField = null;
+        state.originTrace = null;
+        state.selectedTraceRow = null;
+        state.originTraceStatus = 'idle';
+        state.originTraceError = null;
+        state.originTraceKey = null;
+        state.originTraceEtag = null;
+        state.originTraceGeneration += 1;
+        state.signalProfile = null;
+        state.signalProfileStatus = 'idle';
+        state.signalProfileError = null;
+        state.signalProfileKey = null;
+        state.signalProfileEtag = null;
+        state.signalProfileGeneration += 1;
+      }
+
+      function renderRequestCount(visibleCount, loadedCount) {
+        elements.requestCount.textContent = String(visibleCount);
+        const loadedLabel = loadedCount === 1 ? 'request loaded' : 'requests loaded';
+        const suffix = state.eventsLimited ? ' · event window capped' : '';
+        elements.requestCountLabel.textContent = visibleCount === loadedCount
+          ? `${loadedLabel}${suffix}`
+          : `of ${loadedCount} ${loadedCount === 1 ? 'request' : 'requests'} loaded${suffix}`;
+      }
+
       function vmField(label, value) {
         const field = document.createElement('div'); field.className = 'vm-field';
         field.append(textElement('span', '', label), textElement('strong', '', value));
@@ -243,24 +340,124 @@
         renderVmDetail();
       }
 
+      function requestDomain(request) {
+        if (!request) return 'unknown';
+        if (request.origin === 'sample') return 'checkout.acme.test';
+        const target = String(request.path ?? '').trim();
+        if (!target || target === 'Unidentified network event') return 'unknown';
+        try {
+          return new URL(target).host || 'unknown';
+        } catch {
+          return target.replace(/^\/\//, '').split('/')[0] || 'unknown';
+        }
+      }
+
+      function requestTabGroups() {
+        const groups = new Map();
+        state.requests.forEach(request => {
+          const id = request.tabId && request.tabId !== '0' ? request.tabId : 'unattributed';
+          const group = groups.get(id) ?? {id, requests: [], firstTimestamp: request.firstTimestamp};
+          group.requests.push(request);
+          if (request.firstTimestamp < group.firstTimestamp) group.firstTimestamp = request.firstTimestamp;
+          groups.set(id, group);
+        });
+        return [...groups.values()].sort((left, right) => {
+          if (left.id === 'unattributed') return 1;
+          if (right.id === 'unattributed') return -1;
+          return left.firstTimestamp < right.firstTimestamp ? -1 : left.firstTimestamp > right.firstTimestamp ? 1 : 0;
+        });
+      }
+
+      function renderRequestScopes() {
+        const groups = requestTabGroups();
+        const availableTabs = new Set(groups.map(group => group.id));
+        if (state.requestTabId !== 'all' && !availableTabs.has(state.requestTabId)) state.requestTabId = 'all';
+        const buttons = [{id: 'all', label: 'All tabs', count: state.requests.length}, ...groups.map((group, index) => {
+          const domains = [...new Set(group.requests.map(requestDomain))];
+          return {
+            id: group.id,
+            label: group.id === 'unattributed' ? 'Unattributed' : `Tab ${index + 1}`,
+            count: group.requests.length,
+            domains
+          };
+        })].map(scope => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'request-tab-scope';
+          button.setAttribute('role', 'tab');
+          button.setAttribute('aria-selected', String(state.requestTabId === scope.id));
+          button.tabIndex = state.requestTabId === scope.id ? 0 : -1;
+          const label = document.createElement('strong'); label.textContent = scope.label;
+          const count = document.createElement('span'); count.textContent = String(scope.count);
+          button.append(label, count);
+          button.title = scope.id === 'all' ? 'Show requests from every captured browser tab'
+            : scope.id === 'unattributed' ? 'Events without a browser tab identifier'
+              : `${scope.label} · ${scope.domains.join(', ')} · tab id ${scope.id}`;
+          button.addEventListener('click', () => {
+            state.requestTabId = scope.id;
+            state.requestDomain = 'all';
+            renderRequests();
+            elements.requestTabScopes.querySelector('[aria-selected="true"]')?.focus();
+          });
+          button.addEventListener('keydown', event => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const tabs = [...elements.requestTabScopes.querySelectorAll('.request-tab-scope')];
+            const current = tabs.indexOf(button);
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+              : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+            tabs[next].click();
+          });
+          return button;
+        });
+        elements.requestTabScopes.replaceChildren(...buttons);
+
+        const scoped = state.requestTabId === 'all' ? state.requests
+          : state.requests.filter(request => (request.tabId && request.tabId !== '0' ? request.tabId : 'unattributed') === state.requestTabId);
+        const domains = [...new Set(scoped.map(requestDomain))].sort((left, right) => left.localeCompare(right));
+        if (state.requestDomain !== 'all' && !domains.includes(state.requestDomain)) state.requestDomain = 'all';
+        const options = [
+          ['all', `All domains (${scoped.length})`],
+          ...domains.map(domain => [domain, `${domain} (${scoped.filter(request => requestDomain(request) === domain).length})`])
+        ].map(([value, label]) => {
+          const option = document.createElement('option'); option.value = value; option.textContent = label;
+          return option;
+        });
+        elements.requestDomain.replaceChildren(...options);
+        elements.requestDomain.value = state.requestDomain;
+      }
+
       function renderRequests() {
+        renderRequestScopes();
         const needle = elements.requestFilter.value.trim().toLowerCase();
         const visible = state.requests.filter(request =>
+          (state.requestTabId === 'all' ||
+            (request.tabId && request.tabId !== '0' ? request.tabId : 'unattributed') === state.requestTabId) &&
+          (state.requestDomain === 'all' || requestDomain(request) === state.requestDomain) &&
           (state.requestType === 'all' || request.type === state.requestType) &&
           (!needle || `${request.method} ${request.path} ${request.status}`.toLowerCase().includes(needle))
         );
+        const selectedIsVisible = visible.some(request => request.id === state.selectedRequestId);
+        const selectionCleared = state.selectedRequestId !== null && !selectedIsVisible;
+        if (selectionCleared) resetRequestSelection();
+        elements.requestRows.setAttribute('role', 'listbox');
         if (visible.length === 0) {
           const empty = document.createElement('div');
           empty.className = 'request-empty';
           empty.setAttribute('role', 'status');
-          empty.textContent = 'No requests match the current filters.';
-          elements.requestRows.removeAttribute('role');
+          empty.textContent = state.requests.length === 0
+            ? state.sessionMode === 'live' ? 'No live requests yet. Start a capture in the attached browser.'
+              : state.sessionMode === 'demo' ? 'No developer evidence is available.' : 'No capture session is running.'
+            : 'No requests match the current filters. Clear the filter or choose another type.';
           elements.requestRows.replaceChildren(empty);
-          elements.requestCount.textContent = String(state.requests.length);
+          renderRequestCount(0, state.requests.length);
+          if (selectionCleared) {
+            updateSelectionSummary(null);
+            renderInspector();
+            renderEvidence();
+          }
           return;
         }
-        elements.requestRows.setAttribute('role', 'listbox');
-        const selectedIsVisible = visible.some(request => request.id === state.selectedRequestId);
         elements.requestRows.replaceChildren(...visible.map((request, index) => {
           const row = document.createElement('button');
           row.type = 'button';
@@ -268,13 +465,24 @@
           row.setAttribute('role', 'option');
           row.dataset.requestId = request.id;
           row.setAttribute('aria-selected', String(request.id === state.selectedRequestId));
-          row.setAttribute('aria-label', `${request.method} ${request.path}, ${request.status}, ${request.time}, ${request.origin}, ${request.id}`);
+          row.dataset.origin = request.origin;
+          row.dataset.targetKind = request.targetKind ?? 'unknown';
+          const origin = requestOriginLabel(request.origin);
+          const targetDescription = request.hostOnly ? 'host-only metadata' : 'request target';
+          row.setAttribute('aria-label', `${origin} ${targetDescription}: ${request.method} ${request.path}, ${request.status}, ${request.time}, request ${request.id}`);
           row.tabIndex = request.id === state.selectedRequestId || !selectedIsVisible && index === 0 ? 0 : -1;
 
           const name = document.createElement('span'); name.className = 'request-name'; name.textContent = request.path;
-          name.title = `${request.method} ${request.path} · network · ${request.operation ?? 'sample'} · ${request.id}`;
-          const source = document.createElement('span'); source.className = request.origin === 'live' ? 'live-chip' : 'sample-chip'; source.textContent = request.origin;
+          name.title = request.hostOnly
+            ? `${origin} host-only metadata: URL path, query, and fragment were not captured · ${request.id}`
+            : `${origin} ${request.method} ${request.path} · network · ${request.operation ?? 'sample'} · ${request.id}`;
+          const source = document.createElement('span'); source.className = request.origin === 'live' ? 'live-chip' : request.origin === 'demo' ? 'demo-chip' : 'sample-chip'; source.textContent = origin;
           name.append(source);
+          if (request.hostOnly) {
+            const hostOnly = document.createElement('span'); hostOnly.className = 'host-only-chip'; hostOnly.textContent = 'Host only';
+            hostOnly.title = 'Only the destination host was retained; URL path and query were not captured.';
+            name.append(hostOnly);
+          }
           const method = document.createElement('span'); method.className = 'request-method'; method.textContent = request.method;
           const status = document.createElement('span');
           const numericStatus = Number(request.status);
@@ -284,8 +492,12 @@
               ? 'status-ok'
               : 'status-neutral';
           status.textContent = request.status;
+          status.title = request.status === 'pending'
+            ? 'This request has no terminal lifecycle event yet.'
+            : request.failed ? 'The request reported a failure.' : `HTTP status ${request.status}`;
           const time = document.createElement('span'); time.textContent = typeof request.time === 'number' ? `${request.time} ms` : request.time;
           const waterfallCell = document.createElement('span');
+          waterfallCell.title = `${request.operation ?? 'Request'} lifecycle${request.status === 'pending' ? ' · awaiting completion' : ''}`;
           const waterfall = document.createElement('i'); waterfall.className = 'waterfall'; waterfall.setAttribute('aria-hidden', 'true'); waterfall.style.setProperty('--water-start', `${request.start}%`); waterfall.style.setProperty('--water-mid', `${request.mid}%`); waterfall.style.setProperty('--water-end', `${request.end}%`); waterfallCell.append(waterfall);
           row.append(name, method, status, time, waterfallCell);
           row.addEventListener('click', () => {
@@ -295,19 +507,32 @@
           row.addEventListener('keydown', moveRequestSelection);
           return row;
         }));
-        elements.requestCount.textContent = String(state.requests.length);
+        renderRequestCount(visible.length, state.requests.length);
+        if (selectionCleared) {
+          updateSelectionSummary(null);
+          renderInspector();
+          renderEvidence();
+        }
       }
 
       function updateSelectionSummary(request) {
+        if (!request) {
+          elements.selectedMethod.textContent = '-';
+          elements.selectedStatus.textContent = '-';
+          elements.selectedStatus.classList.remove('status-error');
+          elements.selectedStatus.classList.add('status-neutral');
+          elements.selectedUrl.textContent = state.requests.length ? 'Select a request to inspect its evidence.' : 'No request selected';
+          return;
+        }
         elements.selectedMethod.textContent = request.method;
         elements.selectedStatus.textContent = request.status;
         const numericStatus = Number(request.status);
         const failed = Boolean(request.failed) || Number.isFinite(numericStatus) && numericStatus >= 400;
         elements.selectedStatus.classList.toggle('status-error', failed);
-        elements.selectedStatus.classList.toggle('status-neutral', !failed && !Number.isFinite(numericStatus));
+        elements.selectedStatus.classList.toggle('status-neutral', !failed && (!Number.isFinite(numericStatus) || request.status === 'pending'));
         elements.selectedUrl.textContent = request.origin === 'sample'
           ? `https://checkout.acme.test${request.path}`
-          : request.path;
+          : request.hostOnly ? `${request.path} (host only metadata)` : request.path;
       }
 
       function selectRequest(id) {
@@ -335,7 +560,9 @@
         } else {
           elements.prompt.textContent = request.origin === 'live'
             ? 'This live event has no captured field structure yet.'
-            : 'This sample request has no trace target in the proof of concept.';
+            : request.origin === 'demo'
+              ? 'This demo event has no captured field structure.'
+              : 'This sample request has no trace target in the proof of concept.';
           state.selectedField = null;
         }
         renderRequests();
@@ -461,7 +688,11 @@
           empty.className = 'field-empty';
           empty.textContent = request?.origin === 'live'
             ? 'Structured fields were not captured. Request-level origin evidence is still available.'
-            : 'Select a live request to build a broker-backed origin trace.';
+            : request?.origin === 'demo'
+              ? 'Demo request fields are not traceable. Select a live request for broker-backed origin evidence.'
+              : request
+                ? 'This sample request has no trace target in the proof of concept.'
+                : 'Select a request to inspect its fields.';
           elements.fieldTree.replaceChildren(empty);
           const root = requestTraceRoot(request);
           elements.traceTarget.textContent = root
@@ -522,14 +753,16 @@
         });
         const exchangeInspector = document.querySelector('#exchange-inspector');
         const showingExchange = state.inspectorTab === 'exchange';
+        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         exchangeInspector.hidden = !showingExchange;
         const evidenceToggle = document.querySelector('#request-evidence-toggle');
         evidenceToggle.textContent = showingExchange ? 'Evidence' : 'Request / Response';
         evidenceToggle.setAttribute('aria-expanded', String(!showingExchange));
+        evidenceToggle.disabled = !request;
+        elements.requestCollectionPivot.disabled = !request;
         elements.requestInspector.hidden = showingExchange;
         document.querySelector('.detail-pane').classList.toggle('showing-exchange', showingExchange);
         if (showingExchange) {
-          const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
           renderTrafficExchange(exchangeInspector, request, value => {
             resetDecoderChain('Value copied from the request inspector.');
             toolsElements.inputEncoding.value = 'text';
@@ -546,7 +779,6 @@
           elements.fieldTree.removeAttribute('aria-labelledby');
           elements.fieldTree.tabIndex = -1;
         }
-        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         if (state.inspectorTab === 'payload') {
           const traceable = Boolean(request?.traceable);
           const requestTraceable = Boolean(requestTraceRoot(request));
@@ -621,7 +853,7 @@
           elements.fieldTabs.hidden = true;
           elements.traceDock.hidden = true;
           const lifecycleEvents = request?.events ?? [];
-          const correlated = lifecycleEvents.find(event => event.protocol_version === 2 && event.initiator_process_id > 0);
+          const correlated = lifecycleEvents.find(event => event.protocol_version >= 2 && event.initiator_process_id > 0);
           const initiated = lifecycleEvents.find(event => event.type === 'request_initiated');
           const contextEvent = lifecycleEvents.find(event => browserContextToken(event));
           if (correlated || initiated || contextEvent) {
@@ -646,7 +878,9 @@
           } else {
             renderInspectorMessage(request?.origin === 'sample'
               ? 'Sample initiator evidence is available in the request field backtrace.'
-              : 'No renderer initiator was captured for this browser request.');
+              : request?.origin === 'demo'
+                ? 'Demo initiator evidence is available in the retained event payload.'
+                : 'No renderer initiator was captured for this browser request.');
           }
           return;
         }
@@ -665,7 +899,7 @@
           } else if (request) {
             renderInspectorDetails([
               { key: 'duration', value: `${request.time} ms`, type: 'time' },
-              { key: 'source', value: 'sample workspace data', type: 'source' }
+              { key: 'source', value: request.origin === 'demo' ? 'demo evidence' : 'sample workspace data', type: 'source' }
             ]);
           } else {
             renderInspectorMessage('No request timing is available.');
@@ -678,7 +912,12 @@
 
       function renderEvidence() {
         document.querySelectorAll('.nav-button[data-screen="experiments"]')
-          .forEach(button => { button.disabled = !state.selectedField; });
+          .forEach(button => {
+            button.disabled = false;
+            button.title = state.selectedField
+              ? 'Open disposable experiments for the selected request field.'
+              : 'Experiments use the attached debugger target; selecting a request field is optional.';
+          });
         const documentSteps = state.originTrace?.steps ?? [];
         const firstTime = documentSteps.length ? BigInt(documentSteps[documentSteps.length - 1].monotonic_time_ns) : 0n;
         const tracedEvidence = documentSteps.map(step => ({
@@ -780,6 +1019,26 @@
         }
         const step = model.step;
         const facts = document.createElement('dl'); facts.className = 'trace-facts';
+        const identifierLabels = new Set(['Session', 'Process', 'Event', 'Frame', 'Request', 'Artifact']);
+        const traceFactValue = (label, value) => {
+          if (!identifierLabels.has(label)) return textElement('dd', '', String(value));
+          const dd = document.createElement('dd'); dd.className = 'trace-fact-id';
+          const raw = String(value);
+          const valueElement = textElement('span', 'trace-fact-id-value', raw); valueElement.title = raw;
+          const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'trace-copy-id';
+          copy.textContent = 'Copy'; copy.title = `Copy ${label} ID`;
+          copy.setAttribute('aria-label', `Copy ${label} identifier`);
+          copy.addEventListener('click', async () => {
+            try {
+              await navigator.clipboard.writeText(raw);
+              copy.textContent = 'Copied'; copy.dataset.kind = 'success';
+            } catch {
+              copy.textContent = 'Copy failed'; copy.dataset.kind = 'error';
+            }
+          });
+          dd.append(valueElement, copy);
+          return dd;
+        };
         [
           ['Relationship', step.relation.replaceAll('_', ' ')],
           ['Link type', step.confidence === 'observed' ? 'Recorded event link' : 'Matched by shared identifiers'],
@@ -787,7 +1046,7 @@
           ['Session', step.event.session_id], ['Process', step.event.process_id],
           ['Event', step.event.sequence_number], ['Frame', step.frame_id],
           ['Request', step.request_id], ['Artifact', step.artifact_id]
-        ].forEach(([label, value]) => facts.append(textElement('dt', '', label), textElement('dd', '', String(value))));
+        ].forEach(([label, value]) => facts.append(textElement('dt', '', label), traceFactValue(label, value)));
         panel.append(facts);
         if (step.value) panel.append(textElement('h4', '', 'Captured value'), textElement('pre', 'trace-value', step.value));
         const artifact = state.artifacts.find(candidate => candidate.artifact_id === step.artifact_id);
@@ -837,7 +1096,7 @@
         if (elements.traceRequest.dataset.choices !== choiceKey) {
           elements.traceRequest.replaceChildren(...choices.map(candidate => {
           const option = document.createElement('option'); option.value = candidate.id;
-          option.textContent = `${candidate.method} ${candidate.path}${requestTraceRoot(candidate) ? '' : candidate.origin === 'sample' ? ' (sample, no trace)' : ' (no request identifier)'}`;
+          option.textContent = `${candidate.method} ${candidate.path}${requestTraceRoot(candidate) ? '' : candidate.origin === 'sample' ? ' (sample, no predecessor evidence)' : candidate.origin === 'demo' ? ' (demo, no predecessor evidence)' : ' (no request identifier)'}`;
           option.selected = candidate.id === state.selectedRequestId;
           return option;
           }));
@@ -860,21 +1119,31 @@
         elements.traceNotice.hidden = !hasSteps || !(loading || failed);
         elements.traceNotice.textContent = loading ? 'Refreshing trace…' : `Refresh failed. Showing the previous trace. ${state.originTraceError || ''}`;
         elements.traceEmptyTitle.textContent = loading ? 'Loading trace…' : failed ? 'Could not load this trace'
-          : !selection ? (request?.origin === 'sample' ? 'This sample request has no trace' : request ? 'This event has no request identifier' : 'No captured requests yet') : trace ? 'No earlier events were retained' : 'Ready to load';
+          : !selection ? (request?.origin === 'sample' ? 'This sample request has no trace' : request?.origin === 'demo' ? 'This demo event has no trace' : request ? 'This event has no request identifier' : captured.length ? 'Choose a captured request' : 'No captured requests yet')
+          : trace?.status === 'ambiguous' ? 'Choose a concrete request event' : trace ? 'No predecessor evidence was retained' : 'Ready to load';
         elements.traceEmptyMessage.textContent = loading ? 'Reading the recorded events for this request.'
           : failed ? (state.originTraceError || 'Try loading the trace again.')
           : !selection ? (captured.length ? 'Choose a captured request above, or open the first one below.' : 'Capture a request in a live session, then return here to inspect its events.')
-          : trace ? (trace.gaps[0]?.detail || 'The capture does not contain a predecessor for this request.') : 'Choose Load trace to inspect this request.';
+          : trace?.status === 'ambiguous' ? (trace.gaps[0]?.detail || 'Select the request row with the matching process and event identifiers.')
+          : trace ? (trace.gaps[0]?.detail || 'The request was captured, but no earlier predecessor event was retained.') : 'Choose Load trace to inspect this request.';
         const models = [];
         const labels = {trace_target: 'Selected request', parent_event: 'Previous event', request_initiator: 'Request initiator', request_lifecycle: 'Request lifecycle', artifact_request: 'Related artifact'};
+        const gapLabels = {
+          ambiguous_request: 'Ambiguous request identifier',
+          missing_event: 'Missing event · predecessor not retained',
+          no_predecessor: 'Missing predecessor · no recorded link',
+          cycle: 'Trace stopped · correlation cycle',
+          step_limit: 'Trace stopped · step limit reached'
+        };
         (trace?.steps ?? []).forEach((step, index) => {
           models.push({key: `${step.event.process_id}:${step.event.sequence_number}`, index: String(index + 1),
             title: `${step.category} · ${step.operation}`, kind: labels[step.relation] || step.relation,
             confidence: step.confidence === 'observed' ? 'Recorded link' : 'Shared identifiers',
             style: step.confidence === 'observed' ? 'exact' : 'correlation', step});
           trace.gaps.filter(gap => gap.after_step === index).forEach((gap, gapIndex) => models.push({
-            key: `gap:${index}:${gapIndex}`, index: '!', title: gap.reason.replaceAll('_', ' '),
-            kind: 'Missing event', confidence: 'Gap', style: 'unknown', meta: gap.detail, gap: true
+            key: `gap:${index}:${gapIndex}`, index: '!', title: gapLabels[gap.reason] || gap.reason.replaceAll('_', ' '),
+            kind: gap.reason === 'missing_event' ? 'Missing event · retained evidence gap' : 'Trace gap',
+            confidence: 'Gap', style: 'unknown', meta: gap.detail, gap: true
           }));
         });
         if (!models.some(model => model.key === state.selectedTraceRow)) state.selectedTraceRow = models[0]?.key ?? null;
@@ -886,7 +1155,17 @@
         }
         const active = models.find(model => model.key === state.selectedTraceRow);
         if (active) traceStepDetails(active); else elements.traceStepDetails.replaceChildren();
-        elements.coverageValue.textContent = hasSteps ? `${trace.coverage.percent}% coverage` : '';
+        if (hasSteps) {
+          const {linked_steps: linked, gap_count: gaps} = trace.coverage;
+          const possible = linked + gaps;
+          const links = possible ? `${linked} of ${possible} predecessor links recorded` : 'No predecessor links were needed';
+          const gapsText = gaps ? `${gaps} missing predecessor${gaps === 1 ? '' : 's'}` : 'no missing predecessors';
+          elements.coverageValue.textContent = `${trace.coverage.percent}% predecessor coverage · ${links} · ${gapsText}`;
+          elements.coverageValue.title = 'Coverage counts recorded predecessor links against explicit missing-predecessor gaps.';
+        } else {
+          elements.coverageValue.textContent = '';
+          elements.coverageValue.removeAttribute?.('title');
+        }
       }
 
       function requestInterception() {
@@ -2228,7 +2507,9 @@
         const canDispose = experiment?.isolated && ['ready', 'error'].includes(experiment.state) && experiment.pending_requests === 0 && !hookBusy && !automationBusy;
         elements.experimentSubtitle.textContent = request && state.selectedField
           ? `request-${request.id} · ${state.selectedField.label} ${state.selectedField.path} · isolated replay only`
-          : 'Disposable context · no baseline cookies, storage, or credentials';
+          : attached
+            ? 'Debugger target running · request field optional · disposable context only'
+            : 'Disposable context requires an attached debugger target';
 
         if (state.experimentError) setExperimentNotice('error', state.experimentError);
         else if (!experiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
@@ -2237,6 +2518,9 @@
         else if (contextReady) setExperimentNotice('ready', experiment.message);
         else if (experiment.state === 'disposed') setExperimentNotice('ready', experiment.message);
         else if (!attached) setExperimentNotice('idle', 'Connect a browser target to intercept requests.');
+        else if (!request || !state.selectedField) {
+          setExperimentNotice('idle', 'Debugger target is running. Experiments are available without a selected request field; create a disposable context to begin.');
+        }
         else setExperimentNotice('idle', experiment.message);
 
         const contextKind = experiment?.state === 'error' ? 'error' : experiment?.isolated ? '' : 'offline';
@@ -2779,7 +3063,7 @@
       async function refreshApiCollection(force = false) {
         if (state.apiCollectionRefreshing || location.protocol === 'file:') return false;
         state.apiCollectionRefreshing = true;
-        if (!state.apiCollectionLoaded) setCollectionNotice('loading', 'Loading the local API Collection…');
+        if (!state.apiCollectionLoaded) setCollectionNotice('loading', 'Loading your local collection…');
         try {
           const headers = !force && state.apiCollectionEtag ? {'If-None-Match': state.apiCollectionEtag} : {};
           const response = await fetch('/api/api-collection', {cache: 'no-store', headers});
@@ -2794,7 +3078,7 @@
           if (!collectionRequest()) state.collectionSelectedRequestId = null;
           setCollectionNotice(body.requests.length ? 'ready' : 'empty', body.requests.length
             ? `${body.requests.length} saved ${body.requests.length === 1 ? 'request' : 'requests'} loaded from the permission-restricted local store.`
-            : 'The local collection is empty. Create a request or import only method and URL from Traffic.');
+            : 'Start by creating a saved request or importing one from Traffic.');
           renderApiCollection();
           return true;
         } catch (error) {
@@ -3115,11 +3399,13 @@
 
       function renderApiCollection() {
         if (!elements.collectionTree) return;
+        const firstUse = state.apiCollection.requests.length === 0 && state.apiCollection.folders.length === 1;
+        elements.collectionEditorEmpty.parentElement?.parentElement?.setAttribute('data-state', firstUse ? 'empty' : 'ready');
         if (state.apiCollectionLoaded && state.apiCollectionStatus === 'loading') {
           state.apiCollectionStatus = state.apiCollection.requests.length ? 'ready' : 'empty';
           state.apiCollectionMessage = state.apiCollection.requests.length
             ? `${state.apiCollection.requests.length} saved ${state.apiCollection.requests.length === 1 ? 'request' : 'requests'} loaded from the permission-restricted local store.`
-            : 'The local collection is empty. Create a request or import only method and URL from Traffic.';
+            : 'Start by creating a saved request or importing one from Traffic.';
         }
         elements.collectionGeneration.textContent = `Generation ${state.apiCollection.generation}`;
         elements.collectionCount.textContent = `${state.apiCollection.requests.length} / 128`;
@@ -3457,7 +3743,7 @@
           const count = state.localAnalyst.files.length;
           setAnalystNotice(count ? 'ready' : 'empty', count
             ? `${count} saved ${count === 1 ? 'file' : 'files'} loaded from the permission-restricted local workspace.`
-            : 'The workspace is empty. Create an analyst script or a non-executable scratchpad.');
+            : 'Start by saving a script or note.');
           loaded = true;
         } catch (error) {
           setAnalystNotice('error', `Analyst workspace unavailable: ${error.message}. The last valid generation remains visible.`);
@@ -3860,6 +4146,8 @@
 
       function renderLocalAnalyst() {
         if (!analystElements.tree) return;
+        const firstUse = state.localAnalyst.files.length === 0 && state.localAnalyst.folders.length === 1;
+        analystElements.editorEmpty.parentElement?.parentElement?.setAttribute('data-state', firstUse ? 'empty' : 'ready');
         analystElements.generation.textContent = `Generation ${state.localAnalyst.generation}`;
         analystElements.fileCount.textContent = `${state.localAnalyst.files.length} / 64`;
         analystElements.folderUsage.textContent = `${state.localAnalyst.folders.length} / 32`;
@@ -4550,13 +4838,16 @@
       }
 
       function liveSources() {
-        return (state.debuggerSession?.scripts ?? []).map(script => {
+        const staleScriptIds = state.staleScriptIds ?? new Set();
+        return (state.debuggerSession?.scripts ?? []).filter(script => !staleScriptIds.has(script.script_id)).map(script => {
           const cached = state.liveScriptContent.get(script.script_id) ?? {};
           return {
             ...script,
             ...cached,
             source_type: 'script',
             key: `script:${script.script_id}`,
+            target_id: state.debuggerSession?.target?.id ?? '',
+            target_title: state.debuggerSession?.target?.title ?? '',
             kind: script.language === 'WebAssembly' ? 'wasm' : 'javascript',
             mime_type: script.language === 'WebAssembly' ? 'application/wasm' : 'text/javascript',
             byte_size: script.length,
@@ -4574,6 +4865,22 @@
         try { return source.url ? new URL(source.url).origin : '(anonymous)'; } catch { return '(generated)'; }
       }
 
+      function sourceDisplayName(source) {
+        const identity = source.source_type === 'script'
+          ? `script ${source.script_id}` : `artifact ${source.artifact_id}`;
+        if (source.source_type === 'script' && !source.url) return `anonymous · ${identity}`;
+        return `${sourceName(source)} · ${identity}`;
+      }
+
+      function sourceDisplayMeta(source) {
+        if (source.source_type === 'script') {
+          const language = source.language === 'WebAssembly' ? 'WASM' : 'JS';
+          const context = source.execution_context_id > 0 ? `ctx ${source.execution_context_id}` : 'ctx unknown';
+          return `${language} · live · ${context}`;
+        }
+        return `${source.origin === 'sample' ? 'sample' : source.origin === 'demo' ? 'demo' : 'evidence'} · ${source.kind}`;
+      }
+
       function sourcePathParts(source) {
         try { return source.url ? new URL(source.url).pathname.split('/').filter(Boolean) : [sourceName(source)]; } catch { return [sourceName(source)]; }
       }
@@ -4583,6 +4890,23 @@
         if (source.kind === 'source_map') return '{}';
         if (source.kind === 'response_body') return 'R';
         return 'JS';
+      }
+
+      function markLiveSourceStale(scriptId, reason = 'The live source detached before its bytes could be loaded.') {
+        if (!scriptId) return;
+        state.staleScriptIds ??= new Set();
+        state.staleScriptIds.add(scriptId);
+        state.liveScriptContent.delete(scriptId);
+        state.openScriptIds = state.openScriptIds.filter(id => id !== scriptId);
+        if (state.selectedScriptId === scriptId) {
+          state.selectedScriptId = null;
+          state.pendingSourceLine = null;
+          state.sourcePretty = false;
+          state.selectedArtifactId = state.openArtifactIds.at(-1) ?? null;
+          state.sourceCollection = 'captured';
+        }
+        state.sourceNoticeKind = 'error';
+        state.sourceNotice = `${reason} The stale live source was removed from Page and open tabs.`;
       }
 
       function selectedSource() {
@@ -4658,15 +4982,30 @@
               rows.push(sourceTreeRow(directory, '⌄', index + 2));
             });
             rows.push(sourceTreeRow(
-              sourceName(source),
+              sourceDisplayName(source),
               sourceIcon(source),
               Math.max(2, parts.length + 1),
               source,
-              source.source_type === 'script' ? 'live' : source.origin === 'sample' ? 'sample' : 'evidence'
+              sourceDisplayMeta(source)
             ));
           });
         });
         elements.sourceTree.replaceChildren(...rows);
+      }
+
+      function renderSourceHealth() {
+        const notices = [];
+        if (state.artifactReceiverConfigured && !state.artifactReceiverConnected) {
+          const retained = state.artifacts.filter(artifact => artifact.origin !== 'sample').length;
+          notices.push(`Artifact capture is unavailable: the receiver socket is missing. ${retained} captured artifact${retained === 1 ? '' : 's'} remain readable; new artifacts will not appear until the receiver reconnects.`);
+        } else if (state.artifactReceiverError) {
+          notices.push(`Artifact capture health could not be checked: ${state.artifactReceiverError}`);
+        }
+        if (state.sourceNotice) notices.push(state.sourceNotice);
+        elements.sourceHealth.hidden = notices.length === 0;
+        elements.sourceHealth.dataset.kind = state.sourceNoticeKind === 'error' ||
+          (state.artifactReceiverConfigured && !state.artifactReceiverConnected) ? 'error' : 'warning';
+        elements.sourceHealth.textContent = notices.join(' ');
       }
 
       function renderSourceTabs() {
@@ -4686,6 +5025,8 @@
           tab.type = 'button';
           tab.className = 'source-editor-tab';
           tab.setAttribute('role', 'tab');
+          tab.setAttribute('aria-label', sourceDisplayName(source));
+          tab.title = source.url || sourceDisplayName(source);
           const selected = source.source_type === 'script'
             ? source.script_id === state.selectedScriptId
             : source.artifact_id === state.selectedArtifactId && state.selectedScriptId === null;
@@ -4695,7 +5036,8 @@
           icon.className = `source-file-icon ${source.kind}`;
           icon.textContent = sourceIcon(source);
           const name = document.createElement('span');
-          name.textContent = sourceName(source);
+          name.textContent = sourceDisplayName(source);
+          name.title = source.url || sourceDisplayName(source);
           const close = document.createElement('span');
           close.className = 'source-tab-close';
           close.textContent = '×';
@@ -4724,7 +5066,8 @@
         list.className = 'artifact-facts';
         const facts = source.source_type === 'script'
           ? [
-              ['Runtime', 'live target'], ['Script', source.script_id],
+              ['Runtime', 'live target'], ['Target', source.target_title || source.target_id || 'attached browser'],
+              ['Script', source.script_id],
               ['Context', source.execution_context_id], ['Language', source.language],
               ['Module', source.is_module ? 'yes' : 'no'], ['Source map', source.source_map_url || 'none'],
               ['Hash', source.hash || 'unreported'], ['Length', formatByteSize(source.length)]
@@ -4909,10 +5252,12 @@
           tab.tabIndex = selected ? 0 : -1;
         });
         elements.sourceTree.setAttribute('aria-labelledby', `source-tab-${state.sourceCollection}`);
+        renderSourceHealth();
         renderSourceTree();
         renderSourceTabs();
         renderSourceFacts(source);
-        elements.sourceLocation.textContent = source?.url || (source ? sourceName(source) : 'Select a source');
+        elements.sourceLocation.textContent = source?.url || (source ? sourceDisplayName(source) : 'Select a source');
+        elements.sourceLocation.title = source?.url || (source ? sourceDisplayName(source) : '');
         elements.sourceSize.textContent = source ? formatByteSize(source.byte_size) : '0 bytes';
         elements.sourceHash.textContent = source?.sha256 ? `${source.source_type === 'script' ? 'hash' : 'sha256'} ${source.sha256}` : '';
         elements.sourceViewKind.textContent = state.sourcePretty
@@ -5007,7 +5352,15 @@
         try {
           const response = await fetch(`/api/debugger/source?script_id=${encodeURIComponent(source.script_id)}`, { cache: 'no-store' });
           const body = await response.json();
-          if (!response.ok) throw new Error(body.error || `Debugger returned ${response.status}`);
+          const responseError = body?.error || `Debugger returned ${response.status}`;
+          if (!response.ok) {
+            if (/^No script for id:/i.test(responseError)) {
+              markLiveSourceStale(source.script_id, responseError);
+              renderSources();
+              return;
+            }
+            throw new Error(responseError);
+          }
           if (!isPlainObject(body) || body.protocol_version !== 1 || body.script_id !== source.script_id ||
               typeof body.source !== 'string' || typeof body.truncated !== 'boolean') throw new TypeError('Malformed debugger source response');
           const content = source.kind === 'wasm'
@@ -5016,6 +5369,8 @@
           state.liveScriptContent.set(source.script_id, { loading: false, loadError: null, content, contentTruncated: body.truncated });
         } catch (error) {
           state.liveScriptContent.set(source.script_id, { loading: false, loadError: `Live source is unavailable: ${error.message}` });
+          state.sourceNoticeKind = 'warning';
+          state.sourceNotice = `Live source ${sourceDisplayName(source)} could not be loaded. The last debugger catalog remains visible.`;
         }
         renderSources();
       }
@@ -5029,13 +5384,13 @@
       function renderQuickOpen() {
         const needle = elements.quickOpenInput.value.trim().toLowerCase();
         const matches = [...liveSources(), ...capturedSources()].filter(source =>
-          !needle || `${sourceName(source)} ${source.url}`.toLowerCase().includes(needle)
+          !needle || `${sourceDisplayName(source)} ${source.url}`.toLowerCase().includes(needle)
         );
         const rows = matches.map(source => {
           const row = document.createElement('button');
           row.type = 'button';
           row.className = 'quick-open-row';
-          const name = document.createElement('span'); name.textContent = sourceName(source);
+          const name = document.createElement('span'); name.textContent = sourceDisplayName(source);
           const path = document.createElement('small'); path.textContent = `${source.source_type === 'script' ? 'Live' : 'Captured'} · ${source.url || '(anonymous)'}`;
           row.append(name, path);
           row.addEventListener('click', () => {
@@ -5462,6 +5817,7 @@
         elements.memoryResultCount.textContent = String(state.memoryResults.length);
         elements.memoryResults.setAttribute('aria-label', diffMode ? 'Heap growth groups' : originMode ? 'Memory origin trace steps' : snapshotMode ? 'Heap snapshot matches' : 'Live object matches');
 
+        const memoryResultsPane = elements.memoryDetail.parentElement;
         if (state.memoryResults.length === 0) {
           const empty = textElement('div', 'memory-empty', state.memorySearchStatus === 'empty'
             ? originMode
@@ -5472,12 +5828,16 @@
                 : 'No objects matched. Broaden one criterion or lower the similarity threshold.'
             : state.memorySearchStatus === 'error'
               ? 'The last search did not replace any retained results.'
-              : diffMode ? 'Capture a baseline, use the page, then compare a second snapshot to see what grew.' : originMode ? 'Enter the value to trace, arm the trace, then perform the page action that creates it.' : snapshotMode ? 'Enter a value, then capture a snapshot to find matching objects and references.' : 'Start with a property name or value, then choose Search live objects.');
+                : diffMode ? 'Capture a baseline, use the page, then compare a second snapshot to see what grew.' : originMode ? 'Enter the value to trace, arm the trace, then perform the page action that creates it.' : snapshotMode ? 'Enter a value, then capture a snapshot to find matching objects and references.' : 'Enter a property name or value, then run a bounded live-object search.');
           elements.memoryResults.removeAttribute('role');
           elements.memoryResults.replaceChildren(empty);
-          renderMemoryDetail();
+          memoryResultsPane?.setAttribute('data-empty', 'true');
+          elements.memoryDetail.hidden = true;
+          elements.memoryDetail.replaceChildren();
           return;
         }
+        memoryResultsPane?.setAttribute('data-empty', 'false');
+        elements.memoryDetail.hidden = false;
         elements.memoryResults.setAttribute('role', 'listbox');
         if (!state.memoryResults.some(result => result.id === state.selectedMemoryResultId)) {
           state.selectedMemoryResultId = state.memoryResults[0].id;
@@ -6221,15 +6581,33 @@
           const previousOpenScripts = state.openScriptIds.join('\u0000');
           const previousPendingLine = state.pendingSourceLine ? `${state.pendingSourceLine.scriptId}:${state.pendingSourceLine.line}` : '';
           state.debuggerSession = body;
+          rebuildTrafficRequests();
           state.memoryDiffBaseline = body.heap_diff_baseline;
           applyMemoryOriginTrace(body.memory_origin_trace);
           state.debuggerEtag = response.headers.get('ETag');
           state.debuggerError = null;
-          state.openScriptIds = state.openScriptIds.filter(id => body.scripts.some(script => script.script_id === id));
+          state.staleScriptIds ??= new Set();
+          if ((previousSession?.target?.id ?? '') !== (body.target?.id ?? '')) {
+            state.staleScriptIds.clear();
+          } else {
+            const currentScripts = new Map(body.scripts.map(script => [script.script_id, script]));
+            const previousScripts = new Map((previousSession?.scripts ?? []).map(script => [script.script_id, script]));
+            state.staleScriptIds.forEach(scriptId => {
+              const current = currentScripts.get(scriptId);
+              const previous = previousScripts.get(scriptId);
+              if (!current || (previous && current.hash !== previous.hash)) state.staleScriptIds.delete(scriptId);
+            });
+          }
+          state.openScriptIds = state.openScriptIds.filter(id =>
+            body.scripts.some(script => script.script_id === id) && !state.staleScriptIds.has(id));
           if (state.editingBreakpointId !== null && !body.breakpoints.some(breakpoint => breakpoint.id === state.editingBreakpointId)) {
             state.editingBreakpointId = null;
           }
-          if (state.selectedScriptId !== null && !body.scripts.some(script => script.script_id === state.selectedScriptId)) {
+          if (state.selectedScriptId !== null &&
+              (!body.scripts.some(script => script.script_id === state.selectedScriptId) ||
+               state.staleScriptIds.has(state.selectedScriptId))) {
+            state.sourceNoticeKind = 'warning';
+            state.sourceNotice = 'The selected live source is no longer attached to the current debugger target. The current Page catalog is shown after refresh.';
             state.selectedScriptId = null;
             state.pendingSourceLine = null;
             state.selectedArtifactId = state.openArtifactIds.at(-1) ?? null;
@@ -6245,6 +6623,14 @@
             state.pendingSourceLine = null;
           }
           renderDebugger();
+          const selectedTrafficRequest = state.requests.find(request => request.id === state.selectedRequestId) ?? null;
+          if (!selectedTrafficRequest && state.selectedRequestId !== null) resetRequestSelection();
+          if (!document.querySelector('#screen-traffic').hidden) {
+            renderShellStatus();
+            renderRequests();
+            updateSelectionSummary(selectedTrafficRequest);
+            renderInspector();
+          }
           renderMemory();
           if (!document.querySelector('#screen-experiments').hidden) renderExperiment();
           if (!document.querySelector('#screen-api-collection').hidden) renderApiCollection();
@@ -6287,13 +6673,31 @@
           const body = await response.json();
           if (!isArtifactResponse(body)) throw new TypeError('Malformed artifact response');
           state.artifactEtag = response.headers.get('ETag');
-          if (body.artifacts.length === 0) return;
+          if (typeof body.artifact_receiver_configured === 'boolean') {
+            state.artifactReceiverConfigured = body.artifact_receiver_configured;
+          }
+          if (typeof body.artifact_receiver_connected === 'boolean') {
+            state.artifactReceiverConnected = body.artifact_receiver_connected;
+          }
+          state.artifactReceiverError = null;
+          renderShellStatus();
+          if (body.artifacts.length === 0) {
+            if (state.sessionMode === 'live') {
+              state.artifacts = [];
+              state.openArtifactIds = [];
+              state.selectedArtifactId = null;
+              renderSources();
+            } else {
+              renderSourceHealth();
+            }
+            return;
+          }
           const existing = new Map(state.artifacts.map(artifact => [artifact.artifact_id, artifact]));
           state.artifacts = body.artifacts.map(artifact => {
             const cached = existing.get(artifact.artifact_id);
             return {
               ...artifact,
-              origin: 'live',
+              origin: state.sessionMode === 'live' ? 'live' : 'demo',
               content: cached?.content,
               loading: cached?.loading,
               loadError: cached?.loadError,
@@ -6309,8 +6713,13 @@
           const selected = state.artifacts.find(artifact => artifact.artifact_id === state.selectedArtifactId);
           if (selected) loadArtifactContent(selected);
         } catch (error) {
-          if (state.artifacts.every(artifact => artifact.origin === 'sample')) return;
-          elements.sourceCodeEmpty.textContent = `Artifact catalog unavailable: ${error.message}`;
+          if (!state.artifactReceiverConfigured && state.artifacts.every(artifact => artifact.origin === 'sample')) {
+            renderSourceHealth();
+            return;
+          }
+          state.artifactReceiverError = error.message;
+          renderShellStatus();
+          renderSources();
         } finally {
           state.artifactRefreshing = false;
         }
@@ -6367,7 +6776,7 @@
         state.refreshing = true;
         try {
           const headers = state.eventEtag ? { 'If-None-Match': state.eventEtag } : {};
-          const response = await fetch('/api/events?limit=500', { cache: 'no-store', headers });
+          const response = await fetch('/api/events?limit=5000', { cache: 'no-store', headers });
           if (response.status === 304) {
             await refreshRequestSignalProfile();
             await refreshArtifacts();
@@ -6380,37 +6789,51 @@
           try { body = JSON.parse(rawBody); } catch { throw new TypeError('Malformed broker response'); }
           if (!isBrokerResponse(body)) throw new TypeError('Malformed broker response');
           state.eventEtag = response.headers.get('ETag');
+          const brokerConnected = body.broker_connected !== false;
+          state.sessionMode = ['demo', 'idle'].includes(body.capture_mode)
+            ? body.capture_mode : 'live';
           state.events = body.events;
+          state.eventsLimited = body.count >= 5000;
           const vmModel = vmFindingsFromEvents(state.events);
           state.eventVmFindings = vmModel.findings;
           state.vmFindings = [...state.lastValidAnalysisFindings, ...state.eventVmFindings];
           state.malformedVmFindings = vmModel.malformedCount;
-          state.requests = [...sampleRequests, ...requestsFromEvents(state.events)];
+          const eventOrigin = state.sessionMode === 'demo' ? 'demo' : 'live';
+          state.nativeRequests = requestsFromEvents(state.events, eventOrigin);
+          rebuildTrafficRequests();
           let selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
-          if (!selectedRequest) {
-            state.selectedRequestId = '81';
+          if (!selectedRequest && !elements.requestFilter.value.trim() && state.requestType === 'all') {
+            const preferred = state.requests[0];
+            state.selectedRequestId = preferred?.id ?? null;
             state.fieldTab = 'body';
-            state.selectedField = fieldSets.body.find(field => field.traceable);
-            selectedRequest = sampleRequests.find(request => request.id === state.selectedRequestId);
+            state.selectedField = preferred?.traceable ? fieldSets.body.find(field => field.traceable) : null;
+            selectedRequest = preferred ?? null;
           }
           updateSelectionSummary(selectedRequest);
-          const brokerConnected = body.broker_connected !== false;
           state.broker = brokerConnected ? 'connected' : 'unavailable';
-          elements.capture.classList.toggle('offline', !brokerConnected);
-          elements.capture.querySelector('span:last-child').textContent = brokerConnected ? 'Capturing' : 'Offline';
-          elements.broker.classList.toggle('offline', !brokerConnected);
-          elements.broker.textContent = brokerConnected ? 'broker connected' : 'broker unavailable';
-          elements.updated.textContent = brokerConnected
-            ? `updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
-            : (state.events.length > 0 ? 'last valid evidence retained' : 'sample data remains available');
+          state.lastUpdatedLabel = brokerConnected
+            ? state.sessionMode === 'live'
+              ? `updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
+              : state.sessionMode === 'demo' ? 'deterministic developer evidence loaded' : 'start a live capture'
+            : (state.events.length > 0 ? 'last valid evidence retained' : 'no live evidence');
+          renderShellStatus();
           const gapCount = countSequenceGaps(state.events);
           elements.gaps.textContent = `${gapCount} sequence ${gapCount === 1n ? 'gap' : 'gaps'}`;
           if (!brokerConnected) {
-            setNetworkNotice('disconnected', `The local evidence broker is disconnected. ${state.events.length > 0 ? 'The last valid evidence remains visible.' : 'Sample requests remain available.'}`);
+            setNetworkNotice('disconnected', `The local evidence broker is disconnected. ${state.events.length > 0 ? 'The last valid evidence remains visible.' : 'No live requests are available.'}`);
+          } else if (state.eventsLimited) {
+            setNetworkNotice('gap', `Showing the last 5,000 evidence events; older request rows remain recorded on disk.${gapCount > 0n ? ` ${gapCount} sequence ${gapCount === 1n ? 'gap is' : 'gaps are'} also recorded.` : ''}`);
           } else if (gapCount > 0n) {
             setNetworkNotice('gap', `${gapCount} captured ${gapCount === 1n ? 'event is' : 'events are'} missing. Request rows may be incomplete.`);
-          } else if (state.events.length === 0) {
-            setNetworkNotice('empty', 'No live requests yet. Sample requests remain available for exploring the workspace.');
+          } else if (state.sessionMode === 'live' && state.events.length === 0) {
+            setNetworkNotice('empty', 'No live requests yet. Start a capture in the attached browser.');
+          } else if (state.sessionMode === 'demo') {
+            setNetworkNotice('empty', 'Developer evidence loaded. It does not represent a live capture.');
+          } else if (state.sessionMode === 'idle') {
+            setNetworkNotice('empty', 'No evidence is bundled. Start a live capture to populate the workspace.');
+          } else if (state.debuggerSession?.network?.capture_enabled) {
+            const dropped = state.debuggerSession.network.dropped;
+            setNetworkNotice('gap', `CDP content capture is active for the attached tab. Authorization and cookie headers are redacted; request and response bodies are limited to 128 KiB.${dropped ? ` ${dropped} older requests were evicted from the 1,000-request window.` : ''}`);
           } else {
             elements.networkNotice.hidden = true;
           }
@@ -6423,20 +6846,18 @@
           renderVmLab();
         } catch (error) {
           state.broker = 'unavailable';
-          elements.capture.classList.add('offline');
-          elements.capture.querySelector('span:last-child').textContent = 'Offline';
-          elements.broker.classList.add('offline');
-          elements.broker.textContent = 'broker unavailable';
           const malformed = error instanceof TypeError && error.message === 'Malformed broker response';
           const retainedEvidence = state.events.length > 0;
-          elements.updated.textContent = retainedEvidence ? 'last valid evidence retained' : 'sample data remains available';
+          state.lastUpdatedLabel = retainedEvidence ? 'last valid evidence retained' : 'no live evidence';
+          renderShellStatus();
           setNetworkNotice(
             malformed ? 'malformed' : 'disconnected',
             malformed
-              ? `The broker returned malformed event data. ${retainedEvidence ? 'The last valid evidence remains visible.' : 'Sample requests remain available.'}`
-              : `The local evidence broker is disconnected. ${retainedEvidence ? 'The last valid evidence remains visible.' : 'Sample requests remain available.'}`
+              ? `The broker returned malformed event data. ${retainedEvidence ? 'The last valid evidence remains visible.' : 'No live requests are available.'}`
+              : `The local evidence broker is disconnected. ${retainedEvidence ? 'The last valid evidence remains visible.' : 'No live requests are available.'}`
           );
           renderRequests();
+          renderInspector();
           renderEvidence();
           renderVmLab();
         } finally {
@@ -6446,13 +6867,24 @@
 
       function useStandalonePreview() {
         state.broker = 'preview';
-        elements.capture.classList.remove('offline');
-        elements.capture.querySelector('span:last-child').textContent = 'Sample';
-        elements.broker.classList.remove('offline');
-        elements.broker.textContent = 'standalone preview';
-        elements.updated.textContent = 'open the app for live evidence';
+        state.sessionMode = 'preview';
+        state.events = [];
+        state.eventsLimited = false;
+        state.requests = [];
+        state.artifacts = [];
+        state.openArtifactIds = [];
+        state.selectedArtifactId = null;
+        state.artifactReceiverConfigured = false;
+        state.artifactReceiverConnected = false;
+        state.artifactReceiverError = null;
+        state.staleScriptIds?.clear();
+        state.sourceNotice = null;
+        state.selectedRequestId = null;
+        state.selectedField = null;
+        state.lastUpdatedLabel = 'start a live capture';
+        renderShellStatus();
         elements.gaps.textContent = '0 sequence gaps';
-        setNetworkNotice('empty', 'Standalone preview. Open the local app to capture live requests.');
+        setNetworkNotice('empty', 'No evidence is bundled. Start a live capture to populate the workspace.');
         renderRequests();
         renderEvidence();
         renderDebugger();
@@ -6496,6 +6928,7 @@
       }));
       document.querySelectorAll('.type-filter').forEach(button => button.addEventListener('click', () => {
         state.requestType = button.dataset.filter;
+        state.requestDomain = 'all';
         document.querySelectorAll('.type-filter').forEach(candidate => candidate.setAttribute('aria-pressed', String(candidate === button)));
         renderRequests();
       }));
@@ -6536,6 +6969,13 @@
         elements.backtraceSteps.querySelector('.trace-row')?.focus();
       });
       elements.requestFilter.addEventListener('input', renderRequests);
+      elements.requestDomain.addEventListener('change', () => {
+        state.requestDomain = elements.requestDomain.value;
+        state.requestType = 'all';
+        document.querySelectorAll('.type-filter').forEach(candidate =>
+          candidate.setAttribute('aria-pressed', String(candidate.dataset.filter === 'all')));
+        renderRequests();
+      });
       elements.traceButton.addEventListener('click', async () => {
         showScreen('backtrace', elements.traceButton);
         await refreshOriginTrace();
@@ -6978,6 +7418,9 @@
         if (event.key === 'Escape') elements.collectionCancelFolder.click();
       });
       elements.collectionNewRequest.addEventListener('click', () => createCollectionRequest());
+      elements.collectionEditorEmpty.querySelector('#collection-empty-new-request')?.addEventListener('click', () => {
+        elements.collectionNewRequest.click();
+      });
       elements.collectionFolderForm.addEventListener('submit', event => {
         event.preventDefault(); saveCollectionFolder();
       });
@@ -7008,6 +7451,12 @@
       analystElements.newFolder.addEventListener('click', createAnalystFolder);
       analystElements.newScript.addEventListener('click', () => createAnalystFile('analyst-script'));
       analystElements.newNote.addEventListener('click', () => createAnalystFile('scratchpad'));
+      analystElements.editorEmpty.querySelector('#analyst-empty-new-script')?.addEventListener('click', () => {
+        analystElements.newScript.click();
+      });
+      analystElements.editorEmpty.querySelector('#analyst-empty-new-note')?.addEventListener('click', () => {
+        analystElements.newNote.click();
+      });
       analystElements.folderForm.addEventListener('submit', event => {
         event.preventDefault();
         saveAnalystFolder();

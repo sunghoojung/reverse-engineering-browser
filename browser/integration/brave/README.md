@@ -28,6 +28,9 @@ Brave's production `BraveProxyingURLLoaderFactory` and client proxy instead of
 installing a second interception layer. The capture boundary records metadata
 and a bounded payload prefix only. Request payload prefixes contain the method
 and destination host, not URL paths, queries, fragments, or credentials.
+Browser lifecycle records also carry the top-level `FrameTreeNodeId` as a
+session-local tab identifier. This lets Origin Trace organize requests by tab
+and destination domain without capturing tab titles or URL paths.
 Browser lifecycle records also carry Chromium's opaque 128-bit BrowserContext
 token, which disambiguates Brave request IDs generated independently per
 profile without exposing a profile path.

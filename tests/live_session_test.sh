@@ -114,6 +114,7 @@ REB_BRAVE_ARGUMENTS="${brave_arguments}" \
 REB_EVENT_PRODUCER="${event_producer}" \
 REB_ARTIFACT_PRODUCER="${artifact_producer}" \
 REB_CAPTURE_DURATION_SECONDS=60 \
+REB_CDP_NETWORK_CAPTURE=1 \
   "${live_script}" >"${test_root}/live.out" 2>"${test_root}/live.err"
 
 test -f "${analyzer_started}"
@@ -138,13 +139,16 @@ test "$(grep -c '\"category\":\"web_audio\",\"relation\":\"same_context\",\"conf
 grep -Fq '"kind":"wasm"' "${session_directory}/artifacts/manifest.jsonl"
 grep -Fxq -- '--artifacts' "${open_arguments}"
 grep -Fxq -- "${session_directory}/artifacts" "${open_arguments}"
+grep -Eq -- 'Artifact receiver socket: .*-artifacts\.sock$' \
+  "${session_directory}/research-ui.log"
 grep -Fxq -- '--trace-store' "${open_arguments}"
 grep -Fxq -- "${session_directory}/origin-trace.jsonl" "${open_arguments}"
 grep -Fxq -- '--signal-store' "${open_arguments}"
 grep -Fxq -- "${session_directory}/request-signals.jsonl" "${open_arguments}"
 grep -Fxq -- '--ui-url' "${open_arguments}"
-grep -Eq '^http://127\.0\.0\.1:[0-9]+/$' "${open_arguments}"
+grep -Eq '^http://127\.0\.0\.1:[0-9]+/\?native=1$' "${open_arguments}"
 grep -Fxq -- '--remote-debugging-port=0' "${brave_arguments}"
+grep -Fq 'CDP network content: enabled for this session' "${test_root}/live.out"
 grep -Fxq -- "--user-data-dir=${session_directory}/brave-profile" "${brave_arguments}"
 grep -Fq 'accepted=3' "${session_directory}/artifact-receiver.log"
 test ! -e "/tmp/origin-trace-${UID}-$(basename "${session_directory}").sock"

@@ -29,9 +29,18 @@ readonly category_mask="${REB_CAPTURE_CATEGORY_MASK:-1285}"
 readonly duration_seconds="${REB_CAPTURE_DURATION_SECONDS:-3600}"
 readonly open_command="${REB_OPEN_COMMAND:-open}"
 readonly native_quiet_mode="${REB_NATIVE_QUIET_MODE:-0}"
+readonly cdp_network_capture="${REB_CDP_NETWORK_CAPTURE:-0}"
 
 if [[ "${native_quiet_mode}" != 0 && "${native_quiet_mode}" != 1 ]]; then
   echo "REB_NATIVE_QUIET_MODE must be 0 or 1." >&2
+  exit 2
+fi
+if [[ "${cdp_network_capture}" != 0 && "${cdp_network_capture}" != 1 ]]; then
+  echo "REB_CDP_NETWORK_CAPTURE must be 0 or 1." >&2
+  exit 2
+fi
+if [[ "${native_quiet_mode}" == 1 && "${cdp_network_capture}" == 1 ]]; then
+  echo "REB_CDP_NETWORK_CAPTURE requires the live debugger." >&2
   exit 2
 fi
 
@@ -88,6 +97,17 @@ broker_pid=""
 artifact_receiver_pid=""
 analyzer_pid=""
 ui_pid=""
+stop_artifact_receiver() {
+  if [[ -z "${artifact_receiver_pid}" ]]; then
+    return
+  fi
+  if kill -0 "${artifact_receiver_pid}" 2>/dev/null; then
+    kill -TERM "${artifact_receiver_pid}" 2>/dev/null || true
+  fi
+  wait "${artifact_receiver_pid}" 2>/dev/null || true
+  artifact_receiver_pid=""
+}
+
 cleanup() {
   if [[ -n "${analyzer_pid}" ]] && kill -0 "${analyzer_pid}" 2>/dev/null; then
     kill "${analyzer_pid}" 2>/dev/null || true
@@ -97,10 +117,7 @@ cleanup() {
     kill "${broker_pid}" 2>/dev/null || true
     wait "${broker_pid}" 2>/dev/null || true
   fi
-  if [[ -n "${artifact_receiver_pid}" ]] && kill -0 "${artifact_receiver_pid}" 2>/dev/null; then
-    kill "${artifact_receiver_pid}" 2>/dev/null || true
-    wait "${artifact_receiver_pid}" 2>/dev/null || true
-  fi
+  stop_artifact_receiver
   if [[ -n "${ui_pid}" ]] && kill -0 "${ui_pid}" 2>/dev/null; then
     kill "${ui_pid}" 2>/dev/null || true
     wait "${ui_pid}" 2>/dev/null || true
@@ -197,13 +214,16 @@ ui_arguments=(
   --host 127.0.0.1 --port 0 --endpoint-file "${ui_endpoint_path}" \
   --store "${store_path}" --trace-store "${trace_store_path}" \
   --signal-store "${signal_store_path}" --artifacts "${artifact_store_path}" \
-  --socket "${socket_path}"
+  --socket "${socket_path}" --artifact-socket "${artifact_socket_path}"
 )
 if [[ "${native_quiet_mode}" == 0 ]]; then
   ui_arguments+=(
     --devtools-active-port "${devtools_active_port}"
     --debugger-transport "${debugger_transport_binary}"
   )
+  if [[ "${cdp_network_capture}" == 1 ]]; then
+    ui_arguments+=(--capture-network-content)
+  fi
 fi
 python3 -u "${repository_root}/apps/research-ui/server.py" \
   "${ui_arguments[@]}" \
@@ -231,7 +251,7 @@ readonly ui_endpoint
 "${open_command}" -n "${origin_trace_app}" --args --store "${store_path}" \
   --trace-store "${trace_store_path}" --signal-store "${signal_store_path}" \
   --artifacts "${artifact_store_path}" \
-  --broker-socket "${socket_path}" --ui-url "${ui_endpoint}/"
+  --broker-socket "${socket_path}" --ui-url "${ui_endpoint}/?native=1"
 
 echo "Origin Trace live session ${session_id}"
 echo "Evidence store: ${store_path}"
@@ -243,6 +263,11 @@ if [[ "${native_quiet_mode}" == 1 ]]; then
   echo "Live debugger: disabled (native quiet mode)"
 else
   echo "Live debugger: ${ui_endpoint}"
+  if [[ "${cdp_network_capture}" == 1 ]]; then
+    echo "CDP network content: enabled for this session; sensitive headers are redacted and bodies are limited to 128 KiB"
+  else
+    echo "CDP network content: disabled; set REB_CDP_NETWORK_CAPTURE=1 to enable it for one session"
+  fi
 fi
 echo "Close Brave to stop this capture session."
 
@@ -262,9 +287,6 @@ else
 fi
 "${brave_binary}" "${brave_arguments[@]}"
 
+stop_artifact_receiver
 wait "${broker_pid}"
 broker_pid=""
-if [[ -n "${artifact_receiver_pid}" ]]; then
-  wait "${artifact_receiver_pid}"
-  artifact_receiver_pid=""
-fi

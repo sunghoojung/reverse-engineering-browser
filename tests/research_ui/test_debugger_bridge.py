@@ -342,7 +342,57 @@ class FakeDebuggerWebSocket:
             }
         elif method == "Debugger.evaluateOnCallFrame":
             result = {"result": {"type": "number", "value": 3, "description": "3"}}
+        elif method == "Network.getResponseBody":
+            result = {"body": '{"live":true}', "base64Encoded": False}
         self.send_json({"id": command["id"], "result": result})
+        if method == "Network.enable":
+            self.send_json(
+                {
+                    "method": "Network.requestWillBeSent",
+                    "params": {
+                        "requestId": "network-1",
+                        "timestamp": 10.0,
+                        "wallTime": 1_800_000_000.0,
+                        "type": "Fetch",
+                        "documentURL": "https://checkout.test/",
+                        "request": {
+                            "url": "https://api.test/cart?item=7",
+                            "method": "POST",
+                            "hasPostData": True,
+                            "postData": '{"item":7}',
+                            "headers": {
+                                "content-type": "application/json",
+                                "authorization": "Bearer private",
+                            },
+                        },
+                    },
+                }
+            )
+            self.send_json(
+                {
+                    "method": "Network.responseReceived",
+                    "params": {
+                        "requestId": "network-1",
+                        "response": {
+                            "status": 201,
+                            "statusText": "Created",
+                            "protocol": "h2",
+                            "mimeType": "application/json",
+                            "headers": {"content-type": "application/json"},
+                        },
+                    },
+                }
+            )
+            self.send_json(
+                {
+                    "method": "Network.loadingFinished",
+                    "params": {
+                        "requestId": "network-1",
+                        "timestamp": 10.125,
+                        "encodedDataLength": 128,
+                    },
+                }
+            )
         if method == "Debugger.enable":
             self.send_json(
                 {
@@ -516,6 +566,200 @@ class DebuggerBridgeTests(unittest.TestCase):
         self.assertFalse(waiter.is_alive())
         self.assertEqual(result, [initial_generation + 1])
         self.assertEqual(bridge.state(), "unavailable")
+
+    def test_cdp_network_capture_is_explicit_bounded_and_redacts_credentials(
+        self,
+    ) -> None:
+        disabled = DebuggerBridge()
+        disabled._handle_event(
+            "Network.requestWillBeSent",
+            {
+                "requestId": "ignored",
+                "timestamp": 1.0,
+                "request": {"method": "GET", "url": "https://example.test/"},
+            },
+        )
+        self.assertFalse(disabled.snapshot()["network"]["capture_enabled"])
+        self.assertEqual(disabled.snapshot()["network"]["requests"], [])
+
+        bridge = DebuggerBridge(capture_network_content=True)
+        bridge._target = {
+            "id": "page-1",
+            "type": "page",
+            "title": "Checkout",
+            "url": "https://checkout.test/",
+        }
+        bridge._handle_event(
+            "Network.requestWillBeSent",
+            {
+                "requestId": "request-7",
+                "timestamp": 10.0,
+                "wallTime": 1_800_000_000.0,
+                "type": "Fetch",
+                "documentURL": "https://checkout.test/",
+                "request": {
+                    "method": "POST",
+                    "url": "https://user:secret@api.test/cart?item=7#private",
+                    "hasPostData": True,
+                    "postData": '{"item":7}',
+                    "headers": {
+                        "content-type": "application/json",
+                        "authorization": "Bearer secret",
+                        "cookie": "session=secret",
+                    },
+                },
+            },
+        )
+        bridge._handle_event(
+            "Network.responseReceived",
+            {
+                "requestId": "request-7",
+                "response": {
+                    "status": 201,
+                    "statusText": "Created",
+                    "protocol": "h2",
+                    "mimeType": "application/json",
+                    "headers": {
+                        "content-type": "application/json",
+                        "set-cookie": "session=new-secret",
+                    },
+                },
+            },
+        )
+        with mock.patch.object(
+            bridge,
+            "_command",
+            return_value={"body": '{"accepted":true}', "base64Encoded": False},
+        ):
+            bridge._handle_event(
+                "Network.loadingFinished",
+                {
+                    "requestId": "request-7",
+                    "timestamp": 10.125,
+                    "encodedDataLength": 512,
+                },
+            )
+            snapshot = self.wait_for(
+                lambda: (
+                    value
+                    if (
+                        (value := bridge.snapshot())["network"]["requests"][0][
+                            "response"
+                        ]["body"]["state"]
+                        == "available"
+                    )
+                    else None
+                )
+            )
+
+        request = snapshot["network"]["requests"][0]
+        self.assertEqual(request["url"], "https://api.test/cart?item=7")
+        self.assertEqual(request["request"]["body"]["text"], '{"item":7}')
+        self.assertEqual(request["response"]["body"]["text"], '{"accepted":true}')
+        self.assertEqual(request["duration_ms"], 125.0)
+        self.assertEqual(
+            dict(request["request"]["headers"])["authorization"], "<redacted>"
+        )
+        self.assertEqual(dict(request["request"]["headers"])["cookie"], "<redacted>")
+        self.assertEqual(
+            dict(request["response"]["headers"])["set-cookie"], "<redacted>"
+        )
+        self.assertEqual(
+            bridge._network_url("https://user:secret@example.test:invalid/path"),
+            ("", True),
+        )
+
+    def test_cdp_network_response_body_is_limited_to_128_kib(self) -> None:
+        bridge = DebuggerBridge(capture_network_content=True)
+        bridge._target = {
+            "id": "page-1",
+            "type": "page",
+            "title": "Large response",
+            "url": "https://large.test/",
+        }
+        bridge._handle_event(
+            "Network.requestWillBeSent",
+            {
+                "requestId": "large",
+                "timestamp": 1.0,
+                "request": {"method": "GET", "url": "https://large.test/data"},
+            },
+        )
+        with mock.patch.object(
+            bridge,
+            "_command",
+            return_value={"body": "x" * (128 * 1024 + 1), "base64Encoded": False},
+        ):
+            bridge._handle_event(
+                "Network.loadingFinished", {"requestId": "large", "timestamp": 2.0}
+            )
+            snapshot = self.wait_for(
+                lambda: (
+                    value
+                    if (
+                        (value := bridge.snapshot())["network"]["requests"][0][
+                            "response"
+                        ]["body"]["state"]
+                        == "available"
+                    )
+                    else None
+                )
+            )
+        body = snapshot["network"]["requests"][0]["response"]["body"]
+        self.assertEqual(len(body["text"].encode("utf-8")), 128 * 1024)
+        self.assertTrue(body["truncated"])
+
+    def test_live_cdp_connection_enables_network_and_retrieves_response_body(
+        self,
+    ) -> None:
+        web_socket = FakeDebuggerWebSocket()
+        TargetHandler.web_socket_port = web_socket.port
+        target_server = ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)
+        target_thread = threading.Thread(
+            target=target_server.serve_forever, daemon=True
+        )
+        target_thread.start()
+        self.addCleanup(web_socket.close)
+        self.addCleanup(target_thread.join, timeout=2)
+        self.addCleanup(target_server.server_close)
+        self.addCleanup(target_server.shutdown)
+        with tempfile.TemporaryDirectory() as directory:
+            active_port = Path(directory) / "DevToolsActivePort"
+            active_port.write_text(
+                f"{target_server.server_address[1]}\n/devtools/browser/test\n",
+                encoding="utf-8",
+            )
+            bridge = DebuggerBridge(active_port, capture_network_content=True)
+            bridge.start()
+            try:
+                snapshot = self.wait_for(
+                    lambda: (
+                        value
+                        if (
+                            (value := bridge.snapshot())["state"] == "running"
+                            and value["network"]["requests"]
+                            and value["network"]["requests"][0]["response"]["body"][
+                                "state"
+                            ]
+                            == "available"
+                        )
+                        else None
+                    ),
+                    timeout=30.0,
+                )
+                request = snapshot["network"]["requests"][0]
+                self.assertEqual(request["url"], "https://api.test/cart?item=7")
+                self.assertEqual(request["request"]["body"]["text"], '{"item":7}')
+                self.assertEqual(request["response"]["body"]["text"], '{"live":true}')
+                self.assertEqual(
+                    dict(request["request"]["headers"])["authorization"],
+                    "<redacted>",
+                )
+                methods = [command["method"] for command in web_socket.commands]
+                self.assertIn("Network.enable", methods)
+                self.assertIn("Network.getResponseBody", methods)
+            finally:
+                bridge.stop()
 
     def test_native_transport_rejects_missing_binary_and_non_loopback_url(
         self,

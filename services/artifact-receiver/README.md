@@ -46,8 +46,10 @@ Stores and their files are restricted to the current user. Each accepted
 artifact receives a fixed acknowledgment only after its immutable blob,
 manifest entry, and containing directory entries are committed. A rejection
 closes that connection because declared frame lengths cannot be trusted for
-resynchronization. The live launcher treats that as the end of the artifact
-receiver for the session.
+resynchronization. Socket mode then keeps the listener and accepts a later
+authenticated connection, so a browser-side reconnect does not silently end
+artifact capture. The live launcher stops the listener explicitly when the
+browser session ends.
 
 Response bodies are rejected by default. Add `--allow-sensitive` only for a
 session whose visible authorization scope explicitly permits bounded response

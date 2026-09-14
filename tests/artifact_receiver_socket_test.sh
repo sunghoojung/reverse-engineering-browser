@@ -14,15 +14,23 @@ readonly test_root
 receiver_pid=""
 test_succeeded=false
 
+stop_receiver() {
+  if [[ -z "${receiver_pid}" ]]; then
+    return
+  fi
+  if kill -0 "${receiver_pid}" 2>/dev/null; then
+    kill -TERM "${receiver_pid}" 2>/dev/null || true
+  fi
+  wait "${receiver_pid}" 2>/dev/null || true
+  receiver_pid=""
+}
+
 cleanup() {
   if [[ "${test_succeeded}" != true ]]; then
     echo "artifact_receiver_socket_test failed" >&2
     find "${test_root}" -name '*.err' -type f -maxdepth 2 -print -exec sed 's/^/  /' {} \; >&2 || true
   fi
-  if [[ -n "${receiver_pid}" ]] && kill -0 "${receiver_pid}" 2>/dev/null; then
-    kill "${receiver_pid}" 2>/dev/null || true
-    wait "${receiver_pid}" 2>/dev/null || true
-  fi
+  stop_receiver
   rm -rf "${test_root}"
 }
 trap cleanup EXIT
@@ -60,12 +68,21 @@ case "$(uname -s)" in
 esac
 test "${socket_mode}" = 600
 "${producer}" --socket "${accepted_socket}" --token-file "${token_path}" --session-id 41
-wait "${receiver_pid}"
-receiver_pid=""
+if ! kill -0 "${receiver_pid}" 2>/dev/null; then
+  echo "Artifact receiver exited after the first client disconnected" >&2
+  exit 1
+fi
+"${producer}" --socket "${accepted_socket}" --token-file "${token_path}" --session-id 41 \
+  --artifact-id-base 400
+if ! kill -0 "${receiver_pid}" 2>/dev/null; then
+  echo "Artifact receiver exited after a reconnect" >&2
+  exit 1
+fi
+stop_receiver
 test ! -e "${accepted_socket}"
-test "$(wc -l <"${accepted_store}/manifest.jsonl" | tr -d ' ')" = 3
+test "$(wc -l <"${accepted_store}/manifest.jsonl" | tr -d ' ')" = 6
 grep -Fq '"session_id":"41"' "${accepted_store}/manifest.jsonl"
-grep -Fq 'accepted=3' "${test_root}/accepted.err"
+grep -Fq 'accepted=6' "${test_root}/accepted.err"
 
 readonly mismatch_socket="${test_root}/mismatch.sock"
 "${receiver}" --store "${test_root}/mismatch" --socket "${mismatch_socket}" \
@@ -78,11 +95,11 @@ if "${producer}" --socket "${mismatch_socket}" --token-file "${token_path}" --se
   echo "Artifact producer unexpectedly passed mismatched session authentication" >&2
   exit 1
 fi
-if wait "${receiver_pid}"; then
-  echo "Artifact receiver unexpectedly accepted a mismatched session" >&2
+if ! kill -0 "${receiver_pid}" 2>/dev/null; then
+  echo "Artifact receiver exited after a rejected authentication" >&2
   exit 1
 fi
-receiver_pid=""
+stop_receiver
 grep -Fq 'Artifact authentication rejected' "${test_root}/mismatch.err"
 test ! -e "${mismatch_socket}"
 
@@ -99,11 +116,11 @@ if "${producer}" --socket "${frame_mismatch_socket}" --token-file "${token_path}
   echo "Artifact producer unexpectedly passed mismatched frame session validation" >&2
   exit 1
 fi
-if wait "${receiver_pid}"; then
-  echo "Artifact receiver unexpectedly accepted a mismatched frame session" >&2
+if ! kill -0 "${receiver_pid}" 2>/dev/null; then
+  echo "Artifact receiver exited after a rejected frame" >&2
   exit 1
 fi
-receiver_pid=""
+stop_receiver
 grep -Fq 'authenticated connection' "${test_root}/frame-mismatch.err"
 grep -Fq 'invalid=1' "${test_root}/frame-mismatch.err"
 test ! -e "${frame_mismatch_socket}"
@@ -120,11 +137,11 @@ if "${producer}" --socket "${limited_socket}" --token-file "${token_path}" --ses
   echo "Artifact producer unexpectedly received an accepted acknowledgment" >&2
   exit 1
 fi
-if wait "${receiver_pid}"; then
-  echo "Artifact receiver unexpectedly accepted an oversized artifact" >&2
+if ! kill -0 "${receiver_pid}" 2>/dev/null; then
+  echo "Artifact receiver exited after an oversized artifact" >&2
   exit 1
 fi
-receiver_pid=""
+stop_receiver
 grep -Fq 'too_large=1' "${test_root}/limited.err"
 grep -Fq 'acknowledged incorrectly' "${test_root}/limited-producer.err"
 test ! -e "${limited_socket}"

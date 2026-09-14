@@ -7,6 +7,7 @@
 #include <array>
 #include <cerrno>
 #include <charconv>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -31,6 +32,26 @@ using reb::services::ScopedSocketPath;
 constexpr std::uint64_t kDefaultMaxArtifactBytes = 16ULL * 1024ULL * 1024ULL;
 constexpr std::uint64_t kDefaultMaxStoreBytes = 256ULL * 1024ULL * 1024ULL;
 constexpr int kSocketTimeoutSeconds = 30;
+
+volatile std::sig_atomic_t g_stop_requested = 0;
+
+void RequestStop(const int) noexcept {
+  g_stop_requested = 1;
+}
+
+bool InstallSignalHandlers() noexcept {
+  struct sigaction stop_action {};
+  stop_action.sa_handler = RequestStop;
+  sigemptyset(&stop_action.sa_mask);
+  if (sigaction(SIGINT, &stop_action, nullptr) != 0 ||
+      sigaction(SIGTERM, &stop_action, nullptr) != 0) {
+    return false;
+  }
+  struct sigaction pipe_action {};
+  pipe_action.sa_handler = SIG_IGN;
+  sigemptyset(&pipe_action.sa_mask);
+  return sigaction(SIGPIPE, &pipe_action, nullptr) == 0;
+}
 
 struct Options final {
   std::string store_path;
@@ -58,7 +79,7 @@ class DescriptorStreamBuffer final : public std::streambuf {
         setg(buffer_.data(), buffer_.data(), buffer_.data() + static_cast<std::ptrdiff_t>(count));
         return traits_type::to_int_type(*gptr());
       }
-      if (count < 0 && errno == EINTR) {
+      if (count < 0 && errno == EINTR && g_stop_requested == 0) {
         continue;
       }
       return traits_type::eof();
@@ -204,6 +225,49 @@ bool ReceiveStream(std::istream& stream,
   }
 }
 
+bool ReceiveSocketConnections(const int listener,
+                              const Options& options,
+                              const reb::LocalIpcToken& token,
+                              reb::ArtifactReceiver& receiver) {
+  while (g_stop_requested == 0) {
+    int raw_connection = -1;
+    do {
+      raw_connection = accept(listener, nullptr, nullptr);
+    } while (raw_connection < 0 && errno == EINTR && g_stop_requested == 0);
+    if (g_stop_requested != 0) {
+      return true;
+    }
+    if (raw_connection < 0) {
+      std::cerr << "Unable to accept artifact connection: " << std::strerror(errno) << '\n';
+      return false;
+    }
+
+    const ScopedDescriptor connection(raw_connection);
+    const timeval timeout{kSocketTimeoutSeconds, 0};
+    if (setsockopt(connection.get(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) != 0 ||
+        setsockopt(connection.get(), SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) != 0) {
+      std::cerr << "Unable to bound artifact connection I/O: " << std::strerror(errno)
+                << "; waiting for reconnect\n";
+      continue;
+    }
+    if (!Authenticate(connection.get(), options.session_id, token)) {
+      std::cerr
+          << "Artifact connection closed after authentication failure; waiting for reconnect\n";
+      continue;
+    }
+    std::cerr << "Artifact receiver accepted authenticated connection\n";
+    DescriptorStreamBuffer buffer(connection.get());
+    std::istream stream(&buffer);
+    const bool received = ReceiveStream(stream, receiver, connection.get());
+    if (!received) {
+      std::cerr << "Artifact connection closed after a rejected frame; waiting for reconnect\n";
+    } else {
+      std::cerr << "Artifact connection closed; waiting for reconnect\n";
+    }
+  }
+  return true;
+}
+
 void PrintStats(const reb::ArtifactReceiver& receiver) {
   const reb::ArtifactReceiverStats stats = receiver.Stats();
   std::cerr << "Artifact receiver stopped: accepted=" << stats.accepted
@@ -237,6 +301,11 @@ int main(const int argc, char* argv[]) {
     if (options.socket_path.empty()) {
       received = ReceiveStream(std::cin, receiver, -1);
     } else {
+      if (!InstallSignalHandlers()) {
+        std::cerr << "Unable to install artifact receiver signal handlers: " << std::strerror(errno)
+                  << '\n';
+        return 1;
+      }
       reb::LocalIpcToken token{};
       std::string error;
       if (!reb::LoadLocalIpcToken(options.token_path, token, error)) {
@@ -250,23 +319,7 @@ int main(const int argc, char* argv[]) {
       }
       const ScopedSocketPath socket_path(options.socket_path);
       std::cerr << "Artifact receiver listening on " << options.socket_path << '\n';
-      const ScopedDescriptor connection(accept(listener.get(), nullptr, nullptr));
-      if (!connection.is_valid()) {
-        std::cerr << "Unable to accept artifact connection: " << std::strerror(errno) << '\n';
-        return 1;
-      }
-      const timeval timeout{kSocketTimeoutSeconds, 0};
-      if (setsockopt(connection.get(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) != 0 ||
-          setsockopt(connection.get(), SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) != 0) {
-        std::cerr << "Unable to bound artifact connection I/O: " << std::strerror(errno) << '\n';
-        return 1;
-      }
-      if (!Authenticate(connection.get(), options.session_id, token)) {
-        return 1;
-      }
-      DescriptorStreamBuffer buffer(connection.get());
-      std::istream stream(&buffer);
-      received = ReceiveStream(stream, receiver, connection.get());
+      received = ReceiveSocketConnections(listener.get(), options, token, receiver);
     }
     PrintStats(receiver);
     return received ? 0 : 1;

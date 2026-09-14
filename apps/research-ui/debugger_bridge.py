@@ -88,6 +88,11 @@ from debugger.limits import (
     MAX_MEMORY_ORIGIN_TRACE_AFTER_STEPS,
     MAX_MEMORY_ORIGIN_TRACE_BEFORE_STEPS,
     MAX_MEMORY_ORIGIN_TRACE_STEPS,
+    MAX_NETWORK_BODY_BYTES,
+    MAX_NETWORK_HEADER_BYTES,
+    MAX_NETWORK_HEADERS,
+    MAX_NETWORK_PENDING_BODY_FETCHES,
+    MAX_NETWORK_REQUESTS,
     MAX_OBJECT_EXPERIMENT_AUDIT_ENTRIES,
     MAX_OBJECT_EXPERIMENT_MUTATIONS,
     MAX_OBJECT_EXPERIMENT_PROPERTY_BYTES,
@@ -130,6 +135,7 @@ from debugger.limits import (
     MEMORY_ORIGIN_TRACE_TIMEOUT_SECONDS,
     OBJECT_EXPERIMENT_NAVIGATION_TIMEOUT_SECONDS,
     RUNTIME_HOOK_EVALUATION_TIMEOUT_MS,
+    SENSITIVE_INTERCEPTION_HEADERS,
 )
 from debugger.memory import (
     empty_object_experiment_descriptor,
@@ -180,6 +186,7 @@ class DebuggerBridge:
         active_port_path: Optional[Path] = None,
         heap_snapshot_binary: Optional[Path] = None,
         debugger_transport_binary: Optional[Path] = None,
+        capture_network_content: bool = False,
     ) -> None:
         self.active_port_path = active_port_path
         self.heap_snapshot_binary = heap_snapshot_binary or (
@@ -204,6 +211,12 @@ class DebuggerBridge:
         self._target: Optional[dict[str, str]] = None
         self._targets: list[dict[str, str]] = []
         self._preferred_target_id: Optional[str] = None
+        self._capture_network_content = capture_network_content
+        self._network_requests: dict[str, dict[str, Any]] = {}
+        self._network_active_ids: dict[str, str] = {}
+        self._network_redirect_counts: dict[str, int] = {}
+        self._network_pending_body_fetches: set[str] = set()
+        self._network_dropped = 0
         self._scripts: dict[str, dict[str, Any]] = {}
         self._paused: Optional[dict[str, Any]] = None
         self._pause_serial = 0
@@ -343,6 +356,18 @@ class DebuggerBridge:
                 "breakpoints": copy.deepcopy(list(self._breakpoints.values())),
                 "watches": copy.deepcopy(self._watches),
                 "console": copy.deepcopy(self._console),
+                "network": {
+                    "capture_enabled": self._capture_network_content,
+                    "target_id": self._target["id"] if self._target is not None else None,
+                    "requests": copy.deepcopy(list(self._network_requests.values())),
+                    "dropped": self._network_dropped,
+                    "limits": {
+                        "requests": MAX_NETWORK_REQUESTS,
+                        "body_bytes": MAX_NETWORK_BODY_BYTES,
+                        "headers": MAX_NETWORK_HEADERS,
+                        "header_bytes": MAX_NETWORK_HEADER_BYTES,
+                    },
+                },
                 "settings": {
                     "breakpoints_active": self._breakpoints_active,
                     "pause_on_exceptions": self._pause_on_exceptions,
@@ -6870,6 +6895,11 @@ class DebuggerBridge:
             self._connection = connection
             self._target = public_target
             self._scripts = {}
+            self._network_requests = {}
+            self._network_active_ids = {}
+            self._network_redirect_counts = {}
+            self._network_pending_body_fetches = set()
+            self._network_dropped = 0
             self._paused = None
             self._watch_frame_id = None
             self._pause_serial += 1
@@ -6883,6 +6913,15 @@ class DebuggerBridge:
         self._reader_thread = reader
         reader.start()
         try:
+            if self._capture_network_content:
+                self._command(
+                    "Network.enable",
+                    {
+                        "maxTotalBufferSize": 16 * 1024 * 1024,
+                        "maxResourceBufferSize": 2 * 1024 * 1024,
+                        "maxPostDataSize": MAX_NETWORK_BODY_BYTES,
+                    },
+                )
             self._command("Runtime.enable")
             self._command("Page.enable")
             self._command(
@@ -7057,7 +7096,319 @@ class DebuggerBridge:
             self._fail_pending(error or WebSocketClosed("Debugger target disconnected"))
             connection.close()
 
+    @staticmethod
+    def _bounded_network_text(value: object, maximum_bytes: int) -> tuple[str, bool]:
+        if not isinstance(value, str):
+            return "", False
+        encoded = value.encode("utf-8")
+        if len(encoded) <= maximum_bytes:
+            return value, False
+        return encoded[:maximum_bytes].decode("utf-8", errors="ignore"), True
+
+    @classmethod
+    def _network_headers(cls, value: object) -> list[list[str]]:
+        if not isinstance(value, dict):
+            return []
+        headers: list[list[str]] = []
+        retained_bytes = 0
+        for raw_name, raw_value in value.items():
+            if len(headers) >= MAX_NETWORK_HEADERS:
+                break
+            if not isinstance(raw_name, str) or not isinstance(raw_value, str):
+                continue
+            name, _ = cls._bounded_network_text(raw_name, 128)
+            if not name:
+                continue
+            if name.lower() in SENSITIVE_INTERCEPTION_HEADERS:
+                header_value = "<redacted>"
+            else:
+                header_value, _ = cls._bounded_network_text(raw_value, 8 * 1024)
+            entry_bytes = len(name.encode("utf-8")) + len(header_value.encode("utf-8"))
+            if retained_bytes + entry_bytes > MAX_NETWORK_HEADER_BYTES:
+                break
+            retained_bytes += entry_bytes
+            headers.append([name, header_value])
+        return headers
+
+    @staticmethod
+    def _network_mime(headers: list[list[str]], fallback: str = "") -> str:
+        for name, value in headers:
+            if name.lower() == "content-type":
+                return value
+        return fallback
+
+    @classmethod
+    def _network_url(cls, value: object) -> tuple[str, bool]:
+        text, truncated = cls._bounded_network_text(value, MAX_TARGET_URL_BYTES)
+        if not text:
+            return "", truncated
+        try:
+            parsed = urlparse(text)
+            if parsed.username is None and parsed.password is None:
+                return urlunparse(parsed._replace(fragment="")), truncated
+            hostname = parsed.hostname or ""
+            if ":" in hostname and not hostname.startswith("["):
+                hostname = f"[{hostname}]"
+            netloc = hostname
+            if parsed.port is not None:
+                netloc += f":{parsed.port}"
+            return urlunparse(parsed._replace(netloc=netloc, fragment="")), truncated
+        except ValueError:
+            return "", True
+
+    def _network_record_locked(self, protocol_request_id: str) -> Optional[dict[str, Any]]:
+        public_id = self._network_active_ids.get(protocol_request_id)
+        return self._network_requests.get(public_id) if public_id is not None else None
+
+    def _evict_network_request_locked(self) -> None:
+        if len(self._network_requests) < MAX_NETWORK_REQUESTS:
+            return
+        public_id = next(iter(self._network_requests))
+        self._network_requests.pop(public_id, None)
+        for protocol_id, active_id in list(self._network_active_ids.items()):
+            if active_id == public_id:
+                self._network_active_ids.pop(protocol_id, None)
+        self._network_pending_body_fetches.discard(public_id)
+        self._network_dropped += 1
+
+    def _record_network_request(self, params: dict[str, Any]) -> None:
+        protocol_id = params.get("requestId")
+        request = params.get("request")
+        timestamp = params.get("timestamp")
+        if (
+            not isinstance(protocol_id, str)
+            or not protocol_id
+            or len(protocol_id.encode("utf-8")) > MAX_TARGET_ID_BYTES
+            or not isinstance(request, dict)
+            or not isinstance(timestamp, (int, float))
+            or isinstance(timestamp, bool)
+        ):
+            return
+        method, method_truncated = self._bounded_network_text(
+            request.get("method"), MAX_INTERCEPTION_METHOD_BYTES
+        )
+        url, url_truncated = self._network_url(request.get("url"))
+        if not method or not url:
+            return
+        request_headers = self._network_headers(request.get("headers"))
+        post_data = request.get("postData")
+        has_post_data = request.get("hasPostData") is True
+        if isinstance(post_data, str):
+            request_text, body_truncated = self._bounded_network_text(
+                post_data, MAX_NETWORK_BODY_BYTES
+            )
+            request_body = {
+                "state": "available",
+                "mime": self._network_mime(request_headers, "text/plain"),
+                "text": request_text,
+                "base64": "",
+                "truncated": body_truncated,
+                "reason": "",
+            }
+        elif has_post_data:
+            request_body = {
+                "state": "missing",
+                "mime": self._network_mime(request_headers),
+                "text": "",
+                "base64": "",
+                "truncated": False,
+                "reason": "CDP reported request data but did not retain its bytes.",
+            }
+        else:
+            request_body = {
+                "state": "empty",
+                "mime": self._network_mime(request_headers),
+                "text": "",
+                "base64": "",
+                "truncated": False,
+                "reason": "This request has no body.",
+            }
+        with self._lock:
+            redirect_count = self._network_redirect_counts.get(protocol_id, 0)
+            if protocol_id in self._network_active_ids:
+                redirect_count += 1
+            self._network_redirect_counts[protocol_id] = redirect_count
+            public_suffix = f":redirect:{redirect_count}" if redirect_count else ""
+            target_id = self._target["id"] if self._target is not None else "unknown"
+            public_id = f"cdp:{target_id}:{protocol_id}{public_suffix}"
+            self._evict_network_request_locked()
+            record = {
+                "id": public_id,
+                "protocol_request_id": protocol_id,
+                "target_id": target_id,
+                "target_title": self._target.get("title", "") if self._target else "",
+                "url": url,
+                "url_truncated": url_truncated,
+                "method": method,
+                "method_truncated": method_truncated,
+                "resource_type": truncate_text(str(params.get("type", "Other")), 128),
+                "document_url": self._network_url(params.get("documentURL"))[0],
+                "started_monotonic_ms": float(timestamp) * 1000.0,
+                "wall_time_ms": round(float(params.get("wallTime", 0)) * 1000)
+                if isinstance(params.get("wallTime"), (int, float))
+                and not isinstance(params.get("wallTime"), bool)
+                else 0,
+                "state": "pending",
+                "status": None,
+                "status_text": "",
+                "protocol": "",
+                "mime_type": "",
+                "duration_ms": None,
+                "encoded_data_length": 0,
+                "from_disk_cache": False,
+                "from_service_worker": False,
+                "error_text": "",
+                "request": {"headers": request_headers, "body": request_body},
+                "response": {
+                    "headers": [],
+                    "body": {
+                        "state": "loading",
+                        "mime": "",
+                        "text": "",
+                        "base64": "",
+                        "truncated": False,
+                        "reason": "Waiting for the response to complete.",
+                    },
+                },
+            }
+            self._network_requests[public_id] = record
+            self._network_active_ids[protocol_id] = public_id
+            self._changed()
+
+    def _record_network_response(self, params: dict[str, Any]) -> None:
+        protocol_id = params.get("requestId")
+        response = params.get("response")
+        if not isinstance(protocol_id, str) or not isinstance(response, dict):
+            return
+        with self._lock:
+            record = self._network_record_locked(protocol_id)
+            if record is None:
+                return
+            headers = self._network_headers(response.get("headers"))
+            mime, _ = self._bounded_network_text(response.get("mimeType"), 512)
+            status = response.get("status")
+            record["status"] = int(status) if isinstance(status, (int, float)) and not isinstance(status, bool) else None
+            record["status_text"] = truncate_text(str(response.get("statusText", "")), 512)
+            record["protocol"] = truncate_text(str(response.get("protocol", "")), 128)
+            record["mime_type"] = mime
+            record["from_disk_cache"] = response.get("fromDiskCache") is True
+            record["from_service_worker"] = response.get("fromServiceWorker") is True
+            record["response"]["headers"] = headers
+            record["response"]["body"]["mime"] = self._network_mime(headers, mime)
+            if record["method"] == "HEAD" or record["status"] in {204, 205, 304}:
+                record["response"]["body"].update(
+                    state="empty", reason="This HTTP response has no body."
+                )
+            self._changed()
+
+    def _finish_network_request(self, params: dict[str, Any], failed: bool) -> None:
+        protocol_id = params.get("requestId")
+        timestamp = params.get("timestamp")
+        if not isinstance(protocol_id, str):
+            return
+        with self._lock:
+            record = self._network_record_locked(protocol_id)
+            if record is None:
+                return
+            record["state"] = "failed" if failed else "complete"
+            if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool):
+                record["duration_ms"] = max(
+                    0.0, round(float(timestamp) * 1000.0 - record["started_monotonic_ms"], 3)
+                )
+            encoded = params.get("encodedDataLength")
+            if isinstance(encoded, (int, float)) and not isinstance(encoded, bool):
+                record["encoded_data_length"] = max(0, round(float(encoded)))
+            if failed:
+                record["error_text"] = truncate_text(str(params.get("errorText", "")), 512)
+                record["response"]["body"].update(
+                    state="error",
+                    reason=record["error_text"] or "The request failed before a response body was available.",
+                )
+                self._changed()
+                return
+            body = record["response"]["body"]
+            if body["state"] == "empty":
+                self._changed()
+                return
+            if len(self._network_pending_body_fetches) >= MAX_NETWORK_PENDING_BODY_FETCHES:
+                body.update(
+                    state="error",
+                    reason="The bounded response-body retrieval queue was full.",
+                )
+                self._changed()
+                return
+            public_id = record["id"]
+            self._network_pending_body_fetches.add(public_id)
+            body.update(state="loading", reason="Loading response body through CDP.")
+            self._changed()
+        threading.Thread(
+            target=self._load_network_response_body,
+            args=(protocol_id, public_id),
+            name="reb-network-body",
+            daemon=True,
+        ).start()
+
+    def _load_network_response_body(self, protocol_id: str, public_id: str) -> None:
+        try:
+            result = self._command(
+                "Network.getResponseBody", {"requestId": protocol_id}, timeout=5.0
+            )
+            raw_body = result.get("body")
+            if not isinstance(raw_body, str):
+                raise ProtocolError("CDP returned a malformed response body")
+            encoded = result.get("base64Encoded") is True
+            if encoded:
+                try:
+                    content = base64.b64decode(raw_body, validate=True)
+                except ValueError as exception:
+                    raise ProtocolError("CDP returned invalid base64 response data") from exception
+                truncated = len(content) > MAX_NETWORK_BODY_BYTES
+                retained = content[:MAX_NETWORK_BODY_BYTES]
+                text = ""
+                base64_content = base64.b64encode(retained).decode("ascii")
+            else:
+                text, truncated = self._bounded_network_text(
+                    raw_body, MAX_NETWORK_BODY_BYTES
+                )
+                base64_content = ""
+            with self._lock:
+                record = self._network_requests.get(public_id)
+                if record is not None:
+                    record["response"]["body"].update(
+                        state="available",
+                        text=text,
+                        base64=base64_content,
+                        truncated=truncated,
+                        reason="",
+                    )
+                    self._changed()
+        except (OSError, DebuggerBridgeError, ProtocolError) as exception:
+            with self._lock:
+                record = self._network_requests.get(public_id)
+                if record is not None:
+                    record["response"]["body"].update(
+                        state="error",
+                        reason=truncate_text(str(exception), 512),
+                    )
+                    self._changed()
+        finally:
+            with self._lock:
+                self._network_pending_body_fetches.discard(public_id)
+
+    def _handle_network_event(self, method: str, params: dict[str, Any]) -> None:
+        if method == "Network.requestWillBeSent":
+            self._record_network_request(params)
+        elif method == "Network.responseReceived":
+            self._record_network_response(params)
+        elif method == "Network.loadingFinished":
+            self._finish_network_request(params, False)
+        elif method == "Network.loadingFailed":
+            self._finish_network_request(params, True)
+
     def _handle_event(self, method: str, params: dict[str, Any]) -> None:
+        if self._capture_network_content and method.startswith("Network."):
+            self._handle_network_event(method, params)
+            return
         if method == "Runtime.bindingCalled":
             with self._lock:
                 scoped = bool(self._action_scope_targets)

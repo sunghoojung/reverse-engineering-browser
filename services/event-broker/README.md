@@ -36,6 +36,8 @@ If combined gap counts exceed 64-bit range, the count saturates at its maximum
 and a separate saturation flag is reported instead of wrapping silently.
 Protocol v2 stores 64-bit values as canonical decimal strings so opaque IDs and
 large counters remain exact in JavaScript clients.
+Protocol v3 additionally carries a browser-global, session-local `tab_id` for
+network events while preserving the fixed record size.
 
 When `--trace-store` is present, the broker also maintains a bounded cold-path
 correlation index and writes a versioned Origin Trace edge sidecar. The index

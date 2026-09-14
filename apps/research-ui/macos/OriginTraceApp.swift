@@ -1851,7 +1851,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
 
     guard FileManager.default.fileExists(atPath: eventStoreURL.path) else {
       return try JSONSerialization.data(
-        withJSONObject: ["count": 0, "events": [], "broker_connected": brokerConnected()],
+        withJSONObject: [
+          "count": 0,
+          "events": [],
+          "broker_connected": brokerConnected(),
+          "capture_mode": captureMode(),
+        ],
         options: []
       )
     }
@@ -1876,6 +1881,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "count": events.count,
         "events": events,
         "broker_connected": brokerConnected(),
+        "capture_mode": captureMode(),
       ],
       options: []
     )
@@ -2411,6 +2417,11 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     return type == .typeSocket
   }
 
+  private func captureMode() -> String {
+    if brokerSocketURL != nil { return "live" }
+    return FileManager.default.fileExists(atPath: eventStoreURL.path) ? "demo" : "idle"
+  }
+
   private func sendError(_ message: String, status: Int, to task: WKURLSchemeTask) {
     let body = (try? JSONSerialization.data(withJSONObject: ["error": message], options: []))
       ?? Data("{\"error\":\"Application error\"}".utf8)
@@ -2554,7 +2565,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     {
       return URL(fileURLWithPath: configuredPath).standardizedFileURL
     }
-    return resourcesURL.appendingPathComponent("demo.jsonl")
+    return resourcesURL.appendingPathComponent("events.jsonl")
   }
 
   private func configuredArtifactStore(eventStoreURL: URL) -> URL {

@@ -1,73 +1,10 @@
       if (new URLSearchParams(location.search).has('native')) document.documentElement.classList.add('native-shell');
 
-      const sampleRequests = [
-        { id: '78', path: '/api/profile', method: 'GET', status: 200, time: 64, type: 'xhr', origin: 'sample', start: 8, mid: 31, end: 43 },
-        { id: '79', path: '/assets/cart.js', method: 'GET', status: 304, time: 18, type: 'js', origin: 'sample', start: 18, mid: 32, end: 40 },
-        { id: '80', path: '/fingerprint/config', method: 'GET', status: 200, time: 91, type: 'xhr', origin: 'sample', start: 30, mid: 67, end: 79 },
-        { id: '81', path: '/cart', method: 'POST', status: 201, time: 181, type: 'xhr', origin: 'sample', start: 43, mid: 73, end: 88, traceable: true }
-      ];
-
-      const sampleEvidence = [
-        { relative: '0.000 ms', source: 'sample', category: 'network', type: 'request_field', correlation: 'req 81 · nav 100', value: 'body.device.fingerprint' },
-        { relative: '-0.412 ms', source: 'sample', category: 'runtime', type: 'serialized_by', correlation: 'obj 17 · frame 200', value: 'JSON.stringify' },
-        { relative: '-0.831 ms', source: 'sample', category: 'transform', type: 'encoded_by', correlation: 'artifact 300', value: 'Base64 · reversible match' },
-        { relative: '-1.224 ms', source: 'sample', category: 'wasm', type: 'candidate_return', correlation: 'wasm 4 · frame 200', value: 'export generate · correlated only' },
-        { relative: '-1.907 ms', source: 'sample', category: 'canvas', type: 'api_call', correlation: 'event 194 · frame 200', value: 'CanvasRenderingContext2D.getImageData' }
-      ];
-
-      const sampleArtifacts = [
-        {
-          protocol_version: 1, artifact_id: 'sample-300', session_id: '1', navigation_id: '100', frame_id: '200',
-          parent_artifact_id: '0', creator_event_id: '79', kind: 'javascript', origin: 'sample',
-          url: 'https://checkout.acme.test/assets/cart.js', mime_type: 'text/javascript', byte_size: 368,
-          sha256: 'sample-preview-not-stored', sensitive: false,
-          content: `export function buildPayload(cart, fingerprint) {
-  const payload = {
-    cart,
-    device: {locale: navigator.language, fingerprint},
-  };
-  return JSON.stringify(payload);
-}
-
-export async function checkout(cart, fingerprint) {
-  return fetch('/cart', {
-    method: 'POST',
-    headers: {'content-type': 'application/json'},
-    body: buildPayload(cart, fingerprint),
-  });
-}`
-        },
-        {
-          protocol_version: 1, artifact_id: 'sample-301', session_id: '1', navigation_id: '100', frame_id: '200',
-          parent_artifact_id: 'sample-300', creator_event_id: '194', kind: 'wasm', origin: 'sample',
-          url: 'https://checkout.acme.test/assets/fingerprint.wasm', mime_type: 'application/wasm', byte_size: 8,
-          sha256: 'sample-preview-not-stored', sensitive: false,
-          content: '00000000  00 61 73 6d 01 00 00 00                          |.asm....|'
-        }
-      ];
-
-      const fieldSets = {
-        body: [
-          { key: 'cart', value: '{ 3 fields }', type: 'obj', depth: 0, group: true },
-          { key: 'items', value: '[ { sku: "A14", qty: 1 } ]', type: 'arr', depth: 1 },
-          { key: 'device', value: '{ 2 fields }', type: 'obj', depth: 1, group: true },
-          { key: 'locale', value: '"en-US"', type: 'str', depth: 2 },
-          { key: 'fingerprint', value: '"N2Y0YTFjZj…"', type: 'str', depth: 2, traceable: true, path: '$.device.fingerprint', label: 'Body' },
-          { key: 'coupon', value: 'null', type: 'null', depth: 1 }
-        ],
-        headers: [
-          { key: 'content-type', value: 'application/json', type: 'str', depth: 0 },
-          { key: 'x-client-token', value: 'tkn_A7f3…', type: 'str', depth: 0, traceable: true, path: 'x-client-token', label: 'Header' },
-          { key: 'accept-language', value: 'en-US', type: 'str', depth: 0 }
-        ],
-        cookies: [
-          { key: 'session_proof', value: 'proof_42bf…', type: 'str', depth: 0, traceable: true, path: 'session_proof', label: 'Cookie' },
-          { key: 'cart_id', value: 'cart_8e11', type: 'str', depth: 0 }
-        ],
-        raw: [
-          { key: 'payload', value: '{"cart":{"items":[…],"device":{…}}}', type: 'bytes', depth: 0 }
-        ]
-      };
+      const standalonePreview = typeof location !== 'undefined' && location.protocol === 'file:';
+      const sampleRequests = [];
+      const sampleEvidence = [];
+      const sampleArtifacts = [];
+      const fieldSets = {body: [], headers: [], cookies: [], raw: []};
 
       const emptyApiCollection = () => ({
         contract_version: 1,
@@ -134,17 +71,24 @@ export async function checkout(cart, fingerprint) {
 
       const state = {
         events: [],
-        requests: [...sampleRequests],
-        artifacts: [...sampleArtifacts],
-        openArtifactIds: ['sample-300'],
-        selectedArtifactId: 'sample-300',
+        nativeRequests: [],
+        requests: standalonePreview ? [...sampleRequests] : [],
+        artifacts: standalonePreview ? [...sampleArtifacts] : [],
+        openArtifactIds: [],
+        selectedArtifactId: null,
         artifactRefreshing: false,
         artifactEtag: null,
+        artifactReceiverConfigured: false,
+        artifactReceiverConnected: false,
+        artifactReceiverError: null,
         sourceCollection: 'captured',
         sourceSidebarOpen: null,
         openScriptIds: [],
         selectedScriptId: null,
         liveScriptContent: new Map(),
+        staleScriptIds: new Set(),
+        sourceNotice: null,
+        sourceNoticeKind: 'warning',
         pendingSourceLine: null,
         sourceCursor: null,
         sourcePretty: false,
@@ -169,12 +113,17 @@ export async function checkout(cart, fingerprint) {
         memorySearchMeta: null,
         memoryDiffBaseline: null,
         memoryTargetId: null,
-        selectedRequestId: '81',
+        selectedRequestId: standalonePreview ? '81' : null,
         inspectorTab: 'exchange',
         fieldTab: 'body',
-        selectedField: fieldSets.body.find(field => field.traceable),
+        selectedField: null,
         requestType: 'all',
+        requestTabId: 'all',
+        requestDomain: 'all',
         broker: 'connecting',
+        sessionMode: standalonePreview ? 'preview' : 'live',
+        eventsLimited: false,
+        lastUpdatedLabel: null,
         refreshing: false,
         eventEtag: null,
         vmFindings: [],
@@ -280,12 +229,18 @@ export async function checkout(cart, fingerprint) {
 
       const elements = {
         capture: document.querySelector('#capture-state'),
+        sessionMode: document.querySelector('#session-mode'),
         broker: document.querySelector('#broker-status'),
         updated: document.querySelector('#updated-status'),
         gaps: document.querySelector('#gap-status'),
         requestCount: document.querySelector('#request-count'),
+        requestCountLabel: document.querySelector('#request-count-label'),
+        requestSummary: document.querySelector('#request-summary'),
+        sampleStatus: document.querySelector('#sample-status'),
         requestFilter: document.querySelector('#request-filter'),
         requestRows: document.querySelector('#request-rows'),
+        requestTabScopes: document.querySelector('#request-tab-scopes'),
+        requestDomain: document.querySelector('#request-domain'),
         networkNotice: document.querySelector('#network-notice'),
         selectedMethod: document.querySelector('#selected-method'),
         selectedStatus: document.querySelector('#selected-status'),
@@ -560,6 +515,7 @@ export async function checkout(cart, fingerprint) {
         collectionResponseBadge: document.querySelector('#collection-response-badge'),
         collectionResponse: document.querySelector('#collection-response'),
         sourceTree: document.querySelector('#source-tree'),
+        sourceHealth: document.querySelector('#source-health'),
         sourceEditorTabs: document.querySelector('#source-editor-tabs'),
         sourceLocation: document.querySelector('#source-location'),
         sourceSearch: document.querySelector('#source-search'),

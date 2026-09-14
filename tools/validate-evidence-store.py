@@ -116,10 +116,12 @@ def validate_event(event: object, line_number: int) -> None:
     if not isinstance(event, dict):
         raise ValueError(f"line {line_number}: event must be a JSON object")
 
+    protocol_version = event.get("protocol_version")
+    expected_fields = EXPECTED_FIELDS | ({"tab_id"} if protocol_version == 3 else set())
     fields = set(event)
-    if fields != EXPECTED_FIELDS:
-        missing = sorted(EXPECTED_FIELDS - fields)
-        unexpected = sorted(fields - EXPECTED_FIELDS)
+    if fields != expected_fields:
+        missing = sorted(expected_fields - fields)
+        unexpected = sorted(fields - expected_fields)
         raise ValueError(
             f"line {line_number}: evidence schema mismatch; "
             f"missing={missing}, unexpected={unexpected}"
@@ -139,9 +141,16 @@ def validate_event(event: object, line_number: int) -> None:
         if not isinstance(event[field], int) or isinstance(event[field], bool):
             raise ValueError(f"line {line_number}: {field} is not an integer")
 
+    if protocol_version == 3 and (
+        not isinstance(event["tab_id"], int)
+        or isinstance(event["tab_id"], bool)
+        or not 0 <= event["tab_id"] < 2**32
+    ):
+        raise ValueError(f"line {line_number}: tab_id is outside uint32 range")
+
     if not isinstance(event["payload_truncated"], bool):
         raise ValueError(f"line {line_number}: payload_truncated is not a boolean")
-    if event["protocol_version"] != 2:
+    if protocol_version not in {2, 3}:
         raise ValueError(f"line {line_number}: unsupported protocol version")
     if event["category"] not in EVENT_CATEGORIES or event["type"] not in EVENT_TYPES:
         raise ValueError(f"line {line_number}: unknown category or event type")

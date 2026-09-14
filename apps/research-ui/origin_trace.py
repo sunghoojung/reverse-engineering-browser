@@ -146,7 +146,7 @@ def _event_step(event: dict, relation: str, confidence: str) -> dict:
     operation = event.get("type")
     if (
         type(event.get("protocol_version")) is not int
-        or event["protocol_version"] != 2
+        or event["protocol_version"] not in {2, 3}
         or category not in EVENT_CATEGORIES
         or not isinstance(operation, str)
         or not operation

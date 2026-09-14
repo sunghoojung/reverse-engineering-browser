@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
@@ -23,6 +24,7 @@ struct Options final {
   std::string token_path;
   std::uint64_t session_id = kSessionId;
   std::uint64_t frame_session_id = 0;
+  std::uint64_t artifact_id_base = 300;
 };
 
 bool ParseSessionId(const std::string_view value, std::uint64_t& session_id) {
@@ -43,6 +45,11 @@ bool ParseOptions(const int argc, char* argv[], Options& options) {
       }
     } else if (argument == "--frame-session-id" && index + 1 < argc) {
       if (!ParseSessionId(argv[++index], options.frame_session_id)) {
+        return false;
+      }
+    } else if (argument == "--artifact-id-base" && index + 1 < argc) {
+      if (!ParseSessionId(argv[++index], options.artifact_id_base) ||
+          options.artifact_id_base > std::numeric_limits<std::uint64_t>::max() - 2) {
         return false;
       }
     } else {
@@ -121,7 +128,7 @@ int main(const int argc, char* argv[]) {
   if (!ParseOptions(argc, argv, options)) {
     std::cerr << "Usage: " << argv[0]
               << " [--socket PATH --token-file PATH --session-id ID"
-                 " [--frame-session-id ID]]\n";
+                 " [--frame-session-id ID] [--artifact-id-base ID]]\n";
     return 2;
   }
   const std::uint64_t frame_session_id =
@@ -180,18 +187,19 @@ export function runGuest(host, program = guestProgram) {
   }
   const bool expect_ack = !options.socket_path.empty();
   const bool written =
-      WriteArtifact(descriptor, expect_ack, frame_session_id, 300, 0, 4, 0,
+      WriteArtifact(descriptor, expect_ack, frame_session_id, options.artifact_id_base, 0, 4, 0,
                     reb::ArtifactKind::kJavaScript, reb::ArtifactCaptureOrigin::kNetworkResponse,
                     "https://checkout.acme.test/assets/cart.js", "text/javascript",
                     javascript_bytes) &&
-      WriteArtifact(descriptor, expect_ack, frame_session_id, 301, 300, 3, 0,
-                    reb::ArtifactKind::kWasm, reb::ArtifactCaptureOrigin::kNetworkResponse,
+      WriteArtifact(descriptor, expect_ack, frame_session_id, options.artifact_id_base + 1,
+                    options.artifact_id_base, 3, 0, reb::ArtifactKind::kWasm,
+                    reb::ArtifactCaptureOrigin::kNetworkResponse,
                     "https://checkout.acme.test/assets/fingerprint.wasm", "application/wasm",
                     kWasmHeader) &&
-      WriteArtifact(descriptor, expect_ack, frame_session_id, 302, 0, 0, 2200,
-                    reb::ArtifactKind::kJavaScript, reb::ArtifactCaptureOrigin::kDynamicJavaScript,
-                    "https://checkout.acme.test/assets/vm-sample.js", "text/javascript",
-                    javascript_vm_bytes);
+      WriteArtifact(
+          descriptor, expect_ack, frame_session_id, options.artifact_id_base + 2, 0, 0, 2200,
+          reb::ArtifactKind::kJavaScript, reb::ArtifactCaptureOrigin::kDynamicJavaScript,
+          "https://checkout.acme.test/assets/vm-sample.js", "text/javascript", javascript_vm_bytes);
   if (expect_ack && close(descriptor) != 0) {
     std::cerr << "Failed to close artifact socket\n";
     return 1;

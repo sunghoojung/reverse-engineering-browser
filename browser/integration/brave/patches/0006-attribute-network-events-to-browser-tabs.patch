@@ -1,0 +1,96 @@
+diff --git a/browser/net/brave_proxying_url_loader_factory.cc b/browser/net/brave_proxying_url_loader_factory.cc
+--- a/browser/net/brave_proxying_url_loader_factory.cc
++++ b/browser/net/brave_proxying_url_loader_factory.cc
+@@ -28,7 +28,8 @@
+ #include "content/public/browser/browser_task_traits.h"
+ #include "content/public/browser/browser_thread.h"
+ #include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/render_process_host.h"
++#include "content/public/browser/web_contents.h"
+ #include "content/public/common/url_utils.h"
+ #include "mojo/public/cpp/system/data_pipe_producer.h"
+ #include "mojo/public/cpp/system/string_data_source.h"
+@@ -69,6 +70,19 @@ std::uint64_t FrameId(
+   return std::rotl(token.GetHighForSerialization(), 17) ^
+          token.GetLowForSerialization();
+ }
++
++std::uint32_t TabId(
++    const content::GlobalRenderFrameHostToken& render_frame_token) {
++  content::RenderFrameHost* const render_frame_host =
++      content::RenderFrameHost::FromFrameToken(render_frame_token);
++  content::WebContents* const web_contents =
++      render_frame_host ? content::WebContents::FromRenderFrameHost(render_frame_host) : nullptr;
++  content::RenderFrameHost* const main_frame =
++      web_contents ? web_contents->GetPrimaryMainFrame() : nullptr;
++  const content::FrameTreeNodeId tab_id =
++      main_frame ? main_frame->GetFrameTreeNodeId() : content::FrameTreeNodeId();
++  return tab_id ? static_cast<std::uint32_t>(tab_id.value()) : 0;
++}
+ 
+ // Helper struct for crafting responses.
+ struct WriteData {
+@@ -181,6 +195,7 @@ void BraveProxyingURLLoaderFactory<
+     return;
+   }
+   initiator_process_id_ = InitiatorProcessId(render_frame_token_);
++  tab_id_ = TabId(render_frame_token_);
+   frame_id_ = FrameId(render_frame_token_);
+   if (browser_context_) {
+     const base::UnguessableToken& browser_context_token =
+@@ -387,7 +402,7 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::OnComplete(
+     EnsureNativeCaptureIdentity();
+     network_capture.RecordRequestCompleted(
+         request_id_, network_service_request_id_, initiator_process_id_,
+-        frame_id_, browser_context_id_high_, browser_context_id_low_, status);
++        tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_, status);
+   }
+ 
+   target_client_->OnComplete(status);
+@@ -565,7 +580,7 @@ void BraveProxyingURLLoaderFactory<
+       EnsureNativeCaptureIdentity();
+       network_capture.RecordRequestStarted(
+           request_id_, network_service_request_id_, initiator_process_id_,
+-          frame_id_, browser_context_id_high_, browser_context_id_low_,
++          tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_,
+           request_);
+     }
+ 
+@@ -679,7 +694,7 @@ void BraveProxyingURLLoaderFactory<
+     EnsureNativeCaptureIdentity();
+     creator_event_id = network_capture.RecordResponseStarted(
+         request_id_, network_service_request_id_, initiator_process_id_,
+-        frame_id_, browser_context_id_high_, browser_context_id_low_,
++        tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_,
+         *current_response_head_);
+   }
+   auto& artifact_capture = reb::NativeArtifactCaptureSink::Get();
+@@ -719,7 +734,7 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::
+     EnsureNativeCaptureIdentity();
+     network_capture.RecordRequestRedirected(
+         request_id_, network_service_request_id_, initiator_process_id_,
+-        frame_id_, browser_context_id_high_, browser_context_id_low_,
++        tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_,
+         redirect_info, *current_response_head_);
+   }
+ 
+@@ -781,7 +796,7 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::OnRequestError(
+     EnsureNativeCaptureIdentity();
+     network_capture.RecordRequestCompleted(
+         request_id_, network_service_request_id_, initiator_process_id_,
+-        frame_id_, browser_context_id_high_, browser_context_id_low_, status);
++        tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_, status);
+   }
+ 
+   if (base::FeatureList::IsEnabled(
+diff --git a/browser/net/brave_proxying_url_loader_factory.h b/browser/net/brave_proxying_url_loader_factory.h
+--- a/browser/net/brave_proxying_url_loader_factory.h
++++ b/browser/net/brave_proxying_url_loader_factory.h
+@@ -141,6 +141,7 @@ class BraveProxyingURLLoaderFactory : public network::mojom::URLLoaderFactory {
+ 
+     const content::GlobalRenderFrameHostToken render_frame_token_;
+     uint32_t initiator_process_id_ = 0;
++    uint32_t tab_id_ = 0;
+     uint64_t frame_id_ = 0;
+     uint64_t browser_context_id_high_ = 0;
+     uint64_t browser_context_id_low_ = 0;

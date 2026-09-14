@@ -19,10 +19,6 @@ analyst_runner_core="${repo_root}/apps/research-ui/analyst_runner_core.js"
 decoder_service_source="${repo_root}/apps/research-ui/macos/DecoderService.swift"
 decoder_binary="${repo_root}/build/reb-decoder"
 icon_source="${repo_root}/apps/research-ui/macos/assets/origin-trace-icon.png"
-event_store="${repo_root}/build/sessions/demo.jsonl"
-trace_store="${repo_root}/build/sessions/origin-trace.jsonl"
-signal_store="${repo_root}/build/sessions/request-signals.jsonl"
-artifact_store="${repo_root}/build/sessions/artifacts"
 iconset_path="${repo_root}/build/OriginTrace.iconset"
 
 if [[ -e "${app_path}" ]]; then
@@ -37,11 +33,6 @@ done
 cp "${analyst_runner_core}" "${resources_path}/analyst_runner_core.js"
 cp "${decoder_binary}" "${macos_path}/OriginTraceDecoder"
 chmod 755 "${macos_path}/OriginTraceDecoder"
-cp "${event_store}" "${resources_path}/demo.jsonl"
-cp "${trace_store}" "${resources_path}/origin-trace.jsonl"
-cp "${signal_store}" "${resources_path}/request-signals.jsonl"
-cp -R "${artifact_store}" "${resources_path}/artifacts"
-
 rm -rf "${iconset_path}"
 mkdir -p "${iconset_path}"
 

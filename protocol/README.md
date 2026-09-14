@@ -25,6 +25,13 @@ all 64-bit integers. Smaller integer fields remain JSON numbers. The native
 header and record have explicit zero-valued reserved fields and no implicit
 padding, so raw record transfer cannot expose indeterminate bytes.
 
+Protocol v3 assigns the former 32-bit `reserved0` slot to `tab_id` without
+changing the 144-byte header or 320-byte record sizes. Browser network events
+use Chromium's browser-global top-level `FrameTreeNodeId`; zero means the
+event could not be attributed to a tab. This identifier is session-local and
+contains no title, URL, profile path, or page content. Version 2 evidence
+remains readable and is presented as unattributed.
+
 Browser network events carry both 64-bit halves of Chromium's opaque
 `BrowserContext::UniqueToken()`. The full token plus the browser-process request
 identifier disambiguates independent per-profile Brave request-ID generators.

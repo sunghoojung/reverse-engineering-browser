@@ -53,6 +53,7 @@ NativeProbeEvent MakeNetworkEvent(const NativeProbeType type,
                                   const std::uint64_t request_id,
                                   const std::int32_t initiator_request_id,
                                   const std::uint32_t initiator_process_id,
+                                  const std::uint32_t tab_id,
                                   const std::uint64_t frame_id,
                                   const std::uint64_t browser_context_id_high,
                                   const std::uint64_t browser_context_id_low) noexcept {
@@ -64,6 +65,7 @@ NativeProbeEvent MakeNetworkEvent(const NativeProbeType type,
   event.header.session_id = session_id;
   event.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
   event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  event.header.tab_id = tab_id;
   event.header.request_id = request_id;
   event.header.initiator_request_id = static_cast<std::uint32_t>(initiator_request_id);
   event.header.initiator_process_id = initiator_process_id;
@@ -106,6 +108,7 @@ void NativeNetworkCaptureSink::RecordRequestStarted(
     const std::uint64_t request_id,
     const std::int32_t initiator_request_id,
     const std::uint32_t initiator_process_id,
+    const std::uint32_t tab_id,
     const std::uint64_t frame_id,
     const std::uint64_t browser_context_id_high,
     const std::uint64_t browser_context_id_low,
@@ -125,7 +128,7 @@ void NativeNetworkCaptureSink::RecordRequestStarted(
   NativeProbeEvent event = MakeNetworkEvent(
       NativeProbeType::kRequestStarted, NativeProbeSession::Get().NextBrowserSequence(),
       monotonic_time_ns, session_id_.load(std::memory_order_relaxed), request_id,
-      initiator_request_id, initiator_process_id, frame_id, browser_context_id_high,
+      initiator_request_id, initiator_process_id, tab_id, frame_id, browser_context_id_high,
       browser_context_id_low);
   event.header.resource_type =
       static_cast<std::uint16_t>(std::clamp(request.resource_type, 0, 65535));
@@ -140,6 +143,7 @@ void NativeNetworkCaptureSink::RecordRequestRedirected(
     const std::uint64_t request_id,
     const std::int32_t initiator_request_id,
     const std::uint32_t initiator_process_id,
+    const std::uint32_t tab_id,
     const std::uint64_t frame_id,
     const std::uint64_t browser_context_id_high,
     const std::uint64_t browser_context_id_low,
@@ -160,7 +164,7 @@ void NativeNetworkCaptureSink::RecordRequestRedirected(
   NativeProbeEvent event = MakeNetworkEvent(
       NativeProbeType::kRequestRedirected, NativeProbeSession::Get().NextBrowserSequence(),
       monotonic_time_ns, session_id_.load(std::memory_order_relaxed), request_id,
-      initiator_request_id, initiator_process_id, frame_id, browser_context_id_high,
+      initiator_request_id, initiator_process_id, tab_id, frame_id, browser_context_id_high,
       browser_context_id_low);
   event.header.status_code = response_head.headers ? response_head.headers->response_code() : 0;
   event.header.encoded_data_length = response_head.encoded_data_length;
@@ -172,6 +176,7 @@ std::uint64_t NativeNetworkCaptureSink::RecordResponseStarted(
     const std::uint64_t request_id,
     const std::int32_t initiator_request_id,
     const std::uint32_t initiator_process_id,
+    const std::uint32_t tab_id,
     const std::uint64_t frame_id,
     const std::uint64_t browser_context_id_high,
     const std::uint64_t browser_context_id_low,
@@ -192,7 +197,7 @@ std::uint64_t NativeNetworkCaptureSink::RecordResponseStarted(
   NativeProbeEvent event = MakeNetworkEvent(
       NativeProbeType::kResponseStarted, sequence_number, monotonic_time_ns,
       session_id_.load(std::memory_order_relaxed), request_id, initiator_request_id,
-      initiator_process_id, frame_id, browser_context_id_high, browser_context_id_low);
+      initiator_process_id, tab_id, frame_id, browser_context_id_high, browser_context_id_low);
   event.header.status_code = response_head.headers ? response_head.headers->response_code() : 0;
   event.header.encoded_data_length = response_head.encoded_data_length;
   if (response_head.was_fetched_via_cache) {
@@ -210,6 +215,7 @@ void NativeNetworkCaptureSink::RecordRequestCompleted(
     const std::uint64_t request_id,
     const std::int32_t initiator_request_id,
     const std::uint32_t initiator_process_id,
+    const std::uint32_t tab_id,
     const std::uint64_t frame_id,
     const std::uint64_t browser_context_id_high,
     const std::uint64_t browser_context_id_low,
@@ -230,7 +236,7 @@ void NativeNetworkCaptureSink::RecordRequestCompleted(
       status.error_code == 0 ? NativeProbeType::kRequestCompleted : NativeProbeType::kRequestFailed,
       NativeProbeSession::Get().NextBrowserSequence(), monotonic_time_ns,
       session_id_.load(std::memory_order_relaxed), request_id, initiator_request_id,
-      initiator_process_id, frame_id, browser_context_id_high, browser_context_id_low);
+      initiator_process_id, tab_id, frame_id, browser_context_id_high, browser_context_id_low);
   event.header.error_code = status.error_code;
   event.header.encoded_data_length = status.encoded_data_length;
   event.header.decoded_body_length = status.decoded_body_length;

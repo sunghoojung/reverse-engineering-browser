@@ -26,6 +26,19 @@ from ui_test_support import UI_DIRECTORY, read_ui_sources
 
 
 class ResearchUiTests(unittest.TestCase):
+    def test_traffic_filters_cannot_leave_an_invisible_cross_filter_trap(self) -> None:
+        application = (UI_DIRECTORY / "app.js").read_text(encoding="utf-8")
+        self.assertIn(
+            "state.requestType = button.dataset.filter;\n"
+            "        state.requestDomain = 'all';",
+            application,
+        )
+        self.assertIn(
+            "state.requestDomain = elements.requestDomain.value;\n"
+            "        state.requestType = 'all';",
+            application,
+        )
+
     def test_loopback_server_binds_without_hostname_resolution(self) -> None:
         server = LoopbackThreadingHTTPServer(("127.0.0.1", 0), ResearchHandler)
         try:
@@ -67,6 +80,16 @@ class ResearchUiTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             store = Path(directory) / "events.jsonl"
+            store.write_text(json.dumps(valid_event) + "\n", encoding="utf-8")
+            subprocess.run(
+                ["python3", str(validator), str(store)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            valid_event["protocol_version"] = 3
+            valid_event["tab_id"] = 17
             store.write_text(json.dumps(valid_event) + "\n", encoding="utf-8")
             subprocess.run(
                 ["python3", str(validator), str(store)],
@@ -208,7 +231,9 @@ class ResearchUiTests(unittest.TestCase):
             try:
                 url = f"http://127.0.0.1:{server.server_port}/api/events?limit=10"
                 with urllib.request.urlopen(url) as response:
-                    self.assertEqual(json.load(response)["count"], 1)
+                    body = json.load(response)
+                    self.assertEqual(body["count"], 1)
+                    self.assertEqual(body["capture_mode"], "demo")
                     etag = response.headers["ETag"]
 
                 request = urllib.request.Request(url, headers={"If-None-Match": etag})
@@ -604,6 +629,62 @@ class ResearchUiTests(unittest.TestCase):
                 server.server_close()
                 thread.join()
 
+    def test_artifact_api_reports_receiver_health_and_invalidates_health_etags(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_store = root / "artifacts"
+            artifact_store.mkdir()
+            socket_path = root / "artifact-receiver.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(socket_path))
+            listener.listen(1)
+            previous_socket = ResearchHandler.artifact_socket
+            previous_broker_socket = ResearchHandler.broker_socket
+            ResearchHandler.ui_directory = UI_DIRECTORY
+            ResearchHandler.event_store = root / "events.jsonl"
+            ResearchHandler.trace_store = root / "origin-trace.jsonl"
+            ResearchHandler.signal_store = root / "request-signals.jsonl"
+            ResearchHandler.artifact_store = artifact_store
+            ResearchHandler.artifact_socket = socket_path
+            ResearchHandler.broker_socket = None
+            server = ThreadingHTTPServer(("127.0.0.1", 0), ResearchHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base_url = f"http://127.0.0.1:{server.server_port}"
+                catalog_url = f"{base_url}/api/artifacts?limit=10"
+                with urllib.request.urlopen(catalog_url) as response:
+                    catalog = json.load(response)
+                    etag = response.headers["ETag"]
+                self.assertTrue(catalog["artifact_receiver_configured"])
+                self.assertTrue(catalog["artifact_receiver_connected"])
+
+                with urllib.request.urlopen(f"{base_url}/api/health") as response:
+                    health = json.load(response)
+                self.assertTrue(health["artifact_receiver_configured"])
+                self.assertTrue(health["artifact_receiver_connected"])
+
+                listener.close()
+                socket_path.unlink()
+                changed = urllib.request.Request(
+                    catalog_url, headers={"If-None-Match": etag}
+                )
+                with urllib.request.urlopen(changed) as response:
+                    disconnected = json.load(response)
+                    disconnected_etag = response.headers["ETag"]
+                self.assertFalse(disconnected["artifact_receiver_connected"])
+                self.assertNotEqual(disconnected_etag, etag)
+            finally:
+                try:
+                    listener.close()
+                except OSError:
+                    pass
+                server.shutdown()
+                server.server_close()
+                thread.join()
+                ResearchHandler.artifact_socket = previous_socket
+                ResearchHandler.broker_socket = previous_broker_socket
+
     def test_vm_analysis_api_runs_automatically_and_filters_from_a_request(
         self,
     ) -> None:
@@ -856,6 +937,15 @@ class ResearchUiTests(unittest.TestCase):
         self.assertIn("function browserContextToken(event)", html)
         self.assertIn("[13, 'xhr']", html)
         self.assertIn("No requests match the current filters", html)
+        self.assertIn("capture_mode", html)
+        self.assertIn("sample rows hidden", html)
+        self.assertIn("event window capped", html)
+        self.assertIn("host-only metadata", html)
+        self.assertIn('aria-label="Browser tabs"', html)
+        self.assertIn('aria-label="Filter requests by domain"', html)
+        self.assertIn("function renderRequestScopes()", html)
+        self.assertIn("/api/events?limit=5000", html)
+        self.assertIn("last 5,000 evidence events", html)
         self.assertIn("/api/request-signal-profile?", html)
         self.assertIn("function isRequestSignalProfile(body)", html)
         self.assertIn("No fingerprint-relevant browser signals", html)
@@ -968,6 +1058,7 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn(">Workspace</button>", html)
         self.assertNotIn(">Overrides</button>", html)
         self.assertIn('aria-label="Source editor"', html)
+        self.assertIn('id="source-health"', html)
         self.assertIn('aria-label="Debugger sidebar"', html)
         for pane in (
             "Source details",
@@ -981,6 +1072,9 @@ process.stdout.write(JSON.stringify({
         ):
             self.assertIn(f">{pane}</summary>", html)
         self.assertIn("function renderSourceTree()", html)
+        self.assertIn("function sourceDisplayName(source)", html)
+        self.assertIn("function markLiveSourceStale(scriptId", html)
+        self.assertIn("Artifact capture is unavailable", html)
         self.assertIn("function formatWasmHex(buffer)", html)
         self.assertIn("function sourceSyntaxTokens(line, tokenizer)", html)
         self.assertIn("function appendSourceSyntax(container, tokens)", html)
@@ -1048,6 +1142,64 @@ process.stdout.write(JSON.stringify(results));
                 [True, "true", "false", "Debugger"],
                 [True, "false", "false", "Details"],
             ],
+        )
+
+    def test_sources_disambiguate_live_files_and_drop_stale_scripts(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+        source = read_ui_sources()
+        start = source.index("      function liveSources()")
+        end = source.index("      function renderSourceTree()", start)
+        model = source[start:end]
+        exercise = r"""
+const sourceName = source => source.url ? source.url.split('/').at(-1) : `(anonymous ${source.script_id})`;
+const state = {
+  debuggerSession: {target: {id: 'target-1', title: 'Checkout'}, scripts: [
+    {script_id: '6', url: 'https://checkout.test/assets/app.js', hash: 'a', language: 'JavaScript',
+      source_map_url: '', start_line: 0, start_column: 0, end_line: 1, end_column: 0,
+      execution_context_id: 10, length: 12, has_source_url: true, is_module: true},
+    {script_id: '7', url: 'https://checkout.test/assets/app.js', hash: 'b', language: 'JavaScript',
+      source_map_url: '', start_line: 0, start_column: 0, end_line: 1, end_column: 0,
+      execution_context_id: 11, length: 12, has_source_url: true, is_module: true},
+    {script_id: '8', url: '', hash: 'c', language: 'JavaScript', source_map_url: '',
+      start_line: 0, start_column: 0, end_line: 1, end_column: 0,
+      execution_context_id: 12, length: 12, has_source_url: false, is_module: false}
+  ]},
+  staleScriptIds: new Set(), liveScriptContent: new Map(), openScriptIds: ['6'],
+  selectedScriptId: '6', pendingSourceLine: {scriptId: '6', line: 1}, sourcePretty: false,
+  openArtifactIds: [], selectedArtifactId: null, sourceCollection: 'page', sourceNotice: null,
+  sourceNoticeKind: 'warning'
+};
+const before = liveSources().map(source => sourceDisplayName(source));
+markLiveSourceStale('6', 'No script for id: 6');
+process.stdout.write(JSON.stringify({
+  before,
+  after: liveSources().map(source => sourceDisplayName(source)),
+  selected: state.selectedScriptId,
+  open: state.openScriptIds,
+  notice: state.sourceNotice
+}));
+"""
+        result = subprocess.run(
+            [node, "-e", model + exercise],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                "before": [
+                    "app.js · script 6",
+                    "app.js · script 7",
+                    "anonymous · script 8",
+                ],
+                "after": ["app.js · script 7", "anonymous · script 8"],
+                "selected": None,
+                "open": [],
+                "notice": "No script for id: 6 The stale live source was removed from Page and open tabs.",
+            },
         )
 
     def test_source_syntax_highlighter_is_bounded_stateful_and_text_preserving(
@@ -1390,6 +1542,10 @@ const repeaterReady = {
   variables: [{name: 'host', value: 'checkout.test'}], history: [repeaterEntry],
   history_bytes: 512, message: 'Repeater is ready.'
 };
+const networkEmpty = {
+  capture_enabled: false, target_id: null, requests: [], dropped: 0,
+  limits: {requests: 1000, body_bytes: 131072, headers: 128, header_bytes: 65536}
+};
 const snapshot = {
   protocol_version: 1, state: 'paused', generation: 7, error: null,
   heap_diff_baseline: null, memory_origin_trace: originIdle,
@@ -1399,6 +1555,7 @@ const snapshot = {
   runtime_hooks: hooksIdle,
   automation_recipes: automationIdle,
   repeater: repeaterIdle,
+  network: networkEmpty,
   target, targets: [target], scripts: [script],
   paused: {reason: 'breakpoint', description: null, call_frames: [frame],
     async_stack: [{description: 'Promise.then', call_frames: [{
@@ -1481,6 +1638,7 @@ process.stdout.write(JSON.stringify({
   badBreakpointRejected: !isDebuggerResponse({...snapshot, breakpoints: [null]}),
   badWatchRejected: !isDebuggerResponse({...snapshot, watches: [null]}),
   badConsoleRejected: !isDebuggerResponse({...snapshot, console: [null]}),
+  missingNetworkRejected: !isDebuggerResponse({...snapshot, network: undefined}),
   badAsyncStackRejected: !isDebuggerResponse({...snapshot, paused: {
     ...snapshot.paused, async_stack: [null]}}),
   badSettingsRejected: !isDebuggerResponse({...snapshot, settings: {
@@ -1582,6 +1740,7 @@ process.stdout.write(JSON.stringify({
                 "badBreakpointRejected": True,
                 "badWatchRejected": True,
                 "badConsoleRejected": True,
+                "missingNetworkRejected": True,
                 "badAsyncStackRejected": True,
                 "badSettingsRejected": True,
                 "oversizedRejected": True,
@@ -1640,6 +1799,9 @@ process.stdout.write(JSON.stringify({
 
         self.assertIn('data-screen="memory">Memory</button>', html)
         self.assertIn('id="screen-memory"', html)
+        self.assertIn('id="memory-results-pane"', html)
+        self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr))", html)
+        self.assertIn("data-empty", html)
         self.assertIn('aria-label="Memory search criteria"', html)
         self.assertIn('role="listbox" aria-label="Live object matches"', html)
         self.assertIn("function isLiveObjectSearchResponse(body)", html)
@@ -1857,6 +2019,10 @@ process.stdout.write(JSON.stringify({parsedHeaders, serializedHeaders, parsedQue
         html = read_ui_sources()
 
         self.assertIn('data-screen="api-collection"', html)
+        self.assertIn('id="collection-grid"', html)
+        self.assertIn('Start with a request', html)
+        self.assertIn('id="collection-empty-new-request"', html)
+        self.assertIn('data-state', html)
         self.assertIn('id="request-collection-pivot"', html)
         self.assertIn('id="collection-tree"', html)
         self.assertIn('id="collection-folder-form"', html)
@@ -1872,6 +2038,16 @@ process.stdout.write(JSON.stringify({parsedHeaders, serializedHeaders, parsedQue
         self.assertIn("32 folders / 128 requests", html)
         self.assertIn("2 MiB atomic file", html)
         self.assertIn("Captured headers, cookies, bodies, and credentials are never imported", html)
+
+    def test_local_analyst_first_use_has_direct_creation_actions(self) -> None:
+        html = read_ui_sources()
+
+        self.assertIn('id="analyst-grid"', html)
+        self.assertIn('Start with saved work', html)
+        self.assertIn('id="analyst-empty-new-script"', html)
+        self.assertIn('id="analyst-empty-new-note"', html)
+        self.assertIn('Evidence to read', html)
+        self.assertIn("analystElements.editorEmpty.parentElement?.parentElement", html)
 
     def test_api_collection_browser_contract_accepts_native_key_order_and_rejects_malformed_state(self) -> None:
         node = shutil.which("node")
@@ -2013,6 +2189,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn('aria-label="Filter requests"', html)
         self.assertIn('aria-label="Request to trace"', html)
         self.assertNotIn("screenName === 'experiments' && !state.selectedField", html)
+        self.assertIn("Experiments are available without a selected request field", html)
         self.assertIn("enableTabKeyboardNavigation('.experiment-mode-tab')", html)
         self.assertIn("select.id = 'debugger-target-select'", html)
         self.assertIn("input.name = 'event_breakpoint'", html)
@@ -2149,6 +2326,7 @@ const legacyV2 = (overrides = {}) => {
   delete event.browser_context_id_low;
   return event;
 };
+const v3 = (overrides = {}) => ({...v2(), protocol_version: 3, tab_id: 17, ...overrides});
 const oneSidedContext = legacyV2();
 oneSidedContext.browser_context_id_high = "1";
 const v1 = (overrides = {}) => ({
@@ -2224,8 +2402,20 @@ const browserContextRequests = requestsFromEvents([
   v2({type: "request_started", process_id: 99, request_id: "700", browser_context_id_high: "9007199254740993", browser_context_id_low: "2"}),
   v2({type: "request_started", process_id: 100, request_id: "700", browser_context_id_high: "9007199254740993", browser_context_id_low: "1"})
 ]);
+const demoHostOnly = requestsFromEvents([
+  v2({type: "request_completed", status_code: 200, payload_size: 15, payload: "7777772e796f75747562652e636f6d"})
+], "demo");
+const tabbed = requestsFromEvents([
+  v3({type: "request_initiated", process_id: 10, request_id: "81", tab_id: 0}),
+  v3({type: "request_started", process_id: 99, request_id: "700",
+    initiator_process_id: 10, initiator_request_id: 81,
+    browser_context_id_high: "1", browser_context_id_low: "2", tab_id: 23})
+]);
 process.stdout.write(JSON.stringify({
   v2Accepted: isBrokerEvent(v2()),
+  v3Accepted: isBrokerEvent(v3()),
+  v3MissingTabRejected: !isBrokerEvent((() => { const event = v3(); delete event.tab_id; return event; })()),
+  v2UnexpectedTabRejected: !isBrokerEvent({...v2(), tab_id: 17}),
   legacyV2Accepted: isBrokerEvent(legacyV2()),
   oneSidedContextRejected: !isBrokerEvent(oneSidedContext),
   nonCanonicalContextRejected: !isBrokerEvent(v2({browser_context_id_low: "01"})),
@@ -2255,6 +2445,14 @@ process.stdout.write(JSON.stringify({
     events: outOfOrder[0].events.length
   },
   browserContextIds: browserContextRequests.map(request => request.id),
+  demoHostOnly: {
+    origin: demoHostOnly[0].origin,
+    path: demoHostOnly[0].path,
+    method: demoHostOnly[0].method,
+    targetKind: demoHostOnly[0].targetKind,
+    hostOnly: demoHostOnly[0].hostOnly
+  },
+  tabId: tabbed[0].tabId,
   browserContextToken: browserContextToken(v2({
     browser_context_id_high: "9007199254740993",
     browser_context_id_low: "18446744073709551615"
@@ -2281,6 +2479,9 @@ process.stdout.write(JSON.stringify({
             json.loads(completed.stdout),
             {
                 "v2Accepted": True,
+                "v3Accepted": True,
+                "v3MissingTabRejected": True,
+                "v2UnexpectedTabRejected": True,
                 "legacyV2Accepted": True,
                 "oneSidedContextRejected": True,
                 "nonCanonicalContextRejected": True,
@@ -2314,6 +2515,14 @@ process.stdout.write(JSON.stringify({
                     "S1:P99:C9007199254740993:2:B700",
                     "S1:P100:C9007199254740993:1:B700",
                 ],
+                "demoHostOnly": {
+                    "origin": "demo",
+                    "path": "www.youtube.com",
+                    "method": "EVENT",
+                    "targetKind": "host",
+                    "hostOnly": True,
+                },
+                "tabId": "23",
                 "browserContextToken": "9007199254740993:18446744073709551615",
                 "gap": "1",
                 "explicitGap": "1",
@@ -2459,6 +2668,7 @@ process.stdout.write(JSON.stringify({
         build_script = (
             Path(__file__).parents[2] / "scripts" / "build-research-app.sh"
         ).read_text(encoding="utf-8")
+        app_state = (UI_DIRECTORY / "app_state.js").read_text(encoding="utf-8")
 
         self.assertIn(
             "configureApplicationIcon(resourcesURL: resourcesURL)", application
@@ -2516,10 +2726,18 @@ process.stdout.write(JSON.stringify({
         self.assertIn("<string>OriginTrace</string>", plist)
         self.assertIn("<key>NSAllowsLocalNetworking</key>", plist)
         self.assertIn("origin-trace-icon.png", build_script)
-        self.assertIn("build/sessions/artifacts", build_script)
-        self.assertIn('"${resources_path}/artifacts"', build_script)
-        self.assertIn('"${resources_path}/origin-trace.jsonl"', build_script)
-        self.assertIn('"${resources_path}/request-signals.jsonl"', build_script)
+        self.assertNotIn("build/sessions/demo.jsonl", build_script)
+        self.assertNotIn('"${resources_path}/artifacts"', build_script)
+        self.assertNotIn('"${resources_path}/origin-trace.jsonl"', build_script)
+        self.assertNotIn('"${resources_path}/request-signals.jsonl"', build_script)
+        self.assertIn('return resourcesURL.appendingPathComponent("events.jsonl")', application)
+        self.assertIn('return "live"', application)
+        self.assertIn('? "demo" : "idle"', application)
+        self.assertIn("const sampleRequests = [];", app_state)
+        self.assertIn("const sampleEvidence = [];", app_state)
+        self.assertIn("const sampleArtifacts = [];", app_state)
+        self.assertNotIn("checkout.acme.test", app_state)
+        self.assertNotIn("sample-preview-not-stored", app_state)
         self.assertIn('"${trace_document_source}"', build_script)
         self.assertIn("iconutil -c icns", build_script)
 

@@ -2712,10 +2712,18 @@ process.stdout.write(JSON.stringify({
             application,
         )
         self.assertIn(
-            "DispatchQueue.main.async {\n        self?.restoreOriginTraceWindowAfterBrowserLaunch()",
+            "DispatchQueue.main.async {\n        self?.presentOriginTraceWindow()",
             application,
         )
         self.assertIn(
+            "NSRunningApplication.runningApplications(\n      withBundleIdentifier: customBraveBundleIdentifier",
+            application,
+        )
+        self.assertNotIn(
+            "restoreOriginTraceWindowAfterBrowserLaunch",
+            application,
+        )
+        self.assertNotIn(
             "DispatchQueue.main.asyncAfter(deadline: .now() + 0.5)",
             application,
         )

@@ -2567,6 +2567,12 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private let customBraveApplicationName = "Brave Browser Development.app"
 
   private func launchCustomBraveBrowser() {
+    guard NSRunningApplication.runningApplications(
+      withBundleIdentifier: customBraveBundleIdentifier
+    ).isEmpty else {
+      return
+    }
+
     guard let braveURL = customBraveApplicationURL() else {
       NSLog(
         "Origin Trace could not find Brave Browser Development. "
@@ -2586,15 +2592,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
         )
       }
       DispatchQueue.main.async {
-        self?.restoreOriginTraceWindowAfterBrowserLaunch()
+        self?.presentOriginTraceWindow()
       }
-    }
-  }
-
-  private func restoreOriginTraceWindowAfterBrowserLaunch() {
-    presentOriginTraceWindow()
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-      self?.presentOriginTraceWindow()
     }
   }
 

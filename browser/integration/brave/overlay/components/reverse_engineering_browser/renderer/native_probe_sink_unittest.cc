@@ -210,7 +210,7 @@ TEST_F(NativeProbeSinkTest, MarksOversizedOperationNamesTruncated) {
   EXPECT_EQ(events_.front().header.payload_size, kNativeProbeInlinePayloadSize);
   EXPECT_NE(
       events_.front().header.flags & static_cast<std::uint16_t>(NativeProbeFlag::kPayloadTruncated),
-      0u);
+      0);
 }
 
 TEST_F(NativeProbeSinkTest, CapturesAuthorizedRuntimeGeneratedSource) {

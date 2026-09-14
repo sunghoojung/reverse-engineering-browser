@@ -28,6 +28,41 @@ usage() {
   echo "Use --full-history with --init only when complete Chromium Git history is required."
 }
 
+configure_node() {
+  local node_version
+  local node_major
+  local node_minor
+  local candidate
+  local candidates=()
+
+  if [[ -n "${REB_NODE_DIRECTORY:-}" ]]; then
+    candidates+=("${REB_NODE_DIRECTORY}/bin")
+  fi
+  candidates+=(/opt/homebrew/opt/node@24/bin /usr/local/opt/node@24/bin)
+
+  node_version="$(node -p 'process.versions.node' 2>/dev/null || true)"
+  IFS=. read -r node_major node_minor _ <<< "${node_version}"
+  if [[ "${node_major:-}" == 24 && "${node_minor:-0}" =~ ^[0-9]+$ &&
+        "${node_minor}" -ge 16 ]]; then
+    return
+  fi
+
+  for candidate in "${candidates[@]}"; do
+    if [[ -x "${candidate}/node" && -x "${candidate}/npm" ]]; then
+      export PATH="${candidate}:${PATH}"
+      node_version="$(node -p 'process.versions.node')"
+      IFS=. read -r node_major node_minor _ <<< "${node_version}"
+      if [[ "${node_major}" == 24 && "${node_minor}" =~ ^[0-9]+$ &&
+            "${node_minor}" -ge 16 ]]; then
+        return
+      fi
+    fi
+  done
+
+  echo "Brave requires Node.js >=24.16.0 and <25. Set REB_NODE_DIRECTORY or install node@24." >&2
+  exit 1
+}
+
 is_git_checkout_root() {
   local candidate_directory="$1"
   local canonical_directory
@@ -134,6 +169,7 @@ fi
 echo "brave-core is ready at ${brave_directory}"
 
 if [[ "${run_init}" == true ]]; then
+  configure_node
   available_kib="$(df -Pk "${worktree_root}" | awk 'NR == 2 {print $4}')"
   required_kib=$((minimum_init_free_gib * 1024 * 1024))
   if ((available_kib < required_kib)); then
@@ -155,7 +191,7 @@ if [[ "${run_init}" == true ]]; then
     export GIT_CEILING_DIRECTORIES="${repository_root}"
     declare -a init_arguments=(run init)
     if [[ "${use_shallow_history}" == true ]]; then
-      init_arguments+=(-- --no-history)
+      init_arguments+=(--no-history)
     fi
     if command -v corepack >/dev/null 2>&1; then
       corepack pnpm "${init_arguments[@]}"

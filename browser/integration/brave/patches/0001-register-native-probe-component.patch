@@ -1,10 +1,7 @@
 diff --git a/chromium_src/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc b/chromium_src/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
-index 0c5b67a16..0f51ed315 100644
 --- a/chromium_src/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
 +++ b/chromium_src/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
-@@ -4,12 +4,14 @@
-  * You can obtain one at http://mozilla.org/MPL/2.0/. */
- 
+@@ -7,10 +7,12 @@
  #include "base/auto_reset.h"
 +#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
  #include "brave/third_party/blink/renderer/core/farbling/brave_session_cache.h"
@@ -18,26 +15,21 @@ index 0c5b67a16..0f51ed315 100644
      if (!execution_context) {                                               \
        execution_context = scoped_execution_context_.Get();                  \
 diff --git a/renderer/BUILD.gn b/renderer/BUILD.gn
-index 751e5aa18..160deef00 100644
 --- a/renderer/BUILD.gn
 +++ b/renderer/BUILD.gn
-@@ -23,6 +23,7 @@ source_set("renderer") {
-     "//brave/components/brave_search/renderer",
-     "//brave/components/brave_shields/core/common",
-     "//brave/components/cosmetic_filters/renderer",
+@@ -19,3 +19,6 @@ source_set("renderer") {
+   public_deps = [ "//chrome/renderer" ]
++  public_deps += [
 +    "//brave/components/reverse_engineering_browser:renderer",
-     "//v8",
-   ]
++  ]
  
+   deps = [
 diff --git a/third_party/blink/renderer/includes.gni b/third_party/blink/renderer/includes.gni
-index d389a28b5..9a3eb4a83 100644
 --- a/third_party/blink/renderer/includes.gni
 +++ b/third_party/blink/renderer/includes.gni
-@@ -39,6 +39,7 @@ brave_blink_renderer_core_sources = [
+@@ -40,4 +40,5 @@ brave_blink_renderer_core_sources = [
  brave_blink_renderer_core_deps = [
    "//brave/components/brave_shields/core/common:mojom",
    "//brave/components/brave_shields/core/common/",
 +  "//brave/components/reverse_engineering_browser:renderer_sink",
  ]
- 
- if (!is_android && !is_ios) {

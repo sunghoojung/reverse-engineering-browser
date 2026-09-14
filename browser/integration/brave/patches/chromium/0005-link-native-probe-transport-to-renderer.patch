@@ -1,0 +1,9 @@
+diff --git a/chrome/renderer/BUILD.gn b/chrome/renderer/BUILD.gn
+--- a/chrome/renderer/BUILD.gn
++++ b/chrome/renderer/BUILD.gn
+@@ -231,1 +231,4 @@ static_library("renderer") {
++  public_deps += [
++    "//brave/components/reverse_engineering_browser:renderer",
++  ]
+   data_deps = [ "//tools/v8_context_snapshot" ]
+ 

@@ -32,7 +32,7 @@ component("renderer_sink") {
   deps = [ "//base" ]
 }
 
-source_set("renderer") {
+static_library("renderer") {
   sources = [
     "common/native_vm_finding.h",
     "renderer/native_probe_transport.cc",

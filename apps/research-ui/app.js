@@ -64,21 +64,6 @@
         ['storage', 'Storage'], ['webrtc', 'WebRTC']
       ]);
       const signalEventDisplayLimit = 500;
-      const demoCanvasRenderCaptures = Object.freeze([{
-        id: 'canvas#1', context: '2D', width: 240, height: 60, readback: 'toDataURL',
-        operationHash: 'a87c19e4',
-        calls: Object.freeze([
-          {name: 'fillStyle', arguments: ['#f60'], property: true},
-          {name: 'fillRect', arguments: [125, 1, 62, 20]},
-          {name: 'fillStyle', arguments: ['#069'], property: true},
-          {name: 'font', arguments: ['11pt Times New Roman'], property: true},
-          {name: 'textBaseline', arguments: ['alphabetic'], property: true},
-          {name: 'fillText', arguments: ['Cwm fjordbank gly 😃', 2, 15]},
-          {name: 'fillStyle', arguments: ['rgba(102, 204, 0, 0.7)'], property: true},
-          {name: 'font', arguments: ['18pt Arial'], property: true},
-          {name: 'fillText', arguments: ['Cwm fjordbank gly 😃', 4, 45]}
-        ])
-      }]);
 
       function requestSignalRoot(request) {
         if (!request || request.origin === 'sample') return null;
@@ -136,28 +121,22 @@
         const context = canvas.getContext('2d');
         if (!context) return;
         context.clearRect(0, 0, canvas.width, canvas.height);
-        const safeProperties = new Set([
-          'fillStyle', 'strokeStyle', 'font', 'textBaseline', 'textAlign',
-          'globalAlpha', 'lineWidth', 'lineCap', 'lineJoin'
-        ]);
-        const safeMethods = new Set([
-          'fillRect', 'strokeRect', 'clearRect', 'fillText', 'strokeText',
-          'beginPath', 'closePath', 'moveTo', 'lineTo', 'arc', 'rect', 'fill', 'stroke'
-        ]);
         calls.forEach(call => {
-          if (call.property && safeProperties.has(call.name) && call.arguments.length === 1) {
-            context[call.name] = call.arguments[0];
-          } else if (!call.property && safeMethods.has(call.name)) {
-            context[call.name](...call.arguments);
-          }
+          try {
+            if (call.property && canvasReplayProperties.has(call.name) && call.arguments.length === 1) {
+              context[call.name] = call.arguments[0];
+            } else if (!call.property && canvasReplayMethods.has(call.name)) {
+              context[call.name](...call.arguments);
+            }
+          } catch {}
         });
       }
 
       function canvasRenderCaptures(signalEvents) {
         const readbacks = signalEvents.filter(event => event.category === 'canvas' &&
           /(?:toDataURL|toBlob|getImageData)/.test(decodePayload(event)));
-        if (state.sessionMode === 'demo' && readbacks.length > 0) {
-          return demoCanvasRenderCaptures.map((capture, index) => ({
+        if (state.sessionMode === 'demo' && state.canvasRenderCaptures.length > 0 && readbacks.length > 0) {
+          return state.canvasRenderCaptures.map((capture, index) => ({
             ...capture, evidenceEvent: readbacks[Math.min(index, readbacks.length - 1)], demo: true
           }));
         }
@@ -7260,6 +7239,7 @@
           const brokerConnected = body.broker_connected !== false;
           state.sessionMode = ['demo', 'idle'].includes(body.capture_mode)
             ? body.capture_mode : 'live';
+          state.canvasRenderCaptures = body.canvas_render_captures ?? [];
           state.events = body.events;
           state.eventsLimited = body.count >= 5000;
           const vmModel = vmFindingsFromEvents(state.events);
@@ -7342,6 +7322,7 @@
         state.eventFailureKind = null;
         state.sessionMode = 'preview';
         state.events = [];
+        state.canvasRenderCaptures = [];
         state.eventsLimited = false;
         state.requests = [];
         state.artifacts = [];

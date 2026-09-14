@@ -10,9 +10,9 @@ development and live debugger sessions.
 make app
 ```
 
-This builds deterministic demo evidence, packages `build/Origin Trace.app`,
-and opens the native application. The bundle contains its UI assets and native
-helpers. It does not need the Python development server for stored evidence.
+This packages `build/Origin Trace.app` and opens the native application with no
+bundled evidence. The bundle contains its UI assets and native helpers. It does
+not need the Python development server for stored evidence.
 Each normal Origin Trace launch, including reopening it from the Dock, also
 opens the custom Brave Browser Development app, then restores the Origin Trace
 window and keeps it in front. Origin Trace looks beside its own app bundle, in
@@ -21,6 +21,15 @@ the local `browser/worktree/` build output, and among registered applications. A
 session. When custom Brave is already running, clicking Origin Trace leaves the
 browser untouched and brings Origin Trace forward once. Use `make live` for the
 pinned custom Brave capture workflow.
+
+For an explicit development session with deterministic sample evidence:
+
+```sh
+make app-demo
+```
+
+Demo stores and Canvas drawing fixtures are development inputs. They are not
+copied into the application bundle or used by `make app`.
 
 For browser development:
 
@@ -131,11 +140,11 @@ trace, and arrow keys move between trace rows.
 Fingerprinting is a first-class session workspace for Canvas, WebGL, Web Audio,
 Navigator, Permissions, Storage, and WebRTC activity. Rendering is the primary
 view: each Canvas readback becomes a card for visual output, deterministic local
-replay, ordered drawing functions, and stable evidence identity. The bundled
-demo reconstructs both images locally from its visible, bounded call sequence;
-it does not present those pixels as a native capture. A live readback without
-retained render data shows an explicit unavailable preview instead of inventing
-an image.
+replay, ordered drawing functions, and stable evidence identity. The explicit
+development demo reconstructs both images locally from its visible, bounded
+call sequence; it does not present those pixels as a native capture. A live
+readback without retained render data shows an explicit unavailable preview
+instead of inventing an image.
 
 Activity keeps native probe operations newest first, renders at most 500
 matching operations, and moves detailed identifiers behind a disclosure. The

@@ -216,6 +216,13 @@ synchronization:
 6. Run `gn format --dry-run` for changed GN files and compile the affected
    target when full Xcode and Chromium tooling are installed.
 
+For faster repeated local Brave builds, follow
+[`docs/development/fast-browser-builds.md`](docs/development/fast-browser-builds.md).
+Keep the development output as a component build with Siso, use `sccache` with
+symbols disabled when debugging is not required, and inspect
+`sccache --show-stats` after a representative rebuild. Do not commit generated
+`out/` files or the local compiler cache.
+
 Never report an unavailable or skipped check as passing. State the exact
 missing tool, first actionable failure, or dirty upstream condition.
 

@@ -1,0 +1,24 @@
+diff --git a/build/BUILD.gn b/build/BUILD.gn
+--- a/build/BUILD.gn
++++ b/build/BUILD.gn
+@@ -44,10 +44,16 @@ if (is_redirect_cc_build) {
+ }
+ 
+ config("compiler") {
+-  cflags = [
+-    "-Xclang",
+-    "-fexperimental-max-bitint-width=256",
+-  ]
++  if (cc_wrapper == "sccache") {
++    # sccache retains the frontend option in its cache key when -Xclang and
++    # its value use Clang's equivalent single-token spelling.
++    cflags = [ "-Xclang=-fexperimental-max-bitint-width=256" ]
++  } else {
++    cflags = [
++      "-Xclang",
++      "-fexperimental-max-bitint-width=256",
++    ]
++  }
+ 
+   # Perfetto's constexpr category registry (ValidateCategories) recurses once
+   # per category. With Brave's extra categories, the total depth now exceeds

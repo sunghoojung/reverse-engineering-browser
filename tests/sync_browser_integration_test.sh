@@ -150,10 +150,11 @@ printf 'patched siso config\n' >"${siso_brave}/build/config/siso/brave_siso_conf
 git -C "${siso_brave}" add build/config/siso/brave_siso_config.star
 git -C "${siso_brave}" -c user.name='Sync Test' \
   -c user.email='sync-test@example.invalid' commit -q -m fixture
+# macOS ships Bash 3.2, which treats an empty array expansion as unset.
 REB_BRAVE_DIRECTORY="${siso_brave}" \
   REB_BRAVE_INTEGRATION_DIRECTORY="${siso_integration}" \
   REB_BRAVE_CORE_REVISION=HEAD REB_CHROMIUM_REVISION=HEAD \
-  REB_V8_REVISION=HEAD "${sync_script}" \
+  REB_V8_REVISION=HEAD /bin/bash "${sync_script}" \
   >"${siso_root}/sync.out" 2>"${siso_root}/sync.err"
 cmp -s "${siso_brave}/build/config/siso/brave_siso_config.star" \
   "${siso_chromium}/build/config/siso/brave_siso_config.star"

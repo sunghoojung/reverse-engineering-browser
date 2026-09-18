@@ -239,14 +239,16 @@ sync_brave_siso_config() {
 }
 
 brave_stack_refreshed=0
-if preflight_patches "${brave_directory}" "" "${brave_patch_files[@]}"; then
-  :
-else
-  preflight_status=$?
-  if ((preflight_status != 10 && preflight_status != 11)); then
-    exit "${preflight_status}"
+if ((${#brave_patch_files[@]} > 0)); then
+  if preflight_patches "${brave_directory}" "" "${brave_patch_files[@]}"; then
+    :
+  else
+    preflight_status=$?
+    if ((preflight_status != 10 && preflight_status != 11)); then
+      exit "${preflight_status}"
+    fi
+    brave_stack_refreshed=1
   fi
-  brave_stack_refreshed=1
 fi
 chromium_stack_refreshed=0
 if ((${#chromium_patch_files[@]} > 0)); then
@@ -277,7 +279,7 @@ if [[ -d "${overlay_directory}" ]]; then
   cp -Rp "${overlay_directory}/." "${brave_directory}/"
 fi
 
-if ((brave_stack_refreshed == 0)); then
+if ((${#brave_patch_files[@]} > 0 && brave_stack_refreshed == 0)); then
   apply_patches "${brave_directory}" "" "${brave_patch_files[@]}"
 fi
 if ((${#chromium_patch_files[@]} > 0 && chromium_stack_refreshed == 0)); then

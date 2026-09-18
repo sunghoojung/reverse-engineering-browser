@@ -1,11 +1,14 @@
 import hashlib
 import http.client
 import json
+import plistlib
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -15,6 +18,7 @@ from pathlib import Path
 
 from evidence_store import (
     JSONL_TAIL_CHUNK_BYTES,
+    is_artifact,
     is_request_signal_profile,
 )
 from server import (
@@ -27,6 +31,106 @@ from ui_test_support import UI_DIRECTORY, read_ui_sources
 
 
 class ResearchUiTests(unittest.TestCase):
+    def test_capture_controls_stop_before_clearing_current_session_events(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stores = [root / name for name in (
+                "events.jsonl", "origin-trace.jsonl", "request-signals.jsonl"
+            )]
+            for store in stores:
+                store.write_text('evidence\n', encoding="utf-8")
+            artifact = root / "canvas.bin"
+            artifact.write_bytes(b"retained artifact")
+            broker_socket = root / "broker.sock"
+            broker = subprocess.Popen([sys.executable, "-c", """
+import os, signal, socket, sys, time
+path = sys.argv[1]
+sock = socket.socket(socket.AF_UNIX)
+sock.bind(path)
+def stop(_signal, _frame):
+    sock.close()
+    os.unlink(path)
+    sys.exit(0)
+signal.signal(signal.SIGUSR1, stop)
+while True:
+    time.sleep(1)
+""", str(broker_socket)])
+            absent = object()
+            previous = {name: ResearchHandler.__dict__.get(name, absent) for name in (
+                "ui_directory", "event_store", "trace_store", "signal_store",
+                "broker_socket", "broker_pid", "capture_stopped"
+            )}
+            server = None
+            try:
+                for _ in range(100):
+                    if broker_socket.exists():
+                        break
+                    time.sleep(0.01)
+                self.assertTrue(broker_socket.exists())
+                ResearchHandler.ui_directory = UI_DIRECTORY
+                ResearchHandler.event_store, ResearchHandler.trace_store, ResearchHandler.signal_store = stores
+                ResearchHandler.broker_socket = broker_socket
+                ResearchHandler.broker_pid = broker.pid
+                ResearchHandler.capture_stopped = False
+                server = ThreadingHTTPServer(("127.0.0.1", 0), ResearchHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+
+                def action(body):
+                    connection = http.client.HTTPConnection("127.0.0.1", server.server_port)
+                    connection.request("POST", "/api/capture/actions", json.dumps(body),
+                                       {"Content-Type": "application/json"})
+                    response = connection.getresponse()
+                    result = response.status, json.loads(response.read())
+                    connection.close()
+                    return result
+
+                self.assertEqual(action({"action": "clear", "confirm": True})[0], 409)
+                self.assertEqual([store.read_text() for store in stores], ["evidence\n"] * 3)
+                self.assertEqual(action({"action": "stop"})[0], 200)
+                self.assertTrue(ResearchHandler.capture_stopped)
+                self.assertFalse(broker_socket.exists())
+                self.assertEqual(action({"action": "clear"})[0], 400)
+                self.assertEqual(action({"action": "clear", "confirm": True})[0], 200)
+                self.assertEqual([store.read_text() for store in stores], [""] * 3)
+                self.assertEqual(artifact.read_bytes(), b"retained artifact")
+            finally:
+                if server is not None:
+                    server.shutdown()
+                    server.server_close()
+                if broker.poll() is None:
+                    broker.terminate()
+                broker.wait(timeout=5)
+                for name, value in previous.items():
+                    if value is absent:
+                        delattr(ResearchHandler, name)
+                    else:
+                        setattr(ResearchHandler, name, value)
+
+    def test_canvas_artifact_contract_accepts_only_sensitive_native_readbacks(self) -> None:
+        artifact = {
+            "protocol_version": 1,
+            "artifact_id": "27",
+            "session_id": "9",
+            "navigation_id": "0",
+            "frame_id": "42",
+            "parent_artifact_id": "0",
+            "creator_event_id": "31370",
+            "execution_context_id": "0",
+            "capture_origin": "canvas_to_data_url",
+            "kind": "canvas_data_url",
+            "url": "canvas://readback",
+            "mime_type": "text/plain",
+            "byte_size": 30,
+            "sha256": "a" * 64,
+            "sensitive": True,
+            "content_path": f"blobs/{'a' * 64}.bin",
+        }
+
+        self.assertTrue(is_artifact(artifact))
+        self.assertFalse(is_artifact({**artifact, "sensitive": False}))
+        self.assertFalse(is_artifact({**artifact, "execution_context_id": "1"}))
+
     def test_traffic_filters_cannot_leave_an_invisible_cross_filter_trap(self) -> None:
         application = (UI_DIRECTORY / "app.js").read_text(encoding="utf-8")
         self.assertIn(
@@ -991,31 +1095,39 @@ class ResearchUiTests(unittest.TestCase):
         self.assertIn('data-signal-view="activity"', html)
         self.assertIn('data-signal-view="request"', html)
         self.assertIn('id="signal-render-list"', html)
+        self.assertIn('id="signal-surface-overview"', html)
         self.assertIn('aria-label="Fingerprint event activity"', html)
         self.assertIn('aria-label="Selected fingerprint event"', html)
         for slug, category in (
             ("canvas", "Canvas"),
             ("webgl", "WebGL"),
             ("web_audio", "Web Audio"),
-            ("navigator", "Navigator"),
+            ("navigator", "Device, layout &amp; WebGPU"),
             ("permissions", "Permissions"),
             ("storage", "Storage"),
             ("webrtc", "WebRTC"),
+            ("runtime", "Runtime"),
         ):
             self.assertIn(f'data-signal-filter="{slug}"', html)
             self.assertIn(f">{category}</button>", html)
         self.assertIn("function fingerprintEventsFromEvents(events)", html)
         self.assertIn("signalEventDisplayLimit = 500", html)
+        self.assertIn("nativeCanvasCaptureDisplayLimit = 24", html)
         self.assertIn("function renderFingerprintActivity()", html)
         self.assertIn("function renderFingerprintDetail", html)
         self.assertIn("function replayCanvasCalls", html)
         self.assertIn("function renderCanvasCapture", html)
         self.assertIn("function renderFingerprintRendering", html)
+        self.assertIn("function renderSignalSurfaceOverview", html)
         self.assertIn("Drawing functions", html)
+        self.assertIn("observed in renderer order", html)
         self.assertIn("fillRect", html)
         self.assertIn("fillText", html)
         self.assertIn("LOCAL REPLAY", html)
-        self.assertIn("live readback with metadata only remains blank", html.lower())
+        self.assertIn("REB_CAPTURE_CANVAS_IMAGES=1", html)
+        self.assertIn("canvas_data_url", html)
+        self.assertIn("canvas_to_data_url", html)
+        self.assertIn("canvasDataUrlPattern", html)
         self.assertIn("state.broker === 'unavailable'", html)
         self.assertIn("both Canvas images are reconstructed locally", html)
         self.assertIn("does not prove that a value was transmitted", html)
@@ -1092,6 +1204,81 @@ process.stdout.write(JSON.stringify(calls.map(canvasCallLabel)));
             ],
         )
 
+        constants_start = html.index("      const nativeCanvasCaptureDisplayLimit")
+        constants_end = html.index("      function requestSignalRoot", constants_start)
+        captures_start = html.index("      function canvasRenderCaptures")
+        captures_end = html.index("      function canvasPreview", captures_start)
+        captures_exercise = r"""
+const state = {
+  sessionMode: 'live', canvasRenderCaptures: [],
+  artifacts: [{
+    kind: 'canvas_data_url', capture_origin: 'canvas_to_data_url',
+    session_id: '9', creator_event_id: '132',
+    content: 'data:image/png;base64,iVBORw0KGgo='
+  }]
+};
+const integerValue = (event, field) => BigInt(event[field]);
+const integerText = (event, field) => String(event[field]);
+const decodePayload = event => event.decoded;
+const event = (sequence, decoded, process_id = 7, type = 'api_call', time = sequence) => ({
+  category: 'canvas', session_id: '9', process_id,
+  sequence_number: String(sequence), monotonic_time_ns: String(time), decoded, type
+});
+const events = [];
+for (let sequence = 1; sequence <= 130; sequence += 1) {
+  events.push(event(sequence, sequence % 2 ? 'canvas.fillRect' : 'canvas.lineTo'));
+}
+events.push(event(131, 'canvas.constructor'));
+events.push(event(132, 'canvas.toDataURL'));
+events.push(event(1, 'canvas.toDataURL', 8, 'api_call', 133));
+events.reverse();
+const captures = canvasRenderCaptures(events);
+process.stdout.write(JSON.stringify(captures.map(capture => ({
+  process: capture.evidenceEvent.process_id,
+  count: capture.calls.length,
+  truncated: capture.callsTruncated,
+  first: capture.calls[0]?.name ?? null,
+  last: capture.calls.at(-1)?.name ?? null,
+  observedOnly: capture.calls.every(call => call.observedOnly === true && call.arguments.length === 0),
+  hasImage: typeof capture.dataUrl === 'string'
+}))));
+"""
+        captures = subprocess.run(
+            [
+                node,
+                "-e",
+                html[constants_start:constants_end]
+                + html[captures_start:captures_end]
+                + captures_exercise,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            json.loads(captures.stdout),
+            [
+                {
+                    "process": 8,
+                    "count": 0,
+                    "truncated": False,
+                    "first": None,
+                    "last": None,
+                    "observedOnly": True,
+                    "hasImage": False,
+                },
+                {
+                    "process": 7,
+                    "count": 128,
+                    "truncated": True,
+                    "first": "fillRect",
+                    "last": "lineTo",
+                    "observedOnly": True,
+                    "hasImage": True,
+                },
+            ],
+        )
+
     def test_request_signal_profile_model_rejects_ambiguous_evidence(self) -> None:
         node = shutil.which("node")
         if node is None:
@@ -1103,7 +1290,8 @@ process.stdout.write(JSON.stringify(calls.map(canvasCallLabel)));
         model = """
 const uint64Max = 18446744073709551615n;
 const fingerprintSignalCategories = new Set([
-  'canvas', 'webgl', 'web_audio', 'navigator', 'permissions', 'storage', 'webrtc'
+  'canvas', 'webgl', 'web_audio', 'navigator', 'permissions', 'storage', 'webrtc',
+  'runtime'
 ]);
 """ + html[start:end]
         exercise = r"""
@@ -1135,6 +1323,15 @@ const profile = {
 };
 process.stdout.write(JSON.stringify({
   accepted: isRequestSignalProfile(profile),
+  eightCategoriesAccepted: isRequestSignalProfile({
+    ...profile,
+    signals: [...fingerprintSignalCategories].map((category, index) => ({
+      ...profile.signals[0],
+      category,
+      first_event: {process_id: 10, sequence_number: String(index + 1)},
+      last_event: {process_id: 10, sequence_number: String(index + 1)}
+    }))
+  }),
   confidenceBound: !isRequestSignalProfile({
     ...profile,
     signals: [{...profile.signals[0], confidence: 'observed'}]
@@ -1180,6 +1377,7 @@ process.stdout.write(JSON.stringify({
             json.loads(completed.stdout),
             {
                 "accepted": True,
+                "eightCategoriesAccepted": True,
                 "confidenceBound": True,
                 "categoriesUnique": True,
                 "copiedIdentityBound": True,
@@ -1690,6 +1888,7 @@ const networkEmpty = {
 };
 const snapshot = {
   protocol_version: 1, state: 'paused', generation: 7, error: null,
+  live_tab_count: 1,
   heap_diff_baseline: null, memory_origin_trace: originIdle,
   action_scope: actionScopeIdle,
   request_interception: interceptionIdle,
@@ -1777,6 +1976,7 @@ process.stdout.write(JSON.stringify({
   badFrameRejected: !isDebuggerResponse({...snapshot, paused: {...snapshot.paused,
     call_frames: [{...frame, location: {script_id: 'script-1', line: -1, column: 0}}]}}),
   badTargetRejected: !isDebuggerResponse({...snapshot, targets: [null]}),
+  badLiveTabCountRejected: !isDebuggerResponse({...snapshot, live_tab_count: -1}),
   badBreakpointRejected: !isDebuggerResponse({...snapshot, breakpoints: [null]}),
   badWatchRejected: !isDebuggerResponse({...snapshot, watches: [null]}),
   badConsoleRejected: !isDebuggerResponse({...snapshot, console: [null]}),
@@ -1879,6 +2079,7 @@ process.stdout.write(JSON.stringify({
                 "badScriptRejected": True,
                 "badFrameRejected": True,
                 "badTargetRejected": True,
+                "badLiveTabCountRejected": True,
                 "badBreakpointRejected": True,
                 "badWatchRejected": True,
                 "badConsoleRejected": True,
@@ -2624,6 +2825,16 @@ process.stdout.write(JSON.stringify({
   explicitGap: String(countSequenceGaps([
     v2(),
     v2({sequence_number: "2", type: "gap", request_id: "0", payload_size: 0, payload: ""})
+  ])),
+  reportedDrop: String(countReportedQueueDrops([
+    v3({sequence_number: "318"}),
+    v3({sequence_number: "318", type: "gap", request_id: "0", payload_size: 3, payload: "313335"}),
+    v3({sequence_number: "454"})
+  ])),
+  overlappingGap: String(countSequenceGaps([
+    v3({sequence_number: "318"}),
+    v3({sequence_number: "318", type: "gap", request_id: "0", payload_size: 3, payload: "313335"}),
+    v3({sequence_number: "454"})
   ]))
 }));
 """
@@ -2689,7 +2900,9 @@ process.stdout.write(JSON.stringify({
                 "tabId": "23",
                 "browserContextToken": "9007199254740993:18446744073709551615",
                 "gap": "1",
-                "explicitGap": "1",
+                "explicitGap": "0",
+                "reportedDrop": "135",
+                "overlappingGap": "135",
             },
         )
 
@@ -2829,6 +3042,7 @@ process.stdout.write(JSON.stringify({
             encoding="utf-8"
         )
         plist = (macos_directory / "Info.plist").read_text(encoding="utf-8")
+        plist_values = plistlib.loads(plist.encode("utf-8"))
         build_script = (
             Path(__file__).parents[2] / "scripts" / "build-research-app.sh"
         ).read_text(encoding="utf-8")
@@ -2947,6 +3161,8 @@ process.stdout.write(JSON.stringify({
         self.assertIn("<key>CFBundleIconFile</key>", plist)
         self.assertIn("<string>OriginTrace</string>", plist)
         self.assertIn("<key>NSAllowsLocalNetworking</key>", plist)
+        self.assertEqual(plist_values["CFBundleShortVersionString"], "0.1.4")
+        self.assertEqual(plist_values["CFBundleVersion"], "4")
         self.assertIn("origin-trace-icon.png", build_script)
         self.assertNotIn("build/sessions/demo.jsonl", build_script)
         self.assertNotIn('"${resources_path}/artifacts"', build_script)

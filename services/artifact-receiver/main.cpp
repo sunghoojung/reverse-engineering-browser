@@ -255,6 +255,18 @@ bool ReceiveSocketConnections(const int listener,
           << "Artifact connection closed after authentication failure; waiting for reconnect\n";
       continue;
     }
+    // The browser keeps one authenticated connection for the whole capture
+    // session. Bound the unauthenticated handshake, then allow that trusted
+    // local connection to remain idle between artifacts. Leaving SO_RCVTIMEO
+    // enabled disconnects the browser after 30 seconds without an artifact and
+    // makes the next Canvas readback fail even though the session is healthy.
+    const timeval no_receive_timeout{};
+    if (setsockopt(connection.get(), SOL_SOCKET, SO_RCVTIMEO, &no_receive_timeout,
+                   sizeof(no_receive_timeout)) != 0) {
+      std::cerr << "Unable to configure authenticated artifact connection: " << std::strerror(errno)
+                << "; waiting for reconnect\n";
+      continue;
+    }
     std::cerr << "Artifact receiver accepted authenticated connection\n";
     DescriptorStreamBuffer buffer(connection.get());
     std::istream stream(&buffer);

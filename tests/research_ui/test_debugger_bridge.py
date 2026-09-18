@@ -21,6 +21,7 @@ from debugger.automation import (
 from debugger.errors import (
     DebuggerBridgeError,
     ProtocolError,
+    WebSocketClosed,
 )
 from debugger.heap_snapshot import (
     HeapSnapshotCapture,
@@ -514,6 +515,7 @@ class FakeDebuggerWebSocket:
 
 class TargetHandler(BaseHTTPRequestHandler):
     web_socket_port = 0
+    extra_targets = []
 
     def do_GET(self) -> None:
         body = json.dumps(
@@ -524,7 +526,8 @@ class TargetHandler(BaseHTTPRequestHandler):
                     "title": "Checkout",
                     "url": "https://checkout.test/",
                     "webSocketDebuggerUrl": f"ws://127.0.0.1:{self.web_socket_port}/devtools/page/page-1",
-                }
+                },
+                *self.extra_targets,
             ]
         ).encode()
         self.send_response(200)
@@ -784,6 +787,16 @@ class DebuggerBridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(DebuggerBridgeError, "loopback ws://"):
             NativeDebuggerConnection("ws://192.0.2.1/devtools/page/1", binary)
 
+    def test_native_transport_reader_treats_closed_stdout_as_disconnect(self) -> None:
+        connection = object.__new__(NativeDebuggerConnection)
+        connection._closed = False
+        stdout = tempfile.TemporaryFile()
+        stdout.close()
+        connection._process = mock.Mock(stdout=stdout)
+
+        with self.assertRaisesRegex(WebSocketClosed, "closed"):
+            connection._read_control_message(0.0)
+
     def test_action_scope_session_uses_native_transport(self) -> None:
         web_socket = FakeDebuggerWebSocket()
         binary = (
@@ -848,6 +861,27 @@ class DebuggerBridgeTests(unittest.TestCase):
                     timeout=30.0,
                 )
                 self.assertEqual(snapshot["target"]["title"], "Checkout")
+                self.assertEqual(snapshot["live_tab_count"], 1)
+                TargetHandler.extra_targets = [
+                    {
+                        "id": "page-2",
+                        "type": "page",
+                        "title": "Playground",
+                        "url": "https://demo.fingerprint.com/playground",
+                        "webSocketDebuggerUrl": f"ws://127.0.0.1:{web_socket.port}/devtools/page/page-2",
+                    },
+                    {
+                        "id": "webview-1",
+                        "type": "webview",
+                        "title": "Embedded view",
+                        "url": "https://example.test/embed",
+                        "webSocketDebuggerUrl": f"ws://127.0.0.1:{web_socket.port}/devtools/page/webview-1",
+                    },
+                ]
+                self.addCleanup(setattr, TargetHandler, "extra_targets", [])
+                self.wait_for(lambda: bridge.snapshot()["live_tab_count"] == 2)
+                TargetHandler.extra_targets = []
+                self.wait_for(lambda: bridge.snapshot()["live_tab_count"] == 1)
                 self.assertTrue(web_socket.pong_received)
                 self.assertTrue(web_socket.fragmented_message_sent)
                 self.assertEqual(

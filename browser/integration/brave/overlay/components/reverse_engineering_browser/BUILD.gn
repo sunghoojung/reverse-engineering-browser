@@ -46,6 +46,7 @@ static_library("renderer") {
     "//base",
     "//mojo/public/cpp/base",
     "//mojo/public/cpp/bindings",
+    "//third_party/blink/public:blink",
   ]
 }
 
@@ -77,6 +78,7 @@ source_set("browser") {
     ":mojom",
     ":queue",
     "//base",
+    "//content/public/browser",
     "//mojo/public/cpp/base",
     "//mojo/public/cpp/bindings",
     "//net",

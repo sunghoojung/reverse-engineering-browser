@@ -1,9 +1,10 @@
       const eventCategories = new Set([
         'unknown', 'canvas', 'webgl', 'web_audio', 'navigator', 'permissions',
-        'storage', 'webrtc', 'wasm', 'network', 'vm', 'artifact'
+        'storage', 'webrtc', 'wasm', 'network', 'vm', 'artifact', 'runtime'
       ]);
       const fingerprintSignalCategories = new Set([
-        'canvas', 'webgl', 'web_audio', 'navigator', 'permissions', 'storage', 'webrtc'
+        'canvas', 'webgl', 'web_audio', 'navigator', 'permissions', 'storage', 'webrtc',
+        'runtime'
       ]);
 
       function fingerprintEventsFromEvents(events) {
@@ -50,10 +51,12 @@
         ['request_failed', 5]
       ]);
       const networkLifecycleTypes = new Set(lifecycleRanks.keys());
-      const artifactKinds = new Set(['javascript', 'wasm', 'source_map', 'response_body']);
+      const artifactKinds = new Set([
+        'javascript', 'wasm', 'source_map', 'response_body', 'canvas_data_url'
+      ]);
       const artifactCaptureOrigins = new Set([
         'unknown', 'network_response', 'dynamic_javascript', 'webassembly_compile',
-        'webassembly_module', 'webassembly_instantiate'
+        'webassembly_module', 'webassembly_instantiate', 'canvas_to_data_url'
       ]);
       const canvasReplayProperties = new Set([
         'fillStyle', 'strokeStyle', 'font', 'textBaseline', 'textAlign',
@@ -154,16 +157,28 @@
         let gaps = 0n;
         const highWaterMarks = new Map();
         for (const event of events) {
+          if (event.type === 'gap') continue;
           const streamId = `${integerText(event, 'session_id')}:${event.process_id}`;
           const sequence = integerValue(event, 'sequence_number');
           const previous = highWaterMarks.get(streamId);
           const missing = previous !== undefined && sequence > previous + 1n
             ? sequence - previous - 1n
             : 0n;
-          gaps += missing > 0n ? missing : event.type === 'gap' ? 1n : 0n;
+          gaps += missing;
           highWaterMarks.set(streamId, previous === undefined || sequence > previous ? sequence : previous);
         }
         return gaps;
+      }
+
+      function countReportedQueueDrops(events) {
+        let drops = 0n;
+        for (const event of events) {
+          if (event.type !== 'gap') continue;
+          const payload = decodePayload(event);
+          const count = /^[1-9][0-9]{0,19}$/.test(payload) ? BigInt(payload) : 1n;
+          drops += count <= 18446744073709551615n ? count : 1n;
+        }
+        return drops;
       }
 
       function isBrokerEvent(event) {
@@ -210,6 +225,8 @@
           body.count === body.events.length &&
           (body.capture_mode === undefined || ['live', 'demo', 'idle'].includes(body.capture_mode)) &&
           (body.broker_connected === undefined || typeof body.broker_connected === 'boolean') &&
+          (body.capture_stopped === undefined || typeof body.capture_stopped === 'boolean') &&
+          (body.capture_controls_available === undefined || typeof body.capture_controls_available === 'boolean') &&
           (body.canvas_render_captures === undefined ||
             (body.capture_mode === 'demo' &&
               Array.isArray(body.canvas_render_captures) &&
@@ -255,7 +272,9 @@
             (artifact.capture_origin === 'dynamic_javascript' &&
               (artifact.kind !== 'javascript' || artifact.execution_context_id === '0')) ||
             (artifact.capture_origin.startsWith('webassembly_') &&
-              (artifact.kind !== 'wasm' || artifact.execution_context_id === '0'))) return false;
+              (artifact.kind !== 'wasm' || artifact.execution_context_id === '0')) ||
+            (artifact.capture_origin === 'canvas_to_data_url' &&
+              (artifact.kind !== 'canvas_data_url' || artifact.execution_context_id !== '0'))) return false;
         }
         return artifact.protocol_version === 1 &&
           artifactIdentifierFields.every(field => isCanonicalInteger(artifact[field], 0n, uint64Max)) &&
@@ -265,7 +284,8 @@
           isSafeIntegerInRange(artifact.byte_size, 0, Number.MAX_SAFE_INTEGER) &&
           typeof artifact.sha256 === 'string' && /^[0-9a-f]{64}$/.test(artifact.sha256) &&
           typeof artifact.sensitive === 'boolean' &&
-          (!artifact.sensitive || artifact.kind === 'response_body');
+          (!artifact.sensitive || artifact.kind === 'response_body' || artifact.kind === 'canvas_data_url') &&
+          (artifact.kind !== 'canvas_data_url' || artifact.sensitive);
       }
 
       function isArtifactResponse(body) {
@@ -1049,6 +1069,7 @@
             !isSafeIntegerInRange(body.generation, 0, Number.MAX_SAFE_INTEGER) ||
             (body.error !== null && typeof body.error !== 'string') ||
             !Array.isArray(body.targets) || body.targets.length > 128 || !body.targets.every(isDebuggerTarget) ||
+            (body.live_tab_count !== null && !isSafeIntegerInRange(body.live_tab_count, 0, 512)) ||
             !Array.isArray(body.scripts) || body.scripts.length > 5000 || !body.scripts.every(isDebuggerScript) ||
             !Array.isArray(body.breakpoints) || body.breakpoints.length > 1000 || !body.breakpoints.every(isDebuggerBreakpoint) ||
             !Array.isArray(body.watches) || body.watches.length > 100 || !body.watches.every(isDebuggerWatch) ||
@@ -1253,7 +1274,7 @@
             !isCanonicalInteger(body.frame_id, 0n, uint64Max) ||
             !isSignalEventReference(body.root_event) ||
             (body.initiator_event !== null && !isSignalEventReference(body.initiator_event)) ||
-            !Array.isArray(body.signals) || body.signals.length > 7 ||
+            !Array.isArray(body.signals) || body.signals.length > 8 ||
             !isPlainObject(body.coverage)) return false;
         const categories = new Set();
         const expectedProcessID = (body.initiator_event ?? body.root_event).process_id;

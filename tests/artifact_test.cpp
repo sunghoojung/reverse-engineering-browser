@@ -81,6 +81,7 @@ CHECK_ARTIFACT_KIND_VALUE(kJavaScript);
 CHECK_ARTIFACT_KIND_VALUE(kWasm);
 CHECK_ARTIFACT_KIND_VALUE(kSourceMap);
 CHECK_ARTIFACT_KIND_VALUE(kResponseBody);
+CHECK_ARTIFACT_KIND_VALUE(kCanvasDataUrl);
 #undef CHECK_ARTIFACT_KIND_VALUE
 
 #define CHECK_ARTIFACT_ORIGIN_VALUE(value)                                       \
@@ -92,6 +93,7 @@ CHECK_ARTIFACT_ORIGIN_VALUE(kDynamicJavaScript);
 CHECK_ARTIFACT_ORIGIN_VALUE(kWebAssemblyCompile);
 CHECK_ARTIFACT_ORIGIN_VALUE(kWebAssemblyModule);
 CHECK_ARTIFACT_ORIGIN_VALUE(kWebAssemblyInstantiate);
+CHECK_ARTIFACT_ORIGIN_VALUE(kCanvasToDataUrl);
 #undef CHECK_ARTIFACT_ORIGIN_VALUE
 
 namespace {
@@ -121,7 +123,10 @@ reb::ArtifactHeader Header(const std::uint64_t artifact_id,
                            const reb::ArtifactKind kind = reb::ArtifactKind::kJavaScript) {
   reb::ArtifactHeader header;
   header.kind = kind;
-  header.flags = kind == reb::ArtifactKind::kResponseBody ? reb::kArtifactFlagSensitive : 0;
+  header.flags =
+      kind == reb::ArtifactKind::kResponseBody || kind == reb::ArtifactKind::kCanvasDataUrl
+          ? reb::kArtifactFlagSensitive
+          : 0;
   header.session_id = 7;
   header.navigation_id = 100;
   header.frame_id = 200;
@@ -285,6 +290,15 @@ int main() {
   reb::ArtifactReceiver approved_receiver(approved_directory.Path(), Limits(1024, 4096, true));
   std::istringstream approved_response(response_frame);
   CHECK(approved_receiver.ReceiveOne(approved_response) == reb::ArtifactReceiveStatus::kAccepted);
+
+  TemporaryDirectory canvas_directory("canvas-sensitive");
+  reb::ArtifactReceiver canvas_receiver(canvas_directory.Path(), Limits(1024, 4096, true));
+  reb::ArtifactHeader canvas_header = Header(501, 34, reb::ArtifactKind::kCanvasDataUrl);
+  canvas_header.capture_origin = reb::ArtifactCaptureOrigin::kCanvasToDataUrl;
+  const std::string canvas_data_url = "data:image/png;base64,iVBORw0KGgo=";
+  std::istringstream canvas_frame(
+      Frame(canvas_header, canvas_data_url, "canvas://readback", "text/plain"));
+  CHECK(canvas_receiver.ReceiveOne(canvas_frame) == reb::ArtifactReceiveStatus::kAccepted);
 
   TemporaryDirectory invalid_directory("invalid");
   reb::ArtifactReceiver invalid_receiver(invalid_directory.Path(), Limits(1024, 4096));

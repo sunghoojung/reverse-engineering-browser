@@ -86,6 +86,7 @@ CHECK_WIRE_ENUM_VALUE(reb::EventCategory, reb::NativeProbeCategory, kWasm);
 CHECK_WIRE_ENUM_VALUE(reb::EventCategory, reb::NativeProbeCategory, kNetwork);
 CHECK_WIRE_ENUM_VALUE(reb::EventCategory, reb::NativeProbeCategory, kVm);
 CHECK_WIRE_ENUM_VALUE(reb::EventCategory, reb::NativeProbeCategory, kArtifact);
+CHECK_WIRE_ENUM_VALUE(reb::EventCategory, reb::NativeProbeCategory, kRuntime);
 CHECK_WIRE_ENUM_VALUE(reb::EventType, reb::NativeProbeType, kUnknown);
 CHECK_WIRE_ENUM_VALUE(reb::EventType, reb::NativeProbeType, kApiCall);
 CHECK_WIRE_ENUM_VALUE(reb::EventType, reb::NativeProbeType, kPropertyRead);

@@ -24,7 +24,7 @@ class NativeProbeSession;
 
 class NativeProbeHost final : public mojom::NativeProbeHost {
  public:
-  explicit NativeProbeHost(NativeProbeSession& session);
+  NativeProbeHost(NativeProbeSession& session, int renderer_process_id);
   NativeProbeHost(const NativeProbeHost&) = delete;
   NativeProbeHost& operator=(const NativeProbeHost&) = delete;
   ~NativeProbeHost() override;
@@ -34,6 +34,7 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   void EventsAvailable() override;
   void CaptureGeneratedArtifact(std::uint16_t kind,
                                 std::uint16_t capture_origin,
+                                std::uint64_t creator_event_id,
                                 std::uint64_t execution_context_id,
                                 std::uint64_t frame_id,
                                 const std::string& source_url,
@@ -41,13 +42,15 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
 
   void Configure(std::uint64_t session_id,
                  std::uint64_t category_mask,
-                 std::uint64_t expires_at_monotonic_ns);
+                 std::uint64_t expires_at_monotonic_ns,
+                 bool capture_canvas_images);
   void Disable();
 
  private:
   void Drain();
 
   const raw_ref<NativeProbeSession> session_;
+  const int renderer_process_id_;
   mojo::Remote<mojom::NativeProbeClient> client_;
   base::UnsafeSharedMemoryRegion queue_region_;
   base::WritableSharedMemoryMapping queue_mapping_;

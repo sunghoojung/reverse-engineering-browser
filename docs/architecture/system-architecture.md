@@ -9,7 +9,8 @@ is the editable diagram source.
 
 ## Native capture and local evidence
 
-1. Native Canvas, Web Audio, and request-initiation probes write fixed 320-byte
+1. Native binding and V8 runtime probes across eight fingerprint families,
+   lower-level Canvas, WebGL and Web Audio hooks, and request-initiation probes write fixed 320-byte
    records to a bounded shared-memory **multi-producer, single-consumer (MPSC)**
    queue per renderer. Render and worker threads produce events; the browser
    process is the sole consumer. Mojo carries session configuration, lifecycle,
@@ -23,12 +24,13 @@ is the editable diagram source.
    Optional cold-path indexes write Origin Trace edges and request signal
    profiles. Identifier relationships support observed or correlated links,
    not arbitrary JavaScript value provenance.
-4. Authorized JavaScript and WASM response content and runtime-generated source
-   use a separate artifact path. Runtime source arrives through a bounded Mojo
-   submission; response bytes use an asynchronous browser-process tee. Neither
-   puts artifact bytes into the renderer event queue. The artifact receiver
-   commits SHA-256 blobs and manifest records before acknowledging acceptance.
-   Failed captures become explicit events.
+4. Authorized JavaScript and WASM response content, runtime-generated source,
+   and explicitly enabled Canvas data URLs use a separate artifact path. Runtime
+   source and Canvas output arrive through bounded Mojo submission; response
+   bytes use an asynchronous browser-process tee. None puts artifact bytes into
+   the renderer event queue. The artifact receiver commits SHA-256 blobs and
+   manifest records before acknowledging acceptance. Failed captures become
+   explicit events.
 5. Origin Trace reads bounded projections of evidence and artifact stores.
    The cold-path VM analyzer reads events and artifacts and writes a separate
    derived analysis document. It never runs inside a probe, browser capture

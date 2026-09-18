@@ -28,6 +28,7 @@ enum class EventCategory : std::uint16_t {
   kNetwork = 9,
   kVm = 10,
   kArtifact = 11,
+  kRuntime = 12,
 };
 
 enum class EventType : std::uint16_t {

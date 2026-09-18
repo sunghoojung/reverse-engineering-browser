@@ -17,6 +17,8 @@
 
 namespace reb {
 
+using NativeProbeFrameIdProvider = std::uint64_t (*)() noexcept;
+
 class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
  public:
   static NativeProbeSink& Get();
@@ -29,15 +31,37 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                    NativeGeneratedArtifactEmitter artifact_emitter,
                    std::uint64_t session_id,
                    std::uint64_t category_mask,
-                   std::uint64_t expires_at_monotonic_ns) noexcept;
+                   std::uint64_t expires_at_monotonic_ns,
+                   bool capture_canvas_images = false,
+                   NativeProbeFrameIdProvider frame_id_provider = nullptr) noexcept;
   [[nodiscard]] bool IsArtifactCaptureEnabled() const noexcept;
+  [[nodiscard]] bool IsCanvasImageCaptureEnabled() const noexcept;
+  void CaptureGeneratedArtifact(NativeArtifactKind kind,
+                                NativeArtifactCaptureOrigin capture_origin,
+                                std::uint64_t creator_event_id,
+                                std::uint64_t execution_context_id,
+                                std::uint64_t frame_id,
+                                std::string_view source_url,
+                                std::span<const std::uint8_t> content) noexcept;
   void CaptureGeneratedArtifact(NativeArtifactKind kind,
                                 NativeArtifactCaptureOrigin capture_origin,
                                 std::uint64_t execution_context_id,
                                 std::uint64_t frame_id,
                                 std::string_view source_url,
-                                std::span<const std::uint8_t> content) noexcept;
+                                std::span<const std::uint8_t> content) noexcept {
+    CaptureGeneratedArtifact(kind, capture_origin, 0, execution_context_id, frame_id, source_url,
+                             content);
+  }
+  void RecordApiCall(NativeProbeCategory category, std::string_view operation) noexcept;
+  void RecordPropertyRead(NativeProbeCategory category, std::string_view operation) noexcept;
+  void RecordApiCallOnce(NativeProbeCategory category,
+                         std::string_view operation,
+                         std::atomic<std::uint64_t>& observed_session_id) noexcept;
+  void RecordPropertyReadOnce(NativeProbeCategory category,
+                              std::string_view operation,
+                              std::atomic<std::uint64_t>& observed_session_id) noexcept;
   void RecordCanvasToDataUrl() noexcept;
+  void RecordCanvasToDataUrl(std::string_view data_url) noexcept;
   void RecordWebAudioCall(std::string_view operation) noexcept;
   void RecordRequestInitiated(std::int32_t request_id,
                               std::string_view method,
@@ -46,7 +70,14 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
  private:
   NativeProbeSink() = default;
 
+  [[nodiscard]] std::uint64_t RecordSurfaceOperation(
+      NativeProbeCategory category,
+      NativeProbeType type,
+      std::string_view operation,
+      std::atomic<std::uint64_t>* observed_session_id = nullptr) noexcept;
+
   std::atomic<NativeProbeEmitter> emitter_{nullptr};
+  std::atomic<NativeProbeFrameIdProvider> frame_id_provider_{nullptr};
   std::atomic<NativeGeneratedArtifactEmitter> artifact_emitter_{nullptr};
   std::atomic<std::uint64_t> next_sequence_{1};
   // Even generations are stable. SetEmitters transitions through the next odd
@@ -55,6 +86,7 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<std::uint64_t> session_id_{0};
   std::atomic<std::uint64_t> category_mask_{0};
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};
+  std::atomic<bool> capture_canvas_images_{false};
 };
 
 }  // namespace reb

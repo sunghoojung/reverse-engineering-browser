@@ -55,6 +55,20 @@ response bodies are retained only in memory by the local UI bridge, limited to
 128 KiB per side, and discarded when the live session ends. The Origin Trace
 title bar visibly changes to `Live content` while this mode is active.
 
+All eight fingerprint metadata families are enabled by the standard live
+launcher. To retain the exact data URL returned by Canvas readback for one
+authorized session, run:
+
+```sh
+REB_CAPTURE_CANVAS_IMAGES=1 make live
+```
+
+Canvas image capture is disabled by default because rendered output can contain
+page content. Enabled output stays in the local session artifact store, is
+limited to 2 MiB per image, and is joined to its exact `toDataURL` event. The UI
+continues to show operation names when image capture is off or an image exceeds
+the limit.
+
 For a live capture without a DevTools connection:
 
 ```sh
@@ -138,16 +152,49 @@ shared-identifier matches remain explicit. Refresh failures retain the previous
 trace, and arrow keys move between trace rows.
 
 Fingerprinting is a first-class session workspace for Canvas, WebGL, Web Audio,
-Navigator, Permissions, Storage, and WebRTC activity. Rendering is the primary
-view: each Canvas readback becomes a card for visual output, deterministic local
-replay, ordered drawing functions, and stable evidence identity. The explicit
-development demo reconstructs both images locally from its visible, bounded
-call sequence; it does not present those pixels as a native capture. A live
-readback without retained render data shows an explicit unavailable preview
-instead of inventing an image.
+device, layout, and WebGPU APIs, Permissions, Storage, WebRTC, and Runtime activity.
+Rendering is the primary view: an eight-card surface overview reports event
+count, distinct operations, and the most active operation before the Canvas
+readback cards.
+Each card separates exact captured output, replay availability, ordered drawing
+functions, and stable evidence identity. The explicit development demo
+reconstructs both images locally from its visible, bounded call sequence; it
+does not present those pixels as native capture. A live readback lists up to 128
+supported Canvas operation names observed earlier in the same renderer stream.
+When the session explicitly enables Canvas image capture, the exact bounded
+`toDataURL` result is shown as captured output. The UI keeps the newest 24
+readbacks and loads at most 48 MiB of Canvas preview data. The native format
+still does not retain drawing arguments or a canvas object identifier, so local
+replay remains unavailable and the earlier-call relationship stays
+renderer-scoped.
 
-Activity keeps native probe operations newest first, renders at most 500
-matching operations, and moves detailed identifiers behind a disclosure. The
+The fingerprint workspace scopes Rendering and Activity to a captured browser
+tab, all tabs, or explicitly unattributed events. The selected tab is a stable
+top-level frame-tree identifier; renderer events without a live frame context
+remain unattributed instead of being guessed from process ID. Activity keeps
+native probe operations newest first, calls out newly arrived rows, preserves
+the reading position while older rows are inspected, and renders at most 500
+matching operations. Latest jumps back to the top and marks the scoped new
+rows seen. The Stop probes button disables the native session through the
+local broker without closing the browser. Clear events is available after
+capture stops, requires confirmation, and truncates only this session's event,
+trace, and request-profile stores. Canvas artifact files and other saved files
+remain on disk. Detailed identifiers stay behind a disclosure. The
+captured-tab buttons are historical evidence, not an open-tab count. In a live
+debugger session, the browser target list supplies a separately labeled current
+page-tab count, refreshed as targets open and close. Quiet mode and a lost
+debugger connection show that count as unavailable rather than guessing from
+captured events. The footer separates missing per-process sequence IDs from
+reported queue drops, since a gap report can describe the same missing IDs.
+The custom browser observes generated Web IDL callbacks for a selected native
+allowlist across all eight families, in addition to the lower-level Canvas,
+WebGL, and Web Audio hooks needed by internal Blink paths and selected V8 Math,
+Intl, and timezone hooks. Generic DOM bindings retain only measurement and
+capability members, preventing ordinary page rendering from overwhelming the
+timeline. Generated non-Canvas and V8 probes retain the first observation per
+call site in each capture session, while lower-level Canvas drawing hooks keep
+their renderer order for readback inspection. Coverage is broad but
+intentionally does not claim every browser API.
 Request link view separates observed parent chains from same-context
 correlation and exposes zero-count families instead of hiding coverage. The
 view never claims that an observed value was transmitted or that a particular

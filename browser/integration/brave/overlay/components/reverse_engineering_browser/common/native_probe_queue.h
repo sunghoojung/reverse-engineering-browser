@@ -21,8 +21,8 @@
 namespace reb {
 
 inline constexpr std::uint32_t kNativeProbeQueueMagic = 0x52454251;
-inline constexpr std::uint16_t kNativeProbeQueueVersion = 1;
-inline constexpr std::size_t kNativeProbeQueueCapacity = 256;
+inline constexpr std::uint16_t kNativeProbeQueueVersion = 2;
+inline constexpr std::size_t kNativeProbeQueueCapacity = 1024;
 
 inline NativeProbeEvent MakeNativeProbeGapEvent(const NativeProbeEvent& reference,
                                                 const std::uint64_t dropped) noexcept {
@@ -50,6 +50,25 @@ inline NativeProbeEvent MakeNativeProbeGapEvent(const NativeProbeEvent& referenc
   return gap;
 }
 
+// A gap record represents the original dropped events, not one additional
+// event. If another bounded queue rejects that record, preserve its weight.
+inline std::uint64_t NativeProbeDropWeight(const NativeProbeEvent& event) noexcept {
+  if (event.header.type != NativeProbeType::kGap || event.header.payload_size == 0 ||
+      event.header.payload_size > 20) {
+    return 1;
+  }
+  std::uint64_t count = 0;
+  for (std::uint32_t index = 0; index < event.header.payload_size; ++index) {
+    const auto digit = static_cast<unsigned char>(event.inline_payload[index]);
+    if (digit < '0' || digit > '9' ||
+        count > (std::numeric_limits<std::uint64_t>::max() - (digit - '0')) / 10) {
+      return 1;
+    }
+    count = count * 10 + digit - '0';
+  }
+  return count == 0 ? 1 : count;
+}
+
 // A bounded multi-producer, single-consumer queue stored directly in shared
 // memory. Renderer probes can run on the render thread or worker threads, so a
 // single-producer queue would introduce a data race. The browser process is the
@@ -69,7 +88,8 @@ class alignas(64) NativeProbeQueue final {
            record_size_ == sizeof(NativeProbeEvent) && capacity_ == kNativeProbeQueueCapacity;
   }
 
-  [[nodiscard]] bool TryPush(const NativeProbeEvent& event) noexcept {
+  [[nodiscard]] bool TryPush(const NativeProbeEvent& event,
+                             const std::uint64_t dropped_weight = 1) noexcept {
     std::uint64_t position = enqueue_position_.load(std::memory_order_relaxed);
 
     for (;;) {
@@ -88,7 +108,7 @@ class alignas(64) NativeProbeQueue final {
       }
 
       if (difference < 0) {
-        IncrementDroppedCount();
+        IncrementDroppedCount(dropped_weight);
         return false;
       }
 
@@ -145,11 +165,17 @@ class alignas(64) NativeProbeQueue final {
     NativeProbeEvent event{};
   };
 
-  void IncrementDroppedCount() noexcept {
+  void IncrementDroppedCount(const std::uint64_t weight) noexcept {
     std::uint64_t dropped = dropped_.load(std::memory_order_relaxed);
-    while (dropped != std::numeric_limits<std::uint64_t>::max() &&
-           !dropped_.compare_exchange_weak(dropped, dropped + 1, std::memory_order_relaxed,
-                                           std::memory_order_relaxed)) {
+    while (dropped != std::numeric_limits<std::uint64_t>::max()) {
+      const std::uint64_t remaining = std::numeric_limits<std::uint64_t>::max() - dropped;
+      const std::uint64_t bounded_weight = weight == 0 ? 1 : weight;
+      const std::uint64_t next =
+          dropped + (bounded_weight > remaining ? remaining : bounded_weight);
+      if (dropped_.compare_exchange_weak(dropped, next, std::memory_order_relaxed,
+                                         std::memory_order_relaxed)) {
+        return;
+      }
     }
   }
 
@@ -176,7 +202,7 @@ class alignas(64) NativeProbeQueue final {
   alignas(64) std::array<Slot, kNativeProbeQueueCapacity> slots_{};
 };
 
-static_assert(sizeof(NativeProbeQueue) == 98624);
+static_assert(sizeof(NativeProbeQueue) == 393536);
 static_assert(alignof(NativeProbeQueue) == 64);
 
 }  // namespace reb

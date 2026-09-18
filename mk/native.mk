@@ -97,12 +97,16 @@ $(APP_BINARIES) $(TEST_BINARIES):
 
 $(BUILD_DIR)/%.o: %.cpp
 	@mkdir -p $(@D)
-	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) -MMD -MP -c $< -o $@
+	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) -c $< -o $@
+	SCCACHE_DISABLE=1 $(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) -MM -MP -MT $@ -MF $(@:.o=.d) $<
 
 $(BUILD_DIR)/%.o: %.cc
 	@mkdir -p $(@D)
-	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) -MMD -MP -c $< -o $@
+	$(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) -c $< -o $@
+	SCCACHE_DISABLE=1 $(CXX) $(CPPFLAGS) $(COMMON_CXXFLAGS) $(OPT_CXXFLAGS) -MM -MP -MT $@ -MF $(@:.o=.d) $<
 
+# sccache replays cached dependency files with the original output path. Generate
+# these separately, without cache, so each build directory has correct targets.
 # Discover dependency files without adding sources to any link target implicitly.
 NATIVE_CPP_SOURCES := $(wildcard src/*/*.cpp apps/*/main.cpp services/*/main.cpp tests/*.cpp)
 NATIVE_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(NATIVE_CPP_SOURCES)) \

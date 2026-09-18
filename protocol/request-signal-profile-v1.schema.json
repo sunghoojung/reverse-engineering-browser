@@ -32,7 +32,7 @@
     "frame_id": { "$ref": "#/$defs/uint64" },
     "signals": {
       "type": "array",
-      "maxItems": 7,
+      "maxItems": 8,
       "items": { "$ref": "#/$defs/signal" }
     },
     "coverage": { "$ref": "#/$defs/coverage" }
@@ -120,7 +120,8 @@
             "navigator",
             "permissions",
             "storage",
-            "webrtc"
+            "webrtc",
+            "runtime"
           ]
         },
         "relation": { "enum": ["parent_chain", "same_context"] },

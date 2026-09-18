@@ -115,6 +115,7 @@ REB_EVENT_PRODUCER="${event_producer}" \
 REB_ARTIFACT_PRODUCER="${artifact_producer}" \
 REB_CAPTURE_DURATION_SECONDS=60 \
 REB_CDP_NETWORK_CAPTURE=1 \
+REB_CAPTURE_CANVAS_IMAGES=1 \
   "${live_script}" >"${test_root}/live.out" 2>"${test_root}/live.err"
 
 test -f "${analyzer_started}"
@@ -129,13 +130,13 @@ fi
 session_directory="$(find "${test_root}/sessions" -mindepth 1 -maxdepth 1 -type d -print -quit)"
 readonly session_directory
 test -n "${session_directory}"
-test "$(wc -l <"${session_directory}/events.jsonl" | tr -d ' ')" = 6
+test "$(wc -l <"${session_directory}/events.jsonl" | tr -d ' ')" = 14
 test -s "${session_directory}/origin-trace.jsonl"
 test -s "${session_directory}/request-signals.jsonl"
 test "$(wc -l <"${session_directory}/artifacts/manifest.jsonl" | tr -d ' ')" = 3
 grep -Fq '"category":"network"' "${session_directory}/events.jsonl"
 test "$(grep -c "\"category\":\"web_audio\",\"type\":\"api_call\".*\"payload\":\"${web_audio_payload_hex}\"" "${session_directory}/events.jsonl")" = 1
-test "$(grep -c '\"category\":\"web_audio\",\"relation\":\"same_context\",\"confidence\":\"correlated\",\"event_count\":\"1\"' "${session_directory}/request-signals.jsonl")" = 2
+test "$(grep -c '\"category\":\"web_audio\",\"relation\":\"parent_chain\",\"confidence\":\"observed\",\"event_count\":\"1\"' "${session_directory}/request-signals.jsonl")" = 2
 grep -Fq '"kind":"wasm"' "${session_directory}/artifacts/manifest.jsonl"
 grep -Fxq -- '--artifacts' "${open_arguments}"
 grep -Fxq -- "${session_directory}/artifacts" "${open_arguments}"
@@ -146,9 +147,12 @@ grep -Fxq -- "${session_directory}/origin-trace.jsonl" "${open_arguments}"
 grep -Fxq -- '--signal-store' "${open_arguments}"
 grep -Fxq -- "${session_directory}/request-signals.jsonl" "${open_arguments}"
 grep -Fxq -- '--ui-url' "${open_arguments}"
-grep -Eq '^http://127\.0\.0\.1:[0-9]+/\?native=1$' "${open_arguments}"
+grep -Eq '^http://127\.0\.0\.1:[0-9]+/\?native=1&canvas_images=1$' "${open_arguments}"
 grep -Fxq -- '--remote-debugging-port=0' "${brave_arguments}"
+grep -Fxq -- '--reb-category-mask=4095' "${brave_arguments}"
+grep -Fxq -- '--reb-capture-canvas-images' "${brave_arguments}"
 grep -Fq 'CDP network content: enabled for this session' "${test_root}/live.out"
+grep -Fq 'Canvas image capture: enabled for this session' "${test_root}/live.out"
 grep -Fxq -- "--user-data-dir=${session_directory}/brave-profile" "${brave_arguments}"
 grep -Fq 'accepted=3' "${session_directory}/artifact-receiver.log"
 test ! -e "/tmp/origin-trace-${UID}-$(basename "${session_directory}").sock"
@@ -211,6 +215,22 @@ if grep -Fq '"category":"web_audio"' "${disabled_session_directory}/events.jsonl
 fi
 test ! -e "${disabled_session_directory}/artifact-receiver.log"
 test ! -e "${disabled_session_directory}/artifacts/manifest.jsonl"
+grep -Eq '^http://127\.0\.0\.1:[0-9]+/\?native=1&canvas_images=0$' "${open_arguments}"
+if grep -Fxq -- '--reb-capture-canvas-images' "${brave_arguments}"; then
+  echo "Disabled Canvas image capture passed its browser switch" >&2
+  exit 1
+fi
+
+if REB_BRAVE_BINARY="${fake_brave}" \
+  REB_ORIGIN_TRACE_APP="${fake_app}" \
+  REB_LIVE_SESSION_ROOT="${test_root}/invalid-sessions" \
+  REB_CAPTURE_CATEGORY_MASK=1 \
+  REB_CAPTURE_CANVAS_IMAGES=1 \
+  "${live_script}" >"${test_root}/invalid-live.out" 2>"${test_root}/invalid-live.err"; then
+  echo "Canvas image capture started without the Artifact category" >&2
+  exit 1
+fi
+grep -Fq 'requires Canvas and Artifact category bits' "${test_root}/invalid-live.err"
 
 readonly quiet_sessions="${test_root}/quiet-sessions"
 REB_BRAVE_BINARY="${fake_brave}" \

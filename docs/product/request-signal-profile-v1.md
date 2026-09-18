@@ -70,8 +70,8 @@ field. Exact value flow remains future work.
 
 - The index retains at most the broker's configured event capacity and evicts
   in deterministic insertion order.
-- A request reports at most seven fixed categories: Canvas, WebGL, Web Audio,
-  Navigator, Permissions, Storage, and WebRTC.
+- A request reports at most eight fixed categories: Canvas, WebGL, Web Audio,
+  device and layout, Permissions, Storage, WebRTC, and Runtime.
 - Parent traversal stops after 32 events and reports the limit in coverage.
 - Retention eviction remains visible as `retention_truncated`.
 - A saturated category count remains visible as `count_saturated`.

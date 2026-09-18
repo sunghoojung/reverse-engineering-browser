@@ -12,6 +12,7 @@ interface NativeProbeClient {
   Configure(uint64 session_id,
             uint64 category_mask,
             uint64 expires_at_monotonic_ns,
+            bool capture_canvas_images,
             mojo_base.mojom.UnsafeSharedMemoryRegion queue_region);
   Disable();
 };
@@ -23,6 +24,7 @@ interface NativeProbeHost {
   EventsAvailable();
   CaptureGeneratedArtifact(uint16 kind,
                            uint16 capture_origin,
+                           uint64 creator_event_id,
                            uint64 execution_context_id,
                            uint64 frame_id,
                            string source_url,

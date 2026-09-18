@@ -60,10 +60,31 @@
 
       const fingerprintSignalLabels = new Map([
         ['canvas', 'Canvas'], ['webgl', 'WebGL'], ['web_audio', 'Web Audio'],
-        ['navigator', 'Navigator'], ['permissions', 'Permissions'],
-        ['storage', 'Storage'], ['webrtc', 'WebRTC']
+        ['navigator', 'Device, layout & WebGPU'], ['permissions', 'Permissions'],
+        ['storage', 'Storage'], ['webrtc', 'WebRTC'], ['runtime', 'Runtime']
       ]);
       const signalEventDisplayLimit = 500;
+      const nativeCanvasCaptureDisplayLimit = 24;
+      const nativeCanvasDrawingMethods = new Set([
+        'save', 'restore', 'scale', 'rotate', 'translate', 'transform',
+        'setTransform', 'resetTransform', 'beginPath', 'closePath', 'moveTo',
+        'lineTo', 'quadraticCurveTo', 'bezierCurveTo', 'arcTo', 'arc',
+        'ellipse', 'rect', 'roundRect', 'fill', 'stroke', 'fillRect',
+        'strokeRect', 'clearRect', 'drawImage', 'fillText', 'strokeText',
+        'clip', 'putImageData', 'createConicGradient', 'createImageData',
+        'createLinearGradient', 'createPattern', 'createRadialGradient',
+        'addColorStop', 'setLineDash', 'getContext'
+      ]);
+      const nativeCanvasCallLimit = 128;
+      const canvasDataUrlPattern = /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
+
+      function canvasReadbackName(operation) {
+        const match = /^(toDataURL|toBlob|getImageData)$/.exec(operation) ??
+          /^(?:canvas|HTMLCanvasElement)\.(toDataURL|toBlob)$/.exec(operation) ??
+          /^(?:canvas|CanvasRenderingContext2D|OffscreenCanvasRenderingContext2D)\.(getImageData)$/.exec(operation) ??
+          /^(?:OffscreenCanvas)\.(convertToBlob)$/.exec(operation);
+        return match?.[1] ?? null;
+      }
 
       function requestSignalRoot(request) {
         if (!request || request.origin === 'sample') return null;
@@ -133,31 +154,94 @@
       }
 
       function canvasRenderCaptures(signalEvents) {
-        const readbacks = signalEvents.filter(event => event.category === 'canvas' &&
-          /(?:toDataURL|toBlob|getImageData)/.test(decodePayload(event)));
+        const canvasEvents = signalEvents.filter(event => event.category === 'canvas');
+        const readbacks = canvasEvents.filter(event => canvasReadbackName(decodePayload(event)));
         if (state.sessionMode === 'demo' && state.canvasRenderCaptures.length > 0 && readbacks.length > 0) {
           return state.canvasRenderCaptures.map((capture, index) => ({
             ...capture, evidenceEvent: readbacks[Math.min(index, readbacks.length - 1)], demo: true
           }));
         }
-        return readbacks.map((event, index) => ({
-          id: `canvas#${index + 1}`, context: '2D', width: null, height: null,
-          readback: decodePayload(event).split('.').at(-1) || 'readback',
-          operationHash: null, calls: [], evidenceEvent: event, demo: false
-        }));
+        const streams = new Map();
+        const captures = [];
+        const orderedCanvasEvents = [...canvasEvents].sort((left, right) => {
+          const sessionOrder = integerValue(left, 'session_id') - integerValue(right, 'session_id');
+          if (sessionOrder !== 0n) return sessionOrder < 0n ? -1 : 1;
+          if (left.process_id !== right.process_id) return left.process_id - right.process_id;
+          const sequenceOrder = integerValue(left, 'sequence_number') - integerValue(right, 'sequence_number');
+          return sequenceOrder < 0n ? -1 : sequenceOrder > 0n ? 1 : 0;
+        });
+        orderedCanvasEvents.forEach(event => {
+          const operation = decodePayload(event);
+          const streamId = `${integerText(event, 'session_id')}:${event.process_id}:${integerText(event, 'frame_id')}`;
+          const stream = streams.get(streamId) ?? {calls: [], observed: 0};
+          streams.set(streamId, stream);
+          const readback = canvasReadbackName(operation);
+          if (readback) {
+            captures.push({
+              id: `canvas#${captures.length + 1}`, context: '2D', width: null, height: null,
+              readback, operationHash: null, calls: [...stream.calls],
+              callsTruncated: stream.observed > stream.calls.length,
+              evidenceEvent: event, demo: false
+            });
+            return;
+          }
+          const call = /^(?:canvas|HTMLCanvasElement|CanvasRenderingContext2D|OffscreenCanvasRenderingContext2D|CanvasGradient|CanvasPattern)\.([A-Za-z][A-Za-z0-9]*)$/.exec(operation);
+          if (event.type !== 'api_call' || !call || !nativeCanvasDrawingMethods.has(call[1])) return;
+          stream.observed += 1;
+          stream.calls.push({
+            name: operation.startsWith('canvas.') ? call[1] : operation,
+            arguments: [], observedOnly: true
+          });
+          if (stream.calls.length > nativeCanvasCallLimit) stream.calls.shift();
+        });
+        const artifacts = (state.artifacts ?? []).filter(artifact =>
+          artifact.kind === 'canvas_data_url' && artifact.capture_origin === 'canvas_to_data_url');
+        const claimed = new Set();
+        captures.forEach(capture => {
+          const sessionId = integerText(capture.evidenceEvent, 'session_id');
+          const sequence = integerText(capture.evidenceEvent, 'sequence_number');
+          const index = artifacts.findIndex((artifact, artifactIndex) =>
+            !claimed.has(artifactIndex) && artifact.session_id === sessionId &&
+            artifact.creator_event_id === sequence);
+          if (index === -1) return;
+          claimed.add(index);
+          capture.artifact = artifacts[index];
+          if (!capture.artifact.contentTruncated &&
+              canvasDataUrlPattern.test(capture.artifact.content ?? '')) {
+            capture.dataUrl = capture.artifact.content;
+          }
+        });
+        return captures.sort((left, right) => {
+          const delta = integerValue(left.evidenceEvent, 'monotonic_time_ns') -
+            integerValue(right.evidenceEvent, 'monotonic_time_ns');
+          return delta < 0n ? -1 : delta > 0n ? 1 : 0;
+        }).slice(-nativeCanvasCaptureDisplayLimit).reverse();
       }
 
-      function canvasPreview(capture, label, replayLabel) {
+      function canvasPreview(capture, label, replayLabel, capturedOutput = false) {
         const preview = document.createElement('figure');
         preview.className = 'signal-canvas-preview';
         preview.append(textElement('figcaption', '', label));
         const frame = document.createElement('div');
         frame.className = 'signal-canvas-frame';
-        if (capture.calls.length === 0 || !capture.width || !capture.height) {
+        if (capturedOutput && capture.dataUrl) {
+          const image = document.createElement('img');
+          image.src = capture.dataUrl;
+          image.alt = replayLabel;
+          image.decoding = 'async';
+          frame.append(image);
+        } else if (capture.calls.length === 0 || !capture.width || !capture.height || !capture.demo) {
           frame.classList.add('unavailable');
+          const explanation = capturedOutput && !state.canvasImageCaptureEnabled
+            ? 'Image capture is off for this session. Restart with REB_CAPTURE_CANVAS_IMAGES=1 to retain sensitive Canvas output.'
+            : capturedOutput && capture.artifact
+              ? 'The Canvas artifact was retained but did not pass the bounded image data URL validator.'
+              : capture.calls.length
+                ? 'Operation names were retained, but arguments were not, so a faithful local replay cannot be generated.'
+                : 'This capture retained the readback call, but no supported earlier drawing operations.';
           frame.append(
             textElement('strong', '', 'Preview unavailable'),
-            textElement('span', '', 'This capture retained the readback call, but not pixels or earlier drawing calls.')
+            textElement('span', '', explanation)
           );
         } else {
           const canvas = document.createElement('canvas');
@@ -181,7 +265,7 @@
         title.append(
           textElement('span', 'signal-render-icon', '▱'),
           textElement('h3', '', capture.id),
-          textElement('p', '', `${capture.context}${capture.width ? ` · ${capture.width} × ${capture.height}` : ''} · ${capture.readback} · ${capture.calls.length} drawing ${capture.calls.length === 1 ? 'call' : 'calls'}`)
+          textElement('p', '', `${capture.context}${capture.width ? ` · ${capture.width} × ${capture.height}` : ''} · ${capture.readback} · ${capture.calls.length} observed drawing ${capture.calls.length === 1 ? 'call' : 'calls'}`)
         );
         const badges = document.createElement('div');
         badges.className = 'signal-render-badges';
@@ -192,7 +276,7 @@
         const comparison = document.createElement('div');
         comparison.className = 'signal-canvas-comparison';
         comparison.append(
-          canvasPreview(capture, capture.demo ? 'DEMO OUTPUT' : 'CAPTURED OUTPUT', `${capture.id} rendered output`),
+          canvasPreview(capture, capture.demo ? 'DEMO OUTPUT' : 'CAPTURED OUTPUT', `${capture.id} captured output`, true),
           canvasPreview(capture, 'LOCAL REPLAY', `${capture.id} local replay`)
         );
 
@@ -204,7 +288,9 @@
         callsHead.className = 'signal-draw-calls-head';
         callsHead.append(
           textElement('h4', '', 'Drawing functions'),
-          textElement('span', '', capture.calls.length ? `${capture.calls.length} retained in order` : 'Not retained')
+          textElement('span', '', capture.calls.length
+            ? `${capture.calls.length} ${capture.callsTruncated ? 'newest ' : ''}observed in renderer order`
+            : 'None observed')
         );
         calls.append(callsHead);
         if (capture.calls.length) {
@@ -218,7 +304,7 @@
         } else {
           calls.append(textElement(
             'p', 'signal-draw-empty',
-            `${capture.readback} was observed. This event format does not retain the draw-call sequence.`
+            `${capture.readback} was observed without a supported drawing operation earlier in the same renderer stream.`
           ));
         }
 
@@ -229,15 +315,21 @@
         [
           ['event', signalEventKey(capture.evidenceEvent)],
           ['relationship', profileFamily?.confidence ?? 'not linked'],
+          ['drawing scope', capture.demo ? 'deterministic demo' : 'same renderer stream'],
           ['readback', capture.readback],
+          ['canvas artifact', capture.artifact?.artifact_id ?? 'not captured'],
           ['operation hash', capture.operationHash ?? 'not retained']
         ].forEach(([label, value]) => {
           const row = document.createElement('div');
           row.append(textElement('span', '', label), textElement('strong', '', value));
           evidence.append(row);
         });
-        if (capture.demo) evidence.append(textElement(
-          'p', '', 'The demo image is generated locally from the visible calls. A live readback with metadata only remains blank by design.'
+        evidence.append(textElement(
+          'p', '', capture.demo
+            ? 'This demo image is generated locally from visible calls and is not production evidence.'
+            : capture.dataUrl
+              ? 'Sensitive Canvas output was captured locally for this session and linked to the native readback event.'
+              : 'Operation metadata remains available even when sensitive Canvas image capture is off.'
         ));
         body.append(calls, evidence);
         card.append(header, comparison, body);
@@ -245,10 +337,15 @@
       }
 
       function renderFingerprintRendering(signalEvents) {
+        renderSignalSurfaceOverview(signalEvents);
         const captures = canvasRenderCaptures(signalEvents);
+        const readbackCount = signalEvents.filter(event => event.category === 'canvas' &&
+          canvasReadbackName(decodePayload(event))).length;
         elements.signalRenderCount.textContent = String(captures.length);
-        elements.signalRenderSummary.textContent = captures.length
-          ? `${captures.length} canvas ${captures.length === 1 ? 'readback' : 'readbacks'}`
+        elements.signalRenderSummary.textContent = readbackCount
+          ? captures.length < readbackCount
+            ? `${captures.length} newest of ${readbackCount} canvas readbacks`
+            : `${captures.length} canvas ${captures.length === 1 ? 'readback' : 'readbacks'}`
           : 'No canvas readbacks';
         if (!captures.length) {
           elements.signalRenderList.replaceChildren(textElement(
@@ -258,6 +355,41 @@
           return;
         }
         elements.signalRenderList.replaceChildren(...captures.map(renderCanvasCapture));
+      }
+
+      function renderSignalSurfaceOverview(signalEvents) {
+        const uniqueOperations = new Set(signalEvents.map(event =>
+          `${event.category}:${decodePayload(event) || event.type}`));
+        elements.signalOperationSummary.textContent = signalEvents.length
+          ? `${uniqueOperations.size} unique operations` : 'No operations';
+        const cards = [];
+        fingerprintSignalLabels.forEach((label, category) => {
+          const familyEvents = signalEvents.filter(event => event.category === category);
+          const operations = new Map();
+          familyEvents.forEach(event => {
+            const operation = decodePayload(event) || signalTypeLabel(event.type);
+            operations.set(operation, (operations.get(operation) ?? 0) + 1);
+          });
+          const top = [...operations.entries()].sort((left, right) =>
+            right[1] - left[1] || left[0].localeCompare(right[0]))[0];
+          const card = document.createElement('button');
+          card.type = 'button';
+          card.className = 'signal-surface-card';
+          card.dataset.present = String(familyEvents.length > 0);
+          card.append(
+            textElement('span', 'signal-surface-name', label),
+            textElement('strong', '', String(familyEvents.length)),
+            textElement('small', '', `${operations.size} unique ${operations.size === 1 ? 'operation' : 'operations'}`),
+            textElement('code', '', top ? `${top[0]} × ${top[1]}` : 'Not observed')
+          );
+          card.addEventListener('click', () => {
+            state.signalCategoryFilter = category;
+            state.signalView = 'activity';
+            renderFingerprintActivity();
+          });
+          cards.push(card);
+        });
+        elements.signalSurfaceOverview.replaceChildren(...cards);
       }
 
       function renderSignalRequestProfile() {
@@ -336,6 +468,21 @@
           ));
         }
 
+        const snapshot = document.createElement('section');
+        snapshot.className = 'signal-detail-snapshot';
+        snapshot.append(textElement('h3', '', 'What was observed'));
+        const summaryFacts = document.createElement('dl');
+        const tabId = signalTabKey(event);
+        [
+          ['Surface', familyLabel],
+          ['Access', signalTypeLabel(event.type)],
+          ['Browser tab', tabId === 'unattributed' ? 'Unattributed' : `Tab ID ${tabId}`],
+          ['Arguments / return value', 'Not retained in event']
+        ].forEach(([label, value]) => {
+          summaryFacts.append(textElement('dt', '', label), textElement('dd', '', value));
+        });
+        snapshot.append(summaryFacts);
+
         const disclosure = document.createElement('details');
         disclosure.className = 'signal-evidence-disclosure';
         disclosure.append(textElement('summary', '', 'Evidence identifiers'));
@@ -343,6 +490,7 @@
         facts.className = 'signal-facts';
         [
           ['event', signalEventKey(event)],
+          ['tab', tabId],
           ['category', event.category],
           ['operation', event.type],
           ['monotonic time', `${integerText(event, 'monotonic_time_ns')} ns`],
@@ -356,7 +504,7 @@
         });
         disclosure.append(facts);
 
-        const content = [eyebrow, title, subtitle, badges, disclosure];
+        const content = [eyebrow, title, subtitle, badges, snapshot, disclosure];
         if (profileFamily && selectedRequest) {
           const context = document.createElement('section');
           context.className = 'signal-request-context';
@@ -383,8 +531,86 @@
         elements.signalDetail.replaceChildren(...content);
       }
 
+      function signalTabKey(event) {
+        const id = event.protocol_version >= 3 ? integerText(event, 'tab_id') : '0';
+        return id === '0' ? 'unattributed' : id;
+      }
+
+      function renderFingerprintTabScopes(allEvents) {
+        const focusedTabId = elements.signalTabScopes.contains(document.activeElement)
+          ? document.activeElement.dataset.signalTabId : null;
+        const counts = new Map();
+        allEvents.forEach(event => {
+          const id = signalTabKey(event);
+          counts.set(id, (counts.get(id) ?? 0) + 1);
+        });
+        if (state.signalTabId !== 'all' && !counts.has(state.signalTabId)) {
+          state.signalTabId = 'all';
+        }
+        const ids = [...counts.keys()].sort((left, right) =>
+          left === 'unattributed' ? 1 : right === 'unattributed' ? -1 : Number(left) - Number(right));
+        const requestTabLabels = new Map(requestTabGroups()
+          .filter(group => group.id !== 'unattributed')
+          .map((group, index) => [group.id, `Tab ${index + 1}`]));
+        const scopes = [['all', 'All tabs', allEvents.length], ...ids.map(id =>
+          [id, id === 'unattributed' ? 'Unattributed' : requestTabLabels.get(id) ?? `Tab ${id}`, counts.get(id)])];
+        const buttons = scopes.map(([id, label, count]) => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'signal-tab-scope';
+          button.dataset.signalTabId = id;
+          button.setAttribute('role', 'tab');
+          button.setAttribute('aria-selected', String(state.signalTabId === id));
+          button.tabIndex = state.signalTabId === id ? 0 : -1;
+          button.append(textElement('strong', '', label), textElement('span', '', count));
+          button.title = id === 'all' ? 'Show every captured browser tab'
+            : id === 'unattributed' ? 'Events without a browser tab identifier'
+              : `Browser tab ID ${id}`;
+          button.addEventListener('click', () => {
+            state.signalSelectedKeysByTab.set(state.signalTabId, state.selectedSignalEventKey);
+            state.signalTabId = id;
+            state.selectedSignalEventKey = state.signalSelectedKeysByTab.get(id) ?? null;
+            renderFingerprintActivity();
+            elements.signalTabScopes.querySelector('[aria-selected="true"]')?.focus({preventScroll: true});
+          });
+          button.addEventListener('keydown', event => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const tabs = [...elements.signalTabScopes.querySelectorAll('.signal-tab-scope')];
+            const current = tabs.indexOf(button);
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+              : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+            tabs[next].click();
+          });
+          return button;
+        });
+        elements.signalTabScopes.replaceChildren(...buttons);
+        if (focusedTabId) {
+          const restored = buttons.find(button => button.dataset.signalTabId === focusedTabId) ??
+            buttons.find(button => button.dataset.signalTabId === state.signalTabId);
+          restored?.focus({preventScroll: true});
+        }
+      }
+
+      function renderLiveBrowserTabCount() {
+        const count = state.debuggerSession?.live_tab_count;
+        const available = state.sessionMode === 'live' && !state.debuggerError &&
+          Number.isInteger(count) && count >= 0;
+        elements.signalLiveTabs.textContent = available
+          ? `${count} open ${count === 1 ? 'tab' : 'tabs'}`
+          : state.sessionMode === 'live' ? 'Live tab count unavailable' : 'No live browser';
+        elements.signalLiveTabs.dataset.live = String(available);
+        elements.signalLiveTabs.title = available
+          ? 'Current browser page tabs. Captured tab buttons retain historical evidence.'
+          : 'The live browser tab list is unavailable; captured tab buttons show historical evidence.';
+      }
+
       function renderFingerprintActivity() {
-        const signalEvents = fingerprintEventsFromEvents(state.events);
+        const allSignalEvents = fingerprintEventsFromEvents(state.events);
+        renderFingerprintTabScopes(allSignalEvents);
+        renderLiveBrowserTabCount();
+        const signalEvents = state.signalTabId === 'all' ? allSignalEvents
+          : allSignalEvents.filter(event => signalTabKey(event) === state.signalTabId);
         const familyCounts = new Map();
         signalEvents.forEach(event => familyCounts.set(event.category, (familyCounts.get(event.category) ?? 0) + 1));
         const visibleEvents = signalEvents.filter(event =>
@@ -398,6 +624,22 @@
         if (!orderedEvents.some(event => signalEventKey(event) === state.selectedSignalEventKey)) {
           state.selectedSignalEventKey = orderedEvents[0] ? signalEventKey(orderedEvents[0]) : null;
         }
+        state.signalSelectedKeysByTab.set(state.signalTabId, state.selectedSignalEventKey);
+
+        const newCount = signalEvents.filter(event => state.signalNewKeys.has(signalEventKey(event))).length;
+        elements.signalFeedStatus.textContent = newCount > 0
+          ? `${newCount} new ${newCount === 1 ? 'operation' : 'operations'} at the top`
+          : 'Newest first · all caught up';
+        elements.signalFeedStatus.dataset.new = String(newCount > 0);
+        elements.signalLatest.disabled = orderedEvents.length === 0;
+        elements.signalLayout.dataset.detailOpen = String(state.signalDetailOpen);
+        elements.signalDetailToggle.setAttribute('aria-expanded', String(state.signalDetailOpen));
+        elements.signalDetailToggle.textContent = state.signalDetailOpen ? 'Hide details' : 'Details';
+        elements.signalDetailToggle.disabled = orderedEvents.length === 0;
+        elements.signalStopCapture.disabled = !state.captureControlsAvailable || state.captureStopped ||
+          state.broker !== 'connected' || state.sessionMode !== 'live';
+        elements.signalClearEvents.disabled = !state.captureControlsAvailable ||
+          (state.broker === 'connected' && !state.captureStopped) || state.events.length === 0;
 
         elements.signalFamilyCount.textContent = String(familyCounts.size);
         elements.signalEventCount.textContent = String(signalEvents.length);
@@ -410,10 +652,11 @@
         elements.signalVisibleCount.textContent = displayLimited
           ? `${orderedEvents.length} of ${visibleEvents.length} shown` : `${orderedEvents.length} shown`;
         const offline = state.broker === 'unavailable' || state.eventFailureKind === 'disconnected';
-        elements.signalSessionBadge.textContent = offline ? (signalEvents.length ? 'Evidence retained' : 'Disconnected')
+        elements.signalSessionBadge.textContent = state.captureStopped ? 'Probes stopped'
+          : offline ? (signalEvents.length ? 'Evidence retained' : 'Disconnected')
           : state.sessionMode === 'demo' ? 'Demo evidence'
             : state.sessionMode === 'live' ? 'Live native capture' : 'No capture';
-        elements.signalSessionBadge.dataset.kind = offline ? 'offline' : state.sessionMode;
+        elements.signalSessionBadge.dataset.kind = state.captureStopped ? 'stopped' : offline ? 'offline' : state.sessionMode;
 
         elements.signalViewTabs.forEach(button => {
           const selected = button.dataset.signalView === state.signalView;
@@ -425,10 +668,15 @@
         });
 
         const gapCount = countSequenceGaps(state.events);
+        const reportedDrops = countReportedQueueDrops(state.events);
         if (state.eventFailureKind === 'malformed') {
           setSignalNotice('error', signalEvents.length
             ? 'The broker returned malformed event data. The last understandable fingerprint evidence remains visible.'
             : 'The broker returned malformed event data. No fingerprint evidence is available.');
+        } else if (state.captureStopped) {
+          setSignalNotice('stopped', signalEvents.length
+            ? 'Native probes are stopped. Current-session evidence is retained until you clear it.'
+            : 'Native probes are stopped. No fingerprint events remain in this session.');
         } else if (offline) {
           setSignalNotice('disconnected', signalEvents.length
             ? 'The broker is disconnected. The last understandable fingerprint evidence remains visible.'
@@ -439,8 +687,22 @@
           setSignalNotice('empty', state.sessionMode === 'demo'
             ? 'Deterministic fingerprint evidence is not available in this build.'
             : 'No fingerprint-relevant browser activity has been captured yet.');
-        } else if (state.eventsLimited || displayLimited || gapCount > 0n) {
-          setSignalNotice('partial', `Fingerprint activity is visible, but coverage is partial${state.eventsLimited ? ' because the event window is capped' : ''}${displayLimited ? ` because only the newest ${signalEventDisplayLimit} matching events are rendered` : ''}${gapCount > 0n ? ` with ${gapCount} sequence ${gapCount === 1n ? 'gap' : 'gaps'}` : ''}.`);
+        } else if (state.eventsLimited || displayLimited || gapCount > 0n || reportedDrops > 0n) {
+          const limits = [];
+          if (state.eventsLimited) limits.push('the event window is capped');
+          if (displayLimited) {
+            limits.push(`only the newest ${signalEventDisplayLimit} matching events are rendered`);
+          }
+          if (gapCount > 0n) {
+            limits.push(`${gapCount} capture-wide event ${gapCount === 1n ? 'ID is' : 'IDs are'} missing`);
+          }
+          if (reportedDrops > 0n) {
+            limits.push(`${reportedDrops} queue ${reportedDrops === 1n ? 'drop was' : 'drops were'} reported (may overlap missing IDs)`);
+          }
+          setSignalNotice(
+            'partial',
+            `Fingerprint activity is visible with partial coverage: ${limits.join('; ')}.`
+          );
         } else if (state.sessionMode === 'demo') {
           setSignalNotice('demo', 'Demo mode: both Canvas images are reconstructed locally from the visible calls. They are not native-captured pixels.');
         } else {
@@ -463,8 +725,8 @@
         if (orderedEvents.length === 0) {
           elements.signalRows.replaceChildren(emptyListboxOption(
             'signal-empty', signalEvents.length
-              ? 'No captured operations match this surface filter.'
-              : 'Capture a page that reads Canvas, WebGL, Web Audio, Navigator, Permissions, Storage, or WebRTC.'
+              ? 'No captured operations match this tab or surface filter.'
+              : 'Capture a page that reads Canvas, WebGL, Web Audio, device, layout, WebGPU, Permissions, Storage, WebRTC, or runtime APIs.'
           ));
           renderFingerprintDetail(null);
           return;
@@ -474,11 +736,18 @@
           const timestamp = integerValue(event, 'monotonic_time_ns');
           return minimum === null || timestamp < minimum ? timestamp : minimum;
         }, null);
+        const priorScrollTop = elements.signalRows.scrollTop;
+        const anchor = priorScrollTop > 8
+          ? [...elements.signalRows.querySelectorAll('.signal-event-row')]
+              .find(row => row.offsetTop + row.offsetHeight > priorScrollTop) : null;
+        const anchorKey = anchor?.dataset.signalEventKey;
+        const anchorOffset = anchor ? anchor.offsetTop - priorScrollTop : 0;
         const rows = orderedEvents.map(event => {
           const row = document.createElement('button');
           row.type = 'button';
           row.className = 'signal-event-row';
           row.dataset.signalEventKey = signalEventKey(event);
+          row.dataset.new = String(state.signalNewKeys.has(row.dataset.signalEventKey));
           row.setAttribute('role', 'option');
           row.setAttribute('aria-selected', String(row.dataset.signalEventKey === state.selectedSignalEventKey));
           const primary = document.createElement('span');
@@ -488,9 +757,10 @@
             textElement('span', 'signal-event-operation', decodePayload(event) || signalTypeLabel(event.type)),
             textElement('span', 'signal-event-time', formatSignalOffset(integerValue(event, 'monotonic_time_ns') - firstTime))
           );
+          if (row.dataset.new === 'true') primary.append(textElement('span', 'signal-new-badge', 'NEW'));
           const meta = document.createElement('span');
           meta.className = 'signal-event-meta';
-          meta.append(textElement('span', '', `${signalTypeLabel(event.type)} · process ${event.process_id} · frame ${integerText(event, 'frame_id')} · event ${integerText(event, 'sequence_number')}`));
+          meta.append(textElement('span', '', `${signalTypeLabel(event.type)} · ${signalTabKey(event) === 'unattributed' ? 'unattributed' : `tab ${signalTabKey(event)}`} · frame ${integerText(event, 'frame_id')} · event ${integerText(event, 'sequence_number')}`));
           const profileFamily = matchingSignalProfileFamily(event);
           if (profileFamily) {
             meta.append(textElement(
@@ -501,11 +771,16 @@
           row.append(primary, meta);
           row.addEventListener('click', () => {
             state.selectedSignalEventKey = row.dataset.signalEventKey;
+            state.signalDetailOpen = true;
             renderFingerprintActivity();
           });
           return row;
         });
         elements.signalRows.replaceChildren(...rows);
+        if (anchorKey) {
+          const restored = rows.find(row => row.dataset.signalEventKey === anchorKey);
+          if (restored) elements.signalRows.scrollTop = restored.offsetTop - anchorOffset;
+        }
         renderFingerprintDetail(orderedEvents.find(event => signalEventKey(event) === state.selectedSignalEventKey) ?? null);
       }
 
@@ -5304,7 +5579,9 @@
       }
 
       function capturedSources() {
-        return state.artifacts.map(artifact => ({ ...artifact, source_type: 'artifact', key: `artifact:${artifact.artifact_id}` }));
+        return state.artifacts
+          .filter(artifact => artifact.kind !== 'canvas_data_url')
+          .map(artifact => ({ ...artifact, source_type: 'artifact', key: `artifact:${artifact.artifact_id}` }));
       }
 
       function sourceOrigin(source) {
@@ -7032,6 +7309,7 @@
           applyMemoryOriginTrace(body.memory_origin_trace);
           state.debuggerEtag = response.headers.get('ETag');
           state.debuggerError = null;
+          renderLiveBrowserTabCount();
           state.staleScriptIds ??= new Set();
           if ((previousSession?.target?.id ?? '') !== (body.target?.id ?? '')) {
             state.staleScriptIds.clear();
@@ -7097,6 +7375,7 @@
           }
         } catch (error) {
           state.debuggerError = error instanceof TypeError ? 'The debugger returned malformed state. The last valid pause is retained.' : error.message;
+          renderLiveBrowserTabCount();
           renderDebugger();
           renderMemory();
           if (!document.querySelector('#screen-experiments').hidden) renderExperiment();
@@ -7150,6 +7429,10 @@
               contentTruncated: cached?.contentTruncated
             };
           });
+          await Promise.all(state.artifacts
+            .filter(artifact => artifact.kind === 'canvas_data_url')
+            .slice(-nativeCanvasCaptureDisplayLimit)
+            .map(loadArtifactContent));
           state.openArtifactIds = state.openArtifactIds.filter(id => state.artifacts.some(artifact => artifact.artifact_id === id));
           if (!state.artifacts.some(artifact => artifact.artifact_id === state.selectedArtifactId)) {
             state.selectedArtifactId = state.artifacts[0].artifact_id;
@@ -7158,6 +7441,7 @@
           renderSources();
           const selected = state.artifacts.find(artifact => artifact.artifact_id === state.selectedArtifactId);
           if (selected) loadArtifactContent(selected);
+          if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
         } catch (error) {
           if (!state.artifactReceiverConfigured && state.artifacts.every(artifact => artifact.origin === 'sample')) {
             renderSourceHealth();
@@ -7237,10 +7521,22 @@
           if (!isBrokerResponse(body)) throw new TypeError('Malformed broker response');
           state.eventEtag = response.headers.get('ETag');
           const brokerConnected = body.broker_connected !== false;
+          state.captureStopped = body.capture_stopped === true;
+          state.captureControlsAvailable = body.capture_controls_available === true;
           state.sessionMode = ['demo', 'idle'].includes(body.capture_mode)
             ? body.capture_mode : 'live';
           state.canvasRenderCaptures = body.canvas_render_captures ?? [];
           state.events = body.events;
+          const currentSignalKeys = new Set(fingerprintEventsFromEvents(state.events).map(signalEventKey));
+          if (state.signalKnownKeys !== null) {
+            currentSignalKeys.forEach(key => {
+              if (!state.signalKnownKeys.has(key)) state.signalNewKeys.add(key);
+            });
+          }
+          state.signalKnownKeys = currentSignalKeys;
+          for (const key of state.signalNewKeys) {
+            if (!currentSignalKeys.has(key)) state.signalNewKeys.delete(key);
+          }
           state.eventsLimited = body.count >= 5000;
           const vmModel = vmFindingsFromEvents(state.events);
           state.eventVmFindings = vmModel.findings;
@@ -7267,13 +7563,17 @@
             : (state.events.length > 0 ? 'last valid evidence retained' : 'no live evidence');
           renderShellStatus();
           const gapCount = countSequenceGaps(state.events);
-          elements.gaps.textContent = `${gapCount} sequence ${gapCount === 1n ? 'gap' : 'gaps'}`;
+          const reportedDrops = countReportedQueueDrops(state.events);
+          elements.gaps.textContent = `${gapCount} missing event ${gapCount === 1n ? 'ID' : 'IDs'}` +
+            (reportedDrops > 0n ? ` · ${reportedDrops} reported queue ${reportedDrops === 1n ? 'drop' : 'drops'} (may overlap)` : '');
           if (!brokerConnected) {
             setNetworkNotice('disconnected', `The local evidence broker is disconnected. ${state.events.length > 0 ? 'The last valid evidence remains visible.' : 'No live requests are available.'}`);
           } else if (state.eventsLimited) {
             setNetworkNotice('gap', `Showing the last 5,000 evidence events; older request rows remain recorded on disk.${gapCount > 0n ? ` ${gapCount} sequence ${gapCount === 1n ? 'gap is' : 'gaps are'} also recorded.` : ''}`);
           } else if (gapCount > 0n) {
-            setNetworkNotice('gap', `${gapCount} captured ${gapCount === 1n ? 'event is' : 'events are'} missing. Request rows may be incomplete.`);
+            setNetworkNotice('gap', `${gapCount} captured event ${gapCount === 1n ? 'ID is' : 'IDs are'} missing. Request rows may be incomplete.${reportedDrops > 0n ? ` The queue also reports ${reportedDrops} drops; these counts may overlap.` : ''}`);
+          } else if (reportedDrops > 0n) {
+            setNetworkNotice('gap', `The queue reports ${reportedDrops} dropped ${reportedDrops === 1n ? 'event' : 'events'}. No sequence jump is visible in the current event window.`);
           } else if (state.sessionMode === 'live' && state.events.length === 0) {
             setNetworkNotice('empty', 'No live requests yet. Start a capture in the attached browser.');
           } else if (state.sessionMode === 'demo') {
@@ -7337,7 +7637,7 @@
         state.selectedField = null;
         state.lastUpdatedLabel = 'start a live capture';
         renderShellStatus();
-        elements.gaps.textContent = '0 sequence gaps';
+        elements.gaps.textContent = '0 missing event IDs';
         setNetworkNotice('empty', 'No evidence is bundled. Start a live capture to populate the workspace.');
         renderRequests();
         renderEvidence();
@@ -7386,6 +7686,53 @@
         renderFingerprintActivity();
         elements.signalRows.querySelector('.signal-event-row')?.focus({preventScroll: true});
       }));
+      elements.signalLatest.addEventListener('click', () => {
+        const visible = fingerprintEventsFromEvents(state.events).filter(event =>
+          state.signalTabId === 'all' || signalTabKey(event) === state.signalTabId);
+        visible.forEach(event => state.signalNewKeys.delete(signalEventKey(event)));
+        renderFingerprintActivity();
+        elements.signalRows.scrollTop = 0;
+        elements.signalRows.querySelector('.signal-event-row')?.focus({preventScroll: true});
+      });
+      elements.signalDetailToggle.addEventListener('click', () => {
+        state.signalDetailOpen = !state.signalDetailOpen;
+        renderFingerprintActivity();
+      });
+      async function performCaptureAction(action) {
+        const button = action === 'stop' ? elements.signalStopCapture : elements.signalClearEvents;
+        if (button.disabled) return;
+        if (action === 'clear' && !window.confirm(
+          'Clear all recorded events, traces, and request signal profiles from this capture session? Canvas artifacts and other saved files will remain on disk. This cannot be undone.'
+        )) return;
+        button.disabled = true;
+        try {
+          const response = await fetch('/api/capture/actions', {
+            method: 'POST', cache: 'no-store',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(action === 'clear' ? {action, confirm: true} : {action})
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || `Capture action failed (${response.status})`);
+          state.captureStopped = result.capture_stopped === true;
+          if (action === 'clear') {
+            state.signalKnownKeys = null;
+            state.signalNewKeys.clear();
+            state.selectedSignalEventKey = null;
+            state.signalSelectedKeysByTab.clear();
+            state.signalProfile = null;
+            state.signalProfileEtag = null;
+            state.signalProfileKey = null;
+          }
+          state.eventEtag = null;
+          await refresh();
+        } catch (error) {
+          setSignalNotice('error', error.message);
+        } finally {
+          renderFingerprintActivity();
+        }
+      }
+      elements.signalStopCapture.addEventListener('click', () => performCaptureAction('stop'));
+      elements.signalClearEvents.addEventListener('click', () => performCaptureAction('clear'));
       elements.signalViewTabs.forEach(button => button.addEventListener('click', () => {
         state.signalView = button.dataset.signalView;
         renderFingerprintActivity();

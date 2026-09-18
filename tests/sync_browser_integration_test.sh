@@ -42,6 +42,11 @@ test ! -e "${brave_directory}/components/reverse_engineering_browser"
 git -C "${test_root}/src" init -q
 git -C "${test_root}/src" -c user.name='Sync Test' \
   -c user.email='sync-test@example.invalid' commit -q --allow-empty -m fixture
+mkdir -p "${test_root}/src/v8"
+git -C "${test_root}/src/v8" init -q
+git -C "${test_root}/src/v8" -c user.name='Sync Test' \
+  -c user.email='sync-test@example.invalid' commit -q --allow-empty -m fixture
+export REB_V8_REVISION=HEAD
 git -C "${brave_directory}" -c user.name='Sync Test' \
   -c user.email='sync-test@example.invalid' commit -q --allow-empty -m fixture
 if REB_BRAVE_DIRECTORY="${brave_directory}" \
@@ -76,6 +81,18 @@ fi
 grep -Fq 'Chromium checkout revision does not match the pin.' \
   "${test_root}/chromium-revision.err"
 test ! -e "${brave_directory}/components/reverse_engineering_browser"
+
+git -C "${test_root}/src/v8" -c user.name='Sync Test' \
+  -c user.email='sync-test@example.invalid' commit -q --allow-empty -m mismatch
+if REB_BRAVE_DIRECTORY="${brave_directory}" \
+  REB_BRAVE_CORE_REVISION=HEAD REB_CHROMIUM_REVISION=HEAD \
+  REB_V8_REVISION='HEAD~1' "${sync_script}" \
+  >"${test_root}/v8-revision.out" 2>"${test_root}/v8-revision.err"; then
+  echo "Sync unexpectedly accepted a mismatched V8 revision" >&2
+  exit 1
+fi
+grep -Fq 'V8 checkout revision does not match the pin.' \
+  "${test_root}/v8-revision.err"
 
 readonly overlap_root="${test_root}/overlap"
 readonly overlap_checkout="${overlap_root}/checkout"
@@ -115,5 +132,31 @@ for run_number in 1 2; do
 done
 grep -Fq 'Already applied: patch stack' \
   "${overlap_root}/sync-2.out"
+
+readonly siso_root="${test_root}/siso"
+readonly siso_chromium="${siso_root}/src"
+readonly siso_brave="${siso_chromium}/brave"
+readonly siso_integration="${siso_root}/integration"
+mkdir -p "${siso_brave}/build/config/siso" "${siso_chromium}/build/config/siso" \
+  "${siso_integration}/patches" "${siso_chromium}/v8"
+git -C "${siso_chromium}" init -q
+git -C "${siso_chromium}" -c user.name='Sync Test' \
+  -c user.email='sync-test@example.invalid' commit -q --allow-empty -m fixture
+git -C "${siso_chromium}/v8" init -q
+git -C "${siso_chromium}/v8" -c user.name='Sync Test' \
+  -c user.email='sync-test@example.invalid' commit -q --allow-empty -m fixture
+git -C "${siso_brave}" init -q
+printf 'patched siso config\n' >"${siso_brave}/build/config/siso/brave_siso_config.star"
+git -C "${siso_brave}" add build/config/siso/brave_siso_config.star
+git -C "${siso_brave}" -c user.name='Sync Test' \
+  -c user.email='sync-test@example.invalid' commit -q -m fixture
+# macOS ships Bash 3.2, which treats an empty array expansion as unset.
+REB_BRAVE_DIRECTORY="${siso_brave}" \
+  REB_BRAVE_INTEGRATION_DIRECTORY="${siso_integration}" \
+  REB_BRAVE_CORE_REVISION=HEAD REB_CHROMIUM_REVISION=HEAD \
+  REB_V8_REVISION=HEAD /bin/bash "${sync_script}" \
+  >"${siso_root}/sync.out" 2>"${siso_root}/sync.err"
+cmp -s "${siso_brave}/build/config/siso/brave_siso_config.star" \
+  "${siso_chromium}/build/config/siso/brave_siso_config.star"
 
 echo "sync_browser_integration_test passed"

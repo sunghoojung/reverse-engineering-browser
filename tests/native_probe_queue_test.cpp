@@ -47,6 +47,34 @@ bool TestLayoutAndBoundedDrop() {
   return queue.Empty() && !queue.TryPop(event);
 }
 
+bool TestDroppedGapPreservesOriginalCount() {
+  reb::NativeProbeQueue queue;
+  for (std::uint64_t index = 0; index < reb::kNativeProbeQueueCapacity; ++index) {
+    if (!queue.TryPush(Event(0, index))) {
+      return false;
+    }
+  }
+
+  const reb::NativeProbeEvent reference = Event(1, 80);
+  const reb::NativeProbeEvent gap = reb::MakeNativeProbeGapEvent(reference, 135);
+  if (reb::NativeProbeDropWeight(gap) != 135 ||
+      queue.TryPush(gap, reb::NativeProbeDropWeight(gap)) || queue.DroppedCount() != 135) {
+    return false;
+  }
+  const reb::NativeProbeEvent reported =
+      reb::MakeNativeProbeGapEvent(reference, queue.DroppedCount());
+  if (reb::NativeProbeDropWeight(reported) != 135 ||
+      queue.TryPush(gap, std::numeric_limits<std::uint64_t>::max()) ||
+      queue.DroppedCount() != std::numeric_limits<std::uint64_t>::max() ||
+      queue.TryPush(Event(2, 0)) ||
+      queue.DroppedCount() != std::numeric_limits<std::uint64_t>::max()) {
+    return false;
+  }
+  reb::NativeProbeEvent malformed = gap;
+  malformed.inline_payload[0] = std::byte{'x'};
+  return reb::NativeProbeDropWeight(malformed) == 1;
+}
+
 bool TestNotificationCoalescing() {
   reb::NativeProbeQueue queue;
   if (!queue.MarkNotificationPending() || queue.MarkNotificationPending()) {
@@ -61,6 +89,9 @@ bool TestGapMarker() {
   reference.header.category = reb::NativeProbeCategory::kNetwork;
   reference.header.monotonic_time_ns = 1234;
   reference.header.session_id = 55;
+  reference.header.tab_id = 17;
+  reference.header.navigation_id = 23;
+  reference.header.frame_id = 42;
   const reb::NativeProbeEvent gap =
       reb::MakeNativeProbeGapEvent(reference, 18446744073709551615ULL);
   const std::string_view payload(reinterpret_cast<const char*>(gap.inline_payload.data()),
@@ -69,7 +100,10 @@ bool TestGapMarker() {
          gap.header.type == reb::NativeProbeType::kGap &&
          gap.header.sequence_number == reference.header.sequence_number &&
          gap.header.monotonic_time_ns == 1234 && gap.header.session_id == 55 &&
-         gap.header.process_id == reference.header.process_id && payload == "18446744073709551615";
+         gap.header.process_id == reference.header.process_id && gap.header.tab_id == 0 &&
+         gap.header.navigation_id == 0 && gap.header.frame_id == 0 &&
+         reb::NativeProbeDropWeight(gap) == std::numeric_limits<std::uint64_t>::max() &&
+         payload == "18446744073709551615";
 }
 
 bool TestCategoryMasks() {
@@ -77,14 +111,16 @@ bool TestCategoryMasks() {
   const std::uint64_t network = reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kNetwork);
   const std::uint64_t vm = reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kVm);
   const std::uint64_t artifact = reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kArtifact);
+  const std::uint64_t runtime = reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kRuntime);
   return canvas == 1 && network == (std::uint64_t{1} << 8U) && vm == (std::uint64_t{1} << 9U) &&
-         artifact == (std::uint64_t{1} << 10U) &&
+         artifact == (std::uint64_t{1} << 10U) && runtime == (std::uint64_t{1} << 11U) &&
          canvas == reb::EventCategoryMask(reb::EventCategory::kCanvas) &&
          network == reb::EventCategoryMask(reb::EventCategory::kNetwork) &&
          vm == reb::EventCategoryMask(reb::EventCategory::kVm) &&
          artifact == reb::EventCategoryMask(reb::EventCategory::kArtifact) &&
+         runtime == reb::EventCategoryMask(reb::EventCategory::kRuntime) &&
          reb::kAllNativeProbeCategoryMask == reb::kAllEventCategoryMask &&
-         reb::IsValidNativeProbeCategoryMask(canvas | network | vm | artifact) &&
+         reb::IsValidNativeProbeCategoryMask(canvas | network | vm | artifact | runtime) &&
          !reb::IsValidNativeProbeCategoryMask(0) &&
          !reb::IsValidNativeProbeCategoryMask(std::uint64_t{1} << 63U);
 }
@@ -149,8 +185,9 @@ bool TestConcurrentProducers() {
 }  // namespace
 
 int main() {
-  if (!TestLayoutAndBoundedDrop() || !TestNotificationCoalescing() || !TestGapMarker() ||
-      !TestCategoryMasks() || !TestConcurrentProducers()) {
+  if (!TestLayoutAndBoundedDrop() || !TestDroppedGapPreservesOriginalCount() ||
+      !TestNotificationCoalescing() || !TestGapMarker() || !TestCategoryMasks() ||
+      !TestConcurrentProducers()) {
     std::cerr << "native_probe_queue_test failed\n";
     return 1;
   }

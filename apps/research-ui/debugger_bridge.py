@@ -210,6 +210,7 @@ class DebuggerBridge:
         self._error: Optional[str] = None
         self._target: Optional[dict[str, str]] = None
         self._targets: list[dict[str, str]] = []
+        self._live_tab_count: Optional[int] = None
         self._preferred_target_id: Optional[str] = None
         self._capture_network_content = capture_network_content
         self._network_requests: dict[str, dict[str, Any]] = {}
@@ -349,6 +350,7 @@ class DebuggerBridge:
                     {key: target[key] for key in ("id", "type", "title", "url")}
                     for target in self._targets
                 ],
+                "live_tab_count": self._live_tab_count,
                 # Script records contain only scalar values, so copying each mapping
                 # preserves snapshot isolation without a full recursive traversal.
                 "scripts": [dict(script) for script in self._scripts.values()],
@@ -6747,8 +6749,12 @@ class DebuggerBridge:
                 targets = self._discover_targets()
                 with self._lock:
                     current_targets = targets[:MAX_TARGETS]
-                    if current_targets != self._targets:
+                    live_tab_count = sum(
+                        target["type"] == "page" for target in targets
+                    )
+                    if current_targets != self._targets or live_tab_count != self._live_tab_count:
                         self._targets = current_targets
+                        self._live_tab_count = live_tab_count
                         self._changed()
                 pages = [
                     target
@@ -6773,6 +6779,10 @@ class DebuggerBridge:
             ) as exception:
                 if self._stop.is_set():
                     break
+                with self._lock:
+                    if self._live_tab_count is not None:
+                        self._live_tab_count = None
+                        self._changed()
                 self._set_state("waiting", str(exception))
                 self._stop.wait(0.5)
 
@@ -6943,12 +6953,21 @@ class DebuggerBridge:
                     continue
                 next_target_refresh = time.monotonic() + 1.0
                 try:
-                    targets = self._discover_targets()[:MAX_TARGETS]
+                    discovered_targets = self._discover_targets()
                 except (OSError, ValueError, DebuggerBridgeError, json.JSONDecodeError):
+                    with self._lock:
+                        if self._live_tab_count is not None:
+                            self._live_tab_count = None
+                            self._changed()
                     continue
+                targets = discovered_targets[:MAX_TARGETS]
+                live_tab_count = sum(
+                    item["type"] == "page" for item in discovered_targets
+                )
                 with self._lock:
-                    if targets != self._targets:
+                    if targets != self._targets or live_tab_count != self._live_tab_count:
                         self._targets = targets
+                        self._live_tab_count = live_tab_count
                         current = next(
                             (item for item in targets if item["id"] == target["id"]),
                             None,

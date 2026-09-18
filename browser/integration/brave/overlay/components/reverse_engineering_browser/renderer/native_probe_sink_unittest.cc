@@ -28,6 +28,7 @@ std::vector<NativeProbeEvent>* g_events = nullptr;
 struct CapturedArtifact final {
   NativeArtifactKind kind = NativeArtifactKind::kUnknown;
   NativeArtifactCaptureOrigin capture_origin = NativeArtifactCaptureOrigin::kUnknown;
+  std::uint64_t creator_event_id = 0;
   std::uint64_t execution_context_id = 0;
   std::uint64_t frame_id = 0;
   std::string source_url;
@@ -37,6 +38,10 @@ std::vector<CapturedArtifact>* g_artifacts = nullptr;
 std::atomic<std::uint64_t> g_concurrent_event_count{0};
 std::atomic<std::uint64_t> g_mixed_configuration_count{0};
 
+std::uint64_t TestFrameId() noexcept {
+  return 42;
+}
+
 void CaptureEvent(const NativeProbeEvent& event) noexcept {
   if (g_events) {
     g_events->push_back(event);
@@ -45,12 +50,13 @@ void CaptureEvent(const NativeProbeEvent& event) noexcept {
 
 void CaptureArtifact(const NativeArtifactKind kind,
                      const NativeArtifactCaptureOrigin capture_origin,
+                     const std::uint64_t creator_event_id,
                      const std::uint64_t execution_context_id,
                      const std::uint64_t frame_id,
                      const std::string_view source_url,
                      const std::span<const std::uint8_t> content) noexcept {
   if (g_artifacts) {
-    g_artifacts->push_back({kind, capture_origin, execution_context_id, frame_id,
+    g_artifacts->push_back({kind, capture_origin, creator_event_id, execution_context_id, frame_id,
                             std::string(source_url),
                             std::vector<std::uint8_t>(content.begin(), content.end())});
   }
@@ -121,6 +127,117 @@ TEST_F(NativeProbeSinkTest, RecordsAuthorizedWebAudioFunctionCalls) {
   EXPECT_NE(event.header.process_id, 0u);
   EXPECT_EQ(Payload(event), "OfflineAudioContext.startRendering");
   EXPECT_EQ(event.header.flags, 0u);
+}
+
+TEST_F(NativeProbeSinkTest, RecordsAuthorizedSurfaceCallsAndPropertyReads) {
+  NativeProbeSink::Get().SetEmitters(&CaptureEvent, &CaptureArtifact, 71,
+                                     NativeProbeCategoryMask(NativeProbeCategory::kCanvas) |
+                                         NativeProbeCategoryMask(NativeProbeCategory::kWebGl) |
+                                         NativeProbeCategoryMask(NativeProbeCategory::kNavigator),
+                                     std::numeric_limits<std::uint64_t>::max());
+
+  NativeProbeSink::Get().RecordApiCall(NativeProbeCategory::kCanvas, "canvas.fillRect");
+  NativeProbeSink::Get().RecordApiCall(NativeProbeCategory::kWebGl, "WebGL.getParameter");
+  NativeProbeSink::Get().RecordPropertyRead(NativeProbeCategory::kNavigator,
+                                            "navigator.hardwareConcurrency");
+
+  ASSERT_EQ(events_.size(), 3u);
+  EXPECT_EQ(events_[0].header.category, NativeProbeCategory::kCanvas);
+  EXPECT_EQ(events_[0].header.type, NativeProbeType::kApiCall);
+  EXPECT_EQ(Payload(events_[0]), "canvas.fillRect");
+  EXPECT_EQ(events_[1].header.category, NativeProbeCategory::kWebGl);
+  EXPECT_EQ(events_[1].header.type, NativeProbeType::kApiCall);
+  EXPECT_EQ(Payload(events_[1]), "WebGL.getParameter");
+  EXPECT_EQ(events_[2].header.category, NativeProbeCategory::kNavigator);
+  EXPECT_EQ(events_[2].header.type, NativeProbeType::kPropertyRead);
+  EXPECT_EQ(Payload(events_[2]), "navigator.hardwareConcurrency");
+}
+
+TEST_F(NativeProbeSinkTest, AttributesActiveSurfaceEventsToCurrentFrame) {
+  NativeProbeSink::Get().SetEmitters(
+      &CaptureEvent, &CaptureArtifact, 71, NativeProbeCategoryMask(NativeProbeCategory::kCanvas),
+      std::numeric_limits<std::uint64_t>::max(), false, &TestFrameId);
+
+  NativeProbeSink::Get().RecordApiCall(NativeProbeCategory::kCanvas, "canvas.toDataURL");
+
+  ASSERT_EQ(events_.size(), 1u);
+  EXPECT_EQ(events_[0].header.frame_id, 42u);
+}
+
+TEST_F(NativeProbeSinkTest, RecordsAuthorizedRuntimeFingerprintCalls) {
+  NativeProbeSink::Get().SetEmitters(&CaptureEvent, &CaptureArtifact, 71,
+                                     NativeProbeCategoryMask(NativeProbeCategory::kRuntime),
+                                     std::numeric_limits<std::uint64_t>::max());
+
+  NativeProbeSink::Get().RecordApiCall(NativeProbeCategory::kRuntime, "Math.acos");
+
+  ASSERT_EQ(events_.size(), 1u);
+  EXPECT_EQ(events_[0].header.category, NativeProbeCategory::kRuntime);
+  EXPECT_EQ(events_[0].header.type, NativeProbeType::kApiCall);
+  EXPECT_EQ(Payload(events_[0]), "Math.acos");
+}
+
+TEST_F(NativeProbeSinkTest, RetainsOneGeneratedObservationPerCaptureSession) {
+  std::atomic<std::uint64_t> api_observed_session{0};
+  std::atomic<std::uint64_t> property_observed_session{0};
+  NativeProbeSink::Get().SetEmitters(&CaptureEvent, &CaptureArtifact, 71,
+                                     NativeProbeCategoryMask(NativeProbeCategory::kRuntime) |
+                                         NativeProbeCategoryMask(NativeProbeCategory::kNavigator),
+                                     std::numeric_limits<std::uint64_t>::max());
+
+  NativeProbeSink::Get().RecordApiCallOnce(NativeProbeCategory::kRuntime, "Math.acos",
+                                           api_observed_session);
+  NativeProbeSink::Get().RecordApiCallOnce(NativeProbeCategory::kRuntime, "Math.acos",
+                                           api_observed_session);
+  NativeProbeSink::Get().RecordPropertyReadOnce(NativeProbeCategory::kNavigator, "Screen.width",
+                                                property_observed_session);
+  NativeProbeSink::Get().RecordPropertyReadOnce(NativeProbeCategory::kNavigator, "Screen.width",
+                                                property_observed_session);
+
+  ASSERT_EQ(events_.size(), 2u);
+  EXPECT_EQ(Payload(events_[0]), "Math.acos");
+  EXPECT_EQ(Payload(events_[1]), "Screen.width");
+
+  NativeProbeSink::Get().SetEmitters(&CaptureEvent, &CaptureArtifact, 72,
+                                     NativeProbeCategoryMask(NativeProbeCategory::kRuntime),
+                                     std::numeric_limits<std::uint64_t>::max());
+  NativeProbeSink::Get().RecordApiCallOnce(NativeProbeCategory::kRuntime, "Math.acos",
+                                           api_observed_session);
+
+  ASSERT_EQ(events_.size(), 3u);
+  EXPECT_EQ(events_.back().header.session_id, 72u);
+}
+
+TEST_F(NativeProbeSinkTest, DisabledGeneratedObservationDoesNotConsumeSessionMarker) {
+  std::atomic<std::uint64_t> observed_session{0};
+  NativeProbeSink::Get().SetEmitters(&CaptureEvent, &CaptureArtifact, 71,
+                                     NativeProbeCategoryMask(NativeProbeCategory::kCanvas),
+                                     std::numeric_limits<std::uint64_t>::max());
+
+  NativeProbeSink::Get().RecordApiCallOnce(NativeProbeCategory::kRuntime, "Math.acos",
+                                           observed_session);
+  EXPECT_EQ(observed_session.load(std::memory_order_acquire), 0u);
+
+  NativeProbeSink::Get().SetEmitters(&CaptureEvent, &CaptureArtifact, 71,
+                                     NativeProbeCategoryMask(NativeProbeCategory::kRuntime),
+                                     std::numeric_limits<std::uint64_t>::max());
+  NativeProbeSink::Get().RecordApiCallOnce(NativeProbeCategory::kRuntime, "Math.acos",
+                                           observed_session);
+
+  ASSERT_EQ(events_.size(), 1u);
+  EXPECT_EQ(observed_session.load(std::memory_order_acquire), 71u);
+}
+
+TEST_F(NativeProbeSinkTest, RejectsInvalidSurfaceOperations) {
+  NativeProbeSink::Get().SetEmitters(&CaptureEvent, &CaptureArtifact, 71,
+                                     kAllNativeProbeCategoryMask,
+                                     std::numeric_limits<std::uint64_t>::max());
+
+  NativeProbeSink::Get().RecordApiCall(NativeProbeCategory::kUnknown, "unknown.call");
+  NativeProbeSink::Get().RecordApiCall(NativeProbeCategory::kNetwork, "network.call");
+  NativeProbeSink::Get().RecordApiCall(NativeProbeCategory::kCanvas, "");
+
+  EXPECT_TRUE(events_.empty());
 }
 
 TEST_F(NativeProbeSinkTest, RejectsWebAudioOutsideCategoryPolicy) {
@@ -231,6 +348,46 @@ TEST_F(NativeProbeSinkTest, CapturesAuthorizedRuntimeGeneratedSource) {
   EXPECT_EQ(artifacts_.front().frame_id, 92u);
   EXPECT_EQ(artifacts_.front().source_url, "https://authorized.test/runtime");
   EXPECT_EQ(artifacts_.front().content, std::vector<std::uint8_t>(source.begin(), source.end()));
+}
+
+TEST_F(NativeProbeSinkTest, CanvasOutputRequiresExplicitSensitiveCapture) {
+  const std::string data_url = "data:image/png;base64,iVBORw0KGgo=";
+  const std::uint64_t mask = NativeProbeCategoryMask(NativeProbeCategory::kCanvas) |
+                             NativeProbeCategoryMask(NativeProbeCategory::kArtifact);
+  NativeProbeSink::Get().SetEmitters(&CaptureEvent, &CaptureArtifact, 71, mask,
+                                     std::numeric_limits<std::uint64_t>::max());
+
+  NativeProbeSink::Get().RecordCanvasToDataUrl(data_url);
+  EXPECT_EQ(events_.size(), 1u);
+  EXPECT_TRUE(artifacts_.empty());
+
+  NativeProbeSink::Get().SetEmitters(&CaptureEvent, &CaptureArtifact, 71, mask,
+                                     std::numeric_limits<std::uint64_t>::max(), true);
+  NativeProbeSink::Get().RecordCanvasToDataUrl(data_url);
+
+  ASSERT_EQ(events_.size(), 2u);
+  ASSERT_EQ(artifacts_.size(), 1u);
+  EXPECT_EQ(artifacts_.front().kind, NativeArtifactKind::kCanvasDataUrl);
+  EXPECT_EQ(artifacts_.front().capture_origin, NativeArtifactCaptureOrigin::kCanvasToDataUrl);
+  EXPECT_EQ(artifacts_.front().creator_event_id, events_.back().header.sequence_number);
+  EXPECT_EQ(artifacts_.front().content,
+            std::vector<std::uint8_t>(data_url.begin(), data_url.end()));
+}
+
+TEST_F(NativeProbeSinkTest, RejectsCanvasOutputThatCannotBeDisplayedWhole) {
+  constexpr std::size_t kViewerContentLimit = 2U * 1024U * 1024U;
+  std::string data_url = "data:image/png;base64,";
+  data_url.append(kViewerContentLimit, 'A');
+  const std::uint64_t mask = NativeProbeCategoryMask(NativeProbeCategory::kCanvas) |
+                             NativeProbeCategoryMask(NativeProbeCategory::kArtifact);
+  NativeProbeSink::Get().SetEmitters(&CaptureEvent, &CaptureArtifact, 71, mask,
+                                     std::numeric_limits<std::uint64_t>::max(), true);
+
+  NativeProbeSink::Get().RecordCanvasToDataUrl(data_url);
+
+  ASSERT_EQ(events_.size(), 1u);
+  EXPECT_EQ(Payload(events_.front()), "canvas.toDataURL");
+  EXPECT_TRUE(artifacts_.empty());
 }
 
 TEST_F(NativeProbeSinkTest, RejectsGeneratedSourceOutsidePolicyAndLimits) {

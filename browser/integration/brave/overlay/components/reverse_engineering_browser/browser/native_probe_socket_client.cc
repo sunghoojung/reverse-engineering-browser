@@ -41,6 +41,7 @@ constexpr char kSessionIdSwitch[] = "reb-session-id";
 constexpr char kCategoryMaskSwitch[] = "reb-category-mask";
 constexpr char kDurationSecondsSwitch[] = "reb-duration-seconds";
 constexpr char kArtifactSocketSwitch[] = "reb-artifact-socket";
+constexpr char kCaptureCanvasImagesSwitch[] = "reb-capture-canvas-images";
 constexpr std::size_t kSocketBatchCapacity = 32;
 
 bool SendAll(const int descriptor, base::span<const std::uint8_t> bytes, const bool non_blocking) {
@@ -137,6 +138,7 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
     return false;
   }
   const std::uint64_t expires_at_monotonic_ns = now + duration_ns;
+  const bool capture_canvas_images = command_line.HasSwitch(kCaptureCanvasImagesSwitch);
 
   const base::FilePath token_path = command_line.GetSwitchValuePath(kBrokerTokenFileSwitch);
   socket_descriptor_ = ConnectNativeLocalIpc(command_line.GetSwitchValueASCII(kBrokerSocketSwitch),
@@ -168,6 +170,7 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
   writer_thread_.task_runner()->PostTask(
       FROM_HERE, base::BindOnce(&NativeProbeSocketClient::Run, base::Unretained(this)));
   if (!NativeProbeSession::Get().StartSession(session_id, category_mask, expires_at_monotonic_ns,
+                                              capture_canvas_images,
                                               &NativeProbeSocketClient::Emit)) {
     connected_.store(false, std::memory_order_release);
     wakeup_.Signal();
@@ -184,7 +187,8 @@ void NativeProbeSocketClient::Emit(const NativeProbeEvent& event) noexcept {
 }
 
 void NativeProbeSocketClient::Enqueue(const NativeProbeEvent& event) noexcept {
-  if (!connected_.load(std::memory_order_acquire) || !queue_.TryPush(event)) {
+  if (!connected_.load(std::memory_order_acquire) ||
+      !queue_.TryPush(event, NativeProbeDropWeight(event))) {
     return;
   }
   if (queue_.MarkNotificationPending()) {
@@ -195,7 +199,20 @@ void NativeProbeSocketClient::Enqueue(const NativeProbeEvent& event) noexcept {
 void NativeProbeSocketClient::Run() {
   std::uint64_t reported_dropped = 0;
   while (connected_.load(std::memory_order_acquire)) {
-    wakeup_.Wait();
+    wakeup_.TimedWait(base::Milliseconds(250));
+    pollfd connection{socket_descriptor_, static_cast<short>(POLLIN), 0};
+    const int connection_status = poll(&connection, 1, 0);
+    std::uint8_t control_byte = 0;
+    const bool peer_closed =
+        connection_status > 0 && ((connection.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0 ||
+                                  ((connection.revents & POLLIN) != 0 &&
+                                   recv(socket_descriptor_, &control_byte, 1, MSG_PEEK) == 0));
+    if (peer_closed) {
+      browser_task_runner_->PostTask(
+          FROM_HERE,
+          base::BindOnce(&NativeProbeSocketClient::HandleDisconnect, base::Unretained(this)));
+      return;
+    }
     std::array<NativeProbeEvent, kSocketBatchCapacity> batch;
     NativeProbeEvent last_event;
     bool drained_event = false;

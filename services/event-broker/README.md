@@ -48,7 +48,7 @@ observed relationships; artifact/request joins are visibly correlated.
 
 When `--signal-store` is present, a separate bounded cold-path index writes one
 request signal profile for every accepted request start. Profiles summarize
-Canvas, WebGL, Web Audio, Navigator, Permissions, Storage, and WebRTC activity
+Canvas, WebGL, Web Audio, device and layout, Permissions, Storage, WebRTC, and Runtime activity
 using counts and exact event references only. Explicit parent-chain evidence is
 observed; earlier events sharing session, process, navigation, and frame are
 correlated. The index never records browser API values or request content.
@@ -70,6 +70,9 @@ The socket mode requires one session identifier and a user-owned mode-0600
 token file. The broker creates the token when needed, creates a mode-0600 Unix
 socket, authenticates one Brave connection, rejects records from any other
 session, and removes the socket after disconnect.
+For a live session, `SIGUSR1` requests a graceful stop. The broker flushes its
+stores and closes the authenticated connection; the browser then disables its
+native probes. This signal does not delete evidence.
 
 ```sh
 build/reb-event-broker \

@@ -1,0 +1,13 @@
+diff --git a/browser/brave_content_browser_client.cc b/browser/brave_content_browser_client.cc
+--- a/browser/brave_content_browser_client.cc
++++ b/browser/brave_content_browser_client.cc
+@@ -586,7 +586,7 @@ void BraveContentBrowserClient::BindHostReceiverForRenderer(
+   if (auto probe_receiver =
+           receiver.As<reb::mojom::NativeProbeHost>()) {
+-    reb::NativeProbeSession::Get().BindHost(render_process_host->GetID(),
+-                                           std::move(probe_receiver));
++    reb::NativeProbeSession::Get().BindHost(
++        render_process_host->GetID().GetUnsafeValue(), std::move(probe_receiver));
+     return;
+   }
+   ChromeContentBrowserClient::BindHostReceiverForRenderer(

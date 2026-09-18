@@ -23,6 +23,7 @@ MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 MAX_JS_MATCHES_PER_RULE = 32
 MAX_JS_FUNCTION_REGIONS = 4096
 MAX_JS_REGION_WORK_BYTES = 64 * 1024 * 1024
+MAX_JS_FUNCTION_SIGNATURE_CHARACTERS = 1024
 MAX_WASM_SECTIONS = 128
 MAX_WASM_SECTION_BYTES = 2 * 1024 * 1024
 MAX_GRAPH_EDGES = 1024
@@ -323,10 +324,18 @@ def _js_function_regions(
     masked = _mask_js_literals(source)
     starts = []
     omissions = []
-    for match in re.finditer(
-        r"(?:\bfunction\b[^{}]*|\([^{}]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)\s*\{",
-        masked,
-    ):
+    # Keep signature discovery linear on minified bundles. An unbounded
+    # ``[^{}]*`` branch can retry from every opening parenthesis and spend
+    # minutes backtracking through a large script that has no matching arrow
+    # body. Signatures beyond this limit are intentionally treated as top-level
+    # analysis rather than stalling every live UI request.
+    signature_limit = MAX_JS_FUNCTION_SIGNATURE_CHARACTERS
+    signature_pattern = re.compile(
+        rf"(?:\bfunction\b[^{{}}]{{0,{signature_limit}}}|"
+        rf"\([^(){{}}]{{0,{signature_limit}}}\)\s*=>|"
+        r"[A-Za-z_$][\w$]*\s*=>)\s*\{"
+    )
+    for match in signature_pattern.finditer(masked):
         if len(starts) >= limits.max_js_function_regions:
             omissions.append(
                 {
@@ -1314,6 +1323,7 @@ def _validate_artifact(artifact: Any) -> str | None:
             "webassembly_compile",
             "webassembly_module",
             "webassembly_instantiate",
+            "canvas_to_data_url",
         }:
             return "capture_origin is unsupported"
         if origin == "dynamic_javascript" and (
@@ -1326,11 +1336,17 @@ def _validate_artifact(artifact: Any) -> str | None:
             or artifact["execution_context_id"] == "0"
         ):
             return "WebAssembly provenance is inconsistent"
+        if origin == "canvas_to_data_url" and (
+            artifact.get("kind") != "canvas_data_url"
+            or artifact["execution_context_id"] != "0"
+        ):
+            return "Canvas output provenance is inconsistent"
     if artifact.get("kind") not in {
         "javascript",
         "wasm",
         "source_map",
         "response_body",
+        "canvas_data_url",
     }:
         return "unsupported artifact kind"
     if not isinstance(artifact.get("url"), str) or not artifact["url"]:

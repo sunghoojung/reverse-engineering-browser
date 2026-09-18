@@ -25,6 +25,7 @@
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/task/thread_pool.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/browser/native_local_ipc_client.h"
 
@@ -124,7 +125,7 @@ NativeArtifactSocketClient::~NativeArtifactSocketClient() {
 
 bool NativeArtifactSocketClient::StartFromCommandLine(const std::uint64_t session_id,
                                                       const NativeArtifactCompletion completion) {
-  if (connected_.load(std::memory_order_acquire) || !completion) {
+  if (connected_.load(std::memory_order_acquire) || stopping_ || !completion) {
     return false;
   }
   const base::CommandLine& command_line = *base::CommandLine::ForCurrentProcess();
@@ -229,9 +230,11 @@ void NativeArtifactSocketClient::DisconnectPending(const NativeArtifactReceiveSt
 }
 
 void NativeArtifactSocketClient::Stop() {
-  if (!connected_.exchange(false, std::memory_order_acq_rel) && !writer_thread_.IsRunning()) {
+  if (stopping_ ||
+      (!connected_.exchange(false, std::memory_order_acq_rel) && !writer_thread_.IsRunning())) {
     return;
   }
+  stopping_ = true;
   if (socket_descriptor_ >= 0) {
     shutdown(socket_descriptor_, SHUT_RDWR);
   }
@@ -239,7 +242,24 @@ void NativeArtifactSocketClient::Stop() {
     base::AutoLock lock(lock_);
     wakeup_.Broadcast();
   }
+  if (!writer_thread_.IsRunning()) {
+    FinishStop();
+    return;
+  }
+  writer_thread_.DetachFromSequence();
+  // JoinWriter waits for a base::Thread on this blocking worker, not on the
+  // browser sequence. MayBlock alone does not permit base sync primitives.
+  base::ThreadPool::PostTaskAndReply(
+      FROM_HERE, {base::MayBlock(), base::WithBaseSyncPrimitives()},
+      base::BindOnce(&NativeArtifactSocketClient::JoinWriter, base::Unretained(this)),
+      base::BindOnce(&NativeArtifactSocketClient::FinishStop, base::Unretained(this)));
+}
+
+void NativeArtifactSocketClient::JoinWriter() {
   writer_thread_.Stop();
+}
+
+void NativeArtifactSocketClient::FinishStop() {
   if (socket_descriptor_ >= 0) {
     close(socket_descriptor_);
     socket_descriptor_ = -1;
@@ -247,6 +267,7 @@ void NativeArtifactSocketClient::Stop() {
   DisconnectPending(NativeArtifactReceiveStatus::kIoError);
   completion_ = nullptr;
   browser_task_runner_.reset();
+  stopping_ = false;
 }
 
 }  // namespace reb
@@ -274,6 +295,8 @@ void NativeArtifactSocketClient::Stop() {}
 void NativeArtifactSocketClient::Run() {}
 void NativeArtifactSocketClient::Report(std::uint64_t, NativeArtifactReceiveStatus) {}
 void NativeArtifactSocketClient::DisconnectPending(NativeArtifactReceiveStatus) {}
+void NativeArtifactSocketClient::JoinWriter() {}
+void NativeArtifactSocketClient::FinishStop() {}
 
 }  // namespace reb
 

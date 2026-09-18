@@ -40,6 +40,7 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
   void Configure(std::uint64_t session_id,
                  std::uint64_t category_mask,
                  std::uint64_t expires_at_monotonic_ns,
+                 bool capture_canvas_images,
                  base::UnsafeSharedMemoryRegion queue_region) override;
   void Disable() override;
 
@@ -52,6 +53,7 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
   static void Emit(const NativeProbeEvent& event) noexcept;
   static void EmitArtifact(NativeArtifactKind kind,
                            NativeArtifactCaptureOrigin capture_origin,
+                           std::uint64_t creator_event_id,
                            std::uint64_t execution_context_id,
                            std::uint64_t frame_id,
                            std::string_view source_url,
@@ -59,6 +61,7 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
   void EmitEvent(const NativeProbeEvent& event) noexcept;
   void EmitGeneratedArtifact(NativeArtifactKind kind,
                              NativeArtifactCaptureOrigin capture_origin,
+                             std::uint64_t creator_event_id,
                              std::uint64_t execution_context_id,
                              std::uint64_t frame_id,
                              std::string_view source_url,

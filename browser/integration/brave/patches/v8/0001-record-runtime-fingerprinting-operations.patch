@@ -1,0 +1,227 @@
+diff --git a/include/v8-isolate.h b/include/v8-isolate.h
+index f8395c96..4e324679 100644
+--- a/include/v8-isolate.h
++++ b/include/v8-isolate.h
+@@ -665,6 +665,29 @@ class V8_EXPORT Isolate {
+     kOBSOLETE_WasmResizableBuffers = 183,
+     kInvalidatedArrayBufferMutableProtector = 184,
+     kHoleyArrayReadthrough = 185,
++    kRebMathAcos = 186,
++    kRebMathAcosh = 187,
++    kRebMathAsin = 188,
++    kRebMathAsinh = 189,
++    kRebMathAtan = 190,
++    kRebMathAtan2 = 191,
++    kRebMathAtanh = 192,
++    kRebMathCbrt = 193,
++    kRebMathCos = 194,
++    kRebMathCosh = 195,
++    kRebMathExp = 196,
++    kRebMathExpm1 = 197,
++    kRebMathHypot = 198,
++    kRebMathLog = 199,
++    kRebMathLog1p = 200,
++    kRebMathLog10 = 201,
++    kRebMathPow = 202,
++    kRebMathSin = 203,
++    kRebMathSinh = 204,
++    kRebMathSqrt = 205,
++    kRebMathTan = 206,
++    kRebMathTanh = 207,
++    kRebDateGetTimezoneOffset = 208,
+ 
+     // If you add new values here, you'll also need to update Chromium's:
+     // web_feature.mojom, use_counter_callback.cc, and enums.xml. V8 changes to
+diff --git a/src/builtins/builtins-date-gen.cc b/src/builtins/builtins-date-gen.cc
+index 37125aac..312972e3 100644
+--- a/src/builtins/builtins-date-gen.cc
++++ b/src/builtins/builtins-date-gen.cc
+@@ -145,6 +145,8 @@ TF_BUILTIN(DatePrototypeGetTime, DateBuiltinsAssembler) {
+ TF_BUILTIN(DatePrototypeGetTimezoneOffset, DateBuiltinsAssembler) {
+   auto context = Parameter<Context>(Descriptor::kContext);
+   auto receiver = Parameter<Object>(Descriptor::kReceiver);
++  CallRuntime(Runtime::kIncrementUseCounter, context,
++              SmiConstant(v8::Isolate::UseCounterFeature::kRebDateGetTimezoneOffset));
+   Generate_DatePrototype_GetField(context, receiver, JSDate::kTimezoneOffset);
+ }
+ 
+diff --git a/src/builtins/math.tq b/src/builtins/math.tq
+index 98dab8e9..00c86409 100644
+--- a/src/builtins/math.tq
++++ b/src/builtins/math.tq
+@@ -124,6 +124,7 @@ macro MathPowImpl(implicit context: Context)(base: JSAny, exponent: JSAny):
+   return Convert<Number>(result);
+ }
+ 
++@incrementUseCounter('v8::Isolate::kRebMathPow')
+ transitioning javascript builtin MathPow(
+     js-implicit context: NativeContext)(base: JSAny, exponent: JSAny): Number {
+   return MathPowImpl(base, exponent);
+@@ -158,6 +159,7 @@ transitioning javascript builtin MathMin(
+ // https://tc39.es/ecma262/#sec-math.acos
+ extern macro Float64Acos(float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathAcos')
+ transitioning javascript builtin MathAcos(
+     js-implicit context: NativeContext)(x: JSAny): Number {
+   const value = Convert<float64>(ToNumber_Inline(x));
+@@ -167,6 +169,7 @@ transitioning javascript builtin MathAcos(
+ // https://tc39.es/ecma262/#sec-math.acosh
+ extern macro Float64Acosh(float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathAcosh')
+ transitioning javascript builtin MathAcosh(
+     js-implicit context: NativeContext)(x: JSAny): Number {
+   const value = Convert<float64>(ToNumber_Inline(x));
+@@ -176,6 +179,7 @@ transitioning javascript builtin MathAcosh(
+ // https://tc39.es/ecma262/#sec-math.asin
+ extern macro Float64Asin(float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathAsin')
+ transitioning javascript builtin MathAsin(
+     js-implicit context: NativeContext)(x: JSAny): Number {
+   const value = Convert<float64>(ToNumber_Inline(x));
+@@ -185,6 +189,7 @@ transitioning javascript builtin MathAsin(
+ // https://tc39.es/ecma262/#sec-math.asinh
+ extern macro Float64Asinh(float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathAsinh')
+ transitioning javascript builtin MathAsinh(
+     js-implicit context: NativeContext)(x: JSAny): Number {
+   const value = Convert<float64>(ToNumber_Inline(x));
+@@ -194,6 +199,7 @@ transitioning javascript builtin MathAsinh(
+ // https://tc39.es/ecma262/#sec-math.atan
+ extern macro Float64Atan(float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathAtan')
+ transitioning javascript builtin MathAtan(
+     js-implicit context: NativeContext)(x: JSAny): Number {
+   const value = Convert<float64>(ToNumber_Inline(x));
+@@ -203,6 +209,7 @@ transitioning javascript builtin MathAtan(
+ // https://tc39.es/ecma262/#sec-math.atan2
+ extern macro Float64Atan2(float64, float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathAtan2')
+ transitioning javascript builtin MathAtan2(
+     js-implicit context: NativeContext)(y: JSAny, x: JSAny): Number {
+   const yValue = Convert<float64>(ToNumber_Inline(y));
+@@ -213,6 +220,7 @@ transitioning javascript builtin MathAtan2(
+ // https://tc39.es/ecma262/#sec-math.atanh
+ extern macro Float64Atanh(float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathAtanh')
+ transitioning javascript builtin MathAtanh(
+     js-implicit context: NativeContext)(x: JSAny): Number {
+   const value = Convert<float64>(ToNumber_Inline(x));
+@@ -222,6 +230,7 @@ transitioning javascript builtin MathAtanh(
+ // https://tc39.es/ecma262/#sec-math.cbrt
+ extern macro Float64Cbrt(float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathCbrt')
+ transitioning javascript builtin MathCbrt(
+     js-implicit context: NativeContext)(x: JSAny): Number {
+   const value = Convert<float64>(ToNumber_Inline(x));
+@@ -240,6 +249,7 @@ transitioning javascript builtin MathClz32(
+ // https://tc39.es/ecma262/#sec-math.cos
+ extern macro Float64Cos(float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathCos')
+ transitioning javascript builtin MathCos(
+     js-implicit context: NativeContext)(x: JSAny): Number {
+   const value = Convert<float64>(ToNumber_Inline(x));
+@@ -249,6 +259,7 @@ transitioning javascript builtin MathCos(
+ // https://tc39.es/ecma262/#sec-math.cosh
+ extern macro Float64Cosh(float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathCosh')
+ transitioning javascript builtin MathCosh(
+     js-implicit context: NativeContext)(x: JSAny): Number {
+   const value = Convert<float64>(ToNumber_Inline(x));
+@@ -258,6 +269,7 @@ transitioning javascript builtin MathCosh(
+ // https://tc39.es/ecma262/#sec-math.exp
+ extern macro Float64Exp(float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathExp')
+ transitioning javascript builtin MathExp(
+     js-implicit context: NativeContext)(x: JSAny): Number {
+   const value = Convert<float64>(ToNumber_Inline(x));
+@@ -267,6 +279,7 @@ transitioning javascript builtin MathExp(
+ // https://tc39.es/ecma262/#sec-math.expm1
+ extern macro Float64Expm1(float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathExpm1')
+ transitioning javascript builtin MathExpm1(
+     js-implicit context: NativeContext)(x: JSAny): Number {
+   const value = Convert<float64>(ToNumber_Inline(x));
+@@ -301,6 +314,7 @@ transitioning javascript builtin MathImul(
+ // https://tc39.es/ecma262/#sec-math.log
+ extern macro Float64Log(float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathLog')
+ transitioning javascript builtin MathLog(
+     js-implicit context: NativeContext)(x: JSAny): Number {
+   const value = Convert<float64>(ToNumber_Inline(x));
+@@ -310,6 +324,7 @@ transitioning javascript builtin MathLog(
+ // https://tc39.es/ecma262/#sec-math.log1p
+ extern macro Float64Log1p(float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathLog1p')
+ transitioning javascript builtin MathLog1p(
+     js-implicit context: NativeContext)(x: JSAny): Number {
+   const value = Convert<float64>(ToNumber_Inline(x));
+@@ -319,6 +334,7 @@ transitioning javascript builtin MathLog1p(
+ // https://tc39.es/ecma262/#sec-math.log10
+ extern macro Float64Log10(float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathLog10')
+ transitioning javascript builtin MathLog10(
+     js-implicit context: NativeContext)(x: JSAny): Number {
+   const value = Convert<float64>(ToNumber_Inline(x));
+@@ -337,6 +353,7 @@ transitioning javascript builtin MathLog2(
+ // https://tc39.es/ecma262/#sec-math.sin
+ extern macro Float64Sin(float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathSin')
+ transitioning javascript builtin MathSin(
+     js-implicit context: NativeContext)(x: JSAny): Number {
+   const value = Convert<float64>(ToNumber_Inline(x));
+@@ -361,6 +378,7 @@ transitioning javascript builtin MathSign(
+ // https://tc39.es/ecma262/#sec-math.sinh
+ extern macro Float64Sinh(float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathSinh')
+ transitioning javascript builtin MathSinh(
+     js-implicit context: NativeContext)(x: JSAny): Number {
+   const value = Convert<float64>(ToNumber_Inline(x));
+@@ -370,6 +388,7 @@ transitioning javascript builtin MathSinh(
+ // https://tc39.es/ecma262/#sec-math.sqrt
+ extern macro Float64Sqrt(float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathSqrt')
+ transitioning javascript builtin MathSqrt(
+     js-implicit context: NativeContext)(x: JSAny): Number {
+   const value = Convert<float64>(ToNumber_Inline(x));
+@@ -379,6 +398,7 @@ transitioning javascript builtin MathSqrt(
+ // https://tc39.es/ecma262/#sec-math.tan
+ extern macro Float64Tan(float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathTan')
+ transitioning javascript builtin MathTan(
+     js-implicit context: NativeContext)(x: JSAny): Number {
+   const value = Convert<float64>(ToNumber_Inline(x));
+@@ -388,6 +408,7 @@ transitioning javascript builtin MathTan(
+ // https://tc39.es/ecma262/#sec-math.tanh
+ extern macro Float64Tanh(float64): float64;
+ 
++@incrementUseCounter('v8::Isolate::kRebMathTanh')
+ transitioning javascript builtin MathTanh(
+     js-implicit context: NativeContext)(x: JSAny): Number {
+   const value = Convert<float64>(ToNumber_Inline(x));
+@@ -462,6 +483,7 @@ transitioning macro FastMathHypot(
+ }
+ 
+ // https://tc39.es/ecma262/#sec-math.hypot
++@incrementUseCounter('v8::Isolate::kRebMathHypot')
+ transitioning javascript builtin MathHypot(
+     js-implicit context: NativeContext, receiver: JSAny)(
+     ...arguments): Number {

@@ -25,11 +25,12 @@ readonly signal_store_path="${session_directory}/request-signals.jsonl"
 readonly artifact_store_path="${session_directory}/artifacts"
 readonly token_path="${session_directory}/broker.token"
 readonly profile_path="${REB_BRAVE_PROFILE:-${session_directory}/brave-profile}"
-readonly category_mask="${REB_CAPTURE_CATEGORY_MASK:-1285}"
+readonly category_mask="${REB_CAPTURE_CATEGORY_MASK:-4095}"
 readonly duration_seconds="${REB_CAPTURE_DURATION_SECONDS:-3600}"
 readonly open_command="${REB_OPEN_COMMAND:-open}"
 readonly native_quiet_mode="${REB_NATIVE_QUIET_MODE:-0}"
 readonly cdp_network_capture="${REB_CDP_NETWORK_CAPTURE:-0}"
+readonly capture_canvas_images="${REB_CAPTURE_CANVAS_IMAGES:-0}"
 
 if [[ "${native_quiet_mode}" != 0 && "${native_quiet_mode}" != 1 ]]; then
   echo "REB_NATIVE_QUIET_MODE must be 0 or 1." >&2
@@ -37,6 +38,15 @@ if [[ "${native_quiet_mode}" != 0 && "${native_quiet_mode}" != 1 ]]; then
 fi
 if [[ "${cdp_network_capture}" != 0 && "${cdp_network_capture}" != 1 ]]; then
   echo "REB_CDP_NETWORK_CAPTURE must be 0 or 1." >&2
+  exit 2
+fi
+if [[ "${capture_canvas_images}" != 0 && "${capture_canvas_images}" != 1 ]]; then
+  echo "REB_CAPTURE_CANVAS_IMAGES must be 0 or 1." >&2
+  exit 2
+fi
+if [[ "${capture_canvas_images}" == 1 ]] &&
+   (( (category_mask & 1) == 0 || (category_mask & 1024) == 0 )); then
+  echo "REB_CAPTURE_CANVAS_IMAGES requires Canvas and Artifact category bits (mask 1025)." >&2
   exit 2
 fi
 if [[ "${native_quiet_mode}" == 1 && "${cdp_network_capture}" == 1 ]]; then
@@ -155,9 +165,17 @@ if [[ ! -S "${socket_path}" ]]; then
 fi
 
 if ((category_mask & 1024)); then
-  "${artifact_receiver_binary}" --store "${artifact_store_path}" \
-    --socket "${artifact_socket_path}" --token-file "${token_path}" \
-    --session-id "${session_id}" >"${artifact_receiver_log}" 2>&1 &
+  artifact_receiver_arguments=(
+    --store "${artifact_store_path}"
+    --socket "${artifact_socket_path}"
+    --token-file "${token_path}"
+    --session-id "${session_id}"
+  )
+  if [[ "${capture_canvas_images}" == 1 ]]; then
+    artifact_receiver_arguments+=(--allow-sensitive)
+  fi
+  "${artifact_receiver_binary}" "${artifact_receiver_arguments[@]}" \
+    >"${artifact_receiver_log}" 2>&1 &
   artifact_receiver_pid=$!
   for _ in {1..100}; do
     if [[ -S "${artifact_socket_path}" ]]; then
@@ -177,7 +195,7 @@ fi
 
 analyzer_log="${session_directory}/vm-analyzer.log"
 analyze_captured_artifacts() {
-  local previous_signature=""
+  local previous_signature="initial"
   local current_signature=""
   local worker_pid=""
   # shellcheck disable=SC2317,SC2329  # Invoked by the signal trap below.
@@ -191,8 +209,12 @@ analyze_captured_artifacts() {
   }
   trap stop_analyzer_worker INT TERM
   while true; do
-    current_signature="$({ stat -f '%m:%z' "${artifact_store_path}/manifest.jsonl" 2>/dev/null || true; stat -f '%m:%z' "${store_path}" 2>/dev/null || true; } | tr '\n' ':')"
-    if [[ -n "${current_signature}" && "${current_signature}" != "${previous_signature}" ]]; then
+    if [[ -f "${artifact_store_path}/manifest.jsonl" ]]; then
+      current_signature="$(stat -f '%m:%z' "${artifact_store_path}/manifest.jsonl")"
+    else
+      current_signature="missing"
+    fi
+    if [[ "${current_signature}" != "${previous_signature}" ]]; then
       python3 "${vm_analyzer}" --artifacts "${artifact_store_path}" --events "${store_path}" >>"${analyzer_log}" 2>&1 &
       worker_pid=$!
       if ! wait "${worker_pid}"; then
@@ -215,6 +237,7 @@ ui_arguments=(
   --store "${store_path}" --trace-store "${trace_store_path}" \
   --signal-store "${signal_store_path}" --artifacts "${artifact_store_path}" \
   --socket "${socket_path}" --artifact-socket "${artifact_socket_path}"
+  --broker-pid "${broker_pid}"
 )
 if [[ "${native_quiet_mode}" == 0 ]]; then
   ui_arguments+=(
@@ -251,7 +274,8 @@ readonly ui_endpoint
 "${open_command}" -n "${origin_trace_app}" --args --store "${store_path}" \
   --trace-store "${trace_store_path}" --signal-store "${signal_store_path}" \
   --artifacts "${artifact_store_path}" \
-  --broker-socket "${socket_path}" --ui-url "${ui_endpoint}/?native=1"
+  --broker-socket "${socket_path}" \
+  --ui-url "${ui_endpoint}/?native=1&canvas_images=${capture_canvas_images}"
 
 echo "Origin Trace live session ${session_id}"
 echo "Evidence store: ${store_path}"
@@ -259,6 +283,11 @@ echo "Origin trace store: ${trace_store_path}"
 echo "Request signal profile store: ${signal_store_path}"
 echo "Artifact store: ${artifact_store_path}"
 echo "Category mask: ${category_mask}; expires after ${duration_seconds} seconds"
+if [[ "${capture_canvas_images}" == 1 ]]; then
+  echo "Canvas image capture: enabled for this session; outputs may contain sensitive page content"
+else
+  echo "Canvas image capture: disabled; set REB_CAPTURE_CANVAS_IMAGES=1 to enable it for one session"
+fi
 if [[ "${native_quiet_mode}" == 1 ]]; then
   echo "Live debugger: disabled (native quiet mode)"
 else
@@ -284,6 +313,9 @@ if [[ "${native_quiet_mode}" == 1 ]]; then
   brave_arguments+=(--js-flags=--reb-ignore-debugger-statements)
 else
   brave_arguments+=(--remote-debugging-port=0)
+fi
+if [[ "${capture_canvas_images}" == 1 ]]; then
+  brave_arguments+=(--reb-capture-canvas-images)
 fi
 "${brave_binary}" "${brave_arguments[@]}"
 

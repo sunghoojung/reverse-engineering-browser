@@ -58,27 +58,31 @@ int main() {
   reb::EventRecord canvas = Event(reb::EventCategory::kCanvas, reb::EventType::kApiCall, 2);
   canvas.header.parent_event_id = 1;
   reb::EventRecord audio = Event(reb::EventCategory::kWebAudio, reb::EventType::kApiCall, 3);
-  reb::EventRecord wasm = Event(reb::EventCategory::kWasm, reb::EventType::kModuleInstantiated, 4);
+  reb::EventRecord runtime = Event(reb::EventCategory::kRuntime, reb::EventType::kApiCall, 4);
+  reb::EventRecord wasm = Event(reb::EventCategory::kWasm, reb::EventType::kModuleInstantiated, 5);
   wasm.header.parent_event_id = 2;
   reb::EventRecord initiated =
-      Event(reb::EventCategory::kNetwork, reb::EventType::kRequestInitiated, 5);
+      Event(reb::EventCategory::kNetwork, reb::EventType::kRequestInitiated, 6);
   initiated.header.request_id = 81;
-  initiated.header.parent_event_id = 4;
+  initiated.header.parent_event_id = 5;
 
   CHECK(!index.Ingest(navigator));
   CHECK(!index.Ingest(canvas));
   CHECK(!index.Ingest(audio));
+  CHECK(!index.Ingest(runtime));
   CHECK(!index.Ingest(wasm));
   const std::optional<reb::RequestSignalProfile> initiated_profile = index.Ingest(initiated);
   CHECK(initiated_profile);
   CHECK(reb::IsValidRequestSignalProfile(*initiated_profile));
-  CHECK(initiated_profile->signal_count == 3);
+  CHECK(initiated_profile->signal_count == 4);
   CHECK(initiated_profile->parent_depth == 3);
   CHECK(Signal(*initiated_profile, reb::EventCategory::kNavigator)->relation ==
         reb::RequestSignalRelation::kParentChain);
   CHECK(Signal(*initiated_profile, reb::EventCategory::kCanvas)->relation ==
         reb::RequestSignalRelation::kParentChain);
   CHECK(Signal(*initiated_profile, reb::EventCategory::kWebAudio)->relation ==
+        reb::RequestSignalRelation::kSameContext);
+  CHECK(Signal(*initiated_profile, reb::EventCategory::kRuntime)->relation ==
         reb::RequestSignalRelation::kSameContext);
 
   reb::EventRecord started =
@@ -93,12 +97,13 @@ int main() {
   CHECK(started_profile->root_event.process_id == 90);
   CHECK(started_profile->root_event.sequence_number == 1);
   CHECK(started_profile->initiator_event.process_id == 10);
-  CHECK(started_profile->initiator_event.sequence_number == 5);
+  CHECK(started_profile->initiator_event.sequence_number == 6);
   CHECK(started_profile->request_id == 9001);
 
   const std::string json = reb::RequestSignalProfileToJson(*started_profile);
   CHECK(json.find("\"document_kind\":\"request-signal-profile\"") != std::string::npos);
   CHECK(json.find("\"category\":\"web_audio\"") != std::string::npos);
+  CHECK(json.find("\"category\":\"runtime\"") != std::string::npos);
   CHECK(json.find("\"relation\":\"parent_chain\"") != std::string::npos);
   CHECK(json.find("\"relation\":\"same_context\"") != std::string::npos);
   CHECK(json.find("\"copied_from_initiator\":true") != std::string::npos);

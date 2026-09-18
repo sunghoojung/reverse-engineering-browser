@@ -15,17 +15,21 @@
   web applications.
 </p>
 
-## v0.1.3 released
+## v0.1.4 released
 
-Origin Trace now opens as a clean production workspace with no bundled demo
-evidence. Demo rendering is limited to explicit development and test paths.
+Origin Trace now groups native fingerprint activity by browser tab, shows the
+newest operations first, and separates captured Canvas output from its drawing
+functions. Live sessions can stop probes and clear recorded events explicitly.
 
-[Download Origin Trace v0.1.3](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.3/Origin-Trace-v0.1.3-macos.zip)
-· [Release notes](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.1.3)
-· [Full changelog](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.1.2...v0.1.3)
+[Download Origin Trace v0.1.4](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.4/Origin-Trace-v0.1.4-macos.zip)
+· [Release notes](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.1.4)
+· [Full changelog](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.1.3...v0.1.4)
 
 ### Feature changelog
 
+- **v0.1.4:** expanded native fingerprint probes, added per-tab newest-first
+  activity and live tab counts, opt-in Canvas image capture, clearer queue-gap
+  reporting, and controls to stop probes or clear the current session's events.
 - **v0.1.3:** removed sample requests, events, and Canvas output from the
   production app bundle so every session starts with real captured evidence.
 - **v0.1.2:** added the Fingerprinting workspace with Canvas image output, a
@@ -38,8 +42,9 @@ evidence. Demo rendering is limited to explicit development and test paths.
   timing, headers, request bodies, and response bodies captured through CDP.
 - **Tab and domain organization:** separate traffic by browser tab, then narrow
   a tab to a specific destination domain or resource type.
-- **Native browser evidence:** record request initiation and lifecycle events,
-  Canvas and Web Audio activity, and correlated browser-process metadata from a
+- **Native browser evidence:** record calls and property reads across Canvas,
+  WebGL, Web Audio, device and layout APIs, Permissions, Storage, WebRTC, and
+  JavaScript runtime fingerprinting, plus request lifecycle metadata from a
   custom Brave build.
 - **Origin tracing:** follow a request backward through the observed events,
   scripts, frames, execution contexts, and captured artifacts that contributed
@@ -48,7 +53,8 @@ evidence. Demo rendering is limited to explicit development and test paths.
   pause and step through JavaScript, inspect scopes, evaluate watches, and use a
   live console.
 - **Artifact capture:** retain bounded copies of network-delivered and
-  runtime-generated JavaScript and WebAssembly with hashes and provenance.
+  runtime-generated JavaScript and WebAssembly with hashes and provenance, plus
+  explicitly authorized Canvas image output.
 - **Memory and backtrace tools:** inspect heap snapshots, live objects, decoded
   stack frames, and VM-related findings.
 - **Research workflows:** save requests to collections, replay isolated
@@ -64,14 +70,17 @@ evidence. Demo rendering is limited to explicit development and test paths.
 ### Download the compiled macOS apps
 
 1. Download
-   [Origin Trace v0.1.3](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.3/Origin-Trace-v0.1.3-macos.zip)
+   [Origin Trace v0.1.4](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.4/Origin-Trace-v0.1.4-macos.zip)
    and the
    [Brave Browser Development preview](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/brave-build-20260914/Brave-Browser-Development-brave-build-20260914-macos-arm64.zip).
 2. Unzip both files.
 3. Use the compiled Brave executable as `REB_BRAVE_BINARY` when starting a live
    session from the repository, as shown below.
 
-The compiled apps are for Apple silicon Macs. Origin Trace contains no bundled
+The compiled apps are for Apple silicon Macs. The linked Brave Browser
+Development preview predates the v0.1.4 probe expansion. Build the pinned
+Brave integration from this release's source to use the new probes; the
+downloaded preview cannot demonstrate them. Origin Trace contains no bundled
 sample evidence. The applications are ad-hoc signed but not notarized, so the
 first launch may require Control-clicking the app and choosing **Open**.
 
@@ -96,6 +105,12 @@ session. Captured evidence is stored under `build/sessions/live/`.
 CDP content capture is explicit because it can retain page content. It redacts
 authorization, cookie, proxy-authorization, and set-cookie headers. Streaming,
 cached, internal, or already-evicted response bodies may be unavailable.
+
+Fingerprint operation names are captured by default. To also retain the exact
+image returned by `HTMLCanvasElement.toDataURL()` for this one session, add
+`REB_CAPTURE_CANVAS_IMAGES=1`. Canvas image output can contain page content, so
+it is disabled by default, kept only in the local session store, and limited to
+2 MiB per image.
 
 ### Build the custom Brave browser for the first time
 

@@ -1636,6 +1636,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "error": NSNull(),
         "target": NSNull(),
         "targets": [],
+        "live_tab_count": NSNull(),
         "scripts": [],
         "paused": NSNull(),
         "breakpoints": [],
@@ -1918,7 +1919,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       CFGetTypeID(protocolVersion) != CFBooleanGetTypeID(),
       protocolVersion.stringValue == "1",
       let kind = artifact["kind"] as? String,
-      Set(["javascript", "wasm", "source_map", "response_body"]).contains(kind),
+      Set(["javascript", "wasm", "source_map", "response_body", "canvas_data_url"]).contains(kind),
       let url = artifact["url"] as? String,
       !url.isEmpty,
       let mimeType = artifact["mime_type"] as? String,
@@ -1930,7 +1931,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       let sha256 = artifact["sha256"] as? String,
       sha256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
       let sensitive = artifact["sensitive"] as? Bool,
-      sensitive == (kind == "response_body"),
+      sensitive == (kind == "response_body" || kind == "canvas_data_url"),
       artifact["content_path"] as? String == "blobs/\(sha256).bin"
     else {
       return false
@@ -1959,10 +1960,16 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         Set([
           "unknown", "network_response", "dynamic_javascript", "webassembly_compile",
           "webassembly_module", "webassembly_instantiate",
+          "canvas_to_data_url",
         ]).contains(captureOrigin),
         captureOrigin != "dynamic_javascript" || (kind == "javascript" && executionContextID != "0"),
         !captureOrigin.hasPrefix("webassembly_") || (kind == "wasm" && executionContextID != "0")
       else {
+        return false
+      }
+      if captureOrigin == "canvas_to_data_url"
+        && (kind != "canvas_data_url" || executionContextID != "0")
+      {
         return false
       }
     }
@@ -2253,7 +2260,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       "initiator_event", "navigation_id", "frame_id", "signals", "coverage",
     ])
     let categories = Set([
-      "canvas", "webgl", "web_audio", "navigator", "permissions", "storage", "webrtc",
+      "canvas", "webgl", "web_audio", "navigator", "permissions", "storage", "webrtc", "runtime",
     ])
     guard Set(profile.keys) == expectedKeys,
       let protocolVersion = profile["protocol_version"] as? NSNumber,

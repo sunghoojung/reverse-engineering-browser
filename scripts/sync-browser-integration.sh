@@ -9,6 +9,7 @@ readonly repository_root
 readonly brave_directory="${REB_BRAVE_DIRECTORY:-${repository_root}/browser/worktree/src/brave}"
 chromium_directory="$(cd "${brave_directory}/.." 2>/dev/null && pwd)" || chromium_directory=""
 readonly chromium_directory
+readonly v8_directory="${chromium_directory}/v8"
 readonly integration_directory="${REB_BRAVE_INTEGRATION_DIRECTORY:-${repository_root}/browser/integration/brave}"
 readonly overlay_directory="${integration_directory}/overlay"
 readonly patches_directory="${integration_directory}/patches"
@@ -17,6 +18,9 @@ readonly brave_revision="${REB_BRAVE_CORE_REVISION:-$(
 )}"
 readonly chromium_revision="${REB_CHROMIUM_REVISION:-$(
   tr -d '[:space:]' <"${repository_root}/browser/config/chromium.rev"
+)}"
+readonly v8_revision="${REB_V8_REVISION:-$(
+  tr -d '[:space:]' <"${repository_root}/browser/config/v8.rev"
 )}"
 
 is_git_checkout_root() {
@@ -52,12 +56,26 @@ if [[ -d "${chromium_patches_directory}" ]]; then
     -name '*.patch' -print0 | sort -z)
 fi
 
+readonly v8_patches_directory="${patches_directory}/v8"
+declare -a v8_patch_files=()
+if [[ -d "${v8_patches_directory}" ]]; then
+  while IFS= read -r -d '' patch_file; do
+    v8_patch_files+=("${patch_file}")
+  done < <(find "${v8_patches_directory}" -maxdepth 1 -type f \
+    -name '*.patch' -print0 | sort -z)
+fi
+
 if ((${#chromium_patch_files[@]} > 0)); then
   if ! is_git_checkout_root "${chromium_directory}"; then
     echo "Chromium checkout is missing: ${chromium_directory}" >&2
     echo "Run ./scripts/bootstrap-brave.sh --init first." >&2
     exit 1
   fi
+fi
+if ((${#v8_patch_files[@]} > 0)) && ! is_git_checkout_root "${v8_directory}"; then
+  echo "V8 checkout is missing: ${v8_directory}" >&2
+  echo "Run ./scripts/bootstrap-brave.sh --init first." >&2
+  exit 1
 fi
 
 verify_revision() {
@@ -91,6 +109,9 @@ verify_revision() {
 verify_revision "${brave_directory}" "Brave" "${brave_revision}"
 if ((${#chromium_patch_files[@]} > 0)); then
   verify_revision "${chromium_directory}" "Chromium" "${chromium_revision}"
+fi
+if ((${#v8_patch_files[@]} > 0)); then
+  verify_revision "${v8_directory}" "V8" "${v8_revision}"
 fi
 
 patch_stack_is_applied() {
@@ -200,15 +221,34 @@ apply_patches() {
   done
 }
 
-brave_stack_refreshed=0
-if preflight_patches "${brave_directory}" "" "${brave_patch_files[@]}"; then
-  :
-else
-  preflight_status=$?
-  if ((preflight_status != 10 && preflight_status != 11)); then
-    exit "${preflight_status}"
+sync_brave_siso_config() {
+  local source_file="${brave_directory}/build/config/siso/brave_siso_config.star"
+  local destination_file="${chromium_directory}/build/config/siso/brave_siso_config.star"
+
+  # Chromium's Siso entrypoint loads this Brave-owned module from the Chromium
+  # root, while brave-core tracks the authoritative copy under brave/. Keep the
+  # generated root copy in lockstep after applying the Brave patch stack.
+  if [[ ! -f "${source_file}" || ! -d "${chromium_directory}/build/config/siso" ]]; then
+    return
   fi
-  brave_stack_refreshed=1
+  if [[ ! -e "${destination_file}" ]]; then
+    cp "${source_file}" "${destination_file}"
+  elif ! cmp -s "${source_file}" "${destination_file}"; then
+    cp "${source_file}" "${destination_file}"
+  fi
+}
+
+brave_stack_refreshed=0
+if ((${#brave_patch_files[@]} > 0)); then
+  if preflight_patches "${brave_directory}" "" "${brave_patch_files[@]}"; then
+    :
+  else
+    preflight_status=$?
+    if ((preflight_status != 10 && preflight_status != 11)); then
+      exit "${preflight_status}"
+    fi
+    brave_stack_refreshed=1
+  fi
 fi
 chromium_stack_refreshed=0
 if ((${#chromium_patch_files[@]} > 0)); then
@@ -222,16 +262,33 @@ if ((${#chromium_patch_files[@]} > 0)); then
     chromium_stack_refreshed=1
   fi
 fi
-
-if [[ -d "${overlay_directory}" ]]; then
-  cp -R "${overlay_directory}/." "${brave_directory}/"
+v8_stack_refreshed=0
+if ((${#v8_patch_files[@]} > 0)); then
+  if preflight_patches "${v8_directory}" "V8 " "${v8_patch_files[@]}"; then
+    :
+  else
+    preflight_status=$?
+    if ((preflight_status != 10 && preflight_status != 11)); then
+      exit "${preflight_status}"
+    fi
+    v8_stack_refreshed=1
+  fi
 fi
 
-if ((brave_stack_refreshed == 0)); then
+if [[ -d "${overlay_directory}" ]]; then
+  cp -Rp "${overlay_directory}/." "${brave_directory}/"
+fi
+
+if ((${#brave_patch_files[@]} > 0 && brave_stack_refreshed == 0)); then
   apply_patches "${brave_directory}" "" "${brave_patch_files[@]}"
 fi
 if ((${#chromium_patch_files[@]} > 0 && chromium_stack_refreshed == 0)); then
   apply_patches "${chromium_directory}" "chromium/" "${chromium_patch_files[@]}"
 fi
+if ((${#v8_patch_files[@]} > 0 && v8_stack_refreshed == 0)); then
+  apply_patches "${v8_directory}" "v8/" "${v8_patch_files[@]}"
+fi
 
-echo "Synchronized Brave integration (${#brave_patch_files[@]} Brave patch(es), ${#chromium_patch_files[@]} Chromium patch(es))."
+sync_brave_siso_config
+
+echo "Synchronized Brave integration (${#brave_patch_files[@]} Brave patch(es), ${#chromium_patch_files[@]} Chromium patch(es), ${#v8_patch_files[@]} V8 patch(es))."

@@ -3,10 +3,35 @@
 This component owns renderer-side and browser-side boundaries for native probe
 events.
 
-The first call site observes `HTMLCanvasElement::toDataURL` through Brave's
-existing Chromium source override. The inactive path performs one atomic
-emitter check and returns without allocating, blocking, or changing the Canvas
-result.
+Generated Blink binding probes observe calls and property reads from an
+explicit 90-interface allowlist across Canvas, WebGL, WebGPU, Web Audio,
+browser, layout, font, media, Permissions, Storage, and WebRTC surfaces.
+Generic DOM interfaces retain only fingerprint-relevant measurement and
+capability members. V8 use counters add selected cross-engine Math functions,
+Intl constructors, locale-sensitive formatting, and timezone-offset reads as
+Runtime events. Generated non-Canvas bindings and V8 counters retain the first
+observation of each call site per capture session so repeated timing and Math
+loops cannot crowd later unique surfaces out of the bounded queue. Lower-level
+Canvas and WebGL call sites also cover supported internal drawing, readback,
+and capability-query paths, with overlapping generated callbacks excluded to
+avoid duplicates. Each metadata event contains only a fixed operation name and
+never retains arguments, text, pixels, or return values. The inactive sink path
+performs one atomic emitter check and returns without allocating, blocking, or
+changing the surface result.
+
+While capture is active, renderer operations resolve the current Blink frame
+token only after the policy check. The browser-process host maps that token to
+its top-level tab, leaving worker and detached-frame events unattributed. A
+local Stop command closes the broker connection; the browser socket client
+detects that disconnect promptly and disables every renderer host and browser
+capture sink. No page script controls probe activation.
+
+Canvas output is a separate, explicit sensitive-capture mode. When enabled for
+the session, a successful `HTMLCanvasElement.toDataURL()` result of at most 2
+MiB becomes a `canvas_data_url` artifact linked by `creator_event_id` to the
+exact readback operation. Larger or invalid results still produce metadata but
+no artifact. Renderer code passes the output one way to the browser process;
+the browser remains the only owner of the authenticated artifact connection.
 
 Web Audio call sites observe selected graph construction, connection, source
 start, offline rendering, analyser readback, and audio-buffer readback APIs.

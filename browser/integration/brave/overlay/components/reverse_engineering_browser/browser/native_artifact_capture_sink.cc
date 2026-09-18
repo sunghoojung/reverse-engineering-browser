@@ -192,6 +192,7 @@ mojo::ScopedDataPipeConsumerHandle NativeArtifactCaptureSink::MaybeCaptureRespon
 void NativeArtifactCaptureSink::CaptureGeneratedArtifact(
     const NativeArtifactKind kind,
     const NativeArtifactCaptureOrigin capture_origin,
+    const std::uint64_t creator_event_id,
     const std::uint64_t execution_context_id,
     const std::uint64_t frame_id,
     const std::string_view source_url,
@@ -206,9 +207,13 @@ void NativeArtifactCaptureSink::CaptureGeneratedArtifact(
       (kind == NativeArtifactKind::kWasm &&
        (capture_origin == NativeArtifactCaptureOrigin::kWebAssemblyCompile ||
         capture_origin == NativeArtifactCaptureOrigin::kWebAssemblyModule ||
-        capture_origin == NativeArtifactCaptureOrigin::kWebAssemblyInstantiate));
-  if (!valid_kind_and_origin || execution_context_id == 0 || content.size() == 0 ||
-      content.size() > kMaxArtifactBytes || source_url.empty() ||
+        capture_origin == NativeArtifactCaptureOrigin::kWebAssemblyInstantiate)) ||
+      (kind == NativeArtifactKind::kCanvasDataUrl &&
+       capture_origin == NativeArtifactCaptureOrigin::kCanvasToDataUrl && creator_event_id != 0 &&
+       execution_context_id == 0);
+  if (!valid_kind_and_origin ||
+      (kind != NativeArtifactKind::kCanvasDataUrl && execution_context_id == 0) ||
+      content.size() == 0 || content.size() > kMaxArtifactBytes || source_url.empty() ||
       source_url.size() > kNativeArtifactMaxUrlBytes) {
     EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, 0, frame_id,
                "generated_metadata_or_size_limit");
@@ -216,8 +221,9 @@ void NativeArtifactCaptureSink::CaptureGeneratedArtifact(
   }
 
   const std::string sanitized_url = SanitizedUrl(GURL(source_url));
-  const std::string mime_type =
-      kind == NativeArtifactKind::kJavaScript ? "text/javascript" : "application/wasm";
+  const std::string mime_type = kind == NativeArtifactKind::kJavaScript ? "text/javascript"
+                                : kind == NativeArtifactKind::kWasm     ? "application/wasm"
+                                                                        : "text/plain";
   if (sanitized_url.empty() || sanitized_url.size() > kNativeArtifactMaxUrlBytes) {
     EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, 0, frame_id,
                "generated_url_invalid");
@@ -232,6 +238,10 @@ void NativeArtifactCaptureSink::CaptureGeneratedArtifact(
   transfer->header.session_id = session_id_.load(std::memory_order_relaxed);
   transfer->header.frame_id = frame_id;
   transfer->header.artifact_id = artifact_id;
+  transfer->header.creator_event_id = creator_event_id;
+  if (kind == NativeArtifactKind::kCanvasDataUrl) {
+    transfer->header.flags |= kNativeArtifactFlagSensitive;
+  }
   transfer->header.content_size = received.size();
   transfer->header.url_size = static_cast<std::uint32_t>(sanitized_url.size());
   transfer->header.mime_type_size = static_cast<std::uint32_t>(mime_type.size());

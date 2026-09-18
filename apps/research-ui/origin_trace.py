@@ -26,6 +26,7 @@ SOURCE_BOUNDARY_CATEGORIES = {
     "permissions",
     "storage",
     "webrtc",
+    "runtime",
 }
 EVENT_CATEGORIES = SOURCE_BOUNDARY_CATEGORIES | {
     "artifact",

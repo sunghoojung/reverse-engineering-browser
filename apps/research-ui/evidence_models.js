@@ -1,9 +1,10 @@
       const eventCategories = new Set([
         'unknown', 'canvas', 'webgl', 'web_audio', 'navigator', 'permissions',
-        'storage', 'webrtc', 'wasm', 'network', 'vm', 'artifact'
+        'storage', 'webrtc', 'wasm', 'network', 'vm', 'artifact', 'runtime'
       ]);
       const fingerprintSignalCategories = new Set([
-        'canvas', 'webgl', 'web_audio', 'navigator', 'permissions', 'storage', 'webrtc'
+        'canvas', 'webgl', 'web_audio', 'navigator', 'permissions', 'storage', 'webrtc',
+        'runtime'
       ]);
 
       function fingerprintEventsFromEvents(events) {
@@ -50,10 +51,12 @@
         ['request_failed', 5]
       ]);
       const networkLifecycleTypes = new Set(lifecycleRanks.keys());
-      const artifactKinds = new Set(['javascript', 'wasm', 'source_map', 'response_body']);
+      const artifactKinds = new Set([
+        'javascript', 'wasm', 'source_map', 'response_body', 'canvas_data_url'
+      ]);
       const artifactCaptureOrigins = new Set([
         'unknown', 'network_response', 'dynamic_javascript', 'webassembly_compile',
-        'webassembly_module', 'webassembly_instantiate'
+        'webassembly_module', 'webassembly_instantiate', 'canvas_to_data_url'
       ]);
       const canvasReplayProperties = new Set([
         'fillStyle', 'strokeStyle', 'font', 'textBaseline', 'textAlign',
@@ -210,6 +213,8 @@
           body.count === body.events.length &&
           (body.capture_mode === undefined || ['live', 'demo', 'idle'].includes(body.capture_mode)) &&
           (body.broker_connected === undefined || typeof body.broker_connected === 'boolean') &&
+          (body.capture_stopped === undefined || typeof body.capture_stopped === 'boolean') &&
+          (body.capture_controls_available === undefined || typeof body.capture_controls_available === 'boolean') &&
           (body.canvas_render_captures === undefined ||
             (body.capture_mode === 'demo' &&
               Array.isArray(body.canvas_render_captures) &&
@@ -255,7 +260,9 @@
             (artifact.capture_origin === 'dynamic_javascript' &&
               (artifact.kind !== 'javascript' || artifact.execution_context_id === '0')) ||
             (artifact.capture_origin.startsWith('webassembly_') &&
-              (artifact.kind !== 'wasm' || artifact.execution_context_id === '0'))) return false;
+              (artifact.kind !== 'wasm' || artifact.execution_context_id === '0')) ||
+            (artifact.capture_origin === 'canvas_to_data_url' &&
+              (artifact.kind !== 'canvas_data_url' || artifact.execution_context_id !== '0'))) return false;
         }
         return artifact.protocol_version === 1 &&
           artifactIdentifierFields.every(field => isCanonicalInteger(artifact[field], 0n, uint64Max)) &&
@@ -265,7 +272,8 @@
           isSafeIntegerInRange(artifact.byte_size, 0, Number.MAX_SAFE_INTEGER) &&
           typeof artifact.sha256 === 'string' && /^[0-9a-f]{64}$/.test(artifact.sha256) &&
           typeof artifact.sensitive === 'boolean' &&
-          (!artifact.sensitive || artifact.kind === 'response_body');
+          (!artifact.sensitive || artifact.kind === 'response_body' || artifact.kind === 'canvas_data_url') &&
+          (artifact.kind !== 'canvas_data_url' || artifact.sensitive);
       }
 
       function isArtifactResponse(body) {
@@ -1253,7 +1261,7 @@
             !isCanonicalInteger(body.frame_id, 0n, uint64Max) ||
             !isSignalEventReference(body.root_event) ||
             (body.initiator_event !== null && !isSignalEventReference(body.initiator_event)) ||
-            !Array.isArray(body.signals) || body.signals.length > 7 ||
+            !Array.isArray(body.signals) || body.signals.length > 8 ||
             !isPlainObject(body.coverage)) return false;
         const categories = new Set();
         const expectedProcessID = (body.initiator_event ?? body.root_event).process_id;

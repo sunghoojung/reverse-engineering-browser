@@ -1,0 +1,13 @@
+diff --git a/build/config/siso/brave_siso_config.star b/build/config/siso/brave_siso_config.star
+--- a/build/config/siso/brave_siso_config.star
++++ b/build/config/siso/brave_siso_config.star
+@@ -180,7 +180,9 @@ def __adjust_handlers(ctx, step_config, handlers):
+     # If no clang rule was found, add one with redirect_cc handler to handle
+     # C/C++ source file overrides from chromium_src directory.
+     if not found_clang_rule:
+         cc_wrapper = gn.args(ctx).get("cc_wrapper")
++        if cc_wrapper and cc_wrapper.startswith('"') and cc_wrapper.endswith('"'):
++            cc_wrapper = cc_wrapper[1:-1]
+         if __HOST_OS_IS_WINDOWS:
+             clang_command_prefix = "..\\..\\third_party\\llvm-build\\Release+Asserts\\bin\\clang"
+             clang_coverage_command_prefix = "python3.exe ../../build/toolchain/clang_code_coverage_wrapper.py"

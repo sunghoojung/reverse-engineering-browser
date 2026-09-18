@@ -33,6 +33,7 @@ bool IsKnownCategory(const EventCategory category) noexcept {
     case EventCategory::kNetwork:
     case EventCategory::kVm:
     case EventCategory::kArtifact:
+    case EventCategory::kRuntime:
       return true;
     case EventCategory::kUnknown:
       return false;
@@ -224,6 +225,8 @@ std::string_view EventCategoryName(const EventCategory category) noexcept {
       return "vm";
     case EventCategory::kArtifact:
       return "artifact";
+    case EventCategory::kRuntime:
+      return "runtime";
     case EventCategory::kUnknown:
       return "unknown";
   }

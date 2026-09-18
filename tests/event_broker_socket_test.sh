@@ -14,6 +14,7 @@ readonly web_audio_payload_hex="4f66666c696e65417564696f436f6e746578742e73746172
 test_root="$(mktemp -d)"
 readonly test_root
 broker_pid=""
+stop_client_pid=""
 test_succeeded=false
 
 cleanup() {
@@ -31,6 +32,10 @@ cleanup() {
   if [[ -n "${broker_pid}" ]] && kill -0 "${broker_pid}" 2>/dev/null; then
     kill "${broker_pid}" 2>/dev/null || true
     wait "${broker_pid}" 2>/dev/null || true
+  fi
+  if [[ -n "${stop_client_pid}" ]] && kill -0 "${stop_client_pid}" 2>/dev/null; then
+    kill "${stop_client_pid}" 2>/dev/null || true
+    wait "${stop_client_pid}" 2>/dev/null || true
   fi
   rm -rf "${test_root}"
 }
@@ -94,6 +99,55 @@ fi
 grep -Fq 'accepted=4 invalid=0 category_rejected=10 expired=0 sequence_gaps=0' \
   "${test_root}/broker.err"
 test ! -e "${socket_path}"
+
+readonly stop_socket_path="${test_root}/stop.sock"
+readonly stop_token_path="${test_root}/stop-token"
+readonly stop_store_path="${test_root}/stop-events.jsonl"
+"${broker}" --store "${stop_store_path}" --socket "${stop_socket_path}" \
+  --token-file "${stop_token_path}" --session-id 1 --category-mask 2047 \
+  --duration-seconds 60 \
+  >"${test_root}/stop-broker.out" 2>"${test_root}/stop-broker.err" &
+broker_pid=$!
+for _ in {1..100}; do
+  if [[ -S "${stop_socket_path}" && -f "${stop_token_path}" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+test -S "${stop_socket_path}"
+"${producer}" >"${test_root}/stop-input.bin"
+python3 - "${stop_socket_path}" "${stop_token_path}" \
+  "${test_root}/stop-input.bin" "${test_root}/stop-ready" <<'PY' &
+import socket
+import struct
+import sys
+from pathlib import Path
+
+socket_path, token_path, event_path, ready_path = sys.argv[1:]
+token = bytes.fromhex(Path(token_path).read_text(encoding="ascii").strip())
+hello = struct.pack("=IHHQ32s16s", 0x52454249, 1, 64, 1, token, bytes(16))
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+    connection.connect(socket_path)
+    connection.sendall(hello + Path(event_path).read_bytes()[:320])
+    Path(ready_path).touch()
+    connection.settimeout(10)
+    assert connection.recv(1) == b""
+PY
+stop_client_pid=$!
+for _ in {1..100}; do
+  if [[ -f "${test_root}/stop-ready" && -s "${stop_store_path}" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+test -s "${stop_store_path}"
+kill -USR1 "${broker_pid}"
+wait "${broker_pid}"
+broker_pid=""
+wait "${stop_client_pid}"
+stop_client_pid=""
+test "$(wc -l < "${stop_store_path}" | tr -d ' ')" = 1
+test ! -e "${stop_socket_path}"
 
 readonly batch_socket_path="${test_root}/batch.sock"
 readonly batch_token_path="${test_root}/batch-token"

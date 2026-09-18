@@ -9,6 +9,7 @@ from vm_analyzer import (
     AnalysisError,
     Limits,
     _find_js_rule,
+    _js_function_regions,
     analyze_store,
     canonical_json,
     verify_analysis_document,
@@ -326,6 +327,14 @@ while (ip < program.length) {
         reasons = {item["reason"] for item in result["coverage"]["omissions"]}
         self.assertIn("javascript-function-region-limit", reasons)
         self.assertIn("javascript-region-work-limit", reasons)
+
+    def test_minified_parenthesis_runs_do_not_expand_function_signature_work(self) -> None:
+        source = "(" * 64_000 + "value" + ")" * 64_000
+
+        regions, omissions = _js_function_regions(source, Limits())
+
+        self.assertEqual(regions, [(0, len(source))])
+        self.assertEqual(omissions, [])
 
     def test_javascript_coordinates_are_utf8_byte_offsets(self) -> None:
         source = "const marker = 'π';\n" + (FIXTURES / "pure-js-vm.js").read_text(

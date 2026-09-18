@@ -30,15 +30,16 @@ enum class NativeProbeCategory : std::uint16_t {
   kNetwork = 9,
   kVm = 10,
   kArtifact = 11,
+  kRuntime = 12,
 };
 
 inline constexpr std::uint64_t kAllNativeProbeCategoryMask =
-    (std::uint64_t{1} << static_cast<std::uint16_t>(NativeProbeCategory::kArtifact)) - 1;
+    (std::uint64_t{1} << static_cast<std::uint16_t>(NativeProbeCategory::kRuntime)) - 1;
 
 [[nodiscard]] constexpr std::uint64_t NativeProbeCategoryMask(
     const NativeProbeCategory category) noexcept {
   const auto value = static_cast<std::uint16_t>(category);
-  return value == 0 || value > static_cast<std::uint16_t>(NativeProbeCategory::kArtifact)
+  return value == 0 || value > static_cast<std::uint16_t>(NativeProbeCategory::kRuntime)
              ? 0
              : std::uint64_t{1} << (value - 1U);
 }

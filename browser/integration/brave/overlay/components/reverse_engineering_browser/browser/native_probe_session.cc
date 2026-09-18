@@ -27,13 +27,16 @@ NativeProbeSession::NativeProbeSession() = default;
 
 NativeProbeSession::~NativeProbeSession() = default;
 
-void NativeProbeSession::BindHost(mojo::PendingReceiver<mojom::NativeProbeHost> receiver) {
-  mojo::MakeSelfOwnedReceiver(std::make_unique<NativeProbeHost>(*this), std::move(receiver));
+void NativeProbeSession::BindHost(const int renderer_process_id,
+                                  mojo::PendingReceiver<mojom::NativeProbeHost> receiver) {
+  mojo::MakeSelfOwnedReceiver(std::make_unique<NativeProbeHost>(*this, renderer_process_id),
+                              std::move(receiver));
 }
 
 bool NativeProbeSession::StartSession(const std::uint64_t session_id,
                                       const std::uint64_t category_mask,
                                       const std::uint64_t expires_at_monotonic_ns,
+                                      const bool capture_canvas_images,
                                       const NativeProbeEmitter downstream) noexcept {
   const std::uint64_t now =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
@@ -44,6 +47,7 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
 
   category_mask_.store(category_mask, std::memory_order_relaxed);
   expires_at_monotonic_ns_.store(expires_at_monotonic_ns, std::memory_order_relaxed);
+  capture_canvas_images_.store(capture_canvas_images, std::memory_order_relaxed);
   next_browser_sequence_.store(1, std::memory_order_relaxed);
   downstream_.store(downstream, std::memory_order_release);
   session_id_.store(session_id, std::memory_order_release);
@@ -52,7 +56,7 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
   NativeArtifactCaptureSink::Get().SetEmitter(&NativeProbeSession::EmitBrowserEvent, session_id,
                                               category_mask, expires_at_monotonic_ns);
   for (NativeProbeHost* const host : hosts_) {
-    host->Configure(session_id, category_mask, expires_at_monotonic_ns);
+    host->Configure(session_id, category_mask, expires_at_monotonic_ns, capture_canvas_images);
   }
   return true;
 }
@@ -63,6 +67,7 @@ void NativeProbeSession::StopSession() noexcept {
   session_id_.store(0, std::memory_order_release);
   category_mask_.store(0, std::memory_order_release);
   expires_at_monotonic_ns_.store(0, std::memory_order_release);
+  capture_canvas_images_.store(false, std::memory_order_release);
   for (NativeProbeHost* const host : hosts_) {
     host->Disable();
   }
@@ -83,6 +88,10 @@ std::uint64_t NativeProbeSession::category_mask() const noexcept {
 
 std::uint64_t NativeProbeSession::expires_at_monotonic_ns() const noexcept {
   return expires_at_monotonic_ns_.load(std::memory_order_acquire);
+}
+
+bool NativeProbeSession::capture_canvas_images() const noexcept {
+  return capture_canvas_images_.load(std::memory_order_acquire);
 }
 
 std::uint64_t NativeProbeSession::NextBrowserSequence() noexcept {

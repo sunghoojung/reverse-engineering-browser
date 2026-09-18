@@ -21,6 +21,7 @@ from debugger.automation import (
 from debugger.errors import (
     DebuggerBridgeError,
     ProtocolError,
+    WebSocketClosed,
 )
 from debugger.heap_snapshot import (
     HeapSnapshotCapture,
@@ -783,6 +784,16 @@ class DebuggerBridgeTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(DebuggerBridgeError, "loopback ws://"):
             NativeDebuggerConnection("ws://192.0.2.1/devtools/page/1", binary)
+
+    def test_native_transport_reader_treats_closed_stdout_as_disconnect(self) -> None:
+        connection = object.__new__(NativeDebuggerConnection)
+        connection._closed = False
+        stdout = tempfile.TemporaryFile()
+        stdout.close()
+        connection._process = mock.Mock(stdout=stdout)
+
+        with self.assertRaisesRegex(WebSocketClosed, "closed"):
+            connection._read_control_message(0.0)
 
     def test_action_scope_session_uses_native_transport(self) -> None:
         web_socket = FakeDebuggerWebSocket()

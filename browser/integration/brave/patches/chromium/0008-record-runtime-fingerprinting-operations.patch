@@ -1,0 +1,153 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/use_counter_callback.cc b/third_party/blink/renderer/bindings/core/v8/use_counter_callback.cc
+index e2a76e4dd3..8df496c59e 100644
+--- a/third_party/blink/renderer/bindings/core/v8/use_counter_callback.cc
++++ b/third_party/blink/renderer/bindings/core/v8/use_counter_callback.cc
+@@ -4,6 +4,13 @@
+ 
+ #include "third_party/blink/renderer/bindings/core/v8/use_counter_callback.h"
+ 
++#include <array>
++#include <atomic>
++#include <cstddef>
++#include <cstdint>
++#include <string_view>
++
++#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "third_party/blink/public/common/scheme_registry.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+@@ -15,12 +23,122 @@
+ 
+ namespace blink {
+ 
++namespace {
++
++std::string_view RuntimeFingerprintOperation(
++    const v8::Isolate::UseCounterFeature feature) {
++  switch (feature) {
++    case v8::Isolate::kCollator:
++      return "Intl.Collator";
++    case v8::Isolate::kNumberFormat:
++      return "Intl.NumberFormat";
++    case v8::Isolate::kDateTimeFormat:
++      return "Intl.DateTimeFormat";
++    case v8::Isolate::kPluralRules:
++      return "Intl.PluralRules";
++    case v8::Isolate::kRelativeTimeFormat:
++      return "Intl.RelativeTimeFormat";
++    case v8::Isolate::kLocale:
++      return "Intl.Locale";
++    case v8::Isolate::kListFormat:
++      return "Intl.ListFormat";
++    case v8::Isolate::kSegmenter:
++      return "Intl.Segmenter";
++    case v8::Isolate::kStringLocaleCompare:
++      return "String.localeCompare";
++    case v8::Isolate::kStringToLocaleLowerCase:
++      return "String.toLocaleLowerCase";
++    case v8::Isolate::kNumberToLocaleString:
++      return "Number.toLocaleString";
++    case v8::Isolate::kDateToLocaleString:
++      return "Date.toLocaleString";
++    case v8::Isolate::kDateToLocaleDateString:
++      return "Date.toLocaleDateString";
++    case v8::Isolate::kDateToLocaleTimeString:
++      return "Date.toLocaleTimeString";
++    case v8::Isolate::kDisplayNames:
++      return "Intl.DisplayNames";
++    case v8::Isolate::kDurationFormat:
++      return "Intl.DurationFormat";
++    case v8::Isolate::kDateTimeFormatRange:
++      return "Intl.DateTimeFormat.formatRange";
++    case v8::Isolate::kRebMathAcos:
++      return "Math.acos";
++    case v8::Isolate::kRebMathAcosh:
++      return "Math.acosh";
++    case v8::Isolate::kRebMathAsin:
++      return "Math.asin";
++    case v8::Isolate::kRebMathAsinh:
++      return "Math.asinh";
++    case v8::Isolate::kRebMathAtan:
++      return "Math.atan";
++    case v8::Isolate::kRebMathAtan2:
++      return "Math.atan2";
++    case v8::Isolate::kRebMathAtanh:
++      return "Math.atanh";
++    case v8::Isolate::kRebMathCbrt:
++      return "Math.cbrt";
++    case v8::Isolate::kRebMathCos:
++      return "Math.cos";
++    case v8::Isolate::kRebMathCosh:
++      return "Math.cosh";
++    case v8::Isolate::kRebMathExp:
++      return "Math.exp";
++    case v8::Isolate::kRebMathExpm1:
++      return "Math.expm1";
++    case v8::Isolate::kRebMathHypot:
++      return "Math.hypot";
++    case v8::Isolate::kRebMathLog:
++      return "Math.log";
++    case v8::Isolate::kRebMathLog1p:
++      return "Math.log1p";
++    case v8::Isolate::kRebMathLog10:
++      return "Math.log10";
++    case v8::Isolate::kRebMathPow:
++      return "Math.pow";
++    case v8::Isolate::kRebMathSin:
++      return "Math.sin";
++    case v8::Isolate::kRebMathSinh:
++      return "Math.sinh";
++    case v8::Isolate::kRebMathSqrt:
++      return "Math.sqrt";
++    case v8::Isolate::kRebMathTan:
++      return "Math.tan";
++    case v8::Isolate::kRebMathTanh:
++      return "Math.tanh";
++    case v8::Isolate::kRebDateGetTimezoneOffset:
++      return "Date.getTimezoneOffset";
++    default:
++      return {};
++  }
++}
++
++bool IsRebOnlyUseCounter(const v8::Isolate::UseCounterFeature feature) {
++  return feature >= v8::Isolate::kRebMathAcos &&
++         feature <= v8::Isolate::kRebDateGetTimezoneOffset;
++}
++
++}  // namespace
++
+ void UseCounterCallback(v8::Isolate* isolate,
+                         v8::Isolate::UseCounterFeature feature) {
+   if (V8PerIsolateData::From(isolate)->IsUseCounterDisabled()) {
+     return;
+   }
+ 
++  const std::string_view runtime_operation = RuntimeFingerprintOperation(feature);
++  if (!runtime_operation.empty()) {
++    static std::array<std::atomic<std::uint64_t>, v8::Isolate::kUseCounterFeatureCount>
++        observed_sessions{};
++    const auto feature_index = static_cast<std::size_t>(feature);
++    reb::NativeProbeSink::Get().RecordApiCallOnce(reb::NativeProbeCategory::kRuntime,
++                                                   runtime_operation,
++                                                   observed_sessions[feature_index]);
++    if (IsRebOnlyUseCounter(feature)) {
++      return;
++    }
++  }
++
+   std::optional<WebFeature> blink_feature;
+   std::optional<WebDXFeature> webdx_feature;
+   bool deprecated = false;
+diff --git a/third_party/blink/renderer/core/BUILD.gn b/third_party/blink/renderer/core/BUILD.gn
+index a4a53a9003..c439ad904f 100644
+--- a/third_party/blink/renderer/core/BUILD.gn
++++ b/third_party/blink/renderer/core/BUILD.gn
+@@ -408,6 +408,7 @@ component("core") {
+     ":make_deprecation_info",
+     ":xml_ffi",
+     "//base",
++    "//brave/components/reverse_engineering_browser:renderer_sink",
+     "//components/attribution_reporting",
+     "//components/attribution_reporting:mojom_blink",
+     "//components/paint_preview/common",

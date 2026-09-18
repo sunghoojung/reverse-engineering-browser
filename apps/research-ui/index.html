@@ -120,7 +120,7 @@
               <div class="signal-hero-copy">
                 <div class="signal-kicker"><span aria-hidden="true"></span>Native surface capture</div>
                 <h1>Fingerprint inspector</h1>
-                <p>Inspect what page code rendered, replay its drawing calls, and connect the activity to captured requests.</p>
+                <p>See every observed browser surface, the exact API or property touched, and any captured Canvas output.</p>
               </div>
               <div class="signal-session-summary">
                 <span id="signal-session-badge" class="signal-session-badge">Waiting for evidence</span>
@@ -130,6 +130,13 @@
               </div>
             </header>
             <div id="signal-notice" class="signal-notice" data-kind="loading" role="status" aria-live="polite">Loading fingerprint evidence...</div>
+            <div class="signal-scopebar">
+              <div id="signal-tab-scopes" class="signal-tab-scopes" role="tablist" aria-label="Captured browser tabs"></div>
+              <div class="signal-capture-actions">
+                <button id="signal-stop-capture" type="button" title="Disable native probes for this session">Stop probes</button>
+                <button id="signal-clear-events" type="button" title="Clear current-session events after capture stops">Clear events</button>
+              </div>
+            </div>
             <div class="signal-commandbar">
               <div class="signal-view-tabs" role="tablist" aria-label="Fingerprint inspector views">
                 <button id="signal-view-rendering" type="button" role="tab" data-signal-view="rendering" aria-controls="signal-panel-rendering" aria-selected="true">Rendering <span id="signal-render-count">0</span></button>
@@ -140,7 +147,12 @@
 
             <section id="signal-panel-rendering" class="signal-panel signal-rendering-panel" role="tabpanel" aria-labelledby="signal-view-rendering">
               <div class="signal-panel-intro">
-                <div><h2>Canvas render captures</h2><p>Visual output beside a deterministic local replay of the retained drawing sequence.</p></div>
+                <div><h2>Observed surfaces</h2><p>Counts, unique operations, and the most active API or property observed.</p></div>
+                <span id="signal-operation-summary">No operations</span>
+              </div>
+              <div id="signal-surface-overview" class="signal-surface-overview"></div>
+              <div class="signal-panel-intro signal-canvas-intro">
+                <div><h2>Canvas readbacks</h2><p>Captured output beside the native drawing-function sequence observed before it.</p></div>
                 <span id="signal-render-summary">No render captures</span>
               </div>
               <div id="signal-render-list" class="signal-render-list"></div>
@@ -152,14 +164,15 @@
                 <button type="button" data-signal-filter="canvas" aria-pressed="false">Canvas</button>
                 <button type="button" data-signal-filter="webgl" aria-pressed="false">WebGL</button>
                 <button type="button" data-signal-filter="web_audio" aria-pressed="false">Web Audio</button>
-                <button type="button" data-signal-filter="navigator" aria-pressed="false">Navigator</button>
+                <button type="button" data-signal-filter="navigator" aria-pressed="false">Device, layout &amp; WebGPU</button>
                 <button type="button" data-signal-filter="permissions" aria-pressed="false">Permissions</button>
                 <button type="button" data-signal-filter="storage" aria-pressed="false">Storage</button>
                 <button type="button" data-signal-filter="webrtc" aria-pressed="false">WebRTC</button>
+                <button type="button" data-signal-filter="runtime" aria-pressed="false">Runtime</button>
               </div>
-              <div class="signal-layout">
+              <div id="signal-layout" class="signal-layout" data-detail-open="false">
                 <section class="signal-activity-pane" aria-label="Fingerprint event activity">
-                  <div class="signal-pane-head"><div><h2>Captured operations</h2><p>Native evidence, newest first</p></div><span id="signal-visible-count">0 shown</span></div>
+                  <div class="signal-pane-head"><div><h2>Captured operations</h2><p id="signal-feed-status" aria-live="polite">Newest first</p></div><div class="signal-feed-actions"><span id="signal-visible-count">0 shown</span><button id="signal-latest" type="button">↑ Latest</button><button id="signal-detail-toggle" type="button" aria-controls="signal-detail" aria-expanded="false">Details</button></div></div>
                   <div id="signal-rows" class="signal-rows" role="listbox" aria-label="Fingerprint events"></div>
                 </section>
                 <aside id="signal-detail" class="signal-detail" aria-label="Selected fingerprint event">

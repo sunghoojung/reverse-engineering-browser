@@ -38,8 +38,9 @@ evidence. Demo rendering is limited to explicit development and test paths.
   timing, headers, request bodies, and response bodies captured through CDP.
 - **Tab and domain organization:** separate traffic by browser tab, then narrow
   a tab to a specific destination domain or resource type.
-- **Native browser evidence:** record request initiation and lifecycle events,
-  Canvas and Web Audio activity, and correlated browser-process metadata from a
+- **Native browser evidence:** record calls and property reads across Canvas,
+  WebGL, Web Audio, device and layout APIs, Permissions, Storage, WebRTC, and
+  JavaScript runtime fingerprinting, plus request lifecycle metadata from a
   custom Brave build.
 - **Origin tracing:** follow a request backward through the observed events,
   scripts, frames, execution contexts, and captured artifacts that contributed
@@ -48,7 +49,8 @@ evidence. Demo rendering is limited to explicit development and test paths.
   pause and step through JavaScript, inspect scopes, evaluate watches, and use a
   live console.
 - **Artifact capture:** retain bounded copies of network-delivered and
-  runtime-generated JavaScript and WebAssembly with hashes and provenance.
+  runtime-generated JavaScript and WebAssembly with hashes and provenance, plus
+  explicitly authorized Canvas image output.
 - **Memory and backtrace tools:** inspect heap snapshots, live objects, decoded
   stack frames, and VM-related findings.
 - **Research workflows:** save requests to collections, replay isolated
@@ -96,6 +98,12 @@ session. Captured evidence is stored under `build/sessions/live/`.
 CDP content capture is explicit because it can retain page content. It redacts
 authorization, cookie, proxy-authorization, and set-cookie headers. Streaming,
 cached, internal, or already-evicted response bodies may be unavailable.
+
+Fingerprint operation names are captured by default. To also retain the exact
+image returned by `HTMLCanvasElement.toDataURL()` for this one session, add
+`REB_CAPTURE_CANVAS_IMAGES=1`. Canvas image output can contain page content, so
+it is disabled by default, kept only in the local session store, and limited to
+2 MiB per image.
 
 ### Build the custom Brave browser for the first time
 

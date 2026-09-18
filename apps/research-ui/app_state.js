@@ -1,6 +1,8 @@
       if (new URLSearchParams(location.search).has('native')) document.documentElement.classList.add('native-shell');
 
       const standalonePreview = typeof location !== 'undefined' && location.protocol === 'file:';
+      const canvasImageCaptureEnabled = typeof location !== 'undefined' &&
+        new URLSearchParams(location.search).get('canvas_images') === '1';
       const sampleRequests = [];
       const sampleEvidence = [];
       const sampleArtifacts = [];
@@ -72,6 +74,7 @@
       const state = {
         events: [],
         canvasRenderCaptures: [],
+        canvasImageCaptureEnabled,
         nativeRequests: [],
         requests: standalonePreview ? [...sampleRequests] : [],
         artifacts: standalonePreview ? [...sampleArtifacts] : [],
@@ -228,6 +231,13 @@
         signalProfileEtag: null,
         signalProfileGeneration: 0,
         signalView: 'rendering',
+        signalDetailOpen: false,
+        signalTabId: 'all',
+        signalSelectedKeysByTab: new Map(),
+        signalKnownKeys: null,
+        signalNewKeys: new Set(),
+        captureStopped: false,
+        captureControlsAvailable: false,
         signalCategoryFilter: 'all',
         selectedSignalEventKey: null
       };
@@ -251,6 +261,13 @@
         selectedStatus: document.querySelector('#selected-status'),
         selectedUrl: document.querySelector('#selected-url'),
         signalSessionBadge: document.querySelector('#signal-session-badge'),
+        signalTabScopes: document.querySelector('#signal-tab-scopes'),
+        signalStopCapture: document.querySelector('#signal-stop-capture'),
+        signalClearEvents: document.querySelector('#signal-clear-events'),
+        signalFeedStatus: document.querySelector('#signal-feed-status'),
+        signalLatest: document.querySelector('#signal-latest'),
+        signalDetailToggle: document.querySelector('#signal-detail-toggle'),
+        signalLayout: document.querySelector('#signal-layout'),
         signalNotice: document.querySelector('#signal-notice'),
         signalFamilyCount: document.querySelector('#signal-family-count'),
         signalEventCount: document.querySelector('#signal-event-count'),
@@ -260,6 +277,8 @@
         signalPanels: [...document.querySelectorAll('[id^="signal-panel-"]')],
         signalRenderCount: document.querySelector('#signal-render-count'),
         signalActivityCount: document.querySelector('#signal-activity-count'),
+        signalOperationSummary: document.querySelector('#signal-operation-summary'),
+        signalSurfaceOverview: document.querySelector('#signal-surface-overview'),
         signalRenderSummary: document.querySelector('#signal-render-summary'),
         signalRenderList: document.querySelector('#signal-render-list'),
         signalFilters: [...document.querySelectorAll('[data-signal-filter]')],

@@ -31,6 +31,7 @@ enum class NativeArtifactKind : std::uint16_t {
   kWasm = 2,
   kSourceMap = 3,
   kResponseBody = 4,
+  kCanvasDataUrl = 5,
 };
 
 enum class NativeArtifactCaptureOrigin : std::uint16_t {
@@ -40,10 +41,12 @@ enum class NativeArtifactCaptureOrigin : std::uint16_t {
   kWebAssemblyCompile = 3,
   kWebAssemblyModule = 4,
   kWebAssemblyInstantiate = 5,
+  kCanvasToDataUrl = 6,
 };
 
 using NativeGeneratedArtifactEmitter = void (*)(NativeArtifactKind kind,
                                                 NativeArtifactCaptureOrigin capture_origin,
+                                                std::uint64_t creator_event_id,
                                                 std::uint64_t execution_context_id,
                                                 std::uint64_t frame_id,
                                                 std::string_view source_url,

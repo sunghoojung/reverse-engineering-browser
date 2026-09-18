@@ -56,6 +56,7 @@ class NativeArtifactCaptureSink final {
 
   void CaptureGeneratedArtifact(NativeArtifactKind kind,
                                 NativeArtifactCaptureOrigin capture_origin,
+                                std::uint64_t creator_event_id,
                                 std::uint64_t execution_context_id,
                                 std::uint64_t frame_id,
                                 std::string_view source_url,

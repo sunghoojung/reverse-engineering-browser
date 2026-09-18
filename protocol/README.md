@@ -67,9 +67,10 @@ does not hide the missing sequence range from broker accounting.
 
 ## Large artifact transfer
 
-Large JavaScript files, WASM modules, source maps, and explicitly approved
-response bodies never use `EventRecord`, the renderer ring, or the broker event
-queue. They use the separate version 1 artifact stream defined by
+Large JavaScript files, WASM modules, source maps, explicitly approved response
+bodies, and explicitly approved Canvas data URLs never use `EventRecord`, the
+renderer ring, or the broker event queue. They use the separate version 1
+artifact stream defined by
 `include/reb/artifact.hpp`. Its fixed 128-byte header carries kind, byte count,
 correlation identifiers, execution-context and capture-origin provenance,
 metadata lengths, and an optional expected SHA-256, followed by bounded URL,
@@ -85,9 +86,10 @@ outcome. These event types use the `artifact` category in the normal event
 stream, so a missing artifact is explicit evidence rather than silent loss.
 
 The receiver defaults to 16 MiB per artifact and 256 MiB per session store. It
-streams and hashes content into immutable content-addressed storage. Response
-bodies fail closed unless the session receiver is explicitly started with
-sensitive capture enabled. See
+streams and hashes content into immutable content-addressed storage. Canvas
+data URL production has a stricter 2 MiB limit so the UI can retrieve the image
+whole. Response bodies and Canvas data URLs fail closed unless the session
+receiver is explicitly started with sensitive capture enabled. See
 `docs/architecture/artifact-transfer-channel.md` for the low-level design.
 
 ## VM finding payload
@@ -151,7 +153,7 @@ projection.
 The optional broker cold-path signal index writes version 1 request summaries
 described by `request-signal-profile-v1.schema.json`. It includes only counts,
 categories, event references, and correlation context for Canvas, WebGL, Web
-Audio, Navigator, Permissions, Storage, and WebRTC evidence. It never records
+Audio, device and layout, Permissions, Storage, WebRTC, and Runtime evidence. It never records
 API return values or request header, cookie, credential, or body content.
 
 An explicit retained parent chain is `observed`. Earlier signal events in the

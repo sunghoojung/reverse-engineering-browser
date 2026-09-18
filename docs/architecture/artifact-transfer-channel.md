@@ -114,6 +114,10 @@ Defaults are:
 - 64 KiB streaming copy and hashing chunk;
 - 2 MiB maximum UI content response and 20,000 rendered lines.
 
+Canvas data URLs use the 2 MiB UI limit as their capture limit so accepted
+images are always available as complete base64 content. Other artifact kinds
+retain the 16 MiB transfer limit.
+
 The receiver validates declared sizes before it allocates metadata or reads
 content. Content is streamed to a temporary file while SHA-256 is computed, so
 receiver memory does not scale with artifact size. A completed temporary file
@@ -156,17 +160,20 @@ bounded, and loaded identifiers are kept in a bounded in-memory index for
 constant-time duplicate checks. Live stores use mode-0700 directories and
 mode-0600 evidence files.
 
-## Sensitive response bodies
+## Sensitive content
 
-Response bodies require both controls:
+Response bodies and Canvas data URLs require both controls:
 
-1. the frame kind is `response_body` and its sensitive flag is set;
+1. the frame kind is `response_body` or `canvas_data_url` and its sensitive flag
+   is set;
 2. the receiver was started with `--allow-sensitive` for that authorized
    session.
 
-The default receiver rejects all response bodies. JavaScript, WASM, and source
-maps cannot be mislabeled as sensitive content. Credentials, cookies, and
-authorization headers are not artifact kinds and remain outside this channel.
+The default receiver rejects both kinds. The live launcher enables the receiver
+policy for Canvas only when `REB_CAPTURE_CANVAS_IMAGES=1` is set. JavaScript,
+WASM, and source maps cannot be mislabeled as sensitive content. Credentials,
+cookies, and authorization headers are not artifact kinds and remain outside
+this channel.
 
 ## UI safety
 

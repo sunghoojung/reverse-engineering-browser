@@ -29,11 +29,12 @@ class NativeProbeSession final {
   NativeProbeSession(const NativeProbeSession&) = delete;
   NativeProbeSession& operator=(const NativeProbeSession&) = delete;
 
-  void BindHost(mojo::PendingReceiver<mojom::NativeProbeHost> receiver);
+  void BindHost(int renderer_process_id, mojo::PendingReceiver<mojom::NativeProbeHost> receiver);
 
   [[nodiscard]] bool StartSession(std::uint64_t session_id,
                                   std::uint64_t category_mask,
                                   std::uint64_t expires_at_monotonic_ns,
+                                  bool capture_canvas_images,
                                   NativeProbeEmitter downstream) noexcept;
   void StopSession() noexcept;
 
@@ -41,6 +42,7 @@ class NativeProbeSession final {
   [[nodiscard]] std::uint64_t session_id() const noexcept;
   [[nodiscard]] std::uint64_t category_mask() const noexcept;
   [[nodiscard]] std::uint64_t expires_at_monotonic_ns() const noexcept;
+  [[nodiscard]] bool capture_canvas_images() const noexcept;
   [[nodiscard]] std::uint64_t NextBrowserSequence() noexcept;
   void Emit(const NativeProbeEvent& event) const noexcept;
 
@@ -60,6 +62,7 @@ class NativeProbeSession final {
   std::atomic<std::uint64_t> session_id_{0};
   std::atomic<std::uint64_t> category_mask_{0};
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};
+  std::atomic<bool> capture_canvas_images_{false};
   std::atomic<std::uint64_t> next_browser_sequence_{1};
 };
 

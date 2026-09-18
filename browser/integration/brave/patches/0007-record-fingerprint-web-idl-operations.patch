@@ -1,0 +1,255 @@
+diff --git a/chromium_src/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py b/chromium_src/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py
+index 75c3e9bf5..e8cba3a64 100644
+--- a/chromium_src/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py
++++ b/chromium_src/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py
+@@ -82,6 +82,174 @@ _PAGE_GRAPH_TRACKED_ITEMS = {
+     "XMLHttpRequestUpload": {"*"},
+ }
+ 
++# Fingerprint-relevant Web IDL surfaces recorded by Origin Trace. Keeping this
++# classification in the bindings generator gives every generated callback the
++# same fixed-cost, page-JavaScript-independent observation point.
++_REB_TRACKED_INTERFACES = {
++    "AnalyserNode": "WebAudio",
++    "AudioBuffer": "WebAudio",
++    "AudioBufferSourceNode": "WebAudio",
++    "AudioContext": "WebAudio",
++    "AudioListener": "WebAudio",
++    "AudioParam": "WebAudio",
++    "BaseAudioContext": "WebAudio",
++    "BatteryManager": "Navigator",
++    "BiquadFilterNode": "WebAudio",
++    "CacheStorage": "Storage",
++    "CanvasGradient": "Canvas",
++    "CanvasPattern": "Canvas",
++    "CanvasRenderingContext2D": "Canvas",
++    "ChannelMergerNode": "WebAudio",
++    "ChannelSplitterNode": "WebAudio",
++    "ConvolverNode": "WebAudio",
++    "CSS": "Navigator",
++    "CSSStyleDeclaration": "Navigator",
++    "Document": "Navigator",
++    "DOMRectReadOnly": "Navigator",
++    "DynamicsCompressorNode": "WebAudio",
++    "Element": "Navigator",
++    "FontFace": "Navigator",
++    "FontFaceSet": "Navigator",
++    "GainNode": "WebAudio",
++    "Gamepad": "Navigator",
++    "GamepadButton": "Navigator",
++    "GPU": "Navigator",
++    "GPUAdapter": "Navigator",
++    "GPUAdapterInfo": "Navigator",
++    "GPUCanvasContext": "Navigator",
++    "GPUDevice": "Navigator",
++    "GPUQueue": "Navigator",
++    "GPUSupportedFeatures": "Navigator",
++    "GPUSupportedLimits": "Navigator",
++    "HTMLCanvasElement": "Canvas",
++    "HTMLElement": "Navigator",
++    "HTMLIFrameElement": "Navigator",
++    "HTMLMediaElement": "Navigator",
++    "IDBFactory": "Storage",
++    "IIRFilterNode": "WebAudio",
++    "ImageBitmapRenderingContext": "Canvas",
++    "InputDeviceInfo": "Navigator",
++    "MediaCapabilities": "Navigator",
++    "MediaDeviceInfo": "Navigator",
++    "MediaDevices": "Navigator",
++    "MediaQueryList": "Navigator",
++    "MediaRecorder": "Navigator",
++    "MediaSource": "Navigator",
++    "MediaStreamTrack": "Navigator",
++    "MimeType": "Navigator",
++    "MimeTypeArray": "Navigator",
++    "Navigator": "Navigator",
++    "NavigatorUAData": "Navigator",
++    "NetworkInformation": "Navigator",
++    "OfflineAudioContext": "WebAudio",
++    "OffscreenCanvas": "Canvas",
++    "OffscreenCanvasRenderingContext2D": "Canvas",
++    "OscillatorNode": "WebAudio",
++    "PannerNode": "WebAudio",
++    "PeriodicWave": "WebAudio",
++    "Performance": "Runtime",
++    "PermissionStatus": "Permissions",
++    "Permissions": "Permissions",
++    "Plugin": "Navigator",
++    "PluginArray": "Navigator",
++    "Range": "Navigator",
++    "RTCDataChannel": "WebRtc",
++    "RTCPeerConnection": "WebRtc",
++    "RTCRtpReceiver": "WebRtc",
++    "RTCRtpSender": "WebRtc",
++    "Screen": "Navigator",
++    "ScreenDetailed": "Navigator",
++    "ScreenDetails": "Navigator",
++    "SpeechSynthesis": "Navigator",
++    "SpeechSynthesisVoice": "Navigator",
++    "StereoPannerNode": "WebAudio",
++    "Storage": "Storage",
++    "SVGGeometryElement": "Navigator",
++    "SVGGraphicsElement": "Navigator",
++    "SVGTextContentElement": "Navigator",
++    "TextMetrics": "Canvas",
++    "VisualViewport": "Navigator",
++    "VideoPlaybackQuality": "Navigator",
++    "WaveShaperNode": "WebAudio",
++    "WebGL2RenderingContext": "WebGl",
++    "WebGLRenderingContext": "WebGl",
++    "WebGLShaderPrecisionFormat": "WebGl",
++    "Window": "Navigator",
++    "WorkerNavigator": "Navigator",
++}
++
++# Generic DOM interfaces sit under nearly every page framework. Only retain
++# members that expose browser, layout, font, or media capability signals so a
++# capture does not mistake routine rendering work for fingerprinting activity.
++# Interfaces absent from this map retain every generated getter, setter, and
++# operation because their entire API surface is fingerprint-relevant.
++_REB_TRACKED_MEMBERS = {
++    "CSS": {"supports"},
++    "CSSStyleDeclaration": {"getPropertyValue"},
++    "Document": {
++        "cookie", "featurePolicy", "fonts", "hidden", "referrer",
++        "visibilityState",
++    },
++    "DOMRectReadOnly": {
++        "bottom", "height", "left", "right", "top", "width", "x", "y",
++    },
++    "Element": {
++        "clientHeight", "clientWidth", "getBoundingClientRect",
++        "getClientRects", "scrollHeight", "scrollWidth",
++    },
++    "FontFace": {"family", "load", "status"},
++    "HTMLElement": {
++        "clientHeight", "clientWidth", "offsetHeight", "offsetLeft",
++        "offsetTop", "offsetWidth",
++    },
++    "HTMLMediaElement": {
++        "audioTracks", "canPlayType", "sinkId", "videoTracks",
++    },
++    "MediaQueryList": {"matches", "media"},
++    "MediaRecorder": {"isTypeSupported"},
++    "MediaSource": {"isTypeSupported"},
++    "Performance": {"measureUserAgentSpecificMemory", "now", "timeOrigin"},
++    "Range": {"getBoundingClientRect", "getClientRects"},
++    "SVGGeometryElement": {"getPointAtLength", "getTotalLength"},
++    "SVGGraphicsElement": {"getBBox"},
++    "SVGTextContentElement": {
++        "getComputedTextLength", "getSubStringLength",
++    },
++    "Window": {
++        "devicePixelRatio", "getComputedStyle", "innerHeight", "innerWidth",
++        "matchMedia",
++        "outerHeight", "outerWidth", "screenLeft", "screenTop", "screenX",
++        "screenY", "visualViewport",
++    },
++}
++
++# These methods already have hand-written native hooks because they are also
++# needed from internal Blink call paths. Avoid counting one JavaScript call
++# twice when its generated binding reaches those hooks.
++_REB_EXPLICIT_PROBES = {
++    "HTMLCanvasElement": {"toDataURL"},
++    "CanvasRenderingContext2D": {
++        "arc", "arcTo", "beginPath", "bezierCurveTo", "clearRect",
++        "closePath", "drawImage", "ellipse", "fill", "fillRect",
++        "fillText", "getImageData", "lineTo", "measureText", "moveTo",
++        "quadraticCurveTo", "rect", "resetTransform", "restore", "rotate",
++        "roundRect", "save", "scale", "setTransform", "stroke",
++        "strokeRect", "strokeText", "transform", "translate",
++    },
++    "OffscreenCanvasRenderingContext2D": {
++        "arc", "arcTo", "beginPath", "bezierCurveTo", "clearRect",
++        "closePath", "drawImage", "ellipse", "fill", "fillRect",
++        "fillText", "getImageData", "lineTo", "measureText", "moveTo",
++        "quadraticCurveTo", "rect", "resetTransform", "restore", "rotate",
++        "roundRect", "save", "scale", "setTransform", "stroke",
++        "strokeRect", "strokeText", "transform", "translate",
++    },
++    "WebGLRenderingContext": {"getExtension", "getParameter",
++                              "getShaderPrecisionFormat"},
++    "WebGL2RenderingContext": {"getExtension", "getParameter",
++                               "getShaderPrecisionFormat"},
++}
++
+ ### Helpers begin.
+ 
+ 
+@@ -100,6 +254,61 @@ def _should_track_in_page_graph(cg_context):
+     return cg_context.property_.identifier in tracked_class_items
+ 
+ 
++def _reb_probe_details(cg_context):
++    if not cg_context.property_:
++        return None
++    interface = cg_context.class_like.identifier
++    category = _REB_TRACKED_INTERFACES.get(interface)
++    if not category:
++        return None
++    member = cg_context.property_.identifier
++    tracked_members = _REB_TRACKED_MEMBERS.get(interface)
++    if tracked_members is not None and member not in tracked_members:
++        return None
++    if member in _REB_EXPLICIT_PROBES.get(interface, set()):
++        return None
++    if not (cg_context.attribute_get or cg_context.attribute_set or
++            cg_context.operation_group or cg_context.stringifier):
++        return None
++    operation = "{}.{}".format(interface, member)
++    if cg_context.attribute_set:
++        operation += ".set"
++    return category, operation
++
++
++def _make_report_reb_binding_event(cg_context):
++    details = _reb_probe_details(cg_context)
++    if not details:
++        return None
++    category, operation = details
++    record_method = ("RecordPropertyRead" if cg_context.attribute_get else
++                     "RecordApiCall")
++    if category == "Canvas":
++        statement = (
++            "::reb::NativeProbeSink::Get().{}("
++            "::reb::NativeProbeCategory::k{}, \"{}\");".format(
++                record_method, category, operation))
++    else:
++        record_method += "Once"
++        statement = (
++            "static std::atomic<std::uint64_t> "
++            "reb_observed_session_id{{0}};\n"
++            "::reb::NativeProbeSink::Get().{}("
++            "::reb::NativeProbeCategory::k{}, \"{}\", "
++            "reb_observed_session_id);".format(
++                record_method, category, operation))
++    node = TextNode(statement)
++    node.accumulate(
++        CodeGenAccumulator.require_include_headers([
++            "brave/components/reverse_engineering_browser/renderer/"
++            "native_probe_sink.h",
++        ]))
++    if category != "Canvas":
++        node.accumulate(
++            CodeGenAccumulator.require_stdcpp_include_headers(["atomic"]))
++    return node
++
++
+ def _to_page_graph_object(arg):
+     return "ToPageGraphObject({})".format(arg)
+ 
+@@ -283,6 +478,13 @@ def _make_empty_callback_def(original_function, cg_context, function_name):
+     return func_def
+ 
+ 
++@override_utils.override_function(globals())
++def _make_empty_callback_def(original_function, cg_context, function_name):
++    func_def = original_function(cg_context, function_name)
++    func_def.body.extend([_make_report_reb_binding_event(cg_context)])
++    return func_def
++
++
+ @override_utils.override_function(globals(),
+                                   condition=_IS_PG_WEBAPI_PROBES_ENABLED)
+ def _make_blink_api_call(original_function,

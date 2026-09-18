@@ -58,10 +58,16 @@ The launcher passes the broker evidence store and Unix-socket path to Origin
 Trace. The application continues to show the last valid evidence if the broker
 disconnects or the session expires and marks the capture as offline. Raw
 browser records stay on the Brave-to-broker socket; the UI reads the broker's
-normalized store. Live sessions enable Canvas, Web Audio, Network, and Artifact
-for one hour by default with category mask `1285`;
+normalized store. Live sessions enable all eight fingerprint families plus
+Network and Artifact for one hour by default with category mask `4095`;
 `REB_CAPTURE_CATEGORY_MASK` and `REB_CAPTURE_DURATION_SECONDS` change those
 low-level startup limits.
+
+`REB_CAPTURE_CANVAS_IMAGES=1 make live` additionally authorizes complete Canvas
+data URLs for that one session. The output is sensitive local evidence, limited
+to 2 MiB, and linked to the exact readback event. Without the switch, Canvas
+drawing and readback operation names remain visible but image bytes are not
+retained.
 
 Set `REB_NATIVE_QUIET_MODE=1` for a live capture with no DevTools endpoint or
 CDP connection to the page. The custom V8 runtime then ignores page-authored
@@ -83,12 +89,15 @@ lifecycle events by request and first scopes them by browser tab, then by domain
 Protocol v3 records the stable top-level tab identifier; protocol v2 evidence
 remains visible as Unattributed. The workspace provides request filters plus Headers, Payload,
 Preview, Response, Initiator, Timing, and Signals inspectors. The first-class
-Fingerprinting workspace presents Canvas, WebGL, Web Audio, Navigator,
-Permissions, Storage, and WebRTC activity. It opens to compact Canvas render
-cards with image comparison, deterministic local replay, ordered drawing
-functions, and stable evidence identity. The explicit development demo draws
-both previews from its visible bounded call sequence; live readback-only
-evidence explicitly reports that pixels and earlier calls were not retained.
+Fingerprinting workspace presents Canvas, WebGL, Web Audio, device and layout,
+Permissions, Storage, WebRTC, and Runtime activity. Its surface overview shows event
+totals, distinct operation counts, and top operations before compact Canvas
+render cards with captured output, replay state, ordered drawing functions, and
+stable evidence identity. The explicit development demo draws both previews
+from its visible bounded call sequence. Live sessions can show an exact bounded
+Canvas output only when sensitive image capture was enabled; otherwise the UI
+explicitly reports that pixels were not retained. Native live events do not
+retain drawing arguments, so they never claim a faithful replay.
 
 Activity presents up to 500 matching native operations newest first with
 per-family filters and detailed identifiers behind a disclosure. Request link
@@ -335,7 +344,9 @@ timeline as `artifact_capture_failed` events.
 Artifact content responses are capped at 2 MiB and use attachment, `nosniff`,
 and sandbox headers. The editor renders at most 20,000 lines and inserts all
 captured content as text. The catalog keeps original byte size and SHA-256
-visible even when the viewer shows a bounded preview.
+visible even when the viewer shows a bounded preview. Sensitive Canvas data URL
+artifacts use this same cap and render only after their image MIME prefix,
+base64 form, and exact creator-event link have been validated.
 
 Pass `--socket /path/to/broker.sock` to the development server when it should
 also report live broker connectivity.

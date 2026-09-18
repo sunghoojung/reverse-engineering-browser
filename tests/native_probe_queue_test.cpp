@@ -77,14 +77,16 @@ bool TestCategoryMasks() {
   const std::uint64_t network = reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kNetwork);
   const std::uint64_t vm = reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kVm);
   const std::uint64_t artifact = reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kArtifact);
+  const std::uint64_t runtime = reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kRuntime);
   return canvas == 1 && network == (std::uint64_t{1} << 8U) && vm == (std::uint64_t{1} << 9U) &&
-         artifact == (std::uint64_t{1} << 10U) &&
+         artifact == (std::uint64_t{1} << 10U) && runtime == (std::uint64_t{1} << 11U) &&
          canvas == reb::EventCategoryMask(reb::EventCategory::kCanvas) &&
          network == reb::EventCategoryMask(reb::EventCategory::kNetwork) &&
          vm == reb::EventCategoryMask(reb::EventCategory::kVm) &&
          artifact == reb::EventCategoryMask(reb::EventCategory::kArtifact) &&
+         runtime == reb::EventCategoryMask(reb::EventCategory::kRuntime) &&
          reb::kAllNativeProbeCategoryMask == reb::kAllEventCategoryMask &&
-         reb::IsValidNativeProbeCategoryMask(canvas | network | vm | artifact) &&
+         reb::IsValidNativeProbeCategoryMask(canvas | network | vm | artifact | runtime) &&
          !reb::IsValidNativeProbeCategoryMask(0) &&
          !reb::IsValidNativeProbeCategoryMask(std::uint64_t{1} << 63U);
 }

@@ -130,12 +130,17 @@ class NativeDebuggerConnection:
                 stream.close()
 
     def _read_control_message(self, timeout: float) -> Optional[bytes]:
-        if self._process.stdout is None:
+        stdout = self._process.stdout
+        if self._closed or stdout is None:
             raise WebSocketClosed("Debugger WebSocket is closed")
-        ready, _, _ = select.select([self._process.stdout], [], [], max(0.0, timeout))
+        try:
+            descriptor = stdout.fileno()
+            ready, _, _ = select.select([descriptor], [], [], max(0.0, timeout))
+        except (OSError, ValueError) as exception:
+            raise WebSocketClosed("Debugger WebSocket is closed") from exception
         if not ready:
             return None
-        header = self._read_exact(self._process.stdout.fileno(), 8)
+        header = self._read_exact(descriptor, 8)
         if header[:4] != NATIVE_TRANSPORT_PROTOCOL_HEADER:
             raise ProtocolError(
                 "Native debugger transport returned an invalid protocol header"
@@ -143,7 +148,7 @@ class NativeDebuggerConnection:
         length = struct.unpack("!I", header[4:])[0]
         if length > 64 * 1024 * 1024:
             raise DebuggerBridgeError("Debugger WebSocket message is oversized")
-        return self._read_exact(self._process.stdout.fileno(), length)
+        return self._read_exact(descriptor, length)
 
     def _read_exact(self, descriptor: int, length: int) -> bytes:
         body = bytearray()

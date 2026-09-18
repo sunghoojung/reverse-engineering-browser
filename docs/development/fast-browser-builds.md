@@ -39,8 +39,17 @@ REB_BRAVE_DIRECTORY=/absolute/path/to/browser/worktree/src/brave \
 removes large debug information, and `use_lld=false` selects Apple's linker
 for local arm64 macOS links. `use_clang_modules=false` is needed because
 `sccache` bypasses Clang header-module compilations. The Brave integration
-patches the extended BitInt frontend option to an equivalent cacheable spelling
-only when `cc_wrapper` is `sccache`; normal builds retain the original option.
+keeps Siso's `chromium_src` source redirection active when `cc_wrapper` is
+`sccache`, and mirrors the patched Brave Siso module into Chromium's generated
+root during browser synchronization. It also patches the extended BitInt
+frontend option to an equivalent cacheable spelling only when `cc_wrapper` is
+`sccache`; normal builds retain the original option.
+
+After changing the Siso or Brave integration patches, the first probe build may
+recompile affected upstream objects so the redirected source inputs are
+recorded; the toolchain helper refreshes those source timestamps once when the
+Siso redirect configuration is newer than the existing objects. Later builds
+reuse those objects through Siso and `sccache`.
 
 The first build after changing GN arguments is cold. Later compilations with the
 same compiler, flags, and inputs can reuse cached objects. Check the result with:

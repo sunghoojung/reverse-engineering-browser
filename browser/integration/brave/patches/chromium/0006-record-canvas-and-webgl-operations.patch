@@ -1,0 +1,479 @@
+diff --git a/third_party/blink/renderer/modules/canvas/BUILD.gn b/third_party/blink/renderer/modules/canvas/BUILD.gn
+index 1d29be27176bf2473088b9c5d0e406b6765bfaf3..f8fe0f77a8a4e0874e0e29833fde7a9ddb93eef0 100644
+--- a/third_party/blink/renderer/modules/canvas/BUILD.gn
++++ b/third_party/blink/renderer/modules/canvas/BUILD.gn
+@@ -58,6 +58,7 @@ blink_modules_sources("canvas") {
+   ]
+ 
+   deps = [
++    "//brave/components/reverse_engineering_browser:renderer_sink",
+     "//third_party/blink/renderer/modules/webcodecs",
+     "//third_party/blink/renderer/modules/webgpu",
+   ]
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+index 7beb6be481a06fd6b1e8776920d52b717629ecc0..4e961d6cd987aa9d1e7ebc9e95abc97614d4bff7 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+@@ -23,6 +23,7 @@
+ #include "base/numerics/safe_conversions.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/time/time.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "cc/paint/paint_canvas.h"
+ #include "cc/paint/paint_flags.h"
+ #include "cc/paint/paint_image.h"
+@@ -358,6 +359,8 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
+     int sh,
+     ImageDataSettings* image_data_settings,
+     ExceptionState& exception_state) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.getImageData");
+   if (!base::CheckMul(sw, sh).IsValid<int>()) {
+     exception_state.ThrowRangeError("Out of memory at ImageData creation");
+     return nullptr;
+@@ -842,6 +845,8 @@ void BaseRenderingContext2D::setDirection(const V8CanvasDirection direction) {
+ }
+ 
+ void BaseRenderingContext2D::fillText(const String& text, double x, double y) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.fillText");
+   CanvasRenderingContext2DState& state = GetState();
+   DrawTextInternal(text, x, y, CanvasRenderingContext2DState::kFillPaintType,
+                    state.GetTextAlign(), state.GetTextBaseline(), 0,
+@@ -852,6 +857,8 @@ void BaseRenderingContext2D::fillText(const String& text,
+                                       double x,
+                                       double y,
+                                       double max_width) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.fillText");
+   CanvasRenderingContext2DState& state = GetState();
+   DrawTextInternal(text, x, y, CanvasRenderingContext2DState::kFillPaintType,
+                    state.GetTextAlign(), state.GetTextBaseline(), 0,
+@@ -898,6 +905,8 @@ void BaseRenderingContext2D::fillTextCluster(
+ void BaseRenderingContext2D::strokeText(const String& text,
+                                         double x,
+                                         double y) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.strokeText");
+   CanvasRenderingContext2DState& state = GetState();
+   DrawTextInternal(text, x, y, CanvasRenderingContext2DState::kStrokePaintType,
+                    state.GetTextAlign(), state.GetTextBaseline(), 0,
+@@ -908,6 +917,8 @@ void BaseRenderingContext2D::strokeText(const String& text,
+                                         double x,
+                                         double y,
+                                         double max_width) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.strokeText");
+   CanvasRenderingContext2DState& state = GetState();
+   DrawTextInternal(text, x, y, CanvasRenderingContext2DState::kStrokePaintType,
+                    state.GetTextAlign(), state.GetTextBaseline(), 0,
+@@ -1129,6 +1140,8 @@ void BaseRenderingContext2D::DrawTextInternal(
+ }
+ 
+ TextMetrics* BaseRenderingContext2D::measureText(const String& text) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.measureText");
+   // The style resolution required for fonts is not available in frame-less
+   // documents.
+   HTMLCanvasElement* canvas = HostAsHTMLCanvasElement();
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
+index a90d5e3aede280f5a49107c3888a654ad8f2a3a3..0ba8c340880f8f0a713e9e3210650108eac3dd5b 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
+@@ -30,6 +30,7 @@
+ #include "base/metrics/histogram_macros.h"
+ #include "base/notreached.h"
+ #include "base/numerics/safe_conversions.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "cc/paint/paint_canvas.h"
+ #include "cc/paint/paint_flags.h"
+ #include "cc/paint/paint_image.h"
+@@ -392,6 +393,8 @@ Canvas2DRecorderContext::~Canvas2DRecorderContext() {
+ }
+ 
+ void Canvas2DRecorderContext::save() {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.save");
+   if (isContextLost()) [[unlikely]] {
+     return;
+   }
+@@ -417,6 +420,8 @@ void Canvas2DRecorderContext::save() {
+ }
+ 
+ void Canvas2DRecorderContext::restore(ExceptionState& exception_state) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.restore");
+   if (isContextLost()) [[unlikely]] {
+     return;
+   }
+@@ -1352,6 +1357,8 @@ void Canvas2DRecorderContext::setFilter(
+ }
+ 
+ void Canvas2DRecorderContext::scale(double sx, double sy) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.scale");
+   // TODO(crbug.com/40153853): Investigate the performance impact of simply
+   // calling the 3d version of this function
+   cc::PaintCanvas* c = GetOrCreatePaintCanvas();
+@@ -1382,6 +1389,8 @@ void Canvas2DRecorderContext::scale(double sx, double sy) {
+ }
+ 
+ void Canvas2DRecorderContext::rotate(double angle_in_radians) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.rotate");
+   cc::PaintCanvas* c = GetOrCreatePaintCanvas();
+   if (!c) {
+     return;
+@@ -1408,6 +1417,8 @@ void Canvas2DRecorderContext::rotate(double angle_in_radians) {
+ }
+ 
+ void Canvas2DRecorderContext::translate(double tx, double ty) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.translate");
+   // TODO(crbug.com/40153853): Investigate the performance impact of simply
+   // calling the 3d version of this function
+   cc::PaintCanvas* c = GetOrCreatePaintCanvas();
+@@ -1447,6 +1458,8 @@ void Canvas2DRecorderContext::transform(double m11,
+                                         double m22,
+                                         double dx,
+                                         double dy) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.transform");
+   cc::PaintCanvas* c = GetOrCreatePaintCanvas();
+   if (!c) {
+     return;
+@@ -1489,6 +1502,8 @@ void Canvas2DRecorderContext::transform(double m11,
+ // |effective_zoom_| in resetTransform instead of setTransform, to avoid
+ // integrating it twice if we have resetTransform and setTransform API calls.
+ void Canvas2DRecorderContext::resetTransform() {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.resetTransform");
+   cc::PaintCanvas* c = GetOrCreatePaintCanvas();
+   if (!c) {
+     return;
+@@ -1531,6 +1546,8 @@ void Canvas2DRecorderContext::setTransform(double m11,
+                                            double m22,
+                                            double dx,
+                                            double dy) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.setTransform");
+   if (!std::isfinite(m11) || !std::isfinite(m21) || !std::isfinite(dx) ||
+       !std::isfinite(m12) || !std::isfinite(m22) || !std::isfinite(dy)) {
+     return;
+@@ -1569,6 +1586,8 @@ AffineTransform Canvas2DRecorderContext::GetTransform() const {
+ }
+ 
+ void Canvas2DRecorderContext::beginPath() {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.beginPath");
+   Clear();
+ }
+ 
+@@ -1667,10 +1686,14 @@ static SkPathFillType CanvasFillRuleToSkiaFillType(
+ }
+ 
+ void Canvas2DRecorderContext::fill() {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.fill");
+   FillImpl(SkPathFillType::kWinding);
+ }
+ 
+ void Canvas2DRecorderContext::fill(const V8CanvasFillRule& winding) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.fill");
+   FillImpl(CanvasFillRuleToSkiaFillType(winding));
+ }
+ 
+@@ -1680,11 +1703,15 @@ void Canvas2DRecorderContext::FillImpl(SkPathFillType winding_rule) {
+ }
+ 
+ void Canvas2DRecorderContext::fill(Path2D* dom_path) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.fill");
+   FillPathImpl(dom_path, SkPathFillType::kWinding);
+ }
+ 
+ void Canvas2DRecorderContext::fill(Path2D* dom_path,
+                                    const V8CanvasFillRule& winding) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.fill");
+   FillPathImpl(dom_path, CanvasFillRuleToSkiaFillType(winding));
+ }
+ 
+@@ -1695,11 +1722,15 @@ void Canvas2DRecorderContext::FillPathImpl(Path2D* dom_path,
+ }
+ 
+ void Canvas2DRecorderContext::stroke() {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.stroke");
+   DrawPathInternal(*this, CanvasRenderingContext2DState::kStrokePaintType,
+                    SkPathFillType::kWinding, UsePaintCache::kDisabled);
+ }
+ 
+ void Canvas2DRecorderContext::stroke(Path2D* dom_path) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.stroke");
+   DrawPathInternal(*dom_path, CanvasRenderingContext2DState::kStrokePaintType,
+                    SkPathFillType::kWinding, path2d_use_paint_cache_);
+ }
+@@ -1708,6 +1739,8 @@ void Canvas2DRecorderContext::fillRect(double x,
+                                        double y,
+                                        double width,
+                                        double height) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.fillRect");
+   if (!ValidateRectForCanvas(x, y, width, height)) {
+     return;
+   }
+@@ -1771,6 +1804,8 @@ void Canvas2DRecorderContext::strokeRect(double x,
+                                          double y,
+                                          double width,
+                                          double height) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.strokeRect");
+   if (!ValidateRectForCanvas(x, y, width, height)) {
+     return;
+   }
+@@ -1929,6 +1964,8 @@ void Canvas2DRecorderContext::clearRect(double x,
+                                         double y,
+                                         double width,
+                                         double height) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.clearRect");
+   if (!ValidateRectForCanvas(x, y, width, height)) {
+     return;
+   }
+@@ -2230,6 +2267,8 @@ void Canvas2DRecorderContext::drawImage(CanvasImageSource* image_source,
+                                         double dw,
+                                         double dh,
+                                         ExceptionState& exception_state) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.drawImage");
+   if (!GetOrCreatePaintCanvas()) {
+     return;
+   }
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.cc b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.cc
+index 8c8b5f5cb096aa14d69ed2671e655e7d24a66e37..7223cc76d45d0a096eb1cdd4de2689688f40cd90 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.cc
+@@ -44,6 +44,7 @@
+ #include "base/check_op.h"
+ #include "base/compiler_specific.h"
+ #include "base/numerics/safe_conversions.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_dom_point_init.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_union_dompointinit_unrestricteddouble.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"  // IWYU pragma: keep (https://github.com/clangd/clangd/issues/2044)
+@@ -75,6 +76,8 @@ String StrFloatCat(StringView leading, float value, StringView trailing) {
+ }  // namespace
+ 
+ void CanvasPath::closePath() {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.closePath");
+   if (IsEmpty()) [[unlikely]] {
+     return;
+   }
+@@ -105,6 +108,8 @@ void CanvasPath::closePath() {
+ }
+ 
+ void CanvasPath::moveTo(double double_x, double double_y) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.moveTo");
+   float x = base::saturated_cast<float>(double_x);
+   float y = base::saturated_cast<float>(double_y);
+   if (!std::isfinite(x) || !std::isfinite(y)) [[unlikely]] {
+@@ -123,6 +128,8 @@ void CanvasPath::moveTo(double double_x, double double_y) {
+ }
+ 
+ void CanvasPath::lineTo(double double_x, double double_y) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.lineTo");
+   float x = base::saturated_cast<float>(double_x);
+   float y = base::saturated_cast<float>(double_y);
+   if (!std::isfinite(x) || !std::isfinite(y)) [[unlikely]] {
+@@ -154,6 +161,8 @@ void CanvasPath::quadraticCurveTo(double double_cpx,
+                                   double double_cpy,
+                                   double double_x,
+                                   double double_y) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.quadraticCurveTo");
+   float cpx = base::saturated_cast<float>(double_cpx);
+   float cpy = base::saturated_cast<float>(double_cpy);
+   float x = base::saturated_cast<float>(double_x);
+@@ -185,6 +194,8 @@ void CanvasPath::bezierCurveTo(double double_cp1x,
+                                double double_cp2y,
+                                double double_x,
+                                double double_y) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.bezierCurveTo");
+   float cp1x = base::saturated_cast<float>(double_cp1x);
+   float cp1y = base::saturated_cast<float>(double_cp1y);
+   float cp2x = base::saturated_cast<float>(double_cp2x);
+@@ -220,6 +231,8 @@ void CanvasPath::arcTo(double double_x1,
+                        double double_y2,
+                        double double_r,
+                        ExceptionState& exception_state) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.arcTo");
+   float x1 = base::saturated_cast<float>(double_x1);
+   float y1 = base::saturated_cast<float>(double_y1);
+   float x2 = base::saturated_cast<float>(double_x2);
+@@ -431,6 +444,8 @@ void CanvasPath::arc(double double_x,
+                      double double_end_angle,
+                      bool anticlockwise,
+                      ExceptionState& exception_state) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.arc");
+   float x = base::saturated_cast<float>(double_x);
+   float y = base::saturated_cast<float>(double_y);
+   float radius = base::saturated_cast<float>(double_radius);
+@@ -486,6 +501,8 @@ void CanvasPath::ellipse(double double_x,
+                          double double_end_angle,
+                          bool anticlockwise,
+                          ExceptionState& exception_state) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.ellipse");
+   float x = base::saturated_cast<float>(double_x);
+   float y = base::saturated_cast<float>(double_y);
+   float radius_x = base::saturated_cast<float>(double_radius_x);
+@@ -540,6 +557,8 @@ void CanvasPath::rect(double double_x,
+                       double double_y,
+                       double double_width,
+                       double double_height) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.rect");
+   float x = base::saturated_cast<float>(double_x);
+   float y = base::saturated_cast<float>(double_y);
+   float width = base::saturated_cast<float>(double_width);
+@@ -569,6 +588,8 @@ void CanvasPath::roundRect(
+     double double_height,
+     const HeapVector<Member<V8UnionDOMPointInitOrUnrestrictedDouble>>& radii,
+     ExceptionState& exception_state) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kCanvas, "canvas.roundRect");
+   UseCounter::Count(GetTopExecutionContext(),
+                     WebFeature::kCanvasRenderingContext2DRoundRect);
+   constexpr int kMaxRadii = 4;
+diff --git a/third_party/blink/renderer/modules/webgl/BUILD.gn b/third_party/blink/renderer/modules/webgl/BUILD.gn
+index d6112079449f9ee9f75565297e79aef4eddc2045..4ec9c62657b80608d05f8e00e3c68bf323056c82 100644
+--- a/third_party/blink/renderer/modules/webgl/BUILD.gn
++++ b/third_party/blink/renderer/modules/webgl/BUILD.gn
+@@ -195,6 +195,7 @@ blink_modules_sources("webgl") {
+ 
+   public_deps = [ "//device/vr/public/mojom:vr_service_blink" ]
+   deps = [
++    "//brave/components/reverse_engineering_browser:renderer_sink",
+     "//device/vr/buildflags",
+     "//gpu/command_buffer/client:gles2_implementation",
+     "//gpu/command_buffer/client:gles2_interface",
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index 6fa1e1c0744ee380e4c9acce6d7400ad84c8e80d..b2b8f63930c319b5c3b0805394fa053559a53026 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -45,6 +45,7 @@
+ #include "base/trace_event/memory_dump_manager.h"
+ #include "base/trace_event/trace_event.h"
+ #include "build/build_config.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "components/viz/common/gpu/raster_context_provider.h"
+ #include "components/viz/common/resources/shared_image_format_utils.h"
+ #include "device/vr/buildflags/buildflags.h"
+@@ -3637,6 +3638,8 @@ void WebGLRenderingContextBase::generateMipmap(GLenum target) {
+ WebGLActiveInfo* WebGLRenderingContextBase::getActiveAttrib(
+     WebGLProgram* program,
+     GLuint index) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kWebGl, "WebGL.getActiveAttrib");
+   if (!ValidateWebGLProgramOrShader("getActiveAttrib", program))
+     return nullptr;
+   BRAVE_WEBGL_RENDERING_CONTEXT_BASE_NULLPTR
+@@ -3669,6 +3672,8 @@ WebGLActiveInfo* WebGLRenderingContextBase::getActiveAttrib(
+ WebGLActiveInfo* WebGLRenderingContextBase::getActiveUniform(
+     WebGLProgram* program,
+     GLuint index) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kWebGl, "WebGL.getActiveUniform");
+   if (!ValidateWebGLProgramOrShader("getActiveUniform", program))
+     return nullptr;
+   BRAVE_WEBGL_RENDERING_CONTEXT_BASE_NULLPTR
+@@ -3715,6 +3720,8 @@ WebGLRenderingContextBase::getAttachedShaders(WebGLProgram* program) {
+ 
+ GLint WebGLRenderingContextBase::getAttribLocation(WebGLProgram* program,
+                                                    const String& name) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kWebGl, "WebGL.getAttribLocation");
+   if (!ValidateWebGLProgramOrShader("getAttribLocation", program))
+     return -1;
+   BRAVE_WEBGL_RENDERING_CONTEXT_BASE_MINUS_ONE
+@@ -3777,6 +3784,8 @@ ScriptValue WebGLRenderingContextBase::getBufferParameter(
+ 
+ WebGLContextAttributes* WebGLRenderingContextBase::getContextAttributes()
+     const {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kWebGl, "WebGL.getContextAttributes");
+   if (isContextLost())
+     return nullptr;
+ 
+@@ -3870,6 +3879,8 @@ bool WebGLRenderingContextBase::TimerQueryExtensionsEnabled() {
+ 
+ ScriptObject WebGLRenderingContextBase::getExtension(ScriptState* script_state,
+                                                      const String& name) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kWebGl, "WebGL.getExtension");
+   ExecutionContext* context = ExecutionContext::From(script_state);
+ 
+   if (name == WebGLDebugRendererInfo::ExtensionName()) {
+@@ -3986,6 +3997,8 @@ void WebGLRenderingContextBase::RecordANGLEImplementation() {
+ 
+ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+                                                     GLenum pname) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kWebGl, "WebGL.getParameter");
+   if (isContextLost())
+     return ScriptValue::CreateNull(script_state->GetIsolate());
+   const int kIntZero = 0;
+@@ -4332,6 +4345,8 @@ ScriptValue WebGLRenderingContextBase::getProgramParameter(
+     ScriptState* script_state,
+     WebGLProgram* program,
+     GLenum pname) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kWebGl, "WebGL.getProgramParameter");
+   // Completion status queries always return true on a lost context. This is
+   // intended to prevent applications from entering an infinite polling loop.
+   if (isContextLost() && pname == GL_COMPLETION_STATUS_KHR)
+@@ -4447,6 +4462,8 @@ ScriptValue WebGLRenderingContextBase::getShaderParameter(
+     ScriptState* script_state,
+     WebGLShader* shader,
+     GLenum pname) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kWebGl, "WebGL.getShaderParameter");
+   // Completion status queries always return true on a lost context. This is
+   // intended to prevent applications from entering an infinite polling loop.
+   if (isContextLost() && pname == GL_COMPLETION_STATUS_KHR)
+@@ -4491,6 +4508,8 @@ String WebGLRenderingContextBase::getShaderInfoLog(WebGLShader* shader) {
+ WebGLShaderPrecisionFormat* WebGLRenderingContextBase::getShaderPrecisionFormat(
+     GLenum shader_type,
+     GLenum precision_type) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kWebGl, "WebGL.getShaderPrecisionFormat");
+   if (isContextLost())
+     return nullptr;
+   if (!ValidateShaderType("getShaderPrecisionFormat", shader_type)) {
+@@ -4528,6 +4547,8 @@ String WebGLRenderingContextBase::getShaderSource(WebGLShader* shader) {
+ 
+ std::optional<Vector<String>>
+ WebGLRenderingContextBase::getSupportedExtensions() {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kWebGl, "WebGL.getSupportedExtensions");
+   if (isContextLost())
+     return std::nullopt;
+ 
+@@ -5289,6 +5310,8 @@ void WebGLRenderingContextBase::readPixels(
+     GLenum format,
+     GLenum type,
+     MaybeShared<DOMArrayBufferView> pixels) {
++  ::reb::NativeProbeSink::Get().RecordApiCall(
++      ::reb::NativeProbeCategory::kWebGl, "WebGL.readPixels");
+   ReadPixelsHelper(x, y, width, height, format, type, pixels.Get(), 0);
+ }
+ 

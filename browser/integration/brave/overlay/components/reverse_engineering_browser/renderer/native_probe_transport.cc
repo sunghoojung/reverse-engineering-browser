@@ -5,6 +5,7 @@
 
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
 
+#include <bit>
 #include <memory>
 #include <utility>
 
@@ -14,8 +15,22 @@
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 #include "mojo/public/cpp/base/big_buffer.h"
+#include "third_party/blink/public/web/web_local_frame.h"
 
 namespace reb {
+
+namespace {
+
+std::uint64_t CurrentFrameId() noexcept {
+  const blink::WebLocalFrame* const frame = blink::WebLocalFrame::FrameForCurrentContext();
+  if (!frame) {
+    return 0;
+  }
+  const base::UnguessableToken& token = frame->GetLocalFrameToken().value();
+  return std::rotl(token.GetHighForSerialization(), 17) ^ token.GetLowForSerialization();
+}
+
+}  // namespace
 
 NativeProbeTransport& NativeProbeTransport::Get() {
   static base::NoDestructor<NativeProbeTransport> transport;
@@ -41,6 +56,7 @@ void NativeProbeTransport::Connect(mojo::PendingRemote<mojom::NativeProbeHost> p
 void NativeProbeTransport::Configure(const std::uint64_t session_id,
                                      const std::uint64_t category_mask,
                                      const std::uint64_t expires_at_monotonic_ns,
+                                     const bool capture_canvas_images,
                                      base::UnsafeSharedMemoryRegion queue_region) {
   Disable();
   const std::uint64_t now =
@@ -63,13 +79,13 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
 
   queue_mappings_.push_back(std::move(mapping));
   queue_.store(queue, std::memory_order_release);
-  NativeProbeSink::Get().SetEmitters(&NativeProbeTransport::Emit,
-                                     &NativeProbeTransport::EmitArtifact, session_id, category_mask,
-                                     expires_at_monotonic_ns);
+  NativeProbeSink::Get().SetEmitters(
+      &NativeProbeTransport::Emit, &NativeProbeTransport::EmitArtifact, session_id, category_mask,
+      expires_at_monotonic_ns, capture_canvas_images, &CurrentFrameId);
 }
 
 void NativeProbeTransport::Disable() {
-  NativeProbeSink::Get().SetEmitters(nullptr, nullptr, 0, 0, 0);
+  NativeProbeSink::Get().SetEmitters(nullptr, nullptr, 0, 0, 0, false);
   queue_.store(nullptr, std::memory_order_release);
 }
 
@@ -79,12 +95,13 @@ void NativeProbeTransport::Emit(const NativeProbeEvent& event) noexcept {
 
 void NativeProbeTransport::EmitArtifact(const NativeArtifactKind kind,
                                         const NativeArtifactCaptureOrigin capture_origin,
+                                        const std::uint64_t creator_event_id,
                                         const std::uint64_t execution_context_id,
                                         const std::uint64_t frame_id,
                                         const std::string_view source_url,
                                         const std::span<const std::uint8_t> content) noexcept {
-  Get().EmitGeneratedArtifact(kind, capture_origin, execution_context_id, frame_id, source_url,
-                              content);
+  Get().EmitGeneratedArtifact(kind, capture_origin, creator_event_id, execution_context_id,
+                              frame_id, source_url, content);
 }
 
 void NativeProbeTransport::EmitEvent(const NativeProbeEvent& event) noexcept {
@@ -106,6 +123,7 @@ void NativeProbeTransport::EmitEvent(const NativeProbeEvent& event) noexcept {
 void NativeProbeTransport::EmitGeneratedArtifact(
     const NativeArtifactKind kind,
     const NativeArtifactCaptureOrigin capture_origin,
+    const std::uint64_t creator_event_id,
     const std::uint64_t execution_context_id,
     const std::uint64_t frame_id,
     const std::string_view source_url,
@@ -113,9 +131,10 @@ void NativeProbeTransport::EmitGeneratedArtifact(
   auto* const thread_host = HostForCurrentSequence();
   if (*thread_host) {
     (*thread_host)
-        ->CaptureGeneratedArtifact(
-            static_cast<std::uint16_t>(kind), static_cast<std::uint16_t>(capture_origin),
-            execution_context_id, frame_id, std::string(source_url), mojo_base::BigBuffer(content));
+        ->CaptureGeneratedArtifact(static_cast<std::uint16_t>(kind),
+                                   static_cast<std::uint16_t>(capture_origin), creator_event_id,
+                                   execution_context_id, frame_id, std::string(source_url),
+                                   mojo_base::BigBuffer(content));
   }
 }
 

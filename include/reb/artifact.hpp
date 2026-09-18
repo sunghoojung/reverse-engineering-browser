@@ -29,6 +29,7 @@ enum class ArtifactKind : std::uint16_t {
   kWasm = 2,
   kSourceMap = 3,
   kResponseBody = 4,
+  kCanvasDataUrl = 5,
 };
 
 enum class ArtifactCaptureOrigin : std::uint16_t {
@@ -38,6 +39,7 @@ enum class ArtifactCaptureOrigin : std::uint16_t {
   kWebAssemblyCompile = 3,
   kWebAssemblyModule = 4,
   kWebAssemblyInstantiate = 5,
+  kCanvasToDataUrl = 6,
 };
 
 struct ArtifactHeader final {

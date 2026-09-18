@@ -1,0 +1,24 @@
+diff --git a/build/config/siso/brave_siso_config.star b/build/config/siso/brave_siso_config.star
+--- a/build/config/siso/brave_siso_config.star
++++ b/build/config/siso/brave_siso_config.star
+@@ -180,6 +180,7 @@ def __adjust_handlers(ctx, step_config, handlers):
+     # If no clang rule was found, add one with redirect_cc handler to handle
+     # C/C++ source file overrides from chromium_src directory.
+     if not found_clang_rule:
++        cc_wrapper = gn.args(ctx).get("cc_wrapper")
+         if __HOST_OS_IS_WINDOWS:
+             clang_command_prefix = "..\\..\\third_party\\llvm-build\\Release+Asserts\\bin\\clang"
+             clang_coverage_command_prefix = "python3.exe ../../build/toolchain/clang_code_coverage_wrapper.py"
+@@ -198,6 +199,12 @@ def __adjust_handlers(ctx, step_config, handlers):
+                 "handler": "redirect_cc",
+             },
+         ])
++        if cc_wrapper:
++            step_config["rules"].insert(0, {
++                "name": "clang_cc_wrapper_redirect_cc",
++                "command_prefix": cc_wrapper + " " + clang_command_prefix,
++                "handler": "redirect_cc",
++            })
+ 
+ 
+ # Removes labels from platform configurations, because they are not supported by

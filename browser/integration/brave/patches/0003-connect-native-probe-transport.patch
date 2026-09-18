@@ -15,7 +15,7 @@ index 092130bf4..0f04044ab 100644
    Profile* profile = Profile::FromBrowserContext(host->GetBrowserContext());
    // The BraveRendererUpdater might be null for some irregular profiles, e.g.
    // the System Profile.
-@@ -573,6 +575,18 @@ void BraveContentBrowserClient::RenderProcessWillLaunch(
+@@ -573,6 +575,19 @@ void BraveContentBrowserClient::RenderProcessWillLaunch(
    ChromeContentBrowserClient::RenderProcessWillLaunch(host);
  }
  
@@ -24,7 +24,8 @@ index 092130bf4..0f04044ab 100644
 +    mojo::GenericPendingReceiver receiver) {
 +  if (auto probe_receiver =
 +          receiver.As<reb::mojom::NativeProbeHost>()) {
-+    reb::NativeProbeSession::Get().BindHost(std::move(probe_receiver));
++    reb::NativeProbeSession::Get().BindHost(render_process_host->GetID(),
++                                           std::move(probe_receiver));
 +    return;
 +  }
 +  ChromeContentBrowserClient::BindHostReceiverForRenderer(

@@ -1,7 +1,7 @@
 diff --git a/chromium_src/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc b/chromium_src/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
 --- a/chromium_src/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
 +++ b/chromium_src/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
-@@ -7,10 +7,12 @@
+@@ -7,10 +7,11 @@
  #include "base/auto_reset.h"
 +#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
  #include "brave/third_party/blink/renderer/core/farbling/brave_session_cache.h"
@@ -10,26 +10,46 @@ diff --git a/chromium_src/third_party/blink/renderer/core/html/canvas/html_canva
  
  #define BRAVE_TO_DATA_URL_INTERNAL                                          \
    {                                                                         \
-+    ::reb::NativeProbeSink::Get().RecordCanvasToDataUrl();                  \
      ExecutionContext* execution_context = GetExecutionContext();            \
      if (!execution_context) {                                               \
        execution_context = scoped_execution_context_.Get();                  \
+@@ -21,6 +22,16 @@
+     }                                                                       \
+   }
+ 
++#define BRAVE_TO_DATA_URL_INTERNAL_RESULT(data_url)                         \
++  {                                                                         \
++    auto& reb_sink = ::reb::NativeProbeSink::Get();                          \
++    if (reb_sink.IsCanvasImageCaptureEnabled()) {                            \
++      reb_sink.RecordCanvasToDataUrl((data_url).Utf8());                     \
++    } else {                                                                \
++      reb_sink.RecordCanvasToDataUrl();                                      \
++    }                                                                       \
++  }
++
+ #include <third_party/blink/renderer/core/html/canvas/html_canvas_element.cc>
+ 
+ namespace blink {
+@@ -43,3 +54,4 @@ String HTMLCanvasElement::toDataURL(ScriptState* script_state,
+ }  // namespace blink
+ 
+ #undef BRAVE_TO_DATA_URL_INTERNAL
++#undef BRAVE_TO_DATA_URL_INTERNAL_RESULT
 diff --git a/renderer/BUILD.gn b/renderer/BUILD.gn
 --- a/renderer/BUILD.gn
 +++ b/renderer/BUILD.gn
-@@ -19,3 +19,6 @@ source_set("renderer") {
+@@ -19,3 +19,4 @@ source_set("renderer") {
    public_deps = [ "//chrome/renderer" ]
-+  public_deps += [
-+    "//brave/components/reverse_engineering_browser:renderer",
-+  ]
++  public_deps += [ "//brave/components/reverse_engineering_browser:renderer" ]
  
    deps = [
 diff --git a/third_party/blink/renderer/includes.gni b/third_party/blink/renderer/includes.gni
 --- a/third_party/blink/renderer/includes.gni
 +++ b/third_party/blink/renderer/includes.gni
-@@ -40,4 +40,5 @@ brave_blink_renderer_core_sources = [
- brave_blink_renderer_core_deps = [
-   "//brave/components/brave_shields/core/common:mojom",
-   "//brave/components/brave_shields/core/common/",
+@@ -24,5 +24,6 @@ brave_blink_renderer_core_visibility =
+ 
+ brave_blink_renderer_core_public_deps = [
+   "//brave/components/brave_page_graph/common:buildflags",
 +  "//brave/components/reverse_engineering_browser:renderer_sink",
+   "//brave/third_party/blink/renderer",
  ]

@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -36,6 +37,11 @@ using reb::services::ScopedDescriptor;
 using reb::services::ScopedSocketPath;
 
 constexpr std::size_t kSocketEventBatchCapacity = 256;
+volatile std::sig_atomic_t stop_requested = 0;
+
+void RequestStop(int) {
+  stop_requested = 1;
+}
 
 struct Options final {
   std::string store_path;
@@ -247,6 +253,7 @@ enum class TimedReadStatus {
   kComplete,
   kEndOfFile,
   kExpired,
+  kStopped,
   kError,
 };
 
@@ -256,6 +263,9 @@ TimedReadStatus ReadExactUntil(const int descriptor,
                                std::string& error) {
   std::size_t offset = 0;
   while (offset < output.size()) {
+    if (stop_requested) {
+      return TimedReadStatus::kStopped;
+    }
     pollfd readable{descriptor, static_cast<short>(POLLIN), 0};
     const int poll_result = poll(&readable, 1, MillisecondsUntil(deadline_ns));
     if (poll_result == 0) {
@@ -296,6 +306,9 @@ class SocketEventReader final {
                             std::string& error) {
     event_count = 0;
     while (buffered_bytes_ < sizeof(reb::EventRecord)) {
+      if (stop_requested) {
+        return TimedReadStatus::kStopped;
+      }
       pollfd readable{descriptor, static_cast<short>(POLLIN), 0};
       const int poll_result = poll(&readable, 1, MillisecondsUntil(deadline_ns));
       if (poll_result == 0) {
@@ -360,6 +373,9 @@ bool IngestSocket(const int descriptor,
     std::cerr << "Capture session expired\n";
     return true;
   }
+  if (hello_status == TimedReadStatus::kStopped) {
+    return true;
+  }
   if (hello_status == TimedReadStatus::kEndOfFile) {
     std::cerr << "Browser connection closed before authentication\n";
     return false;
@@ -390,6 +406,9 @@ bool IngestSocket(const int descriptor,
       std::cerr << "Capture session expired\n";
       return true;
     }
+    if (event_status == TimedReadStatus::kStopped) {
+      return FlushStores(store, trace_store, signal_store);
+    }
     if (event_status == TimedReadStatus::kError) {
       std::cerr << "Unable to read native event: " << error << '\n';
       return false;
@@ -416,6 +435,9 @@ bool IngestSocket(const int descriptor,
 
 int AcceptUntil(const int listener, const std::uint64_t deadline_ns) {
   for (;;) {
+    if (stop_requested) {
+      return -2;
+    }
     pollfd readable{listener, static_cast<short>(POLLIN), 0};
     const int poll_result = poll(&readable, 1, MillisecondsUntil(deadline_ns));
     if (poll_result > 0) {
@@ -466,6 +488,9 @@ int main(const int argc, char* argv[]) {
   if (!ParseOptions(argc, argv, options)) {
     PrintUsage(argv[0]);
     return 2;
+  }
+  if (!options.socket_path.empty()) {
+    std::signal(SIGUSR1, RequestStop);
   }
 
   reb::SessionPolicy policy;

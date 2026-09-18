@@ -1,0 +1,12 @@
+diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+index 5547d5f09a6d3..a7ebcfbfbd848 100644
+--- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
++++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+@@ -1299,6 +1299,7 @@ String HTMLCanvasElement::ToDataURLInternal(
+ 
+     BRAVE_TO_DATA_URL_INTERNAL
+     String data_url = data_buffer->ToDataURL(encoding_mime_type, quality);
++    BRAVE_TO_DATA_URL_INTERNAL_RESULT(data_url)
+     base::TimeDelta elapsed_time = base::TimeTicks::Now() - start_time;
+     float sqrt_pixels =
+         std::sqrt(image_bitmap->width()) * std::sqrt(image_bitmap->height());

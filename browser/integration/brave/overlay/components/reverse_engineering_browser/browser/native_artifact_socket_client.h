@@ -64,6 +64,8 @@ class NativeArtifactSocketClient final {
   void Run();
   void Report(std::uint64_t artifact_id, NativeArtifactReceiveStatus status);
   void DisconnectPending(NativeArtifactReceiveStatus status);
+  void JoinWriter();
+  void FinishStop();
 
   base::Lock lock_;
   base::ConditionVariable wakeup_{&lock_};
@@ -73,6 +75,7 @@ class NativeArtifactSocketClient final {
   scoped_refptr<base::SequencedTaskRunner> browser_task_runner_;
   NativeArtifactCompletion completion_ = nullptr;
   std::atomic<bool> connected_{false};
+  bool stopping_ = false;
   int socket_descriptor_ = -1;
 };
 

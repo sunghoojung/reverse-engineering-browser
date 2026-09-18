@@ -43,9 +43,14 @@ the existing bounded renderer queue, expiration deadline, category policy,
 drop accounting, and sequence-gap reporting.
 
 The probe is disabled unless the session category mask includes Web Audio bit
-`4`. Live sessions enable it by default as part of mask `1285`, alongside
-Canvas, Network, and Artifact. Events rejected by policy or expiration do not
-consume sequence numbers.
+`4`. Live sessions enable it by default as part of mask `4095`, alongside every
+other fingerprint family, Network, and Artifact. Events rejected by policy or
+expiration do not consume sequence numbers.
+
+In addition to these lower-level boundaries, the Blink bindings generator
+records fixed names for methods and property reads across selected Web Audio
+interfaces. Explicit exclusions prevent duplicate events where a generated
+callback reaches one of the hooks listed above.
 
 The normalized timeline retains the fixed operation name. Request Signal
 Profiles do not duplicate it: they retain bounded Web Audio counts, observed or

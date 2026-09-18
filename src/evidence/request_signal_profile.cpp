@@ -12,7 +12,7 @@ namespace {
 constexpr std::array<EventCategory, kRequestSignalProfileCategoryCount> kSignalCategories = {
     EventCategory::kCanvas,    EventCategory::kWebGl,       EventCategory::kWebAudio,
     EventCategory::kNavigator, EventCategory::kPermissions, EventCategory::kStorage,
-    EventCategory::kWebRtc,
+    EventCategory::kWebRtc,    EventCategory::kRuntime,
 };
 
 template <typename Integer>

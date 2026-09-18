@@ -8,7 +8,13 @@ CANONICAL_UINT64 = re.compile(r"(?:0|[1-9][0-9]*)\Z")
 
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
-ARTIFACT_KINDS = {"javascript", "wasm", "source_map", "response_body"}
+ARTIFACT_KINDS = {
+    "javascript",
+    "wasm",
+    "source_map",
+    "response_body",
+    "canvas_data_url",
+}
 
 JSONL_TAIL_CHUNK_BYTES = 64 * 1024
 
@@ -22,6 +28,7 @@ SIGNAL_CATEGORIES = {
     "permissions",
     "storage",
     "webrtc",
+    "runtime",
 }
 
 ARTIFACT_CAPTURE_ORIGINS = {
@@ -31,7 +38,9 @@ ARTIFACT_CAPTURE_ORIGINS = {
     "webassembly_compile",
     "webassembly_module",
     "webassembly_instantiate",
+    "canvas_to_data_url",
 }
+
 
 def read_recent_json_lines(
     path: Path, limit: int, max_record_bytes: int, record_name: str
@@ -258,6 +267,11 @@ def is_artifact(artifact: object) -> bool:
             or artifact["execution_context_id"] == "0"
         ):
             return False
+        if origin == "canvas_to_data_url" and (
+            artifact.get("kind") != "canvas_data_url"
+            or artifact["execution_context_id"] != "0"
+        ):
+            return False
     if artifact.get("kind") not in ARTIFACT_KINDS:
         return False
     if not isinstance(artifact.get("url"), str) or not artifact["url"]:
@@ -278,4 +292,6 @@ def is_artifact(artifact: object) -> bool:
         return False
     if artifact.get("content_path") != f"blobs/{artifact['sha256']}.bin":
         return False
-    return artifact["sensitive"] == (artifact["kind"] == "response_body")
+    return artifact["sensitive"] == (
+        artifact["kind"] in {"response_body", "canvas_data_url"}
+    )

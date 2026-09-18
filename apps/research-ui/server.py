@@ -5,8 +5,10 @@ import hashlib
 import json
 import os
 import re
+import signal
 import stat
 import threading
+import time
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -63,6 +65,7 @@ MAX_TRACE_EDGE_JSON_BYTES = 2 * 1024
 MAX_SIGNAL_PROFILE_JSON_BYTES = 8 * 1024
 MAX_ARTIFACT_JSON_BYTES = 8 * 1024
 MAX_DEBUGGER_ACTION_BYTES = 128 * 1024
+MAX_CAPTURE_ACTION_BYTES = 256
 MAX_API_COLLECTION_ACTION_BYTES = MAX_API_COLLECTION_BYTES + 64 * 1024
 MAX_LOCAL_ANALYST_ACTION_BYTES = (
     max(MAX_ANALYST_DOCUMENT_BYTES, MAX_ANALYST_INPUT_BYTES) + 64 * 1024
@@ -157,6 +160,9 @@ class ResearchHandler(SimpleHTTPRequestHandler):
     decoder_service = DecoderService(Path("build/reb-decoder").resolve())
     demo_evidence = False
     broker_socket: Optional[Path] = None
+    broker_pid: Optional[int] = None
+    capture_stopped = False
+    capture_lock = threading.Lock()
     artifact_socket: Optional[Path] = None
     debugger: Optional[DebuggerBridge] = None
     analysis_lock = threading.Lock()
@@ -451,7 +457,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                 capture_mode = self.capture_mode()
                 etag = self.resource_etag(
                     self.event_store,
-                    f"{int(broker_connected)}-{capture_mode}-{limit}",
+                    f"{int(broker_connected)}-{capture_mode}-{limit}-{int(self.capture_stopped)}",
                 )
                 if self.send_not_modified(etag):
                     return
@@ -466,6 +472,8 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                 "events": events,
                 "broker_connected": broker_connected,
                 "capture_mode": capture_mode,
+                "capture_stopped": self.capture_stopped,
+                "capture_controls_available": self.broker_pid is not None,
             }
             if capture_mode == "demo":
                 response["canvas_render_captures"] = DEMO_CANVAS_RENDER_CAPTURES
@@ -585,6 +593,54 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             self.send_json(
                 {"error": "Local request origin rejected"}, HTTPStatus.FORBIDDEN
             )
+            return
+        if parsed.path == "/api/capture/actions":
+            try:
+                request = self.read_json_body(MAX_CAPTURE_ACTION_BYTES)
+                if self.broker_pid is None or self.broker_socket is None:
+                    self.send_json(
+                        {"error": "Live capture controls are unavailable"},
+                        HTTPStatus.CONFLICT,
+                    )
+                    return
+                with self.capture_lock:
+                    if request == {"action": "stop"}:
+                        if self.broker_connected():
+                            os.kill(self.broker_pid, signal.SIGUSR1)
+                            for _ in range(100):
+                                if not self.broker_connected():
+                                    break
+                                time.sleep(0.05)
+                            if self.broker_connected():
+                                raise TimeoutError("Native capture did not stop in time")
+                        type(self).capture_stopped = True
+                    elif request == {"action": "clear", "confirm": True}:
+                        if self.broker_connected():
+                            self.send_json(
+                                {"error": "Stop native capture before clearing events"},
+                                HTTPStatus.CONFLICT,
+                            )
+                            return
+                        for path in (self.event_store, self.trace_store, self.signal_store):
+                            if path.exists():
+                                with path.open("r+b") as store:
+                                    store.truncate(0)
+                                    store.flush()
+                                    os.fsync(store.fileno())
+                        type(self).capture_stopped = True
+                    else:
+                        self.send_json(
+                            {"error": "Capture action is invalid"},
+                            HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                self.send_json({"ok": True, "capture_stopped": self.capture_stopped})
+            except (OSError, TimeoutError) as exception:
+                self.send_json(
+                    {"error": str(exception)}, HTTPStatus.INTERNAL_SERVER_ERROR
+                )
+            except ValueError as exception:
+                self.send_json({"error": str(exception)}, HTTPStatus.BAD_REQUEST)
             return
         if parsed.path == "/api/decoder/actions":
             try:
@@ -819,9 +875,13 @@ class ResearchHandler(SimpleHTTPRequestHandler):
 
     def load_vm_analysis(self) -> dict:
         manifest = self.artifact_store / "manifest.jsonl"
-        event_state = self.resource_etag(self.event_store)
         manifest_state = self.resource_etag(manifest)
-        signature = f"{self.artifact_store.resolve()}:{manifest_state}:{event_state}"
+        # VM analysis is artifact-owned. Re-running it for every unrelated
+        # network or fingerprint event can starve the live UI while a busy page
+        # is producing evidence. The event store is sampled when a new artifact
+        # arrives, which retains correlation without coupling analysis work to
+        # the native probe event rate.
+        signature = f"{self.artifact_store.resolve()}:{manifest_state}"
         with self.analysis_lock:
             if type(self).analysis_signature != signature:
                 document = analyze_store(self.artifact_store, self.event_store)
@@ -1052,6 +1112,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--decoder", type=Path, default=Path("build/reb-decoder"))
     parser.add_argument("--socket", type=Path)
+    parser.add_argument("--broker-pid", type=int)
     parser.add_argument("--artifact-socket", type=Path)
     parser.add_argument("--devtools-active-port", type=Path)
     parser.add_argument("--debugger-transport", type=Path)
@@ -1080,6 +1141,8 @@ def main() -> int:
     ResearchHandler.decoder_service = DecoderService(args.decoder.resolve())
     ResearchHandler.demo_evidence = args.demo_evidence
     ResearchHandler.broker_socket = args.socket.resolve() if args.socket else None
+    ResearchHandler.broker_pid = args.broker_pid
+    ResearchHandler.capture_stopped = False
     ResearchHandler.artifact_socket = (
         args.artifact_socket.resolve() if args.artifact_socket else None
     )

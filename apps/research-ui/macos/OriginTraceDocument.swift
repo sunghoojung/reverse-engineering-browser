@@ -8,7 +8,7 @@ enum OriginTraceDocumentBuilder {
     "artifact_request": 3,
   ]
   private static let sourceBoundaries = Set([
-    "canvas", "webgl", "web_audio", "navigator", "permissions", "storage", "webrtc",
+    "canvas", "webgl", "web_audio", "navigator", "permissions", "storage", "webrtc", "runtime",
   ])
   private static let eventCategories = sourceBoundaries.union([
     "artifact", "network", "vm", "wasm",

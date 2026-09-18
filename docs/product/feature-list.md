@@ -133,8 +133,8 @@
 
 ## Research Workspace
 
-- Request Signal Profile for Canvas, WebGL, Web Audio, Navigator, Permissions,
-  Storage, and WebRTC activity, with observed parent chains, correlated
+- Request Signal Profile for Canvas, WebGL, Web Audio, device and layout APIs,
+  Permissions, Storage, WebRTC, and Runtime activity, with observed parent chains, correlated
   same-context evidence, and explicit retention coverage.
 - Request-first Origin Trace over the versioned broker edge sidecar, with exact
   request-root selection, bounded traversal, explicit gaps, and supporting

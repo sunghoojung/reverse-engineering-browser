@@ -27,11 +27,38 @@ readonly probe_objects=(
   "obj/brave/browser/core/brave_content_browser_client.o"
   "obj/chrome/renderer/renderer/brave_content_renderer_client.o"
   "obj/third_party/blink/renderer/core/core/html_canvas_element.o"
+  "obj/third_party/blink/renderer/core/core/use_counter_callback.o"
+  "obj/third_party/blink/renderer/modules/canvas/canvas/base_rendering_context_2d.o"
+  "obj/third_party/blink/renderer/modules/canvas/canvas/canvas_2d_recorder_context.o"
+  "obj/third_party/blink/renderer/modules/canvas/canvas/canvas_path.o"
+  "obj/third_party/blink/renderer/modules/webgl/webgl/webgl_rendering_context_base.o"
   "obj/third_party/blink/renderer/core/core/v8_initializer.o"
+  "obj/third_party/blink/renderer/bindings/modules/v8/v8/v8_canvas_rendering_context_2d.o"
+  "obj/third_party/blink/renderer/bindings/core/v8/v8/v8_element.o"
+  "obj/third_party/blink/renderer/bindings/core/v8/v8/v8_performance.o"
+  "obj/third_party/blink/renderer/bindings/core/v8/v8/v8_svg_graphics_element.o"
+  "obj/third_party/blink/renderer/bindings/core/v8/v8/v8_window.o"
+  "obj/third_party/blink/renderer/bindings/modules/v8/v8/v8_gpu.o"
+  "obj/third_party/blink/renderer/bindings/modules/v8/v8/v8_gpu_adapter_info.o"
+  "obj/third_party/blink/renderer/bindings/modules/v8/v8/v8_gpu_supported_limits.o"
+  "obj/third_party/blink/renderer/bindings/modules/v8/v8/v8_html_iframe_element.o"
+  "obj/third_party/blink/renderer/bindings/modules/v8/v8/v8_media_recorder.o"
+  "obj/third_party/blink/renderer/bindings/modules/v8/v8/v8_media_device_info.o"
+  "obj/third_party/blink/renderer/bindings/modules/v8/v8/v8_media_source.o"
+  "obj/third_party/blink/renderer/bindings/modules/v8/v8/v8_navigator.o"
+  "obj/third_party/blink/renderer/bindings/modules/v8/v8/v8_permissions.o"
+  "obj/third_party/blink/renderer/bindings/modules/v8/v8/v8_rtc_peer_connection.o"
+  "obj/third_party/blink/renderer/bindings/modules/v8/v8/v8_screen.o"
+  "obj/third_party/blink/renderer/bindings/modules/v8/v8/v8_storage.o"
+  "obj/third_party/blink/renderer/bindings/modules/v8/v8/v8_speech_synthesis_voice.o"
+  "obj/third_party/blink/renderer/bindings/modules/v8/v8/v8_webgl_rendering_context.o"
   "obj/third_party/blink/renderer/platform/loader/loader/resource_request_sender.o"
   "obj/v8/v8_base_without_compiler/api.o"
   "obj/v8/v8_base_without_compiler/isolate.o"
   "obj/v8/v8_base_without_compiler/wasm-js.o"
+  "obj/v8/v8_initializers/builtins-date-gen.o"
+  "obj/v8/torque_generated_definitions/math-tq.o"
+  "obj/v8/torque_generated_initializers/math-tq-csa.o"
 )
 readonly web_audio_objects=(
   "obj/third_party/blink/renderer/modules/webaudio/webaudio/audio_buffer.o"
@@ -118,6 +145,65 @@ configure_brave_python() {
   exit 1
 }
 
+touch_brave_overrides() {
+  local override_path
+  local relative_path
+  local siso_config="${chromium_directory}/build/config/siso/brave_siso_config.star"
+  local redirect_config_is_newer=0
+  while IFS= read -r -d '' override_path; do
+    relative_path="${override_path#chromium_src/}"
+    if [[ -f "${chromium_directory}/${relative_path}" &&
+          -f "${siso_config}" &&
+          "${siso_config}" -nt "${chromium_directory}/${relative_path}" ]]; then
+      redirect_config_is_newer=1
+      break
+    fi
+  done < <(git -C "${brave_directory}" ls-files -z --cached --others --exclude-standard -- chromium_src)
+
+  if ((redirect_config_is_newer == 1)); then
+    echo "Siso redirect config changed; refreshing Brave override timestamps."
+    force_touch_brave_overrides
+    return
+  fi
+
+  while IFS= read -r -d '' override_path; do
+    relative_path="${override_path#chromium_src/}"
+    if [[ -f "${brave_directory}/${override_path}" ]] &&
+       { [[ ! -f "${chromium_directory}/${relative_path}" ]] ||
+         [[ "${brave_directory}/${override_path}" -nt "${chromium_directory}/${relative_path}" ]]; }; then
+      (
+        cd "${brave_directory}"
+        node --input-type=module -e \
+          "import util from './build/commands/lib/util.js'; util.touchOverriddenFiles()"
+      )
+      return
+    fi
+  done < <(git -C "${brave_directory}" ls-files -z --cached --others --exclude-standard -- chromium_src)
+
+  echo "Brave override targets are current."
+}
+
+force_touch_brave_overrides() {
+  local override_path
+  local relative_path
+  (
+    cd "${brave_directory}"
+    node --input-type=module -e \
+      "import util from './build/commands/lib/util.js'; util.touchOverriddenFiles()"
+
+    # Brave's helper only touches Chromium sources when the override mtime is
+    # newer. A newly enabled Siso redirect can otherwise leave an older object
+    # built from the Chromium source, so make the redirected source inputs
+    # newer once after the redirect configuration changes.
+    while IFS= read -r -d '' override_path; do
+      relative_path="${override_path#chromium_src/}"
+      if [[ -f "${chromium_directory}/${relative_path}" ]]; then
+        touch "${chromium_directory}/${relative_path}"
+      fi
+    done < <(find chromium_src -type f -print0)
+  )
+}
+
 run_pnpm() {
   if command -v corepack >/dev/null 2>&1; then
     corepack pnpm "$@"
@@ -127,6 +213,17 @@ run_pnpm() {
     echo "Corepack or pnpm is required." >&2
     exit 1
   fi
+}
+
+generated_probe_present() {
+  local generated_file="$1"
+  local operation="$2"
+  awk -v operation="\"${operation}\"" '
+    index($0, "NativeProbeSink::Get().Record") && index($0, operation) {
+      found = 1
+    }
+    END { exit found ? 0 : 1 }
+  ' "${generated_file}"
 }
 
 if (($# == 0)); then
@@ -158,6 +255,7 @@ case "${command_name}" in
   gen)
     "${repository_root}/scripts/sync-browser-integration.sh"
     configure_brave_python
+    touch_brave_overrides
     (
       cd "${chromium_directory}"
       buildtools/mac/gn gen "${output_directory}"
@@ -166,6 +264,7 @@ case "${command_name}" in
   probe-check)
     "${repository_root}/scripts/sync-browser-integration.sh"
     configure_brave_python
+    touch_brave_overrides
     (
       cd "${chromium_directory}"
       buildtools/mac/gn gen "${output_directory}"
@@ -181,6 +280,65 @@ case "${command_name}" in
         "${web_audio_objects[@]}" \
         brave/components/reverse_engineering_browser:native_artifact_body_tee_unittests \
         brave/components/reverse_engineering_browser:native_probe_sink_unittests
+      generated_bindings="${output_directory}/gen/third_party/blink/renderer/bindings/modules/v8"
+      generated_core_bindings="${output_directory}/gen/third_party/blink/renderer/bindings/core/v8"
+      declare -a generated_probe_expectations=(
+        "v8_gpu_adapter_info.cc:GPUAdapterInfo.vendor"
+        "v8_gpu_supported_limits.cc:GPUSupportedLimits.maxTextureDimension2D"
+        "v8_html_iframe_element.cc:HTMLIFrameElement.contentWindow"
+        "v8_media_device_info.cc:MediaDeviceInfo.deviceId"
+        "v8_navigator.cc:Navigator.userAgent"
+        "v8_permissions.cc:Permissions.query"
+        "v8_rtc_peer_connection.cc:RTCPeerConnection.getStats"
+        "v8_screen.cc:Screen.width"
+        "v8_storage.cc:Storage.getItem"
+        "v8_speech_synthesis_voice.cc:SpeechSynthesisVoice.voiceURI"
+        "v8_webgl_rendering_context.cc:WebGLRenderingContext.getSupportedExtensions"
+        "v8_window.cc:Window.devicePixelRatio"
+      )
+      for expectation in "${generated_probe_expectations[@]}"; do
+        generated_file="${expectation%%:*}"
+        operation="${expectation#*:}"
+        if ! generated_probe_present "${generated_bindings}/${generated_file}" "${operation}"; then
+          echo "Generated fingerprint probe is missing: ${operation}" >&2
+          exit 1
+        fi
+      done
+      declare -a generated_core_probe_expectations=(
+        "v8_element.cc:Element.getBoundingClientRect"
+        "v8_performance.cc:Performance.now"
+        "v8_svg_graphics_element.cc:SVGGraphicsElement.getBBox"
+      )
+      for expectation in "${generated_core_probe_expectations[@]}"; do
+        generated_file="${expectation%%:*}"
+        operation="${expectation#*:}"
+        if ! generated_probe_present "${generated_core_bindings}/${generated_file}" "${operation}"; then
+          echo "Generated fingerprint probe is missing: ${operation}" >&2
+          exit 1
+        fi
+      done
+      declare -a excluded_core_probe_expectations=(
+        "v8_document.cc:Document.createElement"
+        "v8_element.cc:Element.classList"
+        "v8_html_element.cc:HTMLElement.style"
+        "v8_window.cc:Window.performance"
+      )
+      for expectation in "${excluded_core_probe_expectations[@]}"; do
+        generated_file="${expectation%%:*}"
+        operation="${expectation#*:}"
+        if generated_probe_present "${generated_core_bindings}/${generated_file}" "${operation}"; then
+          echo "Routine DOM operation was incorrectly generated as a fingerprint probe: ${operation}" >&2
+          exit 1
+        fi
+      done
+      if ! generated_probe_present "${generated_bindings}/v8_gpu.cc" 'GPU.requestAdapter'; then
+        echo "Generated fingerprint probe is missing: GPU.requestAdapter" >&2
+        exit 1
+      fi
+      if ! grep -Fq 'kRebMathAcos' "${chromium_directory}/v8/src/builtins/math.tq"; then
+        echo "V8 Math fingerprint probes are missing." >&2
+        exit 1
+      fi
       "${output_directory}/native_artifact_body_tee_unittests"
       "${output_directory}/native_probe_sink_unittests"
     )

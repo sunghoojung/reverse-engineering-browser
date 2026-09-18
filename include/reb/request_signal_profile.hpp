@@ -16,7 +16,7 @@
 namespace reb {
 
 inline constexpr std::uint16_t kRequestSignalProfileProtocolVersion = 1;
-inline constexpr std::size_t kRequestSignalProfileCategoryCount = 7;
+inline constexpr std::size_t kRequestSignalProfileCategoryCount = 8;
 inline constexpr std::size_t kRequestSignalProfileParentDepthLimit = 32;
 
 enum class RequestSignalRelation : std::uint16_t {
@@ -67,10 +67,10 @@ static_assert(std::is_standard_layout_v<RequestSignalProfile>);
 static_assert(std::is_trivially_copyable_v<RequestSignalProfile>);
 static_assert(sizeof(RequestSignalEventReference) == 24);
 static_assert(sizeof(RequestSignalEvidence) == 64);
-static_assert(sizeof(RequestSignalProfile) == 544);
+static_assert(sizeof(RequestSignalProfile) == 608);
 static_assert(offsetof(RequestSignalProfile, root_event) == 8);
 static_assert(offsetof(RequestSignalProfile, signals) == 88);
-static_assert(offsetof(RequestSignalProfile, signal_count) == 536);
+static_assert(offsetof(RequestSignalProfile, signal_count) == 600);
 
 struct RequestSignalProfileIndexStats final {
   std::uint64_t indexed_events = 0;

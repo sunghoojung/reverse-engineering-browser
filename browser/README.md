@@ -61,6 +61,10 @@ The project helper automatically uses `/Applications/Xcode.app` when present
 and Brave's bundled Python. A complete browser build remains available through
 `./scripts/brave-toolchain.sh build` and may take several hours.
 
+For a self-contained Apple silicon browser ZIP, use the separate
+[Brave distribution build](../docs/development/brave-distribution.md). The
+fast component output below is not portable by itself.
+
 ### Fast local iteration
 
 The macOS development output supports a local `sccache` compiler cache. Install

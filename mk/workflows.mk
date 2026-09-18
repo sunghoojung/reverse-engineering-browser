@@ -16,6 +16,9 @@ browser-sync:
 browser-sync-test:
 	./tests/sync_browser_integration_test.sh
 
+brave-distribution-test:
+	./tests/brave_distribution_test.sh
+
 workspace-check:
 	./scripts/check-workspace.sh
 

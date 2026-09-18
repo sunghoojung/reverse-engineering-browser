@@ -926,6 +926,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
             "error": None,
             "target": None,
             "targets": [],
+            "live_tab_count": None,
             "scripts": [],
             "paused": None,
             "breakpoints": [],

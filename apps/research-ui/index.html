@@ -132,6 +132,7 @@
             <div id="signal-notice" class="signal-notice" data-kind="loading" role="status" aria-live="polite">Loading fingerprint evidence...</div>
             <div class="signal-scopebar">
               <div id="signal-tab-scopes" class="signal-tab-scopes" role="tablist" aria-label="Captured browser tabs"></div>
+              <span id="signal-live-tabs" class="signal-live-tabs" aria-live="polite">Live tabs unavailable</span>
               <div class="signal-capture-actions">
                 <button id="signal-stop-capture" type="button" title="Disable native probes for this session">Stop probes</button>
                 <button id="signal-clear-events" type="button" title="Clear current-session events after capture stops">Clear events</button>
@@ -1103,7 +1104,7 @@
         <span id="broker-status" class="broker-status">connecting to evidence</span>
         <span id="request-summary"><span id="request-count">0</span> <span id="request-count-label">requests loaded</span></span>
         <span id="sample-status">Waiting for session mode</span>
-        <span id="gap-status">0 sequence gaps</span>
+        <span id="gap-status">0 missing event IDs</span>
         <span id="updated-status">waiting for evidence</span>
         <span class="local-only">local only</span>
       </footer>

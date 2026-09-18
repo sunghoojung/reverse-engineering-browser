@@ -1636,6 +1636,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "error": NSNull(),
         "target": NSNull(),
         "targets": [],
+        "live_tab_count": NSNull(),
         "scripts": [],
         "paused": NSNull(),
         "breakpoints": [],

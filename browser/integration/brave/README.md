@@ -74,6 +74,12 @@ and coalesced wake-ups. The browser process
 authenticates to the event broker with a session identifier and a mode-0600
 token file, then sends exact fixed-size records over a Unix socket. A bounded
 browser-process queue keeps those socket writes off the capture paths.
+Both event queues hold 1,024 records. Full queues still drop rather than block
+the renderer; a dropped gap report carries the number of source records it
+represents into the next queue's drop counter. Queue-wide gap reports remain
+unattributed because both queues can mix tabs and frames. Sequence discontinuities
+and queue-drop reports may describe the same missing records and must not be
+added together.
 
 Native quiet mode is an explicit launch-time option. Its Chromium patch adds a
 disabled-by-default V8 flag that returns from the shared debugger-statement

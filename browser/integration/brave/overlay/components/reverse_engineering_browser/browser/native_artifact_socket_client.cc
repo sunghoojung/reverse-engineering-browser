@@ -247,8 +247,10 @@ void NativeArtifactSocketClient::Stop() {
     return;
   }
   writer_thread_.DetachFromSequence();
+  // JoinWriter waits for a base::Thread on this blocking worker, not on the
+  // browser sequence. MayBlock alone does not permit base sync primitives.
   base::ThreadPool::PostTaskAndReply(
-      FROM_HERE, {base::MayBlock()},
+      FROM_HERE, {base::MayBlock(), base::WithBaseSyncPrimitives()},
       base::BindOnce(&NativeArtifactSocketClient::JoinWriter, base::Unretained(this)),
       base::BindOnce(&NativeArtifactSocketClient::FinishStop, base::Unretained(this)));
 }

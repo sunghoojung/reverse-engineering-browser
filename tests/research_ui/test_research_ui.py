@@ -1888,6 +1888,7 @@ const networkEmpty = {
 };
 const snapshot = {
   protocol_version: 1, state: 'paused', generation: 7, error: null,
+  live_tab_count: 1,
   heap_diff_baseline: null, memory_origin_trace: originIdle,
   action_scope: actionScopeIdle,
   request_interception: interceptionIdle,
@@ -1975,6 +1976,7 @@ process.stdout.write(JSON.stringify({
   badFrameRejected: !isDebuggerResponse({...snapshot, paused: {...snapshot.paused,
     call_frames: [{...frame, location: {script_id: 'script-1', line: -1, column: 0}}]}}),
   badTargetRejected: !isDebuggerResponse({...snapshot, targets: [null]}),
+  badLiveTabCountRejected: !isDebuggerResponse({...snapshot, live_tab_count: -1}),
   badBreakpointRejected: !isDebuggerResponse({...snapshot, breakpoints: [null]}),
   badWatchRejected: !isDebuggerResponse({...snapshot, watches: [null]}),
   badConsoleRejected: !isDebuggerResponse({...snapshot, console: [null]}),
@@ -2077,6 +2079,7 @@ process.stdout.write(JSON.stringify({
                 "badScriptRejected": True,
                 "badFrameRejected": True,
                 "badTargetRejected": True,
+                "badLiveTabCountRejected": True,
                 "badBreakpointRejected": True,
                 "badWatchRejected": True,
                 "badConsoleRejected": True,
@@ -2822,6 +2825,16 @@ process.stdout.write(JSON.stringify({
   explicitGap: String(countSequenceGaps([
     v2(),
     v2({sequence_number: "2", type: "gap", request_id: "0", payload_size: 0, payload: ""})
+  ])),
+  reportedDrop: String(countReportedQueueDrops([
+    v3({sequence_number: "318"}),
+    v3({sequence_number: "318", type: "gap", request_id: "0", payload_size: 3, payload: "313335"}),
+    v3({sequence_number: "454"})
+  ])),
+  overlappingGap: String(countSequenceGaps([
+    v3({sequence_number: "318"}),
+    v3({sequence_number: "318", type: "gap", request_id: "0", payload_size: 3, payload: "313335"}),
+    v3({sequence_number: "454"})
   ]))
 }));
 """
@@ -2887,7 +2900,9 @@ process.stdout.write(JSON.stringify({
                 "tabId": "23",
                 "browserContextToken": "9007199254740993:18446744073709551615",
                 "gap": "1",
-                "explicitGap": "1",
+                "explicitGap": "0",
+                "reportedDrop": "135",
+                "overlappingGap": "135",
             },
         )
 

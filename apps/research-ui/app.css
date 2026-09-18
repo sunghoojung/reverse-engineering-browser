@@ -814,6 +814,8 @@
       .signal-tab-scope span { color: var(--faint); font: 10px var(--mono); }
       .signal-tab-scope[aria-selected="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
       .signal-tab-scope[aria-selected="true"] span { color: var(--cyan); }
+      .signal-live-tabs { flex: 0 0 auto; color: var(--muted); font: 10px var(--mono); white-space: nowrap; }
+      .signal-live-tabs[data-live="true"] { color: var(--green); }
       .signal-capture-actions { display: flex; flex: 0 0 auto; gap: 6px; margin-left: auto; }
       .signal-capture-actions button, .signal-feed-actions button { min-height: 28px; padding: 0 9px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel-2); color: var(--text); font-size: 10px; }
       .signal-capture-actions button:hover:not(:disabled), .signal-feed-actions button:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); }

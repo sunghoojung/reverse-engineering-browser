@@ -187,7 +187,8 @@ void NativeProbeSocketClient::Emit(const NativeProbeEvent& event) noexcept {
 }
 
 void NativeProbeSocketClient::Enqueue(const NativeProbeEvent& event) noexcept {
-  if (!connected_.load(std::memory_order_acquire) || !queue_.TryPush(event)) {
+  if (!connected_.load(std::memory_order_acquire) ||
+      !queue_.TryPush(event, NativeProbeDropWeight(event))) {
     return;
   }
   if (queue_.MarkNotificationPending()) {

@@ -157,16 +157,28 @@
         let gaps = 0n;
         const highWaterMarks = new Map();
         for (const event of events) {
+          if (event.type === 'gap') continue;
           const streamId = `${integerText(event, 'session_id')}:${event.process_id}`;
           const sequence = integerValue(event, 'sequence_number');
           const previous = highWaterMarks.get(streamId);
           const missing = previous !== undefined && sequence > previous + 1n
             ? sequence - previous - 1n
             : 0n;
-          gaps += missing > 0n ? missing : event.type === 'gap' ? 1n : 0n;
+          gaps += missing;
           highWaterMarks.set(streamId, previous === undefined || sequence > previous ? sequence : previous);
         }
         return gaps;
+      }
+
+      function countReportedQueueDrops(events) {
+        let drops = 0n;
+        for (const event of events) {
+          if (event.type !== 'gap') continue;
+          const payload = decodePayload(event);
+          const count = /^[1-9][0-9]{0,19}$/.test(payload) ? BigInt(payload) : 1n;
+          drops += count <= 18446744073709551615n ? count : 1n;
+        }
+        return drops;
       }
 
       function isBrokerEvent(event) {
@@ -1057,6 +1069,7 @@
             !isSafeIntegerInRange(body.generation, 0, Number.MAX_SAFE_INTEGER) ||
             (body.error !== null && typeof body.error !== 'string') ||
             !Array.isArray(body.targets) || body.targets.length > 128 || !body.targets.every(isDebuggerTarget) ||
+            (body.live_tab_count !== null && !isSafeIntegerInRange(body.live_tab_count, 0, 512)) ||
             !Array.isArray(body.scripts) || body.scripts.length > 5000 || !body.scripts.every(isDebuggerScript) ||
             !Array.isArray(body.breakpoints) || body.breakpoints.length > 1000 || !body.breakpoints.every(isDebuggerBreakpoint) ||
             !Array.isArray(body.watches) || body.watches.length > 100 || !body.watches.every(isDebuggerWatch) ||

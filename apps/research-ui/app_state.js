@@ -262,6 +262,7 @@
         selectedUrl: document.querySelector('#selected-url'),
         signalSessionBadge: document.querySelector('#signal-session-badge'),
         signalTabScopes: document.querySelector('#signal-tab-scopes'),
+        signalLiveTabs: document.querySelector('#signal-live-tabs'),
         signalStopCapture: document.querySelector('#signal-stop-capture'),
         signalClearEvents: document.querySelector('#signal-clear-events'),
         signalFeedStatus: document.querySelector('#signal-feed-status'),

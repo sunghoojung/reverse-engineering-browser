@@ -180,7 +180,13 @@ local broker without closing the browser. Clear events is available after
 capture stops, requires confirmation, and truncates only this session's event,
 trace, and request-profile stores. Canvas artifact files and other saved files
 remain on disk. Detailed identifiers stay behind a disclosure. The
-custom browser observes generated Web IDL callbacks for a selected native
+captured-tab buttons are historical evidence, not an open-tab count. In a live
+debugger session, the browser target list supplies a separately labeled current
+page-tab count, refreshed as targets open and close. Quiet mode and a lost
+debugger connection show that count as unavailable rather than guessing from
+captured events. The footer separates missing per-process sequence IDs from
+reported queue drops, since a gap report can describe the same missing IDs.
+The custom browser observes generated Web IDL callbacks for a selected native
 allowlist across all eight families, in addition to the lower-level Canvas,
 WebGL, and Web Audio hooks needed by internal Blink paths and selected V8 Math,
 Intl, and timezone hooks. Generic DOM bindings retain only measurement and

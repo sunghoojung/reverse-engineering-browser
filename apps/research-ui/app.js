@@ -537,6 +537,8 @@
       }
 
       function renderFingerprintTabScopes(allEvents) {
+        const focusedTabId = elements.signalTabScopes.contains(document.activeElement)
+          ? document.activeElement.dataset.signalTabId : null;
         const counts = new Map();
         allEvents.forEach(event => {
           const id = signalTabKey(event);
@@ -583,11 +585,30 @@
           return button;
         });
         elements.signalTabScopes.replaceChildren(...buttons);
+        if (focusedTabId) {
+          const restored = buttons.find(button => button.dataset.signalTabId === focusedTabId) ??
+            buttons.find(button => button.dataset.signalTabId === state.signalTabId);
+          restored?.focus({preventScroll: true});
+        }
+      }
+
+      function renderLiveBrowserTabCount() {
+        const count = state.debuggerSession?.live_tab_count;
+        const available = state.sessionMode === 'live' && !state.debuggerError &&
+          Number.isInteger(count) && count >= 0;
+        elements.signalLiveTabs.textContent = available
+          ? `${count} open ${count === 1 ? 'tab' : 'tabs'}`
+          : state.sessionMode === 'live' ? 'Live tab count unavailable' : 'No live browser';
+        elements.signalLiveTabs.dataset.live = String(available);
+        elements.signalLiveTabs.title = available
+          ? 'Current browser page tabs. Captured tab buttons retain historical evidence.'
+          : 'The live browser tab list is unavailable; captured tab buttons show historical evidence.';
       }
 
       function renderFingerprintActivity() {
         const allSignalEvents = fingerprintEventsFromEvents(state.events);
         renderFingerprintTabScopes(allSignalEvents);
+        renderLiveBrowserTabCount();
         const signalEvents = state.signalTabId === 'all' ? allSignalEvents
           : allSignalEvents.filter(event => signalTabKey(event) === state.signalTabId);
         const familyCounts = new Map();
@@ -647,6 +668,7 @@
         });
 
         const gapCount = countSequenceGaps(state.events);
+        const reportedDrops = countReportedQueueDrops(state.events);
         if (state.eventFailureKind === 'malformed') {
           setSignalNotice('error', signalEvents.length
             ? 'The broker returned malformed event data. The last understandable fingerprint evidence remains visible.'
@@ -665,14 +687,17 @@
           setSignalNotice('empty', state.sessionMode === 'demo'
             ? 'Deterministic fingerprint evidence is not available in this build.'
             : 'No fingerprint-relevant browser activity has been captured yet.');
-        } else if (state.eventsLimited || displayLimited || gapCount > 0n) {
+        } else if (state.eventsLimited || displayLimited || gapCount > 0n || reportedDrops > 0n) {
           const limits = [];
           if (state.eventsLimited) limits.push('the event window is capped');
           if (displayLimited) {
             limits.push(`only the newest ${signalEventDisplayLimit} matching events are rendered`);
           }
           if (gapCount > 0n) {
-            limits.push(`${gapCount} sequence ${gapCount === 1n ? 'gap was' : 'gaps were'} recorded`);
+            limits.push(`${gapCount} capture-wide event ${gapCount === 1n ? 'ID is' : 'IDs are'} missing`);
+          }
+          if (reportedDrops > 0n) {
+            limits.push(`${reportedDrops} queue ${reportedDrops === 1n ? 'drop was' : 'drops were'} reported (may overlap missing IDs)`);
           }
           setSignalNotice(
             'partial',
@@ -7284,6 +7309,7 @@
           applyMemoryOriginTrace(body.memory_origin_trace);
           state.debuggerEtag = response.headers.get('ETag');
           state.debuggerError = null;
+          renderLiveBrowserTabCount();
           state.staleScriptIds ??= new Set();
           if ((previousSession?.target?.id ?? '') !== (body.target?.id ?? '')) {
             state.staleScriptIds.clear();
@@ -7349,6 +7375,7 @@
           }
         } catch (error) {
           state.debuggerError = error instanceof TypeError ? 'The debugger returned malformed state. The last valid pause is retained.' : error.message;
+          renderLiveBrowserTabCount();
           renderDebugger();
           renderMemory();
           if (!document.querySelector('#screen-experiments').hidden) renderExperiment();
@@ -7536,13 +7563,17 @@
             : (state.events.length > 0 ? 'last valid evidence retained' : 'no live evidence');
           renderShellStatus();
           const gapCount = countSequenceGaps(state.events);
-          elements.gaps.textContent = `${gapCount} sequence ${gapCount === 1n ? 'gap' : 'gaps'}`;
+          const reportedDrops = countReportedQueueDrops(state.events);
+          elements.gaps.textContent = `${gapCount} missing event ${gapCount === 1n ? 'ID' : 'IDs'}` +
+            (reportedDrops > 0n ? ` · ${reportedDrops} reported queue ${reportedDrops === 1n ? 'drop' : 'drops'} (may overlap)` : '');
           if (!brokerConnected) {
             setNetworkNotice('disconnected', `The local evidence broker is disconnected. ${state.events.length > 0 ? 'The last valid evidence remains visible.' : 'No live requests are available.'}`);
           } else if (state.eventsLimited) {
             setNetworkNotice('gap', `Showing the last 5,000 evidence events; older request rows remain recorded on disk.${gapCount > 0n ? ` ${gapCount} sequence ${gapCount === 1n ? 'gap is' : 'gaps are'} also recorded.` : ''}`);
           } else if (gapCount > 0n) {
-            setNetworkNotice('gap', `${gapCount} captured ${gapCount === 1n ? 'event is' : 'events are'} missing. Request rows may be incomplete.`);
+            setNetworkNotice('gap', `${gapCount} captured event ${gapCount === 1n ? 'ID is' : 'IDs are'} missing. Request rows may be incomplete.${reportedDrops > 0n ? ` The queue also reports ${reportedDrops} drops; these counts may overlap.` : ''}`);
+          } else if (reportedDrops > 0n) {
+            setNetworkNotice('gap', `The queue reports ${reportedDrops} dropped ${reportedDrops === 1n ? 'event' : 'events'}. No sequence jump is visible in the current event window.`);
           } else if (state.sessionMode === 'live' && state.events.length === 0) {
             setNetworkNotice('empty', 'No live requests yet. Start a capture in the attached browser.');
           } else if (state.sessionMode === 'demo') {
@@ -7606,7 +7637,7 @@
         state.selectedField = null;
         state.lastUpdatedLabel = 'start a live capture';
         renderShellStatus();
-        elements.gaps.textContent = '0 sequence gaps';
+        elements.gaps.textContent = '0 missing event IDs';
         setNetworkNotice('empty', 'No evidence is bundled. Start a live capture to populate the workspace.');
         renderRequests();
         renderEvidence();

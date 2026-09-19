@@ -1,5 +1,23 @@
 // Source display formatting and bounded tokenization. No DOM, network, or application state.
 
+      function findSourceOccurrences(lines, query, limit = 1000) {
+        const matches = [];
+        if (!query) return {matches, truncated: false};
+        const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // RegExp indexes preserve source UTF-16 offsets even when case folding
+        // would change the length of an earlier character (for example U+0130).
+        const pattern = new RegExp(escaped, 'giu');
+        for (let line = 0; line < lines.length; line += 1) {
+          pattern.lastIndex = 0;
+          let match;
+          while ((match = pattern.exec(lines[line])) !== null) {
+            if (matches.length === limit) return {matches, truncated: true};
+            matches.push({line, column: match.index, length: match[0].length});
+          }
+        }
+        return {matches, truncated: false};
+      }
+
       function sourceName(source) {
         if (!source.url) return source.source_type === 'script' ? `(anonymous ${source.script_id})` : `artifact-${source.artifact_id}`;
         try {

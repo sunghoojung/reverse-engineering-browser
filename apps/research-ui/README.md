@@ -213,6 +213,9 @@ Sources navigation exposes Page and Captured collections. Unimplemented
 Workspace and Overrides tabs are omitted until they provide a usable workflow.
 File rows reserve their remaining width for the filename, with full URLs in
 tooltips and source metadata in Details. Folder rows retain their item counts.
+Clicking original source records the UTF-16 column across syntax spans, so the
+Hook pivot can target a function inside a minified line. Inline script offsets
+are included; readable representations cannot change the runtime cursor.
 
 The Sources sidebar starts closed without an attached debugger. Details opens
 source metadata and connection status; attached sessions show debugger controls

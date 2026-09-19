@@ -1,7 +1,7 @@
 native-build-test:
 	./tests/native_build_test.sh
 
-check: native-build-test workspace-check bootstrap-test browser-sync-test test ui-test
+check: native-build-test workspace-check bootstrap-test browser-sync-test brave-distribution-test test ui-test
 
 lint: format-check shellcheck python-check javascript-check repository-check workflow-check
 

@@ -69,10 +69,12 @@ SENSITIVE_PAYLOAD_MARKERS = (
     b"set-cookie:",
 )
 EVENT_CATEGORIES = {
+    "artifact",
     "canvas",
     "navigator",
     "network",
     "permissions",
+    "runtime",
     "storage",
     "vm",
     "wasm",
@@ -82,6 +84,8 @@ EVENT_CATEGORIES = {
 }
 EVENT_TYPES = {
     "api_call",
+    "artifact_capture_failed",
+    "artifact_captured",
     "gap",
     "module_compiled",
     "module_instantiated",

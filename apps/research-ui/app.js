@@ -6936,7 +6936,7 @@
 
       function renderSourceSidebar() {
         const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
-        const open = state.sourceSidebarOpen ?? attached;
+        const open = state.sourceSidebarOpen ?? (attached || state.debuggerSession?.state === 'crashed');
         elements.sourceSidebar.dataset.attached = String(attached);
         elements.sourceSidebar.hidden = !open;
         document.querySelector('#screen-sources').dataset.sidebarOpen = String(open);
@@ -6950,7 +6950,7 @@
         const session = state.debuggerSession;
         const originTraceActive = memoryOriginTraceActive();
         const stateLabels = {
-          unavailable: 'Offline', waiting: 'Waiting', connecting: 'Attaching', running: 'Running', paused: 'Paused'
+          unavailable: 'Offline', waiting: 'Waiting', connecting: 'Attaching', running: 'Running', paused: 'Paused', crashed: 'Crashed'
         };
         const line = document.createElement('div'); line.className = 'debug-state-line';
         const label = document.createElement('strong'); label.textContent = stateLabels[session?.state] ?? 'Offline';

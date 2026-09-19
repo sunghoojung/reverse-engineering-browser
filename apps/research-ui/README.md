@@ -83,6 +83,11 @@ Quiet mode keeps native evidence capture and Captured Sources available.
 Live Page sources, breakpoints, stepping, watches, and console controls remain
 disconnected. It does not guarantee that the custom browser is undetectable.
 
+If the attached renderer crashes, Sources shows `Crashed`, clears stale paused
+frames, and retains captured evidence. Reload the browser tab to resume the
+debugger connection. A connected browser socket alone does not imply that its
+renderer is still running.
+
 ## Code ownership
 
 | Location | Responsibility |

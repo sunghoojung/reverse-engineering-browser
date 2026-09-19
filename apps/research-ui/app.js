@@ -270,15 +270,19 @@
         const badges = document.createElement('div');
         badges.className = 'signal-render-badges';
         badges.append(textElement('span', capture.demo ? 'demo' : 'live', capture.demo ? 'DEMO REPLAY' : 'NATIVE EVENT'));
-        if (capture.operationHash) badges.append(textElement('span', 'match', 'OP SEQUENCE MATCH'));
+
         header.append(title, badges);
 
         const comparison = document.createElement('div');
         comparison.className = 'signal-canvas-comparison';
         comparison.append(
-          canvasPreview(capture, capture.demo ? 'DEMO OUTPUT' : 'CAPTURED OUTPUT', `${capture.id} captured output`, true),
-          canvasPreview(capture, 'LOCAL REPLAY', `${capture.id} local replay`)
+          canvasPreview(capture, capture.demo ? 'DEMO OUTPUT' : 'CAPTURED OUTPUT', `${capture.id} captured output`, true)
         );
+        const replay = document.createElement('details');
+        replay.className = 'signal-capture-disclosure';
+        replay.dataset.captureKey = `${signalEventKey(capture.evidenceEvent)}:replay`;
+        replay.append(textElement('summary', '', 'Compare with local replay'),
+          canvasPreview(capture, 'LOCAL REPLAY', `${capture.id} local replay`));
 
         const body = document.createElement('div');
         body.className = 'signal-render-body';
@@ -332,7 +336,11 @@
               : 'Operation metadata remains available even when sensitive Canvas image capture is off.'
         ));
         body.append(calls, evidence);
-        card.append(header, comparison, body);
+        const detail = document.createElement('details');
+        detail.className = 'signal-capture-disclosure';
+        detail.dataset.captureKey = `${signalEventKey(capture.evidenceEvent)}:evidence`;
+        detail.append(textElement('summary', '', `Drawing calls & evidence · ${capture.calls.length} calls`), body);
+        card.append(header, comparison, replay, detail);
         return card;
       }
 
@@ -354,7 +362,16 @@
           ));
           return;
         }
+        // Refreshing evidence must not close a researcher's expanded details or lose focus.
+        const expanded = new Set([...elements.signalRenderList.querySelectorAll('details[open]')]
+          .map(detail => detail.dataset.captureKey));
+        const focused = document.activeElement?.matches('summary')
+          ? document.activeElement.parentElement.dataset.captureKey : null;
         elements.signalRenderList.replaceChildren(...captures.map(renderCanvasCapture));
+        elements.signalRenderList.querySelectorAll('details').forEach(detail => {
+          detail.open = expanded.has(detail.dataset.captureKey);
+          if (focused && detail.dataset.captureKey === focused) detail.querySelector('summary').focus({preventScroll: true});
+        });
       }
 
       function renderSignalSurfaceOverview(signalEvents) {
@@ -376,11 +393,11 @@
           card.type = 'button';
           card.className = 'signal-surface-card';
           card.dataset.present = String(familyEvents.length > 0);
+          card.title = `${operations.size} unique operations${top ? ` · ${top[0]} × ${top[1]}` : ' · Not observed'}`;
+          card.setAttribute('aria-label', `${label}, ${familyEvents.length} events. Open activity.`);
           card.append(
             textElement('span', 'signal-surface-name', label),
-            textElement('strong', '', String(familyEvents.length)),
-            textElement('small', '', `${operations.size} unique ${operations.size === 1 ? 'operation' : 'operations'}`),
-            textElement('code', '', top ? `${top[0]} × ${top[1]}` : 'Not observed')
+            textElement('strong', '', String(familyEvents.length))
           );
           card.addEventListener('click', () => {
             state.signalCategoryFilter = category;
@@ -1154,6 +1171,8 @@
       }
 
       function renderRequests() {
+        const typeLabel = document.querySelector(`.type-filter[data-filter="${state.requestType}"]`)?.textContent || 'All';
+        document.querySelector('#request-filter-label').textContent = state.requestType === 'all' ? 'All types' : typeLabel;
         renderRequestScopes();
         const needle = elements.requestFilter.value.trim().toLowerCase();
         const visible = state.requests.filter(request =>
@@ -1741,6 +1760,7 @@
         const step = model.step;
         const facts = document.createElement('dl'); facts.className = 'trace-facts';
         const identifierLabels = new Set(['Session', 'Process', 'Event', 'Frame', 'Request', 'Artifact']);
+        const identifiers = document.createElement('dl'); identifiers.className = 'trace-facts';
         const traceFactValue = (label, value) => {
           if (!identifierLabels.has(label)) return textElement('dd', '', String(value));
           const dd = document.createElement('dd'); dd.className = 'trace-fact-id';
@@ -1767,8 +1787,13 @@
           ['Session', step.event.session_id], ['Process', step.event.process_id],
           ['Event', step.event.sequence_number], ['Frame', step.frame_id],
           ['Request', step.request_id], ['Artifact', step.artifact_id]
-        ].forEach(([label, value]) => facts.append(textElement('dt', '', label), traceFactValue(label, value)));
-        panel.append(facts);
+        ].forEach(([label, value]) => {
+          const target = identifierLabels.has(label) ? identifiers : facts;
+          target.append(textElement('dt', '', label), traceFactValue(label, value));
+        });
+        const metadata = document.createElement('details'); metadata.className = 'workspace-disclosure';
+        metadata.append(textElement('summary', '', 'Evidence identifiers'), identifiers);
+        panel.append(facts, metadata);
         if (step.value) panel.append(textElement('h4', '', 'Captured value'), textElement('pre', 'trace-value', step.value));
         const artifact = state.artifacts.find(candidate => candidate.artifact_id === step.artifact_id);
         if (artifact) {
@@ -7513,7 +7538,14 @@
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
         document.querySelectorAll('.nav-button').forEach(button => {
           const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence') || (button.dataset.screen === 'traffic' && screenName === 'vm');
-          if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
+          if (active) {
+            button.setAttribute('aria-current', 'page');
+            const group = button.closest('details');
+            if (group) {
+              group.open = !window.matchMedia('(max-width: 800px)').matches;
+              if (!group.open && trigger === button) group.querySelector('summary').focus();
+            }
+          } else button.removeAttribute('aria-current');
         });
         if (screenName === 'signals') renderFingerprintActivity();
         if (screenName === 'backtrace') renderBacktrace();
@@ -7804,9 +7836,23 @@
         [...elements.signalRows.querySelectorAll('.signal-event-row')]
           .find(row => row.dataset.signalEventKey === targetKey)?.focus({preventScroll: true});
       });
+      document.addEventListener('keydown', event => {
+        if (event.key !== 'Escape') return;
+        const disclosure = document.activeElement?.closest('#request-filters, #advanced-navigation');
+        if (!disclosure?.open) return;
+        disclosure.open = false;
+        disclosure.querySelector('summary').focus();
+        event.preventDefault();
+      });
+      document.addEventListener('click', event => {
+        const filters = document.querySelector('#request-filters');
+        if (filters.open && !filters.contains(event.target)) filters.open = false;
+      });
       document.querySelectorAll('.type-filter').forEach(button => button.addEventListener('click', () => {
         state.requestType = button.dataset.filter;
         state.requestDomain = 'all';
+        document.querySelector('#request-filters').open = false;
+        document.querySelector('#request-filter-label').focus();
         document.querySelectorAll('.type-filter').forEach(candidate => candidate.setAttribute('aria-pressed', String(candidate === button)));
         renderRequests();
       }));

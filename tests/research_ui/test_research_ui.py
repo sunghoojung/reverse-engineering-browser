@@ -1088,7 +1088,7 @@ while True:
     ) -> None:
         html = read_ui_sources()
 
-        self.assertIn('data-screen="signals">Fingerprinting</button>', html)
+        self.assertRegex(html, r'data-screen="signals">.*?<span>Fingerprinting</span></button>')
         self.assertIn('id="screen-signals"', html)
         self.assertIn('aria-label="Fingerprint inspector"', html)
         self.assertIn('data-signal-view="rendering"', html)
@@ -1391,7 +1391,7 @@ process.stdout.write(JSON.stringify({
     def test_sources_workspace_matches_the_devtools_navigation_model(self) -> None:
         html = read_ui_sources()
 
-        self.assertIn('data-screen="sources">Sources</button>', html)
+        self.assertRegex(html, r'data-screen="sources">.*?<span>Sources</span></button>')
         self.assertIn('aria-label="Sources navigator"', html)
         self.assertIn(">Page</button>", html)
         self.assertIn(">Captured</button>", html)
@@ -2144,7 +2144,7 @@ process.stdout.write(JSON.stringify({
     def test_memory_workspace_exposes_live_snapshot_diff_and_origin_trace(self) -> None:
         html = read_ui_sources()
 
-        self.assertIn('data-screen="memory">Memory</button>', html)
+        self.assertRegex(html, r'data-screen="memory">.*?<span>Memory</span></button>')
         self.assertIn('id="screen-memory"', html)
         self.assertIn('id="memory-results-pane"', html)
         self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr))", html)
@@ -3165,8 +3165,8 @@ process.stdout.write(JSON.stringify({
         self.assertIn("<key>CFBundleIconFile</key>", plist)
         self.assertIn("<string>OriginTrace</string>", plist)
         self.assertIn("<key>NSAllowsLocalNetworking</key>", plist)
-        self.assertEqual(plist_values["CFBundleShortVersionString"], "0.1.6")
-        self.assertEqual(plist_values["CFBundleVersion"], "6")
+        self.assertEqual(plist_values["CFBundleShortVersionString"], "0.1.7")
+        self.assertEqual(plist_values["CFBundleVersion"], "7")
         self.assertIn("origin-trace-icon.png", build_script)
         self.assertNotIn("build/sessions/demo.jsonl", build_script)
         self.assertNotIn('"${resources_path}/artifacts"', build_script)

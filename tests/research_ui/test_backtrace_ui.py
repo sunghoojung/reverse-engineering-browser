@@ -56,8 +56,7 @@ rows[0].handlers.keydown({key: 'ArrowDown', preventDefault() {}});
 const selection = {key: state.selectedTraceRow, focus: focused === rows[1], selected: rows[1].attrs['aria-pressed']};
 const value = elements.traceStepDetails.children.find(child => child.tag === 'pre');
 const inert = value.textContent === '<img src=x onerror=alert(1)>' && value.children.length === 0;
-const facts = elements.traceStepDetails.children.find(child => child.tag === 'dl');
-const requestFact = facts?.children.find(child => child.className === 'trace-fact-id');
+const requestFact = elements.traceStepDetails.querySelectorAll('.trace-fact-id')[0];
 const copyButton = requestFact?.children.find(child => child.className === 'trace-copy-id');
 const identifiers = Boolean(copyButton) && copyButton.textContent === 'Copy' &&
   copyButton.attrs['aria-label'] === 'Copy Session identifier';

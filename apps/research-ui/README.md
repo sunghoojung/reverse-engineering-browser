@@ -88,6 +88,40 @@ frames, and retains captured evidence. Reload the browser tab to resume the
 debugger connection. A connected browser socket alone does not imply that its
 renderer is still running.
 
+## Workspace layout
+
+Traffic, Collection, Sources, and Fingerprinting are available in the sidebar.
+Expand **Advanced** for Backtraces, Memory, Experiments, Analyst, and Tools.
+Navigation into an advanced tool reveals its group automatically on desktop. On
+narrow windows navigation moves above the workspace and closes after selection.
+
+Traffic places the request list beside the inspector on wide windows, and above
+it on smaller windows. Use **All types** beside search to filter by resource
+type; the control shows the active filter. Escape closes an open navigation or
+filter disclosure and restores focus. Request and response content retain their
+own tabs and scroll areas. Timing and waterfall columns remain in the wider
+stacked request table; use the Evidence inspector for timing in the compact list.
+
+The dark theme uses [Rosé Pine Moon](https://rosepinetheme.com/palette/), with
+slightly brighter secondary labels for legibility. Appearance switches to the
+existing light theme.
+
+Fingerprinting starts with an Overview of active surfaces and captured Canvas
+output. **Show inactive surfaces** reveals the rest of the supported families.
+Surface chips open filtered Activity. Each Canvas card keeps replay comparison,
+drawing calls, and evidence identifiers in expandable sections; open sections
+and summary focus survive evidence refreshes. Activity opens its details pane
+when an event is selected, or with **Details**. Decoder processing limits and
+result statistics are likewise available in expanders beside their controls.
+
+Advanced workspaces keep the primary task visible and secondary information in
+expandable sections. Backtraces groups correlation identifiers separately from
+relationship facts. Memory places its four modes above the search and results.
+Experiments separates setup, request, and response, with activity logs collapsed.
+Analyst prioritizes the editor and evidence permissions; folder settings, storage,
+variables, execution limits, and history can be expanded as needed. Tools keeps
+input and output visible with transformation history available on demand.
+
 ## Code ownership
 
 | Location | Responsibility |

@@ -3565,15 +3565,15 @@
       function pivotSourceToRuntimeHooks() {
         const source = selectedSource();
         const hooks = runtimeHooksState();
-        if (source?.source_type !== 'script' || !hooks?.isolated ||
+        if (source?.source_type !== 'script' || state.sourcePretty || !hooks?.isolated ||
             hooks.target_id !== state.debuggerSession?.target?.id) return;
-        const line = state.sourceCursor?.scriptId === source.script_id
-          ? state.sourceCursor.line : source.start_line;
+        const cursor = state.sourceCursor?.scriptId === source.script_id ? state.sourceCursor : null;
+        const line = cursor?.line ?? source.start_line;
         state.experimentMode = 'hooks';
         showScreen('experiments');
         elements.hooksScript.value = source.script_id;
         elements.hooksLine.value = String(line + 1);
-        elements.hooksColumn.value = String((state.sourceCursor?.column ?? sourceRuntimeColumn(source, 0)) + 1);
+        elements.hooksColumn.value = String((cursor?.column ?? sourceRuntimeColumn(source, 0)) + 1);
         if (!elements.hooksLabel.value) elements.hooksLabel.value = `${sourceName(source)}:${line + 1}`;
         renderRuntimeHooks();
         requestAnimationFrame(() => elements.hooksLabel.focus());
@@ -5850,6 +5850,22 @@
         return source?.source_type === 'script' && sourceLine === 0 ? source.start_column : 0;
       }
 
+      function sourceClickColumn(line, event) {
+        const text = line.querySelector('.source-text');
+        if (!text) return 0;
+        // DOM Range offsets and CDP columns both count UTF-16 code units.
+        // Measure across syntax spans, excluding the line-number gutter.
+        const caret = document.caretPositionFromPoint?.(event.clientX, event.clientY);
+        const range = caret ? null : document.caretRangeFromPoint?.(event.clientX, event.clientY);
+        const node = caret?.offsetNode ?? range?.startContainer;
+        const offset = caret?.offset ?? range?.startOffset;
+        if (!node || !text.contains(node)) return 0;
+        const prefix = document.createRange();
+        prefix.selectNodeContents(text);
+        prefix.setEnd(node, offset);
+        return prefix.toString().length;
+      }
+
       function breakpointLinesForSource(source) {
         const byLine = new Map();
         if (source?.source_type !== 'script') return byLine;
@@ -7900,13 +7916,16 @@
       });
       elements.sourceCode.addEventListener('click', event => {
         const line = event.target.closest('.source-line');
-        if (!line) return;
+        if (!line?.dataset.line) return;
         const source = selectedSource();
-        if (source?.source_type === 'script') {
-          state.sourceCursor = {scriptId: source.script_id, line: Number(line.dataset.line ?? 1) - 1, column: 0};
+        const runtimeLine = Number(line.dataset.line) - 1;
+        const localLine = runtimeLine - (source?.source_type === 'script' ? source.start_line : 0);
+        const column = sourceClickColumn(line, event) + (state.sourcePretty ? 0 : sourceRuntimeColumn(source, localLine));
+        if (source?.source_type === 'script' && !state.sourcePretty) {
+          state.sourceCursor = {scriptId: source.script_id, line: runtimeLine, column};
           elements.sourceCode.querySelectorAll('.source-line').forEach(row => row.classList.toggle('cursor', row === line));
         }
-        elements.sourcePosition.textContent = `Line ${line.dataset.line ?? 1}, Column 1`;
+        elements.sourcePosition.textContent = `Line ${line.dataset.line}, Column ${column + 1}`;
       });
       elements.sourceHookPivot.addEventListener('click', pivotSourceToRuntimeHooks);
       const setConsoleOpen = open => {

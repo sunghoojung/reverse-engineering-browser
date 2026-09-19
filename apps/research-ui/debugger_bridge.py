@@ -7244,6 +7244,23 @@ class DebuggerBridge:
                 "reason": "This request has no body.",
             }
         with self._lock:
+            # CDP reuses a request ID across redirects and carries the previous
+            # hop's response on the next request, without loadingFinished.
+            # Finalize it before replacing the active ID with the next hop.
+            redirect_response = params.get("redirectResponse")
+            if isinstance(redirect_response, dict):
+                self._record_network_response(
+                    {"requestId": protocol_id, "response": redirect_response}
+                )
+                self._finish_network_request(
+                    {
+                        "requestId": protocol_id,
+                        "timestamp": timestamp,
+                        "encodedDataLength": redirect_response.get("encodedDataLength"),
+                    },
+                    False,
+                    redirected=True,
+                )
             redirect_count = self._network_redirect_counts.get(protocol_id, 0)
             if protocol_id in self._network_active_ids:
                 redirect_count += 1
@@ -7321,7 +7338,9 @@ class DebuggerBridge:
                 )
             self._changed()
 
-    def _finish_network_request(self, params: dict[str, Any], failed: bool) -> None:
+    def _finish_network_request(
+        self, params: dict[str, Any], failed: bool, *, redirected: bool = False
+    ) -> None:
         protocol_id = params.get("requestId")
         timestamp = params.get("timestamp")
         if not isinstance(protocol_id, str):
@@ -7347,6 +7366,15 @@ class DebuggerBridge:
                 self._changed()
                 return
             body = record["response"]["body"]
+            if redirected:
+                # getResponseBody uses the reused protocol ID and would refer
+                # to the destination, not this completed redirect response.
+                body.update(
+                    state="missing",
+                    reason="CDP does not retain response bodies for redirect hops.",
+                )
+                self._changed()
+                return
             if body["state"] == "empty":
                 self._changed()
                 return

@@ -706,6 +706,139 @@ class DebuggerBridgeTests(unittest.TestCase):
         bridge._handle_event("Inspector.targetReloadedAfterCrash", {})
         self.assertEqual(bridge.state(), "paused")
 
+    def test_cdp_redirect_chain_finishes_each_hop_without_fetching_its_body(self) -> None:
+        bridge = DebuggerBridge(capture_network_content=True)
+        bridge._handle_event(
+            "Network.requestWillBeSent",
+            {
+                "requestId": "chain",
+                "timestamp": 10.0,
+                "request": {"method": "POST", "url": "https://example.test/start"},
+            },
+        )
+        with mock.patch.object(bridge, "_command") as command:
+            for index, status in enumerate((302, 307), start=1):
+                bridge._handle_event(
+                    "Network.requestWillBeSent",
+                    {
+                        "requestId": "chain",
+                        "timestamp": 10.0 + index / 4,
+                        "redirectResponse": {
+                            "status": status,
+                            "statusText": "Redirect",
+                            "protocol": "h2",
+                            "mimeType": "text/html",
+                            "encodedDataLength": 180 + index,
+                            "headers": {
+                                "location": f"/hop-{index}",
+                                "set-cookie": "private=secret",
+                            },
+                        },
+                        "request": {
+                            "method": "GET",
+                            "url": f"https://example.test/hop-{index}",
+                        },
+                    },
+                )
+            command.assert_not_called()
+        hops = bridge.snapshot()["network"]["requests"]
+        self.assertEqual(len({hop["id"] for hop in hops}), 3)
+        for index, status in enumerate((302, 307)):
+            hop = hops[index]
+            self.assertEqual(hop["state"], "complete")
+            self.assertEqual(hop["status"], status)
+            self.assertEqual(hop["duration_ms"], 250.0)
+            self.assertEqual(hop["encoded_data_length"], 181 + index)
+            self.assertEqual(hop["protocol"], "h2")
+            headers = dict(hop["response"]["headers"])
+            self.assertEqual(headers["location"], f"/hop-{index + 1}")
+            self.assertEqual(headers["set-cookie"], "<redacted>")
+            self.assertEqual(hop["response"]["body"]["state"], "missing")
+            self.assertIn("redirect", hop["response"]["body"]["reason"])
+            self.assertEqual(hop["response"]["body"]["text"], "")
+        self.assertEqual(hops[-1]["state"], "pending")
+        bridge._handle_event(
+            "Network.responseReceived",
+            {"requestId": "chain", "response": {"status": 200}},
+        )
+        with mock.patch.object(
+            bridge, "_command", return_value={"body": "destination", "base64Encoded": False}
+        ) as command:
+            bridge._handle_event(
+                "Network.loadingFinished", {"requestId": "chain", "timestamp": 11.0}
+            )
+            self.wait_for(
+                lambda: bridge.snapshot()["network"]["requests"][-1]["response"]["body"]["state"]
+                == "available"
+            )
+            command.assert_called_once_with(
+                "Network.getResponseBody", {"requestId": "chain"}, timeout=5.0
+            )
+        hops = bridge.snapshot()["network"]["requests"]
+        self.assertEqual(hops[-1]["response"]["body"]["text"], "destination")
+        self.assertEqual(hops[-1]["duration_ms"], 500.0)
+        self.assertEqual(hops[0]["response"]["body"]["text"], "")
+
+    def test_cdp_redirect_retains_completed_hop_when_destination_fails(self) -> None:
+        bridge = DebuggerBridge(capture_network_content=True)
+        for params in (
+            {"timestamp": 1.0, "request": {"method": "GET", "url": "https://a.test/"}},
+            {
+                "timestamp": 2.0,
+                "request": {"method": "GET", "url": "https://b.test/"},
+                "redirectResponse": {"status": 301, "headers": {"location": "https://b.test/"}},
+            },
+        ):
+            bridge._handle_event("Network.requestWillBeSent", {"requestId": "r", **params})
+        bridge._handle_event(
+            "Network.loadingFailed",
+            {"requestId": "r", "timestamp": 3.0, "errorText": "net::ERR_CONNECTION_REFUSED"},
+        )
+        hops = bridge.snapshot()["network"]["requests"]
+        self.assertEqual([(h["state"], h["status"]) for h in hops], [("complete", 301), ("failed", None)])
+        self.assertEqual(hops[1]["response"]["body"]["state"], "error")
+
+    def test_cdp_redirect_without_retained_predecessor_does_not_invent_a_hop(self) -> None:
+        for enabled in (False, True):
+            for redirect in ({"status": 302}, None, "malformed"):
+                with self.subTest(enabled=enabled, redirect=redirect):
+                    bridge = DebuggerBridge(capture_network_content=enabled)
+                    bridge._handle_event(
+                        "Network.requestWillBeSent",
+                        {
+                            "requestId": "r",
+                            "timestamp": 2.0,
+                            "request": {"method": "GET", "url": "https://b.test/"},
+                            "redirectResponse": redirect,
+                        },
+                    )
+                    hops = bridge.snapshot()["network"]["requests"]
+                    self.assertEqual(len(hops), int(enabled))
+                    if enabled:
+                        self.assertIsNone(hops[0]["status"])
+                        self.assertEqual(hops[0]["state"], "pending")
+
+    def test_cdp_redirect_finalizes_before_capacity_eviction(self) -> None:
+        bridge = DebuggerBridge(capture_network_content=True)
+        with mock.patch("debugger_bridge.MAX_NETWORK_REQUESTS", 1), mock.patch.object(bridge, "_command") as command:
+            for index in range(4):
+                bridge._handle_event(
+                    "Network.requestWillBeSent",
+                    {
+                        "requestId": "r",
+                        "timestamp": float(index),
+                        "request": {"method": "GET", "url": f"https://a.test/{index}"},
+                        "redirectResponse": {"status": 302} if index else None,
+                    },
+                )
+            command.assert_not_called()
+        snapshot = bridge.snapshot()["network"]
+        self.assertEqual(len(snapshot["requests"]), 1)
+        self.assertEqual(snapshot["dropped"], 3)
+        self.assertTrue(snapshot["requests"][0]["id"].endswith(":redirect:3"))
+        self.assertEqual(snapshot["requests"][0]["state"], "pending")
+        self.assertEqual(bridge._network_pending_body_fetches, set())
+
     def test_cdp_network_response_body_is_limited_to_128_kib(self) -> None:
         bridge = DebuggerBridge(capture_network_content=True)
         bridge._target = {

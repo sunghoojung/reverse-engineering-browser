@@ -55,6 +55,10 @@ response bodies are retained only in memory by the local UI bridge, limited to
 128 KiB per side, and discarded when the live session ends. The Origin Trace
 title bar visibly changes to `Live content` while this mode is active.
 
+Redirect hops retain their own status, response headers, and elapsed time when
+CDP starts the next request. Their response bodies are explicitly unavailable;
+the destination's body is never substituted for an earlier hop.
+
 All eight fingerprint metadata families are enabled by the standard live
 launcher. To retain the exact data URL returned by Canvas readback for one
 authorized session, run:

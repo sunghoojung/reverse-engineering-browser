@@ -90,6 +90,14 @@ launcher also omits the remote-debugging endpoint in this mode. Ordinary V8
 behavior remains unchanged unless the session passes
 `--js-flags=--reb-ignore-debugger-statements`.
 
+Embedder-requested debugger pauses retain V8's agent break reason. This lets
+other attached inspector sessions recognize an XHR/fetch or DOM breakpoint
+owned by a peer, rather than failing V8's debug assertion because they have no
+local break details. The V8 patch includes
+`debugger/reb-break-program-multiple-sessions` for the inspector test harness.
+It changes pause attribution only; it does not suppress breakpoints or alter
+capture policy.
+
 When the Artifact category is authorized, the browser process recognizes
 JavaScript and WebAssembly responses, removes URL credentials, queries, and
 fragments from stored metadata, and asynchronously tees at most 16 MiB per

@@ -1065,7 +1065,7 @@
 
       function isDebuggerResponse(body) {
         if (!isPlainObject(body) || body.protocol_version !== 1 ||
-            !['unavailable', 'waiting', 'connecting', 'running', 'paused'].includes(body.state) ||
+            !['unavailable', 'waiting', 'connecting', 'running', 'paused', 'crashed'].includes(body.state) ||
             !isSafeIntegerInRange(body.generation, 0, Number.MAX_SAFE_INTEGER) ||
             (body.error !== null && typeof body.error !== 'string') ||
             !Array.isArray(body.targets) || body.targets.length > 128 || !body.targets.every(isDebuggerTarget) ||

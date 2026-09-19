@@ -1464,6 +1464,7 @@ capture();
 state.sourceSidebarOpen = true; capture();
 state.sourceSidebarOpen = null; state.debuggerSession.state = 'running'; capture();
 state.sourceSidebarOpen = false; capture();
+state.sourceSidebarOpen = null; state.debuggerSession.state = 'crashed'; capture();
 state.debuggerSession.state = 'unavailable'; capture();
 process.stdout.write(JSON.stringify(results));
 """
@@ -1480,6 +1481,7 @@ process.stdout.write(JSON.stringify(results));
                 [False, "false", "true", "Details"],
                 [False, "true", "true", "Debugger"],
                 [True, "true", "false", "Debugger"],
+                [False, "false", "true", "Details"],
                 [True, "false", "false", "Details"],
             ],
         )
@@ -1967,6 +1969,7 @@ const heapDiff = {
 };
 process.stdout.write(JSON.stringify({
   accepted: isDebuggerResponse(snapshot),
+  crashedAccepted: isDebuggerResponse({...snapshot, state: 'crashed', paused: null}),
   baselineAccepted: isDebuggerResponse({...snapshot, heap_diff_baseline: {
     target_id: 'page-1', file_bytes: 4096, captured_at_ms: 1}}),
   badBaselineRejected: !isDebuggerResponse({...snapshot, heap_diff_baseline: {
@@ -2073,6 +2076,7 @@ process.stdout.write(JSON.stringify({
             json.loads(completed.stdout),
             {
                 "accepted": True,
+                "crashedAccepted": True,
                 "baselineAccepted": True,
                 "badBaselineRejected": True,
                 "badStateRejected": True,

@@ -6923,6 +6923,7 @@ class DebuggerBridge:
         self._reader_thread = reader
         reader.start()
         try:
+            self._command("Inspector.enable")
             if self._capture_network_content:
                 self._command(
                     "Network.enable",
@@ -6944,8 +6945,8 @@ class DebuggerBridge:
             self._restore_settings()
             self._restore_request_interception(target["id"])
             with self._lock:
-                already_paused = self._paused is not None
-            if not already_paused:
+                interrupted = self._paused is not None or self._state == "crashed"
+            if not interrupted:
                 self._set_state("running", None)
             next_target_refresh = 0.0
             while reader.is_alive() and not self._stop.wait(0.25):
@@ -7425,6 +7426,25 @@ class DebuggerBridge:
             self._finish_network_request(params, True)
 
     def _handle_event(self, method: str, params: dict[str, Any]) -> None:
+        if method == "Inspector.targetCrashed":
+            message = "Browser renderer crashed. Reload the browser tab to reconnect. Captured evidence is retained."
+            with self._lock:
+                self._pause_serial += 1
+                self._paused = None
+                self._watch_frame_id = None
+                for record in self._network_requests.values():
+                    if record["state"] == "pending":
+                        record["state"] = "failed"
+                        record["error_text"] = message
+                        record["response"]["body"].update(state="error", reason=message)
+                self._set_state("crashed", message)
+            self._fail_pending(DebuggerBridgeError(message))
+            return
+        if method == "Inspector.targetReloadedAfterCrash":
+            with self._lock:
+                if self._state == "crashed":
+                    self._set_state("running", None)
+            return
         if self._capture_network_content and method.startswith("Network."):
             self._handle_network_event(method, params)
             return
@@ -7498,6 +7518,8 @@ class DebuggerBridge:
             return
         if method == "Debugger.resumed":
             with self._lock:
+                if self._state == "crashed":
+                    return
                 self._pause_serial += 1
                 self._paused = None
                 self._watch_frame_id = None

@@ -672,6 +672,40 @@ class DebuggerBridgeTests(unittest.TestCase):
             ("", True),
         )
 
+    def test_renderer_crash_clears_live_frames_and_preserves_evidence(self) -> None:
+        bridge = DebuggerBridge(capture_network_content=True)
+        bridge._set_state("running", None)
+        bridge._paused = {"call_frames": [{"id": "stale"}]}
+        bridge._watch_frame_id = "stale"
+        bridge._scripts = {"7": {"script_id": "7", "url": "https://example.test/app.js"}}
+        bridge._handle_event("Network.requestWillBeSent", {
+            "requestId": "r", "timestamp": 1.0,
+            "request": {"method": "GET", "url": "https://example.test/api"},
+        })
+        before = bridge.snapshot()
+        with mock.patch.object(bridge, "_fail_pending") as fail_pending:
+            bridge._handle_event("Inspector.targetCrashed", {})
+            fail_pending.assert_called_once()
+        crashed = bridge.snapshot()
+        self.assertEqual(crashed["state"], "crashed")
+        self.assertIn("Reload", crashed["error"])
+        self.assertIsNone(crashed["paused"])
+        self.assertIsNone(bridge._watch_frame_id)
+        self.assertEqual(crashed["scripts"], before["scripts"])
+        retained = crashed["network"]["requests"][0]
+        self.assertEqual(retained["id"], before["network"]["requests"][0]["id"])
+        self.assertEqual(retained["state"], "failed")
+        self.assertEqual(retained["response"]["body"]["state"], "error")
+        self.assertGreater(crashed["generation"], before["generation"])
+        bridge._handle_event("Debugger.resumed", {})
+        self.assertEqual(bridge.state(), "crashed")
+        bridge._handle_event("Inspector.targetReloadedAfterCrash", {})
+        self.assertEqual(bridge.state(), "running")
+        self.assertIsNone(bridge.snapshot()["error"])
+        bridge._set_state("paused", None)
+        bridge._handle_event("Inspector.targetReloadedAfterCrash", {})
+        self.assertEqual(bridge.state(), "paused")
+
     def test_cdp_network_response_body_is_limited_to_128_kib(self) -> None:
         bridge = DebuggerBridge(capture_network_content=True)
         bridge._target = {
@@ -760,6 +794,7 @@ class DebuggerBridgeTests(unittest.TestCase):
                 )
                 methods = [command["method"] for command in web_socket.commands]
                 self.assertIn("Network.enable", methods)
+                self.assertIn("Inspector.enable", methods)
                 self.assertIn("Network.getResponseBody", methods)
             finally:
                 bridge.stop()

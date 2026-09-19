@@ -1,0 +1,64 @@
+diff --git a/src/inspector/v8-debugger.cc b/src/inspector/v8-debugger.cc
+index 90974d2..e6dcfc3 100644
+--- a/src/inspector/v8-debugger.cc
++++ b/src/inspector/v8-debugger.cc
+@@ -237,7 +237,10 @@ void V8Debugger::breakProgram(int targetContextGroupId) {
+   if (isPaused()) return;
+   DCHECK(targetContextGroupId);
+   m_targetContextGroupId = targetContextGroupId;
+-  v8::debug::BreakRightNow(m_isolate);
++  // Peer inspector sessions do not own this agent's embedder break details.
++  // Keep the agent reason so their didPause validation recognizes the pause.
++  v8::debug::BreakRightNow(
++      m_isolate, v8::debug::BreakReasons({v8::debug::BreakReason::kAgent}));
+ }
+ 
+ void V8Debugger::interruptAndBreak(int targetContextGroupId) {
+diff --git a/test/inspector/debugger/reb-break-program-multiple-sessions-expected.txt b/test/inspector/debugger/reb-break-program-multiple-sessions-expected.txt
+new file mode 100644
+index 0000000..d7d7697
+--- /dev/null
++++ b/test/inspector/debugger/reb-break-program-multiple-sessions-expected.txt
+@@ -0,0 +1,4 @@
++Embedder pauses are reported safely to multiple inspector sessions.
++embedder, other
++embedder, other
++Completed pauses: 2
+diff --git a/test/inspector/debugger/reb-break-program-multiple-sessions.js b/test/inspector/debugger/reb-break-program-multiple-sessions.js
+new file mode 100644
+index 0000000..b43bc31
+--- /dev/null
++++ b/test/inspector/debugger/reb-break-program-multiple-sessions.js
+@@ -0,0 +1,32 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++const {contextGroup, Protocol} = InspectorTest.start(
++    'Embedder pauses are reported safely to multiple inspector sessions.');
++const peer = contextGroup.connect().Protocol;
++
++(async function() {
++  await Protocol.Debugger.enable();
++  await peer.Debugger.enable();
++  let reasons = [];
++  let pauses = 0;
++  function onPaused(message) {
++    reasons.push(message.params.reason);
++    if (reasons.length === 2) {
++      InspectorTest.log(reasons.sort().join(', '));
++      reasons = [];
++      ++pauses;
++      Protocol.Debugger.resume();
++    }
++  }
++  Protocol.Debugger.onPaused(onPaused);
++  peer.Debugger.onPaused(onPaused);
++  // The test helper invokes breakProgram once for each session. Each pause
++  // must reach both sessions, including the peer without local break details.
++  await Protocol.Runtime.evaluate({
++    expression: "inspector.breakProgram('embedder', '{}')"
++  });
++  InspectorTest.log('Completed pauses: ' + pauses);
++  InspectorTest.completeTest();
++})();

@@ -202,6 +202,8 @@ fingerprinting vendor produced the activity.
 
 Sources navigation exposes Page and Captured collections. Unimplemented
 Workspace and Overrides tabs are omitted until they provide a usable workflow.
+File rows reserve their remaining width for the filename, with full URLs in
+tooltips and source metadata in Details. Folder rows retain their item counts.
 
 The Sources sidebar starts closed without an attached debugger. Details opens
 source metadata and connection status; attached sessions show debugger controls

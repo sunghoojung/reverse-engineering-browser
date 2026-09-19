@@ -1170,6 +1170,10 @@
       }
       .source-tree-row:hover { background: var(--panel-3); color: var(--text); }
       .source-tree-row[aria-selected="true"] { background: var(--accent-soft); color: var(--text); }
+      .source-tree-row[data-artifact-id],
+      .source-tree-row[data-script-id] { grid-template-columns: 14px minmax(0, 1fr); }
+      .source-tree-row[data-artifact-id] .source-tree-meta,
+      .source-tree-row[data-script-id] .source-tree-meta { display: none; }
       .source-tree-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .source-tree-meta { color: var(--faint); font: 10px var(--mono); }
       .source-file-icon { color: var(--amber); font: 11px var(--mono); }

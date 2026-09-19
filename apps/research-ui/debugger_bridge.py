@@ -7454,6 +7454,31 @@ class DebuggerBridge:
             self._finish_network_request(params, True)
 
     def _handle_event(self, method: str, params: dict[str, Any]) -> None:
+        if method in {"Runtime.executionContextDestroyed", "Runtime.executionContextsCleared"}:
+            context_id = params.get("executionContextId")
+            clear_all = method == "Runtime.executionContextsCleared"
+            if not clear_all and (
+                not isinstance(context_id, int) or isinstance(context_id, bool) or context_id <= 0
+            ):
+                return
+            with self._lock:
+                retired = {
+                    script_id for script_id, script in self._scripts.items()
+                    if clear_all or script.get("execution_context_id") == context_id
+                }
+                if not retired:
+                    return
+                for script_id in retired:
+                    self._scripts.pop(script_id, None)
+                # Keep URL breakpoint definitions for later navigations, but
+                # never present their dead script locations as live bindings.
+                for breakpoint in self._breakpoints.values():
+                    breakpoint["locations"] = [
+                        location for location in breakpoint.get("locations", [])
+                        if location["script_id"] not in retired
+                    ]
+                self._changed()
+            return
         if method == "Inspector.targetCrashed":
             message = "Browser renderer crashed. Reload the browser tab to reconnect. Captured evidence is retained."
             with self._lock:

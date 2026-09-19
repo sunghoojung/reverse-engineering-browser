@@ -672,6 +672,48 @@ class DebuggerBridgeTests(unittest.TestCase):
             ("", True),
         )
 
+    def test_destroyed_contexts_retire_only_live_sources_and_locations(self) -> None:
+        bridge = DebuggerBridge(capture_network_content=True)
+        for script_id, context_id in (("one", 1), ("two", 1), ("frame", 2)):
+            bridge._handle_event("Debugger.scriptParsed", {
+                "scriptId": script_id, "url": "https://example.test/app.js",
+                "executionContextId": context_id, "startLine": 0,
+                "startColumn": 0, "endLine": 1, "endColumn": 0, "length": 10,
+            })
+        bridge._breakpoints["url-breakpoint"] = {
+            "id": "url-breakpoint", "url": "https://example.test/app.js",
+            "locations": [{"script_id": key, "line": 0, "column": 0}
+                          for key in ("one", "frame")],
+        }
+        bridge._handle_event("Network.requestWillBeSent", {
+            "requestId": "retained", "timestamp": 1.0,
+            "request": {"method": "GET", "url": "https://example.test/app.js"},
+        })
+        before = bridge.snapshot()
+        for invalid in ({}, {"executionContextId": True}, {"executionContextId": "1"},
+                        {"executionContextId": 0}, {"executionContextId": 999}):
+            bridge._handle_event("Runtime.executionContextDestroyed", invalid)
+            self.assertEqual(bridge.snapshot()["generation"], before["generation"])
+        bridge._handle_event("Runtime.executionContextDestroyed", {"executionContextId": 1})
+        after = bridge.snapshot()
+        self.assertEqual([script["script_id"] for script in after["scripts"]], ["frame"])
+        self.assertEqual(after["network"], before["network"])
+        self.assertGreater(after["generation"], before["generation"])
+        breakpoint = bridge._breakpoints["url-breakpoint"]
+        self.assertEqual(breakpoint["url"], "https://example.test/app.js")
+        self.assertEqual(breakpoint["locations"], [{"script_id": "frame", "line": 0, "column": 0}])
+        with mock.patch.object(bridge, "_command") as command:
+            with self.assertRaisesRegex(DebuggerBridgeError, "unavailable"):
+                bridge.get_script_source("one")
+            command.assert_not_called()
+        bridge._handle_event("Runtime.executionContextsCleared", {})
+        self.assertEqual(bridge.snapshot()["scripts"], [])
+        self.assertEqual(breakpoint["locations"], [])
+        self.assertEqual(bridge.snapshot()["network"], before["network"])
+        generation = bridge.generation()
+        bridge._handle_event("Runtime.executionContextsCleared", {})
+        self.assertEqual(bridge.generation(), generation)
+
     def test_renderer_crash_clears_live_frames_and_preserves_evidence(self) -> None:
         bridge = DebuggerBridge(capture_network_content=True)
         bridge._set_state("running", None)

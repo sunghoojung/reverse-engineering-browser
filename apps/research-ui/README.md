@@ -209,7 +209,10 @@ correlation and exposes zero-count families instead of hiding coverage. The
 view never claims that an observed value was transmitted or that a particular
 fingerprinting vendor produced the activity.
 
-Sources navigation exposes Page and Captured collections. Unimplemented
+Sources navigation exposes Page and Captured collections. Page removes scripts
+when their execution context is destroyed or cleared, including removed frames
+and full navigations. URL breakpoint definitions and captured evidence remain;
+only resolved locations in retired scripts are discarded. Unimplemented
 Workspace and Overrides tabs are omitted until they provide a usable workflow.
 File rows reserve their remaining width for the filename, with full URLs in
 tooltips and source metadata in Details. Folder rows retain their item counts.

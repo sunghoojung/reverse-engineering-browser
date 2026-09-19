@@ -1330,6 +1330,7 @@
       .syntax-tag { color: var(--syntax-tag); }
       .syntax-attribute { color: var(--syntax-attribute); }
       .source-line.search-match { background: color-mix(in srgb, var(--amber) 13%, transparent); }
+      ::highlight(source-search-match) { background-color: var(--amber); color: var(--bg); }
       .source-empty {
         min-height: 100%;
         display: grid;

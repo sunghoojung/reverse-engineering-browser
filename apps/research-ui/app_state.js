@@ -95,6 +95,7 @@
         sourceNoticeKind: 'warning',
         pendingSourceLine: null,
         sourceCursor: null,
+        sourceSearchIndex: 0,
         sourcePretty: false,
         sourceTruncated: false,
         consoleOpen: false,

@@ -219,6 +219,11 @@ tooltips and source metadata in Details. Folder rows retain their item counts.
 Clicking original source records the UTF-16 column across syntax spans, so the
 Hook pivot can target a function inside a minified line. Inline script offsets
 are included; readable representations cannot change the runtime cursor.
+Find counts literal, case-insensitive occurrences within rendered lines, including
+multiple matches on one minified line. Enter advances and Shift+Enter goes back,
+wrapping through the first 1000 matches with a visible `+` when results are capped.
+The selected occurrence scrolls into view and supplies the original-source Hook
+location. Formatted search is display-only; captured bytes are never rewritten.
 
 The Sources sidebar starts closed without an attached debugger. Details opens
 source metadata and connection status; attached sessions show debugger controls

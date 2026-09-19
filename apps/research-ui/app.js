@@ -5825,21 +5825,58 @@
         container.replaceChildren(fragment);
       }
 
-      function applySourceSearch() {
-        const needle = elements.sourceSearch.value.toLowerCase();
-        let matches = 0;
-        let first = null;
-        elements.sourceCode.querySelectorAll('.source-line').forEach(line => {
-          const matched = Boolean(needle) && line.querySelector('.source-text')?.textContent.toLowerCase().includes(needle);
-          line.classList.toggle('search-match', matched);
-          if (matched) { matches += 1; first ??= line; }
-        });
-        if (needle) {
-          elements.sourcePosition.textContent = `${matches} ${matches === 1 ? 'match' : 'matches'}`;
-          first?.scrollIntoView({ block: 'center' });
-        } else {
-          elements.sourcePosition.textContent = 'Line 1, Column 1';
+      function sourceOccurrenceRange(text, match) {
+        const walker = document.createTreeWalker(text, NodeFilter.SHOW_TEXT);
+        const range = document.createRange();
+        let offset = 0;
+        let started = false;
+        while (walker.nextNode()) {
+          const node = walker.currentNode;
+          const end = offset + node.textContent.length;
+          if (!started && match.column < end) {
+            range.setStart(node, match.column - offset);
+            started = true;
+          }
+          if (started && match.column + match.length <= end) {
+            range.setEnd(node, match.column + match.length - offset);
+            return range;
+          }
+          offset = end;
         }
+        return null;
+      }
+
+      function applySourceSearch(reset = true, direction = 0) {
+        const query = elements.sourceSearch.value;
+        const rows = [...elements.sourceCode.querySelectorAll('.source-line[data-line]')];
+        const {matches, truncated} = findSourceOccurrences(rows.map(row => row.querySelector('.source-text').textContent), query);
+        const source = selectedSource();
+        const cursor = state.sourceCursor?.scriptId === source?.script_id ? state.sourceCursor : null;
+        const matchingLines = new Set(matches.map(match => match.line));
+        rows.forEach((row, index) => row.classList.toggle('search-match', matchingLines.has(index)));
+        globalThis.CSS?.highlights?.delete('source-search-match');
+        if (!query || !matches.length) {
+          state.sourceSearchIndex = 0;
+          elements.sourcePosition.textContent = query ? '0 matches' : `Line ${(cursor?.line ?? source?.start_line ?? 0) + 1}, Column ${(cursor?.column ?? sourceRuntimeColumn(source, 0)) + 1}`;
+          return;
+        }
+        state.sourceSearchIndex = reset ? 0 : (state.sourceSearchIndex + direction + matches.length) % matches.length;
+        const match = matches[state.sourceSearchIndex];
+        const row = rows[match.line];
+        const line = Number(row.dataset.line) - 1;
+        const column = match.column + (state.sourcePretty ? 0 : sourceRuntimeColumn(source, match.line));
+        if (source?.source_type === 'script' && !state.sourcePretty) {
+          state.sourceCursor = {scriptId: source.script_id, line, column};
+          rows.forEach(candidate => candidate.classList.toggle('cursor', candidate === row));
+        }
+        elements.sourcePosition.textContent = `${state.sourceSearchIndex + 1} of ${matches.length}${truncated ? '+' : ''} matches · Line ${line + 1}, Column ${column + 1}`;
+        const range = sourceOccurrenceRange(row.querySelector('.source-text'), match);
+        if (!range) return;
+        if (globalThis.Highlight && globalThis.CSS?.highlights) CSS.highlights.set('source-search-match', new Highlight(range));
+        const rect = range.getBoundingClientRect();
+        const viewport = elements.sourceCodeWrap.getBoundingClientRect();
+        elements.sourceCodeWrap.scrollLeft += rect.left - viewport.left - Math.min(120, viewport.width / 4);
+        elements.sourceCodeWrap.scrollTop += rect.top - viewport.top - viewport.height / 2;
       }
 
       function sourceRuntimeLine(source, sourceLine) {
@@ -7886,7 +7923,12 @@
         if (requestId) await refreshVmAnalysis(requestId);
         showScreen('vm', elements.requestVmCandidates);
       });
-      elements.sourceSearch.addEventListener('input', applySourceSearch);
+      elements.sourceSearch.addEventListener('input', () => applySourceSearch());
+      elements.sourceSearch.addEventListener('keydown', event => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        applySourceSearch(false, event.shiftKey ? -1 : 1);
+      });
       document.querySelectorAll('[data-source-collection]').forEach(button => button.addEventListener('click', () => {
         state.sourceCollection = button.dataset.sourceCollection;
         if (state.sourceCollection === 'page') {

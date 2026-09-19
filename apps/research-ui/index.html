@@ -19,18 +19,24 @@
       <div class="toolbar">
         <div id="capture-state" class="capture-state" role="status"><span class="pulse" aria-hidden="true"></span><span>Connecting</span></div>
         <nav class="primary-nav" aria-label="Workspace">
-          <button class="nav-button" data-screen="traffic" aria-current="page">Traffic</button>
-          <button class="nav-button" data-screen="signals">Fingerprinting</button>
-          <button class="nav-button" data-screen="sources">Sources</button>
-          <button id="nav-memory" class="nav-button" data-screen="memory">Memory</button>
-          <button class="nav-button" data-screen="backtrace">Backtraces</button>
-          <button class="nav-button" data-screen="experiments">Experiments</button>
-          <button class="nav-button" data-screen="api-collection">Collection</button>
-          <button class="nav-button" data-screen="analyst">Analyst</button>
-          <button class="nav-button" data-screen="tools">Tools</button>
+          <span class="nav-heading">Workspace</span>
+          <button class="nav-button" data-screen="traffic" aria-current="page"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h10M3 15h14"/></svg><span>Traffic</span></button>
+          <button class="nav-button" data-screen="api-collection"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4h6l2 3h6v10H3z"/></svg><span>Collection</span></button>
+          <button class="nav-button" data-screen="sources"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 5-5 5 5 5m6-10 5 5-5 5"/></svg><span>Sources</span></button>
+          <button class="nav-button" data-screen="signals"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10a6 6 0 0 1 12 0m-9 0a3 3 0 0 1 6 0v4m-3-4v7M4 13v2m12-2v2"/></svg><span>Fingerprinting</span></button>
+          <details id="advanced-navigation" class="advanced-navigation">
+            <summary>Advanced</summary>
+            <div class="advanced-items">
+          <button class="nav-button" data-screen="backtrace"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3v9a3 3 0 0 0 3 3h9m-4-4 4 4-4 4"/></svg><span>Backtraces</span></button>
+          <button id="nav-memory" class="nav-button" data-screen="memory"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5h10v10H5zM8 2v3m4-3v3M8 15v3m4-3v3M2 8h3m-3 4h3m10-4h3m-3 4h3"/></svg><span>Memory</span></button>
+          <button class="nav-button" data-screen="experiments"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 2h6m-5 0v6l-5 9h14l-5-9V2M6 12h8"/></svg><span>Experiments</span></button>
+          <button class="nav-button" data-screen="analyst"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 5 4 5-4 5m7 0h5"/></svg><span>Analyst</span></button>
+          <button class="nav-button" data-screen="tools"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3v6m-2-3h4m7 5v6m-2-3h4M13 3v4M4 13v4"/></svg><span>Tools</span></button>
+            </div>
+          </details>
         </nav>
         <div class="toolbar-actions">
-          <button id="theme-toggle" class="icon-button" type="button" aria-label="Switch color theme" title="Switch color theme">◐</button>
+          <button id="theme-toggle" class="icon-button" type="button" aria-label="Switch color theme" title="Switch color theme">◐</button><span class="theme-label">Appearance</span>
         </div>
       </div>
 
@@ -40,10 +46,9 @@
             <div class="traffic-grid">
               <div class="request-pane">
                 <div class="network-tools">
-                  <button class="network-action" type="button" aria-label="Capture is active" title="Capture is active">●</button>
-                  <button class="network-action" type="button" aria-label="Clear visible requests" title="Clear visible requests" disabled>⊘</button>
-                  <span class="filter-divider" aria-hidden="true"></span>
-                  <label class="filter-box"><input id="request-filter" type="search" placeholder="Filter" aria-label="Filter requests" /></label>
+                  <label class="filter-box"><input id="request-filter" type="search" placeholder="Search requests…" aria-label="Filter requests" /></label>
+                  <details class="request-filters" id="request-filters">
+                    <summary id="request-filter-label">All types</summary>
                   <div class="type-filters" aria-label="Resource type filters">
                     <button class="type-filter" type="button" data-filter="all" aria-pressed="true">All</button>
                     <button class="type-filter" type="button" data-filter="xhr" aria-pressed="false">Fetch/XHR</button>
@@ -57,6 +62,7 @@
                     <button class="type-filter" type="button" data-filter="wasm" aria-pressed="false">Wasm</button>
                     <button class="type-filter" type="button" data-filter="other" aria-pressed="false">Other</button>
                   </div>
+                  </details>
                 </div>
 
                 <div id="network-notice" class="network-notice" data-kind="loading" role="status" aria-live="polite">Connecting to the local evidence broker…</div>
@@ -120,7 +126,7 @@
               <div class="signal-hero-copy">
                 <div class="signal-kicker"><span aria-hidden="true"></span>Native surface capture</div>
                 <h1>Fingerprint inspector</h1>
-                <p>See every observed browser surface, the exact API or property touched, and any captured Canvas output.</p>
+                <p>Browser surfaces accessed by this page.</p>
               </div>
               <div class="signal-session-summary">
                 <span id="signal-session-badge" class="signal-session-badge">Waiting for evidence</span>
@@ -140,7 +146,7 @@
             </div>
             <div class="signal-commandbar">
               <div class="signal-view-tabs" role="tablist" aria-label="Fingerprint inspector views">
-                <button id="signal-view-rendering" type="button" role="tab" data-signal-view="rendering" aria-controls="signal-panel-rendering" aria-selected="true">Rendering <span id="signal-render-count">0</span></button>
+                <button id="signal-view-rendering" type="button" role="tab" data-signal-view="rendering" aria-controls="signal-panel-rendering" aria-selected="true">Overview <span id="signal-render-count">0</span></button>
                 <button id="signal-view-activity" type="button" role="tab" data-signal-view="activity" aria-controls="signal-panel-activity" aria-selected="false" tabindex="-1">Activity <span id="signal-activity-count">0</span></button>
                 <button id="signal-view-request" type="button" role="tab" data-signal-view="request" aria-controls="signal-panel-request" aria-selected="false" tabindex="-1">Request link <span id="signal-linked-count">0</span></button>
               </div>
@@ -148,12 +154,13 @@
 
             <section id="signal-panel-rendering" class="signal-panel signal-rendering-panel" role="tabpanel" aria-labelledby="signal-view-rendering">
               <div class="signal-panel-intro">
-                <div><h2>Observed surfaces</h2><p>Counts, unique operations, and the most active API or property observed.</p></div>
+                <div><h2>Observed surfaces</h2></div>
                 <span id="signal-operation-summary">No operations</span>
               </div>
               <div id="signal-surface-overview" class="signal-surface-overview"></div>
+              <label class="signal-inactive-toggle"><input id="signal-show-inactive" type="checkbox" /> Show inactive surfaces</label>
               <div class="signal-panel-intro signal-canvas-intro">
-                <div><h2>Canvas readbacks</h2><p>Captured output beside the native drawing-function sequence observed before it.</p></div>
+                <div><h2>Canvas output</h2></div>
                 <span id="signal-render-summary">No render captures</span>
               </div>
               <div id="signal-render-list" class="signal-render-list"></div>
@@ -261,15 +268,16 @@
               <div class="screen-head-actions"><span class="memory-readonly">Local analysis</span></div>
             </header>
             <div id="memory-notice" class="memory-notice" data-kind="offline" role="status" aria-live="polite">Run a live session to attach an authorized browser target.</div>
-            <div class="memory-grid">
-              <aside class="memory-search-pane" aria-label="Memory search criteria">
-                <form id="memory-search-form" class="memory-form" data-mode="live">
                   <div class="memory-mode-switch" role="group" aria-label="Memory search mode">
                     <button class="memory-mode-button" type="button" data-memory-mode="live" aria-pressed="true">Live objects</button>
                     <button class="memory-mode-button" type="button" data-memory-mode="snapshot" aria-pressed="false">Heap snapshot</button>
                     <button class="memory-mode-button" type="button" data-memory-mode="diff" aria-pressed="false">Heap diff</button>
                     <button class="memory-mode-button" type="button" data-memory-mode="origin" aria-pressed="false">Origin trace</button>
                   </div>
+            <div class="memory-grid">
+              <aside class="memory-search-pane" aria-label="Memory search criteria">
+                <form id="memory-search-form" class="memory-form" data-mode="live">
+
                   <label class="memory-live-only">Property name<input id="memory-property-query" type="text" placeholder="token, config, fingerprint" maxlength="512" autocomplete="off" /></label>
                   <label class="memory-search-only memory-value-field"><span id="memory-value-caption">Value</span><input id="memory-value-query" type="text" placeholder="exact text or pattern" maxlength="512" autocomplete="off" /></label>
                   <label class="memory-reference-only" hidden>Reference scope<select id="memory-reference-scope"><option value="all">All matching nodes</option><option value="reachable">Root-reachable only</option><option value="unreachable">Unreachable only</option></select></label>
@@ -309,7 +317,7 @@
                       <button id="memory-compare-snapshot" class="trace-button memory-diff-primary" type="button" disabled>Capture current and compare</button>
                     </div>
                   </div>
-                  <p id="memory-search-help" class="memory-search-help">Accessors are reported without invoking getters. Results are ephemeral and are never added to the evidence store.</p>
+                  <details class="workspace-disclosure"><summary>Search behavior</summary><p id="memory-search-help" class="memory-search-help">Accessors are reported without invoking getters. Results are ephemeral and are never added to the evidence store.</p></details>
                 </form>
               </aside>
               <div id="memory-results-pane" class="memory-results-pane">
@@ -339,7 +347,7 @@
 
           <section id="screen-backtrace" class="screen" aria-label="Request origin trace" hidden>
             <header class="screen-head">
-              <div><h1>Backtraces</h1><div id="backtrace-subtitle" class="screen-subtitle">Request events and their recorded predecessors</div></div>
+              <div><h1>Backtraces</h1><div id="backtrace-subtitle" class="screen-subtitle">Follow a request back to its recorded origin.</div></div>
               <div class="screen-head-actions"><button class="secondary-button" type="button" data-screen="traffic">View traffic</button></div>
             </header>
             <div class="trace-toolbar">
@@ -483,10 +491,10 @@
                   <header><div><h2>Response</h2><p id="experiment-result-meta">No experiment request has run.</p></div><span id="experiment-result-badge" class="experiment-card-badge" data-kind="offline">No result</span></header>
                   <div id="experiment-result" class="experiment-empty">Create a context, arm a rule, then run a request.</div>
                 </article>
-                <article class="experiment-card">
+                <details class="experiment-card"><summary class="workspace-disclosure-title">Activity log</summary>
                   <header><div><h2>Activity</h2><p>Metadata only. Query strings, headers, and bodies are not retained.</p></div><span id="experiment-audit-count" class="experiment-card-badge" data-kind="offline">0 entries</span></header>
                   <div id="experiment-audit" class="experiment-audit"><div class="experiment-empty">No intercepted requests yet.</div></div>
-                </article>
+                </details>
                 <details class="experiment-card experiment-disclosure">
                   <summary>Limits</summary>
                   <div class="experiment-context-facts">
@@ -664,10 +672,10 @@
                   </div>
                   <div id="object-mutation-result" class="object-mutation-summary">No mutation attempted.</div>
                 </article>
-                <article class="experiment-card">
+                <details class="experiment-card"><summary class="workspace-disclosure-title">Activity log</summary>
                   <header><div><h2>Activity</h2><p>Metadata and value digest only. Set values and page content are not retained.</p></div><span id="object-audit-count" class="experiment-card-badge" data-kind="offline">0 entries</span></header>
                   <div id="object-audit" class="experiment-audit"><div class="experiment-empty">No object mutations attempted.</div></div>
-                </article>
+                </details>
                 <details class="experiment-card experiment-disclosure">
                   <summary>Limits</summary>
                   <div class="experiment-context-facts">
@@ -935,15 +943,15 @@
                   <button id="analyst-new-note" class="secondary-button" type="button">New note</button>
                 </div>
                 <div id="analyst-tree" class="analyst-tree" role="tree" aria-label="Analyst folders and files"></div>
-                <article class="analyst-storage">
+                <details class="analyst-storage"><summary class="workspace-disclosure-title">Folder settings</summary>
                   <header class="analyst-pane-head"><div><h2>Selected folder</h2><p>Rename or move an empty or populated folder without changing file IDs.</p></div></header>
                   <form id="analyst-folder-form" class="analyst-form">
                     <label>Name<input id="analyst-folder-name" type="text" maxlength="128" autocomplete="off" /></label>
                     <label>Parent folder<select id="analyst-folder-parent"></select></label>
                     <div class="analyst-form-actions"><button id="analyst-save-folder" class="trace-button analyst-primary" type="submit">Save folder</button><button id="analyst-delete-folder" class="secondary-button" type="button">Delete empty folder</button></div>
                   </form>
-                </article>
-                <article class="analyst-storage">
+                </details>
+                <details class="analyst-storage"><summary class="workspace-disclosure-title">Storage usage</summary>
                   <header class="analyst-pane-head"><div><h2>Local storage</h2><p>No script, variable, result, or evidence is uploaded.</p></div></header>
                   <div class="analyst-storage-grid">
                     <div><span>Folders</span><strong id="analyst-folder-usage">1 / 32</strong></div>
@@ -951,7 +959,7 @@
                     <div><span>Per file</span><strong>32 KiB</strong></div>
                     <div><span>Depth</span><strong>4 folders</strong></div>
                   </div>
-                </article>
+                </details>
               </aside>
 
               <section class="analyst-pane" aria-label="Analyst file editor">
@@ -965,8 +973,10 @@
                   </div>
                 </div>
                 <form id="analyst-editor-form" class="analyst-form analyst-editor-form" hidden>
+                  <details class="workspace-disclosure" open><summary>File properties</summary>
                   <div class="analyst-form-row"><label>Name<input id="analyst-name" type="text" maxlength="128" autocomplete="off" /></label><label>Folder<select id="analyst-folder"></select></label></div>
                   <div class="analyst-form-row"><label>Type<select id="analyst-kind"><option value="analyst-script">Analyst script</option><option value="scratchpad">Scratchpad</option></select></label><label>Language<select id="analyst-language"><option value="javascript">JavaScript</option><option value="json">JSON</option><option value="markdown">Markdown</option><option value="text">Plain text</option></select></label></div>
+                  </details>
                   <label>Content<textarea id="analyst-content" maxlength="32768" spellcheck="false" placeholder="const events = WB.Node.Evidence.events();&#10;console.info('events', events.length);&#10;return {count: events.length};"></textarea></label>
                   <div id="analyst-draft-status" class="analyst-draft-status" role="status">Saved locally</div>
                   <div class="analyst-form-actions"><button id="analyst-save" class="trace-button analyst-primary" type="submit">Save file</button><button id="analyst-revert" class="secondary-button" type="button">Revert</button><button id="analyst-delete" class="secondary-button" type="button">Delete</button></div>
@@ -977,7 +987,7 @@
                 <article class="analyst-card">
                   <header><div><h2>Evidence to read</h2><p>Choose the captured evidence a script may read. Each run gets a separate local copy.</p></div><span id="analyst-snapshot-badge" class="experiment-card-badge">0 records</span></header>
                   <form id="analyst-run-form" class="analyst-form">
-                    <label>Script variables (JSON object)<textarea id="analyst-variables" maxlength="16384" spellcheck="false" placeholder='{"seed":"verified"}'></textarea></label>
+                    <details class="workspace-disclosure"><summary>Script variables</summary><label>Variables (JSON object)<textarea id="analyst-variables" maxlength="16384" spellcheck="false" placeholder='{"seed":"verified"}'></textarea></label></details>
                     <div class="analyst-options">
                       <label class="analyst-check"><input id="analyst-include-events" type="checkbox" checked /> Events</label>
                       <label class="analyst-check"><input id="analyst-include-artifacts" type="checkbox" checked /> Artifact metadata</label>
@@ -991,15 +1001,17 @@
                     <div class="analyst-form-actions"><button id="analyst-run" class="trace-button analyst-primary" type="submit" disabled>Run saved script</button><button id="analyst-cancel" class="secondary-button" type="button" disabled>Cancel active run</button><button id="analyst-clear-history" class="secondary-button" type="button">Clear history</button></div>
                     <p class="experiment-privacy">No filesystem, network, process, imports, dynamic code generation, DOM, or timers. Runtime is capped at 2 seconds.</p>
                   </form>
+                  <details class="workspace-disclosure"><summary>Execution limits</summary>
                   <div class="analyst-snapshot">
                     <div><span>Evidence</span><strong>768 KiB max</strong></div><div><span>Result</span><strong>32 KiB max</strong></div>
                     <div><span>Logs</span><strong>64 × 1 KiB</strong></div><div><span>Memory</span><strong>64 MiB Node</strong></div>
-                  </div>
+                  </div>                  </details>
+
                 </article>
-                <article class="analyst-card">
+                <details class="analyst-card"><summary class="workspace-disclosure-title">Run history</summary>
                   <header><div><h2>Run history</h2><p>Ephemeral results with source, outcome, time, and correlation IDs.</p></div><span id="analyst-history-badge" class="experiment-card-badge" data-kind="offline">0 / 64</span></header>
                   <div id="analyst-history" class="analyst-history" role="listbox" aria-label="Analyst script runs"><div class="analyst-empty" role="option" aria-disabled="true" aria-selected="false">Run a saved script to see results and logs.</div></div>
-                </article>
+                </details>
                 <article class="analyst-card">
                   <header><div><h2>Selected result</h2><p id="analyst-result-meta">Select a completed run.</p></div><span id="analyst-result-badge" class="experiment-card-badge" data-kind="offline">No result</span></header>
                   <div id="analyst-result" class="analyst-result"><div class="analyst-empty">No run selected.</div></div>
@@ -1037,14 +1049,14 @@
                             <optgroup label="Structured data"><option value="json-pretty">JSON pretty print</option><option value="json-minify">JSON minify</option></optgroup>
                           </select></label>
                         <div class="decoder-actions"><button id="decoder-append" class="secondary-button decoder-primary" type="submit">Run transformation</button></div>
-                        <p class="experiment-privacy">At most 16 explicit steps, 1 MiB per input or output, and 4 MiB retained. Decompression stops at the output cap.</p>
+                        <details class="tool-detail-disclosure"><summary>Processing limits</summary><p class="experiment-privacy">At most 16 explicit steps, 1 MiB per input or output, and 4 MiB retained. Decompression stops at the output cap.</p></details>
                       </form>
                     </article>
-                    <article class="decoder-card">
+                    <details class="decoder-card"><summary class="workspace-disclosure-title">Transformation history</summary>
                       <header><div><h2>Steps</h2><p>Select a step to see its output. The next transformation starts from that step.</p></div><span id="decoder-pipeline-badge" class="experiment-card-badge">0 / 16</span></header>
                       <div id="decoder-pipeline" class="decoder-pipeline" role="listbox" aria-label="Decoder transformation steps"><div class="analyst-empty" role="option" aria-disabled="true" aria-selected="false">Enter input and append the first transform.</div></div>
                       <div class="decoder-chain-actions"><button id="decoder-remove-after" class="secondary-button" type="button">Remove from selected step</button><button id="decoder-reset" class="secondary-button" type="button">Reset chain</button></div>
-                    </article>
+                    </details>
                   </section>
 
                   <aside class="decoder-column" aria-label="Decoded output">
@@ -1055,7 +1067,9 @@
                         <pre id="decoder-output" tabindex="0" data-empty-label="No bytes to display. Enter input to begin.">No bytes selected.</pre>
                         <div class="decoder-actions"><button id="decoder-copy-output" class="secondary-button" type="button" disabled>Copy visible output</button></div>
                       </div>
+                      <details class="tool-detail-disclosure"><summary>Result details</summary>
                       <div class="decoder-facts"><div class="decoder-fact"><span>Selected bytes</span><strong id="decoder-selected-bytes">0 B</strong></div><div class="decoder-fact"><span>Retained</span><strong id="decoder-retained-bytes">0 B / 4 MiB</strong></div><div class="decoder-fact"><span>Engine time</span><strong id="decoder-duration">Not run</strong></div><div class="decoder-fact"><span>Execution</span><strong>Explicit only</strong></div></div>
+                      </details>
                     </article>
                   </aside>
                 </div>

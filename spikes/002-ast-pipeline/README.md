@@ -27,3 +27,4 @@ node deobfuscator.js fixtures/mixed.js
 The pipeline runs passes to a fixed point with a maximum iteration count. Each
 replacement is restricted to values proven by the local static evaluator.
 
+This spike is intentionally bounded and non-executing.

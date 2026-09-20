@@ -46,3 +46,4 @@ than adding more regular expressions.
 - [de4js](https://github.com/lelinhtinh/de4js) is useful historical prior art
   for unpackers, but its repository is archived.
 
+This spike is intentionally bounded and non-executing.

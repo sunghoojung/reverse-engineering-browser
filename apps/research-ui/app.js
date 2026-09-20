@@ -5598,7 +5598,8 @@
             mime_type: script.language === 'WebAssembly' ? 'application/wasm' : 'text/javascript',
             byte_size: script.length,
             sha256: script.hash,
-            sensitive: false
+            sensitive: false,
+            deobfuscation: state.deobfuscationCache?.get(`script:${script.script_id}`) ?? null
           };
         });
       }
@@ -5606,7 +5607,10 @@
       function capturedSources() {
         return state.artifacts
           .filter(artifact => artifact.kind !== 'canvas_data_url')
-          .map(artifact => ({ ...artifact, source_type: 'artifact', key: `artifact:${artifact.artifact_id}` }));
+          .map(artifact => {
+            const key = `artifact:${artifact.artifact_id}`;
+            return { ...artifact, source_type: 'artifact', key, deobfuscation: state.deobfuscationCache?.get(key) ?? null };
+          });
       }
 
       function sourceOrigin(source) {
@@ -6072,17 +6076,18 @@
         elements.sourceHash.textContent = source?.sha256 ? `${source.source_type === 'script' ? 'hash' : 'sha256'} ${source.sha256}` : '';
         const derived = sourceDerivedView(source);
         elements.sourceViewKind.textContent = state.sourcePretty
-          ? derived ? 'Derived representation · mapped to original bytes' : 'Readable derived view'
+          ? derived ? 'Deobfuscated · mapped to original bytes' : 'Readable derived view'
           : source?.source_type === 'script' ? 'Live runtime source' : 'Original evidence';
         elements.sourcePretty.disabled = source?.kind !== 'javascript' || !source.content;
         elements.sourcePretty.setAttribute('aria-pressed', String(state.sourcePretty));
-        elements.sourcePretty.title = state.sourcePretty ? 'Show original evidence' : 'Show readable representation';
+        elements.sourcePretty.setAttribute('aria-label', state.sourcePretty ? 'Show original evidence' : 'Show deobfuscated representation');
+        elements.sourcePretty.title = state.sourcePretty ? 'Show original evidence' : 'Show deobfuscated representation';
         const hooks = runtimeHooksState();
         elements.sourceHookPivot.disabled = source?.source_type !== 'script' || state.sourcePretty ||
           !hooks?.isolated || hooks.target_id !== state.debuggerSession?.target?.id ||
           ['arming', 'armed', 'handling', 'stopping'].includes(hooks?.state);
         renderSourceContent(source);
-        if (source?.source_type === 'script' && source.kind === 'javascript') loadDeobfuscation(source);
+        if ((source?.source_type === 'script' || source?.source_type === 'artifact') && source.kind === 'javascript') loadDeobfuscation(source);
         renderDeobfuscationReport(source);
       }
 
@@ -6109,6 +6114,7 @@
           if (!response.ok) throw new Error(`Deobfuscation analysis returned ${response.status}`);
           source.deobfuscation = await response.json();
           state.deobfuscationCache.set(source.key, source.deobfuscation);
+          if (selectedSource()?.key === source.key && source.deobfuscation?.representation?.text) state.sourcePretty = true;
           source.deobfuscationError = null;
           state.deobfuscationStatus = 'ready';
           state.deobfuscationError = null;
@@ -6118,7 +6124,7 @@
           state.deobfuscationError = error.message;
         } finally {
           source.deobfuscationLoading = false;
-          if (selectedSource() === source) renderSources();
+          if (selectedSource()?.key === source.key) renderSources();
           if (!document.querySelector('#screen-deobfuscation').hidden) renderDeobfuscationLab();
         }
       }

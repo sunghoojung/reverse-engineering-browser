@@ -34,10 +34,6 @@ value of explainable, evidence-backed classification. Brave's
 provided the most direct missing user workflow: make audio and other
 fingerprint-surface activity visible from the request being investigated.
 
-The first version intentionally does not classify a vendor, identify a bypass,
-or claim that a signal value was transmitted. It presents the evidence needed
-for a researcher to decide which request and artifact deserve deeper analysis.
-
 ## Evidence path
 
 1. The event broker validates and stores a normalized browser event.

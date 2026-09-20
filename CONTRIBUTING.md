@@ -4,10 +4,6 @@ Reverse Engineering Browser welcomes focused improvements to its native event
 path, local evidence pipeline, Origin Trace application, versioned contracts,
 and reproducible Brave integration.
 
-Only test against systems you own or are explicitly authorized to assess. Do
-not contribute features whose primary purpose is bypassing access controls,
-capturing sensitive content by default, or concealing malicious activity.
-
 ## Before you change code
 
 1. Read the nearest subsystem README and the relevant contract or design under

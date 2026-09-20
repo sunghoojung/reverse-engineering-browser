@@ -358,18 +358,6 @@ The engineering target is observational equivalence with the corresponding offic
 
 ## Security boundaries
 
-```mermaid
-flowchart LR
-    Site["Untrusted website"] --> Sandbox["Sandboxed renderer"]
-    Sandbox -->|"bounded events"| Broker["Trusted browser broker"]
-    Broker -->|"authenticated local IPC"| Harness["Trusted harness"]
-    Harness --> Policy["Authorization policy"]
-    Policy --> Agent["Scoped AI agent"]
-
-    Agent -. "cannot bypass" .-> Policy
-    Site -. "cannot access" .-> Harness
-```
-
 Security requirements:
 
 - preserve Chromium's renderer sandbox;

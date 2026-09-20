@@ -35,10 +35,6 @@ Build a local-first browser research harness for authorized reverse
 engineering. Connect low-level browser observations to a normalized evidence
 timeline that a researcher can inspect and work backward from.
 
-Optimize for trustworthy evidence, predictable overhead, maintainable systems
-code, and reproducible browser integration. Do not optimize for bypassing
-access controls or concealing malicious activity.
-
 Current project scope:
 
 1. Dependency-free C++ event and queue foundations.

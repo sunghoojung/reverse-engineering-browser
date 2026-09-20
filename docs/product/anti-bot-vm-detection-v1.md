@@ -7,11 +7,6 @@ the first virtual-machine detection milestone. It records the decisions made
 during the design interview and defines the boundary between this milestone,
 later opcode reconstruction, and later exact value tracing.
 
-The feature is for authorized research into client-side anti-bot behavior. It
-explains observed collection, virtualization, challenge, and token-construction
-behavior. It does not solve challenges, generate bypass tokens, evade access
-controls, or conceal automation.
-
 ## Release promise
 
 Given an authorized Deep Analysis capture, Origin Trace automatically scans
@@ -304,11 +299,6 @@ Repository CI requires source-owned deterministic fixtures for:
 5. scoring thresholds, stable reruns, named limits, omissions, residual
    unknowns, and false-positive regression cases.
 
-Operator-local authorized real targets are release acceptance evidence, not a
-stable CI gate. Expectation manifests contain bounded identities and expected
-finding classes without committing proprietary captures, personal content,
-credentials, challenge solutions, or bypass material.
-
 ## Version 1 acceptance gates
 
 Version 1 is complete only when:
@@ -330,14 +320,3 @@ Version 1 is complete only when:
 
 If a required platform or Brave toolchain is unavailable, the exact gap is
 reported and the corresponding acceptance gate remains unclaimed.
-
-## Explicit non-goals for version 1
-
-- assigning semantic names to every opcode;
-- complete guest control-flow reconstruction or disassembly;
-- continuous opcode dispatch or memory tracing;
-- exact value provenance across every transformation;
-- challenge solving, token generation, anti-bot bypass, or stealth behavior;
-- mutation of the observed page or captured evidence;
-- unbounded stack, source, bytecode, or memory capture;
-- provider-specific facts presented as generic observed truth.

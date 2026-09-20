@@ -1,5 +1,5 @@
       :root {
-        /* Rosé Pine Moon. Secondary text is lifted slightly for small labels. */
+        /* Rosé Pine Moon: base / surface / overlay with canonical semantic accents. */
         color-scheme: dark;
         --bg: #232136;
         --chrome: #232136;
@@ -2796,6 +2796,7 @@
       .deobfuscation-mark { color: var(--accent); font: 700 13px var(--mono); }
       .deobfuscation-command-title strong { font-size: 12px; letter-spacing: .01em; }
       .deobfuscation-command-meta { color: var(--faint); font: 10px var(--mono); }
+      .deobfuscation-theme { padding: 3px 6px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius: 3px; color: var(--accent); font: 9px var(--mono); letter-spacing: .06em; }
       .deobfuscation-source-select { min-width: 190px; margin-left: auto; }
       .deobfuscation-source-select select { width: 100%; height: 28px; padding: 0 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); font: 11px var(--mono); }
       .deobfuscation-commandbar .secondary-button { min-height: 28px; padding: 0 10px; }

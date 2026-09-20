@@ -2813,9 +2813,13 @@
       .deobfuscation-editor + .deobfuscation-editor { border-left: 1px solid var(--line); }
       .deobfuscation-editor > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--chrome); color: var(--accent); font: 650 10px var(--mono); letter-spacing: .06em; }
       .deobfuscation-editor > header span:last-child { overflow: hidden; color: var(--faint); font-size: 9px; font-weight: 400; letter-spacing: 0; text-overflow: ellipsis; white-space: nowrap; }
-      .deobfuscation-code-pane { min-height: 0; margin: 0; padding: 13px 16px 24px; overflow: auto; color: var(--text); font: 11px/1.65 var(--mono); tab-size: 2; white-space: pre; }
+      .deobfuscation-code-pane { min-height: 0; margin: 0; padding: 5px 0 24px; overflow: auto; color: var(--text); font: 11px/20px var(--mono); tab-size: 2; white-space: pre; }
+      .deobfuscation-source-line { min-height: 20px; display: grid; grid-template-columns: 42px minmax(max-content, 1fr); padding-right: 16px; white-space: pre; }
+      .deobfuscation-line-number { padding-right: 8px; border-right: 1px solid var(--line-soft); color: var(--faint); text-align: right; user-select: none; }
+      .deobfuscation-line-code { padding-left: 9px; }
       #deobfuscation-original-code { color: color-mix(in srgb, var(--text) 90%, var(--amber)); }
       #deobfuscation-derived-code { color: color-mix(in srgb, var(--text) 94%, var(--cyan)); }
+      .deobfuscation-source-line:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
       .deobfuscation-empty { color: var(--faint); font-style: italic; white-space: normal; }
       .deobfuscation-gutter { display: flex; flex-direction: column; align-items: center; min-height: 0; overflow: hidden; border-left: 1px solid var(--line); border-right: 1px solid var(--line); background: var(--chrome); }
       .deobfuscation-gutter-label { width: 100%; padding: 10px 0 8px; border-bottom: 1px solid var(--line); color: var(--faint); font: 9px var(--mono); text-align: center; }

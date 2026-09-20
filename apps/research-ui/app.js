@@ -6204,8 +6204,8 @@
         const payload = source?.deobfuscation;
         const analysis = payload?.analysis;
         if (!source || !analysis) {
-          elements.deobfuscationOriginalCode.replaceChildren(textElement('span', 'deobfuscation-empty', 'Select a captured JavaScript source.'));
-          elements.deobfuscationDerivedCode.replaceChildren(textElement('span', 'deobfuscation-empty', 'Run analysis to reveal the derived source.'));
+          renderDeobfuscationCode(elements.deobfuscationOriginalCode, '', null, 'Select a captured JavaScript source.');
+          renderDeobfuscationCode(elements.deobfuscationDerivedCode, '', null, 'Run analysis to reveal the derived source.');
           elements.deobfuscationOriginalMeta.textContent = 'original evidence';
           elements.deobfuscationDerivedMeta.textContent = 'awaiting analysis';
           elements.deobfuscationConfidence.textContent = 'No source selected';
@@ -6219,8 +6219,8 @@
         elements.deobfuscationSourceMeta.textContent = `${sourceOrigin(source)} · ${formatByteSize(source.byte_size ?? analysis.source?.byte_size ?? 0)} · ${analysis.source?.sha256 ?? source.sha256 ?? 'hash unavailable'}`;
         const raw = source.content || source.text || source.body || '[Original source bytes are not loaded]';
         const derived = payload.representation?.text ?? 'Derived representation unavailable.';
-        elements.deobfuscationOriginalCode.textContent = raw;
-        elements.deobfuscationDerivedCode.textContent = derived;
+        renderDeobfuscationCode(elements.deobfuscationOriginalCode, raw, source);
+        renderDeobfuscationCode(elements.deobfuscationDerivedCode, derived, source);
         elements.deobfuscationOriginalMeta.textContent = `${analysis.source?.lines ?? 0} lines · ${formatByteSize(analysis.source?.byte_size ?? 0)}`;
         elements.deobfuscationDerivedMeta.textContent = `${analysis.representation?.status ?? 'mapped'} · ${analysis.representation?.segment_count ?? 0} segments`;
         elements.deobfuscationConfidence.textContent = `${String(analysis.classification?.label ?? 'unknown').toUpperCase()} · ${analysis.classification?.confidence ?? 0}% confidence`;
@@ -6234,6 +6234,26 @@
           marker.title = `${entry.id}: ${entry.detail}`;
           return marker;
         }));
+      }
+
+      function renderDeobfuscationCode(container, content, source, emptyMessage = '') {
+        if (!content) {
+          container.replaceChildren(textElement('span', 'deobfuscation-empty', emptyMessage));
+          return;
+        }
+        const tokenizer = createSourceTokenizer({ ...(source ?? {}), kind: 'javascript', mime_type: 'application/javascript' });
+        const fragment = document.createDocumentFragment();
+        content.split('\n').slice(0, 20000).forEach((line, index) => {
+          const row = document.createElement('span');
+          row.className = 'deobfuscation-source-line';
+          const number = textElement('span', 'deobfuscation-line-number', String(index + 1));
+          const code = document.createElement('span');
+          code.className = 'deobfuscation-line-code';
+          appendSourceSyntax(code, sourceSyntaxTokens(line, tokenizer));
+          row.append(number, code);
+          fragment.append(row);
+        });
+        container.replaceChildren(fragment);
       }
 
       function renderDeobfuscationLab() {

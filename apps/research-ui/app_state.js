@@ -563,6 +563,7 @@
         sourceLocation: document.querySelector('#source-location'),
         sourceSearch: document.querySelector('#source-search'),
         sourcePretty: document.querySelector('#source-pretty'),
+        deobfuscationReport: document.querySelector('#deobfuscation-report'),
         sourceHookPivot: document.querySelector('#source-hook-pivot'),
         sourceCodeWrap: document.querySelector('#source-code-wrap'),
         sourceCode: document.querySelector('#source-code'),

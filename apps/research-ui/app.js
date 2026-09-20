@@ -5971,15 +5971,19 @@
           return;
         }
         const original = source.content ?? '';
-        const content = state.sourcePretty && source.kind === 'javascript'
+        const derived = state.sourcePretty && source.kind === 'javascript' ? sourceDerivedView(source) : null;
+        const content = derived?.text ?? (state.sourcePretty && source.kind === 'javascript'
           ? formatJavaScript(original)
-          : original;
+          : original);
+        const lineMap = derived ? derivedLineMap(original, content, derived.segments ?? []) : null;
         const lines = content.split('\n');
         const renderedLines = lines.slice(0, 20000);
         const breakpointsByLine = breakpointLinesForSource(source);
         const tokenizer = createSourceTokenizer(source);
         const nodes = renderedLines.map((line, index) => {
           const runtimeLine = sourceRuntimeLine(source, index);
+          const mapped = lineMap ? lineMap[index] ?? null : null;
+          const mappedLine = mapped?.originalLine ?? null;
           const row = document.createElement('span');
           row.className = 'source-line';
           row.dataset.line = String(runtimeLine + 1);
@@ -5994,12 +5998,17 @@
           const gutter = document.createElement('button');
           gutter.type = 'button';
           gutter.className = 'source-gutter';
-          gutter.textContent = String(runtimeLine + 1);
-          gutter.disabled = source.source_type !== 'script' || state.sourcePretty || !['running', 'paused'].includes(state.debuggerSession?.state) || memoryOriginTraceActive();
-          gutter.title = state.sourcePretty ? 'Show original source to edit breakpoints' : '';
-          gutter.setAttribute('aria-label', `${breakpoint ? 'Remove' : 'Add'} breakpoint on line ${runtimeLine + 1}`);
+          gutter.textContent = String((mappedLine ?? runtimeLine) + 1);
+          gutter.disabled = mappedLine === null && (source.source_type !== 'script' || state.sourcePretty || !['running', 'paused'].includes(state.debuggerSession?.state) || memoryOriginTraceActive());
+          gutter.title = mappedLine === null
+            ? state.sourcePretty ? 'Show original source to edit breakpoints' : ''
+            : `Show original source at line ${mappedLine + 1}`;
+          gutter.setAttribute('aria-label', mappedLine === null
+            ? `${breakpoint ? 'Remove' : 'Add'} breakpoint on line ${runtimeLine + 1}`
+            : `Show original source at line ${mappedLine + 1}`);
           gutter.addEventListener('click', event => {
             event.stopPropagation();
+            if (mappedLine !== null) { revealOriginalLine(source, mappedLine, mapped?.originalColumn ?? 0); return; }
             toggleLineBreakpoint(source, runtimeLine, sourceRuntimeColumn(source, index), breakpointAt(source, runtimeLine));
           });
           const text = document.createElement('span');
@@ -6061,8 +6070,9 @@
         elements.sourceLocation.title = source?.url || (source ? sourceDisplayName(source) : '');
         elements.sourceSize.textContent = source ? formatByteSize(source.byte_size) : '0 bytes';
         elements.sourceHash.textContent = source?.sha256 ? `${source.source_type === 'script' ? 'hash' : 'sha256'} ${source.sha256}` : '';
+        const derived = sourceDerivedView(source);
         elements.sourceViewKind.textContent = state.sourcePretty
-          ? 'Readable derived view'
+          ? derived ? 'Derived representation · mapped to original bytes' : 'Readable derived view'
           : source?.source_type === 'script' ? 'Live runtime source' : 'Original evidence';
         elements.sourcePretty.disabled = source?.kind !== 'javascript' || !source.content;
         elements.sourcePretty.setAttribute('aria-pressed', String(state.sourcePretty));
@@ -6072,6 +6082,96 @@
           !hooks?.isolated || hooks.target_id !== state.debuggerSession?.target?.id ||
           ['arming', 'armed', 'handling', 'stopping'].includes(hooks?.state);
         renderSourceContent(source);
+        if (source?.source_type === 'script' && source.kind === 'javascript') loadDeobfuscation(source);
+        renderDeobfuscationReport(source);
+      }
+
+      function sourceDerivedView(source) {
+        return source?.deobfuscation?.representation ?? null;
+      }
+
+      function revealOriginalLine(source, line, column) {
+        state.sourcePretty = false;
+        if (source.source_type === 'script') {
+          state.sourceCursor = {scriptId: source.script_id, line, column: column ?? 0};
+        }
+        renderSources();
+      }
+
+      async function loadDeobfuscation(source) {
+        if (!source?.script_id || source.deobfuscationLoading || source.deobfuscation) return;
+        source.deobfuscationLoading = true;
+        try {
+          const response = await fetch(`/api/deobfuscation?script_id=${encodeURIComponent(source.script_id)}&mode=derived`, { cache: 'no-store' });
+          if (!response.ok) throw new Error(`Deobfuscation analysis returned ${response.status}`);
+          source.deobfuscation = await response.json();
+          source.deobfuscationError = null;
+        } catch (error) {
+          source.deobfuscationError = error.message;
+        } finally {
+          source.deobfuscationLoading = false;
+          if (selectedSource() === source) renderSources();
+        }
+      }
+
+      function deobfuscationRow(label, value) {
+        const row = document.createElement('div');
+        row.className = 'deobfuscation-row';
+        const name = document.createElement('strong');
+        name.textContent = label;
+        const detail = document.createElement('span');
+        detail.textContent = value;
+        row.append(name, ' ', detail);
+        return row;
+      }
+
+      function renderDeobfuscationReport(source) {
+        const container = elements.deobfuscationReport;
+        if (!container) return;
+        const target = source ?? selectedSource();
+        if (!target || target.kind !== 'javascript') {
+          container.textContent = 'Select a JavaScript source to analyze.';
+          return;
+        }
+        if (target.deobfuscationError) {
+          container.textContent = target.deobfuscationError;
+          return;
+        }
+        const payload = target.deobfuscation;
+        if (!payload) {
+          container.textContent = target.deobfuscationLoading ? 'Analyzing captured source…' : 'No analysis is loaded for this source.';
+          return;
+        }
+        const analysis = payload.analysis ?? {};
+        const classification = analysis.classification ?? {};
+        const representation = analysis.representation ?? {};
+        const rows = [
+          deobfuscationRow('Classification', `${classification.label ?? 'unknown'} · confidence ${classification.confidence ?? 0}`),
+          deobfuscationRow('Representation', `${representation.status ?? 'unknown'} · ${representation.segment_count ?? 0} mapped segments${representation.truncated ? ' · truncated' : ''}`),
+          deobfuscationRow('Source', `${analysis.source?.lines ?? 0} lines · ${formatByteSize(analysis.source?.byte_size ?? 0)}`),
+        ];
+        const evidence = document.createElement('div');
+        evidence.className = 'deobfuscation-evidence';
+        (classification.evidence ?? []).forEach(entry => {
+          evidence.append(deobfuscationRow(entry.id, entry.detail));
+        });
+        const tables = document.createElement('div');
+        tables.className = 'deobfuscation-tables';
+        const tableList = analysis.string_tables ?? [];
+        tables.append(deobfuscationRow('String tables', tableList.length ? String(tableList.length) : 'none recovered'));
+        tableList.slice(0, 4).forEach(table => {
+          tables.append(deobfuscationRow(
+            `${table.kind} at byte ${table.offset}`,
+            `${table.entry_count} entries · ${(table.encodings ?? []).join(', ')}${table.decoded_preview ? ` · ${table.decoded_preview.slice(0, 48)}` : ''}`
+          ));
+        });
+        const transformations = document.createElement('div');
+        transformations.className = 'deobfuscation-transformations';
+        transformations.append(deobfuscationRow('Transformations', String((representation.transformations ?? []).length)));
+        (representation.transformations ?? []).slice(0, 6).forEach(entry => {
+          transformations.append(deobfuscationRow(entry.id, `${entry.detail} (${entry.count})`));
+        });
+        container.replaceChildren(...rows, evidence, tables, transformations);
       }
 
       async function loadArtifactContent(artifact) {

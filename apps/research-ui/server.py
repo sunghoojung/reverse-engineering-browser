@@ -23,6 +23,15 @@ from api_collection import (
     ApiCollectionStore,
 )
 from debugger_bridge import DebuggerBridge, DebuggerBridgeError, ProtocolError
+from deobfuscation import (
+    SCHEMA as DEOBFUSCATION_SCHEMA,
+)
+from deobfuscation import (
+    DeobfuscationError,
+    analyze_source,
+    derive_representation,
+    ensure_source,
+)
 from decoder_service import (
     MAX_DECODER_ACTION_BYTES,
     DecoderError,
@@ -288,6 +297,42 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                 self.send_json({"error": str(exception)}, HTTPStatus.CONFLICT)
                 return
             self.send_json(source)
+            return
+        if parsed.path == "/api/deobfuscation":
+            query = parse_qs(parsed.query)
+            script_id = query.get("script_id", [None])[0]
+            mode = query.get("mode", ["analysis"])[0]
+            if script_id is None:
+                self.send_json(
+                    {"error": "Script ID is required"}, HTTPStatus.BAD_REQUEST
+                )
+                return
+            if mode not in ("analysis", "derived"):
+                self.send_json(
+                    {"error": "Deobfuscation mode is invalid"}, HTTPStatus.BAD_REQUEST
+                )
+                return
+            try:
+                if self.debugger is None:
+                    raise DebuggerBridgeError("Live debugging is not enabled")
+                script = self.debugger.get_script_source(script_id)
+                text_source = ensure_source(script.get("source"))
+                response = {
+                    "schema": DEOBFUSCATION_SCHEMA,
+                    "script_id": script_id,
+                    "mode": mode,
+                    "source_truncated": bool(script.get("truncated")),
+                    "analysis": analyze_source(text_source),
+                }
+                if mode == "derived":
+                    response["representation"] = derive_representation(text_source)
+                self.send_json(response)
+            except DebuggerBridgeError as exception:
+                self.send_json({"error": str(exception)}, HTTPStatus.CONFLICT)
+                return
+            except DeobfuscationError as exception:
+                self.send_json({"error": str(exception)}, HTTPStatus.BAD_REQUEST)
+                return
             return
         if parsed.path == "/api/origin-trace":
             query = parse_qs(parsed.query)

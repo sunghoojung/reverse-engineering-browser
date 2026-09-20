@@ -6204,48 +6204,36 @@
         const payload = source?.deobfuscation;
         const analysis = payload?.analysis;
         if (!source || !analysis) {
-          elements.deobfuscationEmpty.hidden = false;
-          elements.deobfuscationAnalysis.hidden = true;
+          elements.deobfuscationOriginalCode.replaceChildren(textElement('span', 'deobfuscation-empty', 'Select a captured JavaScript source.'));
+          elements.deobfuscationDerivedCode.replaceChildren(textElement('span', 'deobfuscation-empty', 'Run analysis to reveal the derived source.'));
+          elements.deobfuscationOriginalMeta.textContent = 'original evidence';
+          elements.deobfuscationDerivedMeta.textContent = 'awaiting analysis';
+          elements.deobfuscationConfidence.textContent = 'No source selected';
+          elements.deobfuscationEvidenceCount.textContent = '0 evidence markers';
+          elements.deobfuscationSegmentCount.textContent = '0 mapped segments';
+          elements.deobfuscationStringCount.textContent = '0 string tables';
+          elements.deobfuscationTransformList.replaceChildren();
           return;
         }
-        elements.deobfuscationEmpty.hidden = true;
-        elements.deobfuscationAnalysis.hidden = false;
         elements.deobfuscationSourceTitle.textContent = sourceDisplayName(source);
         elements.deobfuscationSourceMeta.textContent = `${sourceOrigin(source)} · ${formatByteSize(source.byte_size ?? analysis.source?.byte_size ?? 0)} · ${analysis.source?.sha256 ?? source.sha256 ?? 'hash unavailable'}`;
-        elements.deobfuscationMetrics.replaceChildren(...[
-          ['classification', `${analysis.classification?.label ?? 'unknown'} · ${analysis.classification?.confidence ?? 0}%`],
-          ['derived view', `${analysis.representation?.segment_count ?? 0} mapped segments`],
-          ['string tables', String(analysis.string_tables?.length ?? 0)],
-          ['source', `${analysis.source?.lines ?? 0} lines`]
-        ].map(([label, value]) => {
-          const metric = document.createElement('div'); metric.className = 'vm-metric';
-          metric.append(textElement('span', '', label), textElement('strong', '', value));
-          return metric;
+        const raw = source.content || source.text || source.body || '[Original source bytes are not loaded]';
+        const derived = payload.representation?.text ?? 'Derived representation unavailable.';
+        elements.deobfuscationOriginalCode.textContent = raw;
+        elements.deobfuscationDerivedCode.textContent = derived;
+        elements.deobfuscationOriginalMeta.textContent = `${analysis.source?.lines ?? 0} lines · ${formatByteSize(analysis.source?.byte_size ?? 0)}`;
+        elements.deobfuscationDerivedMeta.textContent = `${analysis.representation?.status ?? 'mapped'} · ${analysis.representation?.segment_count ?? 0} segments`;
+        elements.deobfuscationConfidence.textContent = `${String(analysis.classification?.label ?? 'unknown').toUpperCase()} · ${analysis.classification?.confidence ?? 0}% confidence`;
+        elements.deobfuscationEvidenceCount.textContent = `${analysis.classification?.evidence?.length ?? 0} evidence markers`;
+        elements.deobfuscationSegmentCount.textContent = `${analysis.representation?.segment_count ?? 0} mapped segments`;
+        elements.deobfuscationStringCount.textContent = `${analysis.string_tables?.length ?? 0} string tables`;
+        const transformations = analysis.representation?.transformations ?? [];
+        elements.deobfuscationTransformList.replaceChildren(...transformations.slice(0, 8).map(entry => {
+          const marker = document.createElement('div'); marker.className = 'deobfuscation-transform-marker';
+          marker.append(textElement('span', '', '→'), textElement('strong', '', String(entry.count ?? 0)));
+          marker.title = `${entry.id}: ${entry.detail}`;
+          return marker;
         }));
-        const evidence = document.createElement('div'); evidence.className = 'deobfuscation-evidence';
-        (analysis.classification?.evidence ?? []).forEach(entry => evidence.append(deobfuscationRow(entry.id, entry.detail)));
-        const transformations = document.createElement('div'); transformations.className = 'deobfuscation-transformations';
-        (analysis.representation?.transformations ?? []).forEach(entry => transformations.append(deobfuscationRow(entry.id, `${entry.detail} (${entry.count})`)));
-        elements.deobfuscationPanelAnalysis.replaceChildren(evidence, transformations);
-        elements.deobfuscationPanelDerived.textContent = payload.representation?.text ?? 'Derived representation unavailable.';
-        const tables = analysis.string_tables ?? [];
-        if (!tables.length) {
-          elements.deobfuscationPanelTables.replaceChildren(textElement('div', 'vm-empty', 'No literal string tables were recovered without execution.'));
-        } else {
-          elements.deobfuscationPanelTables.replaceChildren(...tables.map(table => {
-            const card = document.createElement('article'); card.className = 'deobfuscation-table-card';
-            card.append(textElement('h3', '', `${table.kind} · byte ${table.offset}`), deobfuscationRow('entries', table.entry_count), deobfuscationRow('encodings', (table.encodings ?? []).join(', ') || 'literal'));
-            if (table.decoded_preview) card.append(deobfuscationRow('preview', table.decoded_preview));
-            return card;
-          }));
-        }
-        document.querySelectorAll('[data-deob-tab]').forEach(tab => {
-          const selected = tab.dataset.deobTab === state.deobfuscationTab;
-          tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1;
-        });
-        elements.deobfuscationPanelAnalysis.hidden = state.deobfuscationTab !== 'analysis';
-        elements.deobfuscationPanelDerived.hidden = state.deobfuscationTab !== 'derived';
-        elements.deobfuscationPanelTables.hidden = state.deobfuscationTab !== 'tables';
       }
 
       function renderDeobfuscationLab() {
@@ -6261,19 +6249,10 @@
           elements.deobfuscationNotice.hidden = true;
         }
         if (!sources.some(source => source.key === state.deobfuscationSelectedKey)) state.deobfuscationSelectedKey = sources[0]?.key ?? null;
-        elements.deobfuscationSourceList.replaceChildren(...sources.map(source => {
-          const row = document.createElement('button'); row.type = 'button'; row.className = 'deobfuscation-source-row'; row.setAttribute('role', 'option');
-          row.setAttribute('aria-selected', String(source.key === state.deobfuscationSelectedKey));
-          row.append(textElement('strong', '', sourceDisplayName(source)), textElement('span', '', `${sourceOrigin(source)} · ${formatByteSize(source.byte_size ?? 0)}`));
-          row.addEventListener('click', () => {
-            state.deobfuscationSelectedKey = source.key;
-            state.deobfuscationError = null;
-            state.deobfuscationStatus = 'loading';
-            renderDeobfuscationLab();
-            loadDeobfuscation(source);
-          });
-          return row;
+        elements.deobfuscationSourceSelect.replaceChildren(...sources.map(source => {
+          const option = document.createElement('option'); option.value = source.key; option.textContent = sourceDisplayName(source); return option;
         }));
+        elements.deobfuscationSourceSelect.value = state.deobfuscationSelectedKey ?? '';
         renderDeobfuscationPanel(selectedDeobfuscationSource());
       }
 
@@ -7982,6 +7961,14 @@
       }));
 
       document.querySelectorAll('[data-deob-tab]').forEach(tab => tab.addEventListener('click', () => setDeobfuscationTab(tab.dataset.deobTab)));
+      elements.deobfuscationSourceSelect?.addEventListener('change', () => {
+        state.deobfuscationSelectedKey = elements.deobfuscationSourceSelect.value || null;
+        state.deobfuscationError = null;
+        state.deobfuscationStatus = 'loading';
+        renderDeobfuscationLab();
+        const source = selectedDeobfuscationSource();
+        if (source) loadDeobfuscation(source);
+      });
       elements.deobfuscationRefresh?.addEventListener('click', async () => {
         state.deobfuscationSelectedKey = null;
         state.deobfuscationError = null;

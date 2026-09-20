@@ -654,6 +654,16 @@
         deobfuscationPanelDerived: document.querySelector('#deobfuscation-panel-derived'),
         deobfuscationPanelTables: document.querySelector('#deobfuscation-panel-tables'),
         deobfuscationRefresh: document.querySelector('#deobfuscation-refresh')
+        ,deobfuscationSourceSelect: document.querySelector('#deobfuscation-source-select')
+        ,deobfuscationOriginalCode: document.querySelector('#deobfuscation-original-code')
+        ,deobfuscationDerivedCode: document.querySelector('#deobfuscation-derived-code')
+        ,deobfuscationOriginalMeta: document.querySelector('#deobfuscation-original-meta')
+        ,deobfuscationDerivedMeta: document.querySelector('#deobfuscation-derived-meta')
+        ,deobfuscationTransformList: document.querySelector('#deobfuscation-transform-list')
+        ,deobfuscationConfidence: document.querySelector('#deobfuscation-confidence')
+        ,deobfuscationEvidenceCount: document.querySelector('#deobfuscation-evidence-count')
+        ,deobfuscationSegmentCount: document.querySelector('#deobfuscation-segment-count')
+        ,deobfuscationStringCount: document.querySelector('#deobfuscation-string-count')
       };
 
       const analystElements = {

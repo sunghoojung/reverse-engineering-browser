@@ -6099,18 +6099,27 @@
       }
 
       async function loadDeobfuscation(source) {
-        if (!source?.script_id || source.deobfuscationLoading || source.deobfuscation) return;
+        const sourceId = source?.source_type === 'artifact' ? source.artifact_id : source?.script_id;
+        const sourceParam = source?.source_type === 'artifact' ? 'artifact_id' : 'script_id';
+        if (!sourceId || source.deobfuscationLoading || state.deobfuscationCache.has(source.key)) return;
         source.deobfuscationLoading = true;
+        state.deobfuscationStatus = 'loading';
         try {
-          const response = await fetch(`/api/deobfuscation?script_id=${encodeURIComponent(source.script_id)}&mode=derived`, { cache: 'no-store' });
+          const response = await fetch(`/api/deobfuscation?${sourceParam}=${encodeURIComponent(sourceId)}&mode=derived`, { cache: 'no-store' });
           if (!response.ok) throw new Error(`Deobfuscation analysis returned ${response.status}`);
           source.deobfuscation = await response.json();
+          state.deobfuscationCache.set(source.key, source.deobfuscation);
           source.deobfuscationError = null;
+          state.deobfuscationStatus = 'ready';
+          state.deobfuscationError = null;
         } catch (error) {
           source.deobfuscationError = error.message;
+          state.deobfuscationStatus = 'error';
+          state.deobfuscationError = error.message;
         } finally {
           source.deobfuscationLoading = false;
           if (selectedSource() === source) renderSources();
+          if (!document.querySelector('#screen-deobfuscation').hidden) renderDeobfuscationLab();
         }
       }
 
@@ -6172,6 +6181,105 @@
           transformations.append(deobfuscationRow(entry.id, `${entry.detail} (${entry.count})`));
         });
         container.replaceChildren(...rows, evidence, tables, transformations);
+      }
+
+      function deobfuscationSources() {
+        return [...capturedSources(), ...liveSources()]
+          .filter(source => source.kind === 'javascript')
+          .map(source => ({ ...source, deobfuscation: state.deobfuscationCache.get(source.key) ?? null }))
+          .sort((left, right) => sourceDisplayName(left).localeCompare(sourceDisplayName(right)));
+      }
+
+      function selectedDeobfuscationSource() {
+        return deobfuscationSources().find(source => source.key === state.deobfuscationSelectedKey) ?? null;
+      }
+
+      function setDeobfuscationNotice(kind, message) {
+        elements.deobfuscationNotice.dataset.kind = kind;
+        elements.deobfuscationNotice.textContent = message;
+        elements.deobfuscationNotice.hidden = false;
+      }
+
+      function renderDeobfuscationPanel(source) {
+        const payload = source?.deobfuscation;
+        const analysis = payload?.analysis;
+        if (!source || !analysis) {
+          elements.deobfuscationEmpty.hidden = false;
+          elements.deobfuscationAnalysis.hidden = true;
+          return;
+        }
+        elements.deobfuscationEmpty.hidden = true;
+        elements.deobfuscationAnalysis.hidden = false;
+        elements.deobfuscationSourceTitle.textContent = sourceDisplayName(source);
+        elements.deobfuscationSourceMeta.textContent = `${sourceOrigin(source)} · ${formatByteSize(source.byte_size ?? analysis.source?.byte_size ?? 0)} · ${analysis.source?.sha256 ?? source.sha256 ?? 'hash unavailable'}`;
+        elements.deobfuscationMetrics.replaceChildren(...[
+          ['classification', `${analysis.classification?.label ?? 'unknown'} · ${analysis.classification?.confidence ?? 0}%`],
+          ['derived view', `${analysis.representation?.segment_count ?? 0} mapped segments`],
+          ['string tables', String(analysis.string_tables?.length ?? 0)],
+          ['source', `${analysis.source?.lines ?? 0} lines`]
+        ].map(([label, value]) => {
+          const metric = document.createElement('div'); metric.className = 'vm-metric';
+          metric.append(textElement('span', '', label), textElement('strong', '', value));
+          return metric;
+        }));
+        const evidence = document.createElement('div'); evidence.className = 'deobfuscation-evidence';
+        (analysis.classification?.evidence ?? []).forEach(entry => evidence.append(deobfuscationRow(entry.id, entry.detail)));
+        const transformations = document.createElement('div'); transformations.className = 'deobfuscation-transformations';
+        (analysis.representation?.transformations ?? []).forEach(entry => transformations.append(deobfuscationRow(entry.id, `${entry.detail} (${entry.count})`)));
+        elements.deobfuscationPanelAnalysis.replaceChildren(evidence, transformations);
+        elements.deobfuscationPanelDerived.textContent = payload.representation?.text ?? 'Derived representation unavailable.';
+        const tables = analysis.string_tables ?? [];
+        if (!tables.length) {
+          elements.deobfuscationPanelTables.replaceChildren(textElement('div', 'vm-empty', 'No literal string tables were recovered without execution.'));
+        } else {
+          elements.deobfuscationPanelTables.replaceChildren(...tables.map(table => {
+            const card = document.createElement('article'); card.className = 'deobfuscation-table-card';
+            card.append(textElement('h3', '', `${table.kind} · byte ${table.offset}`), deobfuscationRow('entries', table.entry_count), deobfuscationRow('encodings', (table.encodings ?? []).join(', ') || 'literal'));
+            if (table.decoded_preview) card.append(deobfuscationRow('preview', table.decoded_preview));
+            return card;
+          }));
+        }
+        document.querySelectorAll('[data-deob-tab]').forEach(tab => {
+          const selected = tab.dataset.deobTab === state.deobfuscationTab;
+          tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1;
+        });
+        elements.deobfuscationPanelAnalysis.hidden = state.deobfuscationTab !== 'analysis';
+        elements.deobfuscationPanelDerived.hidden = state.deobfuscationTab !== 'derived';
+        elements.deobfuscationPanelTables.hidden = state.deobfuscationTab !== 'tables';
+      }
+
+      function renderDeobfuscationLab() {
+        const sources = deobfuscationSources();
+        elements.deobfuscationSourceCount.textContent = String(sources.length);
+        if (!sources.length) {
+          setDeobfuscationNotice('empty', 'No JavaScript artifacts or live scripts are available for analysis.');
+        } else if (state.deobfuscationStatus === 'loading') {
+          setDeobfuscationNotice('loading', 'Analyzing the selected source with bounded, evidence-only transforms…');
+        } else if (state.deobfuscationError) {
+          setDeobfuscationNotice('disconnected', state.deobfuscationError);
+        } else {
+          elements.deobfuscationNotice.hidden = true;
+        }
+        if (!sources.some(source => source.key === state.deobfuscationSelectedKey)) state.deobfuscationSelectedKey = sources[0]?.key ?? null;
+        elements.deobfuscationSourceList.replaceChildren(...sources.map(source => {
+          const row = document.createElement('button'); row.type = 'button'; row.className = 'deobfuscation-source-row'; row.setAttribute('role', 'option');
+          row.setAttribute('aria-selected', String(source.key === state.deobfuscationSelectedKey));
+          row.append(textElement('strong', '', sourceDisplayName(source)), textElement('span', '', `${sourceOrigin(source)} · ${formatByteSize(source.byte_size ?? 0)}`));
+          row.addEventListener('click', () => {
+            state.deobfuscationSelectedKey = source.key;
+            state.deobfuscationError = null;
+            state.deobfuscationStatus = 'loading';
+            renderDeobfuscationLab();
+            loadDeobfuscation(source);
+          });
+          return row;
+        }));
+        renderDeobfuscationPanel(selectedDeobfuscationSource());
+      }
+
+      function setDeobfuscationTab(tab) {
+        state.deobfuscationTab = tab;
+        renderDeobfuscationPanel(selectedDeobfuscationSource());
       }
 
       async function loadArtifactContent(artifact) {
@@ -7674,6 +7782,12 @@
           if (trigger?.id === 'nav-vm' && state.vmAnalysisRequestId !== null) refreshVmAnalysis(null);
           renderVmLab();
         }
+        if (screenName === 'deobfuscation') {
+          renderDeobfuscationLab();
+          refreshArtifacts().then(renderDeobfuscationLab);
+          const source = selectedDeobfuscationSource();
+          if (source) loadDeobfuscation(source);
+        }
         if (!trigger?.classList.contains('nav-button')) {
           requestAnimationFrame(() => {
             if (screenName === 'traffic') {
@@ -7866,6 +7980,22 @@
         if (button.dataset.screen === 'backtrace' && originTraceSelection()) await refreshOriginTrace();
         if (button.dataset.screen === 'signals') await refreshRequestSignalProfile();
       }));
+
+      document.querySelectorAll('[data-deob-tab]').forEach(tab => tab.addEventListener('click', () => setDeobfuscationTab(tab.dataset.deobTab)));
+      elements.deobfuscationRefresh?.addEventListener('click', async () => {
+        state.deobfuscationSelectedKey = null;
+        state.deobfuscationError = null;
+        await refreshArtifacts();
+        renderDeobfuscationLab();
+        const source = selectedDeobfuscationSource();
+        if (source) loadDeobfuscation(source);
+      });
+      elements.deobfuscationOpenSource?.addEventListener('click', () => {
+        const source = selectedDeobfuscationSource();
+        if (!source) return;
+        showScreen('sources', elements.deobfuscationOpenSource);
+        source.source_type === 'script' ? selectScript(source.script_id) : selectArtifact(source.artifact_id);
+      });
       elements.signalFilters.forEach(button => button.addEventListener('click', () => {
         state.signalCategoryFilter = button.dataset.signalFilter;
         renderFingerprintActivity();

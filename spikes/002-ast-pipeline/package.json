@@ -1,0 +1,14 @@
+{
+  "name": "reb-ast-deobfuscation-spike",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test": "node test_pipeline.js"
+  },
+  "dependencies": {
+    "@babel/generator": "^7.28.3",
+    "@babel/parser": "^7.28.3",
+    "@babel/traverse": "^7.28.3",
+    "@babel/types": "^7.28.3"
+  }
+}

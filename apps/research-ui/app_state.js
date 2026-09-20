@@ -141,6 +141,11 @@
         vmAnalysisError: null,
         vmAnalysisRequestId: null,
         vmAnalysisEtag: null,
+        deobfuscationSelectedKey: null,
+        deobfuscationTab: 'analysis',
+        deobfuscationStatus: 'idle',
+        deobfuscationError: null,
+        deobfuscationCache: new Map(),
         originTrace: null,
         originTraceStatus: 'idle',
         originTraceError: null,
@@ -635,7 +640,20 @@
         vmNotice: document.querySelector('#vm-notice'),
         vmCount: document.querySelector('#vm-count'),
         vmList: document.querySelector('#vm-list'),
-        vmDetail: document.querySelector('#vm-detail')
+        vmDetail: document.querySelector('#vm-detail'),
+        deobfuscationNotice: document.querySelector('#deobfuscation-notice'),
+        deobfuscationSourceCount: document.querySelector('#deobfuscation-source-count'),
+        deobfuscationSourceList: document.querySelector('#deobfuscation-source-list'),
+        deobfuscationEmpty: document.querySelector('#deobfuscation-empty'),
+        deobfuscationAnalysis: document.querySelector('#deobfuscation-analysis'),
+        deobfuscationSourceTitle: document.querySelector('#deobfuscation-source-title'),
+        deobfuscationSourceMeta: document.querySelector('#deobfuscation-source-meta'),
+        deobfuscationOpenSource: document.querySelector('#deobfuscation-open-source'),
+        deobfuscationMetrics: document.querySelector('#deobfuscation-metrics'),
+        deobfuscationPanelAnalysis: document.querySelector('#deobfuscation-panel-analysis'),
+        deobfuscationPanelDerived: document.querySelector('#deobfuscation-panel-derived'),
+        deobfuscationPanelTables: document.querySelector('#deobfuscation-panel-tables'),
+        deobfuscationRefresh: document.querySelector('#deobfuscation-refresh')
       };
 
       const analystElements = {

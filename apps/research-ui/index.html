@@ -32,6 +32,7 @@
           <button class="nav-button" data-screen="experiments"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 2h6m-5 0v6l-5 9h14l-5-9V2M6 12h8"/></svg><span>Experiments</span></button>
           <button class="nav-button" data-screen="analyst"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 5 4 5-4 5m7 0h5"/></svg><span>Analyst</span></button>
           <button class="nav-button" data-screen="tools"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3v6m-2-3h4m7 5v6m-2-3h4M13 3v4M4 13v4"/></svg><span>Tools</span></button>
+          <button class="nav-button" data-screen="deobfuscation"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4h12v12H4zM7 2v4m6-4v4M2 7h4m8 0h4M7 16v2m6-2v2M16 7v6M6 9h8M6 12h5"/></svg><span>Deobfuscation</span></button>
             </div>
           </details>
         </nav>
@@ -343,6 +344,38 @@
                 <div id="vm-list" class="vm-list" role="listbox" aria-label="Captured VM findings"></div>
               </aside>
               <div id="vm-detail" class="vm-detail" tabindex="0"></div>
+            </div>
+          </section>
+
+          <section id="screen-deobfuscation" class="screen" aria-label="Deobfuscation workspace" hidden>
+            <header class="screen-head">
+              <div><h1>Deobfuscation workspace</h1><div id="deobfuscation-subtitle" class="screen-subtitle">Bounded, evidence-only source recovery.</div></div>
+              <div class="screen-head-actions"><button id="deobfuscation-refresh" class="secondary-button" type="button">Refresh sources</button></div>
+            </header>
+            <div id="deobfuscation-notice" class="vm-notice" data-kind="loading" role="status" aria-live="polite">Loading captured JavaScript sources…</div>
+            <div class="deobfuscation-lab-grid">
+              <aside class="deobfuscation-source-pane" aria-label="JavaScript sources">
+                <div class="deobfuscation-source-head">JavaScript sources <span id="deobfuscation-source-count">0</span></div>
+                <div id="deobfuscation-source-list" class="deobfuscation-source-list" role="listbox" aria-label="JavaScript sources"></div>
+              </aside>
+              <section class="deobfuscation-detail" aria-label="Deobfuscation result">
+                <div id="deobfuscation-empty" class="vm-empty">Select a captured JavaScript source to inspect its classification, derived representation, and recovered tables.</div>
+                <div id="deobfuscation-analysis" hidden>
+                  <header class="deobfuscation-detail-head">
+                    <div><h2 id="deobfuscation-source-title">Selected source</h2><p id="deobfuscation-source-meta"></p></div>
+                    <button id="deobfuscation-open-source" class="secondary-button" type="button">Open in Sources</button>
+                  </header>
+                  <div id="deobfuscation-metrics" class="vm-summary"></div>
+                  <div class="deobfuscation-tabs" role="tablist" aria-label="Deobfuscation views">
+                    <button class="deobfuscation-tab" type="button" role="tab" data-deob-tab="analysis" aria-selected="true">Analysis</button>
+                    <button class="deobfuscation-tab" type="button" role="tab" data-deob-tab="derived" aria-selected="false" tabindex="-1">Derived source</button>
+                    <button class="deobfuscation-tab" type="button" role="tab" data-deob-tab="tables" aria-selected="false" tabindex="-1">String tables</button>
+                  </div>
+                  <div id="deobfuscation-panel-analysis" class="deobfuscation-panel" role="tabpanel"></div>
+                  <pre id="deobfuscation-panel-derived" class="deobfuscation-code" role="tabpanel" hidden></pre>
+                  <div id="deobfuscation-panel-tables" class="deobfuscation-panel" role="tabpanel" hidden></div>
+                </div>
+              </section>
             </div>
           </section>
 

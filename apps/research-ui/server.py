@@ -27,6 +27,7 @@ from deobfuscation import (
     SCHEMA as DEOBFUSCATION_SCHEMA,
 )
 from deobfuscation import (
+    MAX_DEOBFUSCATION_SOURCE_BYTES,
     DeobfuscationError,
     analyze_source,
     derive_representation,
@@ -301,10 +302,16 @@ class ResearchHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/deobfuscation":
             query = parse_qs(parsed.query)
             script_id = query.get("script_id", [None])[0]
+            artifact_id = query.get("artifact_id", [None])[0]
             mode = query.get("mode", ["analysis"])[0]
-            if script_id is None:
+            if script_id is None and artifact_id is None:
                 self.send_json(
-                    {"error": "Script ID is required"}, HTTPStatus.BAD_REQUEST
+                    {"error": "Script ID or artifact ID is required"}, HTTPStatus.BAD_REQUEST
+                )
+                return
+            if script_id is not None and artifact_id is not None:
+                self.send_json(
+                    {"error": "Specify only one source identifier"}, HTTPStatus.BAD_REQUEST
                 )
                 return
             if mode not in ("analysis", "derived"):
@@ -313,15 +320,25 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                 )
                 return
             try:
-                if self.debugger is None:
-                    raise DebuggerBridgeError("Live debugging is not enabled")
-                script = self.debugger.get_script_source(script_id)
-                text_source = ensure_source(script.get("source"))
+                if script_id is not None:
+                    if self.debugger is None:
+                        raise DebuggerBridgeError("Live debugging is not enabled")
+                    script = self.debugger.get_script_source(script_id)
+                    text_source = ensure_source(script.get("source"))
+                else:
+                    artifact, content_path = self.find_artifact(artifact_id)
+                    if artifact["kind"] != "javascript":
+                        raise DeobfuscationError("Artifact is not JavaScript")
+                    with content_path.open("rb") as stream:
+                        text_source = ensure_source(
+                            stream.read(MAX_DEOBFUSCATION_SOURCE_BYTES + 1).decode("utf-8")
+                        )
                 response = {
                     "schema": DEOBFUSCATION_SCHEMA,
                     "script_id": script_id,
+                    "artifact_id": artifact_id,
                     "mode": mode,
-                    "source_truncated": bool(script.get("truncated")),
+                    "source_truncated": bool(script.get("truncated")) if script_id is not None else False,
                     "analysis": analyze_source(text_source),
                 }
                 if mode == "derived":
@@ -329,6 +346,12 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                 self.send_json(response)
             except DebuggerBridgeError as exception:
                 self.send_json({"error": str(exception)}, HTTPStatus.CONFLICT)
+                return
+            except UnicodeDecodeError:
+                self.send_json(
+                    {"error": "Artifact is not valid UTF-8 JavaScript"},
+                    HTTPStatus.BAD_REQUEST,
+                )
                 return
             except DeobfuscationError as exception:
                 self.send_json({"error": str(exception)}, HTTPStatus.BAD_REQUEST)

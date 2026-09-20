@@ -2163,6 +2163,37 @@
       .vm-empty { min-height: 220px; display: grid; place-items: center; padding: 24px; color: var(--muted); text-align: center; }
       .vm-summary { display: grid; grid-template-columns: repeat(4, minmax(110px, 1fr)); gap: 8px; margin-bottom: 16px; }
       .vm-metric { padding: 10px; border: 1px solid var(--line); background: var(--panel-2); }
+      #screen-deobfuscation:not([hidden]) { display: grid; grid-template-rows: 60px auto minmax(0, 1fr); }
+      #screen-deobfuscation > .screen-head { grid-row: 1; }
+      #screen-deobfuscation > .vm-notice { grid-row: 2; }
+      #screen-deobfuscation > .deobfuscation-lab-grid { grid-row: 3; }
+      .deobfuscation-lab-grid { min-height: 0; display: grid; grid-template-columns: minmax(240px, 30%) minmax(0, 1fr); }
+      .deobfuscation-source-pane { min-width: 0; overflow: auto; border-right: 1px solid var(--line); background: var(--chrome); }
+      .deobfuscation-source-head { display: flex; justify-content: space-between; padding: 12px; border-bottom: 1px solid var(--line); color: var(--faint); font: 650 10px var(--mono); text-transform: uppercase; }
+      .deobfuscation-source-head span { color: var(--accent); }
+      .deobfuscation-source-list { display: grid; }
+      .deobfuscation-source-row { min-width: 0; display: grid; gap: 5px; padding: 11px 12px; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; color: var(--text); text-align: left; }
+      .deobfuscation-source-row:hover { background: var(--panel-3); }
+      .deobfuscation-source-row[aria-selected="true"] { background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
+      .deobfuscation-source-row strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+      .deobfuscation-source-row span { overflow: hidden; color: var(--faint); font: 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+      .deobfuscation-detail { min-width: 0; overflow: auto; padding: 18px; }
+      .deobfuscation-detail-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 16px; }
+      .deobfuscation-detail-head h2 { margin: 0; font-size: 15px; }
+      .deobfuscation-detail-head p { margin: 5px 0 0; overflow-wrap: anywhere; color: var(--faint); font: 10px var(--mono); }
+      .deobfuscation-detail-head .secondary-button { margin-left: auto; }
+      .deobfuscation-tabs { display: flex; gap: 2px; margin: 0 -2px 12px; border-bottom: 1px solid var(--line); }
+      .deobfuscation-tab { padding: 9px 11px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-size: 11px; }
+      .deobfuscation-tab:hover { color: var(--text); }
+      .deobfuscation-tab[aria-selected="true"] { border-bottom-color: var(--accent); color: var(--text); }
+      .deobfuscation-panel { display: grid; gap: 12px; }
+      .deobfuscation-code { min-height: 240px; margin: 0; padding: 13px; overflow: auto; border: 1px solid var(--line); background: var(--chrome); color: var(--text); font: 11px/1.55 var(--mono); white-space: pre-wrap; }
+      .deobfuscation-table-card { padding: 12px; border: 1px solid var(--line); background: var(--panel-2); }
+      .deobfuscation-table-card h3 { margin: 0 0 8px; font-size: 12px; }
+      .deobfuscation-table-card .deobfuscation-row { border-top: 1px solid var(--line-soft); }
+      .deobfuscation-row { display: grid; grid-template-columns: minmax(120px, .35fr) minmax(0, 1fr); gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line-soft); color: var(--muted); font-size: 11px; }
+      .deobfuscation-row strong { color: var(--faint); font: 650 10px var(--mono); text-transform: uppercase; }
+      .deobfuscation-row span { overflow-wrap: anywhere; }
       .vm-metric span { display: block; color: var(--faint); font: 10px var(--mono); text-transform: uppercase; }
       .vm-metric strong { display: block; margin-top: 6px; font: 500 18px var(--mono); }
       .vm-detail-card { border: 1px solid var(--line); background: var(--panel-2); }
@@ -2305,6 +2336,11 @@
         .collection-run-pane { grid-template-columns: 1fr; }
         .collection-form-row { grid-template-columns: 1fr; }
         .vm-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+        .deobfuscation-lab-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+        .deobfuscation-source-pane { max-height: 210px; border-right: 0; border-bottom: 1px solid var(--line); }
+        .deobfuscation-detail { padding: 12px; }
+        .deobfuscation-detail-head { flex-wrap: wrap; }
+        .deobfuscation-detail-head .secondary-button { margin-left: 0; }
         .memory-grid { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
         .memory-search-pane { max-height: min(420px, 48vh); border-right: 0; border-bottom: 1px solid var(--line); }
         .memory-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }

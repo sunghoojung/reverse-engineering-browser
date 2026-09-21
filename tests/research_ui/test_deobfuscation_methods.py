@@ -158,3 +158,13 @@ class DeobfuscationMethodsTest(unittest.TestCase):
         self.assertTrue(response['transformations_truncated'])
         self.assertLessEqual(sum(len(r['replacement'].encode()) for r in response['transformations']), 512 * 1024)
         self.assertIn('console.log(text)', response['derived_source'])
+
+    def test_pathological_nesting_is_rejected_without_losing_framing(self):
+        source = '!' * 10000 + '0;'
+        request = json.dumps({'source': source}) + '\n' + json.dumps({'source': '1+2'}) + '\n'
+        result = subprocess.run([str(self.worker)], input=request, text=True, capture_output=True, timeout=5, check=True)
+        rejected, recovered = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertFalse(rejected['ok'])
+        self.assertEqual(rejected['derived_source'], source)
+        self.assertIn('depth', rejected['syntax_errors'][0]['message'])
+        self.assertEqual(recovered['derived_source'], '(3)')

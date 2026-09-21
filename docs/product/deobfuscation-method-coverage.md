@@ -42,11 +42,14 @@ a non-overlapping outer expression when recursive evaluation succeeds, without
 reparsing generated nodes or looping to a fixed point. Exhausted rewrite, work or evaluation-depth budgets mark
 the representation truncated and retain the remaining source.
 
-Oxc parsing itself can exhaust its native stack on pathological nesting. Both
-application adapters isolate each request in a disposable process and report
-an explicit 502 on abnormal termination. This remains a parser limitation,
-not a successful partial analysis. The original source stays visible and the
-next request can proceed. Wall-clock deadlines remain five seconds.
+A heap-backed Tree-sitter preflight iteratively checks syntax-tree depth before
+Oxc parsing. Sources above depth 128 or 500,000 syntax nodes are rejected with a
+recoverable diagnostic; preflight also has a one-second deadline. Error-recovery
+trees are rejected rather than used to infer a depth bound. This adds a
+conservative grammar admission boundary: syntax accepted by Oxc but unsupported
+by the preflight grammar remains unavailable. Literal/comment punctuation does
+not count as nesting. The worker preserves the source and can process the next
+framed request after rejection. Adapter wall-clock deadlines remain five seconds.
 
 ## Validation and engines
 

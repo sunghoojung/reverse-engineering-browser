@@ -5,6 +5,7 @@ use oxc_ast_visit::Visit;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 mod fold;
+mod preflight;
 use serde::{Deserialize, Serialize};
 
 const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
@@ -75,6 +76,12 @@ fn analyze(request: Request) -> Response {
         return error_response("source exceeds the deobfuscation byte limit");
     }
 
+    if let Err(message) = preflight::check(&request.source) {
+        let mut response = error_response(message);
+        response.source_bytes = source_bytes;
+        response.derived_source = request.source;
+        return response;
+    }
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, &request.source, SourceType::unambiguous()).parse();
     let syntax_errors = parsed
@@ -231,7 +238,7 @@ mod tests {
         });
 
         assert!(!response.ok);
-        assert!(response.parsed);
+        assert!(!response.parsed);
         assert!(!response.syntax_errors.is_empty());
         assert_eq!(response.derived_source, "const broken = ;");
         assert!(response.transformations.is_empty());

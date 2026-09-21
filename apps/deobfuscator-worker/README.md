@@ -40,3 +40,8 @@ request cap allows JSON escaping of a 4 MiB source. At most 4,096 rewrites and
 `transformations_truncated`; the remaining source is preserved unchanged.
 
 See [the response contract](../../protocol/deobfuscation-v1.md).
+
+Before recursive Oxc parsing, a heap-backed Tree-sitter preflight admits only
+error-free JavaScript trees with depth at most 128 and at most 500,000 nodes,
+within one second. Excessive nesting returns a recoverable diagnostic and leaves
+the next JSON-line request usable. Both grammars must support the input syntax.

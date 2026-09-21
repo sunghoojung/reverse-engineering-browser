@@ -67,6 +67,13 @@ do {
                 self.assertEqual(source.encode()[segment['original_start']:segment['original_end']], representation['text'].encode()[segment['derived_start']:segment['derived_end']])
         self.assertEqual(response['analysis']['classification']['label'], 'unclassified')
 
+    def test_native_dispatcher_result_keeps_source_mapping(self):
+        source = b'const decode=function(){var n=0;while(true){switch(n++){case 0:continue;case 1:return "hi";}}};const result=decode();'
+        response = self.analyze(source)
+        self.assertIn('const result=("hi");', response['representation']['text'])
+        self.assertEqual(response['original_source'], source.decode())
+        verify_deobfuscation_document(response['analysis'])
+
     def test_invalid_and_oversized_sources_have_explicit_errors(self):
         for source, status in [(b'const broken = ;', 422), (b'\xff', 400), (b'x' * (4 * 1024 * 1024 + 1), 400)]:
             with self.subTest(status=status):

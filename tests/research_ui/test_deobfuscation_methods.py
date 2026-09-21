@@ -230,3 +230,38 @@ class DeobfuscationMethodsTest(unittest.TestCase):
             'Object.defineProperty(String,"fromCharCode",{});const d=()=>String.fromCharCode(65);d();',
         ]:
             self.assertFalse(any(r['kind'] in ('proxy-call','custom-decoder') for r in self.analyze(source, True)['transformations']))
+
+    def test_jsfuck_array_coercion_is_explicit_and_holes_are_not_rewritten(self):
+        cases = [('+[]', '(0)'), ('![]', '(false)'), ('[]+[]', '("")'),
+                 ('(![]+[])[+[]]', '("f")'), ('[][[]]+[]', '("undefined")'),
+                 ('+([[[[[[]],,,]]]] != 0)', '(1)')]
+        for expression, expected in cases:
+            source = 'const result='+expression+';'
+            response = self.analyze(source, True)
+            self.assertIn(expected, response['derived_source'])
+            self.assertEqual(response['assumptions'], ['standard-intrinsics'])
+            self.assertEqual(self.analyze(source)['derived_source'], source)
+        self.assertEqual(self.analyze('const a=[,,];', True)['derived_source'], 'const a=[,,];')
+        source = 'Array.prototype[0]="changed";const result=[,][0];'
+        self.assertEqual(self.analyze(source, True)['derived_source'], source)
+        source = 'const a=[];a.push(7);const result=+a;'
+        self.assertNotIn('const result=(0)', self.analyze(source, True)['derived_source'])
+
+    def test_primitive_and_jsfuck_coercion_matrix_matches_javascript(self):
+        if not shutil.which('node'):
+            self.skipTest('Node.js is not installed')
+        values = ['0','-0','1','null','void 0','true','false','""','"1"','"x"','[]','[[]]','[,]','["2"]','({})']
+        expressions = ['('+a+')'+operator+'('+b+')' for a in values for b in values for operator in ['+','-','*','==','!=','===','<','>=']]
+        expressions += ['+"0x10"', '+"0b10"', '+"0o10"', '+"-0"', '+"1e2"', '+"1_0"', '+"0x"', '+"inf"', '+"\\u0085"', '+"\\uFEFF"']
+        sources = ['const result='+expression+';' for expression in expressions]
+        requests = ''.join(json.dumps({'source': source, 'assume_intrinsics': True})+'\n' for source in sources)
+        worker = subprocess.run([str(self.worker)], input=requests, text=True, capture_output=True, check=True, timeout=15)
+        responses = [json.loads(line) for line in worker.stdout.split('\n') if line]
+        self.assertEqual(len(responses), len(sources))
+        self.assertTrue(all(response['ok'] for response in responses))
+        def program(items):
+            return 'console.log(JSON.stringify([' + ','.join('(()=>{'+source+'return [typeof result,String(result),Object.is(result,-0)];})()' for source in items) + ']));'
+        original = subprocess.run(['node'], input=program(sources), capture_output=True, text=True, check=True)
+        derived = subprocess.run(['node'], input=program([r['derived_source'] for r in responses]), capture_output=True, text=True, check=True)
+        for expression, expected, actual in zip(expressions, json.loads(original.stdout), json.loads(derived.stdout)):
+            self.assertEqual(actual, expected, expression)

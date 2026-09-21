@@ -13,7 +13,7 @@ artifact bytes and byte-range provenance remain available.
 | [String concealing](https://steakenthusiast.github.io/2022/05/22/Deobfuscating-Javascript-via-AST-Manipulation-Various-String-Concealing-Techniques/) | Escape normalization, literal concatenation, own literal array/string indices, non-escaping local constant tables | No global script tables, mutable/aliased tables, sparse indices, arbitrary cipher execution; see the bounded decoder subset below |
 | [Bracket to dot](https://steakenthusiast.github.io/2022/05/28/Deobfuscating-Javascript-via-AST-Manipulation-Converting-Bracket-Notation-Dot-Notation-for-Property-Accessors/) | Literal ASCII identifier properties, including optional access | Numeric receivers retain brackets; non-identifier and Unicode property names remain bracketed |
 | [Dead code](https://steakenthusiast.github.io/2022/06/04/Deobfuscating-Javascript-via-AST-Removing-Dead-or-Unreachable-Code/) | Known primitive conditional/logical expressions; literal-condition `if` arms without declarations | No general control-flow analysis or removal of declarations that might affect hoisting; surviving blocks retain scope |
-| [JSFuck-style expressions](https://steakenthusiast.github.io/2022/06/14/Deobfuscating-Javascript-via-AST-Deobfuscating-a-Peculiar-JSFuck-style-Case/) | Primitive unary chains, boolean arithmetic, negative zero and bounded bitwise operations | Array/object coercion, sparse-array tricks and constructor-generated code remain unresolved |
+| [JSFuck-style expressions](https://steakenthusiast.github.io/2022/06/14/Deobfuscating-Javascript-via-AST-Deobfuscating-a-Peculiar-JSFuck-style-Case/) | Primitive unary chains, boolean arithmetic, negative zero and bounded bitwise operations | Array/object coercion and sparse indices require the explicit intrinsic assumption; custom hooks and constructor-generated code remain unresolved |
 
 The restricted evaluator never invokes `eval`, `Function`, Node's `vm`, Babel's
 `path.evaluate`, analyzed functions, getters or coercion hooks. The site's
@@ -21,7 +21,7 @@ The restricted evaluator never invokes `eval`, `Function`, Node's `vm`, Babel's
 shows why a static analyzer must not substitute host execution for proof.
 
 There is intentionally no claim of complete deobfuscation. Unsupported custom decoder operations, rotated tables, dynamic proxy calls,
-sparse JSFuck arrays and general
+custom prototype hooks and general
 control-flow flattening require additional bounded interpreters or separately
 captured runtime evidence. In particular, replacing array holes with explicit
 `undefined` changes property-existence and prototype-lookup behavior. Unknown
@@ -101,3 +101,21 @@ The intrinsic model is suppressed when the source declares intrinsic names,
 uses eval/with, writes object properties, or contains conflicting references to
 intrinsic objects. This conservative check rejects visible overrides and lexical
 shadowing; it cannot prove the absence of mutations in external runtime code.
+
+## JSFuck-style coercion
+
+The explicit standard-intrinsics model supports literal arrays (including holes),
+empty objects, primitive coercion, array-to-string joining and character/index
+reads. It recovers boolean/alphabetic JSFuck building blocks and the article's
+nested sparse-array comparison. Arrays themselves are never emitted as replacement
+values or propagated as immutable constants; holes remain holes in retained code.
+Object identity comparisons stay unresolved. Known intrinsic conflicts suppress
+the model even when requested.
+
+Primitive conversions follow the
+[ECMAScript abstract operations](https://tc39.es/ecma262/2024/multipage/abstract-operations.html).
+Number-to-string conversion is limited to finite values in the ordinary decimal
+range; large radix integers, lone surrogates, function-source strings and dynamic
+constructors remain unresolved. A trusted-fixture differential matrix compares
+1,810 arithmetic/equality/relational/coercion cases against Node. Array allocation,
+output size and recursive evaluation remain bounded by the existing limits.

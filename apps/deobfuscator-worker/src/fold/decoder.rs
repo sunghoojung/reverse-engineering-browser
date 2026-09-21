@@ -1,5 +1,5 @@
 //! Bounded interpretation of closed decoder bodies. No calls into a JS runtime.
-use super::{Folder, MAX_DEPTH, MAX_STEPS, MAX_VALUE_BYTES, Value, int32};
+use super::{Folder, MAX_DEPTH, MAX_STEPS, Value, int32};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_ast_visit::{Visit, walk};
@@ -127,16 +127,12 @@ impl Folder<'_> {
                 let value = self.eval(&e.right, depth)?;
                 let result = match e.operator {
                     A::Assign => value,
-                    A::Addition => match (old, value) {
-                        (Value::String(mut a), Value::String(b)) => {
-                            if a.len() + b.len() > MAX_VALUE_BYTES {
-                                self.truncated = true;
-                                return None;
-                            }
-                            a.push_str(&b);
-                            Value::String(a)
+                    A::Addition => match old.add(&value) {
+                        Some(value) => value,
+                        None => {
+                            self.truncated = true;
+                            return None;
                         }
-                        (a, b) => Value::Number(a.number()? + b.number()?),
                     },
                     A::Subtraction => Value::Number(old.number()? - value.number()?),
                     A::BitwiseXOR => {

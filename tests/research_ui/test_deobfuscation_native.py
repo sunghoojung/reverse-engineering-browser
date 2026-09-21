@@ -96,3 +96,10 @@ do {
         derived = self.analyze(source, True)
         self.assertEqual(derived['analysis']['assumptions'], ['standard-intrinsics'])
         self.assertIn('("hello")', derived['representation']['text'])
+
+    def test_native_jsfuck_model_is_opt_in(self):
+        source = b'const result=+([[[[[[]],,,]]]] != 0);'
+        self.assertEqual(self.analyze(source)['representation']['text'], source.decode())
+        response = self.analyze(source, True)
+        self.assertEqual(response['representation']['text'], 'const result=(1);')
+        self.assertEqual(response['analysis']['assumptions'], ['standard-intrinsics'])

@@ -4,11 +4,12 @@ This is the bounded Rust worker boundary for JavaScript deobfuscation. It
 accepts one JSON request per line on stdin and emits one JSON response per line
 on stdout. It never executes the analyzed JavaScript.
 
-The first production slice uses Oxc for JavaScript parsing and performs only
-finite numeric constant folding. It returns the rewritten source, the exact
-original byte range for every rewrite, statement/comment evidence, and
-recoverable syntax diagnostics. Sparse arrays, dynamic expressions, calls, and
-non-finite arithmetic remain unchanged.
+The production pipeline parses JavaScript with Oxc and performs bounded static
+primitive folding, constant propagation, string normalization and literal-index
+recovery, member normalization, and conservative dead-expression/branch removal.
+It returns original byte ranges for every rewrite and recoverable diagnostics.
+See the [method coverage and limitations](../../docs/product/deobfuscation-method-coverage.md)
+for the precise supported subsets and regression evidence.
 
 ## Run
 
@@ -28,10 +29,9 @@ native macOS app. `DeobfuscationService.swift` invokes it with a five-second
 wall-clock deadline and projects its original UTF-8 byte ranges into the shared
 UI response. It reads only the selected captured JavaScript artifact.
 
-The browser development server continues to use the Python lexical formatter;
-the response identifies its engine. The Rust slice does not classify obfuscation
-or recover string tables. Those omissions are explicit, not zero-confidence
-claims about the input.
+The browser development server uses this worker when available, with an explicitly
+labelled Python lexical fallback when it is not built. Rust does not classify
+obfuscation. Dynamic decoders and prototype-dependent evaluation stay unresolved.
 
 Requests are read with bounded buffers. An oversized record is drained through
 the next newline, rejected, and flushed before reading another record. The

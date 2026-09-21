@@ -10,8 +10,8 @@ source identifiers (unused one null), `source_truncated`, `original_source`, and
 Original source is retained local evidence, never newly captured or executed.
 
 `engine=python-lexical` provides heuristic classification, whitespace formatting,
-and literal string tables. `engine=rust-oxc` provides parser-validated finite
-numeric folds. Unsupported Rust classification is `unclassified`, confidence
+and literal string tables. `engine=rust-oxc` provides parser-validated bounded
+AST rewrites described in [method coverage](../docs/product/deobfuscation-method-coverage.md). Unsupported Rust classification is `unclassified`, confidence
 is null, and `analysis.omissions` lists missing capabilities. Empty string tables
 in that engine do not establish that the source contains none.
 
@@ -26,7 +26,7 @@ text to a zero-width original position. Rust `replacement` segments anchor a
 folded value to the whole original expression, and a position within one maps
 to that expression's start. Transformations never change retained artifact bytes.
 
-Sources are capped at 4 MiB. Native analysis has a five-second deadline, at most
+Sources are capped at 4 MiB. Worker analysis has a five-second adapter deadline, at most
 4,096 rewrites, and 64 diagnostics. `truncated` means a derivation or rewrite
 budget was reached; unchanged remainder in the Rust engine is preserved. Python
 limits remain those in the workspace design. Native temporary input/output files
@@ -34,5 +34,5 @@ are private and removed when analysis finishes or fails.
 
 Invalid identifiers/modes or malformed source return 400, missing artifacts 404,
 unavailable live debugging or a busy worker 409, native parse failures 422,
-and a native timeout 408. A failed UI request is not automatically retried.
+an abnormal worker exit 502, and a worker timeout 408. A failed UI request is not automatically retried.
 The previous successful representation survives an explicit retry failure.

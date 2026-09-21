@@ -33,6 +33,7 @@ from deobfuscation import (
     derive_representation,
     ensure_source,
 )
+from deobfuscation_worker import WorkerError, derive_with_worker
 from decoder_service import (
     MAX_DECODER_ACTION_BYTES,
     DecoderError,
@@ -343,9 +344,25 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     "source_truncated": bool(script.get("truncated")) if script_id is not None else False,
                     "analysis": analyze_source(text_source),
                 }
+                representation = derive_with_worker(text_source)
+                if representation is not None:
+                    response["engine"] = "rust-oxc"
+                    response["analysis"]["representation"] = {
+                        "status": "unchanged" if representation["text"] == text_source else "derived",
+                        "derived_bytes": len(representation["text"].encode()),
+                        "segment_count": len(representation["segments"]),
+                        "truncated": representation["truncated"],
+                        "transformations": representation["transformations"],
+                    }
+                    response["analysis"]["omissions"] = [
+                        "Dynamic decoders, object/array coercion, sparse indices, mutable or escaping tables, and cross-scope propagation remain unresolved."
+                    ]
                 if mode == "derived":
-                    response["representation"] = derive_representation(text_source)
+                    response["representation"] = representation if representation is not None else derive_representation(text_source)
                 self.send_json(response)
+            except WorkerError as exception:
+                self.send_json({"error": str(exception)}, exception.status)
+                return
             except DebuggerBridgeError as exception:
                 self.send_json({"error": str(exception)}, HTTPStatus.CONFLICT)
                 return

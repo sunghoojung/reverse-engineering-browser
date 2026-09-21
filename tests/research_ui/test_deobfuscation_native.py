@@ -60,7 +60,7 @@ do {
         verify_deobfuscation_document(response['analysis'])
         representation = response['representation']
         self.assertEqual(representation['offset_unit'], 'utf-8-byte')
-        self.assertEqual(representation['text'], 'const emoji = "😀"; const value = 3;')
+        self.assertEqual(representation['text'], 'const emoji = "😀"; const value = (3);')
         for segment in representation['segments']:
             if segment['kind'] == 'verbatim':
                 self.assertEqual(source.encode()[segment['original_start']:segment['original_end']], representation['text'].encode()[segment['derived_start']:segment['derived_end']])

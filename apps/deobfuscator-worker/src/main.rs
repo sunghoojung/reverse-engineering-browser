@@ -1,11 +1,10 @@
 use std::io::{self, BufRead, Write};
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{BinaryExpression, Expression};
 use oxc_ast_visit::Visit;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
-use oxc_syntax::operator::BinaryOperator;
+mod fold;
 use serde::{Deserialize, Serialize};
 
 const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
@@ -50,53 +49,6 @@ struct Transformation {
     original_start: u32,
     original_end: u32,
     replacement: String,
-}
-
-#[derive(Debug)]
-struct NumericFold {
-    start: u32,
-    end: u32,
-    replacement: String,
-}
-
-#[derive(Default)]
-struct NumericFolder {
-    folds: Vec<NumericFold>,
-    truncated: bool,
-}
-
-impl<'a> Visit<'a> for NumericFolder {
-    fn visit_binary_expression(&mut self, expression: &BinaryExpression<'a>) {
-        self.visit_expression(&expression.left);
-        self.visit_expression(&expression.right);
-
-        let (Expression::NumericLiteral(left), Expression::NumericLiteral(right)) =
-            (&expression.left, &expression.right)
-        else {
-            return;
-        };
-        let value = match expression.operator {
-            BinaryOperator::Addition => left.value + right.value,
-            BinaryOperator::Subtraction => left.value - right.value,
-            BinaryOperator::Multiplication => left.value * right.value,
-            BinaryOperator::Division if right.value != 0.0 => left.value / right.value,
-            BinaryOperator::Remainder if right.value != 0.0 => left.value % right.value,
-            BinaryOperator::Exponential => left.value.powf(right.value),
-            _ => return,
-        };
-        if !value.is_finite() {
-            return;
-        }
-        if self.folds.len() >= MAX_TRANSFORMATIONS {
-            self.truncated = true;
-            return;
-        }
-        self.folds.push(NumericFold {
-            start: expression.span.start,
-            end: expression.span.end,
-            replacement: value.to_string(),
-        });
-    }
 }
 
 fn error_response(message: impl Into<String>) -> Response {
@@ -144,23 +96,23 @@ fn analyze(request: Request) -> Response {
     let mut transformations = Vec::new();
     let mut transformations_truncated = false;
     if parsed_ok {
-        let mut folder = NumericFolder::default();
+        let mut folder = fold::Folder::new(&request.source, &parsed.program);
         folder.visit_program(&parsed.program);
         transformations_truncated = folder.truncated;
-        folder.folds.sort_by_key(|fold| fold.start);
+        folder.rewrites.sort_by_key(|fold| fold.original_start);
         // Copy untouched slices once, instead of repeatedly shifting the tail.
         derived_source.clear();
         let mut offset = 0;
-        for fold in folder.folds {
-            let start = fold.start as usize;
-            let end = fold.end as usize;
+        for fold in folder.rewrites {
+            let start = fold.original_start as usize;
+            let end = fold.original_end as usize;
             derived_source.push_str(&request.source[offset..start]);
             derived_source.push_str(&fold.replacement);
             offset = end;
             transformations.push(Transformation {
-                kind: "constant-fold",
-                original_start: fold.start,
-                original_end: fold.end,
+                kind: fold.kind,
+                original_start: fold.original_start,
+                original_end: fold.original_end,
                 replacement: fold.replacement,
             });
         }
@@ -266,7 +218,7 @@ mod tests {
         assert!(response.ok);
         assert_eq!(
             response.derived_source,
-            "const value = 1 + 6; const unsafe = 1 / 0;"
+            "const value = (7); const unsafe = 1 / 0;"
         );
         assert_eq!(response.transformations.len(), 1);
         assert_eq!(response.transformations[0].kind, "constant-fold");
@@ -336,6 +288,6 @@ mod framing_tests {
             .map(|s| serde_json::from_slice(s).unwrap())
             .collect();
         assert_eq!(responses[0]["ok"], false);
-        assert_eq!(responses[1]["derived_source"], "3");
+        assert_eq!(responses[1]["derived_source"], "(3)");
     }
 }

@@ -203,11 +203,14 @@ the acceptance and rejection of analysis documents.
 
 ## Native integration and offset units
 
-The native application uses its packaged Rust/Oxc process for numeric constant
-folding and serves `/api/deobfuscation?artifact_id=...&mode=derived`. This engine
+The native application uses its packaged Rust/Oxc process for bounded static AST
+rewriting and serves `/api/deobfuscation?artifact_id=...&mode=derived`. This engine
 reports `unclassified` with null confidence and an explicit omission for
-classification and string-table recovery. The development server retains the
-Python analysis described above. Responses name their engine and retain the
+classification and dynamic decoding. The development server uses the same
+Rust derivation when built, alongside the Python classification described above.
+Without a worker it retains the labelled Python lexical mode. The supported
+passes and unresolved cases are specified in
+[method coverage](deobfuscation-method-coverage.md). Responses name their engine and retain the
 original source for comparison; neither engine executes it.
 
 Python segment offsets are Unicode code points (`unicode-code-point`), not

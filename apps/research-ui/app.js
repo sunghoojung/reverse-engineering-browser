@@ -5976,9 +5976,7 @@
         }
         const original = source.deobfuscation?.original_source ?? source.content ?? '';
         const derived = state.sourcePretty && source.kind === 'javascript' ? sourceDerivedView(source) : null;
-        const content = derived?.text ?? (state.sourcePretty && source.kind === 'javascript'
-          ? formatJavaScript(original)
-          : original);
+        const content = derived?.text ?? original;
         const lineMap = derived ? derivedLineMap(source.deobfuscation?.original_source ?? original, content, derived.segments ?? [], derived.offset_unit) : null;
         const lines = content.split('\n');
         const renderedLines = lines.slice(0, 20000);
@@ -6074,10 +6072,7 @@
         elements.sourceLocation.title = source?.url || (source ? sourceDisplayName(source) : '');
         elements.sourceSize.textContent = source ? formatByteSize(source.byte_size) : '0 bytes';
         elements.sourceHash.textContent = source?.sha256 ? `${source.source_type === 'script' ? 'hash' : 'sha256'} ${source.sha256}` : '';
-        const derived = sourceDerivedView(source);
-        elements.sourceViewKind.textContent = state.sourcePretty
-          ? derived ? 'Derived · mapped to original source' : 'Readable derived view'
-          : source?.source_type === 'script' ? 'Live runtime source' : 'Original evidence';
+        elements.sourceViewKind.textContent = sourceViewLabel(source);
         elements.sourcePretty.disabled = source?.kind !== 'javascript' || !source.content;
         elements.sourcePretty.setAttribute('aria-pressed', String(state.sourcePretty));
         elements.sourcePretty.setAttribute('aria-label', state.sourcePretty ? 'Show original evidence' : 'Show deobfuscated representation');
@@ -6089,6 +6084,14 @@
         renderSourceContent(source);
         if ((source?.source_type === 'script' || source?.source_type === 'artifact') && source.kind === 'javascript') loadDeobfuscation(source);
         renderDeobfuscationReport(source);
+      }
+
+      function sourceViewLabel(source) {
+        if (state.sourcePretty && sourceDerivedView(source)) return 'Derived · mapped to original source';
+        const original = source?.source_type === 'script' ? 'Live runtime source' : 'Original evidence';
+        if (!state.sourcePretty || !source) return original;
+        const request = state.deobfuscationRequests.get(deobfuscationKey(source));
+        return `${original} · ${request?.status === 'error' ? 'analysis failed' : 'analysis pending'}`;
       }
 
       function sourceDerivedView(source) {
@@ -6209,7 +6212,7 @@
           transformations.append(deobfuscationRow(entry.id, `${entry.detail} (${entry.count})`));
         });
         const omissions = (analysis.omissions ?? []).map(message => deobfuscationRow('Unavailable', message));
-        container.replaceChildren(deobfuscationRow('Engine', payload.engine === 'rust-oxc' ? 'Numeric constant folding' : 'Classification and formatting'), ...rows, evidence, ...(analysis.omissions?.length ? [] : [tables]), transformations, ...omissions);
+        container.replaceChildren(deobfuscationRow('Engine', payload.engine === 'rust-oxc' ? 'Static AST deobfuscation (Rust)' : 'Classification and formatting'), ...rows, evidence, ...(analysis.omissions?.length ? [] : [tables]), transformations, ...omissions);
       }
 
       async function loadArtifactContent(artifact) {

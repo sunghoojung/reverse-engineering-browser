@@ -53,7 +53,10 @@ final class NativeDeobfuscationService {
     let resultFile = try FileHandle(forReadingFrom: outputURL)
     defer { try? resultFile.close() }
     let bytes = try resultFile.read(upToCount: 32 * 1024 * 1024 + 1) ?? Data()
-    guard process.terminationStatus == 0, bytes.count <= 32 * 1024 * 1024,
+    guard process.terminationStatus == 0 else {
+      throw NativeDecoderError(status: 502, message: "JavaScript analysis worker terminated unexpectedly; original source is preserved")
+    }
+    guard bytes.count <= 32 * 1024 * 1024,
       let result = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
       result["schema"] as? String == "reb-deobfuscator-worker-v1",
       let derived = result["derived_source"] as? String,
@@ -88,8 +91,11 @@ final class NativeDeobfuscationService {
       throw NativeDecoderError(status: 502, message: "Deobfuscation worker returned an inconsistent source map")
     }
     let truncated = result["transformations_truncated"] as? Bool ?? false
-    let transformations: [[String: Any]] = [["id": "constant-fold", "kind": "rewrite",
-      "count": rewrites.count, "detail": "Folded finite numeric literal expressions without executing JavaScript."]]
+    let counts = Dictionary(grouping: rewrites, by: { $0["kind"] as? String ?? "unknown" })
+    let transformations: [[String: Any]] = counts.keys.sorted().map { kind in
+      ["id": kind, "kind": "rewrite", "count": counts[kind]?.count ?? 0,
+        "detail": "Static AST rewrite with original-source mapping; no JavaScript execution."]
+    }
     let summary: [String: Any] = ["status": derived == text ? "unchanged" : "derived",
       "derived_bytes": derived.utf8.count, "segment_count": segments.count,
       "truncated": truncated, "transformations": transformations]
@@ -100,7 +106,7 @@ final class NativeDeobfuscationService {
         "scores": [:], "alternatives": []],
       "stats": result["evidence"] ?? [:], "representation": summary, "string_tables": [],
       "limits": ["max_source_bytes": Self.maximumSourceBytes, "max_transformations": 4096],
-      "omissions": ["Classification and string-table recovery are not implemented by the Rust engine."]]
+      "omissions": ["Classification is unavailable. Dynamic decoders, object/array coercion, sparse indices, mutable or escaping tables, and cross-scope propagation remain unresolved."]]
     var response: [String: Any] = ["schema": "deobfuscation-analysis-v1",
       "engine": "rust-oxc", "artifact_id": artifactID, "script_id": NSNull(), "mode": mode,
       "source_truncated": false, "original_source": text, "analysis": analysis]

@@ -70,6 +70,27 @@ const renderSources = () => { if(calls > 8) throw new Error('retry loop'); loadD
 '''
         self.assertEqual(self.node(program), {'failedCalls': 1, 'calls': 4, 'retained': True})
 
+    def test_failed_or_pending_analysis_is_labelled_as_original(self):
+        app = (UI_DIRECTORY / 'app.js').read_text()
+        start = app.index('      function sourceViewLabel(')
+        end = app.index('      function revealOriginalLine(', start)
+        program = app[start:end] + """
+const state = {sourcePretty:true,deobfuscationRequests:new Map()};
+const source = {key:'artifact:9',source_type:'artifact'};
+const deobfuscationKey = source => source.key;
+const pending = sourceViewLabel(source);
+state.deobfuscationRequests.set(source.key,{status:'error'});
+const failed = sourceViewLabel(source);
+source.deobfuscation = {representation:{text:'3'}};
+const retained = sourceViewLabel(source);
+console.log(JSON.stringify({pending,failed,retained}));
+"""
+        self.assertEqual(self.node(program), {
+            'pending': 'Original evidence · analysis pending',
+            'failed': 'Original evidence · analysis failed',
+            'retained': 'Derived · mapped to original source',
+        })
+
     def test_deobfuscation_remains_in_sources(self):
         from html.parser import HTMLParser
 

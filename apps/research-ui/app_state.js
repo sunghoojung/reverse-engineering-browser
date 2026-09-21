@@ -82,6 +82,7 @@
         selectedArtifactId: null,
         artifactRefreshing: false,
         artifactEtag: null,
+        artifactCatalogSignature: null,
         artifactReceiverConfigured: false,
         artifactReceiverConnected: false,
         artifactReceiverError: null,
@@ -141,11 +142,8 @@
         vmAnalysisError: null,
         vmAnalysisRequestId: null,
         vmAnalysisEtag: null,
-        deobfuscationSelectedKey: null,
-        deobfuscationTab: 'analysis',
-        deobfuscationStatus: 'idle',
-        deobfuscationError: null,
         deobfuscationCache: new Map(),
+        deobfuscationRequests: new Map(),
         originTrace: null,
         originTraceStatus: 'idle',
         originTraceError: null,
@@ -641,29 +639,6 @@
         vmCount: document.querySelector('#vm-count'),
         vmList: document.querySelector('#vm-list'),
         vmDetail: document.querySelector('#vm-detail'),
-        deobfuscationNotice: document.querySelector('#deobfuscation-notice'),
-        deobfuscationSourceCount: document.querySelector('#deobfuscation-source-count'),
-        deobfuscationSourceList: document.querySelector('#deobfuscation-source-list'),
-        deobfuscationEmpty: document.querySelector('#deobfuscation-empty'),
-        deobfuscationAnalysis: document.querySelector('#deobfuscation-analysis'),
-        deobfuscationSourceTitle: document.querySelector('#deobfuscation-source-title'),
-        deobfuscationSourceMeta: document.querySelector('#deobfuscation-source-meta'),
-        deobfuscationOpenSource: document.querySelector('#deobfuscation-open-source'),
-        deobfuscationMetrics: document.querySelector('#deobfuscation-metrics'),
-        deobfuscationPanelAnalysis: document.querySelector('#deobfuscation-panel-analysis'),
-        deobfuscationPanelDerived: document.querySelector('#deobfuscation-panel-derived'),
-        deobfuscationPanelTables: document.querySelector('#deobfuscation-panel-tables'),
-        deobfuscationRefresh: document.querySelector('#deobfuscation-refresh')
-        ,deobfuscationSourceSelect: document.querySelector('#deobfuscation-source-select')
-        ,deobfuscationOriginalCode: document.querySelector('#deobfuscation-original-code')
-        ,deobfuscationDerivedCode: document.querySelector('#deobfuscation-derived-code')
-        ,deobfuscationOriginalMeta: document.querySelector('#deobfuscation-original-meta')
-        ,deobfuscationDerivedMeta: document.querySelector('#deobfuscation-derived-meta')
-        ,deobfuscationTransformList: document.querySelector('#deobfuscation-transform-list')
-        ,deobfuscationConfidence: document.querySelector('#deobfuscation-confidence')
-        ,deobfuscationEvidenceCount: document.querySelector('#deobfuscation-evidence-count')
-        ,deobfuscationSegmentCount: document.querySelector('#deobfuscation-segment-count')
-        ,deobfuscationStringCount: document.querySelector('#deobfuscation-string-count')
       };
 
       const analystElements = {

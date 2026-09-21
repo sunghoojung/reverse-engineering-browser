@@ -391,6 +391,7 @@ def derive_representation(
     )
     document: dict[str, Any] = {
         "text": derived_text,
+        "offset_unit": "unicode-code-point",
         "segments": segments,
         "transformations": transformations,
         "segment_count": len(segments),
@@ -924,7 +925,7 @@ def verify_deobfuscation_document(document: Any) -> dict[str, Any]:
     classification = document.get("classification")
     if not isinstance(classification, dict):
         raise DeobfuscationError("Analysis document is missing a classification")
-    if classification.get("label") not in CLASSIFICATION_LABELS:
+    if classification.get("label") not in (*CLASSIFICATION_LABELS, "unclassified"):
         raise DeobfuscationError("Analysis classification label is invalid")
     if not isinstance(classification.get("evidence"), list):
         raise DeobfuscationError("Analysis classification is missing evidence")

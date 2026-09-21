@@ -3131,7 +3131,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn('"runtime_hooks": [', application)
         self.assertIn('"automation_recipes": [', application)
         self.assertIn('"repeater": [', application)
-        self.assertIn(r'let etag = "\"debugger-unavailable-v4\""', application)
+        self.assertIn(r'let etag = "\"debugger-unavailable-v5\""', application)
         self.assertIn("debuggerContractValid: isDebuggerResponse(state.debuggerSession)", application)
         self.assertIn("objectExperimentAvailable: state.debuggerSession?.object_experiment?.protocol_version === 1", application)
         self.assertIn("runtimeHooksAvailable: state.debuggerSession?.runtime_hooks?.protocol_version === 1", application)

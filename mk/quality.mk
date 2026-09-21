@@ -16,7 +16,7 @@ ui-test: heap-snapshot decoder debugger-transport
 
 deob-worker-test:
 	@command -v cargo >/dev/null 2>&1 || { echo "Cargo is not installed" >&2; exit 1; }
-	cargo test --manifest-path apps/deobfuscator-worker/Cargo.toml
+	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 
 sanitize:
 	$(MAKE) BUILD_DIR=$(SANITIZE_BUILD_DIR) clean

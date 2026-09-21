@@ -5599,7 +5599,7 @@
             byte_size: script.length,
             sha256: script.hash,
             sensitive: false,
-            deobfuscation: state.deobfuscationCache?.get(`script:${script.script_id}`) ?? null
+            deobfuscation: state.deobfuscationCache?.get(deobfuscationKey({key: `script:${script.script_id}`, target_id: state.debuggerSession?.target?.id, sha256: script.hash})) ?? null
           };
         });
       }
@@ -5609,7 +5609,7 @@
           .filter(artifact => artifact.kind !== 'canvas_data_url')
           .map(artifact => {
             const key = `artifact:${artifact.artifact_id}`;
-            return { ...artifact, source_type: 'artifact', key, deobfuscation: state.deobfuscationCache?.get(key) ?? null };
+            return { ...artifact, source_type: 'artifact', key, deobfuscation: state.deobfuscationCache?.get(deobfuscationKey({...artifact, key})) ?? null };
           });
       }
 
@@ -5974,12 +5974,12 @@
           elements.sourceCodeEmpty.textContent = source.loadError;
           return;
         }
-        const original = source.content ?? '';
+        const original = source.deobfuscation?.original_source ?? source.content ?? '';
         const derived = state.sourcePretty && source.kind === 'javascript' ? sourceDerivedView(source) : null;
         const content = derived?.text ?? (state.sourcePretty && source.kind === 'javascript'
           ? formatJavaScript(original)
           : original);
-        const lineMap = derived ? derivedLineMap(original, content, derived.segments ?? []) : null;
+        const lineMap = derived ? derivedLineMap(source.deobfuscation?.original_source ?? original, content, derived.segments ?? [], derived.offset_unit) : null;
         const lines = content.split('\n');
         const renderedLines = lines.slice(0, 20000);
         const breakpointsByLine = breakpointLinesForSource(source);
@@ -6076,7 +6076,7 @@
         elements.sourceHash.textContent = source?.sha256 ? `${source.source_type === 'script' ? 'hash' : 'sha256'} ${source.sha256}` : '';
         const derived = sourceDerivedView(source);
         elements.sourceViewKind.textContent = state.sourcePretty
-          ? derived ? 'Deobfuscated · mapped to original bytes' : 'Readable derived view'
+          ? derived ? 'Derived · mapped to original source' : 'Readable derived view'
           : source?.source_type === 'script' ? 'Live runtime source' : 'Original evidence';
         elements.sourcePretty.disabled = source?.kind !== 'javascript' || !source.content;
         elements.sourcePretty.setAttribute('aria-pressed', String(state.sourcePretty));
@@ -6098,34 +6098,52 @@
       function revealOriginalLine(source, line, column) {
         state.sourcePretty = false;
         if (source.source_type === 'script') {
-          state.sourceCursor = {scriptId: source.script_id, line, column: column ?? 0};
+          state.sourceCursor = {scriptId: source.script_id, line: sourceRuntimeLine(source, line), column: (column ?? 0) + sourceRuntimeColumn(source, line)};
         }
         renderSources();
+        const runtimeLine = sourceRuntimeLine(source, line);
+        const row = [...elements.sourceCode.querySelectorAll('.source-line')].find(candidate => Number(candidate.dataset.line) === runtimeLine + 1);
+        if (row) {
+          row.tabIndex = -1;
+          row.focus({preventScroll: true});
+          row.scrollIntoView({block: 'center'});
+        }
       }
 
-      async function loadDeobfuscation(source) {
+      function deobfuscationKey(source) {
+        return `${source.key}|${source.target_id ?? ''}|${source.sha256 ?? ''}`;
+      }
+
+      async function loadDeobfuscation(source, {retry = false} = {}) {
         const sourceId = source?.source_type === 'artifact' ? source.artifact_id : source?.script_id;
         const sourceParam = source?.source_type === 'artifact' ? 'artifact_id' : 'script_id';
-        if (!sourceId || source.deobfuscationLoading || state.deobfuscationCache.has(source.key)) return;
-        source.deobfuscationLoading = true;
-        state.deobfuscationStatus = 'loading';
+        if (!sourceId) return;
+        const key = deobfuscationKey(source);
+        const previous = state.deobfuscationRequests.get(key);
+        if (previous?.status === 'loading' || (!retry && (previous?.status === 'error' || state.deobfuscationCache.has(key)))) return;
+        const request = {status: 'loading', error: null};
+        state.deobfuscationRequests.set(key, request);
+        for (const [oldKey, oldRequest] of state.deobfuscationRequests) {
+          if (state.deobfuscationRequests.size <= 128) break;
+          if (oldKey !== key && oldRequest.status !== 'loading') state.deobfuscationRequests.delete(oldKey);
+        }
         try {
-          const response = await fetch(`/api/deobfuscation?${sourceParam}=${encodeURIComponent(sourceId)}&mode=derived`, { cache: 'no-store' });
-          if (!response.ok) throw new Error(`Deobfuscation analysis returned ${response.status}`);
-          source.deobfuscation = await response.json();
-          state.deobfuscationCache.set(source.key, source.deobfuscation);
-          if (selectedSource()?.key === source.key && source.deobfuscation?.representation?.text) state.sourcePretty = true;
-          source.deobfuscationError = null;
-          state.deobfuscationStatus = 'ready';
-          state.deobfuscationError = null;
+          const response = await fetch(`/api/deobfuscation?${sourceParam}=${encodeURIComponent(sourceId)}&mode=derived`, {cache: 'no-store'});
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || `Deobfuscation analysis returned ${response.status}`);
+          if (payload.schema !== 'deobfuscation-analysis-v1' || !payload.analysis || !payload.representation || typeof payload.original_source !== 'string') {
+            throw new Error('The analyzer returned an invalid document.');
+          }
+          state.deobfuscationCache.delete(key);
+          state.deobfuscationCache.set(key, payload);
+          // Each document may contain several MiB. Retain at most eight sources.
+          while (state.deobfuscationCache.size > 8) state.deobfuscationCache.delete(state.deobfuscationCache.keys().next().value);
+          request.status = 'ready';
         } catch (error) {
-          source.deobfuscationError = error.message;
-          state.deobfuscationStatus = 'error';
-          state.deobfuscationError = error.message;
+          request.status = 'error';
+          request.error = error.message;
         } finally {
-          source.deobfuscationLoading = false;
           if (selectedSource()?.key === source.key) renderSources();
-          if (!document.querySelector('#screen-deobfuscation').hidden) renderDeobfuscationLab();
         }
       }
 
@@ -6148,20 +6166,24 @@
           container.textContent = 'Select a JavaScript source to analyze.';
           return;
         }
-        if (target.deobfuscationError) {
-          container.textContent = target.deobfuscationError;
+        const request = state.deobfuscationRequests.get(deobfuscationKey(target));
+        if (request?.status === 'error') {
+          const retry = textElement('button', 'secondary-button', 'Retry analysis');
+          retry.type = 'button';
+          retry.addEventListener('click', () => loadDeobfuscation(target, {retry: true}));
+          container.replaceChildren(document.createTextNode(request.error), retry);
           return;
         }
         const payload = target.deobfuscation;
         if (!payload) {
-          container.textContent = target.deobfuscationLoading ? 'Analyzing captured source…' : 'No analysis is loaded for this source.';
+          container.textContent = request?.status === 'loading' ? 'Analyzing captured source…' : 'No analysis is loaded for this source.';
           return;
         }
         const analysis = payload.analysis ?? {};
         const classification = analysis.classification ?? {};
         const representation = analysis.representation ?? {};
         const rows = [
-          deobfuscationRow('Classification', `${classification.label ?? 'unknown'} · confidence ${classification.confidence ?? 0}`),
+          deobfuscationRow('Classification', `${classification.label ?? 'unclassified'}${classification.confidence == null ? '' : ` · confidence ${classification.confidence}`}`),
           deobfuscationRow('Representation', `${representation.status ?? 'unknown'} · ${representation.segment_count ?? 0} mapped segments${representation.truncated ? ' · truncated' : ''}`),
           deobfuscationRow('Source', `${analysis.source?.lines ?? 0} lines · ${formatByteSize(analysis.source?.byte_size ?? 0)}`),
         ];
@@ -6176,7 +6198,7 @@
         tables.append(deobfuscationRow('String tables', tableList.length ? String(tableList.length) : 'none recovered'));
         tableList.slice(0, 4).forEach(table => {
           tables.append(deobfuscationRow(
-            `${table.kind} at byte ${table.offset}`,
+            `${table.kind} at character ${table.offset}`,
             `${table.entry_count} entries · ${(table.encodings ?? []).join(', ')}${table.decoded_preview ? ` · ${table.decoded_preview.slice(0, 48)}` : ''}`
           ));
         });
@@ -6186,105 +6208,8 @@
         (representation.transformations ?? []).slice(0, 6).forEach(entry => {
           transformations.append(deobfuscationRow(entry.id, `${entry.detail} (${entry.count})`));
         });
-        container.replaceChildren(...rows, evidence, tables, transformations);
-      }
-
-      function deobfuscationSources() {
-        return [...capturedSources(), ...liveSources()]
-          .filter(source => source.kind === 'javascript')
-          .map(source => ({ ...source, deobfuscation: state.deobfuscationCache.get(source.key) ?? null }))
-          .sort((left, right) => sourceDisplayName(left).localeCompare(sourceDisplayName(right)));
-      }
-
-      function selectedDeobfuscationSource() {
-        return deobfuscationSources().find(source => source.key === state.deobfuscationSelectedKey) ?? null;
-      }
-
-      function setDeobfuscationNotice(kind, message) {
-        elements.deobfuscationNotice.dataset.kind = kind;
-        elements.deobfuscationNotice.textContent = message;
-        elements.deobfuscationNotice.hidden = false;
-      }
-
-      function renderDeobfuscationPanel(source) {
-        const payload = source?.deobfuscation;
-        const analysis = payload?.analysis;
-        if (!source || !analysis) {
-          renderDeobfuscationCode(elements.deobfuscationOriginalCode, '', null, 'Select a captured JavaScript source.');
-          renderDeobfuscationCode(elements.deobfuscationDerivedCode, '', null, 'Run analysis to reveal the derived source.');
-          elements.deobfuscationOriginalMeta.textContent = 'original evidence';
-          elements.deobfuscationDerivedMeta.textContent = 'awaiting analysis';
-          elements.deobfuscationConfidence.textContent = 'No source selected';
-          elements.deobfuscationEvidenceCount.textContent = '0 evidence markers';
-          elements.deobfuscationSegmentCount.textContent = '0 mapped segments';
-          elements.deobfuscationStringCount.textContent = '0 string tables';
-          elements.deobfuscationTransformList.replaceChildren();
-          return;
-        }
-        elements.deobfuscationSourceTitle.textContent = sourceDisplayName(source);
-        elements.deobfuscationSourceMeta.textContent = `${sourceOrigin(source)} · ${formatByteSize(source.byte_size ?? analysis.source?.byte_size ?? 0)} · ${analysis.source?.sha256 ?? source.sha256 ?? 'hash unavailable'}`;
-        const raw = source.content || source.text || source.body || '[Original source bytes are not loaded]';
-        const derived = payload.representation?.text ?? 'Derived representation unavailable.';
-        renderDeobfuscationCode(elements.deobfuscationOriginalCode, raw, source);
-        renderDeobfuscationCode(elements.deobfuscationDerivedCode, derived, source);
-        elements.deobfuscationOriginalMeta.textContent = `${analysis.source?.lines ?? 0} lines · ${formatByteSize(analysis.source?.byte_size ?? 0)}`;
-        elements.deobfuscationDerivedMeta.textContent = `${analysis.representation?.status ?? 'mapped'} · ${analysis.representation?.segment_count ?? 0} segments`;
-        elements.deobfuscationConfidence.textContent = `${String(analysis.classification?.label ?? 'unknown').toUpperCase()} · ${analysis.classification?.confidence ?? 0}% confidence`;
-        elements.deobfuscationEvidenceCount.textContent = `${analysis.classification?.evidence?.length ?? 0} evidence markers`;
-        elements.deobfuscationSegmentCount.textContent = `${analysis.representation?.segment_count ?? 0} mapped segments`;
-        elements.deobfuscationStringCount.textContent = `${analysis.string_tables?.length ?? 0} string tables`;
-        const transformations = analysis.representation?.transformations ?? [];
-        elements.deobfuscationTransformList.replaceChildren(...transformations.slice(0, 8).map(entry => {
-          const marker = document.createElement('div'); marker.className = 'deobfuscation-transform-marker';
-          marker.append(textElement('span', '', '→'), textElement('strong', '', String(entry.count ?? 0)));
-          marker.title = `${entry.id}: ${entry.detail}`;
-          return marker;
-        }));
-      }
-
-      function renderDeobfuscationCode(container, content, source, emptyMessage = '') {
-        if (!content) {
-          container.replaceChildren(textElement('span', 'deobfuscation-empty', emptyMessage));
-          return;
-        }
-        const tokenizer = createSourceTokenizer({ ...(source ?? {}), kind: 'javascript', mime_type: 'application/javascript' });
-        const fragment = document.createDocumentFragment();
-        content.split('\n').slice(0, 20000).forEach((line, index) => {
-          const row = document.createElement('span');
-          row.className = 'deobfuscation-source-line';
-          const number = textElement('span', 'deobfuscation-line-number', String(index + 1));
-          const code = document.createElement('span');
-          code.className = 'deobfuscation-line-code';
-          appendSourceSyntax(code, sourceSyntaxTokens(line, tokenizer));
-          row.append(number, code);
-          fragment.append(row);
-        });
-        container.replaceChildren(fragment);
-      }
-
-      function renderDeobfuscationLab() {
-        const sources = deobfuscationSources();
-        elements.deobfuscationSourceCount.textContent = String(sources.length);
-        if (!sources.length) {
-          setDeobfuscationNotice('empty', 'No JavaScript artifacts or live scripts are available for analysis.');
-        } else if (state.deobfuscationStatus === 'loading') {
-          setDeobfuscationNotice('loading', 'Analyzing the selected source with bounded, evidence-only transforms…');
-        } else if (state.deobfuscationError) {
-          setDeobfuscationNotice('disconnected', state.deobfuscationError);
-        } else {
-          elements.deobfuscationNotice.hidden = true;
-        }
-        if (!sources.some(source => source.key === state.deobfuscationSelectedKey)) state.deobfuscationSelectedKey = sources[0]?.key ?? null;
-        elements.deobfuscationSourceSelect.replaceChildren(...sources.map(source => {
-          const option = document.createElement('option'); option.value = source.key; option.textContent = sourceDisplayName(source); return option;
-        }));
-        elements.deobfuscationSourceSelect.value = state.deobfuscationSelectedKey ?? '';
-        renderDeobfuscationPanel(selectedDeobfuscationSource());
-      }
-
-      function setDeobfuscationTab(tab) {
-        state.deobfuscationTab = tab;
-        renderDeobfuscationPanel(selectedDeobfuscationSource());
+        const omissions = (analysis.omissions ?? []).map(message => deobfuscationRow('Unavailable', message));
+        container.replaceChildren(deobfuscationRow('Engine', payload.engine === 'rust-oxc' ? 'Numeric constant folding' : 'Classification and formatting'), ...rows, evidence, ...(analysis.omissions?.length ? [] : [tables]), transformations, ...omissions);
       }
 
       async function loadArtifactContent(artifact) {
@@ -7697,6 +7622,12 @@
           }
           state.artifactReceiverError = null;
           renderShellStatus();
+          const catalogSignature = JSON.stringify(body.artifacts);
+          if (catalogSignature === state.artifactCatalogSignature) {
+            renderSourceHealth();
+            return;
+          }
+          state.artifactCatalogSignature = catalogSignature;
           if (body.artifacts.length === 0) {
             if (state.sessionMode === 'live') {
               state.artifacts = [];
@@ -7786,12 +7717,6 @@
         if (screenName === 'vm') {
           if (trigger?.id === 'nav-vm' && state.vmAnalysisRequestId !== null) refreshVmAnalysis(null);
           renderVmLab();
-        }
-        if (screenName === 'deobfuscation') {
-          renderDeobfuscationLab();
-          refreshArtifacts().then(renderDeobfuscationLab);
-          const source = selectedDeobfuscationSource();
-          if (source) loadDeobfuscation(source);
         }
         if (!trigger?.classList.contains('nav-button')) {
           requestAnimationFrame(() => {
@@ -7986,29 +7911,6 @@
         if (button.dataset.screen === 'signals') await refreshRequestSignalProfile();
       }));
 
-      document.querySelectorAll('[data-deob-tab]').forEach(tab => tab.addEventListener('click', () => setDeobfuscationTab(tab.dataset.deobTab)));
-      elements.deobfuscationSourceSelect?.addEventListener('change', () => {
-        state.deobfuscationSelectedKey = elements.deobfuscationSourceSelect.value || null;
-        state.deobfuscationError = null;
-        state.deobfuscationStatus = 'loading';
-        renderDeobfuscationLab();
-        const source = selectedDeobfuscationSource();
-        if (source) loadDeobfuscation(source);
-      });
-      elements.deobfuscationRefresh?.addEventListener('click', async () => {
-        state.deobfuscationSelectedKey = null;
-        state.deobfuscationError = null;
-        await refreshArtifacts();
-        renderDeobfuscationLab();
-        const source = selectedDeobfuscationSource();
-        if (source) loadDeobfuscation(source);
-      });
-      elements.deobfuscationOpenSource?.addEventListener('click', () => {
-        const source = selectedDeobfuscationSource();
-        if (!source) return;
-        showScreen('sources', elements.deobfuscationOpenSource);
-        source.source_type === 'script' ? selectScript(source.script_id) : selectArtifact(source.artifact_id);
-      });
       elements.signalFilters.forEach(button => button.addEventListener('click', () => {
         state.signalCategoryFilter = button.dataset.signalFilter;
         renderFingerprintActivity();

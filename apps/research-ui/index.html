@@ -346,23 +346,6 @@
             </div>
           </section>
 
-          <section id="screen-deobfuscation" class="screen" aria-label="Deobfuscation workspace" hidden>
-            <header class="deobfuscation-commandbar">
-              <div class="deobfuscation-command-title"><span class="deobfuscation-mark">{ }</span><strong>Deobfuscate</strong><span class="deobfuscation-command-meta">evidence-only · no execution</span><span class="deobfuscation-theme">MOON</span></div>
-              <label class="deobfuscation-source-select"><span class="sr-only">Source</span><select id="deobfuscation-source-select" aria-label="JavaScript source"></select></label>
-              <button id="deobfuscation-refresh" class="secondary-button" type="button">Refresh</button>
-              <span id="deobfuscation-notice" class="deobfuscation-ready" data-kind="loading" role="status" aria-live="polite">Loading…</span>
-            </header>
-            <div class="deobfuscation-code-toolbar"><span id="deobfuscation-source-title">Select a JavaScript source</span><span id="deobfuscation-source-meta"></span><button id="deobfuscation-open-source" class="source-tool" type="button">Open in Sources</button></div>
-            <div class="deobfuscation-split" aria-label="Obfuscated and deobfuscated source comparison">
-              <section class="deobfuscation-editor" aria-label="Obfuscated source"><header><span>OBFUSCATED</span><span id="deobfuscation-original-meta">original evidence</span></header><pre id="deobfuscation-original-code" class="deobfuscation-code-pane"><span class="deobfuscation-empty">Select a captured JavaScript source.</span></pre></section>
-              <aside class="deobfuscation-gutter" aria-label="Transform status"><div class="deobfuscation-gutter-label">PASS</div><div id="deobfuscation-transform-list"></div></aside>
-              <section class="deobfuscation-editor" aria-label="Deobfuscated source"><header><span>DEOBFUSCATED</span><span id="deobfuscation-derived-meta">awaiting analysis</span></header><pre id="deobfuscation-derived-code" class="deobfuscation-code-pane"><span class="deobfuscation-empty">Run analysis to reveal the derived source.</span></pre></section>
-            </div>
-            <footer class="deobfuscation-statusline"><span id="deobfuscation-confidence">No source selected</span><span id="deobfuscation-evidence-count">0 evidence markers</span><span id="deobfuscation-segment-count">0 mapped segments</span><span id="deobfuscation-string-count">0 string tables</span></footer>
-            <div id="deobfuscation-analysis" hidden></div><div id="deobfuscation-metrics" hidden></div><div id="deobfuscation-panel-analysis" hidden></div><pre id="deobfuscation-panel-derived" hidden></pre><div id="deobfuscation-panel-tables" hidden></div><div id="deobfuscation-empty" hidden></div><div id="deobfuscation-source-list" hidden></div><span id="deobfuscation-source-count" hidden>0</span>
-          </section>
-
           <section id="screen-backtrace" class="screen" aria-label="Request origin trace" hidden>
             <header class="screen-head">
               <div><h1>Backtraces</h1><div id="backtrace-subtitle" class="screen-subtitle">Follow a request back to its recorded origin.</div></div>

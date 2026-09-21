@@ -19,6 +19,9 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let localAnalystStoreURL: URL
   private let analystRunnerURL: URL
   private let analystRunnerCoreURL: URL
+  private let deobfuscationTasksLock = NSLock()
+  private var deobfuscationTasks = Set<ObjectIdentifier>()
+  private let deobfuscationService: NativeDeobfuscationService
   private let decoderService: NativeDecoderService
   private let brokerSocketURL: URL?
   private let demoEvidenceEnabled: Bool
@@ -53,6 +56,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     self.analystRunnerURL = analystRunnerURL
     self.analystRunnerCoreURL = analystRunnerCoreURL
     decoderService = NativeDecoderService(executableURL: decoderExecutableURL)
+    deobfuscationService = NativeDeobfuscationService(executableURL: decoderExecutableURL.deletingLastPathComponent().appendingPathComponent("OriginTraceDeobfuscator"))
     self.brokerSocketURL = brokerSocketURL
     self.demoEvidenceEnabled = demoEvidenceEnabled
   }
@@ -91,6 +95,9 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         )
       case "/api/health":
         response = (try healthResponse(), "application/json; charset=utf-8", 200, [:])
+      case "/api/deobfuscation":
+        handleDeobfuscation(requestURL, to: urlSchemeTask)
+        return
       case "/api/decoder":
         response = (try decoderService.state(), "application/json; charset=utf-8", 200, [:])
       case "/api/decoder/actions":
@@ -201,7 +208,11 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     }
   }
 
-  func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
+  func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
+    deobfuscationTasksLock.lock()
+    deobfuscationTasks.remove(ObjectIdentifier(urlSchemeTask))
+    deobfuscationTasksLock.unlock()
+  }
 
   private func healthResponse() throws -> Data {
     try JSONSerialization.data(
@@ -1624,7 +1635,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private func debuggerUnavailableResponse(
     ifNoneMatch: String?
   ) throws -> (Data, Int, [String: String]) {
-    let etag = "\"debugger-unavailable-v4\""
+    let etag = "\"debugger-unavailable-v5\""
     if ifNoneMatch == etag {
       return (Data(), 304, ["ETag": etag])
     }
@@ -1643,6 +1654,10 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "watches": [],
         "console": [],
         "heap_diff_baseline": NSNull(),
+        "network": [
+          "capture_enabled": false, "target_id": NSNull(), "requests": [], "dropped": 0,
+          "limits": ["requests": 1_000, "body_bytes": 128 * 1_024, "headers": 128, "header_bytes": 64 * 1_024],
+        ],
         "memory_origin_trace": [
           "protocol_version": 1,
           "trace_id": 0,
@@ -1999,6 +2014,67 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       withJSONObject: ["count": artifacts.count, "artifacts": artifacts],
       options: []
     )
+  }
+
+  private func completeDeobfuscation(_ body: Data, status: Int, to task: WKURLSchemeTask) {
+    DispatchQueue.main.async {
+      self.deobfuscationTasksLock.lock()
+      let active = self.deobfuscationTasks.remove(ObjectIdentifier(task)) != nil
+      self.deobfuscationTasksLock.unlock()
+      if active { self.send(body, contentType: "application/json; charset=utf-8", status: status, headers: [:], to: task) }
+    }
+  }
+
+  private func handleDeobfuscation(_ url: URL, to task: WKURLSchemeTask) {
+    deobfuscationTasksLock.lock()
+    deobfuscationTasks.insert(ObjectIdentifier(task))
+    deobfuscationTasksLock.unlock()
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let artifactID = query.first(where: { $0.name == "artifact_id" })?.value
+        let scriptID = query.first(where: { $0.name == "script_id" })?.value
+        let mode = query.first(where: { $0.name == "mode" })?.value ?? "analysis"
+        guard mode == "analysis" || mode == "derived" else {
+          throw NativeDecoderError(status: 400, message: "Deobfuscation mode is invalid")
+        }
+        guard artifactID != nil || scriptID != nil else {
+          throw NativeDecoderError(status: 400, message: "Script ID or artifact ID is required")
+        }
+        guard artifactID == nil || scriptID == nil else {
+          throw NativeDecoderError(status: 400, message: "Specify only one source identifier")
+        }
+        guard scriptID == nil else {
+          throw NativeDecoderError(status: 409, message: "Live debugging is not enabled")
+        }
+        guard let id = artifactID, UInt64(id) != nil,
+          let artifact = try self.artifactEntries().first(where: { ($0["artifact_id"] as? String) == id }),
+          let relativePath = artifact["content_path"] as? String
+        else { throw NativeDecoderError(status: 404, message: "Artifact not found") }
+        guard artifact["kind"] as? String == "javascript" else {
+          throw NativeDecoderError(status: 400, message: "Artifact is not JavaScript")
+        }
+        let root = self.artifactStoreURL.resolvingSymlinksInPath().standardizedFileURL
+        let path = root.appendingPathComponent(relativePath).resolvingSymlinksInPath().standardizedFileURL
+        guard path.path.hasPrefix(root.path + "/") else {
+          throw NativeDecoderError(status: 400, message: "Artifact path escapes the store")
+        }
+        let file = try FileHandle(forReadingFrom: path)
+        defer { try? file.close() }
+        let source = try file.read(upToCount: NativeDeobfuscationService.maximumSourceBytes + 1) ?? Data()
+        guard source.count == artifact["byte_size"] as? Int else {
+          throw NativeDecoderError(status: 400, message: "Artifact is oversized or does not match its manifest")
+        }
+        let response = try self.deobfuscationService.analyze(source: source, artifactID: id, mode: mode)
+        self.completeDeobfuscation(response, status: 200, to: task)
+      } catch let error as NativeDecoderError {
+        let body = (try? JSONSerialization.data(withJSONObject: ["error": error.message])) ?? Data()
+        self.completeDeobfuscation(body, status: error.status, to: task)
+      } catch {
+        let body = (try? JSONSerialization.data(withJSONObject: ["error": "Artifact analysis is unavailable: \(error.localizedDescription)"])) ?? Data()
+        self.completeDeobfuscation(body, status: 500, to: task)
+      }
+    }
   }
 
   private func artifactContentResponse(for requestURL: URL) throws -> (Data, [String: String]) {
@@ -2896,7 +2972,18 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
         window.__rebSmokeExerciseError = null;
         window.__rebSmokeAnalyst = null;
         window.__rebSmokeDecoder = null;
+        window.__rebSmokeDeobfuscation = null;
         void (async () => {
+          const artifacts = await fetch('/api/artifacts?limit=500').then(response => response.json());
+          const source = artifacts.artifacts?.find(artifact => artifact.kind === 'javascript');
+          if (source) {
+            const response = await fetch(`/api/deobfuscation?artifact_id=${encodeURIComponent(source.artifact_id)}&mode=derived`);
+            const analysis = await response.json();
+            if (!response.ok || analysis.engine !== 'rust-oxc' || analysis.representation?.offset_unit !== 'utf-8-byte') {
+              throw new Error('Packaged deobfuscation endpoint failed');
+            }
+            window.__rebSmokeDeobfuscation = analysis;
+          }
           const decoder = await fetch('/api/decoder', {cache: 'no-store'}).then(response => {
             if (!response.ok) throw new Error(`Decoder GET returned ${response.status}`);
             return response.json();
@@ -3057,6 +3144,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
               decoderAvailable: window.__rebSmokeDecoder?.decoder?.available === true,
               decoderTransformText: window.__rebSmokeDecoder?.transform?.utf8_text ?? null,
               decoderSignatureStatus: window.__rebSmokeDecoder?.verification?.signature_status ?? null,
+              nativeDeobfuscationEngine: window.__rebSmokeDeobfuscation?.engine ?? null,
+              nativeDeobfuscationText: window.__rebSmokeDeobfuscation?.representation?.text ?? null,
               smokeExerciseError: window.__rebSmokeExerciseError,
               traceEnabled: !document.querySelector('#trace-origin')?.disabled,
               traceSteps: document.querySelectorAll('#backtrace-steps .trace-step').length,

@@ -23,6 +23,20 @@ Example request:
 {"source":"const value = 1 + 2 * 3;"}
 ```
 
-The worker is intentionally a separate process. The Python Research UI can
-invoke it through a bounded subprocess adapter after the wire contract and
-transform provenance have stabilized.
+The worker is a separate process bundled as `OriginTraceDeobfuscator` in the
+native macOS app. `DeobfuscationService.swift` invokes it with a five-second
+wall-clock deadline and projects its original UTF-8 byte ranges into the shared
+UI response. It reads only the selected captured JavaScript artifact.
+
+The browser development server continues to use the Python lexical formatter;
+the response identifies its engine. The Rust slice does not classify obfuscation
+or recover string tables. Those omissions are explicit, not zero-confidence
+claims about the input.
+
+Requests are read with bounded buffers. An oversized record is drained through
+the next newline, rejected, and flushed before reading another record. The
+request cap allows JSON escaping of a 4 MiB source. At most 4,096 rewrites and
+64 syntax diagnostics are retained. Further rewrites set
+`transformations_truncated`; the remaining source is preserved unchanged.
+
+See [the response contract](../../protocol/deobfuscation-v1.md).

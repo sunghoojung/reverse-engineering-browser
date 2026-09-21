@@ -501,11 +501,42 @@
       function derivedOriginalOffset(segments, derivedOffset) {
         const segment = derivedSegmentAt(segments, derivedOffset);
         if (!segment || segment.original_start === null || segment.original_start === undefined) return null;
-        if (segment.kind === 'synthetic') return segment.original_start;
+        if (segment.kind === 'synthetic' || segment.kind === 'replacement') return segment.original_start;
         return segment.original_start + (derivedOffset - segment.derived_start);
       }
 
-      function derivedLineMap(originalText, derivedText, segments) {
+      // Wire offsets name their encoding. JavaScript and CDP use UTF-16 units.
+      // Build maps only for segment boundaries, in one scan of each source.
+      function sourceOffsetBoundaries(text, offsets, unit) {
+        const wanted = new Set(offsets);
+        const result = new Map();
+        let wire = 0;
+        let utf16 = 0;
+        for (const character of text) {
+          if (wanted.has(wire)) result.set(wire, utf16);
+          const point = character.codePointAt(0);
+          wire += unit === 'unicode-code-point' ? 1 : point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+          utf16 += character.length;
+        }
+        if (wanted.has(wire)) result.set(wire, utf16);
+        return result;
+      }
+
+      function sourceSegmentsUTF16(original, derived, segments, unit) {
+        if (unit === 'utf-16-code-unit') return segments;
+        // Legacy Python documents used code-point offsets without a unit tag.
+        unit = unit ?? 'unicode-code-point';
+        if (!['unicode-code-point', 'utf-8-byte'].includes(unit)) return [];
+        const originals = sourceOffsetBoundaries(original, segments.flatMap(s => [s.original_start, s.original_end]), unit);
+        const deriveds = sourceOffsetBoundaries(derived, segments.flatMap(s => [s.derived_start, s.derived_end]), unit);
+        return segments.map(segment => ({...segment,
+          original_start: originals.get(segment.original_start), original_end: originals.get(segment.original_end),
+          derived_start: deriveds.get(segment.derived_start), derived_end: deriveds.get(segment.derived_end)
+        }));
+      }
+
+      function derivedLineMap(originalText, derivedText, segments, offsetUnit) {
+        segments = sourceSegmentsUTF16(originalText, derivedText, segments, offsetUnit);
         const starts = sourceLineStarts(originalText);
         const lines = derivedText.split('\n');
         const mapped = [];

@@ -338,6 +338,8 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     "script_id": script_id,
                     "artifact_id": artifact_id,
                     "mode": mode,
+                    "engine": "python-lexical",
+                    "original_source": text_source,
                     "source_truncated": bool(script.get("truncated")) if script_id is not None else False,
                     "analysis": analyze_source(text_source),
                 }
@@ -346,6 +348,9 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                 self.send_json(response)
             except DebuggerBridgeError as exception:
                 self.send_json({"error": str(exception)}, HTTPStatus.CONFLICT)
+                return
+            except FileNotFoundError:
+                self.send_json({"error": "Artifact not found"}, HTTPStatus.NOT_FOUND)
                 return
             except UnicodeDecodeError:
                 self.send_json(

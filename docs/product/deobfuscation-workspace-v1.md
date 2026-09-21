@@ -4,10 +4,10 @@
 
 Deobfuscation Workspace adds a bounded, evidence-only reading of captured
 JavaScript to the Research UI: a classification with the measurements behind
-it, a derived representation with an exact derived-range to original-byte map,
+it, a derived representation with an exact derived-range to original-source map,
 and recovered string tables with a replayable transformation log.
 
-Every derived byte maps back to a source range, so a consumer can always return
+Every derived position maps back to a source range, so a consumer can always return
 to the original evidence. The module never executes analyzed code, resolves
 identifiers, or claims semantics the evidence does not support.
 
@@ -200,3 +200,19 @@ with their evidence, the derived-map invariants and offset mapping, the derived
 budget (including its UTF-8 byte accounting) and source bounds, escape-sequence,
 base64, and code-point string-table recovery (including per-entry offsets), and
 the acceptance and rejection of analysis documents.
+
+## Native integration and offset units
+
+The native application uses its packaged Rust/Oxc process for numeric constant
+folding and serves `/api/deobfuscation?artifact_id=...&mode=derived`. This engine
+reports `unclassified` with null confidence and an explicit omission for
+classification and string-table recovery. The development server retains the
+Python analysis described above. Responses name their engine and retain the
+original source for comparison; neither engine executes it.
+
+Python segment offsets are Unicode code points (`unicode-code-point`), not
+UTF-8 bytes. Native segment offsets are `utf-8-byte`. The UI converts either to
+UTF-16 boundaries before performing location arithmetic. Native `replacement`
+segments map to the start of the rewritten expression; they do not imply a
+one-to-one character correspondence. The shared contract lives in
+[`protocol/deobfuscation-v1.md`](../../protocol/deobfuscation-v1.md).

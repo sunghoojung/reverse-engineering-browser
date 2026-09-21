@@ -9,7 +9,8 @@ use oxc_syntax::operator::BinaryOperator;
 use serde::{Deserialize, Serialize};
 
 const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_REQUEST_BYTES: usize = MAX_SOURCE_BYTES + 64 * 1024;
+const MAX_REQUEST_BYTES: usize = MAX_SOURCE_BYTES * 6 + 64 * 1024;
+const MAX_TRANSFORMATIONS: usize = 4096;
 
 #[derive(Debug, Deserialize)]
 struct Request {
@@ -26,6 +27,7 @@ struct Response {
     evidence: Evidence,
     derived_source: String,
     transformations: Vec<Transformation>,
+    transformations_truncated: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -60,6 +62,7 @@ struct NumericFold {
 #[derive(Default)]
 struct NumericFolder {
     folds: Vec<NumericFold>,
+    truncated: bool,
 }
 
 impl<'a> Visit<'a> for NumericFolder {
@@ -84,6 +87,10 @@ impl<'a> Visit<'a> for NumericFolder {
         if !value.is_finite() {
             return;
         }
+        if self.folds.len() >= MAX_TRANSFORMATIONS {
+            self.truncated = true;
+            return;
+        }
         self.folds.push(NumericFold {
             start: expression.span.start,
             end: expression.span.end,
@@ -106,6 +113,7 @@ fn error_response(message: impl Into<String>) -> Response {
         evidence: Evidence::default(),
         derived_source: String::new(),
         transformations: Vec::new(),
+        transformations_truncated: false,
     }
 }
 
@@ -120,6 +128,7 @@ fn analyze(request: Request) -> Response {
     let syntax_errors = parsed
         .diagnostics
         .iter()
+        .take(64)
         .map(|error| SyntaxError {
             message: error.to_string(),
             start: error.labels.first().map_or(0, |label| label.offset()),
@@ -133,26 +142,29 @@ fn analyze(request: Request) -> Response {
     let parsed_ok = syntax_errors.is_empty();
     let mut derived_source = request.source.clone();
     let mut transformations = Vec::new();
+    let mut transformations_truncated = false;
     if parsed_ok {
         let mut folder = NumericFolder::default();
         folder.visit_program(&parsed.program);
-        folder
-            .folds
-            .sort_by_key(|fold| std::cmp::Reverse(fold.start));
+        transformations_truncated = folder.truncated;
+        folder.folds.sort_by_key(|fold| fold.start);
+        // Copy untouched slices once, instead of repeatedly shifting the tail.
+        derived_source.clear();
+        let mut offset = 0;
         for fold in folder.folds {
             let start = fold.start as usize;
             let end = fold.end as usize;
-            if end <= derived_source.len() && start < end {
-                derived_source.replace_range(start..end, &fold.replacement);
-                transformations.push(Transformation {
-                    kind: "constant-fold",
-                    original_start: fold.start,
-                    original_end: fold.end,
-                    replacement: fold.replacement,
-                });
-            }
+            derived_source.push_str(&request.source[offset..start]);
+            derived_source.push_str(&fold.replacement);
+            offset = end;
+            transformations.push(Transformation {
+                kind: "constant-fold",
+                original_start: fold.start,
+                original_end: fold.end,
+                replacement: fold.replacement,
+            });
         }
-        transformations.reverse();
+        derived_source.push_str(&request.source[offset..]);
     }
 
     Response {
@@ -168,40 +180,77 @@ fn analyze(request: Request) -> Response {
         },
         derived_source,
         transformations,
+        transformations_truncated,
     }
 }
 
-fn main() {
-    let stdin = io::stdin();
-    let mut stdout = io::BufWriter::new(io::stdout().lock());
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(line) if line.len() <= MAX_REQUEST_BYTES => line,
-            Ok(_) => {
-                serde_json::to_writer(
-                    &mut stdout,
-                    &error_response("request exceeds the byte limit"),
-                )
-                .expect("write response");
-                writeln!(stdout).expect("write newline");
-                continue;
+// Read at most limit bytes, then drain the remainder of an oversized record.
+// Keeping framing after rejection allows the next request to succeed.
+fn read_request(reader: &mut impl BufRead, limit: usize) -> io::Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    let mut oversized = false;
+    loop {
+        let chunk = reader.fill_buf()?;
+        if chunk.is_empty() {
+            return if oversized {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "request exceeds the byte limit",
+                ))
+            } else if bytes.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(bytes))
+            };
+        }
+        let end = chunk.iter().position(|byte| *byte == b'\n');
+        let count = end.unwrap_or(chunk.len());
+        if !oversized {
+            if count > limit.saturating_sub(bytes.len()) {
+                oversized = true;
+                bytes.clear();
+            } else {
+                bytes.extend_from_slice(&chunk[..count]);
             }
-            Err(error) => {
-                serde_json::to_writer(&mut stdout, &error_response(error.to_string()))
-                    .expect("write response");
-                writeln!(stdout).expect("write newline");
-                continue;
-            }
-        };
-
-        let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => analyze(request),
-            Err(error) => error_response(format!("invalid request: {error}")),
-        };
-        serde_json::to_writer(&mut stdout, &response).expect("write response");
-        writeln!(stdout).expect("write newline");
-        stdout.flush().expect("flush response");
+        }
+        reader.consume(count + usize::from(end.is_some()));
+        if end.is_some() {
+            return if oversized {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "request exceeds the byte limit",
+                ))
+            } else {
+                Ok(Some(bytes))
+            };
+        }
     }
+}
+
+fn serve(reader: &mut impl BufRead, writer: &mut impl Write) -> io::Result<()> {
+    loop {
+        let response = match read_request(reader, MAX_REQUEST_BYTES) {
+            Ok(None) => return Ok(()),
+            Ok(Some(line)) => match serde_json::from_slice::<Request>(&line) {
+                Ok(request) => analyze(request),
+                Err(error) => error_response(format!("invalid request: {error}")),
+            },
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                error_response(error.to_string())
+            }
+            Err(error) => return Err(error),
+        };
+        serde_json::to_writer(&mut *writer, &response)?;
+        writeln!(writer)?;
+        writer.flush()?;
+    }
+}
+
+fn main() -> io::Result<()> {
+    serve(
+        &mut io::stdin().lock(),
+        &mut io::BufWriter::new(io::stdout().lock()),
+    )
 }
 
 #[cfg(test)]
@@ -245,5 +294,48 @@ mod tests {
         assert!(!response.ok);
         assert!(!response.parsed);
         assert!(response.syntax_errors[0].message.contains("byte limit"));
+    }
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+    use std::io::{BufReader, Cursor};
+
+    #[test]
+    fn drains_oversize_and_preserves_next_record() {
+        let mut reader = BufReader::with_capacity(3, Cursor::new(b"123456789\nok\n"));
+        assert_eq!(
+            read_request(&mut reader, 4).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(read_request(&mut reader, 4).unwrap(), Some(b"ok".to_vec()));
+        assert!(read_request(&mut reader, 4).unwrap().is_none());
+    }
+
+    #[test]
+    fn bounds_unterminated_records_and_accepts_exact_limit() {
+        assert!(read_request(&mut Cursor::new(b"12345"), 4).is_err());
+        assert_eq!(
+            read_request(&mut Cursor::new(b"1234"), 4).unwrap(),
+            Some(b"1234".to_vec())
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_does_not_destroy_framing() {
+        let mut output = Vec::new();
+        serve(
+            &mut Cursor::new(b"\xff\n{\"source\":\"1+2\"}\n"),
+            &mut output,
+        )
+        .unwrap();
+        let responses: Vec<serde_json::Value> = output
+            .split(|b| *b == b'\n')
+            .filter(|s| !s.is_empty())
+            .map(|s| serde_json::from_slice(s).unwrap())
+            .collect();
+        assert_eq!(responses[0]["ok"], false);
+        assert_eq!(responses[1]["derived_source"], "3");
     }
 }

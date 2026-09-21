@@ -2399,7 +2399,7 @@
       }
 
       .sources-debugger[data-attached="false"] .debug-controls,
-      .sources-debugger[data-attached="false"] .debug-panes > :not(#artifact-details) { display: none; }
+      .sources-debugger[data-attached="false"] .debug-panes > :not(#artifact-details):not(#deobfuscation-details) { display: none; }
       .sources-debugger[data-attached="false"] { grid-template-rows: auto minmax(0, 1fr); }
 
       /* Experiment tools share setup, editor, and result panes. */
@@ -2789,53 +2789,7 @@
         #screen-experiments .experiment-column { min-height: auto; }
       }
 
-      /* Deobfuscation comparison surface: code first, evidence second. */
-      #screen-deobfuscation:not([hidden]) { display: grid; grid-template-rows: 48px 34px minmax(0, 1fr) 30px; background: var(--bg); }
-      .deobfuscation-commandbar { display: flex; align-items: center; gap: 9px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--chrome); }
-      .deobfuscation-command-title { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
-      .deobfuscation-mark { color: var(--accent); font: 700 13px var(--mono); }
-      .deobfuscation-command-title strong { font-size: 12px; letter-spacing: .01em; }
-      .deobfuscation-command-meta { color: var(--faint); font: 10px var(--mono); }
-      .deobfuscation-theme { padding: 3px 6px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius: 3px; color: var(--accent); font: 9px var(--mono); letter-spacing: .06em; }
-      .deobfuscation-source-select { min-width: 190px; margin-left: auto; }
-      .deobfuscation-source-select select { width: 100%; height: 28px; padding: 0 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); font: 11px var(--mono); }
-      .deobfuscation-commandbar .secondary-button { min-height: 28px; padding: 0 10px; }
-      .deobfuscation-ready { display: inline-flex; align-items: center; gap: 6px; color: var(--green); font: 10px var(--mono); text-transform: uppercase; }
-      .deobfuscation-ready::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-      .deobfuscation-ready[data-kind="loading"] { color: var(--amber); }
-      .deobfuscation-ready[data-kind="disconnected"] { color: var(--red); }
-      .deobfuscation-code-toolbar { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 0 12px; border-bottom: 1px solid var(--line-soft); background: var(--panel); }
-      .deobfuscation-code-toolbar > span:first-child { overflow: hidden; color: var(--text); font: 11px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
-      #deobfuscation-source-meta { overflow: hidden; color: var(--faint); font: 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
-      .deobfuscation-code-toolbar .source-tool { margin-left: auto; }
-      .deobfuscation-split { display: grid; grid-template-columns: minmax(0, 1fr) 42px minmax(0, 1fr); min-height: 0; overflow: hidden; }
-      .deobfuscation-editor { display: grid; grid-template-rows: 32px minmax(0, 1fr); min-width: 0; min-height: 0; background: var(--panel); }
-      .deobfuscation-editor + .deobfuscation-editor { border-left: 1px solid var(--line); }
-      .deobfuscation-editor > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--chrome); color: var(--accent); font: 650 10px var(--mono); letter-spacing: .06em; }
-      .deobfuscation-editor > header span:last-child { overflow: hidden; color: var(--faint); font-size: 9px; font-weight: 400; letter-spacing: 0; text-overflow: ellipsis; white-space: nowrap; }
-      .deobfuscation-code-pane { min-height: 0; margin: 0; padding: 5px 0 24px; overflow: auto; color: var(--text); font: 11px/20px var(--mono); tab-size: 2; white-space: pre; }
-      .deobfuscation-source-line { min-height: 20px; display: grid; grid-template-columns: 42px minmax(max-content, 1fr); padding-right: 16px; white-space: pre; }
-      .deobfuscation-line-number { padding-right: 8px; border-right: 1px solid var(--line-soft); color: var(--faint); text-align: right; user-select: none; }
-      .deobfuscation-line-code { padding-left: 9px; }
-      #deobfuscation-original-code { color: color-mix(in srgb, var(--text) 90%, var(--amber)); }
-      #deobfuscation-derived-code { color: color-mix(in srgb, var(--text) 94%, var(--cyan)); }
-      .deobfuscation-source-line:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
-      .deobfuscation-empty { color: var(--faint); font-style: italic; white-space: normal; }
-      .deobfuscation-gutter { display: flex; flex-direction: column; align-items: center; min-height: 0; overflow: hidden; border-left: 1px solid var(--line); border-right: 1px solid var(--line); background: var(--chrome); }
-      .deobfuscation-gutter-label { width: 100%; padding: 10px 0 8px; border-bottom: 1px solid var(--line); color: var(--faint); font: 9px var(--mono); text-align: center; }
-      #deobfuscation-transform-list { display: flex; flex-direction: column; align-items: center; gap: 11px; padding-top: 13px; overflow: auto; }
-      .deobfuscation-transform-marker { display: grid; justify-items: center; gap: 1px; color: var(--cyan); font: 11px var(--mono); }
-      .deobfuscation-transform-marker strong { color: var(--faint); font-size: 9px; font-weight: 500; }
-      .deobfuscation-statusline { display: flex; align-items: center; gap: 16px; padding: 0 12px; border-top: 1px solid var(--line); background: var(--chrome); color: var(--faint); font: 10px var(--mono); }
-      .deobfuscation-statusline span:first-child { color: var(--green); }
-      @media (max-width: 760px) {
-        #screen-deobfuscation:not([hidden]) { grid-template-rows: auto 34px minmax(0, 1fr) auto; }
-        .deobfuscation-commandbar { flex-wrap: wrap; padding: 7px 10px; }
-        .deobfuscation-source-select { min-width: 0; flex: 1 1 180px; margin-left: auto; }
-        .deobfuscation-command-meta { display: none; }
-        .deobfuscation-split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(180px, 1fr) 34px minmax(180px, 1fr); overflow: auto; }
-        .deobfuscation-gutter { flex-direction: row; justify-content: center; border: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-        .deobfuscation-gutter-label { width: auto; padding: 0 10px; border: 0; }
-        #deobfuscation-transform-list { flex-direction: row; padding: 0; }
-        .deobfuscation-statusline { flex-wrap: wrap; min-height: 30px; gap: 8px 14px; padding-block: 6px; }
-      }
+
+      #deobfuscation-report { overflow-wrap: anywhere; }
+      .deobfuscation-row { margin-bottom: 5px; }
+      #deobfuscation-report .secondary-button { display: block; margin-top: 8px; }

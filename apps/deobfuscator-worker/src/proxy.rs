@@ -1,12 +1,13 @@
 //! Closed proxy descriptions own bounded source text rather than AST pointers.
 use oxc_ast::ast::*;
-use oxc_span::GetSpan;
+use oxc_span::{GetSpan, Span};
 use std::collections::HashSet;
 
 #[derive(Clone)]
 pub struct Proxy {
     pub parameters: Vec<String>,
     pub expression: String,
+    pub block: bool,
 }
 
 impl Proxy {
@@ -15,10 +16,12 @@ impl Proxy {
             Expression::ParenthesizedExpression(e) => Self::expression(&e.expression, source),
             Expression::ArrowFunctionExpression(f) if !f.r#async => {
                 let body = match &f.body {
-                    ArrowFunctionBody::FunctionBody(body) => return_expression(body)?,
+                    ArrowFunctionBody::FunctionBody(body) => {
+                        return Self::body(&f.params, body, source);
+                    }
                     body => body.as_expression()?,
                 };
-                Self::capture(&f.params, body, source)
+                Self::capture(&f.params, body.span(), false, source)
             }
             Expression::FunctionExpression(f) => Self::function(f, source),
             _ => None,
@@ -29,15 +32,24 @@ impl Proxy {
         if function.r#async || function.generator {
             return None;
         }
-        Self::capture(
-            &function.params,
-            return_expression(function.body.as_ref()?)?,
-            source,
-        )
+        Self::body(&function.params, function.body.as_ref()?, source)
     }
 
-    fn capture(params: &FormalParameters<'_>, body: &Expression<'_>, source: &str) -> Option<Self> {
-        if params.rest.is_some() || params.items.len() > 16 || body.span().size() > 4096 {
+    fn body(params: &FormalParameters<'_>, body: &FunctionBody<'_>, source: &str) -> Option<Self> {
+        if let Some(expression) = return_expression(body) {
+            Self::capture(params, expression.span(), false, source)
+        } else {
+            Self::capture(params, body.span, true, source)
+        }
+    }
+
+    fn capture(
+        params: &FormalParameters<'_>,
+        span: Span,
+        block: bool,
+        source: &str,
+    ) -> Option<Self> {
+        if params.rest.is_some() || params.items.len() > 16 || span.size() > 4096 {
             return None;
         }
         let mut names = HashSet::new();
@@ -51,9 +63,9 @@ impl Proxy {
             }
             parameters.push(id.name.to_string());
         }
-        let span = body.span();
         Some(Self {
             parameters,
+            block,
             expression: source[span.start as usize..span.end as usize].to_string(),
         })
     }

@@ -6114,7 +6114,7 @@
       }
 
       function deobfuscationKey(source) {
-        return `${source.key}|${source.target_id ?? ''}|${source.sha256 ?? ''}`;
+        return `${source.key}|${source.target_id ?? ''}|${source.sha256 ?? ''}|intrinsics:${Boolean(state.deobfuscationAssumeIntrinsics)}`;
       }
 
       async function loadDeobfuscation(source, {retry = false} = {}) {
@@ -6131,7 +6131,7 @@
           if (oldKey !== key && oldRequest.status !== 'loading') state.deobfuscationRequests.delete(oldKey);
         }
         try {
-          const response = await fetch(`/api/deobfuscation?${sourceParam}=${encodeURIComponent(sourceId)}&mode=derived`, {cache: 'no-store'});
+          const response = await fetch(`/api/deobfuscation?${sourceParam}=${encodeURIComponent(sourceId)}&mode=derived&assume_intrinsics=${state.deobfuscationAssumeIntrinsics ? 1 : 0}`, {cache: 'no-store'});
           const payload = await response.json();
           if (!response.ok) throw new Error(payload.error || `Deobfuscation analysis returned ${response.status}`);
           if (payload.schema !== 'deobfuscation-analysis-v1' || !payload.analysis || !payload.representation || typeof payload.original_source !== 'string') {
@@ -6162,6 +6162,7 @@
       }
 
       function renderDeobfuscationReport(source) {
+        elements.deobfuscationIntrinsics.checked = Boolean(state.deobfuscationAssumeIntrinsics);
         const container = elements.deobfuscationReport;
         if (!container) return;
         const target = source ?? selectedSource();
@@ -6211,8 +6212,9 @@
         (representation.transformations ?? []).slice(0, 6).forEach(entry => {
           transformations.append(deobfuscationRow(entry.id, `${entry.detail} (${entry.count})`));
         });
+        const assumptions = (analysis.assumptions ?? []).map(() => deobfuscationRow('Assumption', 'Standard JavaScript intrinsics. Prototype overrides are not modeled.'));
         const omissions = (analysis.omissions ?? []).map(message => deobfuscationRow('Unavailable', message));
-        container.replaceChildren(deobfuscationRow('Engine', payload.engine === 'rust-oxc' ? 'Static AST deobfuscation (Rust)' : 'Classification and formatting'), ...rows, evidence, ...(analysis.omissions?.length ? [] : [tables]), transformations, ...omissions);
+        container.replaceChildren(deobfuscationRow('Engine', payload.engine === 'rust-oxc' ? 'Static AST deobfuscation (Rust)' : 'Classification and formatting'), ...rows, ...assumptions, evidence, ...(analysis.omissions?.length ? [] : [tables]), transformations, ...omissions);
       }
 
       async function loadArtifactContent(artifact) {
@@ -8137,6 +8139,10 @@
           else renderSources();
         }
       }));
+      elements.deobfuscationIntrinsics.addEventListener('change', () => {
+        state.deobfuscationAssumeIntrinsics = elements.deobfuscationIntrinsics.checked;
+        renderSources();
+      });
       elements.sourcePretty.addEventListener('click', () => {
         state.sourcePretty = !state.sourcePretty;
         renderSources();

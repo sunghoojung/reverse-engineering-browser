@@ -1,4 +1,5 @@
 //! Closed, bounded abstract evaluation. Never call JavaScript or object coercion hooks.
+mod decoder;
 use std::collections::{HashMap, HashSet};
 
 use oxc_ast::ast::*;
@@ -77,12 +78,19 @@ pub struct Folder<'s> {
     replacement_bytes: usize,
     list_depth: usize,
     in_proxy: bool,
+    assume_intrinsics: bool,
 }
 
 impl<'s> Folder<'s> {
-    pub fn new(source: &'s str, program: &Program<'_>) -> Self {
+    pub fn new(source: &'s str, program: &Program<'_>, assume_intrinsics: bool) -> Self {
         let mut table_uses = TableUses::default();
         table_uses.visit_program(program);
+        let assume_intrinsics = assume_intrinsics
+            && !table_uses.dynamic_scope
+            && !table_uses.intrinsics_conflict
+            && !["String", "Array", "Object", "Number", "Boolean"]
+                .iter()
+                .any(|name| table_uses.bindings.contains_key(*name));
         Self {
             source,
             rewrites: vec![],
@@ -95,6 +103,7 @@ impl<'s> Folder<'s> {
             replacement_bytes: 0,
             list_depth: 0,
             in_proxy: false,
+            assume_intrinsics,
         }
     }
     fn eval(&mut self, expression: &Expression<'_>, depth: usize) -> Option<Value> {
@@ -243,6 +252,17 @@ impl<'s> Folder<'s> {
                     next,
                 )?
             }
+            Expression::StaticMemberExpression(member) if member.property.name == "length" => {
+                let Value::String(text) = self.eval(&member.object, next)? else {
+                    return None;
+                };
+                Value::Number(text.encode_utf16().count() as f64)
+            }
+            Expression::CallExpression(call)
+                if self.in_proxy && self.assume_intrinsics && !call.optional =>
+            {
+                self.intrinsic(call, next)?
+            }
             Expression::CallExpression(call) if !call.optional && !self.in_proxy => {
                 let proxy = match &call.callee {
                     Expression::Identifier(id) => self.proxies.get(id.name.as_str())?.clone(),
@@ -256,16 +276,20 @@ impl<'s> Folder<'s> {
                     // All arguments must be evaluated, including unused parameters.
                     arguments.insert(name.clone(), self.eval(argument.as_expression()?, next)?);
                 }
-                let allocator = Allocator::default();
-                let body = Parser::new(&allocator, &proxy.expression, SourceType::unambiguous())
-                    .parse_expression()
-                    .ok()?;
                 let outer = std::mem::replace(&mut self.constants, arguments);
                 let tables = std::mem::take(&mut self.tables);
                 let proxies = std::mem::take(&mut self.proxies);
                 // No captures, this, arguments, host calls or recursive proxy lookup.
                 self.in_proxy = true;
-                let value = self.eval(&body, next);
+                let value = if proxy.block {
+                    self.decoder(&proxy.expression, next)
+                } else {
+                    let allocator = Allocator::default();
+                    Parser::new(&allocator, &proxy.expression, SourceType::unambiguous())
+                        .parse_expression()
+                        .ok()
+                        .and_then(|body| self.eval(&body, next))
+                };
                 self.in_proxy = false;
                 self.constants = outer;
                 self.tables = tables;
@@ -491,7 +515,14 @@ impl<'a> Visit<'a> for Folder<'_> {
             if let Some(value) = self.eval(expression, 0) {
                 let kind = match expression {
                     Expression::Identifier(_) => "constant-propagation",
-                    Expression::CallExpression(_) => "proxy-call",
+                    Expression::CallExpression(call) => match &call.callee {
+                        Expression::Identifier(id)
+                            if self.proxies.get(id.name.as_str()).is_some_and(|p| p.block) =>
+                        {
+                            "custom-decoder"
+                        }
+                        _ => "proxy-call",
+                    },
                     Expression::StringLiteral(_) => "literal-normalization",
                     Expression::ComputedMemberExpression(_) => "literal-index",
                     Expression::ConditionalExpression(_) | Expression::LogicalExpression(_) => {
@@ -559,6 +590,8 @@ struct TableUses {
     deleting: bool,
     proxy_reads: HashSet<u32>,
     proxy_unsafe: HashSet<String>,
+    intrinsic_reads: HashSet<u32>,
+    intrinsics_conflict: bool,
 }
 impl TableUses {
     fn proxy_safe(&self, name: &str) -> bool {
@@ -577,6 +610,16 @@ impl TableUses {
     }
 }
 impl<'a> Visit<'a> for TableUses {
+    fn visit_assignment_expression(&mut self, expression: &AssignmentExpression<'a>) {
+        if !matches!(
+            expression.left,
+            AssignmentTarget::AssignmentTargetIdentifier(_)
+        ) {
+            self.intrinsics_conflict = true;
+        }
+        walk::walk_assignment_expression(self, expression);
+    }
+
     fn visit_with_statement(&mut self, statement: &WithStatement<'a>) {
         self.dynamic_scope = true;
         walk::walk_with_statement(self, statement);
@@ -586,6 +629,15 @@ impl<'a> Visit<'a> for TableUses {
     }
     fn visit_expression(&mut self, expression: &Expression<'a>) {
         if let Expression::CallExpression(call) = expression {
+            if let Expression::StaticMemberExpression(member) = &call.callee {
+                if member.property.name == "fromCharCode" {
+                    if let Expression::Identifier(id) = &member.object {
+                        if id.name == "String" {
+                            self.intrinsic_reads.insert(id.span.start);
+                        }
+                    }
+                }
+            }
             if let Expression::Identifier(id) = &call.callee {
                 if !call.optional {
                     self.proxy_reads.insert(id.span.start);
@@ -622,6 +674,11 @@ impl<'a> Visit<'a> for TableUses {
         walk::walk_expression(self, expression);
     }
     fn visit_identifier_reference(&mut self, id: &IdentifierReference<'a>) {
+        if matches!(id.name.as_str(), "Array" | "Object" | "Number" | "Boolean")
+            || (id.name == "String" && !self.intrinsic_reads.contains(&id.span.start))
+        {
+            self.intrinsics_conflict = true;
+        }
         if id.name == "eval" {
             self.dynamic_scope = true;
         }

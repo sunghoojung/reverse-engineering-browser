@@ -344,9 +344,13 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                     "source_truncated": bool(script.get("truncated")) if script_id is not None else False,
                     "analysis": analyze_source(text_source),
                 }
-                representation = derive_with_worker(text_source)
+                assumption = query.get("assume_intrinsics", ["0"])
+                if len(assumption) != 1 or assumption[0] not in ("0", "1"):
+                    raise WorkerError("Intrinsic assumption must be 0 or 1", 400)
+                representation = derive_with_worker(text_source, assumption[0] == "1")
                 if representation is not None:
                     response["engine"] = "rust-oxc"
+                    response["analysis"]["assumptions"] = representation["assumptions"]
                     response["analysis"]["representation"] = {
                         "status": "unchanged" if representation["text"] == text_source else "derived",
                         "derived_bytes": len(representation["text"].encode()),
@@ -355,7 +359,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                         "transformations": representation["transformations"],
                     }
                     response["analysis"]["omissions"] = [
-                        "Dynamic decoders, object/array coercion, sparse indices, mutable or escaping tables, and cross-scope propagation remain unresolved."
+                        "Unsupported decoder operations, object/array coercion, sparse indices, mutable or escaping tables, and cross-scope propagation remain unresolved."
                     ]
                 if mode == "derived":
                     response["representation"] = representation if representation is not None else derive_representation(text_source)

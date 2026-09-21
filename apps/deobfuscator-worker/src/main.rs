@@ -16,6 +16,8 @@ const MAX_TRANSFORMATIONS: usize = 4096;
 #[derive(Debug, Deserialize)]
 struct Request {
     source: String,
+    #[serde(default)]
+    assume_intrinsics: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -29,6 +31,7 @@ struct Response {
     derived_source: String,
     transformations: Vec<Transformation>,
     transformations_truncated: bool,
+    assumptions: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,6 +71,7 @@ fn error_response(message: impl Into<String>) -> Response {
         derived_source: String::new(),
         transformations: Vec::new(),
         transformations_truncated: false,
+        assumptions: vec![],
     }
 }
 
@@ -104,7 +108,8 @@ fn analyze(request: Request) -> Response {
     let mut transformations = Vec::new();
     let mut transformations_truncated = false;
     if parsed_ok {
-        let mut folder = fold::Folder::new(&request.source, &parsed.program);
+        let mut folder =
+            fold::Folder::new(&request.source, &parsed.program, request.assume_intrinsics);
         folder.visit_program(&parsed.program);
         transformations_truncated = folder.truncated;
         folder.rewrites.sort_by_key(|fold| fold.original_start);
@@ -141,6 +146,11 @@ fn analyze(request: Request) -> Response {
         derived_source,
         transformations,
         transformations_truncated,
+        assumptions: if request.assume_intrinsics {
+            vec!["standard-intrinsics"]
+        } else {
+            vec![]
+        },
     }
 }
 
@@ -220,6 +230,7 @@ mod tests {
     #[test]
     fn folds_finite_numeric_literals_and_preserves_unsafe_math() {
         let response = analyze(Request {
+            assume_intrinsics: false,
             source: "const value = 1 + 2 * 3; const unsafe = 1 / 0;".to_string(),
         });
 
@@ -235,6 +246,7 @@ mod tests {
     #[test]
     fn reports_parse_errors_without_rewriting_source() {
         let response = analyze(Request {
+            assume_intrinsics: false,
             source: "const broken = ;".to_string(),
         });
 
@@ -248,6 +260,7 @@ mod tests {
     #[test]
     fn rejects_oversized_sources_before_parsing() {
         let response = analyze(Request {
+            assume_intrinsics: false,
             source: "x".repeat(MAX_SOURCE_BYTES + 1),
         });
 

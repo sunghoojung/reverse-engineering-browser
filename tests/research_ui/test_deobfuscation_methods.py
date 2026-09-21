@@ -25,8 +25,8 @@ class DeobfuscationMethodsTest(unittest.TestCase):
         subprocess.run(['cargo', 'build', '--locked', '--manifest-path', str(worker / 'Cargo.toml')], check=True, capture_output=True)
         cls.worker = worker / 'target/debug/reb-deobfuscator-worker'
 
-    def analyze(self, source):
-        result = subprocess.run([str(self.worker)], input=json.dumps({'source': source}), capture_output=True, text=True, check=True, timeout=5)
+    def analyze(self, source, assume_intrinsics=False):
+        result = subprocess.run([str(self.worker)], input=json.dumps({'source': source, 'assume_intrinsics': assume_intrinsics}), capture_output=True, text=True, check=True, timeout=5)
         response = json.loads(result.stdout)
         self.assertTrue(response['ok'], response['syntax_errors'])
         original = source.encode()
@@ -193,3 +193,40 @@ class DeobfuscationMethodsTest(unittest.TestCase):
         ]
         for source in negative:
             self.assertNotIn('proxy-call', [r['kind'] for r in self.analyze(source)['transformations']], source)
+
+    def test_custom_xor_decoder_requires_explicit_intrinsic_assumption(self):
+        source = 'const decode=function(s,k){var out="";for(var i=0;i<s.length;i++){out+=String.fromCharCode(s.charCodeAt(i)^k);}return out;};const result=decode("idmmn",1);'
+        self.assertEqual(self.analyze(source)['derived_source'], source)
+        response = self.analyze(source, True)
+        self.assertIn('const result=("hello")', response['derived_source'])
+        self.assertEqual(response['assumptions'], ['standard-intrinsics'])
+        self.assertIn('custom-decoder', [r['kind'] for r in response['transformations']])
+        with patch('deobfuscation_worker.worker_path', return_value=self.worker):
+            self.assertEqual(derive_with_worker(source, True)['text'], response['derived_source'])
+        if shutil.which('node'):
+            outputs = [subprocess.run(['node', '-e', code+';console.log(result)'], check=True, text=True, capture_output=True).stdout for code in (source, response['derived_source'])]
+            self.assertEqual(outputs, ['hello\n', 'hello\n'])
+
+    def test_custom_decoder_effects_shadowing_and_loop_budget(self):
+        for body in [
+            'var out=String.fromCharCode(65);var String;return out;',
+            'external=1;return "bad";',
+            'var out="";network();return out;',
+            'var out={};out.value=1;return out.value;',
+            'let x=1;return x;',
+        ]:
+            source = 'const d=function(){'+body+'};d();'
+            self.assertNotIn('custom-decoder', [r['kind'] for r in self.analyze(source, True)['transformations']])
+        response = self.analyze('const d=function(){var i=0;for(;;){i++;}return i;};d();', True)
+        self.assertTrue(response['transformations_truncated'])
+        self.assertNotIn('custom-decoder', [r['kind'] for r in response['transformations']])
+        response = self.analyze('const d=function(n){var x=0;for(var i=0;i<n;i++){x+=i;}return x;};d(5);')
+        self.assertIn('(10)', response['derived_source'])
+
+    def test_intrinsic_model_rejects_lexical_shadowing_and_visible_mutation(self):
+        for source in [
+            'const String={fromCharCode(){return "changed";}};const d=()=>String.fromCharCode(65);d();',
+            'String.fromCharCode=()=>"changed";const d=()=>String.fromCharCode(65);d();',
+            'Object.defineProperty(String,"fromCharCode",{});const d=()=>String.fromCharCode(65);d();',
+        ]:
+            self.assertFalse(any(r['kind'] in ('proxy-call','custom-decoder') for r in self.analyze(source, True)['transformations']))

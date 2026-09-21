@@ -36,7 +36,7 @@ if CommandLine.arguments[1] == "--offline" {
 }
 let service = NativeDeobfuscationService(executableURL: URL(fileURLWithPath: CommandLine.arguments[1]))
 do {
-  let result = try service.analyze(source: FileHandle.standardInput.readDataToEndOfFile(), artifactID: "9", mode: "derived")
+  let result = try service.analyze(source: FileHandle.standardInput.readDataToEndOfFile(), artifactID: "9", mode: "derived", assumeIntrinsics: CommandLine.arguments.contains("--assume-intrinsics"))
   FileHandle.standardOutput.write(result)
 } catch let error as NativeDecoderError {
   FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: ["status":error.status,"error":error.message]))
@@ -48,8 +48,9 @@ do {
     def tearDownClass(cls):
         cls.temporary.cleanup()
 
-    def analyze(self, source):
-        result = subprocess.run([str(self.runner), str(self.worker)], input=source, capture_output=True, check=True, timeout=10)
+    def analyze(self, source, assume_intrinsics=False):
+        args = [str(self.runner), str(self.worker)] + (["--assume-intrinsics"] if assume_intrinsics else [])
+        result = subprocess.run(args, input=source, capture_output=True, check=True, timeout=10)
         return json.loads(result.stdout)
 
     def test_native_worker_returns_unicode_source_and_mapped_fold(self):
@@ -86,3 +87,12 @@ do {
         program += '\nconsole.log(isDebuggerResponse(' + response.stdout + '));'
         result = subprocess.run(['node', '-e', program], capture_output=True, text=True, check=True)
         self.assertEqual(result.stdout.strip(), 'true')
+
+    def test_native_custom_decoder_assumptions_are_explicit(self):
+        source = b'const d=function(s){var out="";for(var i=0;i<s.length;i++){out+=String.fromCharCode(s.charCodeAt(i)^1);}return out;};d("idmmn");'
+        original = self.analyze(source)
+        self.assertEqual(original['analysis']['assumptions'], [])
+        self.assertEqual(original['representation']['text'], source.decode())
+        derived = self.analyze(source, True)
+        self.assertEqual(derived['analysis']['assumptions'], ['standard-intrinsics'])
+        self.assertIn('("hello")', derived['representation']['text'])

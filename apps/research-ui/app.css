@@ -2793,3 +2793,5 @@
       #deobfuscation-report { overflow-wrap: anywhere; }
       .deobfuscation-row { margin-bottom: 5px; }
       #deobfuscation-report .secondary-button { display: block; margin-top: 8px; }
+
+.deobfuscation-assumption { display: flex; align-items: flex-start; gap: 8px; padding: 10px; font-size: 12px; line-height: 1.5; }

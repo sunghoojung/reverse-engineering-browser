@@ -168,3 +168,28 @@ class DeobfuscationMethodsTest(unittest.TestCase):
         self.assertEqual(rejected['derived_source'], source)
         self.assertIn('depth', rejected['syntax_errors'][0]['message'])
         self.assertEqual(recovered['derived_source'], '(3)')
+
+    def test_pure_proxy_calls_and_unsafe_call_boundaries(self):
+        positive = [
+            ('const p=(a,b)=>a^b; const result=p(7,3);', '(4)'),
+            ('const result=((a,b)=>a+b)("ab","cd");', '("abcd")'),
+            ('function f(){function p(a){return a*2;} return p(4);}', '(8)'),
+            ('const p=function(a){return a+1;}; const result=p(4);', '(5)'),
+        ]
+        for source, value in positive:
+            response = self.analyze(source)
+            self.assertIn(value, response['derived_source'])
+            self.assertIn('proxy-call', [r['kind'] for r in response['transformations']])
+        negative = [
+            'const p=(x)=>1; p(effect());',
+            'const p=(x)=>1; p(1,effect());',
+            'const p=(x=effect())=>1; p();',
+            'const p=async(x)=>x+1; p(2);',
+            'const p=(x)=>this.value+x; p(2);',
+            'const y=4; const p=(x)=>x+y; p(2);',
+            'function f(){function p(x){return x+1;} p=other;return p(2);}',
+            'function f(){function p(x){return x+1;} eval("p=other");return p(2);}',
+            'const p=(x)=>((y)=>y+1)(x); p(2);',
+        ]
+        for source in negative:
+            self.assertNotIn('proxy-call', [r['kind'] for r in self.analyze(source)['transformations']], source)

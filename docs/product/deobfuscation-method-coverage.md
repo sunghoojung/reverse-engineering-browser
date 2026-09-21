@@ -21,7 +21,7 @@ The restricted evaluator never invokes `eval`, `Function`, Node's `vm`, Babel's
 shows why a static analyzer must not substitute host execution for proof.
 
 There is intentionally no claim of complete deobfuscation. Custom XOR/base64
-functions, rotated tables, proxy calls, sparse JSFuck arrays and general
+functions, rotated tables, dynamic proxy calls, sparse JSFuck arrays and general
 control-flow flattening require additional bounded interpreters or separately
 captured runtime evidence. In particular, replacing array holes with explicit
 `undefined` changes property-existence and prototype-lookup behavior. Unknown
@@ -66,3 +66,15 @@ labelled `python-lexical` classifier/formatter. An available worker's error
 never silently falls back. Native builds always bundle Rust. Python heuristic
 classification and table previews remain supplementary evidence, not proof
 that a Rust rewrite is valid.
+
+## Proxy calls
+
+Literal calls through preceding immutable function/arrow bindings and immediate
+functions can be reduced when the body is one return expression and all arguments
+are statically known primitives. Non-escaping local function declarations are
+also supported after their declaration. All supplied arguments must be pure,
+including unused arguments. Rest/default/destructured parameters, async/generator
+functions, captures, `this`, host calls and recursive/nested proxy evaluation are
+left unresolved. Templates are limited to 4 KiB, 16 parameters and 64 bindings
+per statement list. Declarations remain in place; each call maps to its original
+call range. No analyzed function is executed by a JavaScript runtime.

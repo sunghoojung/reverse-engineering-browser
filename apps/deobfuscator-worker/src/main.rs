@@ -6,6 +6,7 @@ use oxc_parser::Parser;
 use oxc_span::SourceType;
 mod fold;
 mod preflight;
+mod proxy;
 use serde::{Deserialize, Serialize};
 
 const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;

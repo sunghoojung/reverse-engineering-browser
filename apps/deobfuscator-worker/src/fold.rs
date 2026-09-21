@@ -6,7 +6,10 @@ use oxc_ast_visit::{Visit, walk};
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::operator::{BinaryOperator as B, LogicalOperator as L, UnaryOperator as U};
 
-use crate::{MAX_TRANSFORMATIONS, Transformation};
+use crate::{MAX_TRANSFORMATIONS, Transformation, proxy::Proxy};
+use oxc_allocator::Allocator;
+use oxc_parser::Parser;
+use oxc_span::SourceType;
 
 const MAX_DEPTH: usize = 64;
 const MAX_VALUE_BYTES: usize = 16 * 1024;
@@ -69,9 +72,11 @@ pub struct Folder<'s> {
     // Nested execution/scope boundaries never inherit these bindings.
     constants: HashMap<String, Value>,
     tables: HashMap<String, Vec<Value>>,
+    proxies: HashMap<String, Proxy>,
     table_uses: TableUses,
     replacement_bytes: usize,
     list_depth: usize,
+    in_proxy: bool,
 }
 
 impl<'s> Folder<'s> {
@@ -85,9 +90,11 @@ impl<'s> Folder<'s> {
             steps: 0,
             constants: HashMap::new(),
             tables: HashMap::new(),
+            proxies: HashMap::new(),
             table_uses,
             replacement_bytes: 0,
             list_depth: 0,
+            in_proxy: false,
         }
     }
     fn eval(&mut self, expression: &Expression<'_>, depth: usize) -> Option<Value> {
@@ -236,6 +243,35 @@ impl<'s> Folder<'s> {
                     next,
                 )?
             }
+            Expression::CallExpression(call) if !call.optional && !self.in_proxy => {
+                let proxy = match &call.callee {
+                    Expression::Identifier(id) => self.proxies.get(id.name.as_str())?.clone(),
+                    callee => Proxy::expression(callee, self.source)?,
+                };
+                if proxy.parameters.len() != call.arguments.len() {
+                    return None;
+                }
+                let mut arguments = HashMap::new();
+                for (name, argument) in proxy.parameters.iter().zip(&call.arguments) {
+                    // All arguments must be evaluated, including unused parameters.
+                    arguments.insert(name.clone(), self.eval(argument.as_expression()?, next)?);
+                }
+                let allocator = Allocator::default();
+                let body = Parser::new(&allocator, &proxy.expression, SourceType::unambiguous())
+                    .parse_expression()
+                    .ok()?;
+                let outer = std::mem::replace(&mut self.constants, arguments);
+                let tables = std::mem::take(&mut self.tables);
+                let proxies = std::mem::take(&mut self.proxies);
+                // No captures, this, arguments, host calls or recursive proxy lookup.
+                self.in_proxy = true;
+                let value = self.eval(&body, next);
+                self.in_proxy = false;
+                self.constants = outer;
+                self.tables = tables;
+                self.proxies = proxies;
+                value?
+            }
             Expression::ComputedMemberExpression(e) if !e.optional => {
                 // Only own, present indices. No prototype lookup, holes, getters,
                 // user objects, spreads or bindings that could alias a mutable array.
@@ -300,6 +336,7 @@ impl<'a> Visit<'a> for Folder<'_> {
     fn visit_statements(&mut self, statements: &oxc_allocator::Vec<'a, Statement<'a>>) {
         let outer = std::mem::take(&mut self.constants);
         let outer_tables = std::mem::take(&mut self.tables);
+        let outer_proxies = std::mem::take(&mut self.proxies);
         self.list_depth += 1;
         for statement in statements {
             match statement {
@@ -312,6 +349,11 @@ impl<'a> Visit<'a> for Folder<'_> {
                                     if let Some(value) = self.eval(init, 0) {
                                         if self.constants.len() < 64 {
                                             self.constants.insert(id.name.to_string(), value);
+                                        }
+                                    }
+                                    if self.proxies.len() < 64 {
+                                        if let Some(proxy) = Proxy::expression(init, self.source) {
+                                            self.proxies.insert(id.name.to_string(), proxy);
                                         }
                                     }
                                     if let Expression::ArrayExpression(array) = init {
@@ -348,6 +390,18 @@ impl<'a> Visit<'a> for Folder<'_> {
                         }
                     }
                 }
+                Statement::FunctionDeclaration(function) => {
+                    if self.list_depth > 1 && self.proxies.len() < 64 {
+                        if let Some(id) = &function.id {
+                            if self.table_uses.proxy_safe(id.name.as_str()) {
+                                if let Some(proxy) = Proxy::function(function, self.source) {
+                                    self.proxies.insert(id.name.to_string(), proxy);
+                                }
+                            }
+                        }
+                    }
+                    walk::walk_statement(self, statement);
+                }
                 Statement::ExpressionStatement(s) => self.visit_expression(&s.expression),
                 Statement::ReturnStatement(s) => {
                     if let Some(argument) = &s.argument {
@@ -358,36 +412,45 @@ impl<'a> Visit<'a> for Folder<'_> {
                 _ => {
                     let local = std::mem::take(&mut self.constants);
                     let local_tables = std::mem::take(&mut self.tables);
+                    let local_proxies = std::mem::take(&mut self.proxies);
                     self.visit_statement(statement);
                     self.constants = local;
                     self.tables = local_tables;
+                    self.proxies = local_proxies;
                 }
             }
         }
         self.constants = outer;
         self.tables = outer_tables;
+        self.proxies = outer_proxies;
         self.list_depth -= 1;
     }
     fn visit_function(&mut self, function: &Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
         let outer = std::mem::take(&mut self.constants);
         let tables = std::mem::take(&mut self.tables);
+        let proxies = std::mem::take(&mut self.proxies);
         walk::walk_function(self, function, flags);
         self.constants = outer;
         self.tables = tables;
+        self.proxies = proxies;
     }
     fn visit_arrow_function_expression(&mut self, function: &ArrowFunctionExpression<'a>) {
         let outer = std::mem::take(&mut self.constants);
         let tables = std::mem::take(&mut self.tables);
+        let proxies = std::mem::take(&mut self.proxies);
         walk::walk_arrow_function_expression(self, function);
         self.constants = outer;
         self.tables = tables;
+        self.proxies = proxies;
     }
     fn visit_class(&mut self, class: &Class<'a>) {
         let outer = std::mem::take(&mut self.constants);
         let tables = std::mem::take(&mut self.tables);
+        let proxies = std::mem::take(&mut self.proxies);
         walk::walk_class(self, class);
         self.constants = outer;
         self.tables = tables;
+        self.proxies = proxies;
     }
     fn visit_if_statement(&mut self, statement: &IfStatement<'a>) {
         if let Some(test) = self.eval(&statement.test, 0) {
@@ -428,6 +491,7 @@ impl<'a> Visit<'a> for Folder<'_> {
             if let Some(value) = self.eval(expression, 0) {
                 let kind = match expression {
                     Expression::Identifier(_) => "constant-propagation",
+                    Expression::CallExpression(_) => "proxy-call",
                     Expression::StringLiteral(_) => "literal-normalization",
                     Expression::ComputedMemberExpression(_) => "literal-index",
                     Expression::ConditionalExpression(_) | Expression::LogicalExpression(_) => {
@@ -493,8 +557,15 @@ struct TableUses {
     unsafe_names: HashSet<String>,
     dynamic_scope: bool,
     deleting: bool,
+    proxy_reads: HashSet<u32>,
+    proxy_unsafe: HashSet<String>,
 }
 impl TableUses {
+    fn proxy_safe(&self, name: &str) -> bool {
+        !self.dynamic_scope
+            && self.bindings.get(name) == Some(&1)
+            && !self.proxy_unsafe.contains(name)
+    }
     fn safe(&self, name: &str, length: usize) -> bool {
         !self.dynamic_scope
             && self.bindings.get(name) == Some(&1)
@@ -514,6 +585,13 @@ impl<'a> Visit<'a> for TableUses {
         *self.bindings.entry(id.name.to_string()).or_default() += 1;
     }
     fn visit_expression(&mut self, expression: &Expression<'a>) {
+        if let Expression::CallExpression(call) = expression {
+            if let Expression::Identifier(id) = &call.callee {
+                if !call.optional {
+                    self.proxy_reads.insert(id.span.start);
+                }
+            }
+        }
         if let Expression::ComputedMemberExpression(member) = expression {
             if let (Expression::Identifier(id), Expression::NumericLiteral(index)) =
                 (&member.object, &member.expression)
@@ -546,6 +624,9 @@ impl<'a> Visit<'a> for TableUses {
     fn visit_identifier_reference(&mut self, id: &IdentifierReference<'a>) {
         if id.name == "eval" {
             self.dynamic_scope = true;
+        }
+        if !self.proxy_reads.contains(&id.span.start) {
+            self.proxy_unsafe.insert(id.name.to_string());
         }
         if !self.allowed.contains(&id.span.start) {
             self.unsafe_names.insert(id.name.to_string());

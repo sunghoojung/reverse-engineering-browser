@@ -1,7 +1,7 @@
 native-build-test:
 	./tests/native_build_test.sh
 
-check: native-build-test workspace-check bootstrap-test browser-sync-test brave-distribution-test test ui-test
+check: native-build-test workspace-check bootstrap-test browser-sync-test brave-distribution-test deob-worker-test test ui-test
 
 lint: format-check shellcheck python-check javascript-check repository-check workflow-check
 
@@ -13,6 +13,10 @@ test: $(TEST_BINARIES)
 
 ui-test: heap-snapshot decoder debugger-transport
 	PYTHONPATH=apps/research-ui python3 -m unittest discover -s tests/research_ui -p 'test_*.py'
+
+deob-worker-test:
+	@command -v cargo >/dev/null 2>&1 || { echo "Cargo is not installed" >&2; exit 1; }
+	cargo test --manifest-path apps/deobfuscator-worker/Cargo.toml
 
 sanitize:
 	$(MAKE) BUILD_DIR=$(SANITIZE_BUILD_DIR) clean

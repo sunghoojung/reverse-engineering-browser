@@ -2777,6 +2777,12 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     didFailProvisionalNavigation navigation: WKNavigation!,
     withError error: Error
   ) {
+    let navigationError = error as NSError
+    if navigationError.domain == NSURLErrorDomain
+      && navigationError.code == NSURLErrorCancelled
+    {
+      return
+    }
     presentFatalError(error.localizedDescription)
   }
 

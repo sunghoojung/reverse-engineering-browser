@@ -19,7 +19,7 @@ class SourceCursorTest(unittest.TestCase):
             functions.append(source[start:end])
         exercise = r'''
 const source = {source_type: 'script', script_id: 'second', start_line: 7, start_column: 31};
-const state = {sourcePretty: false, sourceCursor: {scriptId: 'first', line: 90, column: 800}, debuggerSession: {target: {id: 'page'}}};
+const state = {sourceDeobfuscated: false, sourceCursor: {scriptId: 'first', line: 90, column: 800}, debuggerSession: {target: {id: 'page'}}};
 const elements = Object.fromEntries(['hooksScript', 'hooksLine', 'hooksColumn', 'hooksLabel'].map(k => [k, {value: '', focus(){}}]));
 const selectedSource = () => source;
 const runtimeHooksState = () => ({isolated: true, target_id: 'page'});
@@ -32,7 +32,7 @@ const switched = [elements.hooksLine.value, elements.hooksColumn.value];
 state.sourceCursor = {scriptId: 'second', line: 8, column: 62};
 pivotSourceToRuntimeHooks();
 const selected = [elements.hooksLine.value, elements.hooksColumn.value];
-state.sourcePretty = true;
+state.sourceDeobfuscated = true;
 state.sourceCursor.column = 999;
 pivotSourceToRuntimeHooks();
 const pretty = elements.hooksColumn.value;

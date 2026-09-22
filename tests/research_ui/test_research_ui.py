@@ -1416,6 +1416,11 @@ process.stdout.write(JSON.stringify({
         self.assertIn("function markLiveSourceStale(scriptId", html)
         self.assertIn("Artifact capture is unavailable", html)
         self.assertIn("function formatWasmHex(buffer)", html)
+        self.assertIn('id="source-pretty"', html)
+        self.assertIn('id="source-deob"', html)
+        self.assertIn("function prettyPrintSource(source, value)", html)
+        self.assertIn("SOURCE_PRETTY_INPUT_LIMIT = 2 * 1024 * 1024", html)
+        self.assertIn("function sourceRepresentationLineMap(", html)
         self.assertIn("function sourceSyntaxTokens(line, tokenizer)", html)
         self.assertIn("function appendSourceSyntax(container, tokens)", html)
         self.assertIn("SOURCE_HIGHLIGHT_TOKEN_LIMIT = 50000", html)
@@ -1423,7 +1428,8 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("span.innerHTML = token.text", html)
         self.assertIn("function openQuickOpen()", html)
         self.assertIn("Viewer preview limited to the first 2 MB", html)
-        self.assertIn("Derived · mapped to original source", html)
+        self.assertIn("Pretty printed derived", html)
+        self.assertIn("mapped to original source", html)
         self.assertIn("analysis failed", html)
         self.assertNotIn("Readable derived view", html)
         self.assertIn("Original evidence", html)
@@ -1511,7 +1517,7 @@ const state = {
       execution_context_id: 12, length: 12, has_source_url: false, is_module: false}
   ]},
   staleScriptIds: new Set(), liveScriptContent: new Map(), openScriptIds: ['6'],
-  selectedScriptId: '6', pendingSourceLine: {scriptId: '6', line: 1}, sourcePretty: false,
+  selectedScriptId: '6', pendingSourceLine: {scriptId: '6', line: 1}, sourceDeobfuscated: false,
   openArtifactIds: [], selectedArtifactId: null, sourceCollection: 'page', sourceNotice: null,
   sourceNoticeKind: 'warning'
 };

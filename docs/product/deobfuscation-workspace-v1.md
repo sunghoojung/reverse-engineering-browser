@@ -30,6 +30,24 @@ The server exposes this work at `/api/deobfuscation` with `script_id` and
 `mode=analysis|derived`. The `analysis` mode returns the document; `derived`
 also returns the representation text and segment map.
 
+## Sources presentation
+
+Sources keeps semantic rewriting and display formatting as separate controls.
+**Deob** selects the mapped representation returned by the analysis engine.
+The DevTools-style **{ }** control pretty prints whichever representation is
+active. This means a source classified as minified can still be expanded when
+the semantic deobfuscator correctly reports that no safe rewrite was found.
+
+Pretty printing detects JavaScript, JSON, CSS, and HTML from the captured kind,
+MIME type, and filename. It changes only display whitespace, preserves strings,
+comments, regular expressions, and template literals, and produces a UTF-16
+segment map back to its input. When pretty print is layered over Deob, Sources
+composes both maps so every displayed line can return to original evidence.
+Formatting is bounded to 2 MiB of input and 4 MiB of output, cached for the last
+eight representations, and never changes the artifact or live runtime source.
+The formatter stops at 250,000 lexical tokens or 500,000 mapping segments so a
+small but adversarial source cannot create an unbounded display structure.
+
 ## Analysis schema
 
 The document is a JSON object with schema identifier

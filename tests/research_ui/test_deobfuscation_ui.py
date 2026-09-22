@@ -75,7 +75,7 @@ const renderSources = () => { if(calls > 8) throw new Error('retry loop'); loadD
         start = app.index('      function sourceViewLabel(')
         end = app.index('      function revealOriginalLine(', start)
         program = app[start:end] + """
-const state = {sourcePretty:true,deobfuscationRequests:new Map()};
+const state = {sourceDeobfuscated:true,deobfuscationRequests:new Map()};
 const source = {key:'artifact:9',source_type:'artifact'};
 const deobfuscationKey = source => source.key;
 const pending = sourceViewLabel(source);
@@ -119,6 +119,7 @@ console.log(JSON.stringify({different:original!==deobfuscationKey(source)}));
         controls.feed((UI_DIRECTORY / 'index.html').read_text())
         self.assertFalse(any(element.get('data-screen') == 'deobfuscation' for element in controls.elements))
         self.assertFalse(any(element.get('id') == 'screen-deobfuscation' for element in controls.elements))
+        self.assertTrue(any(element.get('id') == 'source-deob' for element in controls.elements))
         self.assertTrue(any(element.get('id') == 'source-pretty' for element in controls.elements))
         self.assertTrue(any(element.get('id') == 'deobfuscation-report' for element in controls.elements))
 

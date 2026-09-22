@@ -1,57 +1,23 @@
 //! Closed, bounded abstract evaluation. Never call JavaScript or object coercion hooks.
+mod decoder;
+mod value;
 use std::collections::{HashMap, HashSet};
+use value::Value;
 
 use oxc_ast::ast::*;
 use oxc_ast_visit::{Visit, walk};
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::operator::{BinaryOperator as B, LogicalOperator as L, UnaryOperator as U};
 
-use crate::{MAX_TRANSFORMATIONS, Transformation};
+use crate::{MAX_TRANSFORMATIONS, Transformation, proxy::Proxy};
+use oxc_allocator::Allocator;
+use oxc_parser::Parser;
+use oxc_span::SourceType;
 
 const MAX_DEPTH: usize = 64;
 const MAX_VALUE_BYTES: usize = 16 * 1024;
 const MAX_STEPS: usize = 250_000;
 const MAX_REPLACEMENT_BYTES: usize = 512 * 1024;
-
-#[derive(Clone, Debug, PartialEq)]
-enum Value {
-    Number(f64),
-    String(String),
-    Bool(bool),
-    Null,
-    Undefined,
-}
-
-impl Value {
-    fn truthy(&self) -> bool {
-        match self {
-            Self::Number(n) => *n != 0.0 && !n.is_nan(),
-            Self::String(s) => !s.is_empty(),
-            Self::Bool(b) => *b,
-            Self::Null | Self::Undefined => false,
-        }
-    }
-    fn number(&self) -> Option<f64> {
-        match self {
-            Self::Number(n) => Some(*n),
-            Self::Bool(b) => Some(f64::from(u8::from(*b))),
-            Self::Null => Some(0.0),
-            // StringNumericLiteral has different rules from Rust's float parser.
-            // Leave it unresolved rather than accepting a subtly different grammar.
-            _ => None,
-        }
-    }
-    fn code(&self) -> String {
-        match self {
-            Self::Number(n) if *n == 0.0 && n.is_sign_negative() => "-0".into(),
-            Self::Number(n) => n.to_string(),
-            Self::String(s) => serde_json::to_string(s).unwrap(),
-            Self::Bool(b) => b.to_string(),
-            Self::Null => "null".into(),
-            Self::Undefined => "void 0".into(),
-        }
-    }
-}
 
 fn int32(n: f64) -> i32 {
     if !n.is_finite() || n == 0.0 {
@@ -69,15 +35,24 @@ pub struct Folder<'s> {
     // Nested execution/scope boundaries never inherit these bindings.
     constants: HashMap<String, Value>,
     tables: HashMap<String, Vec<Value>>,
+    proxies: HashMap<String, Proxy>,
     table_uses: TableUses,
     replacement_bytes: usize,
     list_depth: usize,
+    in_proxy: bool,
+    assume_intrinsics: bool,
 }
 
 impl<'s> Folder<'s> {
-    pub fn new(source: &'s str, program: &Program<'_>) -> Self {
+    pub fn new(source: &'s str, program: &Program<'_>, assume_intrinsics: bool) -> Self {
         let mut table_uses = TableUses::default();
         table_uses.visit_program(program);
+        let assume_intrinsics = assume_intrinsics
+            && !table_uses.dynamic_scope
+            && !table_uses.intrinsics_conflict
+            && !["String", "Array", "Object", "Number", "Boolean"]
+                .iter()
+                .any(|name| table_uses.bindings.contains_key(*name));
         Self {
             source,
             rewrites: vec![],
@@ -85,9 +60,12 @@ impl<'s> Folder<'s> {
             steps: 0,
             constants: HashMap::new(),
             tables: HashMap::new(),
+            proxies: HashMap::new(),
             table_uses,
             replacement_bytes: 0,
             list_depth: 0,
+            in_proxy: false,
+            assume_intrinsics,
         }
     }
     fn eval(&mut self, expression: &Expression<'_>, depth: usize) -> Option<Value> {
@@ -98,6 +76,13 @@ impl<'s> Folder<'s> {
         self.steps += 1;
         let next = depth + 1;
         let value = match expression {
+            Expression::AssignmentExpression(_)
+            | Expression::UpdateExpression(_)
+            | Expression::SequenceExpression(_)
+                if self.in_proxy =>
+            {
+                self.local_effect(expression, next)?
+            }
             Expression::ParenthesizedExpression(e) => self.eval(&e.expression, next)?,
             Expression::NumericLiteral(n) => Value::Number(n.value),
             Expression::StringLiteral(s)
@@ -107,6 +92,25 @@ impl<'s> Folder<'s> {
             }
             Expression::BooleanLiteral(b) => Value::Bool(b.value),
             Expression::NullLiteral(_) => Value::Null,
+            Expression::ArrayExpression(array) if self.assume_intrinsics => {
+                if array.elements.len() > 256 {
+                    self.truncated = true;
+                    return None;
+                }
+                let mut values = Vec::new();
+                for element in &array.elements {
+                    values.push(match element {
+                        ArrayExpressionElement::Elision(_) => None,
+                        element => Some(self.eval(element.as_expression()?, next)?),
+                    });
+                }
+                Value::Array(values)
+            }
+            Expression::ObjectExpression(object)
+                if self.assume_intrinsics && object.properties.is_empty() =>
+            {
+                Value::EmptyObject
+            }
             Expression::Identifier(id) => self.constants.get(id.name.as_str())?.clone(),
             Expression::UnaryExpression(e) => {
                 // Even void must prove its argument free of effects and exceptions.
@@ -124,6 +128,7 @@ impl<'s> Folder<'s> {
                             Value::Bool(_) => "boolean",
                             Value::Null => "object",
                             Value::Undefined => "undefined",
+                            Value::Array(_) | Value::EmptyObject => "object",
                         }
                         .into(),
                     ),
@@ -133,27 +138,29 @@ impl<'s> Folder<'s> {
             Expression::BinaryExpression(e) => {
                 let left = self.eval(&e.left, next)?;
                 let right = self.eval(&e.right, next)?;
+                let (left, right) = if matches!(
+                    e.operator,
+                    B::LessThan | B::LessEqualThan | B::GreaterThan | B::GreaterEqualThan
+                ) {
+                    (left.primitive()?, right.primitive()?)
+                } else {
+                    (left, right)
+                };
                 match e.operator {
-                    B::Addition
-                        if matches!((&left, &right), (Value::String(_), Value::String(_))) =>
-                    {
-                        let (Value::String(mut a), Value::String(b)) = (left, right) else {
-                            unreachable!()
-                        };
-                        if a.len() + b.len() > MAX_VALUE_BYTES {
+                    B::Addition => match left.add(&right) {
+                        Some(value) => value,
+                        None => {
                             self.truncated = true;
                             return None;
                         }
-                        a.push_str(&b);
-                        Value::String(a)
-                    }
-                    B::StrictEquality | B::StrictInequality => {
+                    },
+                    B::StrictEquality | B::StrictInequality
+                        if left.is_primitive() && right.is_primitive() =>
+                    {
                         Value::Bool((left == right) == (e.operator == B::StrictEquality))
                     }
-                    B::Equality | B::Inequality
-                        if std::mem::discriminant(&left) == std::mem::discriminant(&right) =>
-                    {
-                        Value::Bool((left == right) == (e.operator == B::Equality))
+                    B::Equality | B::Inequality => {
+                        Value::Bool(left.loose_equal(&right)? == (e.operator == B::Equality))
                     }
                     B::LessThan | B::LessEqualThan | B::GreaterThan | B::GreaterEqualThan
                         if matches!((&left, &right), (Value::String(_), Value::String(_))) =>
@@ -236,10 +243,127 @@ impl<'s> Folder<'s> {
                     next,
                 )?
             }
+            Expression::StaticMemberExpression(member) if member.property.name == "length" => {
+                match self.eval(&member.object, next)? {
+                    Value::String(text) => Value::Number(text.encode_utf16().count() as f64),
+                    Value::Array(values) => Value::Number(values.len() as f64),
+                    _ => return None,
+                }
+            }
+            Expression::CallExpression(call)
+                if self.in_proxy && self.assume_intrinsics && !call.optional =>
+            {
+                self.intrinsic(call, next)?
+            }
+            Expression::CallExpression(call) if !call.optional && !self.in_proxy => {
+                let proxy = match &call.callee {
+                    Expression::Identifier(id) => self.proxies.get(id.name.as_str())?.clone(),
+                    callee => Proxy::expression(callee, self.source)?,
+                };
+                if proxy.parameters.len() != call.arguments.len() {
+                    return None;
+                }
+                let mut arguments = HashMap::new();
+                for (name, argument) in proxy.parameters.iter().zip(&call.arguments) {
+                    // All arguments must be evaluated, including unused parameters.
+                    arguments.insert(name.clone(), self.eval(argument.as_expression()?, next)?);
+                }
+                let outer = std::mem::replace(&mut self.constants, arguments);
+                let tables = std::mem::take(&mut self.tables);
+                let proxies = std::mem::take(&mut self.proxies);
+                // No captures, this, arguments, host calls or recursive proxy lookup.
+                self.in_proxy = true;
+                let value = if proxy.block {
+                    self.decoder(&proxy.expression, next)
+                } else {
+                    let allocator = Allocator::default();
+                    Parser::new(&allocator, &proxy.expression, SourceType::unambiguous())
+                        .parse_expression()
+                        .ok()
+                        .and_then(|body| self.eval(&body, next))
+                };
+                self.in_proxy = false;
+                self.constants = outer;
+                self.tables = tables;
+                self.proxies = proxies;
+                value?
+            }
+            Expression::ComputedMemberExpression(e) if !e.optional && self.in_proxy => {
+                let object = self.eval(&e.object, next)?;
+                let key = self.eval(&e.expression, next)?;
+                let index = match key {
+                    Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
+                    Value::String(s)
+                        if s == "0"
+                            || (!s.is_empty()
+                                && !s.starts_with('0')
+                                && s.bytes().all(|b| b.is_ascii_digit())) =>
+                    {
+                        s.parse().ok()?
+                    }
+                    _ => return None,
+                };
+                match object {
+                    Value::Array(values) if self.assume_intrinsics => values
+                        .get(index)
+                        .cloned()
+                        .flatten()
+                        .unwrap_or(Value::Undefined),
+                    Value::String(s) => match s.encode_utf16().nth(index) {
+                        Some(unit) => Value::String(char::from_u32(u32::from(unit))?.to_string()),
+                        None if self.assume_intrinsics => Value::Undefined,
+                        None => return None,
+                    },
+                    _ => return None,
+                }
+            }
             Expression::ComputedMemberExpression(e) if !e.optional => {
                 // Only own, present indices. No prototype lookup, holes, getters,
                 // user objects, spreads or bindings that could alias a mutable array.
-                let Value::Number(index) = self.eval(&e.expression, next)? else {
+                let key = self.eval(&e.expression, next)?;
+                if self.assume_intrinsics {
+                    let object = self.eval(&e.object, next);
+                    let primitive_key = key.primitive()?;
+                    let index = match &primitive_key {
+                        Value::Number(n) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as usize),
+                        Value::String(s)
+                            if s == "0"
+                                || (!s.starts_with('0')
+                                    && s.bytes().all(|b| b.is_ascii_digit())) =>
+                        {
+                            s.parse().ok()
+                        }
+                        _ => None,
+                    };
+                    match object {
+                        Some(Value::Array(values)) => {
+                            if let Some(index) = index {
+                                return Some(
+                                    values
+                                        .get(index)
+                                        .cloned()
+                                        .flatten()
+                                        .unwrap_or(Value::Undefined),
+                                );
+                            }
+                            if primitive_key == Value::String(String::new()) {
+                                return Some(Value::Undefined);
+                            }
+                        }
+                        Some(Value::String(text)) => {
+                            if let Some(index) = index {
+                                return Some(match text.encode_utf16().nth(index) {
+                                    None => Value::Undefined,
+                                    Some(unit) => {
+                                        Value::String(char::from_u32(u32::from(unit))?.to_string())
+                                    }
+                                });
+                            }
+                        }
+                        _ => (),
+                    }
+                }
+                let Value::Number(index) = key else {
                     return None;
                 };
                 if index < 0.0 || index.fract() != 0.0 {
@@ -300,6 +424,7 @@ impl<'a> Visit<'a> for Folder<'_> {
     fn visit_statements(&mut self, statements: &oxc_allocator::Vec<'a, Statement<'a>>) {
         let outer = std::mem::take(&mut self.constants);
         let outer_tables = std::mem::take(&mut self.tables);
+        let outer_proxies = std::mem::take(&mut self.proxies);
         self.list_depth += 1;
         for statement in statements {
             match statement {
@@ -310,8 +435,13 @@ impl<'a> Visit<'a> for Folder<'_> {
                             if declaration.kind == VariableDeclarationKind::Const {
                                 if let BindingPattern::BindingIdentifier(id) = &declarator.id {
                                     if let Some(value) = self.eval(init, 0) {
-                                        if self.constants.len() < 64 {
+                                        if value.is_primitive() && self.constants.len() < 64 {
                                             self.constants.insert(id.name.to_string(), value);
+                                        }
+                                    }
+                                    if self.proxies.len() < 64 {
+                                        if let Some(proxy) = Proxy::expression(init, self.source) {
+                                            self.proxies.insert(id.name.to_string(), proxy);
                                         }
                                     }
                                     if let Expression::ArrayExpression(array) = init {
@@ -326,7 +456,9 @@ impl<'a> Visit<'a> for Folder<'_> {
                                                 .iter()
                                                 .map(|e| self.eval(e.as_expression()?, 0))
                                                 .collect();
-                                            if let Some(values) = values {
+                                            if let Some(values) = values.filter(|values| {
+                                                values.iter().all(Value::is_primitive)
+                                            }) {
                                                 if values
                                                     .iter()
                                                     .map(|v| v.code().len())
@@ -348,6 +480,18 @@ impl<'a> Visit<'a> for Folder<'_> {
                         }
                     }
                 }
+                Statement::FunctionDeclaration(function) => {
+                    if self.list_depth > 1 && self.proxies.len() < 64 {
+                        if let Some(id) = &function.id {
+                            if self.table_uses.proxy_safe(id.name.as_str()) {
+                                if let Some(proxy) = Proxy::function(function, self.source) {
+                                    self.proxies.insert(id.name.to_string(), proxy);
+                                }
+                            }
+                        }
+                    }
+                    walk::walk_statement(self, statement);
+                }
                 Statement::ExpressionStatement(s) => self.visit_expression(&s.expression),
                 Statement::ReturnStatement(s) => {
                     if let Some(argument) = &s.argument {
@@ -358,36 +502,45 @@ impl<'a> Visit<'a> for Folder<'_> {
                 _ => {
                     let local = std::mem::take(&mut self.constants);
                     let local_tables = std::mem::take(&mut self.tables);
+                    let local_proxies = std::mem::take(&mut self.proxies);
                     self.visit_statement(statement);
                     self.constants = local;
                     self.tables = local_tables;
+                    self.proxies = local_proxies;
                 }
             }
         }
         self.constants = outer;
         self.tables = outer_tables;
+        self.proxies = outer_proxies;
         self.list_depth -= 1;
     }
     fn visit_function(&mut self, function: &Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
         let outer = std::mem::take(&mut self.constants);
         let tables = std::mem::take(&mut self.tables);
+        let proxies = std::mem::take(&mut self.proxies);
         walk::walk_function(self, function, flags);
         self.constants = outer;
         self.tables = tables;
+        self.proxies = proxies;
     }
     fn visit_arrow_function_expression(&mut self, function: &ArrowFunctionExpression<'a>) {
         let outer = std::mem::take(&mut self.constants);
         let tables = std::mem::take(&mut self.tables);
+        let proxies = std::mem::take(&mut self.proxies);
         walk::walk_arrow_function_expression(self, function);
         self.constants = outer;
         self.tables = tables;
+        self.proxies = proxies;
     }
     fn visit_class(&mut self, class: &Class<'a>) {
         let outer = std::mem::take(&mut self.constants);
         let tables = std::mem::take(&mut self.tables);
+        let proxies = std::mem::take(&mut self.proxies);
         walk::walk_class(self, class);
         self.constants = outer;
         self.tables = tables;
+        self.proxies = proxies;
     }
     fn visit_if_statement(&mut self, statement: &IfStatement<'a>) {
         if let Some(test) = self.eval(&statement.test, 0) {
@@ -425,9 +578,25 @@ impl<'a> Visit<'a> for Folder<'_> {
                 | Expression::NullLiteral(_)
         );
         if eligible {
-            if let Some(value) = self.eval(expression, 0) {
+            if let Some(value) = self.eval(expression, 0).filter(Value::is_primitive) {
                 let kind = match expression {
                     Expression::Identifier(_) => "constant-propagation",
+                    Expression::CallExpression(call) => match &call.callee {
+                        Expression::Identifier(id)
+                            if self
+                                .proxies
+                                .get(id.name.as_str())
+                                .is_some_and(|p| p.control_flow) =>
+                        {
+                            "control-flow"
+                        }
+                        Expression::Identifier(id)
+                            if self.proxies.get(id.name.as_str()).is_some_and(|p| p.block) =>
+                        {
+                            "custom-decoder"
+                        }
+                        _ => "proxy-call",
+                    },
                     Expression::StringLiteral(_) => "literal-normalization",
                     Expression::ComputedMemberExpression(_) => "literal-index",
                     Expression::ConditionalExpression(_) | Expression::LogicalExpression(_) => {
@@ -493,8 +662,17 @@ struct TableUses {
     unsafe_names: HashSet<String>,
     dynamic_scope: bool,
     deleting: bool,
+    proxy_reads: HashSet<u32>,
+    proxy_unsafe: HashSet<String>,
+    intrinsic_reads: HashSet<u32>,
+    intrinsics_conflict: bool,
 }
 impl TableUses {
+    fn proxy_safe(&self, name: &str) -> bool {
+        !self.dynamic_scope
+            && self.bindings.get(name) == Some(&1)
+            && !self.proxy_unsafe.contains(name)
+    }
     fn safe(&self, name: &str, length: usize) -> bool {
         !self.dynamic_scope
             && self.bindings.get(name) == Some(&1)
@@ -506,6 +684,16 @@ impl TableUses {
     }
 }
 impl<'a> Visit<'a> for TableUses {
+    fn visit_assignment_expression(&mut self, expression: &AssignmentExpression<'a>) {
+        if !matches!(
+            expression.left,
+            AssignmentTarget::AssignmentTargetIdentifier(_)
+        ) {
+            self.intrinsics_conflict = true;
+        }
+        walk::walk_assignment_expression(self, expression);
+    }
+
     fn visit_with_statement(&mut self, statement: &WithStatement<'a>) {
         self.dynamic_scope = true;
         walk::walk_with_statement(self, statement);
@@ -514,6 +702,22 @@ impl<'a> Visit<'a> for TableUses {
         *self.bindings.entry(id.name.to_string()).or_default() += 1;
     }
     fn visit_expression(&mut self, expression: &Expression<'a>) {
+        if let Expression::CallExpression(call) = expression {
+            if let Expression::StaticMemberExpression(member) = &call.callee {
+                if member.property.name == "fromCharCode" {
+                    if let Expression::Identifier(id) = &member.object {
+                        if id.name == "String" {
+                            self.intrinsic_reads.insert(id.span.start);
+                        }
+                    }
+                }
+            }
+            if let Expression::Identifier(id) = &call.callee {
+                if !call.optional {
+                    self.proxy_reads.insert(id.span.start);
+                }
+            }
+        }
         if let Expression::ComputedMemberExpression(member) = expression {
             if let (Expression::Identifier(id), Expression::NumericLiteral(index)) =
                 (&member.object, &member.expression)
@@ -544,8 +748,16 @@ impl<'a> Visit<'a> for TableUses {
         walk::walk_expression(self, expression);
     }
     fn visit_identifier_reference(&mut self, id: &IdentifierReference<'a>) {
+        if matches!(id.name.as_str(), "Array" | "Object" | "Number" | "Boolean")
+            || (id.name == "String" && !self.intrinsic_reads.contains(&id.span.start))
+        {
+            self.intrinsics_conflict = true;
+        }
         if id.name == "eval" {
             self.dynamic_scope = true;
+        }
+        if !self.proxy_reads.contains(&id.span.start) {
+            self.proxy_unsafe.insert(id.name.to_string());
         }
         if !self.allowed.contains(&id.span.start) {
             self.unsafe_names.insert(id.name.to_string());

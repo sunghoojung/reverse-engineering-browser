@@ -11,7 +11,7 @@ final class NativeDeobfuscationService {
 
   init(executableURL: URL) { self.executableURL = executableURL }
 
-  func analyze(source: Data, artifactID: String, mode: String) throws -> Data {
+  func analyze(source: Data, artifactID: String, mode: String, assumeIntrinsics: Bool = false) throws -> Data {
     guard !source.isEmpty, source.count <= Self.maximumSourceBytes,
       let text = String(data: source, encoding: .utf8)
     else { throw NativeDecoderError(status: 400, message: "Source must be nonempty UTF-8 JavaScript of at most 4 MiB") }
@@ -26,7 +26,8 @@ final class NativeDeobfuscationService {
     defer { try? FileManager.default.removeItem(at: directory) }
     let inputURL = directory.appendingPathComponent("input")
     let outputURL = directory.appendingPathComponent("output")
-    var request = try JSONSerialization.data(withJSONObject: ["source": text])
+    let inputObject: [String: Any] = ["source": text, "assume_intrinsics": assumeIntrinsics]
+    var request = try JSONSerialization.data(withJSONObject: inputObject)
     request.append(10)
     FileManager.default.createFile(atPath: inputURL.path, contents: request, attributes: [.posixPermissions: 0o600])
     FileManager.default.createFile(atPath: outputURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
@@ -67,6 +68,10 @@ final class NativeDeobfuscationService {
       let diagnostics = result["syntax_errors"] as? [[String: Any]] ?? []
       throw NativeDecoderError(status: 422, message: diagnostics.first?["message"] as? String ?? "JavaScript could not be parsed")
     }
+    let assumptions = result["assumptions"] as? [String] ?? []
+    guard assumptions == (assumeIntrinsics ? ["standard-intrinsics"] : []) else {
+      throw NativeDecoderError(status: 502, message: "Worker does not support the requested assumption mode")
+    }
     var segments: [[String: Any]] = []
     var originalOffset = 0
     var derivedOffset = 0
@@ -104,9 +109,9 @@ final class NativeDeobfuscationService {
         "byte_size": source.count, "lines": text.components(separatedBy: "\n").count],
       "classification": ["label": "unclassified", "confidence": NSNull(), "evidence": [],
         "scores": [:], "alternatives": []],
-      "stats": result["evidence"] ?? [:], "representation": summary, "string_tables": [],
+      "assumptions": assumptions, "stats": result["evidence"] ?? [:], "representation": summary, "string_tables": [],
       "limits": ["max_source_bytes": Self.maximumSourceBytes, "max_transformations": 4096],
-      "omissions": ["Classification is unavailable. Dynamic decoders, object/array coercion, sparse indices, mutable or escaping tables, and cross-scope propagation remain unresolved."]]
+      "omissions": ["Classification is unavailable. Unsupported decoder operations, custom prototype hooks, mutable or escaping tables, and cross-scope propagation remain unresolved."]]
     var response: [String: Any] = ["schema": "deobfuscation-analysis-v1",
       "engine": "rust-oxc", "artifact_id": artifactID, "script_id": NSNull(), "mode": mode,
       "source_truncated": false, "original_source": text, "analysis": analysis]

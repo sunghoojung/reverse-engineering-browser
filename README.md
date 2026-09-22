@@ -15,19 +15,23 @@
   web applications.
 </p>
 
-## v0.1.9 released
+## v0.1.10 released
 
 Origin Trace now starts a complete instrumented research session when launched.
 The app creates private evidence storage, starts its capture and debugger
-services, and opens an isolated Brave Browser Development profile with safe
-metadata probes enabled.
+services, opens an isolated Brave Browser Development profile with safe
+metadata probes enabled, and switches to the live workspace without treating
+the replaced offline navigation as a startup failure.
 
-[Download Origin Trace v0.1.9](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.9/Origin-Trace-v0.1.9-macos.zip)
-· [Release notes](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.1.9)
-· [Full changelog](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.1.8...v0.1.9)
+[Download Origin Trace v0.1.10](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.10/Origin-Trace-v0.1.10-macos.zip)
+· [Release notes](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.1.10)
+· [Full changelog](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.1.9...v0.1.10)
 
 ### Feature changelog
 
+- **v0.1.10:** fixed the launch-time WebKit cancellation race that could show
+  `NSURLErrorDomain error -999` while Origin Trace switched from its offline
+  shell to the newly started live workspace.
 - **v0.1.9:** made normal app launch start the broker, artifact receiver,
   debugger, analyzers, loopback UI, and instrumented custom Brave session
   automatically; packaged the required helpers and added explicit startup
@@ -83,7 +87,7 @@ metadata probes enabled.
 ### Download the compiled macOS apps
 
 1. Download
-   [Origin Trace v0.1.9](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.9/Origin-Trace-v0.1.9-macos.zip)
+   [Origin Trace v0.1.10](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.10/Origin-Trace-v0.1.10-macos.zip)
    and the
    [Brave Browser Development preview](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/brave-build-20260914/Brave-Browser-Development-brave-build-20260914-macos-arm64.zip).
 2. Unzip both files and place the applications beside each other, or install

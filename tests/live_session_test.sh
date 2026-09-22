@@ -55,6 +55,7 @@ printf '%s\n' \
   'token_file=""' \
   'session_id=""' \
   'category_mask=""' \
+  'user_data_dir=""' \
   'for argument in "$@"; do' \
   '  case "${argument}" in' \
   '    --reb-broker-socket=*) event_socket="${argument#*=}" ;;' \
@@ -62,6 +63,7 @@ printf '%s\n' \
   '    --reb-broker-token-file=*) token_file="${argument#*=}" ;;' \
   '    --reb-session-id=*) session_id="${argument#*=}" ;;' \
   '    --reb-category-mask=*) category_mask="${argument#*=}" ;;' \
+  '    --user-data-dir=*) user_data_dir="${argument#*=}" ;;' \
   '  esac' \
   'done' \
   'test -n "${event_socket}"' \
@@ -69,6 +71,10 @@ printf '%s\n' \
   'test -n "${token_file}"' \
   'test -n "${session_id}"' \
   'test -n "${category_mask}"' \
+  'test -n "${user_data_dir}"' \
+  'mkdir -p "${user_data_dir}"' \
+  'sleep "${REB_FAKE_BRAVE_READY_DELAY:-0}"' \
+  'printf "9222\n/devtools/browser/reb-test\n" >"${user_data_dir}/DevToolsActivePort"' \
   'if [[ -n "${REB_ANALYZER_STARTED:-}" ]]; then' \
   '  for _ in {1..200}; do' \
   '    [[ -f "${REB_ANALYZER_STARTED}" ]] && break' \
@@ -80,6 +86,7 @@ printf '%s\n' \
   'if ((category_mask & 1024)); then' \
   '  "${REB_ARTIFACT_PRODUCER}" --socket "${artifact_socket}" --token-file "${token_file}" --session-id "${session_id}"' \
   'fi' \
+  'sleep "${REB_FAKE_BRAVE_HOLD_DELAY:-0}"' \
   >"${fake_brave}"
 
 # shellcheck disable=SC2016
@@ -113,6 +120,7 @@ REB_VM_ANALYZER="${fake_analyzer}" \
 REB_ANALYZER_STARTED="${analyzer_started}" \
 REB_ANALYZER_STOPPED="${analyzer_stopped}" \
 REB_LIVE_SESSION_ROOT="${test_root}/sessions" \
+REB_BRAVE_CACHE_ROOT="${test_root}/caches" \
 REB_OPEN_COMMAND="${fake_open}" \
 REB_OPEN_ARGUMENTS="${open_arguments}" \
 REB_BRAVE_ARGUMENTS="${brave_arguments}" \
@@ -154,6 +162,15 @@ grep -Fxq -- "${session_directory}/request-signals.jsonl" "${open_arguments}"
 grep -Fxq -- '--ui-url' "${open_arguments}"
 grep -Eq '^http://127\.0\.0\.1:[0-9]+/\?native=1&canvas_images=1$' "${open_arguments}"
 grep -Fxq -- '--remote-debugging-port=0' "${brave_arguments}"
+grep -Fxq -- '--disable-background-networking' "${brave_arguments}"
+grep -Fxq -- '--disable-component-update' "${brave_arguments}"
+grep -Fxq -- '--disable-sync' "${brave_arguments}"
+grep -Fxq -- '--no-default-browser-check' "${brave_arguments}"
+grep -Fxq -- '--no-first-run' "${brave_arguments}"
+if grep -Fxq -- '--use-mock-keychain' "${brave_arguments}"; then
+  echo "Command-line live session disabled the system Keychain without an explicit request" >&2
+  exit 1
+fi
 grep -Fxq -- '--reb-category-mask=4095' "${brave_arguments}"
 grep -Fxq -- '--reb-capture-canvas-images' "${brave_arguments}"
 grep -Fq 'CDP network content: enabled for this session' "${test_root}/live.out"
@@ -179,6 +196,7 @@ test "$(mode_of "${session_directory}/request-signals.jsonl")" = 600
 test "$(mode_of "${session_directory}/broker.log")" = 600
 test "$(mode_of "${session_directory}/artifact-receiver.log")" = 600
 test "$(mode_of "${session_directory}/research-ui.log")" = 600
+test "$(mode_of "${session_directory}/brave.log")" = 600
 test "$(mode_of "${session_directory}/broker.token")" = 600
 test "$(mode_of "${session_directory}/artifacts/manifest.jsonl")" = 600
 artifact_blob="$(find "${session_directory}/artifacts/blobs" -type f -name '*.bin' -print -quit)"
@@ -197,6 +215,7 @@ REB_VM_ANALYZER="${fake_analyzer}" \
 REB_ANALYZER_STARTED="${embedded_analyzer_started}" \
 REB_ANALYZER_STOPPED="${embedded_analyzer_stopped}" \
 REB_LIVE_SESSION_ROOT="${embedded_sessions}" \
+REB_BRAVE_CACHE_ROOT="${test_root}/embedded-caches" \
 REB_SESSION_HANDSHAKE="${embedded_handshake}" \
 REB_SESSION_OWNER_PID="${owner_pid}" \
 REB_EMBEDDED_SESSION=1 \
@@ -204,9 +223,16 @@ REB_BRAVE_ARGUMENTS="${brave_arguments}" \
 REB_EVENT_PRODUCER="${event_producer}" \
 REB_ARTIFACT_PRODUCER="${artifact_producer}" \
 REB_CAPTURE_DURATION_SECONDS=60 \
+REB_FAKE_BRAVE_READY_DELAY=0.2 \
+REB_USE_SYSTEM_KEYCHAIN=0 \
   "${live_script}" >"${test_root}/embedded-live.out" \
   2>"${test_root}/embedded-live.err" &
 live_pid=$!
+sleep 0.05
+if [[ -e "${embedded_handshake}" ]]; then
+  echo "Embedded handshake was published before Brave became ready" >&2
+  exit 1
+fi
 for _ in {1..300}; do
   [[ -s "${embedded_handshake}" ]] && break
   if ! kill -0 "${live_pid}" 2>/dev/null; then
@@ -218,6 +244,7 @@ done
 grep -Eq '^http://127\.0\.0\.1:[0-9]+/\?native=1&canvas_images=0$' \
   "${embedded_handshake}"
 test ! -e "${open_arguments}"
+grep -Fxq -- '--use-mock-keychain' "${brave_arguments}"
 embedded_session_directory="$(find "${embedded_sessions}" -mindepth 1 -maxdepth 1 -type d -print -quit)"
 test -n "${embedded_session_directory}"
 for _ in {1..200}; do
@@ -235,6 +262,51 @@ test -f "${embedded_analyzer_stopped}"
 embedded_session_id="$(basename "${embedded_session_directory}")"
 test ! -e "/tmp/origin-trace-${UID}-${embedded_session_id}.sock"
 test ! -e "/tmp/origin-trace-${UID}-${embedded_session_id}-artifacts.sock"
+
+readonly relaunch_sessions="${test_root}/relaunch-sessions"
+readonly relaunch_handshake="${test_root}/relaunch.endpoint"
+readonly relaunch_analyzer_started="${test_root}/relaunch-analyzer-started"
+readonly relaunch_analyzer_stopped="${test_root}/relaunch-analyzer-stopped"
+sleep 30 &
+owner_pid=$!
+REB_BRAVE_BINARY="${fake_brave}" \
+REB_VM_ANALYZER="${fake_analyzer}" \
+REB_ANALYZER_STARTED="${relaunch_analyzer_started}" \
+REB_ANALYZER_STOPPED="${relaunch_analyzer_stopped}" \
+REB_LIVE_SESSION_ROOT="${relaunch_sessions}" \
+REB_BRAVE_CACHE_ROOT="${test_root}/relaunch-caches" \
+REB_SESSION_HANDSHAKE="${relaunch_handshake}" \
+REB_SESSION_OWNER_PID="${owner_pid}" \
+REB_EMBEDDED_SESSION=1 \
+REB_BRAVE_ARGUMENTS="${brave_arguments}" \
+REB_EVENT_PRODUCER="${event_producer}" \
+REB_ARTIFACT_PRODUCER="${artifact_producer}" \
+REB_CAPTURE_DURATION_SECONDS=60 \
+  "${live_script}" >"${test_root}/relaunch-live.out" \
+  2>"${test_root}/relaunch-live.err" &
+live_pid=$!
+for _ in {1..300}; do
+  [[ -s "${relaunch_handshake}" ]] && break
+  if ! kill -0 "${live_pid}" 2>/dev/null; then
+    echo "Relaunched live session stopped during startup" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+test -s "${relaunch_handshake}"
+relaunch_session_directory="$(find "${relaunch_sessions}" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+test -n "${relaunch_session_directory}"
+relaunch_session_id="$(basename "${relaunch_session_directory}")"
+test "${relaunch_session_id}" != "${embedded_session_id}"
+kill "${owner_pid}"
+wait "${owner_pid}" 2>/dev/null || true
+owner_pid=""
+wait "${live_pid}"
+live_pid=""
+test ! -e "${relaunch_handshake}"
+test -f "${relaunch_analyzer_stopped}"
+test ! -e "/tmp/origin-trace-${UID}-${relaunch_session_id}.sock"
+test ! -e "/tmp/origin-trace-${UID}-${relaunch_session_id}-artifacts.sock"
 
 readonly disabled_sessions="${test_root}/disabled-sessions"
 REB_BRAVE_BINARY="${fake_brave}" \
@@ -303,6 +375,7 @@ REB_ARTIFACT_PRODUCER="${artifact_producer}" \
 REB_CAPTURE_CATEGORY_MASK=257 \
 REB_CAPTURE_DURATION_SECONDS=60 \
 REB_NATIVE_QUIET_MODE=1 \
+REB_FAKE_BRAVE_HOLD_DELAY=0.5 \
   "${live_script}" >"${test_root}/quiet-live.out" \
   2>"${test_root}/quiet-live.err"
 

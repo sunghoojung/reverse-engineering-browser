@@ -16,6 +16,11 @@ Implementation objects mirror source paths inside `BUILD_DIR`; compiler-generate
 queue test links the tracked browser queue implementation. Only decoder targets
 add zlib to their link commands.
 
+`make bootstrap-dev-tools` installs only missing `clang-format`, `shellcheck`,
+and `actionlint` formulae with Homebrew. `make deob-benchmark` builds the Rust
+worker and runs the bounded semantic corpus with timing, memory, transformation,
+and changed-source coverage evidence.
+
 Use a separate build directory for a different compiler or set of flags:
 
 ```sh

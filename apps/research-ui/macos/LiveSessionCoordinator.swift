@@ -15,6 +15,8 @@ final class LiveSessionCoordinator {
 
   func start(
     braveExecutableURL: URL,
+    captureNetworkContent: Bool,
+    useSystemKeychain: Bool,
     ready: @escaping (URL) -> Void,
     failed: @escaping (String) -> Void
   ) {
@@ -29,7 +31,11 @@ final class LiveSessionCoordinator {
     lock.unlock()
 
     do {
-      let configuration = try makeConfiguration(braveExecutableURL: braveExecutableURL)
+      let configuration = try makeConfiguration(
+        braveExecutableURL: braveExecutableURL,
+        captureNetworkContent: captureNetworkContent,
+        useSystemKeychain: useSystemKeychain
+      )
       let child = Process()
       child.executableURL = URL(fileURLWithPath: "/bin/bash")
       child.arguments = [configuration.scriptURL.path]
@@ -98,7 +104,11 @@ final class LiveSessionCoordinator {
     let environment: [String: String]
   }
 
-  private func makeConfiguration(braveExecutableURL: URL) throws -> Configuration {
+  private func makeConfiguration(
+    braveExecutableURL: URL,
+    captureNetworkContent: Bool,
+    useSystemKeychain: Bool
+  ) throws -> Configuration {
     guard let resourcesURL = Bundle.main.resourceURL else {
       throw sessionError("Application resources are missing")
     }
@@ -142,6 +152,16 @@ final class LiveSessionCoordinator {
     )
     let sessionRootURL = originTraceURL.appendingPathComponent("sessions/live", isDirectory: true)
     let logsURL = originTraceURL.appendingPathComponent("logs", isDirectory: true)
+    let cachesURL =
+      FileManager.default.urls(
+        for: .cachesDirectory,
+        in: .userDomainMask
+      ).first
+      ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches")
+    let browserCacheRootURL = cachesURL.appendingPathComponent(
+      "Origin Trace/sessions/live",
+      isDirectory: true
+    )
     try FileManager.default.createDirectory(
       at: sessionRootURL,
       withIntermediateDirectories: true,
@@ -149,6 +169,11 @@ final class LiveSessionCoordinator {
     )
     try FileManager.default.createDirectory(
       at: logsURL,
+      withIntermediateDirectories: true,
+      attributes: [.posixPermissions: 0o700]
+    )
+    try FileManager.default.createDirectory(
+      at: browserCacheRootURL,
       withIntermediateDirectories: true,
       attributes: [.posixPermissions: 0o700]
     )
@@ -170,7 +195,10 @@ final class LiveSessionCoordinator {
     environment["REB_SESSION_HANDSHAKE"] = handshakeURL.path
     environment["REB_SESSION_OWNER_PID"] = String(ProcessInfo.processInfo.processIdentifier)
     environment["REB_LIVE_SESSION_ROOT"] = sessionRootURL.path
+    environment["REB_BRAVE_CACHE_ROOT"] = browserCacheRootURL.path
     environment["REB_BRAVE_BINARY"] = braveExecutableURL.path
+    environment["REB_CDP_NETWORK_CAPTURE"] = captureNetworkContent ? "1" : "0"
+    environment["REB_USE_SYSTEM_KEYCHAIN"] = useSystemKeychain ? "1" : "0"
     environment["REB_PYTHON_BINARY"] = pythonURL.path
     environment["REB_BROKER_BINARY"] =
       macOSURL.appendingPathComponent(

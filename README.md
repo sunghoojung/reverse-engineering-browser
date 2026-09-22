@@ -15,18 +15,26 @@
   web applications.
 </p>
 
-## v0.1.4 released
+## v0.1.8 released
 
-Origin Trace now groups native fingerprint activity by browser tab, shows the
-newest operations first, and separates captured Canvas output from its drawing
-functions. Live sessions can stop probes and clear recorded events explicitly.
+Origin Trace now provides bounded static JavaScript deobfuscation directly in
+Sources. It preserves the captured artifact, maps derived expressions back to
+their original byte ranges, and keeps unknown or unsafe operations visible.
 
-[Download Origin Trace v0.1.4](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.4/Origin-Trace-v0.1.4-macos.zip)
-· [Release notes](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.1.4)
-· [Full changelog](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.1.3...v0.1.4)
+[Download Origin Trace v0.1.8](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.8/Origin-Trace-v0.1.8-macos.zip)
+· [Release notes](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.1.8)
+· [Full changelog](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.1.7...v0.1.8)
 
 ### Feature changelog
 
+- **v0.1.8:** added bounded Rust/Oxc deobfuscation inside Sources, original-byte
+  provenance, nesting protection, proxy and custom decoder evaluation, explicit
+  JSFuck coercion assumptions, and bounded loop/switch dispatcher recovery.
+- **v0.1.7:** refreshed the research interface and reorganized advanced tools,
+  source inspection, request details, fingerprinting, memory, and experiments.
+- **v0.1.6:** added stronger source, memory, request-signal, and analyst
+  workflows with native application packaging and validation updates.
+- **v0.1.5:** expanded the native research workflow and macOS distribution.
 - **v0.1.4:** expanded native fingerprint probes, added per-tab newest-first
   activity and live tab counts, opt-in Canvas image capture, clearer queue-gap
   reporting, and controls to stop probes or clear the current session's events.
@@ -70,7 +78,7 @@ functions. Live sessions can stop probes and clear recorded events explicitly.
 ### Download the compiled macOS apps
 
 1. Download
-   [Origin Trace v0.1.4](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.4/Origin-Trace-v0.1.4-macos.zip)
+   [Origin Trace v0.1.8](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.8/Origin-Trace-v0.1.8-macos.zip)
    and the
    [Brave Browser Development preview](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/brave-build-20260914/Brave-Browser-Development-brave-build-20260914-macos-arm64.zip).
 2. Unzip both files.
@@ -78,8 +86,8 @@ functions. Live sessions can stop probes and clear recorded events explicitly.
    session from the repository, as shown below.
 
 The compiled apps are for Apple silicon Macs. The linked Brave Browser
-Development preview predates the v0.1.4 probe expansion. Build the pinned
-Brave integration from this release's source to use the new probes; the
+Development preview predates current probe support. Build the pinned Brave
+integration from this release's source to use every native probe; the
 downloaded preview cannot demonstrate them. Origin Trace contains no bundled
 sample evidence. The applications are ad-hoc signed but not notarized, so the
 first launch may require Control-clicking the app and choosing **Open**.

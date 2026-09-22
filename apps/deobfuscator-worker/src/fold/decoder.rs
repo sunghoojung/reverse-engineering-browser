@@ -10,6 +10,8 @@ use std::collections::HashSet;
 
 enum Flow {
     Next,
+    Break,
+    Continue,
     Return(Value),
 }
 
@@ -34,8 +36,10 @@ impl Folder<'_> {
             self.constants.entry(name).or_insert(Value::Undefined);
         }
         for statement in &body.statements {
-            if let Flow::Return(value) = self.statement(statement, depth)? {
-                return Some(value);
+            match self.statement(statement, depth)? {
+                Flow::Return(value) => return Some(value),
+                Flow::Next => (),
+                _ => return None,
             }
         }
         Some(Value::Undefined)
@@ -59,7 +63,9 @@ impl Folder<'_> {
             }
             Statement::BlockStatement(block) => {
                 for statement in &block.body {
-                    if let result @ Flow::Return(_) = self.statement(statement, next)? {
+                    if let result @ (Flow::Return(_) | Flow::Break | Flow::Continue) =
+                        self.statement(statement, next)?
+                    {
                         return Some(result);
                     }
                 }
@@ -85,8 +91,10 @@ impl Folder<'_> {
                             return Some(Flow::Next);
                         }
                     }
-                    if let result @ Flow::Return(_) = self.statement(&s.body, next)? {
-                        return Some(result);
+                    match self.statement(&s.body, next)? {
+                        result @ Flow::Return(_) => return Some(result),
+                        Flow::Break => return Some(Flow::Next),
+                        Flow::Next | Flow::Continue => (),
                     }
                     if let Some(update) = &s.update {
                         self.effect(update, next)?;
@@ -94,6 +102,68 @@ impl Folder<'_> {
                 }
                 self.truncated = true;
                 return None;
+            }
+            Statement::BreakStatement(s) if s.label.is_none() => return Some(Flow::Break),
+            Statement::ContinueStatement(s) if s.label.is_none() => return Some(Flow::Continue),
+            Statement::WhileStatement(s) => {
+                for _ in 0..4096 {
+                    if !self.eval(&s.test, next)?.truthy() {
+                        return Some(Flow::Next);
+                    }
+                    match self.statement(&s.body, next)? {
+                        result @ Flow::Return(_) => return Some(result),
+                        Flow::Break => return Some(Flow::Next),
+                        Flow::Next | Flow::Continue => (),
+                    }
+                }
+                self.truncated = true;
+                return None;
+            }
+            Statement::DoWhileStatement(s) => {
+                for _ in 0..4096 {
+                    match self.statement(&s.body, next)? {
+                        result @ Flow::Return(_) => return Some(result),
+                        Flow::Break => return Some(Flow::Next),
+                        Flow::Next | Flow::Continue => (),
+                    }
+                    if !self.eval(&s.test, next)?.truthy() {
+                        return Some(Flow::Next);
+                    }
+                }
+                self.truncated = true;
+                return None;
+            }
+            Statement::SwitchStatement(s) => {
+                let value = self.eval(&s.discriminant, next)?;
+                if !value.is_primitive() {
+                    return None;
+                }
+                let mut start = None;
+                for (index, case) in s.cases.iter().enumerate() {
+                    if let Some(test) = &case.test {
+                        let test = self.eval(test, next)?;
+                        if !test.is_primitive() {
+                            return None;
+                        }
+                        if value == test {
+                            start = Some(index);
+                            break;
+                        }
+                    } else {
+                        start = Some(index);
+                    }
+                }
+                if let Some(start) = start {
+                    for case in s.cases.iter().skip(start) {
+                        for statement in &case.consequent {
+                            match self.statement(statement, next)? {
+                                Flow::Break => return Some(Flow::Next),
+                                Flow::Next => (),
+                                result => return Some(result),
+                            }
+                        }
+                    }
+                }
             }
             Statement::EmptyStatement(_) => (),
             _ => return None,
@@ -118,6 +188,14 @@ impl Folder<'_> {
     }
 
     fn effect(&mut self, expression: &Expression<'_>, depth: usize) -> Option<()> {
+        self.eval(expression, depth).map(|_| ())
+    }
+
+    pub(super) fn local_effect(
+        &mut self,
+        expression: &Expression<'_>,
+        depth: usize,
+    ) -> Option<Value> {
         match expression {
             Expression::AssignmentExpression(e) => {
                 let AssignmentTarget::AssignmentTargetIdentifier(id) = &e.left else {
@@ -146,13 +224,15 @@ impl Folder<'_> {
                 if matches!(&result, Value::Number(n) if !n.is_finite()) {
                     return None;
                 }
-                self.constants.insert(id.name.to_string(), result);
+                self.constants.insert(id.name.to_string(), result.clone());
+                Some(result)
             }
             Expression::UpdateExpression(e) => {
                 let SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = &e.argument else {
                     return None;
                 };
                 let n = self.constants.get(id.name.as_str())?.number()?;
+                let old = n;
                 let n = n + if e.operator == UpdateOperator::Increment {
                     1.0
                 } else {
@@ -162,17 +242,31 @@ impl Folder<'_> {
                     return None;
                 }
                 self.constants.insert(id.name.to_string(), Value::Number(n));
+                Some(Value::Number(if e.prefix { n } else { old }))
             }
-            _ => {
-                self.eval(expression, depth)?;
+            Expression::SequenceExpression(e) => {
+                let mut result = Value::Undefined;
+                for expression in &e.expressions {
+                    result = self.eval(expression, depth)?;
+                }
+                Some(result)
             }
+            _ => None,
         }
-        Some(())
     }
 
     pub(super) fn intrinsic(&mut self, call: &CallExpression<'_>, depth: usize) -> Option<Value> {
         let Expression::StaticMemberExpression(member) = &call.callee else {
             return None;
+        };
+        let from_char_code = matches!(&member.object, Expression::Identifier(id) if id.name == "String")
+            && !self.constants.contains_key("String")
+            && member.property.name == "fromCharCode";
+        // Evaluate the receiver before arguments, including local updates.
+        let receiver = if from_char_code {
+            None
+        } else {
+            Some(self.eval(&member.object, depth)?)
         };
         let mut args = Vec::new();
         if call.arguments.len() > 256 {
@@ -181,19 +275,14 @@ impl Folder<'_> {
         for argument in &call.arguments {
             args.push(self.eval(argument.as_expression()?, depth)?);
         }
-        if let Expression::Identifier(id) = &member.object {
-            if id.name == "String"
-                && !self.constants.contains_key("String")
-                && member.property.name == "fromCharCode"
-            {
-                let units: Option<Vec<_>> = args
-                    .iter()
-                    .map(|v| Some(int32(v.number()?) as u16))
-                    .collect();
-                return Some(Value::String(String::from_utf16(&units?).ok()?));
-            }
+        if from_char_code {
+            let units: Option<Vec<_>> = args
+                .iter()
+                .map(|v| Some(int32(v.number()?) as u16))
+                .collect();
+            return Some(Value::String(String::from_utf16(&units?).ok()?));
         }
-        let Value::String(text) = self.eval(&member.object, depth)? else {
+        let Value::String(text) = receiver? else {
             return None;
         };
         match member.property.name.as_str() {
@@ -210,6 +299,29 @@ impl Folder<'_> {
                     }));
                 }
                 Some(Value::Number(f64::from(unit?)))
+            }
+            "split" if args.len() == 1 => {
+                let Value::String(separator) = &args[0] else {
+                    return None;
+                };
+                let parts: Vec<String> = if separator.is_empty() {
+                    text.encode_utf16()
+                        .take(257)
+                        .map(|unit| char::from_u32(u32::from(unit)).map(|c| c.to_string()))
+                        .collect::<Option<Vec<_>>>()?
+                } else {
+                    text.split(separator)
+                        .take(257)
+                        .map(str::to_string)
+                        .collect()
+                };
+                if parts.len() > 256 {
+                    self.truncated = true;
+                    return None;
+                }
+                Some(Value::Array(
+                    parts.into_iter().map(|s| Some(Value::String(s))).collect(),
+                ))
             }
             "indexOf" if args.len() == 1 => {
                 let Value::String(needle) = &args[0] else {
@@ -244,6 +356,11 @@ impl<'a> Visit<'a> for Locals {
         walk::walk_variable_declaration(self, d);
     }
     fn visit_function(&mut self, _: &Function<'a>, _: oxc_syntax::scope::ScopeFlags) {
+        self.invalid = true;
+    }
+    fn visit_class(&mut self, _: &Class<'a>) {
+        // Class bindings introduce lexical scope and temporal dead zones, even
+        // when execution returns before reaching the declaration.
         self.invalid = true;
     }
     fn visit_arrow_function_expression(&mut self, _: &ArrowFunctionExpression<'a>) {

@@ -43,6 +43,64 @@ class DeobfuscationMethodsTest(unittest.TestCase):
         self.assertEqual(rebuilt.decode(), response['derived_source'])
         return response
 
+    def test_bounded_control_flow_matches_javascript(self):
+        bodies = [
+            ('var state=0, out=""; while(true){switch(state){case 0:out+="h";state=2;break;case 2:out+="i";state=1;break;case 1:return out;}}', False, 'hi'),
+            ('var order="2|0|1".split("|"), i=0, out=""; while(true){switch(order[i++]){case "0":out+="i";continue;case "1":return out;case "2":out+="h";continue;}break;}return out;', True, 'hi'),
+            ('var out="";switch(2){default:out+="bad";case 2:out+="a";case 3:out+="b";break;case 4:out+="bad";}return out;', False, 'ab'),
+            ('var out="";switch(7){case 1:out+="bad";default:out+="a";case 2:out+="b";}return out;', False, 'ab'),
+            ('var out="";for(var i=0;i<3;i++){switch(i){case 1:continue;default:out+=i;}}return out;', False, '02'),
+            ('var n=0;do{n++;continue;}while(n<2);return n;', False, 2),
+            ('var n=0;do{n++;break;}while(true);return n;', False, 1),
+            ('var i=0;return (i++,++i,i);', False, 2),
+            ('var s="a";return s.charAt((s="b",0));', True, 'a'),
+            ('var s="ab";return s[(s="cd",0)];', False, 'a'),
+            ('var n=0;switch(n++){case n++:return 99;case 0:return n;default:return n;}', False, 2),
+        ]
+        for body, assumed, expected in bodies:
+            with self.subTest(body=body):
+                source = 'const decode=function(){' + body + '}; const result=decode();'
+                response = self.analyze(source, assumed)
+                self.assertIn('const result=(' + json.dumps(expected, separators=(',', ':')) + ');', response['derived_source'])
+                if shutil.which('node'):
+                    for code in [source, response['derived_source']]:
+                        actual = subprocess.run(['node'], input=code + '\nconsole.log(JSON.stringify(result));', text=True, capture_output=True, check=True, timeout=5)
+                        self.assertEqual(json.loads(actual.stdout), expected)
+
+    def test_control_flow_rejects_unknown_effects_and_bounds_cycles(self):
+        bodies = [
+            'while(external()){return 1;}return 2;',
+            'while(true){globalValue=1;return 2;}',
+            'outer:while(true){break outer;}return 2;',
+            'try{return 1;}finally{effect();}',
+            'var x=1;{return x;class x{}}',
+            'switch(1){case external():return 1;default:return 2;}',
+            'while(true){switch(0){case 0:continue;}}',
+            'var state=0;while(true){state=1-state;}',
+            'var x="a".split("");x[0]="b";return x[0];',
+        ]
+        for body in bodies:
+            with self.subTest(body=body):
+                source = 'const decode=function(){' + body + '}; const result=decode();'
+                response = self.analyze(source, True)
+                self.assertIn('const result=decode();', response['derived_source'])
+        response = self.analyze('const decode=function(){while(true){}};const result=decode();')
+        self.assertTrue(response['transformations_truncated'])
+
+    def test_dispatcher_split_limits_and_utf16(self):
+        for text, separator, expected in [('abc', '', 'b'), ('a||b', '|', ''), ('', '|', None)]:
+            source = 'const decode=function(){return ' + json.dumps(text) + '.split(' + json.dumps(separator) + ')[1];};const result=decode();'
+            response = self.analyze(source, True)
+            replacement = 'void 0' if expected is None else json.dumps(expected)
+            self.assertIn('const result=(' + replacement + ');', response['derived_source'])
+            self.assertIn('const result=decode();', self.analyze(source)['derived_source'])
+        for text in ['a' * 257, '😀']:
+            source = 'const decode=function(){return ' + json.dumps(text) + '.split("")[0];};const result=decode();'
+            response = self.analyze(source, True)
+            self.assertIn('const result=decode();', response['derived_source'])
+            if text == 'a' * 257:
+                self.assertTrue(response['transformations_truncated'])
+
     def test_supported_techniques_through_worker_protocol(self):
         cases = [
             ('const result = 1 + 2 * 3;', '(7)', 'constant-fold'),

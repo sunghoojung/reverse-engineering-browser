@@ -76,6 +76,13 @@ impl<'s> Folder<'s> {
         self.steps += 1;
         let next = depth + 1;
         let value = match expression {
+            Expression::AssignmentExpression(_)
+            | Expression::UpdateExpression(_)
+            | Expression::SequenceExpression(_)
+                if self.in_proxy =>
+            {
+                self.local_effect(expression, next)?
+            }
             Expression::ParenthesizedExpression(e) => self.eval(&e.expression, next)?,
             Expression::NumericLiteral(n) => Value::Number(n.value),
             Expression::StringLiteral(s)
@@ -280,6 +287,35 @@ impl<'s> Folder<'s> {
                 self.tables = tables;
                 self.proxies = proxies;
                 value?
+            }
+            Expression::ComputedMemberExpression(e) if !e.optional && self.in_proxy => {
+                let object = self.eval(&e.object, next)?;
+                let key = self.eval(&e.expression, next)?;
+                let index = match key {
+                    Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
+                    Value::String(s)
+                        if s == "0"
+                            || (!s.is_empty()
+                                && !s.starts_with('0')
+                                && s.bytes().all(|b| b.is_ascii_digit())) =>
+                    {
+                        s.parse().ok()?
+                    }
+                    _ => return None,
+                };
+                match object {
+                    Value::Array(values) if self.assume_intrinsics => values
+                        .get(index)
+                        .cloned()
+                        .flatten()
+                        .unwrap_or(Value::Undefined),
+                    Value::String(s) => match s.encode_utf16().nth(index) {
+                        Some(unit) => Value::String(char::from_u32(u32::from(unit))?.to_string()),
+                        None if self.assume_intrinsics => Value::Undefined,
+                        None => return None,
+                    },
+                    _ => return None,
+                }
             }
             Expression::ComputedMemberExpression(e) if !e.optional => {
                 // Only own, present indices. No prototype lookup, holes, getters,
@@ -546,6 +582,14 @@ impl<'a> Visit<'a> for Folder<'_> {
                 let kind = match expression {
                     Expression::Identifier(_) => "constant-propagation",
                     Expression::CallExpression(call) => match &call.callee {
+                        Expression::Identifier(id)
+                            if self
+                                .proxies
+                                .get(id.name.as_str())
+                                .is_some_and(|p| p.control_flow) =>
+                        {
+                            "control-flow"
+                        }
                         Expression::Identifier(id)
                             if self.proxies.get(id.name.as_str()).is_some_and(|p| p.block) =>
                         {

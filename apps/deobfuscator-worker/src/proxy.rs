@@ -1,5 +1,6 @@
 //! Closed proxy descriptions own bounded source text rather than AST pointers.
 use oxc_ast::ast::*;
+use oxc_ast_visit::Visit;
 use oxc_span::{GetSpan, Span};
 use std::collections::HashSet;
 
@@ -8,6 +9,7 @@ pub struct Proxy {
     pub parameters: Vec<String>,
     pub expression: String,
     pub block: bool,
+    pub control_flow: bool,
 }
 
 impl Proxy {
@@ -39,7 +41,11 @@ impl Proxy {
         if let Some(expression) = return_expression(body) {
             Self::capture(params, expression.span(), false, source)
         } else {
-            Self::capture(params, body.span, true, source)
+            let mut proxy = Self::capture(params, body.span, true, source)?;
+            let mut flow = ControlFlow::default();
+            flow.visit_function_body(body);
+            proxy.control_flow = flow.0;
+            Some(proxy)
         }
     }
 
@@ -66,6 +72,7 @@ impl Proxy {
         Some(Self {
             parameters,
             block,
+            control_flow: false,
             expression: source[span.start as usize..span.end as usize].to_string(),
         })
     }
@@ -79,4 +86,18 @@ fn return_expression<'a, 'b>(body: &'b FunctionBody<'a>) -> Option<&'b Expressio
         return None;
     };
     statement.argument.as_ref()
+}
+
+#[derive(Default)]
+struct ControlFlow(bool);
+impl<'a> Visit<'a> for ControlFlow {
+    fn visit_while_statement(&mut self, _: &WhileStatement<'a>) {
+        self.0 = true;
+    }
+    fn visit_do_while_statement(&mut self, _: &DoWhileStatement<'a>) {
+        self.0 = true;
+    }
+    fn visit_switch_statement(&mut self, _: &SwitchStatement<'a>) {
+        self.0 = true;
+    }
 }

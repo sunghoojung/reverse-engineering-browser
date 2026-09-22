@@ -1,6 +1,8 @@
 //! Closed, bounded abstract evaluation. Never call JavaScript or object coercion hooks.
 mod decoder;
+mod value;
 use std::collections::{HashMap, HashSet};
+use value::Value;
 
 use oxc_ast::ast::*;
 use oxc_ast_visit::{Visit, walk};
@@ -16,46 +18,6 @@ const MAX_DEPTH: usize = 64;
 const MAX_VALUE_BYTES: usize = 16 * 1024;
 const MAX_STEPS: usize = 250_000;
 const MAX_REPLACEMENT_BYTES: usize = 512 * 1024;
-
-#[derive(Clone, Debug, PartialEq)]
-enum Value {
-    Number(f64),
-    String(String),
-    Bool(bool),
-    Null,
-    Undefined,
-}
-
-impl Value {
-    fn truthy(&self) -> bool {
-        match self {
-            Self::Number(n) => *n != 0.0 && !n.is_nan(),
-            Self::String(s) => !s.is_empty(),
-            Self::Bool(b) => *b,
-            Self::Null | Self::Undefined => false,
-        }
-    }
-    fn number(&self) -> Option<f64> {
-        match self {
-            Self::Number(n) => Some(*n),
-            Self::Bool(b) => Some(f64::from(u8::from(*b))),
-            Self::Null => Some(0.0),
-            // StringNumericLiteral has different rules from Rust's float parser.
-            // Leave it unresolved rather than accepting a subtly different grammar.
-            _ => None,
-        }
-    }
-    fn code(&self) -> String {
-        match self {
-            Self::Number(n) if *n == 0.0 && n.is_sign_negative() => "-0".into(),
-            Self::Number(n) => n.to_string(),
-            Self::String(s) => serde_json::to_string(s).unwrap(),
-            Self::Bool(b) => b.to_string(),
-            Self::Null => "null".into(),
-            Self::Undefined => "void 0".into(),
-        }
-    }
-}
 
 fn int32(n: f64) -> i32 {
     if !n.is_finite() || n == 0.0 {
@@ -114,6 +76,13 @@ impl<'s> Folder<'s> {
         self.steps += 1;
         let next = depth + 1;
         let value = match expression {
+            Expression::AssignmentExpression(_)
+            | Expression::UpdateExpression(_)
+            | Expression::SequenceExpression(_)
+                if self.in_proxy =>
+            {
+                self.local_effect(expression, next)?
+            }
             Expression::ParenthesizedExpression(e) => self.eval(&e.expression, next)?,
             Expression::NumericLiteral(n) => Value::Number(n.value),
             Expression::StringLiteral(s)
@@ -123,6 +92,25 @@ impl<'s> Folder<'s> {
             }
             Expression::BooleanLiteral(b) => Value::Bool(b.value),
             Expression::NullLiteral(_) => Value::Null,
+            Expression::ArrayExpression(array) if self.assume_intrinsics => {
+                if array.elements.len() > 256 {
+                    self.truncated = true;
+                    return None;
+                }
+                let mut values = Vec::new();
+                for element in &array.elements {
+                    values.push(match element {
+                        ArrayExpressionElement::Elision(_) => None,
+                        element => Some(self.eval(element.as_expression()?, next)?),
+                    });
+                }
+                Value::Array(values)
+            }
+            Expression::ObjectExpression(object)
+                if self.assume_intrinsics && object.properties.is_empty() =>
+            {
+                Value::EmptyObject
+            }
             Expression::Identifier(id) => self.constants.get(id.name.as_str())?.clone(),
             Expression::UnaryExpression(e) => {
                 // Even void must prove its argument free of effects and exceptions.
@@ -140,6 +128,7 @@ impl<'s> Folder<'s> {
                             Value::Bool(_) => "boolean",
                             Value::Null => "object",
                             Value::Undefined => "undefined",
+                            Value::Array(_) | Value::EmptyObject => "object",
                         }
                         .into(),
                     ),
@@ -149,27 +138,29 @@ impl<'s> Folder<'s> {
             Expression::BinaryExpression(e) => {
                 let left = self.eval(&e.left, next)?;
                 let right = self.eval(&e.right, next)?;
+                let (left, right) = if matches!(
+                    e.operator,
+                    B::LessThan | B::LessEqualThan | B::GreaterThan | B::GreaterEqualThan
+                ) {
+                    (left.primitive()?, right.primitive()?)
+                } else {
+                    (left, right)
+                };
                 match e.operator {
-                    B::Addition
-                        if matches!((&left, &right), (Value::String(_), Value::String(_))) =>
-                    {
-                        let (Value::String(mut a), Value::String(b)) = (left, right) else {
-                            unreachable!()
-                        };
-                        if a.len() + b.len() > MAX_VALUE_BYTES {
+                    B::Addition => match left.add(&right) {
+                        Some(value) => value,
+                        None => {
                             self.truncated = true;
                             return None;
                         }
-                        a.push_str(&b);
-                        Value::String(a)
-                    }
-                    B::StrictEquality | B::StrictInequality => {
+                    },
+                    B::StrictEquality | B::StrictInequality
+                        if left.is_primitive() && right.is_primitive() =>
+                    {
                         Value::Bool((left == right) == (e.operator == B::StrictEquality))
                     }
-                    B::Equality | B::Inequality
-                        if std::mem::discriminant(&left) == std::mem::discriminant(&right) =>
-                    {
-                        Value::Bool((left == right) == (e.operator == B::Equality))
+                    B::Equality | B::Inequality => {
+                        Value::Bool(left.loose_equal(&right)? == (e.operator == B::Equality))
                     }
                     B::LessThan | B::LessEqualThan | B::GreaterThan | B::GreaterEqualThan
                         if matches!((&left, &right), (Value::String(_), Value::String(_))) =>
@@ -253,10 +244,11 @@ impl<'s> Folder<'s> {
                 )?
             }
             Expression::StaticMemberExpression(member) if member.property.name == "length" => {
-                let Value::String(text) = self.eval(&member.object, next)? else {
-                    return None;
-                };
-                Value::Number(text.encode_utf16().count() as f64)
+                match self.eval(&member.object, next)? {
+                    Value::String(text) => Value::Number(text.encode_utf16().count() as f64),
+                    Value::Array(values) => Value::Number(values.len() as f64),
+                    _ => return None,
+                }
             }
             Expression::CallExpression(call)
                 if self.in_proxy && self.assume_intrinsics && !call.optional =>
@@ -296,10 +288,82 @@ impl<'s> Folder<'s> {
                 self.proxies = proxies;
                 value?
             }
+            Expression::ComputedMemberExpression(e) if !e.optional && self.in_proxy => {
+                let object = self.eval(&e.object, next)?;
+                let key = self.eval(&e.expression, next)?;
+                let index = match key {
+                    Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
+                    Value::String(s)
+                        if s == "0"
+                            || (!s.is_empty()
+                                && !s.starts_with('0')
+                                && s.bytes().all(|b| b.is_ascii_digit())) =>
+                    {
+                        s.parse().ok()?
+                    }
+                    _ => return None,
+                };
+                match object {
+                    Value::Array(values) if self.assume_intrinsics => values
+                        .get(index)
+                        .cloned()
+                        .flatten()
+                        .unwrap_or(Value::Undefined),
+                    Value::String(s) => match s.encode_utf16().nth(index) {
+                        Some(unit) => Value::String(char::from_u32(u32::from(unit))?.to_string()),
+                        None if self.assume_intrinsics => Value::Undefined,
+                        None => return None,
+                    },
+                    _ => return None,
+                }
+            }
             Expression::ComputedMemberExpression(e) if !e.optional => {
                 // Only own, present indices. No prototype lookup, holes, getters,
                 // user objects, spreads or bindings that could alias a mutable array.
-                let Value::Number(index) = self.eval(&e.expression, next)? else {
+                let key = self.eval(&e.expression, next)?;
+                if self.assume_intrinsics {
+                    let object = self.eval(&e.object, next);
+                    let primitive_key = key.primitive()?;
+                    let index = match &primitive_key {
+                        Value::Number(n) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as usize),
+                        Value::String(s)
+                            if s == "0"
+                                || (!s.starts_with('0')
+                                    && s.bytes().all(|b| b.is_ascii_digit())) =>
+                        {
+                            s.parse().ok()
+                        }
+                        _ => None,
+                    };
+                    match object {
+                        Some(Value::Array(values)) => {
+                            if let Some(index) = index {
+                                return Some(
+                                    values
+                                        .get(index)
+                                        .cloned()
+                                        .flatten()
+                                        .unwrap_or(Value::Undefined),
+                                );
+                            }
+                            if primitive_key == Value::String(String::new()) {
+                                return Some(Value::Undefined);
+                            }
+                        }
+                        Some(Value::String(text)) => {
+                            if let Some(index) = index {
+                                return Some(match text.encode_utf16().nth(index) {
+                                    None => Value::Undefined,
+                                    Some(unit) => {
+                                        Value::String(char::from_u32(u32::from(unit))?.to_string())
+                                    }
+                                });
+                            }
+                        }
+                        _ => (),
+                    }
+                }
+                let Value::Number(index) = key else {
                     return None;
                 };
                 if index < 0.0 || index.fract() != 0.0 {
@@ -371,7 +435,7 @@ impl<'a> Visit<'a> for Folder<'_> {
                             if declaration.kind == VariableDeclarationKind::Const {
                                 if let BindingPattern::BindingIdentifier(id) = &declarator.id {
                                     if let Some(value) = self.eval(init, 0) {
-                                        if self.constants.len() < 64 {
+                                        if value.is_primitive() && self.constants.len() < 64 {
                                             self.constants.insert(id.name.to_string(), value);
                                         }
                                     }
@@ -392,7 +456,9 @@ impl<'a> Visit<'a> for Folder<'_> {
                                                 .iter()
                                                 .map(|e| self.eval(e.as_expression()?, 0))
                                                 .collect();
-                                            if let Some(values) = values {
+                                            if let Some(values) = values.filter(|values| {
+                                                values.iter().all(Value::is_primitive)
+                                            }) {
                                                 if values
                                                     .iter()
                                                     .map(|v| v.code().len())
@@ -512,10 +578,18 @@ impl<'a> Visit<'a> for Folder<'_> {
                 | Expression::NullLiteral(_)
         );
         if eligible {
-            if let Some(value) = self.eval(expression, 0) {
+            if let Some(value) = self.eval(expression, 0).filter(Value::is_primitive) {
                 let kind = match expression {
                     Expression::Identifier(_) => "constant-propagation",
                     Expression::CallExpression(call) => match &call.callee {
+                        Expression::Identifier(id)
+                            if self
+                                .proxies
+                                .get(id.name.as_str())
+                                .is_some_and(|p| p.control_flow) =>
+                        {
+                            "control-flow"
+                        }
                         Expression::Identifier(id)
                             if self.proxies.get(id.name.as_str()).is_some_and(|p| p.block) =>
                         {

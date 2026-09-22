@@ -359,7 +359,7 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                         "transformations": representation["transformations"],
                     }
                     response["analysis"]["omissions"] = [
-                        "Unsupported decoder operations, object/array coercion, sparse indices, mutable or escaping tables, and cross-scope propagation remain unresolved."
+                        "Unsupported decoder operations, custom prototype hooks, mutable or escaping tables, and cross-scope propagation remain unresolved."
                     ]
                 if mode == "derived":
                     response["representation"] = representation if representation is not None else derive_representation(text_source)

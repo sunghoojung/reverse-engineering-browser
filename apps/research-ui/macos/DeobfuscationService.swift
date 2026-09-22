@@ -111,7 +111,7 @@ final class NativeDeobfuscationService {
         "scores": [:], "alternatives": []],
       "assumptions": assumptions, "stats": result["evidence"] ?? [:], "representation": summary, "string_tables": [],
       "limits": ["max_source_bytes": Self.maximumSourceBytes, "max_transformations": 4096],
-      "omissions": ["Classification is unavailable. Unsupported decoder operations, object/array coercion, sparse indices, mutable or escaping tables, and cross-scope propagation remain unresolved."]]
+      "omissions": ["Classification is unavailable. Unsupported decoder operations, custom prototype hooks, mutable or escaping tables, and cross-scope propagation remain unresolved."]]
     var response: [String: Any] = ["schema": "deobfuscation-analysis-v1",
       "engine": "rust-oxc", "artifact_id": artifactID, "script_id": NSNull(), "mode": mode,
       "source_truncated": false, "original_source": text, "analysis": analysis]

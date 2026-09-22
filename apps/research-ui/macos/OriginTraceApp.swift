@@ -2065,7 +2065,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         guard source.count == artifact["byte_size"] as? Int else {
           throw NativeDecoderError(status: 400, message: "Artifact is oversized or does not match its manifest")
         }
-        let response = try self.deobfuscationService.analyze(source: source, artifactID: id, mode: mode)
+        let assumptionItems = query.filter { $0.name == "assume_intrinsics" }
+        let assumption = assumptionItems.first?.value ?? "0"
+        guard assumptionItems.count <= 1, assumption == "0" || assumption == "1" else {
+          throw NativeDecoderError(status: 400, message: "Intrinsic assumption must be 0 or 1")
+        }
+        let response = try self.deobfuscationService.analyze(source: source, artifactID: id, mode: mode, assumeIntrinsics: assumption == "1")
         self.completeDeobfuscation(response, status: 200, to: task)
       } catch let error as NativeDecoderError {
         let body = (try? JSONSerialization.data(withJSONObject: ["error": error.message])) ?? Data()

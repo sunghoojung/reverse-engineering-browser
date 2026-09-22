@@ -37,15 +37,17 @@ def worker_path():
     return None
 
 
-def derive_with_worker(source):
+def derive_with_worker(source, assume_intrinsics=False):
     path = worker_path()
     if path is None:
+        if assume_intrinsics:
+            raise WorkerError("Intrinsic assumptions require the Rust worker", 503)
         return None
     if not _LOCK.acquire(blocking=False):
         raise WorkerError('Deobfuscation worker is busy; retry when analysis finishes', 409)
     try:
         with tempfile.TemporaryFile() as input_file, tempfile.TemporaryFile() as output:
-            input_file.write(json.dumps({'source': source}).encode() + b'\n')
+            input_file.write(json.dumps({'source': source, 'assume_intrinsics': assume_intrinsics}).encode() + b'\n')
             input_file.seek(0)
             try:
                 result = subprocess.run([str(path)], stdin=input_file, stdout=output, stderr=subprocess.DEVNULL, timeout=5, env={'LANG': 'C', 'LC_ALL': 'C'}, check=False)
@@ -65,6 +67,9 @@ def derive_with_worker(source):
                 raise ValueError('schema')
             if document['ok'] is not True:
                 raise WorkerError('JavaScript could not be parsed', 422)
+            assumptions = document.get('assumptions', [])
+            if assumptions != (['standard-intrinsics'] if assume_intrinsics else []):
+                raise ValueError('assumptions')
             rewrites = document['transformations']
             derived = document['derived_source']
             if not isinstance(rewrites, list) or len(rewrites) > 4096 or not isinstance(derived, str):
@@ -94,7 +99,7 @@ def derive_with_worker(source):
                 append('verbatim', offset, len(original), original[offset:])
             if rebuilt.decode() != derived:
                 raise ValueError('source map')
-            return {'text': derived, 'offset_unit': 'utf-8-byte', 'segments': segments,
+            return {'text': derived, 'assumptions': assumptions, 'offset_unit': 'utf-8-byte', 'segments': segments,
                     'truncated': bool(document['transformations_truncated']),
                     'transformations': [{'id': kind, 'kind': 'rewrite', 'count': count,
                                          'detail': 'Static AST rewrite with original-source mapping; no JavaScript execution.'}

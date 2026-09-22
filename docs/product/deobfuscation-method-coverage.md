@@ -10,18 +10,18 @@ artifact bytes and byte-range provenance remain available.
 | --- | --- | --- |
 | [Constant folding](https://steakenthusiast.github.io/2022/05/28/Deobfuscating-Javascript-via-AST-Manipulation-Constant-Folding/) | Recursive primitive arithmetic, bitwise operations, comparisons and string concatenation | Non-finite values, mixed string coercion and non-exact exponentiation remain unresolved |
 | [Constant propagation](https://steakenthusiast.github.io/2022/05/31/Deobfuscating-Javascript-via-AST-Replacing-References-to-Constant-Variables-with-Their-Actual-Value/) | Earlier primitive `const` initializers in the same statement list | No cross-scope, mutable binding, destructuring or closure propagation; declarations stay intact |
-| [String concealing](https://steakenthusiast.github.io/2022/05/22/Deobfuscating-Javascript-via-AST-Manipulation-Various-String-Concealing-Techniques/) | Escape normalization, literal concatenation, own literal array/string indices, non-escaping local constant tables | No global script tables, mutable/aliased tables, sparse indices, custom cipher execution or general decoder interpretation |
+| [String concealing](https://steakenthusiast.github.io/2022/05/22/Deobfuscating-Javascript-via-AST-Manipulation-Various-String-Concealing-Techniques/) | Escape normalization, literal concatenation, own literal array/string indices, non-escaping local constant tables | No global script tables, mutable/aliased tables, sparse indices, arbitrary cipher execution; see the bounded decoder subset below |
 | [Bracket to dot](https://steakenthusiast.github.io/2022/05/28/Deobfuscating-Javascript-via-AST-Manipulation-Converting-Bracket-Notation-Dot-Notation-for-Property-Accessors/) | Literal ASCII identifier properties, including optional access | Numeric receivers retain brackets; non-identifier and Unicode property names remain bracketed |
-| [Dead code](https://steakenthusiast.github.io/2022/06/04/Deobfuscating-Javascript-via-AST-Removing-Dead-or-Unreachable-Code/) | Known primitive conditional/logical expressions; literal-condition `if` arms without declarations | No general control-flow analysis or removal of declarations that might affect hoisting; surviving blocks retain scope |
-| [JSFuck-style expressions](https://steakenthusiast.github.io/2022/06/14/Deobfuscating-Javascript-via-AST-Deobfuscating-a-Peculiar-JSFuck-style-Case/) | Primitive unary chains, boolean arithmetic, negative zero and bounded bitwise operations | Array/object coercion, sparse-array tricks and constructor-generated code remain unresolved |
+| [Dead code](https://steakenthusiast.github.io/2022/06/04/Deobfuscating-Javascript-via-AST-Removing-Dead-or-Unreachable-Code/) | Known primitive conditional/logical expressions; literal-condition `if` arms without declarations | Closed decoder loops and switches are interpreted as described below; no arbitrary interprocedural analysis or removal of declarations that might affect hoisting |
+| [JSFuck-style expressions](https://steakenthusiast.github.io/2022/06/14/Deobfuscating-Javascript-via-AST-Deobfuscating-a-Peculiar-JSFuck-style-Case/) | Primitive unary chains, boolean arithmetic, negative zero and bounded bitwise operations | Array/object coercion and sparse indices require the explicit intrinsic assumption; custom hooks and constructor-generated code remain unresolved |
 
 The restricted evaluator never invokes `eval`, `Function`, Node's `vm`, Babel's
 `path.evaluate`, analyzed functions, getters or coercion hooks. The site's
 [Babel execution vulnerability investigation](https://steakenthusiast.github.io/2023/10/11/CVE-2023-45133-Finding-an-Arbitrary-Code-Execution-Vulnerability-In-Babel/)
 shows why a static analyzer must not substitute host execution for proof.
 
-There is intentionally no claim of complete deobfuscation. Custom XOR/base64
-functions, rotated tables, dynamic proxy calls, sparse JSFuck arrays and general
+There is intentionally no claim of complete deobfuscation. Unsupported custom decoder operations, rotated tables, dynamic proxy calls,
+custom prototype hooks and general
 control-flow flattening require additional bounded interpreters or separately
 captured runtime evidence. In particular, replacing array holes with explicit
 `undefined` changes property-existence and prototype-lookup behavior. Unknown
@@ -70,7 +70,7 @@ that a Rust rewrite is valid.
 ## Proxy calls
 
 Literal calls through preceding immutable function/arrow bindings and immediate
-functions can be reduced when the body is one return expression and all arguments
+functions can be reduced when the body is one return expression (or the bounded decoder subset below) and all arguments
 are statically known primitives. Non-escaping local function declarations are
 also supported after their declaration. All supplied arguments must be pure,
 including unused arguments. Rest/default/destructured parameters, async/generator
@@ -78,3 +78,66 @@ functions, captures, `this`, host calls and recursive/nested proxy evaluation ar
 left unresolved. Templates are limited to 4 KiB, 16 parameters and 64 bindings
 per statement list. Declarations remain in place; each call maps to its original
 call range. No analyzed function is executed by a JavaScript runtime.
+
+## Bounded custom decoders
+
+Closed function/arrow bindings can contain `var` locals, assignments, primitive
+conditions, returns, `for`/`while`/`do...while` loops and `switch` dispatchers. Locals are predeclared to preserve var
+hoisting; nonlocal writes, object mutation, lexical declarations, unsupported
+calls and recursion abort interpretation. Loops are limited to 4,096 iterations
+in addition to shared evaluation and string-growth budgets. No partial result
+is substituted when interpretation fails.
+
+With **Assume standard JavaScript intrinsics** explicitly enabled in Sources,
+the interpreter models string `charCodeAt`, `charAt`, `indexOf`, literal-separator `split` and
+`String.fromCharCode`. This supports bounded XOR and character-based custom
+string decoders without invoking their JavaScript functions. Primitive string
+length is modeled without that assumption. Intrinsic results that cannot be
+represented exactly (including lone-surrogate strings) stay unresolved. The
+assumption is visible in the result and part of cache identity; defaults remain
+off. Prototype overrides are not modeled in this opt-in mode.
+
+The intrinsic model is suppressed when the source declares intrinsic names,
+uses eval/with, writes object properties, or contains conflicting references to
+intrinsic objects. This conservative check rejects visible overrides and lexical
+shadowing; it cannot prove the absence of mutations in external runtime code.
+
+## JSFuck-style coercion
+
+The explicit standard-intrinsics model supports literal arrays (including holes),
+empty objects, primitive coercion, array-to-string joining and character/index
+reads. It recovers boolean/alphabetic JSFuck building blocks and the article's
+nested sparse-array comparison. Arrays themselves are never emitted as replacement
+values or propagated as immutable constants; holes remain holes in retained code.
+Object identity comparisons stay unresolved. Known intrinsic conflicts suppress
+the model even when requested.
+
+Primitive conversions follow the
+[ECMAScript abstract operations](https://tc39.es/ecma262/2024/multipage/abstract-operations.html).
+Number-to-string conversion is limited to finite values in the ordinary decimal
+range; large radix integers, lone surrogates, function-source strings and dynamic
+constructors remain unresolved. A trusted-fixture differential matrix compares
+1,810 arithmetic/equality/relational/coercion cases against Node. Array allocation,
+output size and recursive evaluation remain bounded by the existing limits.
+
+## Bounded control-flow recovery
+
+Closed decoders can use state-machine switches and shuffled string dispatchers.
+The interpreter preserves switch strict matching, default selection, fallthrough,
+unlabeled break/continue, return and local assignment/update evaluation order.
+Case tests after the selected match are not evaluated. A continue in a for loop
+still runs its update. Post-incremented indices and sequence expressions are
+supported only within the isolated local interpreter.
+
+With the explicit intrinsic assumption, literal-separator string splitting yields
+at most 256 entries. Empty separators use UTF-16 units; unrepresentable lone
+surrogates remain unresolved. No regex separator or custom split hook is run.
+Each loop admits at most 4,096 iterations and all nested loops share the
+250,000-step budget. Cycles retain the original call and mark the result truncated.
+
+This recovers the result of a closed dispatcher call, with original byte-range
+provenance. It does not restructure arbitrary top-level control-flow graphs.
+External effects, unknown conditions, labeled jumps, try/finally, lexical locals,
+object writes and recursive calls remain unresolved. Trusted fixtures compare
+switch fallthrough/defaults, loop exits, update ordering and receiver/index
+ordering against Node; the native adapter verifies mapped dispatcher results.

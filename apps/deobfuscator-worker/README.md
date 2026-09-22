@@ -6,7 +6,8 @@ on stdout. It never executes the analyzed JavaScript.
 
 The production pipeline parses JavaScript with Oxc and performs bounded static
 primitive folding, constant propagation, string normalization and literal-index
-recovery, member normalization, and conservative dead-expression/branch removal.
+recovery, member normalization, conservative dead-expression/branch removal,
+and bounded interpretation of closed proxy/decoder calls and loop/switch dispatchers.
 It returns original byte ranges for every rewrite and recoverable diagnostics.
 See the [method coverage and limitations](../../docs/product/deobfuscation-method-coverage.md)
 for the precise supported subsets and regression evidence.
@@ -31,7 +32,8 @@ UI response. It reads only the selected captured JavaScript artifact.
 
 The browser development server uses this worker when available, with an explicitly
 labelled Python lexical fallback when it is not built. Rust does not classify
-obfuscation. Dynamic decoders and prototype-dependent evaluation stay unresolved.
+obfuscation. Unknown decoder operations remain unresolved. Modeled prototype-dependent
+coercions require the explicit standard-intrinsics assumption.
 
 Requests are read with bounded buffers. An oversized record is drained through
 the next newline, rejected, and flushed before reading another record. The

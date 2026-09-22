@@ -2556,7 +2556,9 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
 
 private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigationDelegate {
   private var window: NSWindow?
+  private weak var webView: WKWebView?
   private var contentHandler: LocalContentHandler?
+  private let liveSessionCoordinator = LiveSessionCoordinator()
   private let smokeTest = ProcessInfo.processInfo.environment["REB_APP_SMOKE_TEST"] == "1"
 
   func applicationDidFinishLaunching(_ notification: Notification) {
@@ -2622,11 +2624,11 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     window.center()
     window.makeKeyAndOrderFront(nil)
     self.window = window
+    self.webView = webView
 
     NSApp.setActivationPolicy(.regular)
     if !smokeTest {
       presentOriginTraceWindow()
-      launchCustomBraveBrowser()
     }
     let localApplicationURL = URL(string: "reb://app/index.html?native=1")!
     let requestedUIURL = configuredUIURL()
@@ -2635,6 +2637,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       return
     }
     webView.load(URLRequest(url: requestedUIURL ?? localApplicationURL))
+    if !smokeTest && requestedUIURL == nil && automaticLiveSessionEnabled() {
+      startAutomaticLiveSession()
+    }
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -2652,42 +2657,53 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   ) -> Bool {
     guard !smokeTest else { return true }
     presentOriginTraceWindow()
-    launchCustomBraveBrowser()
+    if automaticLiveSessionEnabled() {
+      startAutomaticLiveSession()
+    }
     return true
+  }
+
+  func applicationWillTerminate(_ notification: Notification) {
+    liveSessionCoordinator.stop()
   }
 
   private let customBraveBundleIdentifier = "com.brave.Browser.development"
   private let customBraveApplicationName = "Brave Browser Development.app"
 
-  private func launchCustomBraveBrowser() {
-    guard NSRunningApplication.runningApplications(
-      withBundleIdentifier: customBraveBundleIdentifier
-    ).isEmpty else {
-      return
-    }
-
-    guard let braveURL = customBraveApplicationURL() else {
-      NSLog(
+  private func startAutomaticLiveSession() {
+    guard !liveSessionCoordinator.isRunning else { return }
+    guard let braveURL = customBraveApplicationURL(),
+      let braveBundle = Bundle(url: braveURL),
+      let braveExecutableURL = braveBundle.executableURL
+    else {
+      presentLiveSessionError(
         "Origin Trace could not find Brave Browser Development. "
           + "Place it beside Origin Trace or set REB_BRAVE_BINARY."
       )
       return
     }
+    liveSessionCoordinator.start(
+      braveExecutableURL: braveExecutableURL,
+      ready: { [weak self] liveURL in
+        guard let self, let webView = self.webView else { return }
+        webView.load(URLRequest(url: liveURL))
+        self.presentOriginTraceWindow()
+      },
+      failed: { [weak self] message in
+        self?.presentLiveSessionError(message)
+      }
+    )
+  }
 
-    let configuration = NSWorkspace.OpenConfiguration()
-    configuration.activates = false
-    NSWorkspace.shared.openApplication(at: braveURL, configuration: configuration) {
-      [weak self] _, error in
-      if let error {
-        NSLog(
-          "Origin Trace could not launch Brave Browser Development: "
-            + error.localizedDescription
-        )
-      }
-      DispatchQueue.main.async {
-        self?.presentOriginTraceWindow()
-      }
+  private func automaticLiveSessionEnabled() -> Bool {
+    if ProcessInfo.processInfo.environment["REB_DISABLE_AUTOMATIC_LIVE_SESSION"] == "1" {
+      return false
     }
+    let explicitSessionArguments = Set([
+      "--store", "--trace-store", "--signal-store", "--artifacts", "--broker-socket",
+      "--ui-url", "--demo-evidence",
+    ])
+    return explicitSessionArguments.isDisjoint(with: CommandLine.arguments)
   }
 
   private func presentOriginTraceWindow() {
@@ -2964,6 +2980,17 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     alert.informativeText = message
     alert.runModal()
     NSApp.terminate(nil)
+  }
+
+  private func presentLiveSessionError(_ message: String) {
+    guard NSApp.isRunning else { return }
+    let alert = NSAlert()
+    alert.alertStyle = .critical
+    alert.messageText = "Live capture could not start"
+    alert.informativeText = message
+    alert.addButton(withTitle: "Continue Offline")
+    alert.runModal()
+    presentOriginTraceWindow()
   }
 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

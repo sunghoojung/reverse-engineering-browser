@@ -39,16 +39,17 @@ On macOS, build and open the native application window:
 make app
 ```
 
-The application uses a native WebKit shell and reads configured local evidence
-directly. It has no browser address bar, does not require a localhost server,
-and ships with no evidence records or Canvas demo fixture. The build output is
-`build/Origin Trace.app`.
+The application uses a native WebKit shell and starts a private live session by
+default. It launches bundled capture helpers and a loopback debugger service,
+then opens an isolated Brave Browser Development profile with safe metadata
+capture enabled. It ships with no evidence records or Canvas demo fixture. The
+build output is `build/Origin Trace.app`.
 
 Use `make app-demo` only when deterministic development evidence is wanted.
 That target supplies generated stores and drawing fixtures outside the packaged
 application.
 
-For a live custom-Brave capture, run:
+For the repository-managed equivalent of that live capture, run:
 
 ```sh
 make live

@@ -1211,6 +1211,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artifact-socket", type=Path)
     parser.add_argument("--devtools-active-port", type=Path)
     parser.add_argument("--debugger-transport", type=Path)
+    parser.add_argument("--heap-snapshot", type=Path)
     parser.add_argument("--capture-network-content", action="store_true")
     parser.add_argument("--demo-evidence", action="store_true")
     parser.add_argument("--endpoint-file", type=Path)
@@ -1243,6 +1244,9 @@ def main() -> int:
     )
     debugger = DebuggerBridge(
         args.devtools_active_port.resolve() if args.devtools_active_port else None,
+        heap_snapshot_binary=(
+            args.heap_snapshot.resolve() if args.heap_snapshot else None
+        ),
         debugger_transport_binary=(
             args.debugger_transport.resolve() if args.debugger_transport else None
         ),

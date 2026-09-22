@@ -15,6 +15,7 @@ test_root="$(mktemp -d)"
 readonly test_root
 test_succeeded=false
 live_pid=""
+owner_pid=""
 
 cleanup() {
   if [[ "${test_succeeded}" != true ]]; then
@@ -24,6 +25,10 @@ cleanup() {
   if [[ -n "${live_pid}" ]] && kill -0 "${live_pid}" 2>/dev/null; then
     kill "${live_pid}" 2>/dev/null || true
     wait "${live_pid}" 2>/dev/null || true
+  fi
+  if [[ -n "${owner_pid}" ]] && kill -0 "${owner_pid}" 2>/dev/null; then
+    kill "${owner_pid}" 2>/dev/null || true
+    wait "${owner_pid}" 2>/dev/null || true
   fi
   rm -rf "${test_root}"
 }
@@ -179,6 +184,57 @@ test "$(mode_of "${session_directory}/artifacts/manifest.jsonl")" = 600
 artifact_blob="$(find "${session_directory}/artifacts/blobs" -type f -name '*.bin' -print -quit)"
 test -n "${artifact_blob}"
 test "$(mode_of "${artifact_blob}")" = 600
+
+readonly embedded_sessions="${test_root}/embedded-sessions"
+readonly embedded_handshake="${test_root}/embedded.endpoint"
+readonly embedded_analyzer_started="${test_root}/embedded-analyzer-started"
+readonly embedded_analyzer_stopped="${test_root}/embedded-analyzer-stopped"
+rm -f "${open_arguments}"
+sleep 30 &
+owner_pid=$!
+REB_BRAVE_BINARY="${fake_brave}" \
+REB_VM_ANALYZER="${fake_analyzer}" \
+REB_ANALYZER_STARTED="${embedded_analyzer_started}" \
+REB_ANALYZER_STOPPED="${embedded_analyzer_stopped}" \
+REB_LIVE_SESSION_ROOT="${embedded_sessions}" \
+REB_SESSION_HANDSHAKE="${embedded_handshake}" \
+REB_SESSION_OWNER_PID="${owner_pid}" \
+REB_EMBEDDED_SESSION=1 \
+REB_BRAVE_ARGUMENTS="${brave_arguments}" \
+REB_EVENT_PRODUCER="${event_producer}" \
+REB_ARTIFACT_PRODUCER="${artifact_producer}" \
+REB_CAPTURE_DURATION_SECONDS=60 \
+  "${live_script}" >"${test_root}/embedded-live.out" \
+  2>"${test_root}/embedded-live.err" &
+live_pid=$!
+for _ in {1..300}; do
+  [[ -s "${embedded_handshake}" ]] && break
+  if ! kill -0 "${live_pid}" 2>/dev/null; then
+    echo "Embedded live session stopped during startup" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+grep -Eq '^http://127\.0\.0\.1:[0-9]+/\?native=1&canvas_images=0$' \
+  "${embedded_handshake}"
+test ! -e "${open_arguments}"
+embedded_session_directory="$(find "${embedded_sessions}" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+test -n "${embedded_session_directory}"
+for _ in {1..200}; do
+  [[ -s "${embedded_session_directory}/events.jsonl" ]] && break
+  sleep 0.05
+done
+test -s "${embedded_session_directory}/events.jsonl"
+kill "${owner_pid}"
+wait "${owner_pid}" 2>/dev/null || true
+owner_pid=""
+wait "${live_pid}"
+live_pid=""
+test ! -e "${embedded_handshake}"
+test -f "${embedded_analyzer_stopped}"
+embedded_session_id="$(basename "${embedded_session_directory}")"
+test ! -e "/tmp/origin-trace-${UID}-${embedded_session_id}.sock"
+test ! -e "/tmp/origin-trace-${UID}-${embedded_session_id}-artifacts.sock"
 
 readonly disabled_sessions="${test_root}/disabled-sessions"
 REB_BRAVE_BINARY="${fake_brave}" \

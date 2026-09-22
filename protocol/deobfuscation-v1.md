@@ -36,3 +36,11 @@ Invalid identifiers/modes or malformed source return 400, missing artifacts 404,
 unavailable live debugging or a busy worker 409, native parse failures 422,
 an abnormal worker exit 502, and a worker timeout 408. A failed UI request is not automatically retried.
 The previous successful representation survives an explicit retry failure.
+
+`assume_intrinsics=0|1` defaults to 0. Opt-in responses carry
+`analysis.assumptions: ["standard-intrinsics"]`; default responses carry an empty
+list. Sources exposes the setting beside its deobfuscation report and includes
+it in cache/request identity. The assumption means modeled built-ins have their
+standard behavior; it is not a claim that captured code has pristine prototypes.
+Missing workers cannot honor this mode and return 503. Worker JSON requests use
+the boolean `assume_intrinsics` with the same default.

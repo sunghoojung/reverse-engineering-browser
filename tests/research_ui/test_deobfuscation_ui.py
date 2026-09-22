@@ -91,6 +91,19 @@ console.log(JSON.stringify({pending,failed,retained}));
             'retained': 'Derived · mapped to original source',
         })
 
+    def test_intrinsic_assumption_changes_cache_identity(self):
+        app = (UI_DIRECTORY / 'app.js').read_text()
+        start = app.index('      function deobfuscationKey(')
+        end = app.index('      async function loadDeobfuscation(', start)
+        result = self.node(app[start:end] + """
+const state={deobfuscationAssumeIntrinsics:false};
+const source={key:'artifact:9',sha256:'abc'};
+const original=deobfuscationKey(source);
+state.deobfuscationAssumeIntrinsics=true;
+console.log(JSON.stringify({different:original!==deobfuscationKey(source)}));
+""")
+        self.assertTrue(result['different'])
+
     def test_deobfuscation_remains_in_sources(self):
         from html.parser import HTMLParser
 

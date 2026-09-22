@@ -5,6 +5,8 @@ use oxc_ast_visit::Visit;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 mod fold;
+mod preflight;
+mod proxy;
 use serde::{Deserialize, Serialize};
 
 const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
@@ -14,6 +16,8 @@ const MAX_TRANSFORMATIONS: usize = 4096;
 #[derive(Debug, Deserialize)]
 struct Request {
     source: String,
+    #[serde(default)]
+    assume_intrinsics: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -27,6 +31,7 @@ struct Response {
     derived_source: String,
     transformations: Vec<Transformation>,
     transformations_truncated: bool,
+    assumptions: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -66,6 +71,7 @@ fn error_response(message: impl Into<String>) -> Response {
         derived_source: String::new(),
         transformations: Vec::new(),
         transformations_truncated: false,
+        assumptions: vec![],
     }
 }
 
@@ -75,6 +81,12 @@ fn analyze(request: Request) -> Response {
         return error_response("source exceeds the deobfuscation byte limit");
     }
 
+    if let Err(message) = preflight::check(&request.source) {
+        let mut response = error_response(message);
+        response.source_bytes = source_bytes;
+        response.derived_source = request.source;
+        return response;
+    }
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, &request.source, SourceType::unambiguous()).parse();
     let syntax_errors = parsed
@@ -96,7 +108,8 @@ fn analyze(request: Request) -> Response {
     let mut transformations = Vec::new();
     let mut transformations_truncated = false;
     if parsed_ok {
-        let mut folder = fold::Folder::new(&request.source, &parsed.program);
+        let mut folder =
+            fold::Folder::new(&request.source, &parsed.program, request.assume_intrinsics);
         folder.visit_program(&parsed.program);
         transformations_truncated = folder.truncated;
         folder.rewrites.sort_by_key(|fold| fold.original_start);
@@ -133,6 +146,11 @@ fn analyze(request: Request) -> Response {
         derived_source,
         transformations,
         transformations_truncated,
+        assumptions: if request.assume_intrinsics {
+            vec!["standard-intrinsics"]
+        } else {
+            vec![]
+        },
     }
 }
 
@@ -212,6 +230,7 @@ mod tests {
     #[test]
     fn folds_finite_numeric_literals_and_preserves_unsafe_math() {
         let response = analyze(Request {
+            assume_intrinsics: false,
             source: "const value = 1 + 2 * 3; const unsafe = 1 / 0;".to_string(),
         });
 
@@ -227,11 +246,12 @@ mod tests {
     #[test]
     fn reports_parse_errors_without_rewriting_source() {
         let response = analyze(Request {
+            assume_intrinsics: false,
             source: "const broken = ;".to_string(),
         });
 
         assert!(!response.ok);
-        assert!(response.parsed);
+        assert!(!response.parsed);
         assert!(!response.syntax_errors.is_empty());
         assert_eq!(response.derived_source, "const broken = ;");
         assert!(response.transformations.is_empty());
@@ -240,6 +260,7 @@ mod tests {
     #[test]
     fn rejects_oversized_sources_before_parsing() {
         let response = analyze(Request {
+            assume_intrinsics: false,
             source: "x".repeat(MAX_SOURCE_BYTES + 1),
         });
 

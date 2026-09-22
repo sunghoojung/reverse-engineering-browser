@@ -465,3 +465,94 @@
         if (tokenizer.language === 'wasm') return tokenizeWasmSourceLine(line, tokenizer);
         return [{type: 'plain', text: line}];
       }
+
+      function sourceLineStarts(text) {
+        const starts = [0];
+        for (let index = 0; index < text.length; index += 1) {
+          if (text[index] === '\n') starts.push(index + 1);
+        }
+        return starts;
+      }
+
+      function sourceLocationForOffset(starts, offset) {
+        let low = 0;
+        let high = starts.length - 1;
+        while (low < high) {
+          const middle = Math.ceil((low + high) / 2);
+          if (starts[middle] <= offset) low = middle;
+          else high = middle - 1;
+        }
+        return {line: low, column: Math.max(0, offset - starts[low])};
+      }
+
+      function derivedSegmentAt(segments, derivedOffset) {
+        let low = 0;
+        let high = segments.length - 1;
+        while (low <= high) {
+          const middle = (low + high) >> 1;
+          const segment = segments[middle];
+          if (derivedOffset < segment.derived_start) high = middle - 1;
+          else if (derivedOffset >= segment.derived_end) low = middle + 1;
+          else return segment;
+        }
+        return null;
+      }
+
+      function derivedOriginalOffset(segments, derivedOffset) {
+        const segment = derivedSegmentAt(segments, derivedOffset);
+        if (!segment || segment.original_start === null || segment.original_start === undefined) return null;
+        if (segment.kind === 'synthetic' || segment.kind === 'replacement') return segment.original_start;
+        return segment.original_start + (derivedOffset - segment.derived_start);
+      }
+
+      // Wire offsets name their encoding. JavaScript and CDP use UTF-16 units.
+      // Build maps only for segment boundaries, in one scan of each source.
+      function sourceOffsetBoundaries(text, offsets, unit) {
+        const wanted = new Set(offsets);
+        const result = new Map();
+        let wire = 0;
+        let utf16 = 0;
+        for (const character of text) {
+          if (wanted.has(wire)) result.set(wire, utf16);
+          const point = character.codePointAt(0);
+          wire += unit === 'unicode-code-point' ? 1 : point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+          utf16 += character.length;
+        }
+        if (wanted.has(wire)) result.set(wire, utf16);
+        return result;
+      }
+
+      function sourceSegmentsUTF16(original, derived, segments, unit) {
+        if (unit === 'utf-16-code-unit') return segments;
+        // Legacy Python documents used code-point offsets without a unit tag.
+        unit = unit ?? 'unicode-code-point';
+        if (!['unicode-code-point', 'utf-8-byte'].includes(unit)) return [];
+        const originals = sourceOffsetBoundaries(original, segments.flatMap(s => [s.original_start, s.original_end]), unit);
+        const deriveds = sourceOffsetBoundaries(derived, segments.flatMap(s => [s.derived_start, s.derived_end]), unit);
+        return segments.map(segment => ({...segment,
+          original_start: originals.get(segment.original_start), original_end: originals.get(segment.original_end),
+          derived_start: deriveds.get(segment.derived_start), derived_end: deriveds.get(segment.derived_end)
+        }));
+      }
+
+      function derivedLineMap(originalText, derivedText, segments, offsetUnit) {
+        segments = sourceSegmentsUTF16(originalText, derivedText, segments, offsetUnit);
+        const starts = sourceLineStarts(originalText);
+        const lines = derivedText.split('\n');
+        const mapped = [];
+        let offset = 0;
+        for (let line = 0; line < lines.length; line += 1) {
+          const segment = derivedSegmentAt(segments, offset) ?? derivedSegmentAt(segments, offset + lines[line].length);
+          const originalOffset = derivedOriginalOffset(segments, offset);
+          const location = originalOffset === null ? null : sourceLocationForOffset(starts, originalOffset);
+          mapped.push({
+            line,
+            synthetic: !segment || segment.kind === 'synthetic',
+            originalOffset,
+            originalLine: location ? location.line : null,
+            originalColumn: location ? location.column : null
+          });
+          offset += lines[line].length + 1;
+        }
+        return mapped;
+      }

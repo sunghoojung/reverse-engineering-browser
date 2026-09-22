@@ -1,5 +1,6 @@
 .DS_Store
 build/
+target/
 compile_commands.json
 *.o
 *.out

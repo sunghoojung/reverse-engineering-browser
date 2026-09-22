@@ -7,6 +7,6 @@ include mk/native.mk
 include mk/workflows.mk
 include mk/quality.mk
 
-.PHONY: all app app-build app-demo artifact-producer artifact-receiver artifact-socket-e2e bootstrap-brave bootstrap-test brave-distribution-test brave-doctor brave-probe-check browser-sync browser-sync-test broker check clean debugger-transport decoder demo e2e format format-check heap-snapshot javascript-check lint live native-build-test producer python-check repository-check sanitize shellcheck socket-e2e test ui ui-test workflow-check workspace-check
+.PHONY: all app app-build app-demo artifact-producer artifact-receiver artifact-socket-e2e bootstrap-brave bootstrap-test brave-distribution-test brave-doctor brave-probe-check browser-sync browser-sync-test broker check clean deob-worker-test debugger-transport decoder demo e2e format format-check heap-snapshot javascript-check lint live native-build-test producer python-check repository-check sanitize shellcheck socket-e2e test ui ui-test workflow-check workspace-check
 
 all: demo producer broker artifact-producer artifact-receiver heap-snapshot decoder debugger-transport

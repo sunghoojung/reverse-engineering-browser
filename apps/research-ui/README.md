@@ -303,3 +303,29 @@ projects the attached tab's full request lifecycle into Traffic and correlates
 it with matching native events when their host, method, and monotonic timing
 agree. CDP body retrieval can still report unavailable content for streaming,
 evicted, cached, or protocol-internal responses rather than inventing bytes.
+
+## Deobfuscation engines
+
+Deobfuscation stays inside **Sources**. Select a JavaScript source and use the
+**Deob** toggle to switch between original evidence and the mapped derived view.
+**Details > Deobfuscation** shows analysis, limits, omissions, and retry actions. The native app ships a Rust/Oxc worker for bounded static AST rewriting
+over captured artifacts. It needs no Python runtime. Building the app
+requires a current stable Rust toolchain (`rustup toolchain install stable`).
+The browser development server retains Python classification, formatting, and
+literal-table analysis for captured artifacts and live scripts. The Deobfuscation details
+name the engine. Rust classification and dynamic decoding remain
+unimplemented and are reported as omissions. Static table substitution is
+restricted to non-escaping local tables with proven own-index reads.
+
+Failed analysis remains visible until **Retry analysis** is selected. A failed
+retry retains the last successful result. Source selection does not switch the
+Sources editor away from original evidence. The UI retains at most eight analysis
+documents and distinguishes source hashes and debugger targets in its cache.
+The [versioned contract](../../protocol/deobfuscation-v1.md) defines source-map
+units and how native replacements map back to their original expressions.
+
+The production Rust AST passes and their ReverseJS comparison are documented in
+[method coverage](../../docs/product/deobfuscation-method-coverage.md). The browser
+server uses a built worker when available (debug before release), or the explicit
+`REB_DEOBFUSCATOR_WORKER` executable. Worker failures remain errors; a missing
+worker retains the labelled Python lexical mode. Deob stays inside Sources.

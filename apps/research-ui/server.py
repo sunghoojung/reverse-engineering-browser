@@ -23,6 +23,17 @@ from api_collection import (
     ApiCollectionStore,
 )
 from debugger_bridge import DebuggerBridge, DebuggerBridgeError, ProtocolError
+from deobfuscation import (
+    SCHEMA as DEOBFUSCATION_SCHEMA,
+)
+from deobfuscation import (
+    MAX_DEOBFUSCATION_SOURCE_BYTES,
+    DeobfuscationError,
+    analyze_source,
+    derive_representation,
+    ensure_source,
+)
+from deobfuscation_worker import WorkerError, derive_with_worker
 from decoder_service import (
     MAX_DECODER_ACTION_BYTES,
     DecoderError,
@@ -288,6 +299,89 @@ class ResearchHandler(SimpleHTTPRequestHandler):
                 self.send_json({"error": str(exception)}, HTTPStatus.CONFLICT)
                 return
             self.send_json(source)
+            return
+        if parsed.path == "/api/deobfuscation":
+            query = parse_qs(parsed.query)
+            script_id = query.get("script_id", [None])[0]
+            artifact_id = query.get("artifact_id", [None])[0]
+            mode = query.get("mode", ["analysis"])[0]
+            if script_id is None and artifact_id is None:
+                self.send_json(
+                    {"error": "Script ID or artifact ID is required"}, HTTPStatus.BAD_REQUEST
+                )
+                return
+            if script_id is not None and artifact_id is not None:
+                self.send_json(
+                    {"error": "Specify only one source identifier"}, HTTPStatus.BAD_REQUEST
+                )
+                return
+            if mode not in ("analysis", "derived"):
+                self.send_json(
+                    {"error": "Deobfuscation mode is invalid"}, HTTPStatus.BAD_REQUEST
+                )
+                return
+            try:
+                if script_id is not None:
+                    if self.debugger is None:
+                        raise DebuggerBridgeError("Live debugging is not enabled")
+                    script = self.debugger.get_script_source(script_id)
+                    text_source = ensure_source(script.get("source"))
+                else:
+                    artifact, content_path = self.find_artifact(artifact_id)
+                    if artifact["kind"] != "javascript":
+                        raise DeobfuscationError("Artifact is not JavaScript")
+                    with content_path.open("rb") as stream:
+                        text_source = ensure_source(
+                            stream.read(MAX_DEOBFUSCATION_SOURCE_BYTES + 1).decode("utf-8")
+                        )
+                response = {
+                    "schema": DEOBFUSCATION_SCHEMA,
+                    "script_id": script_id,
+                    "artifact_id": artifact_id,
+                    "mode": mode,
+                    "engine": "python-lexical",
+                    "original_source": text_source,
+                    "source_truncated": bool(script.get("truncated")) if script_id is not None else False,
+                    "analysis": analyze_source(text_source),
+                }
+                assumption = query.get("assume_intrinsics", ["0"])
+                if len(assumption) != 1 or assumption[0] not in ("0", "1"):
+                    raise WorkerError("Intrinsic assumption must be 0 or 1", 400)
+                representation = derive_with_worker(text_source, assumption[0] == "1")
+                if representation is not None:
+                    response["engine"] = "rust-oxc"
+                    response["analysis"]["assumptions"] = representation["assumptions"]
+                    response["analysis"]["representation"] = {
+                        "status": "unchanged" if representation["text"] == text_source else "derived",
+                        "derived_bytes": len(representation["text"].encode()),
+                        "segment_count": len(representation["segments"]),
+                        "truncated": representation["truncated"],
+                        "transformations": representation["transformations"],
+                    }
+                    response["analysis"]["omissions"] = [
+                        "Unsupported decoder operations, custom prototype hooks, mutable or escaping tables, and cross-scope propagation remain unresolved."
+                    ]
+                if mode == "derived":
+                    response["representation"] = representation if representation is not None else derive_representation(text_source)
+                self.send_json(response)
+            except WorkerError as exception:
+                self.send_json({"error": str(exception)}, exception.status)
+                return
+            except DebuggerBridgeError as exception:
+                self.send_json({"error": str(exception)}, HTTPStatus.CONFLICT)
+                return
+            except FileNotFoundError:
+                self.send_json({"error": "Artifact not found"}, HTTPStatus.NOT_FOUND)
+                return
+            except UnicodeDecodeError:
+                self.send_json(
+                    {"error": "Artifact is not valid UTF-8 JavaScript"},
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            except DeobfuscationError as exception:
+                self.send_json({"error": str(exception)}, HTTPStatus.BAD_REQUEST)
+                return
             return
         if parsed.path == "/api/origin-trace":
             query = parse_qs(parsed.query)

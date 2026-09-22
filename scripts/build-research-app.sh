@@ -18,6 +18,9 @@ analyst_runner_source="${repo_root}/apps/research-ui/macos/AnalystRunner.swift"
 analyst_runner_core="${repo_root}/apps/research-ui/analyst_runner_core.js"
 decoder_service_source="${repo_root}/apps/research-ui/macos/DecoderService.swift"
 decoder_binary="${repo_root}/build/reb-decoder"
+deobfuscation_service_source="${repo_root}/apps/research-ui/macos/DeobfuscationService.swift"
+cargo build --locked --release --manifest-path "${repo_root}/apps/deobfuscator-worker/Cargo.toml"
+deobfuscation_binary="${repo_root}/apps/deobfuscator-worker/target/release/reb-deobfuscator-worker"
 icon_source="${repo_root}/apps/research-ui/macos/assets/origin-trace-icon.png"
 iconset_path="${repo_root}/build/OriginTrace.iconset"
 
@@ -33,6 +36,8 @@ done
 cp "${analyst_runner_core}" "${resources_path}/analyst_runner_core.js"
 cp "${decoder_binary}" "${macos_path}/OriginTraceDecoder"
 chmod 755 "${macos_path}/OriginTraceDecoder"
+cp "${deobfuscation_binary}" "${macos_path}/OriginTraceDeobfuscator"
+chmod 755 "${macos_path}/OriginTraceDeobfuscator"
 rm -rf "${iconset_path}"
 mkdir -p "${iconset_path}"
 
@@ -59,7 +64,7 @@ xcrun swiftc \
   -parse-as-library \
   -framework Cocoa \
   -framework WebKit \
-  "${swift_source}" "${trace_document_source}" "${decoder_service_source}" \
+  "${swift_source}" "${trace_document_source}" "${decoder_service_source}" "${deobfuscation_service_source}" \
   -o "${macos_path}/OriginTrace"
 
 xcrun swiftc \

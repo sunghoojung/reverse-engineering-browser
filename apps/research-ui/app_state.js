@@ -82,6 +82,7 @@
         selectedArtifactId: null,
         artifactRefreshing: false,
         artifactEtag: null,
+        artifactCatalogSignature: null,
         artifactReceiverConfigured: false,
         artifactReceiverConnected: false,
         artifactReceiverError: null,
@@ -141,6 +142,9 @@
         vmAnalysisError: null,
         vmAnalysisRequestId: null,
         vmAnalysisEtag: null,
+        deobfuscationCache: new Map(),
+        deobfuscationRequests: new Map(),
+        deobfuscationAssumeIntrinsics: false,
         originTrace: null,
         originTraceStatus: 'idle',
         originTraceError: null,
@@ -563,6 +567,8 @@
         sourceLocation: document.querySelector('#source-location'),
         sourceSearch: document.querySelector('#source-search'),
         sourcePretty: document.querySelector('#source-pretty'),
+        deobfuscationReport: document.querySelector('#deobfuscation-report'),
+        deobfuscationIntrinsics: document.querySelector('#deobfuscation-intrinsics'),
         sourceHookPivot: document.querySelector('#source-hook-pivot'),
         sourceCodeWrap: document.querySelector('#source-code-wrap'),
         sourceCode: document.querySelector('#source-code'),
@@ -634,7 +640,7 @@
         vmNotice: document.querySelector('#vm-notice'),
         vmCount: document.querySelector('#vm-count'),
         vmList: document.querySelector('#vm-list'),
-        vmDetail: document.querySelector('#vm-detail')
+        vmDetail: document.querySelector('#vm-detail'),
       };
 
       const analystElements = {

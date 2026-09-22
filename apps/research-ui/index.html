@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark light" />
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%23292a2d'/%3E%3Crect x='4' y='6' width='24' height='20' rx='2' fill='none' stroke='%238ab4f8' stroke-width='2'/%3E%3Cpath d='M9 12h4l-2 3 2 3H9m7-6v6m3-6h4l-2 3 2 3h-4' fill='none' stroke='%23e8eaed' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'/%3E%3C/svg%3E" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%23232136'/%3E%3Crect x='4' y='6' width='24' height='20' rx='2' fill='none' stroke='%23c4a7e7' stroke-width='2'/%3E%3Cpath d='M9 12h4l-2 3 2 3H9m7-6v6m3-6h4l-2 3 2 3h-4' fill='none' stroke='%23e0def4' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'/%3E%3C/svg%3E" />
     <title>Origin Trace - Reverse Engineering Browser</title>
     <link rel="stylesheet" href="app.css">
   </head>
@@ -213,7 +213,7 @@
                 <span id="source-location" class="source-location">Select a captured artifact</span>
                 <button id="source-quick-open" class="source-tool" type="button" aria-label="Open file" title="Open file (⌘P)">⌘P</button>
                 <label><span class="sr-only" hidden>Find in source</span><input id="source-search" class="source-search" type="search" placeholder="Find" aria-label="Find in source" title="Find text; Enter for next, Shift+Enter for previous (first 1000 matches)" /></label>
-                <button id="source-pretty" class="source-tool" type="button" aria-label="Show readable representation" title="Show readable representation" disabled>{ }</button>
+                <button id="source-pretty" class="source-tool" type="button" aria-label="Show deobfuscated representation" title="Show deobfuscated representation" disabled>Deob</button>
                 <button id="source-hook-pivot" class="source-tool" type="button" title="Add Runtime Hook at cursor" disabled>Hook</button>
                 <button id="source-sidebar-toggle" class="source-tool" type="button" aria-controls="source-sidebar" aria-expanded="false">Details</button>
                 <button id="console-toggle" class="source-tool" type="button" aria-label="Toggle console drawer" title="Toggle console drawer (Escape)">Console</button>
@@ -251,6 +251,7 @@
               <div id="debug-state" class="debug-state"><div class="debug-state-line"><strong>Offline</strong><span class="debug-target">Run a live session to attach</span></div></div>
               <div class="debug-panes">
                 <details id="artifact-details" class="debug-pane" open><summary>Source details</summary><div id="artifact-facts" class="debug-pane-body">Select a source to inspect capture or runtime metadata.</div></details>
+                <details id="deobfuscation-details" class="debug-pane" open><summary>Deobfuscation</summary><label class="deobfuscation-assumption"><input id="deobfuscation-intrinsics" type="checkbox"> Assume standard JavaScript intrinsics</label><div id="deobfuscation-report" class="debug-pane-body">Select a JavaScript source to analyze.</div></details>
                 <details class="debug-pane" open><summary>Watch</summary><div class="debug-pane-body"><form id="watch-form" class="debug-form"><input id="watch-expression" type="text" placeholder="Add expression" aria-label="Watch expression" autocomplete="off" /><button type="submit" aria-label="Add watch expression">+</button></form><div id="watch-list"></div></div></details>
                 <details class="debug-pane" open><summary>Breakpoints</summary><div id="breakpoint-list" class="debug-pane-body">No breakpoints</div></details>
                 <details class="debug-pane" open><summary>Scope</summary><div id="scope-list" class="debug-pane-body">Not paused</div></details>

@@ -33,7 +33,7 @@ int HexValue(const char value) noexcept {
 }
 
 bool ValidateTokenFile(const int descriptor, const std::string& path, std::string& error) {
-  struct stat status{};
+  struct stat status {};
   if (fstat(descriptor, &status) != 0) {
     error = "Unable to inspect token file " + path + ": " + std::strerror(errno);
     return false;
@@ -133,7 +133,7 @@ bool LoadLocalIpcToken(const std::string& path, LocalIpcToken& token, std::strin
 }
 
 bool LoadOrCreateLocalIpcToken(const std::string& path, LocalIpcToken& token, std::string& error) {
-  struct stat status{};
+  struct stat status {};
   if (lstat(path.c_str(), &status) == 0) {
     return LoadLocalIpcToken(path, token, error);
   }
@@ -179,7 +179,7 @@ int ListenOnLocalSocket(const std::string& path, std::string& error) {
     error = "Local socket path is invalid or too long";
     return -1;
   }
-  struct stat existing{};
+  struct stat existing {};
   if (lstat(path.c_str(), &existing) == 0 || errno != ENOENT) {
     error = "Local socket path already exists or is inaccessible: " + path;
     return -1;

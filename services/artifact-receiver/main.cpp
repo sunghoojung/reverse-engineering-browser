@@ -40,14 +40,14 @@ void RequestStop(const int) noexcept {
 }
 
 bool InstallSignalHandlers() noexcept {
-  struct sigaction stop_action{};
+  struct sigaction stop_action {};
   stop_action.sa_handler = RequestStop;
   sigemptyset(&stop_action.sa_mask);
   if (sigaction(SIGINT, &stop_action, nullptr) != 0 ||
       sigaction(SIGTERM, &stop_action, nullptr) != 0) {
     return false;
   }
-  struct sigaction pipe_action{};
+  struct sigaction pipe_action {};
   pipe_action.sa_handler = SIG_IGN;
   sigemptyset(&pipe_action.sa_mask);
   return sigaction(SIGPIPE, &pipe_action, nullptr) == 0;
@@ -159,7 +159,7 @@ bool PeerIsCurrentUser(const int descriptor) noexcept {
   gid_t group_id = 0;
   return getpeereid(descriptor, &user_id, &group_id) == 0 && user_id == geteuid();
 #elif defined(__linux__)
-  struct ucred credentials{};
+  struct ucred credentials {};
   socklen_t size = sizeof(credentials);
   return getsockopt(descriptor, SOL_SOCKET, SO_PEERCRED, &credentials, &size) == 0 &&
          size == sizeof(credentials) && credentials.uid == geteuid();

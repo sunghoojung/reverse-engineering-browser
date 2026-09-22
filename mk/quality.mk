@@ -49,7 +49,7 @@ shellcheck:
 
 python-check:
 	python3 -m compileall -q apps/research-ui tests/research_ui tools
-	python3 -m ruff check apps/research-ui tests/research_ui tools
+	$(RUFF) check apps/research-ui tests/research_ui tools
 
 repository-check:
 	./scripts/check-repository-hygiene.sh

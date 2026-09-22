@@ -1,5 +1,7 @@
 CXX ?= c++
-CLANG_FORMAT ?= clang-format
+REB_DEV_TOOLS_DIR ?= $(HOME)/.local/share/reb-tools
+CLANG_FORMAT ?= $(if $(wildcard $(REB_DEV_TOOLS_DIR)/bin/clang-format),$(REB_DEV_TOOLS_DIR)/bin/clang-format,clang-format)
+RUFF ?= $(if $(wildcard $(REB_DEV_TOOLS_DIR)/bin/ruff),$(REB_DEV_TOOLS_DIR)/bin/ruff,python3 -m ruff)
 OPT_CXXFLAGS ?= -O2 -g
 
 BUILD_DIR := build

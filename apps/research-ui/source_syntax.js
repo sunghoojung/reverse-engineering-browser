@@ -47,49 +47,395 @@
         return rows.join('\n');
       }
 
-      function formatJavaScript(source) {
-        if (source.split('\n').length > 5) return source;
-        let output = '';
-        let indent = 0;
-        let quote = '';
+      const SOURCE_PRETTY_INPUT_LIMIT = 2 * 1024 * 1024;
+      const SOURCE_PRETTY_OUTPUT_LIMIT = 4 * 1024 * 1024;
+      const SOURCE_PRETTY_TOKEN_LIMIT = 250000;
+      const SOURCE_PRETTY_SEGMENT_LIMIT = 500000;
+      const SOURCE_PRETTY_LANGUAGES = new Set(['javascript', 'json', 'css', 'markup']);
+      const SOURCE_PRETTY_CONTROL_WORDS = new Set(['catch', 'for', 'if', 'switch', 'while', 'with']);
+      const SOURCE_PRETTY_REGEX_PREFIXES = new Set([
+        'await', 'case', 'delete', 'do', 'else', 'in', 'instanceof', 'new', 'of',
+        'return', 'throw', 'typeof', 'void', 'yield'
+      ]);
+      const SOURCE_PRETTY_NUMBER_PATTERN = /(?:0[xX][\da-fA-F](?:_?[\da-fA-F])*n?|0[bB][01](?:_?[01])*n?|0[oO][0-7](?:_?[0-7])*n?|(?:\d(?:_?\d)*(?:\.(?:\d(?:_?\d)*)?)?|\.\d(?:_?\d)*)(?:[eE][+-]?\d(?:_?\d)*)?n?)/y;
+      const SOURCE_PRETTY_OPERATORS = [
+        '>>>=', '**=', '===', '!==', '>>>', '<<=', '>>=', '&&=', '||=', '??=',
+        '...', '=>', '==', '!=', '<=', '>=', '++', '--', '&&', '||', '??', '?.', '**',
+        '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<', '>>',
+        '{', '}', '(', ')', '[', ']', ';', ',', ':', '.', '?', '+', '-', '*',
+        '/', '%', '=', '<', '>', '!', '~', '&', '|', '^'
+      ];
+
+      function sourcePrettySupported(source) {
+        return SOURCE_PRETTY_LANGUAGES.has(sourceSyntaxLanguage(source));
+      }
+
+      function sourcePrettyQuotedEnd(value, start, quote) {
         let escaped = false;
-        let lineComment = false;
-        let blockComment = false;
-        const newline = () => { output = `${output.trimEnd()}\n${'  '.repeat(indent)}`; };
-        for (let index = 0; index < source.length; index += 1) {
-          const character = source[index];
-          const next = source[index + 1] ?? '';
-          if (lineComment) {
-            output += character;
-            if (character === '\n') { lineComment = false; output += '  '.repeat(indent); }
-            continue;
-          }
-          if (blockComment) {
-            output += character;
-            if (character === '*' && next === '/') { output += next; index += 1; blockComment = false; }
-            continue;
-          }
-          if (quote) {
-            output += character;
-            if (escaped) escaped = false;
-            else if (character === '\\') escaped = true;
-            else if (character === quote) quote = '';
-            continue;
-          }
-          if (character === '/' && next === '/') { output += '//'; index += 1; lineComment = true; continue; }
-          if (character === '/' && next === '*') { output += '/*'; index += 1; blockComment = true; continue; }
-          if (character === '"' || character === "'" || character === '`') { quote = character; output += character; continue; }
-          if (character === '{') { output += ' {'; indent += 1; newline(); continue; }
-          if (character === '}') { indent = Math.max(0, indent - 1); newline(); output += '}'; if (next && next !== ';' && next !== ',' && next !== ')') newline(); continue; }
-          if (character === ';') { output += ';'; newline(); continue; }
-          if (character === ',') { output += ', '; continue; }
-          if (/\s/.test(character)) {
-            if (output && !/\s$/.test(output)) output += ' ';
-            continue;
-          }
-          output += character;
+        for (let index = start + 1; index < value.length; index += 1) {
+          const character = value[index];
+          if (escaped) escaped = false;
+          else if (character === '\\') escaped = true;
+          else if (character === quote) return index + 1;
         }
-        return output.trim();
+        return value.length;
+      }
+
+      function sourcePrettyRegexEnd(value, start) {
+        let escaped = false;
+        let characterClass = false;
+        for (let index = start + 1; index < value.length; index += 1) {
+          const character = value[index];
+          if (escaped) { escaped = false; continue; }
+          if (character === '\\') { escaped = true; continue; }
+          if (character === '[') { characterClass = true; continue; }
+          if (character === ']') { characterClass = false; continue; }
+          if (character === '/' && !characterClass) {
+            let end = index + 1;
+            while (/[a-z]/i.test(value[end] ?? '')) end += 1;
+            return end;
+          }
+          if (character === '\n' || character === '\r') return start + 1;
+        }
+        return start + 1;
+      }
+
+      function sourcePrettyMayStartRegex(previous) {
+        if (!previous) return true;
+        if (previous.kind === 'word') return SOURCE_PRETTY_REGEX_PREFIXES.has(previous.text);
+        return previous.kind === 'operator' && ![')', ']', '}', '++', '--'].includes(previous.text);
+      }
+
+      function sourcePrettyTokens(value, language) {
+        const tokens = [];
+        let index = 0;
+        let previous = null;
+        const push = (kind, start, end) => {
+          if (tokens.length >= SOURCE_PRETTY_TOKEN_LIMIT) throw new RangeError('Pretty print token limit reached');
+          const token = {kind, start, end, text: value.slice(start, end)};
+          tokens.push(token);
+          if (kind !== 'whitespace' && kind !== 'comment') previous = token;
+        };
+        while (index < value.length) {
+          const start = index;
+          const character = value[index];
+          const next = value[index + 1] ?? '';
+          if (/\s/.test(character)) {
+            while (index < value.length && /\s/.test(value[index])) index += 1;
+            push('whitespace', start, index);
+            continue;
+          }
+          if ((language === 'javascript' || language === 'css') && character === '/' && next === '*') {
+            const close = value.indexOf('*/', index + 2);
+            index = close === -1 ? value.length : close + 2;
+            push('comment', start, index);
+            continue;
+          }
+          if (language === 'javascript' && character === '/' && next === '/') {
+            const close = value.indexOf('\n', index + 2);
+            index = close === -1 ? value.length : close;
+            push('line-comment', start, index);
+            continue;
+          }
+          if (character === '"' || character === "'" || (language === 'javascript' && character === '`')) {
+            index = sourcePrettyQuotedEnd(value, index, character);
+            push('literal', start, index);
+            continue;
+          }
+          if (language === 'javascript' && character === '/' && next !== '/' && next !== '*' && sourcePrettyMayStartRegex(previous)) {
+            const end = sourcePrettyRegexEnd(value, index);
+            if (end > index + 1) {
+              index = end;
+              push('literal', start, index);
+              continue;
+            }
+          }
+          if (/[A-Za-z_$]/.test(character)) {
+            index += 1;
+            while (/[\w$]/.test(value[index] ?? '')) index += 1;
+            push('word', start, index);
+            continue;
+          }
+          if (/\d/.test(character) || (character === '.' && /\d/.test(next))) {
+            SOURCE_PRETTY_NUMBER_PATTERN.lastIndex = index;
+            index = SOURCE_PRETTY_NUMBER_PATTERN.exec(value)?.index === start
+              ? SOURCE_PRETTY_NUMBER_PATTERN.lastIndex
+              : index + 1;
+            push('number', start, index);
+            continue;
+          }
+          const operator = SOURCE_PRETTY_OPERATORS.find(candidate => value.startsWith(candidate, index));
+          index += operator?.length ?? 1;
+          push('operator', start, index);
+        }
+        return tokens;
+      }
+
+      function createSourcePrettyWriter(value) {
+        let text = '';
+        const segments = [];
+        let indent = 0;
+        let lineStart = true;
+        const append = (kind, chunk, originalStart, originalEnd) => {
+          if (!chunk) return;
+          if (text.length + chunk.length > SOURCE_PRETTY_OUTPUT_LIMIT) throw new RangeError('Pretty-print output exceeds 4 MB');
+          const derivedStart = text.length;
+          text += chunk;
+          const segment = {kind, original_start: originalStart, original_end: originalEnd, derived_start: derivedStart, derived_end: text.length};
+          const previous = segments.at(-1);
+          const contiguous = previous && previous.kind === kind && previous.derived_end === segment.derived_start &&
+            (kind === 'synthetic' || previous.original_end === segment.original_start);
+          if (contiguous) {
+            previous.original_end = segment.original_end;
+            previous.derived_end = segment.derived_end;
+          } else {
+            if (segments.length >= SOURCE_PRETTY_SEGMENT_LIMIT) throw new RangeError('Pretty print mapping limit reached');
+            segments.push(segment);
+          }
+          lineStart = chunk.endsWith('\n');
+        };
+        const synthetic = (chunk, anchor) => append('synthetic', chunk, anchor, anchor);
+        const original = token => {
+          if (lineStart) synthetic('  '.repeat(Math.min(indent, 32)), token.start);
+          append('verbatim', token.text, token.start, token.end);
+        };
+        const space = anchor => {
+          if (!lineStart && text && !/\s$/.test(text)) synthetic(' ', anchor);
+        };
+        const newline = anchor => {
+          if (!text || text.endsWith('\n')) return;
+          synthetic('\n', anchor);
+          lineStart = true;
+        };
+        return {
+          original, space, newline,
+          indent: () => { indent += 1; },
+          outdent: () => { indent = Math.max(0, indent - 1); },
+          isLineStart: () => lineStart,
+          finish: () => {
+            while (segments.at(-1)?.kind === 'synthetic') {
+              const segment = segments.at(-1);
+              const chunk = text.slice(segment.derived_start, segment.derived_end);
+              const trimmed = chunk.replace(/\s+$/, '');
+              if (trimmed === chunk) break;
+              text = text.slice(0, segment.derived_start) + trimmed;
+              segment.derived_end = text.length;
+              if (segment.derived_start === segment.derived_end) segments.pop();
+            }
+            return {text, segments};
+          }
+        };
+      }
+
+      function prettyPrintStructuredSource(value, language) {
+        const tokens = sourcePrettyTokens(value, language);
+        const writer = createSourcePrettyWriter(value);
+        let parens = 0;
+        let brackets = 0;
+        let braces = 0;
+        const multilineBrackets = [];
+        let forDepth = null;
+        let previous = null;
+        let pendingFor = false;
+        const significant = tokens.filter(token => token.kind !== 'whitespace');
+        for (let index = 0; index < significant.length; index += 1) {
+          const token = significant[index];
+          const next = significant[index + 1] ?? null;
+          if (token.kind === 'line-comment') {
+            writer.space(token.start); writer.original(token); writer.newline(token.end); previous = token; continue;
+          }
+          if (token.kind === 'comment') {
+            writer.space(token.start); writer.original(token);
+            if (token.text.includes('\n') || next) writer.newline(token.end);
+            previous = token; continue;
+          }
+          if (token.kind === 'word') {
+            if (token.text === 'for') pendingFor = true;
+            if (previous && ['word', 'number', 'literal'].includes(previous.kind)) writer.space(token.start);
+            if (previous?.text === ')' || previous?.text === ']') writer.space(token.start);
+            writer.original(token);
+            previous = token;
+            continue;
+          }
+          if (token.kind === 'number' || token.kind === 'literal') {
+            if (previous && ['word', 'number', 'literal'].includes(previous.kind)) writer.space(token.start);
+            writer.original(token);
+            previous = token;
+            continue;
+          }
+          const operator = token.text;
+          if (operator === '{') {
+            writer.space(token.start); writer.original(token); braces += 1;
+            if (next?.text !== '}') { writer.indent(); writer.newline(token.end); }
+          } else if (operator === '}') {
+            if (previous?.text !== '{') writer.outdent();
+            if (!writer.isLineStart() && previous?.text !== '{') writer.newline(token.start);
+            writer.original(token); braces = Math.max(0, braces - 1);
+            if (next && ![';', ',', ')', ']', '.', '?.'].includes(next.text) && !['else', 'catch', 'finally', 'while'].includes(next.text)) writer.newline(token.end);
+            else if (next && ['else', 'catch', 'finally'].includes(next.text)) writer.space(token.end);
+          } else if (operator === '(') {
+            if (previous?.kind === 'word' && SOURCE_PRETTY_CONTROL_WORDS.has(previous.text)) writer.space(token.start);
+            writer.original(token); parens += 1;
+            if (pendingFor) { forDepth = parens; pendingFor = false; }
+          } else if (operator === ')') {
+            writer.original(token);
+            if (forDepth === parens) forDepth = null;
+            parens = Math.max(0, parens - 1);
+          } else if (operator === '[') {
+            writer.original(token); brackets += 1;
+            const multiline = language === 'json' || !previous ||
+              (previous.kind === 'operator' && ![')', ']'].includes(previous.text));
+            multilineBrackets.push(multiline);
+            if (multiline && next?.text !== ']') { writer.indent(); writer.newline(token.end); }
+          } else if (operator === ']') {
+            const multiline = multilineBrackets.pop() ?? false;
+            if (multiline && previous?.text !== '[') { writer.outdent(); writer.newline(token.start); }
+            writer.original(token); brackets = Math.max(0, brackets - 1);
+          } else if (operator === ';') {
+            writer.original(token);
+            if (forDepth === null) writer.newline(token.end); else writer.space(token.end);
+          } else if (operator === ',') {
+            writer.original(token);
+            if (language === 'json' || (language === 'javascript' && parens === 0 && (braces > 0 || brackets > 0))) writer.newline(token.end);
+            else writer.space(token.end);
+          } else if (operator === ':') {
+            writer.original(token); writer.space(token.end);
+          } else if (operator === '.') {
+            writer.original(token);
+          } else if (operator === '?.') {
+            writer.original(token);
+          } else if (['++', '--', '!', '~'].includes(operator)) {
+            writer.original(token);
+          } else if (operator === '?') {
+            writer.space(token.start); writer.original(token); writer.space(token.end);
+          } else {
+            writer.space(token.start); writer.original(token); writer.space(token.end);
+          }
+          previous = token;
+        }
+        return writer.finish();
+      }
+
+      function prettyPrintCssSource(value) {
+        const tokens = sourcePrettyTokens(value, 'css').filter(token => token.kind !== 'whitespace');
+        const writer = createSourcePrettyWriter(value);
+        let depth = 0;
+        for (let index = 0; index < tokens.length; index += 1) {
+          const token = tokens[index];
+          const next = tokens[index + 1] ?? null;
+          if (token.kind === 'comment') {
+            writer.original(token); writer.newline(token.end); continue;
+          }
+          if (token.kind !== 'operator') {
+            if (index && ![':', '(', '[', '.', '#', '-', '@'].includes(tokens[index - 1]?.text)) writer.space(token.start);
+            writer.original(token); continue;
+          }
+          if (token.text === '{') {
+            writer.space(token.start); writer.original(token); depth += 1;
+            if (next?.text !== '}') { writer.indent(); writer.newline(token.end); }
+          } else if (token.text === '}') {
+            if (tokens[index - 1]?.text !== '{') writer.outdent();
+            writer.newline(token.start); writer.original(token); depth = Math.max(0, depth - 1);
+            if (next) writer.newline(token.end);
+          } else if (token.text === ';') {
+            writer.original(token); writer.newline(token.end);
+          } else if (token.text === ':') {
+            writer.original(token); writer.space(token.end);
+          } else if (token.text === ',' && depth === 0) {
+            writer.original(token); writer.newline(token.end);
+          } else {
+            writer.original(token);
+          }
+        }
+        return writer.finish();
+      }
+
+      function sourcePrettyMarkupTokens(value) {
+        const tokens = [];
+        const push = token => {
+          if (tokens.length >= SOURCE_PRETTY_TOKEN_LIMIT) throw new RangeError('Pretty print token limit reached');
+          tokens.push(token);
+        };
+        let index = 0;
+        while (index < value.length) {
+          if (value[index] !== '<') {
+            const end = value.indexOf('<', index);
+            const boundary = end === -1 ? value.length : end;
+            const leading = value.slice(index, boundary).search(/\S/);
+            if (leading !== -1) {
+              const start = index + leading;
+              const trailing = value.slice(start, boundary).match(/\s*$/)?.[0].length ?? 0;
+              push({kind: 'text', start, end: boundary - trailing, text: value.slice(start, boundary - trailing)});
+            }
+            index = boundary;
+            continue;
+          }
+          const start = index;
+          if (value.startsWith('<!--', index)) {
+            const close = value.indexOf('-->', index + 4);
+            index = close === -1 ? value.length : close + 3;
+          } else {
+            let quote = '';
+            index += 1;
+            for (; index < value.length; index += 1) {
+              const character = value[index];
+              if (quote) {
+                if (character === '\\') index += 1;
+                else if (character === quote) quote = '';
+              } else if (character === '"' || character === "'") quote = character;
+              else if (character === '>') { index += 1; break; }
+            }
+          }
+          const text = value.slice(start, index);
+          push({kind: 'tag', start, end: index, text});
+          const rawTag = text.match(/^<\s*(script|style)\b/i)?.[1]?.toLowerCase();
+          if (rawTag && !/\/\s*>$/.test(text)) {
+            const close = value.toLowerCase().indexOf(`</${rawTag}`, index);
+            if (close !== -1) {
+              const leading = value.slice(index, close).search(/\S/);
+              if (leading !== -1) {
+                const rawStart = index + leading;
+                const trailing = value.slice(rawStart, close).match(/\s*$/)?.[0].length ?? 0;
+                push({kind: 'raw', start: rawStart, end: close - trailing, text: value.slice(rawStart, close - trailing)});
+              }
+              index = close;
+            }
+          }
+        }
+        return tokens;
+      }
+
+      function prettyPrintMarkupSource(value) {
+        const tokens = sourcePrettyMarkupTokens(value);
+        const writer = createSourcePrettyWriter(value);
+        const voidTag = /^<\s*(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)\b/i;
+        for (const token of tokens) {
+          if (token.kind !== 'tag') {
+            writer.original(token); writer.newline(token.end); continue;
+          }
+          const closing = /^<\s*\//.test(token.text);
+          const declaration = /^<\s*[!?]/.test(token.text);
+          const selfClosing = /\/\s*>$/.test(token.text) || voidTag.test(token.text) || declaration;
+          if (closing) writer.outdent();
+          writer.original(token);
+          writer.newline(token.end);
+          if (!closing && !selfClosing) writer.indent();
+        }
+        return writer.finish();
+      }
+
+      function prettyPrintSource(source, value) {
+        const language = sourceSyntaxLanguage(source);
+        if (!SOURCE_PRETTY_LANGUAGES.has(language)) return {error: `Pretty print does not support ${sourceSyntaxLabel(language)}.`};
+        if (value.length > SOURCE_PRETTY_INPUT_LIMIT) return {error: 'Pretty print is limited to the first 2 MB.'};
+        try {
+          const formatted = language === 'markup' ? prettyPrintMarkupSource(value)
+            : language === 'css' ? prettyPrintCssSource(value)
+              : prettyPrintStructuredSource(value, language);
+          return {...formatted, offset_unit: 'utf-16-code-unit', language, changed: formatted.text !== value};
+        } catch (error) {
+          return {error: error instanceof Error ? error.message : 'Pretty print failed.'};
+        }
       }
 
       const SOURCE_HIGHLIGHT_TOKEN_LIMIT = 50000;
@@ -541,9 +887,24 @@
         const lines = derivedText.split('\n');
         const mapped = [];
         let offset = 0;
+        let segmentIndex = 0;
         for (let line = 0; line < lines.length; line += 1) {
-          const segment = derivedSegmentAt(segments, offset) ?? derivedSegmentAt(segments, offset + lines[line].length);
-          const originalOffset = derivedOriginalOffset(segments, offset);
+          const lineEnd = offset + lines[line].length;
+          while (segmentIndex < segments.length && segments[segmentIndex].derived_end <= offset) segmentIndex += 1;
+          let mappedOffset = null;
+          let segment = null;
+          for (let candidateIndex = segmentIndex; candidateIndex < segments.length; candidateIndex += 1) {
+            const candidate = segments[candidateIndex];
+            if (candidate.derived_start > lineEnd) break;
+            const candidateOffset = Math.max(offset, candidate.derived_start);
+            const original = derivedOriginalOffset(segments, candidateOffset);
+            if (original !== null) {
+              mappedOffset = original;
+              segment = candidate;
+              break;
+            }
+          }
+          const originalOffset = mappedOffset;
           const location = originalOffset === null ? null : sourceLocationForOffset(starts, originalOffset);
           mapped.push({
             line,
@@ -555,4 +916,34 @@
           offset += lines[line].length + 1;
         }
         return mapped;
+      }
+
+      function sourceRepresentationLineMap(originalText, activeText, derived, formatted) {
+        if (!formatted && !derived) return null;
+        const activeMap = formatted
+          ? derivedLineMap(activeText, formatted.text, formatted.segments ?? [], formatted.offset_unit)
+          : null;
+        if (!derived) return activeMap;
+        if (!formatted) {
+          return derivedLineMap(originalText, activeText, derived.segments ?? [], derived.offset_unit);
+        }
+        const derivedSegments = sourceSegmentsUTF16(
+          originalText,
+          activeText,
+          derived.segments ?? [],
+          derived.offset_unit
+        );
+        const originalStarts = sourceLineStarts(originalText);
+        return activeMap.map(entry => {
+          const originalOffset = entry.originalOffset === null
+            ? null
+            : derivedOriginalOffset(derivedSegments, entry.originalOffset);
+          const location = originalOffset === null ? null : sourceLocationForOffset(originalStarts, originalOffset);
+          return {
+            ...entry,
+            originalOffset,
+            originalLine: location ? location.line : null,
+            originalColumn: location ? location.column : null
+          };
+        });
       }

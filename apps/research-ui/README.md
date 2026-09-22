@@ -313,6 +313,14 @@ evicted, cached, or protocol-internal responses rather than inventing bytes.
 
 Deobfuscation stays inside **Sources**. Select a JavaScript source and use the
 **Deob** toggle to switch between original evidence and the mapped derived view.
+The adjacent **{ }** control pretty prints JavaScript, JSON, CSS, and HTML using
+the detected source type. It can format either the original evidence or the
+active deobfuscated representation, so an unchanged deobfuscation result does
+not leave a minified bundle on one line. Pretty printing changes only display
+whitespace, keeps source-line mappings back to the captured bytes, and never
+rewrites stored evidence. Input is capped at 2 MiB and formatted output at 4
+MiB, with 250,000 lexical tokens and 500,000 mapping segments as pathological
+input guards.
 **Details > Deobfuscation** shows analysis, limits, omissions, and retry actions. The native app ships a Rust/Oxc worker for bounded static AST rewriting
 over captured artifacts. It needs no Python runtime. Building the app
 requires a current stable Rust toolchain (`rustup toolchain install stable`).

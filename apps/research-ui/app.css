@@ -1260,6 +1260,7 @@
         font: 11px var(--mono);
       }
       .source-tool:hover:not(:disabled) { border-color: var(--line); background: var(--panel-3); color: var(--text); }
+      .source-tool[aria-pressed="true"] { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: var(--accent-soft); color: var(--text); }
       .source-tool:disabled { cursor: not-allowed; opacity: .35; }
       .source-search {
         width: 150px;

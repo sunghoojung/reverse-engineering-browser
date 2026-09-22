@@ -11,7 +11,16 @@ make app
 ```
 
 This packages `build/Origin Trace.app` and opens a complete live capture
-session. The app creates a private evidence directory and isolated browser
+session. Before launch, the app asks whether the session should retain metadata
+only or bounded request and response content. The default isolated research
+profile uses Chromium's mock Keychain so launch does not stop on a macOS password
+prompt; do not save credentials in that profile. An explicit checkbox opts into
+macOS Keychain encryption when credential storage is required. The app does not
+mark the session live until the browser debugger endpoint is ready, and the
+failure dialog can retry the same privacy mode without restarting Origin Trace.
+**New Live Session…** in the application menu reopens these controls.
+
+The app creates a private evidence directory and isolated browser
 profile, starts its bundled broker, artifact receiver, debugger transport,
 analysis helpers, and loopback UI, then launches Brave Browser Development with
 all safe metadata categories enabled. Closing Origin Trace stops the session
@@ -46,8 +55,10 @@ Open `http://127.0.0.1:7319`. For a live capture with the pinned custom Brave
 build, use `make live`. Follow the [browser setup](../../browser/README.md)
 before starting a live session.
 
-Native evidence capture retains host-level network metadata by default. Enable
-full CDP Traffic inspection for one live session with:
+Native evidence capture retains host-level network metadata by default. Choose
+**Full request and response content** in the native launch dialog to enable CDP
+Traffic inspection for one live session. Command-line development sessions can
+select the same mode with:
 
 ```sh
 REB_CDP_NETWORK_CAPTURE=1 make live
@@ -59,6 +70,11 @@ proxy-authorization, and set-cookie values are always redacted. Request and
 response bodies are retained only in memory by the local UI bridge, limited to
 128 KiB per side, and discarded when the live session ends. The Origin Trace
 title bar visibly changes to `Live content` while this mode is active.
+
+The live launcher disables Brave background networking, component updates, and
+sync for its isolated research profile. Browser diagnostics are retained in the
+session's private `brave.log`, separate from coordinator failures. The native
+app pre-creates the matching macOS cache sandbox path before launch.
 
 Redirect hops retain their own status, response headers, and elapsed time when
 CDP starts the next request. Their response bodies are explicitly unavailable;

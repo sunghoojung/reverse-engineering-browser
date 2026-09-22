@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "string-table-proxy",
+      "source": "const selected=[\"first\",\"second\"][1];const p=(a,b)=>a^b;const numeric=p(7,3);const result=[selected,numeric];",
+      "assume_intrinsics": false,
+      "expected_result": ["second", 4],
+      "required_transformations": ["literal-index", "proxy-call"]
+    },
+    {
+      "id": "xor-decoder",
+      "source": "const decode=function(s,k){var out=\"\";for(var i=0;i<s.length;i++){out+=String.fromCharCode(s.charCodeAt(i)^k);}return out;};const result=decode(\"idmmn\",1);",
+      "assume_intrinsics": true,
+      "expected_result": "hello",
+      "required_transformations": ["custom-decoder"]
+    },
+    {
+      "id": "flattened-dispatch",
+      "source": "const decode=function(){var state=0,out=\"\";while(true){switch(state){case 0:out+=\"h\";state=2;break;case 2:out+=\"i\";state=1;break;case 1:return out;}}};const result=decode();",
+      "assume_intrinsics": false,
+      "expected_result": "hi",
+      "required_transformations": ["control-flow"]
+    },
+    {
+      "id": "jsfuck-coercion",
+      "source": "const result=(![]+[])[+[]];",
+      "assume_intrinsics": true,
+      "expected_result": "f",
+      "required_transformations": ["literal-index"]
+    },
+    {
+      "id": "effect-preservation",
+      "source": "let count=0;function effect(){count++;return 2;}const result=[void effect(),count];",
+      "assume_intrinsics": false,
+      "expected_result": [null, 1],
+      "required_transformations": []
+    }
+  ]
+}

@@ -2555,11 +2555,31 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
 }
 
 private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigationDelegate {
+  private enum LiveCaptureMode: String {
+    case metadata
+    case content
+
+    var capturesNetworkContent: Bool { self == .content }
+
+    var title: String {
+      switch self {
+      case .metadata:
+        return "Metadata only (recommended)"
+      case .content:
+        return "Full request and response content"
+      }
+    }
+  }
+
   private var window: NSWindow?
   private weak var webView: WKWebView?
   private var contentHandler: LocalContentHandler?
   private let liveSessionCoordinator = LiveSessionCoordinator()
   private let smokeTest = ProcessInfo.processInfo.environment["REB_APP_SMOKE_TEST"] == "1"
+  private var selectedCaptureMode = LiveCaptureMode.metadata
+  private var selectedSystemKeychain = false
+  private var automaticSessionSuppressed = false
+  private var localApplicationURL: URL?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     if smokeTest {
@@ -2631,6 +2651,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       presentOriginTraceWindow()
     }
     let localApplicationURL = URL(string: "reb://app/index.html?native=1")!
+    self.localApplicationURL = localApplicationURL
     let requestedUIURL = configuredUIURL()
     if CommandLine.arguments.contains("--ui-url"), requestedUIURL == nil {
       presentFatalError("The live UI URL must be an explicit loopback HTTP address")
@@ -2638,7 +2659,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     }
     webView.load(URLRequest(url: requestedUIURL ?? localApplicationURL))
     if !smokeTest && requestedUIURL == nil && automaticLiveSessionEnabled() {
-      startAutomaticLiveSession()
+      requestAutomaticLiveSession()
     }
   }
 
@@ -2657,8 +2678,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   ) -> Bool {
     guard !smokeTest else { return true }
     presentOriginTraceWindow()
-    if automaticLiveSessionEnabled() {
-      startAutomaticLiveSession()
+    if automaticLiveSessionEnabled() && !automaticSessionSuppressed {
+      requestAutomaticLiveSession()
     }
     return true
   }
@@ -2670,7 +2691,84 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private let customBraveBundleIdentifier = "com.brave.Browser.development"
   private let customBraveApplicationName = "Brave Browser Development.app"
 
-  private func startAutomaticLiveSession() {
+  private func requestAutomaticLiveSession() {
+    guard !liveSessionCoordinator.isRunning else { return }
+    if let configuredMode = configuredAutomaticCaptureMode() {
+      startAutomaticLiveSession(
+        captureMode: configuredMode,
+        useSystemKeychain: configuredAutomaticSystemKeychain()
+      )
+      return
+    }
+    presentLiveSessionSetup()
+  }
+
+  private func presentLiveSessionSetup() {
+    guard NSApp.isRunning, !liveSessionCoordinator.isRunning else { return }
+    presentOriginTraceWindow()
+
+    let captureMode = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 390, height: 28))
+    captureMode.addItems(withTitles: [
+      LiveCaptureMode.metadata.title,
+      LiveCaptureMode.content.title,
+    ])
+    captureMode.selectItem(at: selectedCaptureMode == .content ? 1 : 0)
+
+    let modeLabel = NSTextField(labelWithString: "Capture mode")
+    modeLabel.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+    let privacyLabel = NSTextField(wrappingLabelWithString:
+      "Metadata mode excludes URL paths, sensitive headers, and bodies. Full content keeps bounded request and response data in memory for this local session and always redacts credentials."
+    )
+    privacyLabel.textColor = .secondaryLabelColor
+    privacyLabel.maximumNumberOfLines = 4
+    privacyLabel.preferredMaxLayoutWidth = 420
+    let keychainToggle = NSButton(
+      checkboxWithTitle: "Use macOS Keychain for browser credential storage",
+      target: nil,
+      action: nil
+    )
+    keychainToggle.state = selectedSystemKeychain ? .on : .off
+    let keychainLabel = NSTextField(wrappingLabelWithString:
+      "Keep this off for a prompt-free isolated research profile, and do not save passwords in that profile. Enable it only when you need encrypted browser credentials; macOS may then request your login password in its own Safe Storage prompt."
+    )
+    keychainLabel.maximumNumberOfLines = 4
+    keychainLabel.preferredMaxLayoutWidth = 420
+
+    let stack = NSStackView(views: [
+      modeLabel, captureMode, privacyLabel, keychainToggle, keychainLabel,
+    ])
+    stack.orientation = .vertical
+    stack.alignment = .leading
+    stack.spacing = 8
+    stack.distribution = .fill
+    stack.frame = NSRect(x: 0, y: 0, width: 420, height: 216)
+
+    let alert = NSAlert()
+    alert.alertStyle = .informational
+    alert.messageText = "Start a live research session"
+    alert.informativeText = "Choose the evidence boundary for this session. You can start another session later from the Origin Trace menu."
+    alert.accessoryView = stack
+    alert.addButton(withTitle: "Start Session")
+    alert.addButton(withTitle: "Continue Offline")
+    let response = alert.runModal()
+    guard response == .alertFirstButtonReturn else {
+      automaticSessionSuppressed = true
+      presentOriginTraceWindow()
+      return
+    }
+    automaticSessionSuppressed = false
+    selectedCaptureMode = captureMode.indexOfSelectedItem == 1 ? .content : .metadata
+    selectedSystemKeychain = keychainToggle.state == .on
+    startAutomaticLiveSession(
+      captureMode: selectedCaptureMode,
+      useSystemKeychain: selectedSystemKeychain
+    )
+  }
+
+  private func startAutomaticLiveSession(
+    captureMode: LiveCaptureMode,
+    useSystemKeychain: Bool
+  ) {
     guard !liveSessionCoordinator.isRunning else { return }
     guard let braveURL = customBraveApplicationURL(),
       let braveBundle = Bundle(url: braveURL),
@@ -2678,21 +2776,49 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     else {
       presentLiveSessionError(
         "Origin Trace could not find Brave Browser Development. "
-          + "Place it beside Origin Trace or set REB_BRAVE_BINARY."
+          + "Place it beside Origin Trace or set REB_BRAVE_BINARY.",
+        captureMode: captureMode,
+        useSystemKeychain: useSystemKeychain
       )
       return
     }
     liveSessionCoordinator.start(
       braveExecutableURL: braveExecutableURL,
+      captureNetworkContent: captureMode.capturesNetworkContent,
+      useSystemKeychain: useSystemKeychain,
       ready: { [weak self] liveURL in
         guard let self, let webView = self.webView else { return }
         webView.load(URLRequest(url: liveURL))
         self.presentOriginTraceWindow()
       },
       failed: { [weak self] message in
-        self?.presentLiveSessionError(message)
+        self?.presentLiveSessionError(
+          message,
+          captureMode: captureMode,
+          useSystemKeychain: useSystemKeychain
+        )
       }
     )
+  }
+
+  private func configuredAutomaticCaptureMode() -> LiveCaptureMode? {
+    guard let value = ProcessInfo.processInfo.environment["REB_AUTOMATIC_CAPTURE_MODE"] else {
+      return nil
+    }
+    return LiveCaptureMode(rawValue: value)
+  }
+
+  private func configuredAutomaticSystemKeychain() -> Bool {
+    ProcessInfo.processInfo.environment["REB_AUTOMATIC_USE_SYSTEM_KEYCHAIN"] == "1"
+  }
+
+  @objc private func newLiveSession(_ sender: Any?) {
+    automaticSessionSuppressed = false
+    liveSessionCoordinator.stop()
+    if let localApplicationURL, let webView {
+      webView.load(URLRequest(url: localApplicationURL))
+    }
+    presentLiveSessionSetup()
   }
 
   private func automaticLiveSessionEnabled() -> Bool {
@@ -2925,6 +3051,13 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       keyEquivalent: ""
     )
     applicationMenu.addItem(.separator())
+    let newSessionItem = applicationMenu.addItem(
+      withTitle: "New Live Session…",
+      action: #selector(newLiveSession(_:)),
+      keyEquivalent: "n"
+    )
+    newSessionItem.target = self
+    applicationMenu.addItem(.separator())
     applicationMenu.addItem(
       withTitle: "Hide Origin Trace",
       action: #selector(NSApplication.hide(_:)),
@@ -2988,14 +3121,28 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     NSApp.terminate(nil)
   }
 
-  private func presentLiveSessionError(_ message: String) {
+  private func presentLiveSessionError(
+    _ message: String,
+    captureMode: LiveCaptureMode,
+    useSystemKeychain: Bool
+  ) {
     guard NSApp.isRunning else { return }
     let alert = NSAlert()
     alert.alertStyle = .critical
     alert.messageText = "Live capture could not start"
     alert.informativeText = message
+    alert.addButton(withTitle: "Retry")
     alert.addButton(withTitle: "Continue Offline")
-    alert.runModal()
+    let response = alert.runModal()
+    if response == .alertFirstButtonReturn {
+      liveSessionCoordinator.stop()
+      startAutomaticLiveSession(
+        captureMode: captureMode,
+        useSystemKeychain: useSystemKeychain
+      )
+      return
+    }
+    automaticSessionSuppressed = true
     presentOriginTraceWindow()
   }
 

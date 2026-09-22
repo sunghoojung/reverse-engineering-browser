@@ -15,20 +15,24 @@
   web applications.
 </p>
 
-## v0.1.10 released
+## v0.2.0 released
 
-Origin Trace now starts a complete instrumented research session when launched.
-The app creates private evidence storage, starts its capture and debugger
-services, opens an isolated Brave Browser Development profile with safe
-metadata probes enabled, and switches to the live workspace without treating
-the replaced offline navigation as a startup failure.
+Origin Trace now starts live research sessions through an explicit privacy
+dialog. Metadata-only capture remains the default, bounded request and response
+content is an opt-in, and the isolated browser profile launches without a
+Keychain prompt unless encrypted credential storage is selected. Browser
+readiness, retry, offline, and clean relaunch paths are covered end to end.
 
-[Download Origin Trace v0.1.10](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.10/Origin-Trace-v0.1.10-macos.zip)
-· [Release notes](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.1.10)
-· [Full changelog](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.1.9...v0.1.10)
+[Download Origin Trace v0.2.0](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.2.0/Origin-Trace-v0.2.0-macos.zip)
+· [Release notes](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.2.0)
+· [Full changelog](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.1.10...v0.2.0)
 
 ### Feature changelog
 
+- **v0.2.0:** added per-session metadata or bounded-content capture controls,
+  prompt-free isolated profiles with explicit Keychain opt-in, verified browser
+  readiness and retry/relaunch flows, private Brave diagnostics, a semantic
+  deobfuscation benchmark corpus, and automated developer-tool bootstrap.
 - **v0.1.10:** fixed the launch-time WebKit cancellation race that could show
   `NSURLErrorDomain error -999` while Origin Trace switched from its offline
   shell to the newly started live workspace.
@@ -87,7 +91,7 @@ the replaced offline navigation as a startup failure.
 ### Download the compiled macOS apps
 
 1. Download
-   [Origin Trace v0.1.10](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.10/Origin-Trace-v0.1.10-macos.zip)
+   [Origin Trace v0.2.0](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.2.0/Origin-Trace-v0.2.0-macos.zip)
    and the
    [Brave Browser Development preview](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/brave-build-20260914/Brave-Browser-Development-brave-build-20260914-macos-arm64.zip).
 2. Unzip both files and place the applications beside each other, or install

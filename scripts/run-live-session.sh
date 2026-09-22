@@ -28,12 +28,14 @@ readonly signal_store_path="${session_directory}/request-signals.jsonl"
 readonly artifact_store_path="${session_directory}/artifacts"
 readonly token_path="${session_directory}/broker.token"
 readonly profile_path="${REB_BRAVE_PROFILE:-${session_directory}/brave-profile}"
+readonly brave_cache_root="${REB_BRAVE_CACHE_ROOT:-}"
 readonly category_mask="${REB_CAPTURE_CATEGORY_MASK:-4095}"
 readonly duration_seconds="${REB_CAPTURE_DURATION_SECONDS:-3600}"
 readonly open_command="${REB_OPEN_COMMAND:-open}"
 readonly native_quiet_mode="${REB_NATIVE_QUIET_MODE:-0}"
 readonly cdp_network_capture="${REB_CDP_NETWORK_CAPTURE:-0}"
 readonly capture_canvas_images="${REB_CAPTURE_CANVAS_IMAGES:-0}"
+readonly use_system_keychain="${REB_USE_SYSTEM_KEYCHAIN:-1}"
 readonly embedded_session="${REB_EMBEDDED_SESSION:-0}"
 readonly session_handshake="${REB_SESSION_HANDSHAKE:-}"
 readonly session_owner_pid="${REB_SESSION_OWNER_PID:-}"
@@ -51,6 +53,10 @@ if [[ "${cdp_network_capture}" != 0 && "${cdp_network_capture}" != 1 ]]; then
 fi
 if [[ "${capture_canvas_images}" != 0 && "${capture_canvas_images}" != 1 ]]; then
   echo "REB_CAPTURE_CANVAS_IMAGES must be 0 or 1." >&2
+  exit 2
+fi
+if [[ "${use_system_keychain}" != 0 && "${use_system_keychain}" != 1 ]]; then
+  echo "REB_USE_SYSTEM_KEYCHAIN must be 0 or 1." >&2
   exit 2
 fi
 if [[ "${embedded_session}" != 0 && "${embedded_session}" != 1 ]]; then
@@ -76,14 +82,22 @@ fi
 
 mkdir -p "${session_directory}" "${artifact_store_path}" "${profile_path}"
 chmod 700 "${session_directory}" "${artifact_store_path}" "${profile_path}"
+if [[ -n "${brave_cache_root}" ]]; then
+  readonly brave_cache_profile="${brave_cache_root}/${session_id}/brave-profile"
+  mkdir -p "${brave_cache_profile}"
+  chmod 700 "${brave_cache_root}" "${brave_cache_root}/${session_id}" "${brave_cache_profile}"
+fi
 
 readonly socket_path="/tmp/origin-trace-${UID}-${session_id}.sock"
 readonly artifact_socket_path="/tmp/origin-trace-${UID}-${session_id}-artifacts.sock"
 readonly broker_log="${session_directory}/broker.log"
 readonly artifact_receiver_log="${session_directory}/artifact-receiver.log"
 readonly ui_log="${session_directory}/research-ui.log"
+readonly brave_log="${session_directory}/brave.log"
 readonly ui_endpoint_path="${session_directory}/research-ui.endpoint"
 readonly devtools_active_port="${profile_path}/DevToolsActivePort"
+touch "${brave_log}"
+chmod 600 "${brave_log}"
 
 brave_binary="${REB_BRAVE_BINARY:-}"
 if [[ -z "${brave_binary}" ]]; then
@@ -318,6 +332,58 @@ ui_endpoint="$(tr -d '\r\n' < "${ui_endpoint_path}")"
 readonly ui_endpoint
 readonly live_ui_url="${ui_endpoint}/?native=1&canvas_images=${capture_canvas_images}"
 
+brave_arguments=(
+  --user-data-dir="${profile_path}" \
+  --disable-background-networking \
+  --disable-component-update \
+  --disable-sync \
+  --no-default-browser-check \
+  --no-first-run \
+  --reb-broker-socket="${socket_path}" \
+  --reb-artifact-socket="${artifact_socket_path}" \
+  --reb-broker-token-file="${token_path}" \
+  --reb-session-id="${session_id}" \
+  --reb-category-mask="${category_mask}" \
+  --reb-duration-seconds="${duration_seconds}"
+)
+if [[ "${native_quiet_mode}" == 1 ]]; then
+  brave_arguments+=(--js-flags=--reb-ignore-debugger-statements)
+else
+  brave_arguments+=(--remote-debugging-port=0)
+fi
+if [[ "${capture_canvas_images}" == 1 ]]; then
+  brave_arguments+=(--reb-capture-canvas-images)
+fi
+if [[ "${use_system_keychain}" == 0 ]]; then
+  brave_arguments+=(--use-mock-keychain)
+fi
+
+"${brave_binary}" "${brave_arguments[@]}" >"${brave_log}" 2>&1 &
+brave_pid=$!
+
+if [[ "${native_quiet_mode}" == 0 ]]; then
+  for _ in {1..600}; do
+    if [[ -s "${devtools_active_port}" ]]; then
+      break
+    fi
+    if ! kill -0 "${brave_pid}" 2>/dev/null; then
+      echo "Brave stopped before its debugger endpoint became ready. See: ${brave_log}" >&2
+      exit 1
+    fi
+    sleep 0.05
+  done
+  if [[ ! -s "${devtools_active_port}" ]]; then
+    echo "Brave did not become ready within 30 seconds. Complete any macOS Brave Safe Storage prompt, then retry. See: ${brave_log}" >&2
+    exit 1
+  fi
+else
+  sleep 0.25
+  if ! kill -0 "${brave_pid}" 2>/dev/null; then
+    echo "Brave stopped during quiet-mode startup. See: ${brave_log}" >&2
+    exit 1
+  fi
+fi
+
 if [[ "${embedded_session}" == 1 ]]; then
   handshake_temporary="${session_handshake}.tmp.$$"
   printf '%s\n' "${live_ui_url}" >"${handshake_temporary}"
@@ -336,6 +402,7 @@ echo "Evidence store: ${store_path}"
 echo "Origin trace store: ${trace_store_path}"
 echo "Request signal profile store: ${signal_store_path}"
 echo "Artifact store: ${artifact_store_path}"
+echo "Brave log: ${brave_log}"
 echo "Category mask: ${category_mask}; expires after ${duration_seconds} seconds"
 if [[ "${capture_canvas_images}" == 1 ]]; then
   echo "Canvas image capture: enabled for this session; outputs may contain sensitive page content"
@@ -349,36 +416,18 @@ else
   if [[ "${cdp_network_capture}" == 1 ]]; then
     echo "CDP network content: enabled for this session; sensitive headers are redacted and bodies are limited to 128 KiB"
   else
-    echo "CDP network content: disabled; set REB_CDP_NETWORK_CAPTURE=1 to enable it for one session"
+    echo "CDP network content: disabled for this session"
   fi
 fi
 echo "Close Brave to stop this capture session."
 
-brave_arguments=(
-  --user-data-dir="${profile_path}" \
-  --reb-broker-socket="${socket_path}" \
-  --reb-artifact-socket="${artifact_socket_path}" \
-  --reb-broker-token-file="${token_path}" \
-  --reb-session-id="${session_id}" \
-  --reb-category-mask="${category_mask}" \
-  --reb-duration-seconds="${duration_seconds}"
-)
-if [[ "${native_quiet_mode}" == 1 ]]; then
-  brave_arguments+=(--js-flags=--reb-ignore-debugger-statements)
-else
-  brave_arguments+=(--remote-debugging-port=0)
-fi
-if [[ "${capture_canvas_images}" == 1 ]]; then
-  brave_arguments+=(--reb-capture-canvas-images)
-fi
 if [[ "${embedded_session}" == 1 ]]; then
-  "${brave_binary}" "${brave_arguments[@]}" &
-  brave_pid=$!
   while kill -0 "${session_owner_pid}" 2>/dev/null; do
     sleep 1
   done
 else
-  "${brave_binary}" "${brave_arguments[@]}"
+  wait "${brave_pid}"
+  brave_pid=""
   stop_artifact_receiver
   wait "${broker_pid}"
   broker_pid=""

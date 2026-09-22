@@ -1,7 +1,7 @@
 native-build-test:
 	./tests/native_build_test.sh
 
-check: native-build-test workspace-check bootstrap-test browser-sync-test brave-distribution-test deob-worker-test test ui-test
+check: native-build-test workspace-check bootstrap-test browser-sync-test brave-distribution-test deob-worker-test deob-benchmark test ui-test
 
 lint: format-check shellcheck python-check javascript-check repository-check workflow-check
 
@@ -49,7 +49,7 @@ shellcheck:
 
 python-check:
 	python3 -m compileall -q apps/research-ui tests/research_ui tools
-	python3 -m ruff check apps/research-ui tests/research_ui tools
+	$(RUFF) check apps/research-ui tests/research_ui tools
 
 repository-check:
 	./scripts/check-repository-hygiene.sh

@@ -17,6 +17,7 @@ for the precise supported subsets and regression evidence.
 ```sh
 cargo test --manifest-path apps/deobfuscator-worker/Cargo.toml
 cargo run --manifest-path apps/deobfuscator-worker/Cargo.toml
+make deob-benchmark
 ```
 
 Example request:
@@ -47,3 +48,11 @@ Before recursive Oxc parsing, a heap-backed Tree-sitter preflight admits only
 error-free JavaScript trees with depth at most 128 and at most 500,000 nodes,
 within one second. Excessive nesting returns a recoverable diagnostic and leaves
 the next JSON-line request usable. Both grammars must support the input syntax.
+
+`make deob-benchmark` runs the worker against the versioned technique corpus in
+`tests/fixtures/deobfuscation-benchmark/`.
+Each case compares the original and derived observable result in Node, requires
+the expected transformation families, rejects budget truncation, and reports
+wall time, rewrite count, changed-source coverage, and child peak RSS. The
+fixtures are repository-owned regression programs, not captured or untrusted
+malware samples.

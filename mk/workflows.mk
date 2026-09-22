@@ -1,6 +1,9 @@
 bootstrap-brave:
 	./scripts/bootstrap-brave.sh
 
+bootstrap-dev-tools:
+	./scripts/bootstrap-dev-tools.sh
+
 bootstrap-test:
 	./tests/bootstrap_brave_test.sh
 
@@ -96,3 +99,9 @@ app-demo: app-build e2e
 
 live: app-build broker artifact-receiver debugger-transport
 	./scripts/run-live-session.sh
+
+deob-benchmark:
+	@command -v cargo >/dev/null 2>&1 || { echo "Cargo is not installed" >&2; exit 1; }
+	@command -v node >/dev/null 2>&1 || { echo "Node.js is not installed" >&2; exit 1; }
+	cargo build --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
+	python3 tools/run-deobfuscation-benchmark.py

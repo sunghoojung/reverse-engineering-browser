@@ -3053,6 +3053,9 @@ process.stdout.write(JSON.stringify({
         application = (macos_directory / "OriginTraceApp.swift").read_text(
             encoding="utf-8"
         )
+        live_session = (macos_directory / "LiveSessionCoordinator.swift").read_text(
+            encoding="utf-8"
+        )
         plist = (macos_directory / "Info.plist").read_text(encoding="utf-8")
         plist_values = plistlib.loads(plist.encode("utf-8"))
         build_script = (
@@ -3067,8 +3070,26 @@ process.stdout.write(JSON.stringify({
         self.assertIn(
             "configureApplicationIcon(resourcesURL: resourcesURL)", application
         )
-        self.assertIn("startAutomaticLiveSession()", application)
+        self.assertIn("requestAutomaticLiveSession()", application)
         self.assertIn("LiveSessionCoordinator()", application)
+        self.assertIn('case .metadata', application)
+        self.assertIn('case .content', application)
+        self.assertIn('"Metadata only (recommended)"', application)
+        self.assertIn('"Full request and response content"', application)
+        self.assertIn(
+            '"Use macOS Keychain for browser credential storage"', application
+        )
+        self.assertIn('"REB_AUTOMATIC_USE_SYSTEM_KEYCHAIN"', application)
+        self.assertIn('"Start a live research session"', application)
+        self.assertIn('"Start Session"', application)
+        self.assertIn('"Continue Offline"', application)
+        self.assertIn('"New Live Session…"', application)
+        self.assertIn('"REB_AUTOMATIC_CAPTURE_MODE"', application)
+        self.assertIn('captureNetworkContent: captureMode.capturesNetworkContent', application)
+        self.assertIn('alert.addButton(withTitle: "Retry")', application)
+        self.assertIn('environment["REB_CDP_NETWORK_CAPTURE"]', live_session)
+        self.assertIn('environment["REB_BRAVE_CACHE_ROOT"]', live_session)
+        self.assertIn('environment["REB_USE_SYSTEM_KEYCHAIN"]', live_session)
         self.assertIn(
             'customBraveBundleIdentifier = "com.brave.Browser.development"',
             application,
@@ -3093,7 +3114,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn("automaticLiveSessionEnabled()", application)
         self.assertIn("applicationShouldHandleReopen", application)
         self.assertIn(
-            "if automaticLiveSessionEnabled() {\n      startAutomaticLiveSession()",
+            "if automaticLiveSessionEnabled() && !automaticSessionSuppressed {\n      requestAutomaticLiveSession()",
             application,
         )
         self.assertIn("func applicationWillTerminate", application)
@@ -3151,8 +3172,8 @@ process.stdout.write(JSON.stringify({
         self.assertIn("<key>CFBundleIconFile</key>", plist)
         self.assertIn("<string>OriginTrace</string>", plist)
         self.assertIn("<key>NSAllowsLocalNetworking</key>", plist)
-        self.assertEqual(plist_values["CFBundleShortVersionString"], "0.1.10")
-        self.assertEqual(plist_values["CFBundleVersion"], "10")
+        self.assertEqual(plist_values["CFBundleShortVersionString"], "0.2.0")
+        self.assertEqual(plist_values["CFBundleVersion"], "20")
         self.assertIn("navigationError.domain == NSURLErrorDomain", application)
         self.assertIn("navigationError.code == NSURLErrorCancelled", application)
         self.assertIn("origin-trace-icon.png", build_script)

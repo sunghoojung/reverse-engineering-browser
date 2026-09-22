@@ -15,18 +15,23 @@
   web applications.
 </p>
 
-## v0.1.8 released
+## v0.1.9 released
 
-Origin Trace now provides bounded static JavaScript deobfuscation directly in
-Sources. It preserves the captured artifact, maps derived expressions back to
-their original byte ranges, and keeps unknown or unsafe operations visible.
+Origin Trace now starts a complete instrumented research session when launched.
+The app creates private evidence storage, starts its capture and debugger
+services, and opens an isolated Brave Browser Development profile with safe
+metadata probes enabled.
 
-[Download Origin Trace v0.1.8](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.8/Origin-Trace-v0.1.8-macos.zip)
-· [Release notes](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.1.8)
-· [Full changelog](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.1.7...v0.1.8)
+[Download Origin Trace v0.1.9](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.9/Origin-Trace-v0.1.9-macos.zip)
+· [Release notes](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.1.9)
+· [Full changelog](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.1.8...v0.1.9)
 
 ### Feature changelog
 
+- **v0.1.9:** made normal app launch start the broker, artifact receiver,
+  debugger, analyzers, loopback UI, and instrumented custom Brave session
+  automatically; packaged the required helpers and added explicit startup
+  failure reporting and owned cleanup.
 - **v0.1.8:** added bounded Rust/Oxc deobfuscation inside Sources, original-byte
   provenance, nesting protection, proxy and custom decoder evaluation, explicit
   JSFuck coercion assumptions, and bounded loop/switch dispatcher recovery.
@@ -78,12 +83,13 @@ their original byte ranges, and keeps unknown or unsafe operations visible.
 ### Download the compiled macOS apps
 
 1. Download
-   [Origin Trace v0.1.8](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.8/Origin-Trace-v0.1.8-macos.zip)
+   [Origin Trace v0.1.9](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.1.9/Origin-Trace-v0.1.9-macos.zip)
    and the
    [Brave Browser Development preview](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/brave-build-20260914/Brave-Browser-Development-brave-build-20260914-macos-arm64.zip).
-2. Unzip both files.
-3. Use the compiled Brave executable as `REB_BRAVE_BINARY` when starting a live
-   session from the repository, as shown below.
+2. Unzip both files and place the applications beside each other, or install
+   Brave Browser Development in `/Applications`.
+3. Open Origin Trace. It starts the capture services and an isolated custom
+   Brave session automatically.
 
 The compiled apps are for Apple silicon Macs. The linked Brave Browser
 Development preview predates current probe support. Build the pinned Brave

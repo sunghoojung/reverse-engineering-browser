@@ -7,9 +7,12 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly script_dir
 repository_root="$(cd "${script_dir}/.." && pwd)"
 readonly repository_root
-readonly broker_binary="${repository_root}/build/reb-event-broker"
-readonly artifact_receiver_binary="${repository_root}/build/reb-artifact-receiver"
-readonly debugger_transport_binary="${repository_root}/build/reb-debugger-transport"
+readonly broker_binary="${REB_BROKER_BINARY:-${repository_root}/build/reb-event-broker}"
+readonly artifact_receiver_binary="${REB_ARTIFACT_RECEIVER_BINARY:-${repository_root}/build/reb-artifact-receiver}"
+readonly debugger_transport_binary="${REB_DEBUGGER_TRANSPORT_BINARY:-${repository_root}/build/reb-debugger-transport}"
+readonly heap_snapshot_binary="${REB_HEAP_SNAPSHOT_BINARY:-${repository_root}/build/reb-heap-snapshot}"
+readonly decoder_binary="${REB_DECODER_BINARY:-${repository_root}/build/reb-decoder}"
+readonly research_ui_server="${REB_RESEARCH_UI_SERVER:-${repository_root}/apps/research-ui/server.py}"
 readonly vm_analyzer="${REB_VM_ANALYZER:-${repository_root}/apps/research-ui/vm_analyzer.py}"
 readonly origin_trace_app="${REB_ORIGIN_TRACE_APP:-${repository_root}/build/Origin Trace.app}"
 session_id="$(od -An -N8 -tu8 /dev/urandom | tr -d '[:space:]')"
@@ -31,6 +34,12 @@ readonly open_command="${REB_OPEN_COMMAND:-open}"
 readonly native_quiet_mode="${REB_NATIVE_QUIET_MODE:-0}"
 readonly cdp_network_capture="${REB_CDP_NETWORK_CAPTURE:-0}"
 readonly capture_canvas_images="${REB_CAPTURE_CANVAS_IMAGES:-0}"
+readonly embedded_session="${REB_EMBEDDED_SESSION:-0}"
+readonly session_handshake="${REB_SESSION_HANDSHAKE:-}"
+readonly session_owner_pid="${REB_SESSION_OWNER_PID:-}"
+readonly python_binary="${REB_PYTHON_BINARY:-python3}"
+readonly api_collection_store="${REB_API_COLLECTION_STORE:-${live_session_root}/../api-collection-v1.json}"
+readonly local_analyst_store="${REB_LOCAL_ANALYST_STORE:-${live_session_root}/../local-analyst-workspace-v1.json}"
 
 if [[ "${native_quiet_mode}" != 0 && "${native_quiet_mode}" != 1 ]]; then
   echo "REB_NATIVE_QUIET_MODE must be 0 or 1." >&2
@@ -43,6 +52,17 @@ fi
 if [[ "${capture_canvas_images}" != 0 && "${capture_canvas_images}" != 1 ]]; then
   echo "REB_CAPTURE_CANVAS_IMAGES must be 0 or 1." >&2
   exit 2
+fi
+if [[ "${embedded_session}" != 0 && "${embedded_session}" != 1 ]]; then
+  echo "REB_EMBEDDED_SESSION must be 0 or 1." >&2
+  exit 2
+fi
+if [[ "${embedded_session}" == 1 ]]; then
+  if [[ -z "${session_handshake}" || -z "${session_owner_pid}" ]] ||
+     ! [[ "${session_owner_pid}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Embedded sessions require REB_SESSION_HANDSHAKE and a valid REB_SESSION_OWNER_PID." >&2
+    exit 2
+  fi
 fi
 if [[ "${capture_canvas_images}" == 1 ]] &&
    (( (category_mask & 1) == 0 || (category_mask & 1024) == 0 )); then
@@ -93,7 +113,23 @@ if [[ "${native_quiet_mode}" == 0 && ! -x "${debugger_transport_binary}" ]]; the
   echo "Debugger transport is missing. Run: make debugger-transport" >&2
   exit 1
 fi
-if [[ ! -d "${origin_trace_app}" ]]; then
+if [[ ! -x "${heap_snapshot_binary}" ]]; then
+  echo "Heap snapshot helper is missing. Run: make heap-snapshot" >&2
+  exit 1
+fi
+if [[ ! -x "${decoder_binary}" ]]; then
+  echo "Decoder is missing. Run: make decoder" >&2
+  exit 1
+fi
+if [[ ! -f "${research_ui_server}" ]]; then
+  echo "Research UI server is missing: ${research_ui_server}" >&2
+  exit 1
+fi
+if ! command -v "${python_binary}" >/dev/null 2>&1; then
+  echo "Python 3 is required to run the live research UI." >&2
+  exit 1
+fi
+if [[ "${embedded_session}" == 0 && ! -d "${origin_trace_app}" ]]; then
   echo "Origin Trace is missing. Run: make app-build" >&2
   exit 1
 fi
@@ -107,6 +143,7 @@ broker_pid=""
 artifact_receiver_pid=""
 analyzer_pid=""
 ui_pid=""
+brave_pid=""
 stop_artifact_receiver() {
   if [[ -z "${artifact_receiver_pid}" ]]; then
     return
@@ -119,6 +156,10 @@ stop_artifact_receiver() {
 }
 
 cleanup() {
+  if [[ -n "${brave_pid}" ]] && kill -0 "${brave_pid}" 2>/dev/null; then
+    kill -TERM "${brave_pid}" 2>/dev/null || true
+    wait "${brave_pid}" 2>/dev/null || true
+  fi
   if [[ -n "${analyzer_pid}" ]] && kill -0 "${analyzer_pid}" 2>/dev/null; then
     kill "${analyzer_pid}" 2>/dev/null || true
     wait "${analyzer_pid}" 2>/dev/null || true
@@ -137,6 +178,9 @@ cleanup() {
   fi
   if [[ -S "${artifact_socket_path}" ]]; then
     rm -f "${artifact_socket_path}"
+  fi
+  if [[ "${embedded_session}" == 1 && -n "${session_handshake}" ]]; then
+    rm -f "${session_handshake}"
   fi
 }
 trap cleanup EXIT INT TERM
@@ -215,7 +259,7 @@ analyze_captured_artifacts() {
       current_signature="missing"
     fi
     if [[ "${current_signature}" != "${previous_signature}" ]]; then
-      python3 "${vm_analyzer}" --artifacts "${artifact_store_path}" --events "${store_path}" >>"${analyzer_log}" 2>&1 &
+      "${python_binary}" "${vm_analyzer}" --artifacts "${artifact_store_path}" --events "${store_path}" >>"${analyzer_log}" 2>&1 &
       worker_pid=$!
       if ! wait "${worker_pid}"; then
         echo "VM analysis failed for input state ${current_signature}" >>"${analyzer_log}"
@@ -236,6 +280,8 @@ ui_arguments=(
   --host 127.0.0.1 --port 0 --endpoint-file "${ui_endpoint_path}" \
   --store "${store_path}" --trace-store "${trace_store_path}" \
   --signal-store "${signal_store_path}" --artifacts "${artifact_store_path}" \
+  --api-collection "${api_collection_store}" --local-analyst "${local_analyst_store}" \
+  --decoder "${decoder_binary}" --heap-snapshot "${heap_snapshot_binary}" \
   --socket "${socket_path}" --artifact-socket "${artifact_socket_path}"
   --broker-pid "${broker_pid}"
 )
@@ -248,7 +294,7 @@ if [[ "${native_quiet_mode}" == 0 ]]; then
     ui_arguments+=(--capture-network-content)
   fi
 fi
-python3 -u "${repository_root}/apps/research-ui/server.py" \
+"${python_binary}" -u "${research_ui_server}" \
   "${ui_arguments[@]}" \
   >"${ui_log}" 2>&1 &
 ui_pid=$!
@@ -270,12 +316,20 @@ if [[ ! -s "${ui_endpoint_path}" ]]; then
 fi
 ui_endpoint="$(tr -d '\r\n' < "${ui_endpoint_path}")"
 readonly ui_endpoint
+readonly live_ui_url="${ui_endpoint}/?native=1&canvas_images=${capture_canvas_images}"
 
-"${open_command}" -n "${origin_trace_app}" --args --store "${store_path}" \
-  --trace-store "${trace_store_path}" --signal-store "${signal_store_path}" \
-  --artifacts "${artifact_store_path}" \
-  --broker-socket "${socket_path}" \
-  --ui-url "${ui_endpoint}/?native=1&canvas_images=${capture_canvas_images}"
+if [[ "${embedded_session}" == 1 ]]; then
+  handshake_temporary="${session_handshake}.tmp.$$"
+  printf '%s\n' "${live_ui_url}" >"${handshake_temporary}"
+  chmod 600 "${handshake_temporary}"
+  mv "${handshake_temporary}" "${session_handshake}"
+else
+  "${open_command}" -n "${origin_trace_app}" --args --store "${store_path}" \
+    --trace-store "${trace_store_path}" --signal-store "${signal_store_path}" \
+    --artifacts "${artifact_store_path}" \
+    --broker-socket "${socket_path}" \
+    --ui-url "${live_ui_url}"
+fi
 
 echo "Origin Trace live session ${session_id}"
 echo "Evidence store: ${store_path}"
@@ -317,8 +371,15 @@ fi
 if [[ "${capture_canvas_images}" == 1 ]]; then
   brave_arguments+=(--reb-capture-canvas-images)
 fi
-"${brave_binary}" "${brave_arguments[@]}"
-
-stop_artifact_receiver
-wait "${broker_pid}"
-broker_pid=""
+if [[ "${embedded_session}" == 1 ]]; then
+  "${brave_binary}" "${brave_arguments[@]}" &
+  brave_pid=$!
+  while kill -0 "${session_owner_pid}" 2>/dev/null; do
+    sleep 1
+  done
+else
+  "${brave_binary}" "${brave_arguments[@]}"
+  stop_artifact_receiver
+  wait "${broker_pid}"
+  broker_pid=""
+fi

@@ -47,15 +47,17 @@ Implementation and contracts:
 [artifact receiver](../../services/artifact-receiver/README.md), and
 [shared protocol](../../protocol/README.md).
 
-## Application and optional live debugging
+## Application and live debugging
 
-The normal macOS application uses Swift and WKWebView. `make app` opens the
-bundled interface with native evidence readers; `make ui` serves the browser
-development interface from Python. `make live` starts the local capture
-services, analysis worker, Python server, private Brave profile, and the native
-app window pointed at the local server.
+The normal macOS application uses Swift and WKWebView. `make app` packages and
+opens the application, which starts its bundled capture services, analysis
+worker, loopback Python server, and an isolated instrumented Brave profile.
+`make live` provides the same orchestration from the repository for development
+and fixture testing. `make ui` serves the browser development interface alone.
+Explicit store or demo arguments retain the native stored-evidence reader path
+without starting another session.
 
-Live debugging is a separate, optional path: a loopback DevTools WebSocket
+Live debugging is enabled for a normal session. A loopback DevTools WebSocket
 connects Brave to `reb-debugger-transport`, a bounded C++ helper. Versioned
 private process pipes connect that helper to the Python debugger-state and
 policy adapter. The UI uses allowlisted local routes for debugger, source,

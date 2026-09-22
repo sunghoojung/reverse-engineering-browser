@@ -3061,7 +3061,8 @@ process.stdout.write(JSON.stringify({
         self.assertIn(
             "configureApplicationIcon(resourcesURL: resourcesURL)", application
         )
-        self.assertIn("launchCustomBraveBrowser()", application)
+        self.assertIn("startAutomaticLiveSession()", application)
+        self.assertIn("LiveSessionCoordinator()", application)
         self.assertIn(
             'customBraveBundleIdentifier = "com.brave.Browser.development"',
             application,
@@ -3077,44 +3078,21 @@ process.stdout.write(JSON.stringify({
             application,
         )
         self.assertIn("isCustomBraveApplication(candidate)", application)
-        self.assertIn(
-            "configuration.activates = false",
-            application,
-        )
         self.assertIn("private func presentOriginTraceWindow()", application)
         self.assertIn("window.deminiaturize(nil)", application)
         self.assertIn("window.makeKeyAndOrderFront(nil)", application)
         self.assertIn("func applicationDidBecomeActive", application)
-        self.assertIn(
-            "NSWorkspace.shared.openApplication(at: braveURL, configuration: configuration)",
-            application,
-        )
-        self.assertNotIn("runningApplication.activate", application)
-        self.assertIn(
-            "if !smokeTest {\n      presentOriginTraceWindow()\n      launchCustomBraveBrowser()",
-            application,
-        )
+        self.assertNotIn("NSWorkspace.shared.openApplication", application)
+        self.assertNotIn("launchCustomBraveBrowser", application)
+        self.assertIn("automaticLiveSessionEnabled()", application)
         self.assertIn("applicationShouldHandleReopen", application)
         self.assertIn(
-            "guard !smokeTest else { return true }\n    presentOriginTraceWindow()\n    launchCustomBraveBrowser()",
+            "if automaticLiveSessionEnabled() {\n      startAutomaticLiveSession()",
             application,
         )
-        self.assertIn(
-            "DispatchQueue.main.async {\n        self?.presentOriginTraceWindow()",
-            application,
-        )
-        self.assertIn(
-            "NSRunningApplication.runningApplications(\n      withBundleIdentifier: customBraveBundleIdentifier",
-            application,
-        )
-        self.assertNotIn(
-            "restoreOriginTraceWindowAfterBrowserLaunch",
-            application,
-        )
-        self.assertNotIn(
-            "DispatchQueue.main.asyncAfter(deadline: .now() + 0.5)",
-            application,
-        )
+        self.assertIn("func applicationWillTerminate", application)
+        self.assertIn("liveSessionCoordinator.stop()", application)
+        self.assertIn('"REB_DISABLE_AUTOMATIC_LIVE_SESSION"', application)
         self.assertIn('appendingPathComponent("OriginTrace.icns")', application)
         self.assertIn("NSApp.applicationIconImage = icon", application)
         self.assertNotIn("makeApplicationIcon", application)
@@ -3167,9 +3145,15 @@ process.stdout.write(JSON.stringify({
         self.assertIn("<key>CFBundleIconFile</key>", plist)
         self.assertIn("<string>OriginTrace</string>", plist)
         self.assertIn("<key>NSAllowsLocalNetworking</key>", plist)
-        self.assertEqual(plist_values["CFBundleShortVersionString"], "0.1.8")
-        self.assertEqual(plist_values["CFBundleVersion"], "8")
+        self.assertEqual(plist_values["CFBundleShortVersionString"], "0.1.9")
+        self.assertEqual(plist_values["CFBundleVersion"], "9")
         self.assertIn("origin-trace-icon.png", build_script)
+        self.assertIn("OriginTraceEventBroker", build_script)
+        self.assertIn("OriginTraceArtifactReceiver", build_script)
+        self.assertIn("OriginTraceDebuggerTransport", build_script)
+        self.assertIn("OriginTraceHeapSnapshot", build_script)
+        self.assertIn("run-live-session.sh", build_script)
+        self.assertIn('"${live_session_source}"', build_script)
         self.assertNotIn("build/sessions/demo.jsonl", build_script)
         self.assertNotIn('"${resources_path}/artifacts"', build_script)
         self.assertNotIn('"${resources_path}/origin-trace.jsonl"', build_script)

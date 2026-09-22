@@ -38,7 +38,7 @@ decoder: $(DECODER_BINARY)
 
 debugger-transport: $(DEBUGGER_TRANSPORT_BINARY)
 
-e2e: producer broker artifact-producer artifact-receiver debugger-transport
+e2e: producer broker artifact-producer artifact-receiver debugger-transport heap-snapshot decoder
 	@mkdir -p $(BUILD_DIR)/sessions
 	$(PRODUCER_BINARY) | $(BROKER_BINARY) \
 		--store $(BUILD_DIR)/sessions/demo.jsonl \
@@ -80,7 +80,7 @@ ui: e2e heap-snapshot decoder
 		--trace-store $(BUILD_DIR)/sessions/origin-trace.jsonl \
 		--signal-store $(BUILD_DIR)/sessions/request-signals.jsonl
 
-app-build: heap-snapshot decoder
+app-build: heap-snapshot decoder broker artifact-receiver debugger-transport
 	./scripts/build-research-app.sh
 
 app: app-build

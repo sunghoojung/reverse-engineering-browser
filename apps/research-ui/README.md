@@ -10,17 +10,22 @@ development and live debugger sessions.
 make app
 ```
 
-This packages `build/Origin Trace.app` and opens the native application with no
-bundled evidence. The bundle contains its UI assets and native helpers. It does
-not need the Python development server for stored evidence.
-Each normal Origin Trace launch, including reopening it from the Dock, also
-opens the custom Brave Browser Development app, then restores the Origin Trace
-window and keeps it in front. Origin Trace looks beside its own app bundle, in
-the local `browser/worktree/` build output, and among registered applications. A
-`REB_BRAVE_BINARY` override takes precedence. This does not start a live capture
-session. When custom Brave is already running, clicking Origin Trace leaves the
-browser untouched and brings Origin Trace forward once. Use `make live` for the
-pinned custom Brave capture workflow.
+This packages `build/Origin Trace.app` and opens a complete live capture
+session. The app creates a private evidence directory and isolated browser
+profile, starts its bundled broker, artifact receiver, debugger transport,
+analysis helpers, and loopback UI, then launches Brave Browser Development with
+all safe metadata categories enabled. Closing Origin Trace stops the session
+processes. Evidence remains under `~/Library/Application Support/Origin
+Trace/sessions/live/`.
+
+Origin Trace looks beside its app bundle, in the local `browser/worktree/`
+build output, and among registered applications for Brave Browser Development.
+A `REB_BRAVE_BINARY` override takes precedence. Python 3 is currently required
+for the bundled live debugger service. A startup problem is shown explicitly
+and leaves the stored-evidence interface available offline.
+Pass an explicit evidence-store or demo argument, or set
+`REB_DISABLE_AUTOMATIC_LIVE_SESSION=1`, when opening the native stored-evidence
+interface without starting Brave.
 
 For an explicit development session with deterministic sample evidence:
 

@@ -77,8 +77,9 @@
                 </div>
 
                 <div class="request-table">
-                  <div class="request-head" aria-hidden="true"><span>Name</span><span>Method</span><span>Status</span><span>Time</span><span>Waterfall</span></div>
+                  <div class="request-head" aria-hidden="true"><span>Name</span><span>Status</span><span>Type</span><span>Method</span><span>Time</span></div>
                   <div id="request-rows" class="request-rows" role="listbox" aria-label="Captured requests"></div>
+                  <button id="request-latest" class="request-latest" type="button" hidden>New requests ↓</button>
                 </div>
               </div>
 
@@ -87,6 +88,7 @@
                   <span id="selected-method" class="method-pill">POST</span>
                   <span id="selected-status" class="status-pill">201</span>
                   <span id="selected-url" class="selection-url">https://checkout.acme.test/cart</span>
+                  <button id="request-copy-url" class="secondary-button" type="button" title="Copy selected request URL">Copy URL</button>
                   <button id="request-evidence-toggle" class="secondary-button" type="button" aria-expanded="false">Evidence</button>
                   <button id="request-collection-pivot" class="secondary-button" type="button">Save to Collection</button>
                 </div>

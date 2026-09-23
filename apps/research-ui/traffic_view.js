@@ -1,6 +1,32 @@
 /* Body views consume explicit capture states. Missing bytes are never inferred from a URL. */
 const TRAFFIC_BODY_LIMIT = 128 * 1024;
 const TRAFFIC_TREE_LIMIT = 1000;
+function trafficTargetParts(request) {
+  const target = String(request?.path ?? '').trim();
+  if (request?.hostOnly) return {name: target || 'Unknown host', host: 'Host-only metadata'};
+  try {
+    const url = new URL(target);
+    if (!['http:', 'https:', 'ws:', 'wss:'].includes(url.protocol)) throw new TypeError('Not a network URL');
+    return {name: `${url.pathname || '/'}${url.search}`, host: url.host};
+  } catch {
+    return {name: target || 'Unidentified request', host: ''};
+  }
+}
+
+const TRAFFIC_TYPE_LABELS = Object.freeze({xhr: 'Fetch/XHR', doc: 'Document', css: 'CSS', js: 'Script',
+  font: 'Font', img: 'Image', media: 'Media', socket: 'WebSocket', wasm: 'Wasm', other: 'Other'});
+function trafficTypeLabel(type) {
+  return Object.hasOwn(TRAFFIC_TYPE_LABELS, type) ? TRAFFIC_TYPE_LABELS[type] : 'Other';
+}
+
+function trafficTimeLabel(time) {
+  if (typeof time !== 'number' || !Number.isFinite(time)) return time === 'pending' ? '—' : String(time ?? '—');
+  if (time < 1) return `${time.toFixed(2)} ms`;
+  if (time < 100) return `${time.toFixed(1)} ms`;
+  if (time < 1000) return `${Math.round(time)} ms`;
+  return `${(time / 1000).toFixed(2)} s`;
+}
+
 const sampleExchanges = {
   '78': {
     request: {state: 'empty', headers: [['accept', 'application/json']]},

@@ -116,12 +116,16 @@ Expand **Advanced** for Backtraces, Memory, Experiments, Analyst, and Tools.
 Navigation into an advanced tool reveals its group automatically on desktop. On
 narrow windows navigation moves above the workspace and closes after selection.
 
-Traffic places the request list beside the inspector on wide windows, and above
-it on smaller windows. Use **All types** beside search to filter by resource
-type; the control shows the active filter. Escape closes an open navigation or
-filter disclosure and restores focus. Request and response content retain their
-own tabs and scroll areas. Timing and waterfall columns remain in the wider
-stacked request table; use the Evidence inspector for timing in the compact list.
+Traffic keeps a full-width request table above the inspector, including on wide
+windows. Each row shows the URL path and query over its host; host-only native
+metadata is labeled without implying that a path was captured. Status, type,
+method, and elapsed time remain visible where width permits. The selected
+request exposes its complete URL and a Copy URL action. New requests follow the
+bottom of the list while the researcher is there; scrolling up preserves the
+reading position and offers a new-request jump button. Use **All types** beside
+search to filter by resource type. Escape closes an open navigation or filter
+disclosure and restores focus. Request and response content retain their own
+tabs and scroll areas.
 
 The dark theme uses [Rosé Pine Moon](https://rosepinetheme.com/palette/), with
 slightly brighter secondary labels for legibility. Appearance switches to the
@@ -194,7 +198,7 @@ Versioned wire and storage contracts belong in [`protocol/`](../../protocol/).
 ### Interface styling
 
 The shared shell uses neutral charcoal surfaces, thin pane dividers, and
-blue selection accents in both themes. Traffic places a full-width, striped
+blue selection accents in both themes. Traffic places a full-width
 request table above the inspector, with independently scrolling panes. Compact
 resource filters share the search row on wide windows and wrap below it on
 narrow windows. Selected-field actions sit beside the evidence on wide windows

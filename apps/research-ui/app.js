@@ -28,8 +28,8 @@
       }
 
       function setNetworkNotice(kind, message) {
-        elements.networkNotice.dataset.kind = kind;
-        elements.networkNotice.textContent = message;
+        if (elements.networkNotice.dataset.kind !== kind) elements.networkNotice.dataset.kind = kind;
+        if (elements.networkNotice.textContent !== message) elements.networkNotice.textContent = message;
         elements.networkNotice.hidden = false;
       }
 
@@ -1182,9 +1182,18 @@
           (state.requestType === 'all' || request.type === state.requestType) &&
           (!needle || `${request.method} ${request.path} ${request.status}`.toLowerCase().includes(needle))
         );
+        const filterKey = JSON.stringify([state.requestTabId, state.requestDomain, state.requestType, needle]);
+        if (filterKey !== state.trafficFilterKey) state.trafficPendingCount = 0;
+        state.trafficFilterKey = filterKey;
         const selectedIsVisible = visible.some(request => request.id === state.selectedRequestId);
         const selectionCleared = state.selectedRequestId !== null && !selectedIsVisible;
         if (selectionCleared) resetRequestSelection();
+        const knownIds = state.trafficKnownIds;
+        const newIds = new Set(knownIds ? visible.filter(request => !knownIds.has(request.id)).map(request => request.id) : []);
+        state.trafficKnownIds = new Set(state.requests.map(request => request.id));
+        const focusedId = document.activeElement?.closest?.('.request-row')?.dataset.requestId;
+        const atBottom = elements.requestRows.scrollHeight - elements.requestRows.scrollTop - elements.requestRows.clientHeight < 40;
+        const previousScrollTop = elements.requestRows.scrollTop;
         elements.requestRows.setAttribute('role', 'listbox');
         if (visible.length === 0) {
           const empty = document.createElement('div');
@@ -1195,6 +1204,8 @@
               : state.sessionMode === 'demo' ? 'No developer evidence is available.' : 'No capture session is running.'
             : 'No requests match the current filters. Clear the filter or choose another type.';
           elements.requestRows.replaceChildren(empty);
+          state.trafficPendingCount = 0;
+          elements.requestLatest.hidden = true;
           renderRequestCount(0, state.requests.length);
           if (selectionCleared) {
             updateSelectionSummary(null);
@@ -1203,31 +1214,37 @@
           }
           return;
         }
-        elements.requestRows.replaceChildren(...visible.map((request, index) => {
+        const previousRows = new Map([...elements.requestRows.querySelectorAll('.request-row')]
+          .map(row => [row.dataset.requestId, row]));
+        const rows = visible.map((request, index) => {
+          const renderKey = JSON.stringify([request.path, request.method, request.status, request.time,
+            request.type, request.origin, request.hostOnly, request.failed, request.id === state.selectedRequestId,
+            !selectedIsVisible && index === 0]);
+          const previous = previousRows.get(String(request.id));
+          if (previous?.dataset.renderKey === renderKey) return previous;
           const row = document.createElement('button');
           row.type = 'button';
           row.className = 'request-row';
           row.setAttribute('role', 'option');
           row.dataset.requestId = request.id;
+          row.dataset.renderKey = renderKey;
           row.setAttribute('aria-selected', String(request.id === state.selectedRequestId));
           row.dataset.origin = request.origin;
           row.dataset.targetKind = request.targetKind ?? 'unknown';
+          if (newIds.has(request.id)) row.classList.add('is-new');
           const origin = requestOriginLabel(request.origin);
           const targetDescription = request.hostOnly ? 'host-only metadata' : 'request target';
           row.setAttribute('aria-label', `${origin} ${targetDescription}: ${request.method} ${request.path}, ${request.status}, ${request.time}, request ${request.id}`);
           row.tabIndex = request.id === state.selectedRequestId || !selectedIsVisible && index === 0 ? 0 : -1;
 
-          const name = document.createElement('span'); name.className = 'request-name'; name.textContent = request.path;
+          const target = trafficTargetParts(request);
+          const name = document.createElement('span'); name.className = 'request-name';
           name.title = request.hostOnly
             ? `${origin} host-only metadata: URL path, query, and fragment were not captured · ${request.id}`
             : `${origin} ${request.method} ${request.path} · network · ${request.operation ?? 'sample'} · ${request.id}`;
-          const source = document.createElement('span'); source.className = request.origin === 'live' ? 'live-chip' : request.origin === 'demo' ? 'demo-chip' : 'sample-chip'; source.textContent = origin;
-          name.append(source);
-          if (request.hostOnly) {
-            const hostOnly = document.createElement('span'); hostOnly.className = 'host-only-chip'; hostOnly.textContent = 'Host only';
-            hostOnly.title = 'Only the destination host was retained; URL path and query were not captured.';
-            name.append(hostOnly);
-          }
+          const resource = document.createElement('span'); resource.className = 'request-resource'; resource.textContent = target.name;
+          const host = document.createElement('span'); host.className = 'request-host'; host.textContent = target.host || (request.origin === 'demo' ? 'Developer evidence' : '');
+          name.append(resource, host);
           const method = document.createElement('span'); method.className = 'request-method'; method.textContent = request.method;
           const status = document.createElement('span');
           const numericStatus = Number(request.status);
@@ -1236,22 +1253,35 @@
             : Number.isFinite(numericStatus) && numericStatus >= 200
               ? 'status-ok'
               : 'status-neutral';
-          status.textContent = request.status;
+          status.textContent = request.status === 'pending' ? 'Pending' : request.status;
           status.title = request.status === 'pending'
             ? 'This request has no terminal lifecycle event yet.'
             : request.failed ? 'The request reported a failure.' : `HTTP status ${request.status}`;
-          const time = document.createElement('span'); time.textContent = typeof request.time === 'number' ? `${request.time} ms` : request.time;
-          const waterfallCell = document.createElement('span');
-          waterfallCell.title = `${request.operation ?? 'Request'} lifecycle${request.status === 'pending' ? ' · awaiting completion' : ''}`;
-          const waterfall = document.createElement('i'); waterfall.className = 'waterfall'; waterfall.setAttribute('aria-hidden', 'true'); waterfall.style.setProperty('--water-start', `${request.start}%`); waterfall.style.setProperty('--water-mid', `${request.mid}%`); waterfall.style.setProperty('--water-end', `${request.end}%`); waterfallCell.append(waterfall);
-          row.append(name, method, status, time, waterfallCell);
+          const type = document.createElement('span'); type.className = 'request-type'; type.textContent = trafficTypeLabel(request.type);
+          const time = document.createElement('span'); time.className = 'request-time'; time.textContent = trafficTimeLabel(request.time);
+          row.append(name, status, type, method, time);
           row.addEventListener('click', () => {
             selectRequest(request.id);
             focusRequestRow(request.id);
           });
           row.addEventListener('keydown', moveRequestSelection);
           return row;
-        }));
+        });
+        rows.forEach((row, index) => {
+          const current = elements.requestRows.children[index];
+          if (current !== row) elements.requestRows.insertBefore(row, current ?? null);
+        });
+        while (elements.requestRows.children.length > rows.length) elements.requestRows.lastElementChild.remove();
+        if (focusedId) focusRequestRow(focusedId);
+        if (atBottom) {
+          elements.requestRows.scrollTop = elements.requestRows.scrollHeight;
+          state.trafficPendingCount = 0;
+        } else {
+          elements.requestRows.scrollTop = previousScrollTop;
+          state.trafficPendingCount += newIds.size;
+        }
+        elements.requestLatest.hidden = state.trafficPendingCount === 0;
+        elements.requestLatest.textContent = `${state.trafficPendingCount} new ${state.trafficPendingCount === 1 ? 'request' : 'requests'} ↓`;
         renderRequestCount(visible.length, state.requests.length);
         if (selectionCleared) {
           updateSelectionSummary(null);
@@ -1267,6 +1297,8 @@
           elements.selectedStatus.classList.remove('status-error');
           elements.selectedStatus.classList.add('status-neutral');
           elements.selectedUrl.textContent = state.requests.length ? 'Select a request to inspect its evidence.' : 'No request selected';
+          elements.selectedUrl.title = '';
+          elements.requestCopyUrl.disabled = true;
           return;
         }
         elements.selectedMethod.textContent = request.method;
@@ -1278,6 +1310,8 @@
         elements.selectedUrl.textContent = request.origin === 'sample'
           ? `https://checkout.acme.test${request.path}`
           : request.hostOnly ? `${request.path} (host only metadata)` : request.path;
+        elements.selectedUrl.title = elements.selectedUrl.textContent;
+        elements.requestCopyUrl.disabled = request.hostOnly;
       }
 
       function selectRequest(id) {
@@ -7628,6 +7662,10 @@
           if (!document.querySelector('#screen-traffic').hidden) {
             renderShellStatus();
             renderRequests();
+            if (body.network?.capture_enabled && state.broker === 'connected') {
+              const dropped = body.network.dropped;
+              setNetworkNotice(dropped ? 'gap' : 'active', `Recording live requests and responses · sensitive headers redacted · 128 KiB body limit${dropped ? ` · ${dropped} older requests evicted from the 1,000-request window` : ''}`);
+            }
             updateSelectionSummary(selectedTrafficRequest);
             renderInspector();
           }
@@ -7651,6 +7689,9 @@
           }
         } catch (error) {
           state.debuggerError = error instanceof TypeError ? 'The debugger returned malformed state. The last valid pause is retained.' : error.message;
+          if (!document.querySelector('#screen-traffic').hidden && state.debuggerSession?.network?.capture_enabled) {
+            setNetworkNotice('disconnected', 'The live debugger is disconnected. The last recorded requests remain visible.');
+          }
           renderLiveBrowserTabCount();
           renderDebugger();
           renderMemory();
@@ -7863,15 +7904,17 @@
             setNetworkNotice('gap', `${gapCount} captured event ${gapCount === 1n ? 'ID is' : 'IDs are'} missing. Request rows may be incomplete.${reportedDrops > 0n ? ` The queue also reports ${reportedDrops} drops; these counts may overlap.` : ''}`);
           } else if (reportedDrops > 0n) {
             setNetworkNotice('gap', `The queue reports ${reportedDrops} dropped ${reportedDrops === 1n ? 'event' : 'events'}. No sequence jump is visible in the current event window.`);
+          } else if (state.debuggerSession?.network?.capture_enabled && !state.debuggerError) {
+            const dropped = state.debuggerSession.network.dropped;
+            setNetworkNotice(dropped ? 'gap' : 'active', `Recording live requests and responses · sensitive headers redacted · 128 KiB body limit${dropped ? ` · ${dropped} older requests evicted from the 1,000-request window` : ''}`);
+          } else if (state.debuggerSession?.network?.capture_enabled && state.debuggerError) {
+            setNetworkNotice('disconnected', 'The live debugger is disconnected. The last recorded requests remain visible.');
           } else if (state.sessionMode === 'live' && state.events.length === 0) {
             setNetworkNotice('empty', 'No live requests yet. Start a capture in the attached browser.');
           } else if (state.sessionMode === 'demo') {
             setNetworkNotice('empty', 'Developer evidence loaded. It does not represent a live capture.');
           } else if (state.sessionMode === 'idle') {
             setNetworkNotice('empty', 'No evidence is bundled. Start a live capture to populate the workspace.');
-          } else if (state.debuggerSession?.network?.capture_enabled) {
-            const dropped = state.debuggerSession.network.dropped;
-            setNetworkNotice('gap', `CDP content capture is active for the attached tab. Authorization and cookie headers are redacted; request and response bodies are limited to 128 KiB.${dropped ? ` ${dropped} older requests were evicted from the 1,000-request window.` : ''}`);
           } else {
             elements.networkNotice.hidden = true;
           }
@@ -8098,6 +8141,29 @@
         elements.backtraceSteps.querySelector('.trace-row')?.focus();
       });
       elements.requestFilter.addEventListener('input', renderRequests);
+      elements.requestRows.addEventListener('scroll', () => {
+        if (elements.requestRows.scrollHeight - elements.requestRows.scrollTop - elements.requestRows.clientHeight < 40) {
+          state.trafficPendingCount = 0;
+          elements.requestLatest.hidden = true;
+        }
+      });
+      elements.requestLatest.addEventListener('click', () => {
+        elements.requestRows.scrollTop = elements.requestRows.scrollHeight;
+        state.trafficPendingCount = 0;
+        elements.requestLatest.hidden = true;
+      });
+      elements.requestCopyUrl.addEventListener('click', async () => {
+        const selected = state.requests.find(request => request.id === state.selectedRequestId);
+        if (!selected || selected.hostOnly) return;
+        try {
+          const url = selected.origin === 'sample' ? `https://checkout.acme.test${selected.path}` : selected.path;
+          await navigator.clipboard.writeText(url);
+          elements.requestCopyUrl.textContent = 'Copied';
+        } catch {
+          elements.requestCopyUrl.textContent = 'Copy unavailable';
+        }
+        setTimeout(() => { elements.requestCopyUrl.textContent = 'Copy URL'; }, 1800);
+      });
       elements.requestDomain.addEventListener('change', () => {
         state.requestDomain = elements.requestDomain.value;
         state.requestType = 'all';

@@ -56,6 +56,21 @@ class TrafficViewTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_request_labels_separate_path_from_host_without_inventing_a_url(self) -> None:
+        self.run_js(r"""
+assert.deepEqual(trafficTargetParts({path: 'https://api.example.test/v1/orders?limit=20'}),
+  {name: '/v1/orders?limit=20', host: 'api.example.test'});
+assert.deepEqual(trafficTargetParts({path: 'api.example.test', hostOnly: true}),
+  {name: 'api.example.test', host: 'Host-only metadata'});
+assert.deepEqual(trafficTargetParts({path: 'Unidentified network event'}),
+  {name: 'Unidentified network event', host: ''});
+assert.equal(trafficTypeLabel('img'), 'Image');
+assert.equal(trafficTypeLabel('__proto__'), 'Other');
+assert.equal(trafficTimeLabel(12.34), '12.3 ms');
+assert.equal(trafficTimeLabel(1250), '1.25 s');
+assert.equal(trafficTimeLabel('pending'), '—');
+""")
+
     def test_live_metadata_cannot_inherit_sample_content(self) -> None:
         self.run_js(r"""
 const live = trafficExchange({origin: 'live', id: '81', method: 'POST', status: 200});

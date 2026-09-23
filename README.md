@@ -15,20 +15,24 @@
   web applications.
 </p>
 
-## v0.2.0 released
+## v0.2.1 released
 
-Origin Trace now starts live research sessions through an explicit privacy
-dialog. Metadata-only capture remains the default, bounded request and response
-content is an opt-in, and the isolated browser profile launches without a
-Keychain prompt unless encrypted credential storage is selected. Browser
-readiness, retry, offline, and clean relaunch paths are covered end to end.
+Origin Trace Traffic now has a full-width, DevTools-style request table. Paths
+and hosts are easier to read, with separate status, type, method, and timing
+columns. Live requests follow the bottom of the list; scrolling up preserves
+your place and offers a jump to new requests. Selecting a request shows its
+complete URL with a Copy URL action. The v0.2.0 session privacy and launch
+improvements remain available.
 
-[Download Origin Trace v0.2.0](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.2.0/Origin-Trace-v0.2.0-macos.zip)
-· [Release notes](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.2.0)
-· [Full changelog](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.1.10...v0.2.0)
+[Download Origin Trace v0.2.1](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.2.1/Origin-Trace-v0.2.1-macos.zip)
+· [Release notes](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.2.1)
+· [Full changelog](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.2.0...v0.2.1)
 
 ### Feature changelog
 
+- **v0.2.1:** redesigned live Traffic as a readable full-width request table
+  with path and host hierarchy, compact request metadata, follow-to-bottom
+  updates, a new-request jump, and full-URL inspection and copying.
 - **v0.2.0:** added per-session metadata or bounded-content capture controls,
   prompt-free isolated profiles with explicit Keychain opt-in, verified browser
   readiness and retry/relaunch flows, private Brave diagnostics, a semantic
@@ -59,8 +63,9 @@ readiness, retry, offline, and clean relaunch paths are covered end to end.
 
 ## Features
 
-- **Live network traffic:** inspect request methods, full URLs, status codes,
-  timing, headers, request bodies, and response bodies captured through CDP.
+- **Live network traffic:** inspect requests in a full-width table with readable
+  paths, hosts, methods, status codes, and timing; select one to inspect its full
+  URL, headers, request body, and response body captured through CDP.
 - **Tab and domain organization:** separate traffic by browser tab, then narrow
   a tab to a specific destination domain or resource type.
 - **Native browser evidence:** record calls and property reads across Canvas,
@@ -91,7 +96,7 @@ readiness, retry, offline, and clean relaunch paths are covered end to end.
 ### Download the compiled macOS apps
 
 1. Download
-   [Origin Trace v0.2.0](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.2.0/Origin-Trace-v0.2.0-macos.zip)
+   [Origin Trace v0.2.1](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.2.1/Origin-Trace-v0.2.1-macos.zip)
    and the
    [Brave Browser Development preview](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/brave-build-20260914/Brave-Browser-Development-brave-build-20260914-macos-arm64.zip).
 2. Unzip both files and place the applications beside each other, or install
@@ -103,8 +108,9 @@ The compiled apps are for Apple silicon Macs. The linked Brave Browser
 Development preview predates current probe support. Build the pinned Brave
 integration from this release's source to use every native probe; the
 downloaded preview cannot demonstrate them. Origin Trace contains no bundled
-sample evidence. The applications are ad-hoc signed but not notarized, so the
-first launch may require Control-clicking the app and choosing **Open**.
+sample evidence. The applications are ad-hoc signed but not Apple-notarized, so
+the first launch may require Control-clicking the app and choosing **Open**. The
+v0.2.1 GitHub release tag is unsigned; its merge commit is GitHub-verified.
 
 Downloading the compiled Brave app does not require a 100+ GiB source checkout.
 Allow about 1 GiB to download and extract both apps, plus whatever space you

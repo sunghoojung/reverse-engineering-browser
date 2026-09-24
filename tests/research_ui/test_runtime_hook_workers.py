@@ -1,10 +1,11 @@
 import queue
+import threading
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from debugger.errors import WebSocketClosed
+from debugger.errors import DebuggerBridgeError, WebSocketClosed
 from debugger.transport import ActionScopeTargetSession
 from debugger_bridge import DebuggerBridge
 
@@ -181,6 +182,102 @@ class RuntimeHookWorkerTests(unittest.TestCase):
             script.get("target_id") != removed
             for script in self.bridge.snapshot()["scripts"]
         ))
+
+    def test_breakpoint_setting_follows_page_toggles_after_worker_attachment(self):
+        page_commands = []
+        self.bridge._command = lambda method, params=None, timeout=3.0: (
+            page_commands.append((method, params)) or {}
+        )
+        self.bridge.action({"action": "set_breakpoints_active", "active": False})
+        self.bridge._refresh_runtime_hook_workers()
+        session = FakeWorkerSession.instances[0]
+        self.bridge.action({"action": "set_breakpoints_active", "active": True})
+        self.assertEqual(
+            [params for method, params in page_commands if method == "Debugger.setBreakpointsActive"],
+            [{"active": False}, {"active": True}],
+        )
+        self.assertEqual(
+            [params for method, params, _ in session.commands if method == "Debugger.setBreakpointsActive"],
+            [{"active": False}, {"active": True}],
+        )
+        self.assertTrue(self.bridge.snapshot()["settings"]["breakpoints_active"])
+
+    def test_failed_worker_setup_drops_scripts_and_backs_off_before_retry(self):
+        original_command = FakeWorkerSession.command
+        attempts = 0
+
+        def fail_first_network(session, method, params=None, timeout=3.0):
+            nonlocal attempts
+            if method == "Network.enable":
+                attempts += 1
+                if attempts == 1:
+                    raise DebuggerBridgeError("Network unavailable")
+            return original_command(session, method, params, timeout)
+
+        with mock.patch.object(FakeWorkerSession, "command", fail_first_network):
+            self.bridge._refresh_runtime_hook_workers()
+            self.assertEqual(self.bridge._runtime_hook_worker_sessions, {})
+            self.assertEqual(self.bridge._runtime_hook_worker_scripts, {})
+            self.assertIn("retrying in 2s", self.bridge.snapshot()["runtime_hooks"]["last_failure"])
+            self.bridge._refresh_runtime_hook_workers()
+            self.assertEqual(attempts, 1)
+            self.assertEqual(len(FakeWorkerSession.instances), 1)
+            self.bridge._runtime_hook_worker_retry["worker-1"] = (1, 0.0)
+            self.bridge._refresh_runtime_hook_workers()
+        self.assertEqual(attempts, 2)
+        self.assertEqual(len(self.bridge._runtime_hook_worker_sessions), 1)
+        self.assertEqual(len(self.bridge._runtime_hook_worker_scripts), 1)
+        self.assertNotIn("worker-1", self.bridge._runtime_hook_worker_retry)
+
+    def test_worker_refresh_is_background_and_does_not_overlap(self):
+        entered = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def slow_refresh():
+            calls.append(1)
+            entered.set()
+            release.wait(1.0)
+
+        self.bridge._refresh_runtime_hook_workers = slow_refresh
+        try:
+            self.bridge._schedule_runtime_hook_worker_refresh()
+            self.assertTrue(entered.wait(1.0))
+            self.bridge._schedule_runtime_hook_worker_refresh()
+            self.assertEqual(len(calls), 1)
+        finally:
+            release.set()
+        for _ in range(50):
+            if not self.bridge._runtime_hook_worker_refreshing:
+                break
+            time.sleep(0.01)
+        self.assertFalse(self.bridge._runtime_hook_worker_refreshing)
+
+    def test_disposal_during_failed_attachment_cannot_restore_stale_state(self):
+        entered = threading.Event()
+        release = threading.Event()
+        original_command = FakeWorkerSession.command
+
+        def fail_after_disposal(session, method, params=None, timeout=3.0):
+            if method == "Network.enable":
+                entered.set()
+                release.wait(1.0)
+                raise DebuggerBridgeError("Network unavailable")
+            return original_command(session, method, params, timeout)
+
+        with mock.patch.object(FakeWorkerSession, "command", fail_after_disposal):
+            thread = threading.Thread(target=self.bridge._refresh_runtime_hook_workers)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(1.0))
+                self.bridge._close_runtime_hook_workers()
+            finally:
+                release.set()
+                thread.join(timeout=1.0)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(self.bridge._runtime_hook_worker_scripts, {})
+        self.assertEqual(self.bridge._runtime_hook_worker_retry, {})
+        self.assertIsNone(self.bridge.snapshot()["runtime_hooks"]["last_failure"])
 
     def test_malformed_worker_script_is_ignored(self):
         self.bridge._refresh_runtime_hook_workers()

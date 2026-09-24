@@ -289,8 +289,11 @@ sources. Runtime Hooks can arm page and worker definitions together, with
 commands and hit records identified by target. Live-function-object mode takes
 a side-effect-free expression such as `self.onmessage` in the selected target
 and captures entry only; it does not discover closure-held functions
-automatically. While armed, worker requests appear as bounded, redacted
-metadata. Links to nearby hits are labeled temporal/inferred, not causal proof.
+automatically. Worker attachment runs off the page-target watcher; a failed
+attachment drops its scripts and retries with bounded backoff. The breakpoint
+active setting is shared with attached workers. While armed, worker requests
+appear as bounded, redacted metadata. Links to nearby hits are labeled
+temporal/inferred, not causal proof.
 Find counts literal, case-insensitive occurrences within rendered lines, including
 multiple matches on one minified line. Enter advances and Shift+Enter goes back,
 wrapping through the first 1000 matches with a visible `+` when results are capped.

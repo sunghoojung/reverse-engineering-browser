@@ -202,6 +202,8 @@ class DebuggerBridge:
             / "reb-debugger-transport"
         )
         self._lock = threading.RLock()
+        # Serialize worker registration with changes to the shared breakpoint state.
+        self._runtime_hook_worker_control_lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -280,6 +282,9 @@ class DebuggerBridge:
         self._runtime_hook_worker_targets: dict[str, dict[str, str]] = {}
         self._runtime_hook_worker_scripts: dict[str, dict[str, Any]] = {}
         self._runtime_hook_worker_overflow = 0
+        self._runtime_hook_worker_retry: dict[str, tuple[int, float]] = {}
+        self._runtime_hook_worker_refreshing = False
+        self._runtime_hook_worker_revision = 0
         self._next_automation_recipe_id = 1
         self._next_automation_run_id = 1
         self._automation_recipes: list[dict[str, Any]] = []
@@ -533,10 +538,7 @@ class DebuggerBridge:
             active = request.get("active")
             if not isinstance(active, bool):
                 raise DebuggerBridgeError("Breakpoint active state must be boolean")
-            self._command("Debugger.setBreakpointsActive", {"active": active})
-            with self._lock:
-                self._breakpoints_active = active
-                self._changed()
+            self._set_breakpoints_active(active)
         elif action == "set_pause_on_exceptions":
             mode = request.get("mode")
             if mode not in {"none", "uncaught", "all"}:
@@ -5526,15 +5528,63 @@ class DebuggerBridge:
             self._runtime_hook_worker_targets = {}
             self._runtime_hook_worker_scripts = {}
             self._runtime_hook_worker_overflow = 0
+            self._runtime_hook_worker_retry = {}
+            self._runtime_hook_worker_revision += 1
             self._runtime_hooks["workers"] = []
             self._runtime_hooks["worker_overflow"] = 0
             self._changed()
         for session in sessions:
             session.close()
 
+    def _schedule_runtime_hook_worker_refresh(self) -> None:
+        with self._lock:
+            context_id = self._request_interception_context_id
+            revision = self._runtime_hook_worker_revision
+            if (
+                context_id is None
+                or self._runtime_hook_worker_refreshing
+                or self._stop.is_set()
+            ):
+                return
+            self._runtime_hook_worker_refreshing = True
+
+        def refresh() -> None:
+            try:
+                self._refresh_runtime_hook_workers()
+            except (OSError, ValueError, DebuggerBridgeError, json.JSONDecodeError) as error:
+                with self._lock:
+                    if (
+                        self._request_interception_context_id == context_id
+                        and self._runtime_hook_worker_revision == revision
+                    ):
+                        self._runtime_hooks["last_failure"] = truncate_text(
+                            f"Worker discovery failed: {error}", 512
+                        )
+                        self._changed()
+            finally:
+                with self._lock:
+                    self._runtime_hook_worker_refreshing = False
+
+        try:
+            threading.Thread(
+                target=refresh, name="reb-hook-worker-discovery", daemon=True
+            ).start()
+        except RuntimeError as error:
+            with self._lock:
+                self._runtime_hook_worker_refreshing = False
+                if (
+                    self._request_interception_context_id == context_id
+                    and self._runtime_hook_worker_revision == revision
+                ):
+                    self._runtime_hooks["last_failure"] = truncate_text(
+                        f"Worker discovery could not start: {error}", 512
+                    )
+                    self._changed()
+
     def _refresh_runtime_hook_workers(self) -> None:
         with self._lock:
             context_id = self._request_interception_context_id
+            revision = self._runtime_hook_worker_revision
         if context_id is None:
             return
         _, browser_url = self._devtools_endpoint()
@@ -5559,8 +5609,16 @@ class DebuggerBridge:
         candidates = candidates[:MAX_RUNTIME_HOOK_WORKERS]
         candidate_ids = {target["id"] for target in candidates}
         with self._lock:
-            if self._request_interception_context_id != context_id:
+            if (
+                self._request_interception_context_id != context_id
+                or self._runtime_hook_worker_revision != revision
+            ):
                 return
+            self._runtime_hook_worker_retry = {
+                target_id: retry
+                for target_id, retry in self._runtime_hook_worker_retry.items()
+                if target_id in candidate_ids
+            }
             removed = [
                 self._runtime_hook_worker_sessions.pop(target_id)
                 for target_id in list(self._runtime_hook_worker_sessions)
@@ -5578,12 +5636,20 @@ class DebuggerBridge:
             new_targets = [
                 target for target in candidates
                 if target["id"] not in self._runtime_hook_worker_sessions
+                and self._runtime_hook_worker_retry.get(target["id"], (0, 0.0))[1]
+                <= time.monotonic()
             ]
             self._changed()
         for session in removed:
             session.close()
             self._on_runtime_hook_worker_closed(session.target_id, WebSocketClosed("Worker target closed"))
         for target in new_targets:
+            with self._lock:
+                if (
+                    self._request_interception_context_id != context_id
+                    or self._runtime_hook_worker_revision != revision
+                ):
+                    break
             session = None
             try:
                 session = ActionScopeTargetSession(
@@ -5596,32 +5662,60 @@ class DebuggerBridge:
                     browser_url=browser_url,
                 )
                 session.start()
-                session.command("Debugger.setBreakpointsActive", {"active": self._breakpoints_active})
                 session.command("Network.enable")
-            except BaseException as exception:
+                with self._runtime_hook_worker_control_lock:
+                    with self._lock:
+                        active = self._breakpoints_active
+                    session.command("Debugger.setBreakpointsActive", {"active": active})
+                    with self._lock:
+                        keep_session = (
+                            self._request_interception_context_id == context_id
+                            and self._runtime_hook_worker_revision == revision
+                            and target["id"] in self._runtime_hook_worker_targets
+                            and session.ready()
+                        )
+                        if keep_session:
+                            self._runtime_hook_worker_sessions[target["id"]] = session
+                            self._runtime_hook_worker_retry.pop(target["id"], None)
+                            failure = self._runtime_hooks.get("last_failure")
+                            if (
+                                not self._runtime_hook_worker_retry
+                                and isinstance(failure, str)
+                                and failure.startswith(
+                                    (
+                                        "Worker debugger attach failed:",
+                                        "Worker discovery failed:",
+                                    )
+                                )
+                            ):
+                                self._runtime_hooks["last_failure"] = None
+                            self._changed()
+                if not keep_session:
+                    raise WebSocketClosed("Worker debugger target disconnected during setup")
+            except Exception as exception:
                 if session is not None:
                     session.close()
                 with self._lock:
-                    self._runtime_hooks["last_failure"] = truncate_text(
-                        f"Worker debugger attach failed: {exception}", 512
-                    )
-                    self._changed()
-                continue
-            with self._lock:
-                keep_session = (
-                    self._request_interception_context_id == context_id
-                    and target["id"] in self._runtime_hook_worker_targets
-                )
-                if keep_session:
-                    self._runtime_hook_worker_sessions[target["id"]] = session
-                    failure = self._runtime_hooks.get("last_failure")
-                    if isinstance(failure, str) and failure.startswith(
-                        ("Worker debugger attach failed:", "Worker discovery failed:")
+                    if (
+                        self._request_interception_context_id == context_id
+                        and self._runtime_hook_worker_revision == revision
                     ):
-                        self._runtime_hooks["last_failure"] = None
-                    self._changed()
-            if not keep_session:
-                session.close()
+                        self._runtime_hook_worker_scripts = {
+                            key: script for key, script in self._runtime_hook_worker_scripts.items()
+                            if script["target_id"] != target["id"]
+                        }
+                        failures, _ = self._runtime_hook_worker_retry.get(target["id"], (0, 0.0))
+                        failures += 1
+                        delay = min(30.0, 2.0 ** min(failures, 5))
+                        self._runtime_hook_worker_retry[target["id"]] = (
+                            failures, time.monotonic() + delay
+                        )
+                        self._runtime_hooks["last_failure"] = truncate_text(
+                            f"Worker debugger attach failed: {exception}; retrying in {delay:g}s",
+                            512,
+                        )
+                        self._changed()
+                continue
 
     def _set_action_scope(self, request: dict[str, Any]) -> dict[str, Any]:
         mode = request.get("mode")
@@ -5887,9 +5981,9 @@ class DebuggerBridge:
             self._changed()
         if connection is not None:
             connection.close()
+        self._schedule_runtime_hook_worker_refresh()
         try:
             self._refresh_action_scope_targets()
-            self._refresh_runtime_hook_workers()
         except DebuggerBridgeError as exception:
             with self._lock:
                 self._action_scope_last_error = truncate_text(str(exception), 512)
@@ -7446,19 +7540,7 @@ class DebuggerBridge:
                                 str(exception), 512
                             )
                             self._changed()
-                    try:
-                        self._refresh_runtime_hook_workers()
-                    except (
-                        OSError,
-                        ValueError,
-                        DebuggerBridgeError,
-                        json.JSONDecodeError,
-                    ) as exception:
-                        with self._lock:
-                            self._runtime_hooks["last_failure"] = truncate_text(
-                                f"Worker discovery failed: {exception}", 512
-                            )
-                            self._changed()
+                    self._schedule_runtime_hook_worker_refresh()
         finally:
             connection.close()
             reader.join(timeout=1.0)
@@ -8296,6 +8378,37 @@ class DebuggerBridge:
             if pattern not in self._xhr_breakpoints:
                 self._xhr_breakpoints.append(pattern)
             self._changed()
+
+    def _set_breakpoints_active(self, active: bool) -> None:
+        with self._runtime_hook_worker_control_lock:
+            with self._lock:
+                previous = self._breakpoints_active
+                workers = list(self._runtime_hook_worker_sessions.values())
+            updated: list[ActionScopeTargetSession] = []
+            failed_worker: Optional[ActionScopeTargetSession] = None
+            try:
+                for worker in workers:
+                    if not worker.ready():
+                        continue
+                    failed_worker = worker
+                    worker.command("Debugger.setBreakpointsActive", {"active": active})
+                    updated.append(worker)
+                    failed_worker = None
+                self._command("Debugger.setBreakpointsActive", {"active": active})
+            except (OSError, DebuggerBridgeError) as error:
+                if failed_worker is not None:
+                    failed_worker.close()
+                    self._on_runtime_hook_worker_closed(failed_worker.target_id, error)
+                for worker in updated:
+                    try:
+                        worker.command("Debugger.setBreakpointsActive", {"active": previous})
+                    except (OSError, DebuggerBridgeError) as rollback_error:
+                        worker.close()
+                        self._on_runtime_hook_worker_closed(worker.target_id, rollback_error)
+                raise
+            with self._lock:
+                self._breakpoints_active = active
+                self._changed()
 
     def _restore_settings(self) -> None:
         with self._lock:

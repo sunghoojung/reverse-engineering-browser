@@ -278,6 +278,19 @@ tooltips and source metadata in Details. Folder rows retain their item counts.
 Clicking original source records the UTF-16 column across syntax spans, so the
 Hook pivot can target a function inside a minified line. Inline script offsets
 are included; readable representations cannot change the runtime cursor.
+Runtime Hooks resolves that cursor against the original live JavaScript with
+the bundled Rust parser. It chooses the innermost function, including anonymous
+callbacks and arrows, and shows its start and V8 entry-search position before
+arming. A cursor outside a function is rejected rather than creating a hook at
+an unrelated statement. In an isolated Experiment context, Sources also lists
+dedicated-worker scripts with a Worker label. The Hook pivot can select one of
+those scripts; ordinary page-debugger gutters remain disabled for worker
+sources. Runtime Hooks can arm page and worker definitions together, with
+commands and hit records identified by target. Live-function-object mode takes
+a side-effect-free expression such as `self.onmessage` in the selected target
+and captures entry only; it does not discover closure-held functions
+automatically. While armed, worker requests appear as bounded, redacted
+metadata. Links to nearby hits are labeled temporal/inferred, not causal proof.
 Find counts literal, case-insensitive occurrences within rendered lines, including
 multiple matches on one minified line. Enter advances and Shift+Enter goes back,
 wrapping through the first 1000 matches with a visible `+` when results are capped.

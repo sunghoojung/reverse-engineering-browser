@@ -2769,7 +2769,12 @@ process.stdout.write(JSON.stringify({{
                 }
             )
 
-    def test_runtime_hooks_arm_capture_override_disarm_and_erase(self) -> None:
+    @mock.patch("debugger_bridge.locate_function", return_value={
+        "kind": "arrow_function", "start": {"line": 1, "column": 4},
+        "end": {"line": 8, "column": 1}, "body_start": {"line": 2, "column": 0},
+    })
+    @mock.patch.object(DebuggerBridge, "get_script_source", return_value={"source": "function", "truncated": False})
+    def test_runtime_hooks_arm_capture_override_disarm_and_erase(self, _source, _locator) -> None:
         class RuntimeHookBridge(DebuggerBridge):
             def __init__(self) -> None:
                 super().__init__()
@@ -2885,6 +2890,12 @@ process.stdout.write(JSON.stringify({{
             }
         )["runtime_hooks"]
         self.assertEqual(len(added["definitions"]), 1)
+        self.assertEqual(added["definitions"][0]["function_kind"], "arrow_function")
+        with self.assertRaisesRegex(DebuggerBridgeError, "already targets this function"):
+            bridge.action({
+                "action": "add_runtime_hook", "label": "same callback", "script_id": "script-hook",
+                "line": 4, "column": 3, "entry_enabled": True, "return_enabled": False,
+            })
         self.assertNotIn("private=ephemeral", json.dumps(added))
         with self.assertRaisesRegex(DebuggerBridgeError, "confirmation"):
             bridge.action({"action": "arm_runtime_hooks"})
@@ -2892,6 +2903,9 @@ process.stdout.write(JSON.stringify({{
         armed = bridge.action(
             {"action": "arm_runtime_hooks", "confirmed": True}
         )["runtime_hooks"]
+        self.assertEqual(next(params["start"] for method, params, _ in bridge.commands
+                              if method == "Debugger.getPossibleBreakpoints"),
+                         {"scriptId": "script-hook", "lineNumber": 2, "columnNumber": 0})
         self.assertEqual(armed["state"], "armed")
         self.assertEqual(armed["active_points"], 2)
         self.assertEqual(
@@ -2900,7 +2914,7 @@ process.stdout.write(JSON.stringify({{
         )
 
         return_breakpoint = next(
-            breakpoint_id
+            breakpoint_id[1]
             for breakpoint_id, point in bridge._runtime_hook_points.items()
             if "return" in point["phases"]
         )
@@ -2924,7 +2938,7 @@ process.stdout.write(JSON.stringify({{
         }
 
         entry_breakpoint = next(
-            breakpoint_id
+            breakpoint_id[1]
             for breakpoint_id, point in bridge._runtime_hook_points.items()
             if "entry" in point["phases"]
         )
@@ -2986,7 +3000,12 @@ process.stdout.write(JSON.stringify({{
         self.assertEqual(erased["hits"], [])
         self.assertEqual(erased["definitions"], [])
 
-    def test_runtime_hooks_reject_promises_bounds_and_partial_arming(self) -> None:
+    @mock.patch("debugger_bridge.locate_function", return_value={
+        "kind": "function_expression", "start": {"line": 0, "column": 0},
+        "end": {"line": 9, "column": 1}, "body_start": {"line": 1, "column": 0},
+    })
+    @mock.patch.object(DebuggerBridge, "get_script_source", return_value={"source": "function", "truncated": False})
+    def test_runtime_hooks_reject_promises_bounds_and_partial_arming(self, _source, _locator) -> None:
         with self.assertRaisesRegex(DebuggerBridgeError, "8 KiB"):
             normalize_runtime_hook_json("x" * (8 * 1024 + 1))
         with self.assertRaisesRegex(DebuggerBridgeError, "depth 8"):

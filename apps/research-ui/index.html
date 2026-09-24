@@ -738,12 +738,14 @@
               </div>
               <div class="experiment-column">
                 <article class="experiment-card">
-                  <header><div><h2>Function hook</h2><p>Start inside the selected function. V8 resolves its bounded entry and return points.</p></div><span id="hooks-definition-count" class="experiment-card-badge" data-kind="offline">0 / 8</span></header>
+                  <header><div><h2>Function hook</h2><p>Choose a live page or worker source. Source cursor mode resolves an inner function and its entry/return points; live-function mode accepts a side-effect-free expression and captures entry only.</p></div><span id="hooks-definition-count" class="experiment-card-badge" data-kind="offline">0 / 8</span></header>
                   <div class="experiment-body">
                     <form id="hooks-definition-form" class="experiment-form">
                       <label>Label<input id="hooks-label" type="text" maxlength="128" placeholder="checkout guard" autocomplete="off" /></label>
                       <label>Live JavaScript source<select id="hooks-script"></select></label>
-                      <div class="experiment-form-row"><label>Line<input id="hooks-line" type="number" min="1" max="2147483647" step="1" value="1" /></label><label>Column<input id="hooks-column" type="number" min="1" max="2147483647" step="1" value="1" /></label></div>
+                      <label>Entry target<select id="hooks-entry-mode"><option value="source">Source cursor</option><option value="function">Live function object</option></select></label>
+                      <div id="hooks-source-location-fields" class="experiment-form-row"><label>Line<input id="hooks-line" type="number" min="1" max="2147483647" step="1" value="1" /></label><label>Column<input id="hooks-column" type="number" min="1" max="2147483647" step="1" value="1" /></label></div>
+                      <label id="hooks-function-expression-field" hidden>Side-effect-free function expression<input id="hooks-function-expression" type="text" maxlength="1024" placeholder="self.onmessage" autocomplete="off" /></label>
                       <div class="hook-phase-options"><label><input id="hooks-entry-enabled" type="checkbox" checked /> Entry</label><label><input id="hooks-return-enabled" type="checkbox" checked /> Synchronous return</label></div>
                       <label>Side-effect-free condition<input id="hooks-condition" type="text" maxlength="1024" placeholder="cart.total &gt; 100" autocomplete="off" /></label>
                       <label>Entry logic<textarea id="hooks-entry-logic" maxlength="8192" spellcheck="false" placeholder="cart.reviewed = true;"></textarea></label>

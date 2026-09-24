@@ -30,6 +30,7 @@ from debugger.errors import (
     ProtocolError,
     WebSocketClosed,
 )
+from debugger.function_locator import locate_function
 from debugger.heap_snapshot import (
     HeapSnapshotCapture,
     HeapSnapshotCollector,
@@ -110,12 +111,15 @@ from debugger.limits import (
     MAX_RUNTIME_HOOK_BINDINGS,
     MAX_RUNTIME_HOOK_BREAKPOINTS,
     MAX_RUNTIME_HOOK_CONDITION_BYTES,
+    MAX_RUNTIME_HOOK_FUNCTION_EXPRESSION_BYTES,
     MAX_RUNTIME_HOOK_HITS,
     MAX_RUNTIME_HOOK_LABEL_BYTES,
     MAX_RUNTIME_HOOK_LOGIC_BYTES,
     MAX_RUNTIME_HOOK_RETAINED_HITS,
+    MAX_RUNTIME_HOOK_REQUESTS,
     MAX_RUNTIME_HOOK_RETURN_BYTES,
     MAX_RUNTIME_HOOK_RETURN_POINTS,
+    MAX_RUNTIME_HOOK_WORKERS,
     MAX_RUNTIME_HOOKS,
     MAX_SCOPE_PROPERTIES,
     MAX_SCOPES_PER_FRAME,
@@ -265,12 +269,17 @@ class DebuggerBridge:
         self._object_experiment_result_indices: set[int] = set()
         self._next_runtime_hook_id = 1
         self._next_runtime_hook_hit_id = 1
+        self._next_runtime_hook_request_id = 1
         self._runtime_hooks = self._empty_runtime_hooks()
-        self._runtime_hook_points: dict[str, dict[str, Any]] = {}
+        self._runtime_hook_points: dict[tuple[str, str], dict[str, Any]] = {}
         self._runtime_hook_processing = False
         self._runtime_hook_stop_requested = False
         self._runtime_hook_deferred_pause: Optional[dict[str, Any]] = None
         self._runtime_hook_epoch = 0
+        self._runtime_hook_worker_sessions: dict[str, ActionScopeTargetSession] = {}
+        self._runtime_hook_worker_targets: dict[str, dict[str, str]] = {}
+        self._runtime_hook_worker_scripts: dict[str, dict[str, Any]] = {}
+        self._runtime_hook_worker_overflow = 0
         self._next_automation_recipe_id = 1
         self._next_automation_run_id = 1
         self._automation_recipes: list[dict[str, Any]] = []
@@ -321,6 +330,7 @@ class DebuggerBridge:
         self._clear_heap_diff_baseline(force=True)
         self._dispose_request_interception_context(preserve_result=False, force=True)
         self._close_action_scope_sessions()
+        self._close_runtime_hook_workers()
 
     def generation(self) -> int:
         with self._lock:
@@ -353,7 +363,10 @@ class DebuggerBridge:
                 "live_tab_count": self._live_tab_count,
                 # Script records contain only scalar values, so copying each mapping
                 # preserves snapshot isolation without a full recursive traversal.
-                "scripts": [dict(script) for script in self._scripts.values()],
+                "scripts": [
+                    *(dict(script) for script in self._runtime_hook_worker_scripts.values()),
+                    *(dict(script) for script in self._scripts.values()),
+                ][:MAX_SCRIPTS],
                 "paused": copy.deepcopy(self._paused),
                 "breakpoints": copy.deepcopy(list(self._breakpoints.values())),
                 "watches": copy.deepcopy(self._watches),
@@ -706,13 +719,16 @@ class DebuggerBridge:
         if not script_id or len(script_id.encode("utf-8")) > 4_096:
             raise DebuggerBridgeError("Script ID is invalid")
         with self._lock:
-            script = self._scripts.get(script_id)
+            script = self._scripts.get(script_id) or self._runtime_hook_worker_scripts.get(script_id)
             if script is None:
                 raise DebuggerBridgeError("Script is unavailable")
             if script["length"] > MAX_SCRIPT_SOURCE_BYTES:
                 raise DebuggerBridgeError("Live script exceeds the 2 MiB viewer limit")
-        result = self._command(
-            "Debugger.getScriptSource", {"scriptId": script_id}, timeout=5.0
+            target_id = script.get("target_id")
+            cdp_script_id = script.get("cdp_script_id", script_id)
+        result = self._runtime_hook_command(
+            target_id,
+            "Debugger.getScriptSource", {"scriptId": cdp_script_id}, timeout=5.0
         )
         source = result.get("scriptSource")
         if not isinstance(source, str):
@@ -1468,6 +1484,32 @@ class DebuggerBridge:
             self._object_experiment["audit_evictions"] += 1
         return entry
 
+    def _runtime_hook_command(
+        self,
+        target_id: Optional[str],
+        method: str,
+        params: Optional[dict[str, Any]] = None,
+        timeout: float = 3.0,
+    ) -> dict[str, Any]:
+        with self._lock:
+            page_id = self._runtime_hooks.get("target_id")
+            worker = self._runtime_hook_worker_sessions.get(target_id or "")
+        if target_id is None or target_id == page_id:
+            return self._command(method, params, timeout=timeout)
+        if worker is None or not worker.ready():
+            raise DebuggerBridgeError("The isolated worker debugger is unavailable")
+        return worker.command(method, params, timeout=timeout)
+
+    def _runtime_hook_command_without_wait(
+        self, target_id: str, method: str, params: Optional[dict[str, Any]] = None
+    ) -> bool:
+        with self._lock:
+            page_id = self._runtime_hooks.get("target_id")
+            worker = self._runtime_hook_worker_sessions.get(target_id)
+        if target_id == page_id:
+            return self._command_without_wait(method, params)
+        return worker.command_without_wait(method, params) if worker and worker.ready() else False
+
     def _runtime_hook_target_ready_locked(self) -> None:
         if (
             self._request_interception_context_id is None
@@ -1510,6 +1552,21 @@ class DebuggerBridge:
             raise DebuggerBridgeError("Runtime Hooks phases must be boolean")
         if not entry_enabled and not return_enabled:
             raise DebuggerBridgeError("Runtime Hooks requires an entry or return phase")
+        entry_mode = request.get("entry_mode", "source")
+        if entry_mode not in {"source", "function"}:
+            raise DebuggerBridgeError("Runtime Hooks entry target mode is invalid")
+        function_expression = runtime_hook_text(
+            request, "function_expression", MAX_RUNTIME_HOOK_FUNCTION_EXPRESSION_BYTES
+        ).strip()
+        if entry_mode == "function":
+            if not function_expression or not entry_enabled or return_enabled:
+                raise DebuggerBridgeError(
+                    "Live-function targeting requires an expression and entry-only capture"
+                )
+        elif function_expression:
+            raise DebuggerBridgeError(
+                "A live-function expression requires function-object targeting"
+            )
         condition = runtime_hook_text(
             request, "condition", MAX_RUNTIME_HOOK_CONDITION_BYTES
         )
@@ -1544,8 +1601,12 @@ class DebuggerBridge:
             raise DebuggerBridgeError(
                 "Runtime Hooks return replacement requires the return phase"
             )
+        if entry_mode == "function" and (return_mode != "none" or return_logic):
+            raise DebuggerBridgeError(
+                "Live-function targeting supports entry logic only"
+            )
         with self._lock:
-            script = self._scripts.get(script_id)
+            script = self._scripts.get(script_id) or self._runtime_hook_worker_scripts.get(script_id)
             if script is None or script["language"] != "JavaScript":
                 raise DebuggerBridgeError(
                     "Runtime Hooks requires a live JavaScript source"
@@ -1555,13 +1616,42 @@ class DebuggerBridge:
                     "Runtime Hooks location is outside the selected script"
                 )
             source_url = runtime_hook_source_label(script["url"])
+            target_id = script.get("target_id") or self._runtime_hooks["target_id"]
+            if target_id != self._runtime_hooks["target_id"] and (
+                target_id not in self._runtime_hook_worker_sessions
+                or not self._runtime_hook_worker_sessions[target_id].ready()
+            ):
+                raise DebuggerBridgeError("The isolated worker debugger is unavailable")
+            script = script.copy()
+        if entry_mode == "source":
+            source_document = self.get_script_source(script_id)
+            if source_document["truncated"]:
+                raise DebuggerBridgeError("Runtime Hooks cannot target a truncated live script")
+            function = locate_function(source_document["source"], script, line, column)
+        else:
+            function = {
+                "kind": "live_function_object",
+                "start": {"line": line, "column": column},
+                "end": {"line": line, "column": column},
+                "body_start": {"line": line, "column": column},
+            }
         return {
             "id": 0,
             "label": label,
             "script_id": script_id,
+            "cdp_script_id": script.get("cdp_script_id", script_id),
+            "target_id": target_id,
+            "target_type": script.get("target_type", "page"),
+            "entry_mode": entry_mode,
+            "function_expression": function_expression,
             "url": source_url,
             "line": line,
             "column": column,
+            "function_kind": function["kind"],
+            "function_start": function["start"],
+            "function_end": function["end"],
+            "target_line": function["body_start"]["line"],
+            "target_column": function["body_start"]["column"],
             "entry_enabled": entry_enabled,
             "return_enabled": return_enabled,
             "condition": condition,
@@ -1591,13 +1681,18 @@ class DebuggerBridge:
             if len(definitions) >= MAX_RUNTIME_HOOKS:
                 raise DebuggerBridgeError("Runtime Hooks reached the 8-definition limit")
             if any(
-                item["script_id"] == definition["script_id"]
-                and item["line"] == definition["line"]
-                and item["column"] == definition["column"]
+                item["target_id"] == definition["target_id"]
+                and item["entry_mode"] == definition["entry_mode"]
+                and (
+                    item["function_expression"] == definition["function_expression"]
+                    if definition["entry_mode"] == "function"
+                    else item["script_id"] == definition["script_id"]
+                    and item["function_start"] == definition["function_start"]
+                )
                 for item in definitions
             ):
                 raise DebuggerBridgeError(
-                    "A Runtime Hook already uses this script location"
+                    "A Runtime Hook already targets this function"
                 )
             definition["id"] = self._next_runtime_hook_id
             self._next_runtime_hook_id += 1
@@ -1646,13 +1741,14 @@ class DebuggerBridge:
     def _runtime_hook_possible_locations(
         self, definition: dict[str, Any]
     ) -> list[dict[str, Any]]:
-        result = self._command(
+        result = self._runtime_hook_command(
+            definition["target_id"],
             "Debugger.getPossibleBreakpoints",
             {
                 "start": {
-                    "scriptId": definition["script_id"],
-                    "lineNumber": definition["line"],
-                    "columnNumber": definition["column"],
+                    "scriptId": definition["cdp_script_id"],
+                    "lineNumber": definition["target_line"],
+                    "columnNumber": definition["target_column"],
                 },
                 "restrictToFunction": True,
             },
@@ -1666,7 +1762,7 @@ class DebuggerBridge:
         return_keys: set[tuple[str, int, int]] = set()
         for raw in raw_locations:
             location = self._parse_location(raw)
-            if location is None or location["script_id"] != definition["script_id"]:
+            if location is None or location["script_id"] != definition["cdp_script_id"]:
                 continue
             location["type"] = (
                 raw.get("type")
@@ -1710,6 +1806,44 @@ class DebuggerBridge:
             ),
         ]
 
+    def _runtime_hook_function_breakpoint(
+        self, target_id: str, expression: str, object_group: str
+    ) -> dict[str, Any]:
+        try:
+            evaluated = self._runtime_hook_command(
+                target_id,
+                "Runtime.evaluate",
+                {
+                    "expression": expression,
+                    "objectGroup": object_group,
+                    "silent": True,
+                    "returnByValue": False,
+                    "throwOnSideEffect": True,
+                    "awaitPromise": False,
+                    "timeout": RUNTIME_HOOK_EVALUATION_TIMEOUT_MS,
+                },
+            )
+            function = evaluated.get("result")
+            if isinstance(evaluated.get("exceptionDetails"), dict) or not isinstance(function, dict):
+                raise DebuggerBridgeError("Live-function expression could not be evaluated without side effects")
+            if function.get("type") != "function":
+                raise DebuggerBridgeError("Live-function expression did not resolve to a function")
+            object_id = required_protocol_identifier(
+                function.get("objectId"), "live function object"
+            )
+            return self._runtime_hook_command(
+                target_id,
+                "Debugger.setBreakpointOnFunctionCall",
+                {"objectId": object_id},
+            )
+        finally:
+            try:
+                self._runtime_hook_command(
+                    target_id, "Runtime.releaseObjectGroup", {"objectGroup": object_group}
+                )
+            except DebuggerBridgeError:
+                pass
+
     def _arm_runtime_hooks(self, request: dict[str, Any]) -> dict[str, Any]:
         if request.get("confirmed") is not True:
             raise DebuggerBridgeError(
@@ -1743,9 +1877,19 @@ class DebuggerBridge:
             self._changed()
 
         point_specs: list[dict[str, Any]] = []
-        installed: dict[str, dict[str, Any]] = {}
+        installed: dict[tuple[str, str], dict[str, Any]] = {}
         try:
             for definition in definitions:
+                if definition["entry_mode"] == "function":
+                    point_specs.append({
+                        "hook_id": definition["id"],
+                        "target_id": definition["target_id"],
+                        "entry_mode": "function",
+                        "function_expression": definition["function_expression"],
+                        "phases": ["entry"],
+                    })
+                    definition["resolved"] = {"entry_points": 1, "return_points": 0}
+                    continue
                 locations = self._runtime_hook_possible_locations(definition)
                 returns = [item for item in locations if item["type"] == "return"]
                 if definition["return_enabled"] and not returns:
@@ -1758,6 +1902,7 @@ class DebuggerBridge:
                     key = (entry["script_id"], entry["line"], entry["column"])
                     by_location[key] = {
                         "hook_id": definition["id"],
+                        "target_id": definition["target_id"],
                         "location": entry,
                         "phases": ["entry"],
                     }
@@ -1772,6 +1917,7 @@ class DebuggerBridge:
                             key,
                             {
                                 "hook_id": definition["id"],
+                                "target_id": definition["target_id"],
                                 "location": location,
                                 "phases": [],
                             },
@@ -1793,28 +1939,37 @@ class DebuggerBridge:
                     "Runtime Hooks exceeds the 64 active-point limit"
                 )
             for spec in point_specs:
-                location = spec["location"]
-                result = self._command(
-                    "Debugger.setBreakpoint",
-                    {
-                        "location": {
-                            "scriptId": location["script_id"],
-                            "lineNumber": location["line"],
-                            "columnNumber": location["column"],
-                        }
-                    },
-                )
+                if spec.get("entry_mode") == "function":
+                    result = self._runtime_hook_function_breakpoint(
+                        spec["target_id"],
+                        spec["function_expression"],
+                        f"reb-hook-function-{self._runtime_hooks['session_id']}-{spec['hook_id']}",
+                    )
+                else:
+                    location = spec["location"]
+                    result = self._runtime_hook_command(
+                        spec["target_id"],
+                        "Debugger.setBreakpoint",
+                        {
+                            "location": {
+                                "scriptId": location["script_id"],
+                                "lineNumber": location["line"],
+                                "columnNumber": location["column"],
+                            }
+                        },
+                    )
                 breakpoint_id = required_protocol_identifier(
                     result.get("breakpointId"), "runtime hook breakpoint"
                 )
-                installed[breakpoint_id] = spec
+                installed[(spec["target_id"], breakpoint_id)] = spec
                 with self._lock:
                     if self._runtime_hook_stop_requested or epoch != self._runtime_hook_epoch:
                         raise DebuggerBridgeError("Runtime Hooks arming was cancelled")
         except BaseException as exception:
-            for breakpoint_id in installed:
+            for target_id, breakpoint_id in installed:
                 try:
-                    self._command(
+                    self._runtime_hook_command(
+                        target_id,
                         "Debugger.removeBreakpoint", {"breakpointId": breakpoint_id}
                     )
                 except DebuggerBridgeError:
@@ -1859,15 +2014,16 @@ class DebuggerBridge:
                 return
             self._runtime_hook_epoch += 1
             epoch = self._runtime_hook_epoch
-            breakpoint_ids = list(self._runtime_hook_points)
+            breakpoint_specs = list(self._runtime_hook_points.items())
             self._runtime_hook_stop_requested = True
             self._runtime_hooks["state"] = "stopping"
             self._runtime_hooks["message"] = "Removing Runtime Hooks breakpoints."
             self._changed()
         failures = 0
-        for breakpoint_id in breakpoint_ids:
+        for (target_id, breakpoint_id), spec in breakpoint_specs:
             try:
-                self._command(
+                self._runtime_hook_command(
+                    target_id,
                     "Debugger.removeBreakpoint", {"breakpointId": breakpoint_id}
                 )
             except DebuggerBridgeError:
@@ -1933,8 +2089,10 @@ class DebuggerBridge:
             self._runtime_hooks["total_hits"] = 0
             self._runtime_hooks["hits"] = []
             self._runtime_hooks["hit_evictions"] = 0
+            self._runtime_hooks["requests"] = []
+            self._runtime_hooks["request_evictions"] = 0
             self._runtime_hooks["last_failure"] = None
-            self._runtime_hooks["message"] = "Runtime Hooks hit records were cleared."
+            self._runtime_hooks["message"] = "Runtime Hooks hits and request links were cleared."
             self._changed()
             hooks = copy.deepcopy(self._runtime_hooks)
         return {"ok": True, "runtime_hooks": hooks, "generation": self.generation()}
@@ -1948,6 +2106,11 @@ class DebuggerBridge:
                 not in {"arming", "armed", "handling", "stopping"}
             ):
                 return
+            worker_points = [
+                (breakpoint_id, target_id)
+                for (target_id, breakpoint_id), spec in self._runtime_hook_points.items()
+                if spec["target_id"] != self._runtime_hooks["target_id"]
+            ]
             self._runtime_hook_epoch += 1
             self._runtime_hook_points.clear()
             self._runtime_hook_processing = False
@@ -1963,21 +2126,40 @@ class DebuggerBridge:
                 "Navigation disarmed Runtime Hooks. Choose a live function and add it again."
             )
             self._changed()
+        if worker_points:
+            threading.Thread(
+                target=self._remove_stale_hook_points,
+                args=(worker_points,),
+                name="reb-worker-hook-navigation-cleanup",
+                daemon=True,
+            ).start()
 
-    def _handle_runtime_hook_pause_async(self, params: dict[str, Any]) -> bool:
+    def _remove_stale_hook_points(self, points: list[tuple[str, str]]) -> None:
+        for breakpoint_id, target_id in points:
+            try:
+                self._runtime_hook_command(
+                    target_id, "Debugger.removeBreakpoint", {"breakpointId": breakpoint_id}
+                )
+            except DebuggerBridgeError:
+                pass
+
+    def _handle_runtime_hook_pause_async(
+        self, params: dict[str, Any], target_id: Optional[str] = None
+    ) -> bool:
         raw_hits = params.get("hitBreakpoints")
         if not isinstance(raw_hits, list):
             return False
         with self._lock:
+            target_id = target_id or self._runtime_hooks["target_id"]
             matches = [
-                copy.deepcopy(self._runtime_hook_points[item])
+                copy.deepcopy(self._runtime_hook_points[(target_id, item)])
                 for item in raw_hits
-                if isinstance(item, str) and item in self._runtime_hook_points
+                if isinstance(item, str) and (target_id, item) in self._runtime_hook_points
             ]
             if not matches:
                 return False
             if self._runtime_hooks["state"] == "stopping":
-                self._command_without_wait("Debugger.resume")
+                self._runtime_hook_command_without_wait(target_id, "Debugger.resume")
                 return True
             if self._runtime_hook_processing:
                 if self._runtime_hook_deferred_pause is not None:
@@ -1985,13 +2167,14 @@ class DebuggerBridge:
                         "Runtime Hooks received more than one deferred pause."
                     )
                     self._runtime_hook_stop_requested = True
-                    self._command_without_wait("Debugger.resume")
+                    self._runtime_hook_command_without_wait(target_id, "Debugger.resume")
                     self._changed()
                     return True
                 self._runtime_hook_deferred_pause = {
                     "epoch": self._runtime_hook_epoch,
                     "matches": matches,
                     "params": params,
+                    "target_id": target_id,
                 }
                 self._runtime_hooks["message"] = (
                     "Handing the synchronous return phase to the bounded hook worker."
@@ -2005,7 +2188,7 @@ class DebuggerBridge:
             self._changed()
         thread = threading.Thread(
             target=self._process_runtime_hook_pause,
-            args=(epoch, matches, params),
+            args=(epoch, matches, params, target_id),
             name="reb-runtime-hooks",
             daemon=True,
         )
@@ -2014,6 +2197,7 @@ class DebuggerBridge:
 
     def _runtime_hook_evaluate(
         self,
+        target_id: str,
         frame_id: str,
         expression: str,
         object_group: str,
@@ -2021,7 +2205,8 @@ class DebuggerBridge:
         return_by_value: bool,
         throw_on_side_effect: bool,
     ) -> dict[str, Any]:
-        result = self._command(
+        result = self._runtime_hook_command(
+            target_id,
             "Debugger.evaluateOnCallFrame",
             {
                 "callFrameId": frame_id,
@@ -2044,7 +2229,7 @@ class DebuggerBridge:
         return remote
 
     def _runtime_hook_bindings(
-        self, raw_frame: dict[str, Any]
+        self, raw_frame: dict[str, Any], target_id: str
     ) -> tuple[list[dict[str, Any]], bool]:
         raw_scopes = raw_frame.get("scopeChain")
         if not isinstance(raw_scopes, list):
@@ -2059,7 +2244,8 @@ class DebuggerBridge:
                 break
         if local_id is None or len(local_id.encode("utf-8")) > MAX_TARGET_ID_BYTES:
             return [], False
-        result = self._command(
+        result = self._runtime_hook_command(
+            target_id,
             "Runtime.getProperties",
             {
                 "objectId": local_id,
@@ -2153,14 +2339,21 @@ class DebuggerBridge:
             "column": hook["column"],
         }
         function_name = raw_frame.get("functionName")
+        frame_url = raw_frame.get("url")
+        source_url = (
+            runtime_hook_source_label(frame_url)
+            if hook["entry_mode"] == "function" and isinstance(frame_url, str)
+            else hook["url"]
+        )
         entry = {
             "id": self._next_runtime_hook_hit_id,
             "occurred_at_ms": int(time.time() * 1_000),
             "session_id": self._runtime_hooks["session_id"],
             "hook_id": hook["id"],
-            "target_id": self._runtime_hooks["target_id"],
+            "target_id": hook["target_id"],
+            "target_type": hook["target_type"],
             "label": hook["label"],
-            "source": truncate_text(hook["url"], MAX_INTERCEPTION_URL_BYTES),
+            "source": truncate_text(source_url, MAX_INTERCEPTION_URL_BYTES),
             "function": truncate_text(function_name, 256)
             if isinstance(function_name, str) and function_name
             else "(anonymous)",
@@ -2189,6 +2382,7 @@ class DebuggerBridge:
         epoch: int,
         matches: list[dict[str, Any]],
         params: dict[str, Any],
+        target_id: str,
     ) -> None:
         raw_frames = params.get("callFrames")
         raw_frame = raw_frames[0] if isinstance(raw_frames, list) and raw_frames else None
@@ -2235,6 +2429,7 @@ class DebuggerBridge:
                     try:
                         if hook["condition"]:
                             condition_remote = self._runtime_hook_evaluate(
+                                target_id,
                                 frame_id,
                                 f"Boolean(({hook['condition']}))",
                                 object_group,
@@ -2258,7 +2453,7 @@ class DebuggerBridge:
                                     self._changed()
                                 continue
                         bindings, bindings_truncated = self._runtime_hook_bindings(
-                            raw_frame
+                            raw_frame, target_id
                         )
                         logic = (
                             hook["entry_logic"]
@@ -2267,6 +2462,7 @@ class DebuggerBridge:
                         )
                         if logic:
                             logic_remote = self._runtime_hook_evaluate(
+                                target_id,
                                 frame_id,
                                 f"(()=>{{\n{logic}\n}})()",
                                 object_group,
@@ -2318,6 +2514,7 @@ class DebuggerBridge:
                                 }
                             else:
                                 replacement_remote = self._runtime_hook_evaluate(
+                                    target_id,
                                     frame_id,
                                     hook["return_expression"],
                                     object_group,
@@ -2334,8 +2531,8 @@ class DebuggerBridge:
                                 replacement_return = self._runtime_hook_remote_preview(
                                     replacement_remote
                                 )
-                            self._command(
-                                "Debugger.setReturnValue", {"newValue": argument}
+                            self._runtime_hook_command(
+                                target_id, "Debugger.setReturnValue", {"newValue": argument}
                             )
                             operation = "return_overridden"
                     except DebuggerBridgeError as exception:
@@ -2370,11 +2567,13 @@ class DebuggerBridge:
             auto_disarm = True
         finally:
             try:
-                self._command("Runtime.releaseObjectGroup", {"objectGroup": object_group})
+                self._runtime_hook_command(
+                    target_id, "Runtime.releaseObjectGroup", {"objectGroup": object_group}
+                )
             except DebuggerBridgeError:
                 pass
             try:
-                self._command("Debugger.resume")
+                self._runtime_hook_command(target_id, "Debugger.resume")
             except DebuggerBridgeError as exception:
                 fatal_error = truncate_text(str(exception), 512)
                 auto_disarm = True
@@ -2416,7 +2615,7 @@ class DebuggerBridge:
                 try:
                     threading.Thread(
                         target=self._process_runtime_hook_pause,
-                        args=(epoch, deferred["matches"], deferred["params"]),
+                        args=(epoch, deferred["matches"], deferred["params"], deferred["target_id"]),
                         name="reb-runtime-hooks",
                         daemon=True,
                     ).start()
@@ -2434,7 +2633,7 @@ class DebuggerBridge:
                 auto_disarm or stop_requested
             ):
                 try:
-                    self._command("Debugger.resume")
+                    self._runtime_hook_command(deferred["target_id"], "Debugger.resume")
                 except DebuggerBridgeError:
                     pass
             if still_current and (auto_disarm or stop_requested):
@@ -3225,22 +3424,29 @@ class DebuggerBridge:
             "state": "idle",
             "isolated": False,
             "target_id": None,
+            "workers": [],
+            "worker_overflow": 0,
             "definitions": [],
             "active_points": 0,
             "total_hits": 0,
             "hits": [],
             "hit_evictions": 0,
+            "requests": [],
+            "request_evictions": 0,
             "last_failure": None,
             "message": "Create an isolated Experiment context to use Runtime Hooks.",
             "limits": {
                 "definitions": MAX_RUNTIME_HOOKS,
+                "workers": MAX_RUNTIME_HOOK_WORKERS,
                 "active_points": MAX_RUNTIME_HOOK_BREAKPOINTS,
                 "return_points_per_definition": MAX_RUNTIME_HOOK_RETURN_POINTS,
                 "total_hits": MAX_RUNTIME_HOOK_HITS,
                 "retained_hits": MAX_RUNTIME_HOOK_RETAINED_HITS,
+                "retained_requests": MAX_RUNTIME_HOOK_REQUESTS,
                 "bindings_per_hit": MAX_RUNTIME_HOOK_BINDINGS,
                 "binding_preview_bytes": MAX_RUNTIME_HOOK_BINDING_PREVIEW_BYTES,
                 "condition_bytes": MAX_RUNTIME_HOOK_CONDITION_BYTES,
+                "function_expression_bytes": MAX_RUNTIME_HOOK_FUNCTION_EXPRESSION_BYTES,
                 "logic_bytes": MAX_RUNTIME_HOOK_LOGIC_BYTES,
                 "return_bytes": MAX_RUNTIME_HOOK_RETURN_BYTES,
                 "evaluation_timeout_ms": RUNTIME_HOOK_EVALUATION_TIMEOUT_MS,
@@ -5175,6 +5381,248 @@ class DebuggerBridge:
             if self._public_action_scope_locked() != previous_public:
                 self._changed()
 
+    def _on_runtime_hook_worker_event(
+        self, session: ActionScopeTargetSession, method: str, params: dict[str, Any]
+    ) -> None:
+        target_id = session.target_id
+        if method == "Debugger.scriptParsed":
+            script = self._parse_script(params)
+            if script is None:
+                return
+            raw_id = script["script_id"]
+            public_id = f"w:{hashlib.sha256(target_id.encode()).hexdigest()[:16]}:{raw_id}"
+            if len(public_id.encode("utf-8")) > MAX_TARGET_ID_BYTES:
+                return
+            script.update(
+                script_id=public_id,
+                cdp_script_id=raw_id,
+                target_id=target_id,
+                target_type="worker",
+            )
+            with self._lock:
+                if target_id not in self._runtime_hook_worker_targets:
+                    return
+                if (
+                    len(self._runtime_hook_worker_scripts) >= MAX_SCRIPTS
+                    and public_id not in self._runtime_hook_worker_scripts
+                ):
+                    self._runtime_hook_worker_scripts.pop(next(iter(self._runtime_hook_worker_scripts)))
+                self._runtime_hook_worker_scripts[public_id] = script
+                self._changed()
+        elif method == "Debugger.paused":
+            if not self._handle_runtime_hook_pause_async(params, target_id):
+                session.command_without_wait("Debugger.resume")
+        elif method == "Network.requestWillBeSent":
+            request = params.get("request")
+            request_id = params.get("requestId")
+            if not isinstance(request, dict) or not isinstance(request_id, str):
+                return
+            if len(request_id.encode("utf-8")) > MAX_TARGET_ID_BYTES:
+                return
+            raw_url = request.get("url")
+            url = redacted_request_url(raw_url) if isinstance(raw_url, str) else ""
+            if not url:
+                return
+            method_name = request.get("method")
+            resource_type = params.get("type")
+            occurred_at_ms = int(time.time() * 1_000)
+            with self._lock:
+                if self._runtime_hooks["state"] not in {"armed", "handling"}:
+                    return
+                worker_hit_id = None
+                page_hit_id = None
+                for hit in reversed(self._runtime_hooks["hits"]):
+                    age = occurred_at_ms - hit["occurred_at_ms"]
+                    if age < 0 or age > 5_000:
+                        continue
+                    if hit["target_id"] == target_id and worker_hit_id is None:
+                        worker_hit_id = hit["id"]
+                    elif hit["target_id"] == self._runtime_hooks["target_id"] and page_hit_id is None:
+                        page_hit_id = hit["id"]
+                    if worker_hit_id is not None and page_hit_id is not None:
+                        break
+                related_hits = [
+                    hit_id for hit_id in (page_hit_id, worker_hit_id)
+                    if hit_id is not None
+                ]
+                record = {
+                    "id": self._next_runtime_hook_request_id,
+                    "occurred_at_ms": occurred_at_ms,
+                    "target_id": target_id,
+                    "request_id": request_id,
+                    "url": url,
+                    "method": truncate_text(method_name, 32) if isinstance(method_name, str) else "",
+                    "resource_type": truncate_text(resource_type, 32) if isinstance(resource_type, str) else "",
+                    "status": None,
+                    "related_hit_ids": related_hits,
+                    "relation": "same-context temporal proximity, inferred" if related_hits else "unlinked",
+                }
+                self._next_runtime_hook_request_id += 1
+                requests = self._runtime_hooks["requests"]
+                requests.append(record)
+                if len(requests) > MAX_RUNTIME_HOOK_REQUESTS:
+                    requests.pop(0)
+                    self._runtime_hooks["request_evictions"] += 1
+                self._changed()
+        elif method == "Network.responseReceived":
+            request_id = params.get("requestId")
+            response = params.get("response")
+            if not isinstance(request_id, str) or not isinstance(response, dict):
+                return
+            status = response.get("status")
+            if isinstance(status, bool) or not isinstance(status, (int, float)) or not 100 <= status <= 599:
+                return
+            with self._lock:
+                for record in reversed(self._runtime_hooks["requests"]):
+                    if record["target_id"] == target_id and record["request_id"] == request_id:
+                        record["status"] = int(status)
+                        self._changed()
+                        break
+
+    def _on_runtime_hook_worker_closed(
+        self, target_id: str, error: BaseException
+    ) -> None:
+        stale_points: list[tuple[str, str]] = []
+        with self._lock:
+            self._runtime_hook_worker_sessions.pop(target_id, None)
+            self._runtime_hook_worker_targets.pop(target_id, None)
+            self._runtime_hook_worker_scripts = {
+                key: script for key, script in self._runtime_hook_worker_scripts.items()
+                if script["target_id"] != target_id
+            }
+            self._runtime_hooks["workers"] = [
+                {key: target[key] for key in ("id", "type", "title", "url")}
+                for target in self._runtime_hook_worker_targets.values()
+            ]
+            if any(item["target_id"] == target_id for item in self._runtime_hooks["definitions"]):
+                stale_points = [
+                    (breakpoint_id, point_target_id)
+                    for point_target_id, breakpoint_id in self._runtime_hook_points
+                    if point_target_id != target_id
+                ]
+                self._runtime_hook_epoch += 1
+                self._runtime_hook_points.clear()
+                self._runtime_hook_processing = False
+                self._runtime_hook_stop_requested = False
+                self._runtime_hook_deferred_pause = None
+                self._runtime_hooks["definitions"] = []
+                self._runtime_hooks["active_points"] = 0
+                self._runtime_hooks["state"] = "error"
+                self._runtime_hooks["last_failure"] = "The isolated worker disconnected. Its hooks were cleared."
+                self._runtime_hooks["message"] = self._runtime_hooks["last_failure"]
+            self._changed()
+        if stale_points:
+            threading.Thread(
+                target=self._remove_stale_hook_points,
+                args=(stale_points,),
+                name="reb-hook-worker-detach-cleanup",
+                daemon=True,
+            ).start()
+
+    def _close_runtime_hook_workers(self) -> None:
+        with self._lock:
+            sessions = list(self._runtime_hook_worker_sessions.values())
+            self._runtime_hook_worker_sessions = {}
+            self._runtime_hook_worker_targets = {}
+            self._runtime_hook_worker_scripts = {}
+            self._runtime_hook_worker_overflow = 0
+            self._runtime_hooks["workers"] = []
+            self._runtime_hooks["worker_overflow"] = 0
+            self._changed()
+        for session in sessions:
+            session.close()
+
+    def _refresh_runtime_hook_workers(self) -> None:
+        with self._lock:
+            context_id = self._request_interception_context_id
+        if context_id is None:
+            return
+        _, browser_url = self._devtools_endpoint()
+        result = self._browser_command("Target.getTargets")
+        infos = result.get("targetInfos")
+        if not isinstance(infos, list) or len(infos) > MAX_TARGETS * 4:
+            raise ProtocolError("Browser returned a malformed worker target list")
+        discovered = {target["id"]: target for target in self._discover_targets()}
+        candidates = sorted(
+            (
+                discovered[raw["targetId"]]
+                for raw in infos
+                if isinstance(raw, dict)
+                and raw.get("browserContextId") == context_id
+                and raw.get("type") == "worker"
+                and isinstance(raw.get("targetId"), str)
+                and raw["targetId"] in discovered
+            ),
+            key=lambda target: target["id"],
+        )
+        overflow = max(0, len(candidates) - MAX_RUNTIME_HOOK_WORKERS)
+        candidates = candidates[:MAX_RUNTIME_HOOK_WORKERS]
+        candidate_ids = {target["id"] for target in candidates}
+        with self._lock:
+            if self._request_interception_context_id != context_id:
+                return
+            removed = [
+                self._runtime_hook_worker_sessions.pop(target_id)
+                for target_id in list(self._runtime_hook_worker_sessions)
+                if target_id not in candidate_ids
+            ]
+            self._runtime_hook_worker_targets = {
+                target["id"]: target for target in candidates
+            }
+            self._runtime_hook_worker_overflow = overflow
+            self._runtime_hooks["workers"] = [
+                {key: target[key] for key in ("id", "type", "title", "url")}
+                for target in candidates
+            ]
+            self._runtime_hooks["worker_overflow"] = overflow
+            new_targets = [
+                target for target in candidates
+                if target["id"] not in self._runtime_hook_worker_sessions
+            ]
+            self._changed()
+        for session in removed:
+            session.close()
+            self._on_runtime_hook_worker_closed(session.target_id, WebSocketClosed("Worker target closed"))
+        for target in new_targets:
+            session = None
+            try:
+                session = ActionScopeTargetSession(
+                    target,
+                    self._on_runtime_hook_worker_event,
+                    self._on_runtime_hook_worker_closed,
+                    self.debugger_transport_binary,
+                    enable_page=False,
+                    enable_debugger=True,
+                    browser_url=browser_url,
+                )
+                session.start()
+                session.command("Debugger.setBreakpointsActive", {"active": self._breakpoints_active})
+                session.command("Network.enable")
+            except BaseException as exception:
+                if session is not None:
+                    session.close()
+                with self._lock:
+                    self._runtime_hooks["last_failure"] = truncate_text(
+                        f"Worker debugger attach failed: {exception}", 512
+                    )
+                    self._changed()
+                continue
+            with self._lock:
+                keep_session = (
+                    self._request_interception_context_id == context_id
+                    and target["id"] in self._runtime_hook_worker_targets
+                )
+                if keep_session:
+                    self._runtime_hook_worker_sessions[target["id"]] = session
+                    failure = self._runtime_hooks.get("last_failure")
+                    if isinstance(failure, str) and failure.startswith(
+                        ("Worker debugger attach failed:", "Worker discovery failed:")
+                    ):
+                        self._runtime_hooks["last_failure"] = None
+                    self._changed()
+            if not keep_session:
+                session.close()
+
     def _set_action_scope(self, request: dict[str, Any]) -> dict[str, Any]:
         mode = request.get("mode")
         target_id = request.get("target_id")
@@ -5441,6 +5889,7 @@ class DebuggerBridge:
             connection.close()
         try:
             self._refresh_action_scope_targets()
+            self._refresh_runtime_hook_workers()
         except DebuggerBridgeError as exception:
             with self._lock:
                 self._action_scope_last_error = truncate_text(str(exception), 512)
@@ -5799,6 +6248,7 @@ class DebuggerBridge:
                 raise
             return
         self._close_action_scope_sessions()
+        self._close_runtime_hook_workers()
         with self._lock:
             self._request_interception_context_id = None
             self._request_interception_return_target_id = None
@@ -6996,9 +7446,23 @@ class DebuggerBridge:
                                 str(exception), 512
                             )
                             self._changed()
+                    try:
+                        self._refresh_runtime_hook_workers()
+                    except (
+                        OSError,
+                        ValueError,
+                        DebuggerBridgeError,
+                        json.JSONDecodeError,
+                    ) as exception:
+                        with self._lock:
+                            self._runtime_hooks["last_failure"] = truncate_text(
+                                f"Worker discovery failed: {exception}", 512
+                            )
+                            self._changed()
         finally:
             connection.close()
             reader.join(timeout=1.0)
+            stale_worker_points: list[tuple[str, str]] = []
             with self._lock:
                 origin_trace_id = (
                     self._memory_origin_trace["trace_id"]
@@ -7025,6 +7489,11 @@ class DebuggerBridge:
                             "Object Lab target disconnected. Reattach it and run the search again."
                         )
                 if self._runtime_hooks.get("target_id") == target["id"]:
+                    stale_worker_points = [
+                        (breakpoint_id, point_target_id)
+                        for point_target_id, breakpoint_id in self._runtime_hook_points
+                        if point_target_id != target["id"]
+                    ]
                     self._runtime_hook_points.clear()
                     self._runtime_hook_processing = False
                     self._runtime_hook_stop_requested = False
@@ -7081,6 +7550,15 @@ class DebuggerBridge:
                     self._watch_frame_id = None
                     self._pause_serial += 1
                     self._changed()
+            if stale_worker_points:
+                threading.Thread(
+                    target=self._remove_stale_hook_points,
+                    args=(stale_worker_points,),
+                    name="reb-hook-page-detach-cleanup",
+                    daemon=True,
+                ).start()
+            if self._runtime_hooks.get("target_id") == target["id"]:
+                self._close_runtime_hook_workers()
             if origin_trace_id is not None:
                 self._complete_memory_origin_trace(
                     origin_trace_id,

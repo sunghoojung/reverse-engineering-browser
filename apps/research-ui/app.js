@@ -2913,7 +2913,7 @@
           ? `${definitions.length} ${definitions.length === 1 ? 'hook' : 'hooks'}` : 'Empty';
         elements.hooksDefinitionBadge.dataset.kind = definitions.length ? '' : 'offline';
         if (!definitions.length) {
-          elements.hooksDefinitions.replaceChildren(textElement('div', 'experiment-empty', 'No function hooks configured.'));
+          elements.hooksDefinitions.replaceChildren(textElement('div', 'experiment-empty', 'No hooks yet.'));
           return;
         }
         elements.hooksDefinitions.replaceChildren(...definitions.map(definition => {
@@ -2947,7 +2947,12 @@
         const total = hooks?.total_hits ?? 0;
         elements.hooksHitCount.textContent = `${total} / ${hooks?.limits?.total_hits ?? 512}`;
         elements.hooksHitCount.dataset.kind = hooks?.last_failure ? 'error' : hits.length ? '' : 'offline';
-        elements.hooksHitMeta.textContent = `${hits.length} hits retained · ${hooks?.hit_evictions ?? 0} hit evictions · ${requests.length} worker requests · metadata stays ephemeral`;
+        const hitDetails = [];
+        if (hooks?.hit_evictions || hits.length !== total) hitDetails.push(`${hits.length} retained`);
+        if (hooks?.hit_evictions) hitDetails.push(`${hooks.hit_evictions} evicted`);
+        if (requests.length) hitDetails.push(`${requests.length} worker ${requests.length === 1 ? 'request' : 'requests'}`);
+        elements.hooksHitMeta.textContent = hitDetails.join(' · ');
+        elements.hooksHitMeta.hidden = !hitDetails.length;
         const key = JSON.stringify([hits, requests, total, hooks?.hit_evictions, hooks?.last_failure]);
         if (key === state.runtimeHookHitsKey) return;
         state.runtimeHookHitsKey = key;
@@ -3123,9 +3128,10 @@
             : hooks?.state === 'disposed' ? 'Disposed' : 'Not created';
         const workerCount = hooks?.workers?.length ?? 0;
         const workerOverflow = hooks?.worker_overflow ?? 0;
-        elements.hooksContextMessage.textContent = hooks?.isolated
-          ? `${hooks.message} · ${workerCount} dedicated ${workerCount === 1 ? 'worker' : 'workers'} discovered${workerOverflow ? ` · ${workerOverflow} beyond the attachment limit` : ''}`
-          : hooks?.message ?? 'No disposable Experiment context exists.';
+        elements.hooksContextMessage.textContent = workerCount || workerOverflow
+          ? `${workerCount} ${workerCount === 1 ? 'worker' : 'workers'} discovered${workerOverflow ? ` · ${workerOverflow} beyond the attachment limit` : ''}`
+          : '';
+        elements.hooksContextMessage.hidden = !(workerCount || workerOverflow);
         elements.hooksStorageState.textContent = hooks?.isolated ? 'Ephemeral and isolated'
           : hooks?.state === 'disposed' ? 'Deleted and erased' : 'Not allocated';
         elements.hooksPointUsage.textContent = `${hooks?.active_points ?? 0} / ${hooks?.limits?.active_points ?? 64}`;
@@ -3160,7 +3166,11 @@
         renderRuntimeHookDefinitions(hooks, active);
         renderRuntimeHookHits(hooks);
         elements.sourceHooksNotice.dataset.kind = elements.experimentNotice.dataset.kind;
-        elements.sourceHooksNotice.textContent = elements.experimentNotice.textContent;
+        elements.sourceHooksNotice.textContent = hooks?.state === 'armed' && !state.experimentError && !hooks.last_failure
+          ? `Armed · ${hooks.total_hits} ${hooks.total_hits === 1 ? 'hit' : 'hits'}`
+          : elements.experimentNotice.textContent;
+        elements.sourceHooksNotice.hidden = !state.sourceHooksOpen ||
+          (contextReady && !active && !contextWorking && !state.experimentError && !hooks?.last_failure);
       }
 
       function parseAutomationVariables() {

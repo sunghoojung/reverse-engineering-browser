@@ -282,6 +282,8 @@ In a connected session, **Hooks** opens the shared Runtime Hooks workspace
 beside the Sources editor, with its ephemeral hit trail below the code. The
 panel creates and manages the same disposable Experiment context used by
 Experiments; its header labels the isolation and links back to Experiments.
+Targeting guidance stays in the **Targeting help** disclosure, while armed
+status uses a compact hit count.
 Selecting a hit returns to the original live source location when that script
 is still attached. Captured or pretty-printed sources cannot prefill a runtime
 location, and an unavailable script is reported rather than guessed.

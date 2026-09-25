@@ -698,12 +698,12 @@
             </div>
             <div id="hooks-home" hidden></div>
             <div id="hooks-workspace" class="experiment-workspace" aria-label="Runtime Hooks" hidden>
-              <div class="source-hooks-head"><strong>Runtime Hooks · isolated experiment</strong><button id="source-hooks-experiments" class="source-tool" type="button">Experiments</button><button id="source-hooks-close" class="source-tool" type="button" aria-label="Close Runtime Hooks panel">Close</button></div>
+              <div class="source-hooks-head"><strong>Runtime Hooks · isolated</strong><button id="source-hooks-experiments" class="source-tool" type="button">Experiments</button><button id="source-hooks-close" class="source-tool" type="button" aria-label="Close Runtime Hooks panel">Close</button></div>
               <div id="source-hooks-notice" class="experiment-notice" data-kind="idle" role="status" aria-live="polite" hidden></div>
               <div class="experiment-column hooks-setup-column">
                 <article class="experiment-card">
                   <header>
-                    <div><h2>Session</h2><p id="hooks-context-message">No disposable Experiment context exists.</p></div>
+                    <div><h2>Session</h2><p id="hooks-context-message" hidden></p></div>
                     <span id="hooks-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span>
                   </header>
                   <div class="experiment-body">
@@ -721,7 +721,7 @@
                   </details>
                 </article>
                 <article class="experiment-card">
-                  <header><div><h2>Disposable page</h2><p>Open one credential-free page, then choose one of its live functions.</p></div><span id="hooks-page-badge" class="experiment-card-badge" data-kind="offline">No page</span></header>
+                  <header><div><h2>Disposable page</h2><p>Credential-free URL only.</p></div><span id="hooks-page-badge" class="experiment-card-badge" data-kind="offline">No page</span></header>
                   <div class="experiment-body">
                     <form id="hooks-navigation-form" class="experiment-form">
                       <label>Page URL<input id="hooks-page-url" type="url" maxlength="8192" placeholder="https://app.example.test/lab" autocomplete="off" /></label>
@@ -731,7 +731,7 @@
                   </div>
                 </article>
                 <article class="experiment-card">
-                  <header><div><h2>Session controls</h2><p>Arming permits the configured code to mutate only this disposable page.</p></div><span id="hooks-state-badge" class="experiment-card-badge" data-kind="offline">Disarmed</span></header>
+                  <header><div><h2>Session controls</h2></div><span id="hooks-state-badge" class="experiment-card-badge" data-kind="offline">Disarmed</span></header>
                   <div class="experiment-body experiment-form">
                     <label class="hook-confirm"><input id="hooks-confirm" type="checkbox" /> I confirm these hooks may mutate the isolated page</label>
                     <div class="hook-control-actions">
@@ -744,12 +744,13 @@
               </div>
               <div class="experiment-column hooks-definition-column">
                 <article class="experiment-card">
-                  <header><div><h2>Function hook</h2><p>Choose a live page or worker source. Source cursor mode resolves an inner function and its entry/return points; live-function mode accepts a side-effect-free expression and captures entry only.</p></div><span id="hooks-definition-count" class="experiment-card-badge" data-kind="offline">0 / 8</span></header>
+                  <header><div><h2>Add hook</h2></div><span id="hooks-definition-count" class="experiment-card-badge" data-kind="offline">0 / 8</span></header>
                   <div class="experiment-body">
                     <form id="hooks-definition-form" class="experiment-form">
                       <label>Label<input id="hooks-label" type="text" maxlength="128" placeholder="checkout guard" autocomplete="off" /></label>
-                      <label>Live JavaScript source<select id="hooks-script"></select></label>
-                      <label>Entry target<select id="hooks-entry-mode"><option value="source">Source cursor</option><option value="function">Live function object</option></select></label>
+                      <label>Source<select id="hooks-script"></select></label>
+                      <label>Target<select id="hooks-entry-mode"><option value="source">Source cursor</option><option value="function">Live function object</option></select></label>
+                      <details class="experiment-help"><summary>Targeting help</summary><p class="experiment-privacy">Source cursor targets the innermost function and supports entry and return. Live function object accepts a side-effect-free expression and supports entry only.</p></details>
                       <div id="hooks-source-location-fields" class="experiment-form-row"><label>Line<input id="hooks-line" type="number" min="1" max="2147483647" step="1" value="1" /></label><label>Column<input id="hooks-column" type="number" min="1" max="2147483647" step="1" value="1" /></label></div>
                       <label id="hooks-function-expression-field" hidden>Side-effect-free function expression<input id="hooks-function-expression" type="text" maxlength="1024" placeholder="self.onmessage" autocomplete="off" /></label>
                       <div class="hook-phase-options"><label><input id="hooks-entry-enabled" type="checkbox" checked /> Entry</label><label><input id="hooks-return-enabled" type="checkbox" checked /> Synchronous return</label></div>
@@ -758,19 +759,19 @@
                       <label>Return logic<textarea id="hooks-return-logic" maxlength="8192" spellcheck="false" placeholder="window.__labHits = (window.__labHits || 0) + 1;"></textarea></label>
                       <label>Return replacement<select id="hooks-return-mode"><option value="none">Keep original</option><option value="json">Typed JSON value</option><option value="expression">Frame expression</option></select></label>
                       <label id="hooks-return-value-field" hidden>Replacement JSON or expression<textarea id="hooks-return-value" maxlength="8192" spellcheck="false" placeholder='{"allowed":true}'></textarea></label>
-                      <button id="hooks-add" class="secondary-button" type="submit" disabled>Add hook definition</button>
+                      <button id="hooks-add" class="secondary-button" type="submit" disabled>Add hook</button>
                     </form>
                   </div>
                 </article>
                 <article class="experiment-card">
-                  <header><div><h2>Definitions</h2><p>Definitions remain editable after disarming and are erased on navigation.</p></div><span id="hooks-definition-badge" class="experiment-card-badge" data-kind="offline">Empty</span></header>
-                  <div id="hooks-definitions" class="hook-definition-list"><div class="experiment-empty">No function hooks configured.</div></div>
+                  <header><div><h2>Configured</h2><p>Edit while disarmed. Cleared on navigation.</p></div><span id="hooks-definition-badge" class="experiment-card-badge" data-kind="offline">Empty</span></header>
+                  <div id="hooks-definitions" class="hook-definition-list"><div class="experiment-empty">No hooks yet.</div></div>
                 </article>
               </div>
               <div id="hooks-hits-home" hidden></div>
               <div id="hooks-hits-column" class="experiment-column">
                 <article class="experiment-card hook-hits-card">
-                  <header><div><h2>Function hits</h2><p id="hooks-hit-meta">Entry bindings and return outcomes stay in ephemeral session memory.</p></div><span id="hooks-hit-count" class="experiment-card-badge" data-kind="offline">0 / 512</span></header>
+                  <header><div><h2>Hits</h2><p id="hooks-hit-meta" hidden></p></div><span id="hooks-hit-count" class="experiment-card-badge" data-kind="offline">0 / 512</span></header>
                   <div id="hooks-hits" class="hook-hit-list" role="log" aria-live="polite"><div class="experiment-empty">Arm a hook, then exercise the isolated page.</div></div>
                 </article>
                 <details class="experiment-card experiment-disclosure">

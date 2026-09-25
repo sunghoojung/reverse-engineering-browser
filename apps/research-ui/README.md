@@ -300,12 +300,18 @@ a side-effect-free expression such as `self.onmessage` in the selected target
 and captures entry only; it does not discover closure-held functions
 automatically. Worker attachment runs off the page-target watcher; a failed
 attachment drops its scripts and retries with bounded backoff. The breakpoint
-active setting is shared with attached workers. While armed, worker requests
+active setting is shared with attached workers. While armed, page and worker requests
 appear as bounded, redacted metadata. Links to nearby hits are labeled
 temporal/inferred, not causal proof.
-Selecting one of these worker requests opens a separate ephemeral trail in
+Selecting one of these requests opens a separate ephemeral trail in
 Traffic, with links back to retained hits. It is not merged into the captured
 request ledger or presented as a proven initiator chain.
+The optional [Request Value Test](../../docs/product/request-value-test-v2.md)
+captures one selected JSON, form, query, header, or raw-text request value from
+the isolated page or a dedicated worker. Its baseline/variant comparison links
+a changed value to a successful synchronous return override when retained hits
+support that interpretation. It does not claim complete value provenance, and
+the value preview is erased with the disposable context.
 Find counts literal, case-insensitive occurrences within rendered lines, including
 multiple matches on one minified line. Enter advances and Shift+Enter goes back,
 wrapping through the first 1000 matches with a visible `+` when results are capped.

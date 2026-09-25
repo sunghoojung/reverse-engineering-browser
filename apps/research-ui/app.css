@@ -1626,6 +1626,7 @@
       .hook-phase-options label { display: flex; grid-template-columns: none; align-items: center; gap: 6px; color: var(--text); text-transform: none; }
       .hook-phase-options input { width: auto; min-height: auto; accent-color: var(--accent); }
       .hook-definition-list, .hook-hit-list { display: grid; max-height: 430px; overflow: auto; }
+      #hooks-field-result .source-tool { margin-left: 8px; }
       .hook-definition-row, .hook-hit-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 9px; padding: 10px; border-bottom: 1px solid var(--line-soft); }
       .hook-hit-row { content-visibility: auto; contain-intrinsic-size: auto 82px; }
       .hook-definition-row:last-child, .hook-hit-row:last-child { border-bottom: 0; }

@@ -7,6 +7,7 @@ use oxc_span::SourceType;
 mod fold;
 mod preflight;
 mod proxy;
+mod request_field;
 use serde::{Deserialize, Serialize};
 
 const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
@@ -229,12 +230,37 @@ fn serve(reader: &mut impl BufRead, writer: &mut impl Write) -> io::Result<()> {
     loop {
         let response = match read_request(reader, MAX_REQUEST_BYTES) {
             Ok(None) => return Ok(()),
-            Ok(Some(line)) => match serde_json::from_slice::<Request>(&line) {
-                Ok(request) => analyze(request),
-                Err(error) => error_response(format!("invalid request: {error}")),
-            },
+            Ok(Some(line)) => {
+                let field_mode = serde_json::from_slice::<serde_json::Value>(&line)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("operation")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned)
+                    })
+                    .is_some_and(|operation| operation == "request_field");
+                if field_mode {
+                    match serde_json::from_slice::<request_field::Request>(&line) {
+                        Ok(request) => serde_json::to_value(request_field::extract(request))?,
+                        Err(_) => {
+                            serde_json::to_value(request_field::extract(request_field::Request {
+                                operation: String::new(),
+                                body: String::new(),
+                                pointer: String::new(),
+                            }))?
+                        }
+                    }
+                } else {
+                    let analyzed = match serde_json::from_slice::<Request>(&line) {
+                        Ok(request) => analyze(request),
+                        Err(error) => error_response(format!("invalid request: {error}")),
+                    };
+                    serde_json::to_value(analyzed)?
+                }
+            }
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                error_response(error.to_string())
+                serde_json::to_value(error_response(error.to_string()))?
             }
             Err(error) => return Err(error),
         };

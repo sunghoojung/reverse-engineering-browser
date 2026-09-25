@@ -123,6 +123,7 @@ class RuntimeHookWorkerTests(unittest.TestCase):
     def setUp(self):
         FakeWorkerSession.instances = []
         self.bridge = DebuggerBridge()
+        self.bridge._capture_network_content = True
         self.bridge._state = "running"
         self.bridge._target = {"id": "page-1", "type": "page", "title": "Fixture", "url": "http://127.0.0.1:8766/"}
         self.bridge._request_interception_context_id = "isolated-1"
@@ -341,11 +342,246 @@ class RuntimeHookWorkerTests(unittest.TestCase):
         self.bridge.action({"action": "clear_runtime_hook_hits"})
         self.assertEqual(self.bridge.snapshot()["runtime_hooks"]["requests"], [])
 
+    def test_field_test_requires_consent_and_compares_worker_intervention(self):
+        self.bridge._refresh_runtime_hook_workers()
+        session = FakeWorkerSession.instances[0]
+        configuration = {"action": "configure_runtime_field_test", "enabled": True,
+                         "url": "http://127.0.0.1:8766/api/submit", "method": "POST",
+                         "pointer": "/payload"}
+        with self.assertRaisesRegex(DebuggerBridgeError, "confirmation"):
+            self.bridge.action(configuration)
+        with self.assertRaisesRegex(DebuggerBridgeError, "query"):
+            self.bridge.action({**configuration, "confirmed": True,
+                                "url": configuration["url"] + "?secret=1"})
+        with self.assertRaisesRegex(DebuggerBridgeError, "supported"):
+            self.bridge.action({**configuration, "confirmed": True, "kind": {"bad": True}})
+        with self.assertRaisesRegex(DebuggerBridgeError, "header name"):
+            self.bridge.action({**configuration, "confirmed": True,
+                                "kind": "header", "pointer": "X-Test\nInjected"})
+        self.bridge.action({**configuration, "confirmed": True})
+        self.bridge._runtime_hooks["state"] = "armed"
+        with mock.patch("debugger_bridge.extract_request_value", side_effect=[
+            {"status": "available", "sha256": "a" * 64, "preview": '"before"', "bytes": 8},
+            {"status": "available", "sha256": "b" * 64, "preview": '"after"', "bytes": 7},
+        ]):
+            self.bridge._runtime_hooks["hits"].append({
+                "id": 1, "hook_id": 7, "target_id": "worker-1", "occurred_at_ms": int(time.time() * 1000),
+                "operation": "observed", "category": "return", "source": "signer-worker.js",
+                "function": "sign", "line": 3, "column": 4,
+            })
+            self.bridge._on_runtime_hook_worker_event(session, "Network.requestWillBeSent", {
+                "requestId": "first", "type": "Fetch",
+                "request": {"url": configuration["url"], "method": "POST",
+                            "postData": '{"payload":"before","secret":"hidden"}'},
+            })
+            for _ in range(100):
+                if self.bridge._runtime_hooks["field_test"]["observations"][0]["status"] != "pending":
+                    break
+                time.sleep(0.01)
+            self.bridge._runtime_hooks["hits"].append({
+                "id": 2, "hook_id": 8, "target_id": "worker-1", "occurred_at_ms": int(time.time() * 1000),
+                "operation": "return_overridden", "category": "return", "source": "signer-worker.js",
+                "function": "sign", "line": 3, "column": 4,
+            })
+            self.bridge._on_runtime_hook_worker_event(session, "Network.requestWillBeSent", {
+                "requestId": "second", "type": "Fetch",
+                "request": {"url": configuration["url"], "method": "POST",
+                            "postData": '{"payload":"after","secret":"hidden"}'},
+            })
+            for _ in range(100):
+                if self.bridge._runtime_hooks["field_test"]["observations"][1]["status"] != "pending":
+                    break
+                time.sleep(0.01)
+        observations = self.bridge.snapshot()["runtime_hooks"]["field_test"]["observations"]
+        self.assertEqual([item["status"] for item in observations], ["available", "available"])
+        self.assertNotIn("hidden", str(observations))
+        self.assertNotIn("payload", str(observations))
+        with self.assertRaisesRegex(DebuggerBridgeError, "disarmed"):
+            self.bridge.action({"action": "compare_runtime_field_test",
+                                "baseline_id": observations[0]["id"],
+                                "variant_id": observations[1]["id"]})
+        self.bridge._runtime_hooks["state"] = "disarmed"
+        comparison = self.bridge.action({"action": "compare_runtime_field_test",
+                                         "baseline_id": observations[0]["id"],
+                                         "variant_id": observations[1]["id"]})["runtime_hooks"]["field_test"]["comparison"]
+        self.assertTrue(comparison["changed"])
+        self.assertEqual(comparison["intervention_hit_id"], 2)
+        self.assertEqual(comparison["interpretation"], "intervention-associated")
+        retained = self.bridge._runtime_hooks["field_test"]["observations"]
+        retained[1]["sha256"] = retained[0]["sha256"]
+        comparison = self.bridge.action({"action": "compare_runtime_field_test",
+                                         "baseline_id": observations[0]["id"],
+                                         "variant_id": observations[1]["id"]})["runtime_hooks"]["field_test"]["comparison"]
+        self.assertFalse(comparison["changed"])
+        self.assertEqual(comparison["interpretation"], "inconclusive")
+        retained[1]["sha256"] = "b" * 64
+        self.bridge._runtime_hooks["hits"][0]["line"] = 99
+        comparison = self.bridge.action({"action": "compare_runtime_field_test",
+                                         "baseline_id": observations[0]["id"],
+                                         "variant_id": observations[1]["id"]})["runtime_hooks"]["field_test"]["comparison"]
+        self.assertEqual(comparison["interpretation"], "inconclusive")
+        self.bridge._runtime_hooks["state"] = "disarmed"
+        self.bridge.action({"action": "configure_runtime_field_test", "enabled": False})
+        self.assertEqual(self.bridge.snapshot()["runtime_hooks"]["field_test"]["observations"], [])
+
+    def test_page_query_value_compares_with_page_override(self):
+        self.bridge._capture_network_content = False
+        self.bridge._runtime_hook_page_network_enabled = True
+        url = "https://example.test/api/send"
+        self.bridge.action({"action": "configure_runtime_field_test", "enabled": True,
+                            "url": url, "method": "GET", "kind": "query", "pointer": "payload",
+                            "confirmed": True})
+        self.bridge._runtime_hooks["state"] = "armed"
+        with mock.patch.object(self.bridge, "_record_network_request"):
+            for index, value in enumerate(("before", "after"), start=1):
+                self.bridge._runtime_hooks["hits"].append({
+                    "id": index, "hook_id": 7, "target_id": "page-1",
+                    "occurred_at_ms": int(time.time() * 1000),
+                    "operation": "observed" if index == 1 else "return_overridden",
+                    "category": "return", "source": "https://example.test/app.js",
+                    "function": "makePayload", "line": 3, "column": 4,
+                })
+                self.bridge._handle_event("Network.requestWillBeSent", {
+                    "requestId": f"page-{index}", "type": "Fetch",
+                    "request": {"url": f"{url}?payload={value}&private=hidden", "method": "GET"},
+                })
+                for _ in range(100):
+                    observations = self.bridge._runtime_hooks["field_test"]["observations"]
+                    if len(observations) == index and observations[-1]["status"] != "pending":
+                        break
+                    time.sleep(0.01)
+        observations = self.bridge._runtime_hooks["field_test"]["observations"]
+        self.assertEqual([item["preview"] for item in observations], ['"before"', '"after"'])
+        self.assertTrue(all(item["target_type"] == "page" for item in observations))
+        self.assertNotIn("hidden", str(observations))
+        self.assertEqual([item["target_type"] for item in self.bridge._runtime_hooks["requests"]], ["page", "page"])
+        self.bridge._runtime_hooks["state"] = "disarmed"
+        comparison = self.bridge.action({"action": "compare_runtime_field_test",
+                                         "baseline_id": observations[0]["id"],
+                                         "variant_id": observations[1]["id"]})["runtime_hooks"]["field_test"]["comparison"]
+        self.assertEqual(comparison["interpretation"], "intervention-associated")
+        observations[1]["query_context_sha256"] = "f" * 64
+        comparison = self.bridge.action({"action": "compare_runtime_field_test",
+                                         "baseline_id": observations[0]["id"],
+                                         "variant_id": observations[1]["id"]})["runtime_hooks"]["field_test"]["comparison"]
+        self.assertFalse(comparison["same_query_context"])
+        self.assertEqual(comparison["interpretation"], "inconclusive")
+
+    def test_passive_page_value_needs_no_hook_and_stops_on_erase(self):
+        self.bridge._capture_network_content = False
+        url = "https://example.test/api/send"
+        with mock.patch.object(self.bridge, "_command", return_value={}) as command:
+            self.bridge.action({"action": "configure_runtime_field_test", "enabled": True,
+                                "url": url, "method": "GET", "kind": "query",
+                                "pointer": "payload", "confirmed": True})
+        self.assertEqual(command.call_args.args[0], "Network.enable")
+        self.assertTrue(self.bridge._runtime_hook_page_network_enabled)
+        self.bridge._handle_event("Network.requestWillBeSent", {
+            "requestId": "passive-1", "type": "Fetch",
+            "request": {"url": url + "?payload=alpha&other=one", "method": "GET"},
+        })
+        for _ in range(100):
+            observations = self.bridge._runtime_hooks["field_test"]["observations"]
+            if observations and observations[0]["status"] != "pending":
+                break
+            time.sleep(0.01)
+        self.assertEqual(observations[0]["preview"], '"alpha"')
+        self.assertEqual(observations[0]["related_hit_ids"], [])
+        self.bridge.action({"action": "configure_runtime_field_test", "enabled": False})
+        self.bridge._handle_event("Network.requestWillBeSent", {
+            "requestId": "passive-2", "type": "Fetch",
+            "request": {"url": url + "?payload=beta", "method": "GET"},
+        })
+        self.assertEqual(self.bridge._runtime_hooks["field_test"]["observations"], [])
+
+    def test_scoped_extra_headers_complete_missing_worker_header(self):
+        self.bridge._refresh_runtime_hook_workers()
+        session = FakeWorkerSession.instances[0]
+        url = "https://example.test/payload.json"
+        self.bridge.action({"action": "configure_runtime_field_test", "enabled": True,
+                            "url": url, "method": "GET", "kind": "header",
+                            "pointer": "Accept", "confirmed": True})
+        self.bridge._on_runtime_hook_worker_event(session, "Network.requestWillBeSentExtraInfo", {
+            "requestId": "unrelated", "headers": {"Accept": "private-value"},
+        })
+        self.assertEqual(self.bridge._runtime_hooks["field_test"]["observations"], [])
+        self.bridge._on_runtime_hook_worker_event(session, "Network.requestWillBeSent", {
+            "requestId": "matched", "type": "Fetch",
+            "request": {"url": url, "method": "GET", "headers": {}},
+        })
+        self.bridge._on_runtime_hook_worker_event(session, "Network.requestWillBeSentExtraInfo", {
+            "requestId": "matched", "headers": {"Accept": "*/*", "Authorization": "private-value"},
+        })
+        observation = self.bridge._runtime_hooks["field_test"]["observations"][0]
+        self.assertEqual(observation["status"], "available")
+        self.assertEqual(observation["preview"], '"*/*"')
+        self.assertNotIn("private-value", str(observation))
+        self.bridge._on_runtime_hook_worker_event(session, "Network.requestWillBeSent", {
+            "requestId": "extra-before-request", "type": "Fetch", "hasExtraInfo": True,
+            "request": {"url": url, "method": "GET", "headers": {}},
+        })
+        for _ in range(100):
+            second = self.bridge._runtime_hooks["field_test"]["observations"][1]
+            if second["status"] != "pending":
+                break
+            time.sleep(0.01)
+        self.assertEqual(second["status"], "unavailable")
+
+    def test_field_test_missing_body_and_eviction_are_visible(self):
+        self.bridge._refresh_runtime_hook_workers()
+        session = FakeWorkerSession.instances[0]
+        url = "http://127.0.0.1:8766/api/submit"
+        self.bridge.action({"action": "configure_runtime_field_test", "enabled": True,
+                            "url": url, "method": "POST", "pointer": "/payload",
+                            "confirmed": True})
+        self.bridge._runtime_hooks["state"] = "armed"
+        self.bridge._on_runtime_hook_worker_event(session, "Network.requestWillBeSent", {
+            "requestId": "queried", "type": "Fetch",
+            "request": {"url": url + "/other?other=1", "method": "POST",
+                        "postData": '{"payload":"wrong request"}'},
+        })
+        self.assertEqual(self.bridge._runtime_hooks["field_test"]["observations"], [])
+        self.bridge._on_runtime_hook_worker_event(session, "Network.requestWillBeSent", {
+            "requestId": "no-body", "type": "Fetch",
+            "request": {"url": url, "method": "POST"},
+        })
+        test = self.bridge._runtime_hooks["field_test"]
+        self.assertEqual(test["observations"][0]["status"], "uncaptured")
+        original_command = session.command
+
+        def command(method, params=None, timeout=3.0):
+            if method == "Network.getRequestPostData":
+                return {"postData": '{"payload":"found"}'}
+            return original_command(method, params, timeout)
+
+        session.command = command
+        with mock.patch("debugger_bridge.extract_request_value", return_value={
+            "status": "available", "sha256": "a" * 64, "preview": '"found"', "bytes": 7,
+        }):
+            self.bridge._on_runtime_hook_worker_event(session, "Network.requestWillBeSent", {
+                "requestId": "cdp-body", "type": "Fetch",
+                "request": {"url": url, "method": "POST", "hasPostData": True},
+            })
+            for _ in range(100):
+                if test["observations"][1]["status"] != "pending":
+                    break
+                time.sleep(0.01)
+        self.assertEqual(test["observations"][1]["status"], "available")
+        test["comparison"] = {"baseline_id": 1, "variant_id": 2}
+        for index in range(15):
+            self.bridge._on_runtime_hook_worker_event(session, "Network.requestWillBeSent", {
+                "requestId": f"overflow-{index}", "type": "Fetch",
+                "request": {"url": url, "method": "POST"},
+            })
+        self.assertEqual((len(test["observations"]), test["observation_evictions"]), (16, 1))
+        self.assertIsNone(test["comparison"])
+
     @mock.patch("debugger_bridge.locate_function", return_value={
         "kind": "arrow_function", "start": {"line": 0, "column": 10},
         "end": {"line": 0, "column": 39}, "body_start": {"line": 0, "column": 20},
     })
     def test_hook_arms_and_records_hit_on_worker_target(self, _locator):
+        self.bridge._capture_network_content = False
         self.bridge._refresh_runtime_hook_workers()
         session = FakeWorkerSession.instances[0]
         script_id = next(iter(self.bridge._runtime_hook_worker_scripts))
@@ -354,7 +590,9 @@ class RuntimeHookWorkerTests(unittest.TestCase):
             "line": 0, "column": 25, "entry_enabled": True, "return_enabled": False,
         })["runtime_hooks"]
         self.assertEqual(added["definitions"][0]["target_id"], "worker-1")
-        armed = self.bridge.action({"action": "arm_runtime_hooks", "confirmed": True})["runtime_hooks"]
+        with mock.patch.object(self.bridge, "_command", return_value={}) as page_command:
+            armed = self.bridge.action({"action": "arm_runtime_hooks", "confirmed": True})["runtime_hooks"]
+        self.assertEqual(page_command.call_args.args[0], "Network.enable")
         self.assertEqual(armed["active_points"], 1)
         possible = next(params for method, params, _ in session.commands if method == "Debugger.getPossibleBreakpoints")
         self.assertEqual(possible["start"]["scriptId"], "12")

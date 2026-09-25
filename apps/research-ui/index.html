@@ -774,6 +774,23 @@
                   <header><div><h2>Hits</h2><p id="hooks-hit-meta" hidden></p></div><span id="hooks-hit-count" class="experiment-card-badge" data-kind="offline">0 / 512</span></header>
                   <div id="hooks-hits" class="hook-hit-list" role="log" aria-live="polite"><div class="experiment-empty">Arm a hook, then exercise the isolated page.</div></div>
                 </article>
+                <article class="experiment-card">
+                  <header><div><h2>Request value test</h2><p>Compare a request value before and after a return override.</p></div><span id="hooks-field-badge" class="experiment-card-badge" data-kind="offline">Off</span></header>
+                  <div class="experiment-body experiment-form">
+                    <form id="hooks-field-form" class="experiment-form">
+                      <label>Page or worker request URL (path only; query excluded)<input id="hooks-field-url" type="url" maxlength="8192" placeholder="https://example.test/api/submit" autocomplete="off" /></label>
+                      <div class="experiment-form-row"><label>Method<input id="hooks-field-method" type="text" maxlength="32" value="POST" autocomplete="off" /></label><label>Value type<select id="hooks-field-kind"><option value="json">JSON field</option><option value="form">Form field</option><option value="query">Query parameter</option><option value="header">Request header</option><option value="body">Raw text body</option></select></label></div>
+                      <label id="hooks-field-pointer-label">JSON pointer or field name<input id="hooks-field-pointer" type="text" maxlength="256" placeholder="/payload" autocomplete="off" /></label>
+                      <label class="hook-confirm"><input id="hooks-field-confirm" type="checkbox" /> Capture this selected value in the isolated page or worker</label>
+                      <div class="hook-control-actions"><button id="hooks-field-configure" class="trace-button" type="submit" disabled>Capture field</button><button id="hooks-field-erase" class="secondary-button" type="button" disabled>Stop and erase</button></div>
+                    </form>
+                    <p class="experiment-privacy">Matches the chosen path and method even when query values vary. The selected value is previewed and hashed; unselected query input gets an ephemeral keyed digest for comparison. Full request bodies are not retained. Raw text body selection can reveal body content. Observe without a hook, or repeat the same input with a synchronous return override to test an intervention.</p>
+                    <div id="hooks-field-observations" class="hook-hit-list" role="log" aria-live="polite"><div class="experiment-empty">Configure a field, arm a hook, then run the isolated page.</div></div>
+                    <div class="experiment-form-row"><label>Baseline<select id="hooks-field-baseline"></select></label><label>Variant<select id="hooks-field-variant"></select></label></div>
+                    <button id="hooks-field-compare" class="secondary-button" type="button" disabled>Compare selected field</button>
+                    <div id="hooks-field-result" role="status" aria-live="polite"></div>
+                  </div>
+                </article>
                 <details class="experiment-card experiment-disclosure">
                   <summary>Limits</summary>
                   <div class="experiment-context-facts"><div class="experiment-context-fact"><span>Definitions</span><strong>8 / 64 points</strong></div><div class="experiment-context-fact"><span>Returns</span><strong>32 per function</strong></div></div>

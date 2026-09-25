@@ -2950,7 +2950,7 @@
         const hitDetails = [];
         if (hooks?.hit_evictions || hits.length !== total) hitDetails.push(`${hits.length} retained`);
         if (hooks?.hit_evictions) hitDetails.push(`${hooks.hit_evictions} evicted`);
-        if (requests.length) hitDetails.push(`${requests.length} worker ${requests.length === 1 ? 'request' : 'requests'}`);
+        if (requests.length) hitDetails.push(`${requests.length} ${requests.length === 1 ? 'request' : 'requests'}`);
         elements.hooksHitMeta.textContent = hitDetails.join(' · ');
         elements.hooksHitMeta.hidden = !hitDetails.length;
         const key = JSON.stringify([hits, requests, total, hooks?.hit_evictions, hooks?.last_failure]);
@@ -2969,12 +2969,12 @@
           if (event.kind === 'request') {
             const request = event.value;
             const row = document.createElement('button'); row.type = 'button'; row.className = 'hook-hit-row hook-hit-link';
-            row.setAttribute('aria-label', `Show ${request.method} worker request in Traffic`);
+            row.setAttribute('aria-label', `Show ${request.method} ${request.target_type || 'worker'} request in Traffic`);
             row.addEventListener('click', () => revealRuntimeHookRequest(request));
             row.append(
               textElement('span', 'hook-hit-title', `${request.method} ${request.url}`),
               textElement('span', 'hook-hit-operation', request.status === null ? 'pending' : String(request.status)),
-              textElement('span', 'hook-hit-meta', `${new Date(request.occurred_at_ms).toLocaleTimeString()} · observed worker request ${request.target_id.slice(0, 12)} · ${request.resource_type || 'resource'}`),
+              textElement('span', 'hook-hit-meta', `${new Date(request.occurred_at_ms).toLocaleTimeString()} · observed ${request.target_type || 'worker'} request ${request.target_id.slice(0, 12)} · ${request.resource_type || 'resource'}`),
               textElement('span', 'hook-hit-bindings', request.related_hit_ids.length
                 ? `Related hits ${request.related_hit_ids.join(', ')} · ${request.relation}; not proof of a causal call chain`
                 : 'No hook hit linked to this request')
@@ -3002,6 +3002,72 @@
         elements.hooksHits.replaceChildren(...rows);
       }
 
+      function renderRuntimeFieldTest(hooks, editable) {
+        const test = hooks?.field_test;
+        elements.hooksFieldBadge.textContent = test?.enabled ? `${test.observations.length} observed` : 'Off';
+        elements.hooksFieldBadge.dataset.kind = test?.enabled ? '' : 'offline';
+        elements.hooksFieldForm.querySelectorAll('input, select').forEach(field => { field.disabled = !editable; });
+        const kind = elements.hooksFieldKind.value;
+        elements.hooksFieldPointerLabel.firstChild.textContent = kind === 'json' ? 'JSON pointer' :
+          kind === 'body' ? 'No field name needed' : kind === 'header' ? 'Header name' : 'Field name';
+        elements.hooksFieldPointer.placeholder = kind === 'json' ? '/payload' : kind === 'header' ? 'X-Request-ID' :
+          kind === 'body' ? '' : 'payload';
+        elements.hooksFieldPointer.disabled = !editable || kind === 'body';
+        elements.hooksFieldConfigure.disabled = !editable || !elements.hooksFieldConfirm.checked ||
+          !elements.hooksFieldUrl.value.trim() || (kind !== 'body' && !elements.hooksFieldPointer.value.trim()) || state.debuggerActionPending;
+        elements.hooksFieldErase.disabled = !editable || !test?.enabled || state.debuggerActionPending;
+        const observations = test?.observations ?? [];
+        const key = JSON.stringify([observations, test?.comparison, test?.enabled]);
+        if (key !== state.runtimeFieldTestKey) {
+          state.runtimeFieldTestKey = key;
+          if (observations.length) {
+            elements.hooksFieldObservations.replaceChildren(...observations.map(observation => {
+              const row = document.createElement('div'); row.className = 'hook-hit-row';
+              row.append(textElement('span', 'hook-hit-title', `#${observation.id} · ${observation.method} ${observation.url}`),
+                textElement('span', 'hook-hit-operation', observation.status.replaceAll('_', ' ')),
+                textElement('span', 'hook-hit-meta', `${new Date(observation.occurred_at_ms).toLocaleTimeString()} · ${observation.target_type || 'worker'} ${observation.target_id.slice(0, 12)} · request ${observation.request_id}`),
+                textElement('span', 'hook-hit-bindings', observation.status === 'available'
+                  ? `${observation.preview || '(empty)'}${observation.bytes > new TextEncoder().encode(observation.preview).length ? '…' : ''} · SHA-256 ${observation.sha256}`
+                  : 'No complete selected value retained.'));
+              return row;
+            }));
+          } else elements.hooksFieldObservations.replaceChildren(textElement('div', 'experiment-empty',
+            test?.enabled ? 'Repeat the page or worker request. A return hook is optional for observation.' :
+              'Configure a value, then run the isolated page. Add a return hook to test an intervention.'));
+          const previousBaseline = elements.hooksFieldBaseline.value;
+          const previousVariant = elements.hooksFieldVariant.value;
+          const options = available => available.map(observation => {
+            const option = document.createElement('option'); option.value = String(observation.id);
+            option.textContent = `#${observation.id} · ${new Date(observation.occurred_at_ms).toLocaleTimeString()}`;
+            return option;
+          });
+          const available = observations.filter(observation => observation.status === 'available');
+          elements.hooksFieldBaseline.replaceChildren(...options(available));
+          elements.hooksFieldVariant.replaceChildren(...options(available));
+          if (available.some(observation => String(observation.id) === previousBaseline)) elements.hooksFieldBaseline.value = previousBaseline;
+          if (available.some(observation => String(observation.id) === previousVariant)) elements.hooksFieldVariant.value = previousVariant;
+          else if (available.length) elements.hooksFieldVariant.value = String(available[available.length - 1].id);
+          const comparison = test?.comparison;
+          elements.hooksFieldResult.replaceChildren();
+          if (comparison) {
+            elements.hooksFieldResult.append(document.createTextNode(
+              `#${comparison.baseline_id} → #${comparison.variant_id}: ${comparison.changed ? 'value changed' : 'value unchanged'} · ${comparison.interpretation.replaceAll('-', ' ')}${comparison.same_query_context ? '' : ' · other query input changed'}. This does not prove the full value-flow chain.`));
+            const hit = hooks.hits.find(candidate => candidate.id === comparison.intervention_hit_id);
+            if (hit) {
+              const sourceLink = document.createElement('button');
+              sourceLink.type = 'button';
+              sourceLink.className = 'source-tool';
+              sourceLink.textContent = `Override hit ${hit.id} in Sources`;
+              sourceLink.addEventListener('click', () => revealRuntimeHookHit(hit));
+              elements.hooksFieldResult.append(sourceLink);
+            }
+          }
+        }
+        elements.hooksFieldCompare.disabled = !editable || !test?.enabled || state.debuggerActionPending ||
+          !elements.hooksFieldBaseline.value || !elements.hooksFieldVariant.value ||
+          elements.hooksFieldBaseline.value === elements.hooksFieldVariant.value;
+      }
+
       function revealRuntimeHookRequest(request) {
         state.selectedRuntimeHookRequest = {sessionId: runtimeHooksState()?.session_id, id: request.id};
         state.runtimeHookTrafficKey = null;
@@ -3022,7 +3088,7 @@
         if (key === state.runtimeHookTrafficKey) return;
         state.runtimeHookTrafficKey = key;
         const close = document.createElement('button'); close.type = 'button'; close.className = 'source-tool';
-        close.textContent = 'Close'; close.setAttribute('aria-label', 'Close worker request trail');
+        close.textContent = 'Close'; close.setAttribute('aria-label', 'Close request trail');
         close.addEventListener('click', () => {
           state.selectedRuntimeHookRequest = null;
           state.runtimeHookTrafficKey = null;
@@ -3031,23 +3097,38 @@
         });
         if (!request) {
           elements.runtimeHookTraffic.replaceChildren(
-            textElement('span', 'runtime-hook-traffic-status', 'This ephemeral worker request is no longer available.'), close);
+            textElement('span', 'runtime-hook-traffic-status', 'This ephemeral request is no longer available.'), close);
           return;
         }
         const title = textElement('strong', 'runtime-hook-traffic-title', `${request.method} ${request.url}`);
         const status = textElement('span', 'runtime-hook-traffic-status',
-          `${request.status ?? 'Pending'} · ${request.resource_type || 'resource'} · isolated worker ${request.target_id.slice(0, 12)}`);
+          `${request.status ?? 'Pending'} · ${request.resource_type || 'resource'} · isolated ${request.target_type || 'worker'} ${request.target_id.slice(0, 12)}`);
         const relation = textElement('span', 'runtime-hook-traffic-relation',
           related.length ? `${request.relation}; not proof of a causal call chain`
             : 'No retained hook hit is linked to this request.');
-        const heading = textElement('span', 'runtime-hook-traffic-heading', 'Isolated worker request trail · ephemeral, separate from captured requests');
+        const heading = textElement('span', 'runtime-hook-traffic-heading', 'Isolated request trail · ephemeral, separate from captured requests');
         const links = related.map(hit => {
           const button = document.createElement('button'); button.type = 'button'; button.className = 'source-tool';
           button.textContent = `Hit ${hit.id} · ${hit.category} in Sources`;
           button.addEventListener('click', () => revealRuntimeHookHit(hit));
           return button;
         });
-        elements.runtimeHookTraffic.replaceChildren(heading, title, status, relation, ...links, close);
+        const testField = document.createElement('button'); testField.type = 'button'; testField.className = 'source-tool';
+        testField.textContent = ['arming', 'armed', 'handling', 'stopping'].includes(hooks?.state)
+          ? 'Disarm to test a field' : 'Test a field';
+        testField.addEventListener('click', async () => {
+          if (['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state)) {
+            const response = await runExperimentAction({action: 'disarm_runtime_hooks'});
+            if (!response) return;
+          }
+          elements.hooksFieldUrl.value = request.url;
+          elements.hooksFieldMethod.value = request.method;
+          showScreen('sources');
+          if (!state.sourceHooksOpen) openSourceHooks(false, false);
+          renderRuntimeHooks();
+          elements.hooksFieldPointer.focus();
+        });
+        elements.runtimeHookTraffic.replaceChildren(heading, title, status, relation, ...links, testField, close);
       }
 
       function revealRuntimeHookHit(hit) {
@@ -3165,6 +3246,7 @@
         elements.hooksDisarm.disabled = !active || state.debuggerActionPending;
         renderRuntimeHookDefinitions(hooks, active);
         renderRuntimeHookHits(hooks);
+        renderRuntimeFieldTest(hooks, editable);
         elements.sourceHooksNotice.dataset.kind = elements.experimentNotice.dataset.kind;
         elements.sourceHooksNotice.textContent = hooks?.state === 'armed' && !state.experimentError && !hooks.last_failure
           ? `Armed · ${hooks.total_hits} ${hooks.total_hits === 1 ? 'hit' : 'hits'}`
@@ -8687,6 +8769,24 @@
         const response = await runExperimentAction({action: 'disarm_runtime_hooks'});
         if (response) elements.hooksConfirm.checked = false;
       });
+      elements.hooksFieldForm.addEventListener('submit', async event => {
+        event.preventDefault();
+        const response = await runExperimentAction({action: 'configure_runtime_field_test', enabled: true,
+          url: elements.hooksFieldUrl.value.trim(), method: elements.hooksFieldMethod.value.trim().toUpperCase(),
+          kind: elements.hooksFieldKind.value, pointer: elements.hooksFieldPointer.value.trim(),
+          confirmed: elements.hooksFieldConfirm.checked});
+        if (response) elements.hooksFieldConfirm.checked = false;
+      });
+      elements.hooksFieldForm.addEventListener('input', renderRuntimeHooks);
+      elements.hooksFieldKind.addEventListener('change', () => {
+        elements.hooksFieldPointer.value = '';
+        renderRuntimeHooks();
+      });
+      elements.hooksFieldErase.addEventListener('click', () => runExperimentAction({action: 'configure_runtime_field_test', enabled: false}));
+      elements.hooksFieldCompare.addEventListener('click', () => runExperimentAction({action: 'compare_runtime_field_test',
+        baseline_id: Number(elements.hooksFieldBaseline.value), variant_id: Number(elements.hooksFieldVariant.value)}));
+      elements.hooksFieldBaseline.addEventListener('change', renderRuntimeHooks);
+      elements.hooksFieldVariant.addEventListener('change', renderRuntimeHooks);
       elements.automationCreate.addEventListener('click', () => runExperimentAction({
         action: 'create_request_interception_experiment'
       }));

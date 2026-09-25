@@ -1974,6 +1974,7 @@
 
       function setExperimentMode(mode, focus = false) {
         if (!['interceptor', 'repeater', 'object', 'hooks', 'automation'].includes(mode)) return;
+        if (state.sourceHooksOpen) closeSourceHooks(false);
         state.experimentMode = mode;
         elements.interceptionWorkspace.hidden = mode !== 'interceptor';
         elements.repeaterWorkspace.hidden = mode !== 'repeater';
@@ -2947,6 +2948,9 @@
         elements.hooksHitCount.textContent = `${total} / ${hooks?.limits?.total_hits ?? 512}`;
         elements.hooksHitCount.dataset.kind = hooks?.last_failure ? 'error' : hits.length ? '' : 'offline';
         elements.hooksHitMeta.textContent = `${hits.length} hits retained · ${hooks?.hit_evictions ?? 0} hit evictions · ${requests.length} worker requests · metadata stays ephemeral`;
+        const key = JSON.stringify([hits, requests, total, hooks?.hit_evictions, hooks?.last_failure]);
+        if (key === state.runtimeHookHitsKey) return;
+        state.runtimeHookHitsKey = key;
         if (!hits.length && !requests.length) {
           elements.hooksHits.replaceChildren(textElement('div', 'experiment-empty', 'Arm a hook, then exercise the isolated page.'));
           return;
@@ -2959,7 +2963,9 @@
         const rows = events.map(event => {
           if (event.kind === 'request') {
             const request = event.value;
-            const row = document.createElement('div'); row.className = 'hook-hit-row';
+            const row = document.createElement('button'); row.type = 'button'; row.className = 'hook-hit-row hook-hit-link';
+            row.setAttribute('aria-label', `Show ${request.method} worker request in Traffic`);
+            row.addEventListener('click', () => revealRuntimeHookRequest(request));
             row.append(
               textElement('span', 'hook-hit-title', `${request.method} ${request.url}`),
               textElement('span', 'hook-hit-operation', request.status === null ? 'pending' : String(request.status)),
@@ -2971,7 +2977,9 @@
             return row;
           }
           const hit = event.value;
-          const row = document.createElement('div'); row.className = 'hook-hit-row';
+          const row = document.createElement('button'); row.type = 'button'; row.className = 'hook-hit-row hook-hit-link';
+          row.setAttribute('aria-label', `Show ${hit.label} ${hit.category} hit in Sources`);
+          row.addEventListener('click', () => revealRuntimeHookHit(hit));
           const title = textElement('span', 'hook-hit-title', `${hit.label} · ${hit.function}`);
           const operation = textElement('span', 'hook-hit-operation', hit.operation.replaceAll('_', ' '));
           const source = sourceName({url: hit.source, source_type: 'script', script_id: ''});
@@ -2987,6 +2995,73 @@
           return row;
         });
         elements.hooksHits.replaceChildren(...rows);
+      }
+
+      function revealRuntimeHookRequest(request) {
+        state.selectedRuntimeHookRequest = {sessionId: runtimeHooksState()?.session_id, id: request.id};
+        state.runtimeHookTrafficKey = null;
+        showScreen('traffic');
+        renderRuntimeHookTraffic();
+        requestAnimationFrame(() => elements.runtimeHookTraffic.focus({preventScroll: true}));
+      }
+
+      function renderRuntimeHookTraffic() {
+        const selected = state.selectedRuntimeHookRequest;
+        elements.runtimeHookTraffic.hidden = !selected;
+        if (!selected) return;
+        const hooks = runtimeHooksState();
+        const request = hooks?.session_id === selected.sessionId
+          ? hooks.requests.find(candidate => candidate.id === selected.id) : null;
+        const related = request?.related_hit_ids.map(id => hooks.hits.find(hit => hit.id === id)).filter(Boolean) ?? [];
+        const key = JSON.stringify([selected, request, related]);
+        if (key === state.runtimeHookTrafficKey) return;
+        state.runtimeHookTrafficKey = key;
+        const close = document.createElement('button'); close.type = 'button'; close.className = 'source-tool';
+        close.textContent = 'Close'; close.setAttribute('aria-label', 'Close worker request trail');
+        close.addEventListener('click', () => {
+          state.selectedRuntimeHookRequest = null;
+          state.runtimeHookTrafficKey = null;
+          elements.runtimeHookTraffic.hidden = true;
+          elements.requestFilter.focus({preventScroll: true});
+        });
+        if (!request) {
+          elements.runtimeHookTraffic.replaceChildren(
+            textElement('span', 'runtime-hook-traffic-status', 'This ephemeral worker request is no longer available.'), close);
+          return;
+        }
+        const title = textElement('strong', 'runtime-hook-traffic-title', `${request.method} ${request.url}`);
+        const status = textElement('span', 'runtime-hook-traffic-status',
+          `${request.status ?? 'Pending'} · ${request.resource_type || 'resource'} · isolated worker ${request.target_id.slice(0, 12)}`);
+        const relation = textElement('span', 'runtime-hook-traffic-relation',
+          related.length ? `${request.relation}; not proof of a causal call chain`
+            : 'No retained hook hit is linked to this request.');
+        const heading = textElement('span', 'runtime-hook-traffic-heading', 'Isolated worker request trail · ephemeral, separate from captured requests');
+        const links = related.map(hit => {
+          const button = document.createElement('button'); button.type = 'button'; button.className = 'source-tool';
+          button.textContent = `Hit ${hit.id} · ${hit.category} in Sources`;
+          button.addEventListener('click', () => revealRuntimeHookHit(hit));
+          return button;
+        });
+        elements.runtimeHookTraffic.replaceChildren(heading, title, status, relation, ...links, close);
+      }
+
+      function revealRuntimeHookHit(hit) {
+        const definition = runtimeHooksState()?.definitions.find(candidate => candidate.id === hit.hook_id);
+        const source = liveSources().find(candidate => candidate.script_id === definition?.script_id) ??
+          liveSources().find(candidate => candidate.target_id === hit.target_id && candidate.url === hit.source);
+        if (!source) {
+          state.experimentError = 'The source for this hit is no longer attached.';
+          showScreen('sources');
+          if (!state.sourceHooksOpen) openSourceHooks(false, false);
+          else renderRuntimeHooks();
+          return;
+        }
+        showScreen('sources');
+        if (!state.sourceHooksOpen) openSourceHooks(false, false);
+        selectScript(source.script_id, hit.line);
+        state.sourceCursor = {scriptId: source.script_id, line: hit.line, column: hit.column};
+        elements.sourcePosition.textContent = `Line ${hit.line + 1}, Column ${hit.column + 1}`;
+        requestAnimationFrame(() => elements.sourceCodeWrap.focus({preventScroll: true}));
       }
 
       function renderRuntimeHooks() {
@@ -3018,6 +3093,7 @@
           ...workerScripts,
           ...hookableScripts.filter(script => script.target_type !== 'worker').slice(-(256 - workerScripts.length))
         ];
+        elements.hooksWorkspace.dataset.sourceReady = String(Boolean(pageReady && scripts.length));
         const selectedScript = elements.hooksScript.value;
         const options = scripts.map(script => {
           const option = document.createElement('option'); option.value = script.script_id;
@@ -3083,6 +3159,8 @@
         elements.hooksDisarm.disabled = !active || state.debuggerActionPending;
         renderRuntimeHookDefinitions(hooks, active);
         renderRuntimeHookHits(hooks);
+        elements.sourceHooksNotice.dataset.kind = elements.experimentNotice.dataset.kind;
+        elements.sourceHooksNotice.textContent = elements.experimentNotice.textContent;
       }
 
       function parseAutomationVariables() {
@@ -3292,7 +3370,7 @@
         elements.interceptionWorkspace.hidden = state.experimentMode !== 'interceptor';
         elements.repeaterWorkspace.hidden = state.experimentMode !== 'repeater';
         elements.objectWorkspace.hidden = state.experimentMode !== 'object';
-        elements.hooksWorkspace.hidden = state.experimentMode !== 'hooks';
+        elements.hooksWorkspace.hidden = !state.sourceHooksOpen && state.experimentMode !== 'hooks';
         elements.automationWorkspace.hidden = state.experimentMode !== 'automation';
         renderActionScope();
         if (state.experimentMode === 'repeater') {
@@ -3666,22 +3744,63 @@
         }
       }
 
-      function pivotSourceToRuntimeHooks() {
-        const source = selectedSource();
+      function prefillHookFromSource(source) {
         const hooks = runtimeHooksState();
         if (source?.source_type !== 'script' || state.sourceDeobfuscated || state.sourceFormatted || !hooks?.isolated ||
-            hooks.target_id !== state.debuggerSession?.target?.id) return;
+            hooks.target_id !== state.debuggerSession?.target?.id) return false;
         const cursor = state.sourceCursor?.scriptId === source.script_id ? state.sourceCursor : null;
         const line = cursor?.line ?? source.start_line;
-        state.experimentMode = 'hooks';
-        showScreen('experiments');
         elements.hooksScript.value = source.script_id;
         elements.hooksEntryMode.value = 'source';
         elements.hooksLine.value = String(line + 1);
         elements.hooksColumn.value = String((cursor?.column ?? sourceRuntimeColumn(source, 0)) + 1);
         if (!elements.hooksLabel.value) elements.hooksLabel.value = `${sourceName(source)}:${line + 1}`;
+        return true;
+      }
+
+      function openSourceHooks(prefill = true, focus = true) {
+        state.sourceHooksOpen = true;
+        state.experimentMode = 'hooks';
+        document.querySelector('#screen-sources').dataset.hooksOpen = 'true';
+        document.querySelector('#screen-sources').append(elements.hooksWorkspace);
+        elements.sourceHooksHits.append(elements.hooksHitsColumn);
+        elements.hooksWorkspace.hidden = false;
+        elements.sourceHooksHits.hidden = false;
+        elements.sourceHooksNotice.hidden = false;
+        elements.sourceHookPivot.setAttribute('aria-expanded', 'true');
+        renderSourceSidebar();
         renderRuntimeHooks();
-        requestAnimationFrame(() => elements.hooksLabel.focus());
+        if (prefill) {
+          prefillHookFromSource(selectedSource());
+          renderRuntimeHooks();
+        }
+        if (focus) requestAnimationFrame(() => {
+          const field = [elements.hooksLabel, elements.hooksCreate, elements.hooksDisarm, elements.sourceHooksClose]
+            .find(candidate => !candidate.disabled);
+          field?.focus({preventScroll: true});
+        });
+      }
+
+      function closeSourceHooks(restoreFocus = true) {
+        state.sourceHooksOpen = false;
+        document.querySelector('#screen-sources').dataset.hooksOpen = 'false';
+        elements.hooksHome.after(elements.hooksWorkspace);
+        elements.hooksHitsHome.after(elements.hooksHitsColumn);
+        elements.sourceHooksHits.hidden = true;
+        elements.sourceHooksNotice.hidden = true;
+        elements.sourceHookPivot.setAttribute('aria-expanded', 'false');
+        elements.hooksWorkspace.hidden = state.experimentMode !== 'hooks' || document.querySelector('#screen-experiments').hidden;
+        renderSourceSidebar();
+        if (restoreFocus) elements.sourceHookPivot.focus({preventScroll: true});
+      }
+
+      function pivotSourceToRuntimeHooks() {
+        if (state.sourceHooksOpen) {
+          closeSourceHooks();
+          return;
+        }
+        if (!['running', 'paused'].includes(state.debuggerSession?.state)) return;
+        openSourceHooks(Boolean(selectedSource()));
       }
 
       async function applyRepeaterVariables() {
@@ -6203,10 +6322,8 @@
         elements.sourceDeob.setAttribute('aria-pressed', String(state.sourceDeobfuscated));
         elements.sourceDeob.setAttribute('aria-label', state.sourceDeobfuscated ? 'Show original evidence' : 'Show deobfuscated representation');
         elements.sourceDeob.title = state.sourceDeobfuscated ? 'Show original evidence' : 'Show deobfuscated representation';
-        const hooks = runtimeHooksState();
-        elements.sourceHookPivot.disabled = source?.source_type !== 'script' || state.sourceDeobfuscated || state.sourceFormatted ||
-          !hooks?.isolated || hooks.target_id !== state.debuggerSession?.target?.id ||
-          ['arming', 'armed', 'handling', 'stopping'].includes(hooks?.state);
+        elements.sourceHookPivot.disabled = !['running', 'paused'].includes(state.debuggerSession?.state);
+        elements.sourceHookPivot.setAttribute('aria-expanded', String(state.sourceHooksOpen));
         renderSourceContent(source, view);
         if ((source?.source_type === 'script' || source?.source_type === 'artifact') && source.kind === 'javascript') loadDeobfuscation(source);
         renderDeobfuscationReport(source);
@@ -6398,6 +6515,7 @@
         state.sourceFormatted = false;
         if (!state.openScriptIds.includes(scriptId)) state.openScriptIds.push(scriptId);
         renderSources();
+        if (state.sourceHooksOpen && line === null && prefillHookFromSource(source)) renderRuntimeHooks();
         loadScriptContent(source);
       }
 
@@ -7578,6 +7696,7 @@
         const paused = session?.state === 'paused';
         const running = session?.state === 'running';
         const attached = paused || running;
+        elements.sourceHookPivot.disabled = !attached;
         const originTraceActive = memoryOriginTraceActive();
         elements.debugResume.disabled = !paused || state.debuggerActionPending || originTraceActive;
         elements.debugPause.disabled = !running || state.debuggerActionPending || originTraceActive;
@@ -7719,6 +7838,8 @@
           }
           renderMemory();
           if (!document.querySelector('#screen-experiments').hidden) renderExperiment();
+          if (state.sourceHooksOpen) renderRuntimeHooks();
+          if (state.selectedRuntimeHookRequest) renderRuntimeHookTraffic();
           if (!document.querySelector('#screen-api-collection').hidden) renderApiCollection();
           const sourcesVisible = !document.querySelector('#screen-sources').hidden;
           if (sourcesVisible && !sourceRendered) {
@@ -7744,6 +7865,8 @@
           renderDebugger();
           renderMemory();
           if (!document.querySelector('#screen-experiments').hidden) renderExperiment();
+          if (state.sourceHooksOpen) renderRuntimeHooks();
+          if (state.selectedRuntimeHookRequest) renderRuntimeHookTraffic();
           if (!document.querySelector('#screen-api-collection').hidden) renderApiCollection();
         } finally {
           state.debuggerRefreshing = false;
@@ -7828,6 +7951,7 @@
 
       function showScreen(name, trigger = null) {
         const screenName = name === 'backtraces' ? 'backtrace' : name;
+        if (screenName !== 'sources' && state.sourceHooksOpen) closeSourceHooks(false);
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
         document.querySelectorAll('.nav-button').forEach(button => {
           const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence') || (button.dataset.screen === 'traffic' && screenName === 'vm');
@@ -7841,6 +7965,7 @@
           } else button.removeAttribute('aria-current');
         });
         if (screenName === 'signals') renderFingerprintActivity();
+        if (screenName === 'traffic') renderRuntimeHookTraffic();
         if (screenName === 'backtrace') renderBacktrace();
         if (screenName === 'experiments') renderExperiment();
         if (screenName === 'api-collection') {
@@ -8340,10 +8465,13 @@
         if (source?.source_type === 'script' && !transformed) {
           state.sourceCursor = {scriptId: source.script_id, line: runtimeLine, column};
           elements.sourceCode.querySelectorAll('.source-line').forEach(row => row.classList.toggle('cursor', row === line));
+          if (state.sourceHooksOpen && prefillHookFromSource(source)) renderRuntimeHooks();
         }
         elements.sourcePosition.textContent = `Line ${line.dataset.line}, Column ${column + 1}`;
       });
       elements.sourceHookPivot.addEventListener('click', pivotSourceToRuntimeHooks);
+      elements.sourceHooksClose.addEventListener('click', () => closeSourceHooks());
+      elements.sourceHooksExperiments.addEventListener('click', () => showScreen('experiments'));
       const setConsoleOpen = open => {
         state.consoleOpen = open;
         elements.consoleDrawer.hidden = !open;

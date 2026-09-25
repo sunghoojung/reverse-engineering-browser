@@ -7,34 +7,30 @@ from ui_test_support import read_ui_sources
 
 
 class SourceCursorTest(unittest.TestCase):
-    def test_hook_pivot_uses_only_original_selected_script_coordinates(self):
+    def test_hook_prefill_uses_only_original_selected_script_coordinates(self):
         node = shutil.which('node')
         if not node:
             self.skipTest('Node.js is not installed')
         source = read_ui_sources()
         functions = []
-        for name in ('sourceRuntimeColumn', 'pivotSourceToRuntimeHooks'):
+        for name in ('sourceRuntimeColumn', 'prefillHookFromSource'):
             start = source.index(f'      function {name}(')
             end = source.index('\n      }', start) + len('\n      }')
             functions.append(source[start:end])
         exercise = r'''
 const source = {source_type: 'script', script_id: 'second', start_line: 7, start_column: 31};
-const state = {sourceDeobfuscated: false, sourceCursor: {scriptId: 'first', line: 90, column: 800}, debuggerSession: {target: {id: 'page'}}};
-const elements = Object.fromEntries(['hooksScript', 'hooksEntryMode', 'hooksLine', 'hooksColumn', 'hooksLabel'].map(k => [k, {value: '', focus(){}}]));
-const selectedSource = () => source;
+const state = {sourceDeobfuscated: false, sourceFormatted: false, sourceCursor: {scriptId: 'first', line: 90, column: 800}, debuggerSession: {target: {id: 'page'}}};
+const elements = Object.fromEntries(['hooksScript', 'hooksEntryMode', 'hooksLine', 'hooksColumn', 'hooksLabel'].map(k => [k, {value: ''}]));
 const runtimeHooksState = () => ({isolated: true, target_id: 'page'});
-const showScreen = () => {};
-const renderRuntimeHooks = () => {};
 const sourceName = () => 'inline';
-const requestAnimationFrame = callback => callback();
-pivotSourceToRuntimeHooks();
+prefillHookFromSource(source);
 const switched = [elements.hooksEntryMode.value, elements.hooksLine.value, elements.hooksColumn.value];
 state.sourceCursor = {scriptId: 'second', line: 8, column: 62};
-pivotSourceToRuntimeHooks();
+prefillHookFromSource(source);
 const selected = [elements.hooksLine.value, elements.hooksColumn.value];
 state.sourceDeobfuscated = true;
 state.sourceCursor.column = 999;
-pivotSourceToRuntimeHooks();
+prefillHookFromSource(source);
 const pretty = elements.hooksColumn.value;
 process.stdout.write(JSON.stringify({switched, selected, pretty, nextLine: sourceRuntimeColumn(source, 1)}));
 '''

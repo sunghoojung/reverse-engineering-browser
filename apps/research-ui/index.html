@@ -43,6 +43,7 @@
       <div id="workspace" class="workspace">
         <main class="main">
           <section id="screen-traffic" class="screen" aria-label="Traffic">
+            <section id="runtime-hook-traffic" class="runtime-hook-traffic" aria-label="Isolated worker request trail" tabindex="-1" hidden></section>
             <div class="traffic-grid">
               <div class="request-pane">
                 <div class="network-tools">
@@ -217,7 +218,7 @@
                 <label><span class="sr-only" hidden>Find in source</span><input id="source-search" class="source-search" type="search" placeholder="Find" aria-label="Find in source" title="Find text; Enter for next, Shift+Enter for previous (first 1000 matches)" /></label>
                 <button id="source-pretty" class="source-tool" type="button" aria-label="Pretty print source" title="Pretty print source" disabled>{ }</button>
                 <button id="source-deob" class="source-tool" type="button" aria-label="Show deobfuscated representation" title="Show deobfuscated representation" disabled>Deob</button>
-                <button id="source-hook-pivot" class="source-tool" type="button" title="Add Runtime Hook at cursor" disabled>Hook</button>
+                <button id="source-hook-pivot" class="source-tool" type="button" aria-controls="hooks-workspace" aria-expanded="false" title="Open Runtime Hooks beside source" disabled>Hooks</button>
                 <button id="source-sidebar-toggle" class="source-tool" type="button" aria-controls="source-sidebar" aria-expanded="false">Details</button>
                 <button id="console-toggle" class="source-tool" type="button" aria-label="Toggle console drawer" title="Toggle console drawer (Escape)">Console</button>
               </div>
@@ -241,6 +242,8 @@
                 <div id="quick-open-results" class="quick-open-results"></div>
               </div>
             </section>
+
+            <section id="source-hooks-hits" class="source-hooks-hits" aria-label="Runtime Hook hits" hidden></section>
 
             <aside id="source-sidebar" class="sources-debugger" aria-label="Debugger sidebar" hidden>
               <div class="debug-controls" aria-label="Debugger controls">
@@ -693,8 +696,11 @@
                 </details>
               </div>
             </div>
-            <div id="hooks-workspace" class="experiment-workspace" hidden>
-              <div class="experiment-column">
+            <div id="hooks-home" hidden></div>
+            <div id="hooks-workspace" class="experiment-workspace" aria-label="Runtime Hooks" hidden>
+              <div class="source-hooks-head"><strong>Runtime Hooks · isolated experiment</strong><button id="source-hooks-experiments" class="source-tool" type="button">Experiments</button><button id="source-hooks-close" class="source-tool" type="button" aria-label="Close Runtime Hooks panel">Close</button></div>
+              <div id="source-hooks-notice" class="experiment-notice" data-kind="idle" role="status" aria-live="polite" hidden></div>
+              <div class="experiment-column hooks-setup-column">
                 <article class="experiment-card">
                   <header>
                     <div><h2>Session</h2><p id="hooks-context-message">No disposable Experiment context exists.</p></div>
@@ -736,7 +742,7 @@
                   </div>
                 </article>
               </div>
-              <div class="experiment-column">
+              <div class="experiment-column hooks-definition-column">
                 <article class="experiment-card">
                   <header><div><h2>Function hook</h2><p>Choose a live page or worker source. Source cursor mode resolves an inner function and its entry/return points; live-function mode accepts a side-effect-free expression and captures entry only.</p></div><span id="hooks-definition-count" class="experiment-card-badge" data-kind="offline">0 / 8</span></header>
                   <div class="experiment-body">
@@ -761,7 +767,8 @@
                   <div id="hooks-definitions" class="hook-definition-list"><div class="experiment-empty">No function hooks configured.</div></div>
                 </article>
               </div>
-              <div class="experiment-column">
+              <div id="hooks-hits-home" hidden></div>
+              <div id="hooks-hits-column" class="experiment-column">
                 <article class="experiment-card hook-hits-card">
                   <header><div><h2>Function hits</h2><p id="hooks-hit-meta">Entry bindings and return outcomes stay in ephemeral session memory.</p></div><span id="hooks-hit-count" class="experiment-card-badge" data-kind="offline">0 / 512</span></header>
                   <div id="hooks-hits" class="hook-hit-list" role="log" aria-live="polite"><div class="experiment-empty">Arm a hook, then exercise the isolated page.</div></div>

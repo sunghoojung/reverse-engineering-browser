@@ -5214,6 +5214,19 @@ class DebuggerBridge:
     def _configure_action_scope_session(
         self, session: ActionScopeTargetSession
     ) -> None:
+        # Attach from the owning page before it navigates. A worker discovered
+        # only through the browser target list can still have an empty URL and
+        # accept a CDP connection without servicing Runtime commands. Page-
+        # scoped auto-attach initializes the worker inspector without pausing it.
+        session.command(
+            "Target.setAutoAttach",
+            {
+                "autoAttach": True,
+                "waitForDebuggerOnStart": False,
+                "flatten": True,
+                "filter": [{"type": "worker", "exclude": False}],
+            },
+        )
         with self._lock:
             configured = self._request_interception_configured
             matches = self._action_scope_matches_locked(session.target_id)
@@ -5237,6 +5250,14 @@ class DebuggerBridge:
         method: str,
         params: dict[str, Any],
     ) -> None:
+        if method == "Target.attachedToTarget":
+            target_info = params.get("targetInfo")
+            if isinstance(target_info, dict) and target_info.get("type") == "worker":
+                self._schedule_runtime_hook_worker_refresh()
+            return
+        if method == "Target.detachedFromTarget":
+            self._schedule_runtime_hook_worker_refresh()
+            return
         if method == "Fetch.requestPaused":
             self._handle_request_interception_pause_async(params, session)
             return
@@ -5602,6 +5623,7 @@ class DebuggerBridge:
                 and raw.get("type") == "worker"
                 and isinstance(raw.get("targetId"), str)
                 and raw["targetId"] in discovered
+                and discovered[raw["targetId"]]["url"]
             ),
             key=lambda target: target["id"],
         )

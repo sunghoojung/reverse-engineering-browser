@@ -128,7 +128,8 @@ class RuntimeHookWorkerTests(unittest.TestCase):
         self.bridge._request_interception_context_id = "isolated-1"
         self.bridge._runtime_hooks.update({"state": "ready", "isolated": True, "target_id": "page-1", "session_id": 1})
         self.worker = {
-            "id": "worker-1", "type": "worker", "title": "", "url": "",
+            "id": "worker-1", "type": "worker", "title": "",
+            "url": "http://127.0.0.1:8766/signer-worker.js",
             "web_socket_url": "ws://127.0.0.1/devtools/page/worker-1",
         }
         self.unrelated = {**self.worker, "id": "other-worker"}
@@ -161,6 +162,42 @@ class RuntimeHookWorkerTests(unittest.TestCase):
         self.assertIn("self.onmessage", source["source"])
         self.assertIn(("Debugger.getScriptSource", {"scriptId": "12"}, 5.0), session.commands)
         self.assertNotIn("other-worker", self.bridge._runtime_hook_worker_sessions)
+
+    def test_page_auto_attach_initializes_workers_before_discovery(self):
+        commands = []
+
+        class PageSession:
+            target_id = "page-1"
+
+            def command(self, method, params=None):
+                commands.append((method, params))
+
+        session = PageSession()
+        self.bridge._configure_action_scope_session(session)
+        self.assertEqual(commands[0], (
+            "Target.setAutoAttach",
+            {
+                "autoAttach": True,
+                "waitForDebuggerOnStart": False,
+                "flatten": True,
+                "filter": [{"type": "worker", "exclude": False}],
+            },
+        ))
+        self.assertEqual(commands[1], ("Fetch.disable", None))
+
+        scheduled = []
+        self.bridge._schedule_runtime_hook_worker_refresh = lambda: scheduled.append(True)
+        self.bridge._on_action_scope_event(session, "Target.attachedToTarget", {
+            "targetInfo": {"type": "worker", "targetId": "worker-1"},
+        })
+        self.assertEqual(scheduled, [True])
+
+    def test_uninitialized_worker_target_is_not_attached(self):
+        self.worker["url"] = ""
+        self.bridge._refresh_runtime_hook_workers()
+        self.assertEqual(self.bridge.snapshot()["runtime_hooks"]["workers"], [])
+        self.assertEqual(FakeWorkerSession.instances, [])
+        self.assertIsNone(self.bridge.snapshot()["runtime_hooks"]["last_failure"])
 
     def test_worker_limit_and_detach_drop_stale_sources(self):
         candidates = [

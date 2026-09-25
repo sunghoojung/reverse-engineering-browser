@@ -96,8 +96,16 @@ pivot. In the pinned one-line file, the `const` starts at line 1, column
 page handoff; arm it with the isolated-target confirmation, then click
 **Prepare shipment**. The Hooks panel separates worker hits from page hits and
 shows the worker's `/api/submit` request with any nearby-hit association
-labeled temporal/inferred. This guide describes the verification procedure;
-it does not claim a new live run until that result is recorded.
+labeled temporal/inferred.
+
+Observed on 2026-09-24 in an isolated Origin Trace session using Brave Browser
+Development 151.1.95.0: `signer-worker.js` appeared as a Worker source, and a
+source hook at line 1, column 12,270 recorded an entry and return hit in
+`_0x2a814c`. **Prepare shipment** still returned a receipt. Runtime Hooks
+showed the worker's `POST /api/submit` with status 200 and related it to the
+return hit as **same-context temporal proximity, inferred**, not a proven
+causal chain. The hook was disarmed and the disposable context was erased
+after verification.
 
 Live-function-object mode offers an additional entry-only test using
 `self.onmessage` in the worker target. It is not automatic recovery of the

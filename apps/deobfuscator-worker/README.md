@@ -26,6 +26,14 @@ Example request:
 {"source":"const value = 1 + 2 * 3;"}
 ```
 
+Runtime Hooks may instead include `function_at_byte`, a zero-based UTF-8 byte
+offset in the original source. The worker returns the innermost enclosing
+function's `kind`, `start`, `end`, and `body_start` byte offsets in
+`function_location`, without executing or rewriting the script. In this query
+mode, `derived_source` is empty and `function_location` is null when the cursor
+is outside a function. The live debugger converts CDP UTF-16 columns before
+querying and uses the body start to find V8's first breakable entry point.
+
 The worker is a separate process bundled as `OriginTraceDeobfuscator` in the
 native macOS app. `DeobfuscationService.swift` invokes it with a five-second
 wall-clock deadline and projects its original UTF-8 byte ranges into the shared

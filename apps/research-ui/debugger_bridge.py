@@ -5684,7 +5684,7 @@ class DebuggerBridge:
                     browser_url=browser_url,
                 )
                 session.start()
-                session.command("Network.enable")
+                session.command("Network.enable", {"maxPostDataSize": 0})
                 with self._runtime_hook_worker_control_lock:
                     with self._lock:
                         active = self._breakpoints_active

@@ -155,6 +155,7 @@ class RuntimeHookWorkerTests(unittest.TestCase):
         self.assertEqual(len(FakeWorkerSession.instances), 1)
         session = FakeWorkerSession.instances[0]
         self.assertEqual(session.options["browser_url"], "ws://127.0.0.1/devtools/browser/test")
+        self.assertIn(("Network.enable", {"maxPostDataSize": 0}, 3.0), session.commands)
         script = next(script for script in self.bridge.snapshot()["scripts"] if script.get("target_type") == "worker")
         self.assertEqual(script["target_id"], "worker-1")
         self.assertNotEqual(script["script_id"], script["cdp_script_id"])

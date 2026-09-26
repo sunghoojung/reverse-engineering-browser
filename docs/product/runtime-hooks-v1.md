@@ -118,8 +118,9 @@ eviction count, last failure, and documented limits. Every hit row exposes:
 Stopping a session removes its DevTools breakpoints but retains bounded hit
 records until they are cleared or the disposable context is erased.
 
-While armed, the worker CDP session observes request metadata but never reads
-request or response bodies. URLs omit credentials, query strings, and fragments.
+While armed, the worker CDP session observes request metadata with post-data
+inclusion disabled. It never reads request or response bodies. URLs omit
+credentials, query strings, and fragments.
 The UI can show a worker request beside recent page and worker hook hits. The
 target and request events are observed; a link from a hit to a request is only
 same-context temporal proximity (at most five seconds), explicitly labeled

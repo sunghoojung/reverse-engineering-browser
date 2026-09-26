@@ -475,8 +475,9 @@ class RuntimeHookWorkerTests(unittest.TestCase):
             self.bridge.action({"action": "configure_runtime_field_test", "enabled": True,
                                 "url": url, "method": "GET", "kind": "query",
                                 "pointer": "payload", "confirmed": True})
-        self.assertEqual(command.call_args.args[0], "Network.enable")
-        self.assertTrue(self.bridge._runtime_hook_page_network_enabled)
+            self.assertEqual(command.call_args.args[0], "Network.enable")
+            self.assertEqual(command.call_args.args[1]["maxPostDataSize"], 0)
+            self.assertTrue(self.bridge._runtime_hook_page_network_enabled)
         self.bridge._handle_event("Network.requestWillBeSent", {
             "requestId": "passive-1", "type": "Fetch",
             "request": {"url": url + "?payload=alpha&other=one", "method": "GET"},
@@ -488,7 +489,10 @@ class RuntimeHookWorkerTests(unittest.TestCase):
             time.sleep(0.01)
         self.assertEqual(observations[0]["preview"], '"alpha"')
         self.assertEqual(observations[0]["related_hit_ids"], [])
-        self.bridge.action({"action": "configure_runtime_field_test", "enabled": False})
+        with mock.patch.object(self.bridge, "_command", return_value={}) as command:
+            self.bridge.action({"action": "configure_runtime_field_test", "enabled": False})
+            command.assert_called_once_with("Network.disable")
+        self.assertFalse(self.bridge._runtime_hook_page_network_enabled)
         self.bridge._handle_event("Network.requestWillBeSent", {
             "requestId": "passive-2", "type": "Fetch",
             "request": {"url": url + "?payload=beta", "method": "GET"},
@@ -527,6 +531,34 @@ class RuntimeHookWorkerTests(unittest.TestCase):
                 break
             time.sleep(0.01)
         self.assertEqual(second["status"], "unavailable")
+
+    def test_late_extra_header_invalidates_existing_comparison(self):
+        self.bridge._refresh_runtime_hook_workers()
+        session = FakeWorkerSession.instances[0]
+        url = "https://example.test/payload.json"
+        self.bridge.action({"action": "configure_runtime_field_test", "enabled": True,
+                            "url": url, "method": "GET", "kind": "header",
+                            "pointer": "X-Test", "confirmed": True})
+        for index, value in enumerate(("before", "after"), start=1):
+            self.bridge._on_runtime_hook_worker_event(session, "Network.requestWillBeSent", {
+                "requestId": f"header-{index}", "type": "Fetch", "hasExtraInfo": True,
+                "request": {"url": url, "method": "GET", "headers": {"X-Test": value}},
+            })
+            for _ in range(100):
+                observation = self.bridge._runtime_hooks["field_test"]["observations"][index - 1]
+                if observation["status"] != "pending":
+                    break
+                time.sleep(0.01)
+            self.assertEqual(observation["status"], "available")
+        comparison = self.bridge.action({"action": "compare_runtime_field_test",
+                                         "baseline_id": 1, "variant_id": 2})["runtime_hooks"]["field_test"]["comparison"]
+        self.assertTrue(comparison["changed"])
+        self.bridge._on_runtime_hook_worker_event(session, "Network.requestWillBeSentExtraInfo", {
+            "requestId": "header-2", "headers": {"X-Test": "before"},
+        })
+        self.assertEqual(self.bridge._runtime_hooks["field_test"]["observations"][0]["sha256"],
+                         self.bridge._runtime_hooks["field_test"]["observations"][1]["sha256"])
+        self.assertIsNone(self.bridge._runtime_hooks["field_test"]["comparison"])
 
     def test_field_test_missing_body_and_eviction_are_visible(self):
         self.bridge._refresh_runtime_hook_workers()
@@ -628,7 +660,9 @@ class RuntimeHookWorkerTests(unittest.TestCase):
         self.assertEqual(request["related_hit_ids"], [hit["id"]])
         self.assertEqual(request["relation"], "same-context temporal proximity, inferred")
         self.assertEqual(request["status"], 200)
-        self.bridge.action({"action": "disarm_runtime_hooks"})
+        with mock.patch.object(self.bridge, "_command", return_value={}) as page_command:
+            self.bridge.action({"action": "disarm_runtime_hooks"})
+        page_command.assert_called_once_with("Network.disable")
         self.assertIn("Debugger.removeBreakpoint", [method for method, _, _ in session.commands])
 
     def test_live_function_object_entry_is_side_effect_free(self):

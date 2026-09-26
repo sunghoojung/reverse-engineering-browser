@@ -226,6 +226,7 @@ class DebuggerBridge:
         self._lock = threading.RLock()
         # Serialize worker registration with changes to the shared breakpoint state.
         self._runtime_hook_worker_control_lock = threading.Lock()
+        self._runtime_hook_page_network_control_lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -2021,6 +2022,7 @@ class DebuggerBridge:
                     self._runtime_hook_stop_requested = False
                     self._runtime_hook_deferred_pause = None
                     self._changed()
+            self._disable_runtime_hook_page_network_if_unused()
             raise
 
         with self._lock:
@@ -2040,21 +2042,52 @@ class DebuggerBridge:
         return {"ok": True, "runtime_hooks": hooks, "generation": self.generation()}
 
     def _ensure_runtime_hook_page_network(self) -> None:
+        with self._runtime_hook_page_network_control_lock:
+            with self._lock:
+                if self._capture_network_content or self._runtime_hook_page_network_enabled:
+                    return
+                target_id = self._runtime_hooks["target_id"]
+                connection = self._connection
+            # Fetch post data only for the one matched request after explicit consent.
+            self._command("Network.enable", {"maxPostDataSize": 0})
+            with self._lock:
+                if (self._runtime_hooks["target_id"] != target_id or self._connection is not connection or
+                        self._target is None or self._target["id"] != target_id):
+                    raise DebuggerBridgeError("Isolated page changed while enabling request observation")
+                self._runtime_hook_page_network_enabled = True
+
+    def _disable_runtime_hook_page_network_if_unused(self) -> None:
+        with self._runtime_hook_page_network_control_lock:
+            with self._lock:
+                if (self._capture_network_content or not self._runtime_hook_page_network_enabled or
+                        self._runtime_hooks["field_test"]["enabled"] or
+                        self._runtime_hooks["state"] in {"arming", "armed", "handling", "stopping"}):
+                    return
+                connection = self._connection
+                target_id = self._runtime_hooks["target_id"]
+            self._command("Network.disable")
+            with self._lock:
+                if (self._connection is connection and self._runtime_hooks["target_id"] == target_id):
+                    self._runtime_hook_page_network_enabled = False
+
+    def _schedule_runtime_hook_page_network_disable(self) -> None:
         with self._lock:
-            if self._capture_network_content or self._runtime_hook_page_network_enabled:
+            if self._capture_network_content or not self._runtime_hook_page_network_enabled:
                 return
-            target_id = self._runtime_hooks["target_id"]
-            connection = self._connection
-        self._command("Network.enable", {
-            "maxTotalBufferSize": 16 * 1024 * 1024,
-            "maxResourceBufferSize": 2 * 1024 * 1024,
-            "maxPostDataSize": 128 * 1024,
-        })
-        with self._lock:
-            if (self._runtime_hooks["target_id"] != target_id or self._connection is not connection or
-                    self._target is None or self._target["id"] != target_id):
-                raise DebuggerBridgeError("Isolated page changed while enabling request observation")
-            self._runtime_hook_page_network_enabled = True
+
+        def disable() -> None:
+            try:
+                self._disable_runtime_hook_page_network_if_unused()
+            except DebuggerBridgeError as error:
+                with self._lock:
+                    self._runtime_hooks["last_failure"] = truncate_text(
+                        f"Page request observation could not stop: {error}", 512
+                    )
+                    self._changed()
+
+        threading.Thread(
+            target=disable, name="reb-hook-page-network-disable", daemon=True
+        ).start()
 
     def _remove_runtime_hook_points(
         self, reason: str, expected_epoch: Optional[int] = None
@@ -2093,6 +2126,7 @@ class DebuggerBridge:
                     f"{failures} stale breakpoint removals could not be confirmed."
                 )
             self._changed()
+        self._disable_runtime_hook_page_network_if_unused()
 
     def _disarm_runtime_hooks(self) -> dict[str, Any]:
         with self._lock:
@@ -2196,17 +2230,23 @@ class DebuggerBridge:
                 raise DebuggerBridgeError("Disarm Runtime Hooks before changing the field test")
         if enabled:
             self._ensure_runtime_hook_page_network()
-        with self._lock:
-            self._runtime_hook_target_ready_locked()
-            if self._runtime_hooks["state"] in {"arming", "armed", "handling", "stopping"}:
-                raise DebuggerBridgeError("Disarm Runtime Hooks before changing the field test")
-            field_test = self._empty_runtime_hooks()["field_test"]
-            self._runtime_field_query_key = os.urandom(32)
-            if enabled:
-                field_test.update(enabled=True, url=url, method=method, kind=kind, pointer=pointer)
-            self._runtime_hooks["field_test"] = field_test
-            self._changed()
-            hooks = copy.deepcopy(self._runtime_hooks)
+        try:
+            with self._lock:
+                self._runtime_hook_target_ready_locked()
+                if self._runtime_hooks["state"] in {"arming", "armed", "handling", "stopping"}:
+                    raise DebuggerBridgeError("Disarm Runtime Hooks before changing the field test")
+                field_test = self._empty_runtime_hooks()["field_test"]
+                self._runtime_field_query_key = os.urandom(32)
+                if enabled:
+                    field_test.update(enabled=True, url=url, method=method, kind=kind, pointer=pointer)
+                self._runtime_hooks["field_test"] = field_test
+                self._changed()
+                hooks = copy.deepcopy(self._runtime_hooks)
+        except BaseException:
+            self._disable_runtime_hook_page_network_if_unused()
+            raise
+        if not enabled:
+            self._disable_runtime_hook_page_network_if_unused()
         return {"ok": True, "runtime_hooks": hooks, "generation": self.generation()}
 
     def _compare_runtime_field_test(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -2315,6 +2355,7 @@ class DebuggerBridge:
                 name="reb-worker-hook-navigation-cleanup",
                 daemon=True,
             ).start()
+        self._schedule_runtime_hook_page_network_disable()
 
     def _remove_stale_hook_points(self, points: list[tuple[str, str]]) -> None:
         for breakpoint_id, target_id in points:
@@ -5746,8 +5787,12 @@ class DebuggerBridge:
                     return
                 selected = extract_request_value("header", field_test["pointer"], headers=headers)
                 if selected["status"] == "available":
-                    observation.update(selected)
-                    self._changed()
+                    if any(observation[key] != value for key, value in selected.items()):
+                        observation.update(selected)
+                        comparison = field_test["comparison"]
+                        if comparison and observation["id"] in (comparison["baseline_id"], comparison["variant_id"]):
+                            field_test["comparison"] = None
+                        self._changed()
         elif method == "Network.responseReceived":
             request_id = params.get("requestId")
             response = params.get("response")
@@ -5767,6 +5812,7 @@ class DebuggerBridge:
         self, target_id: str, error: BaseException
     ) -> None:
         stale_points: list[tuple[str, str]] = []
+        hooks_cleared = False
         with self._lock:
             self._runtime_hook_worker_sessions.pop(target_id, None)
             self._runtime_hook_worker_targets.pop(target_id, None)
@@ -5779,6 +5825,7 @@ class DebuggerBridge:
                 for target in self._runtime_hook_worker_targets.values()
             ]
             if any(item["target_id"] == target_id for item in self._runtime_hooks["definitions"]):
+                hooks_cleared = True
                 stale_points = [
                     (breakpoint_id, point_target_id)
                     for point_target_id, breakpoint_id in self._runtime_hook_points
@@ -5802,6 +5849,8 @@ class DebuggerBridge:
                 name="reb-hook-worker-detach-cleanup",
                 daemon=True,
             ).start()
+        if hooks_cleared:
+            self._schedule_runtime_hook_page_network_disable()
 
     def _close_runtime_hook_workers(self) -> None:
         with self._lock:

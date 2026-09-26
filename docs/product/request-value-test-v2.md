@@ -52,12 +52,20 @@ ephemeral keyed digest of unselected query input are retained, never a complete 
 or complete query string. Clearing hits, stopping capture, or disposing the
 context erases the observations and comparison.
 
+The isolated page's network subscription excludes post bodies from ordinary
+request events. When a selected body is needed, REB fetches post data only for
+the matched request after confirmation. With general network-content capture
+off, the page network subscription stops when both hooks and the field test are
+inactive.
+
 Header selection uses the request event and, when available after it, the
 correlated network-stack extra-header event. The [CDP Network protocol](https://chromedevtools.github.io/devtools-protocol/tot/Network/)
 says extra-header events are optional and may arrive before the request event.
 REB does not buffer an unrelated request's headers while waiting for a URL
 match. A header not present in available CDP data is therefore **missing** or
 **unavailable**, not proof that it was absent on the wire.
+If a later extra-header event changes a retained observation, its prior
+comparison is cleared so the researcher must compare the updated values.
 
 This covers ordinary page and dedicated-worker JavaScript that Chrome DevTools
 Protocol exposes. It does not guarantee coverage for every site or code path:

@@ -754,9 +754,11 @@
                       <div id="hooks-source-location-fields" class="experiment-form-row"><label>Line<input id="hooks-line" type="number" min="1" max="2147483647" step="1" value="1" /></label><label>Column<input id="hooks-column" type="number" min="1" max="2147483647" step="1" value="1" /></label></div>
                       <label id="hooks-function-expression-field" hidden>Side-effect-free function expression<input id="hooks-function-expression" type="text" maxlength="1024" placeholder="self.onmessage" autocomplete="off" /></label>
                       <div class="hook-phase-options"><label><input id="hooks-entry-enabled" type="checkbox" checked /> Entry</label><label><input id="hooks-return-enabled" type="checkbox" checked /> Synchronous return</label></div>
+                      <details class="experiment-help"><summary>Conditions and custom logic · optional</summary>
                       <label>Side-effect-free condition<input id="hooks-condition" type="text" maxlength="1024" placeholder="cart.total &gt; 100" autocomplete="off" /></label>
                       <label>Entry logic<textarea id="hooks-entry-logic" maxlength="8192" spellcheck="false" placeholder="cart.reviewed = true;"></textarea></label>
                       <label>Return logic<textarea id="hooks-return-logic" maxlength="8192" spellcheck="false" placeholder="window.__labHits = (window.__labHits || 0) + 1;"></textarea></label>
+                      </details>
                       <label>Return replacement<select id="hooks-return-mode"><option value="none">Keep original</option><option value="json">Typed JSON value</option><option value="expression">Frame expression</option></select></label>
                       <label id="hooks-return-value-field" hidden>Replacement JSON or expression<textarea id="hooks-return-value" maxlength="8192" spellcheck="false" placeholder='{"allowed":true}'></textarea></label>
                       <button id="hooks-add" class="secondary-button" type="submit" disabled>Add hook</button>

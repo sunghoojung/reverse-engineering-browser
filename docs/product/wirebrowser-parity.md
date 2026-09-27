@@ -25,7 +25,7 @@ bounded evidence architecture. Matching a panel name is not sufficient.
 | Heap comparison | REB extension | Exact dominators and retained-size change comparison go beyond the pinned WireBrowser workflow. |
 | Breakpoint-driven origin trace | Implemented | [Memory Origin Trace v1](./memory-origin-trace-v1.md) adds bounded click-driven temporal heap probing and source-function mapping. |
 | Expose or patch a live object | Implemented | [Live Object Experiment v1](./live-object-experiment-v1.md) adds bounded live-object search and confirmed typed own-property set/delete operations inside the disposable Experiment BrowserContext, with metadata-only audit records and no arbitrary code execution. |
-| Runtime hooks and return overrides | Implemented | [Runtime Hooks v1](./runtime-hooks-v1.md) adds bounded function-entry and synchronous-return hooks, local binding capture, conditional logic, and typed return replacement inside the disposable Experiment BrowserContext. |
+| Runtime hooks and return overrides | Implemented | [Runtime Hooks v1](./runtime-hooks-v1.md) adds bounded function-entry and synchronous-return hooks, local binding capture, conditional logic, typed return replacement, and innermost anonymous-function targeting inside the disposable Experiment BrowserContext. |
 | Expose or patch a live object | Missing | Must be restricted to a visibly isolated Experiment session with explicit mutation audit records. |
 | Runtime hooks and return overrides | Partial | REB has breakpoints and logpoints. Function-call hooks, argument capture, injected logic, and synchronous return overrides remain. |
 

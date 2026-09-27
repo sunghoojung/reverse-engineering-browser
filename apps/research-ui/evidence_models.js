@@ -325,6 +325,10 @@
 
       function isDebuggerScript(script) {
         return isPlainObject(script) && typeof script.script_id === 'string' && script.script_id.length > 0 &&
+          (script.target_type === undefined
+            ? script.target_id === undefined && script.cdp_script_id === undefined
+            : script.target_type === 'worker' && isBoundedText(script.target_id, 4 * 1024) && script.target_id.length > 0 &&
+              isBoundedText(script.cdp_script_id, 4 * 1024) && script.cdp_script_id.length > 0) &&
           typeof script.url === 'string' && typeof script.hash === 'string' &&
           typeof script.source_map_url === 'string' && ['JavaScript', 'WebAssembly'].includes(script.language) &&
           ['start_line', 'start_column', 'end_line', 'end_column', 'execution_context_id', 'length']
@@ -708,9 +712,21 @@
       function isRuntimeHookDefinition(definition) {
         if (!isPlainObject(definition) || !isSafeIntegerInRange(definition.id, 1, Number.MAX_SAFE_INTEGER) ||
             !isBoundedText(definition.label, 128) || !isBoundedText(definition.script_id, 4 * 1024) ||
+            !isBoundedText(definition.cdp_script_id, 4 * 1024) ||
+            !isBoundedText(definition.target_id, 4 * 1024) ||
+            !['page', 'worker'].includes(definition.target_type) ||
+            !['source', 'function'].includes(definition.entry_mode) ||
+            !isBoundedText(definition.function_expression, 1024) ||
             !isBoundedText(definition.url, 64 * 1024) ||
             !isSafeIntegerInRange(definition.line, 0, 0x7fffffff) ||
             !isSafeIntegerInRange(definition.column, 0, 0x7fffffff) ||
+            !['function_declaration', 'function_expression', 'arrow_function', 'method_definition',
+              'generator_function_declaration', 'generator_function', 'live_function_object'].includes(definition.function_kind) ||
+            ![definition.function_start, definition.function_end].every(location =>
+              isPlainObject(location) && isSafeIntegerInRange(location.line, 0, 0x7fffffff) &&
+              isSafeIntegerInRange(location.column, 0, 0x7fffffff)) ||
+            !isSafeIntegerInRange(definition.target_line, 0, 0x7fffffff) ||
+            !isSafeIntegerInRange(definition.target_column, 0, 0x7fffffff) ||
             typeof definition.entry_enabled !== 'boolean' || typeof definition.return_enabled !== 'boolean' ||
             (!definition.entry_enabled && !definition.return_enabled) ||
             !isBoundedText(definition.condition, 1024) || !isBoundedText(definition.entry_logic, 8 * 1024) ||
@@ -718,6 +734,10 @@
             !['none', 'json', 'expression'].includes(definition.return_mode) ||
             !isBoundedText(definition.return_expression, 8 * 1024) ||
             !isSafeIntegerInRange(definition.return_value_bytes, 0, 8 * 1024)) return false;
+        if (definition.entry_mode === 'source' && definition.function_expression !== '') return false;
+        if (definition.entry_mode === 'function' && (!definition.function_expression || !definition.entry_enabled ||
+            definition.return_enabled || definition.return_mode !== 'none' || definition.return_logic !== '' ||
+            definition.function_kind !== 'live_function_object')) return false;
         if (definition.return_mode === 'none' &&
             (definition.return_expression !== '' || definition.return_value !== null || definition.return_value_bytes !== 0)) return false;
         if (definition.return_mode === 'expression' &&
@@ -739,17 +759,21 @@
             !isSafeIntegerInRange(hooks.session_id, 0, Number.MAX_SAFE_INTEGER) || !states.includes(hooks.state) ||
             typeof hooks.isolated !== 'boolean' ||
             (hooks.target_id !== null && !isBoundedText(hooks.target_id, 4 * 1024)) ||
+            !Array.isArray(hooks.workers) || hooks.workers.length > 8 || !hooks.workers.every(isDebuggerTarget) ||
+            !isSafeIntegerInRange(hooks.worker_overflow, 0, Number.MAX_SAFE_INTEGER) ||
             !Array.isArray(hooks.definitions) || hooks.definitions.length > 8 ||
             !hooks.definitions.every(isRuntimeHookDefinition) ||
             !isSafeIntegerInRange(hooks.active_points, 0, 64) ||
             !isSafeIntegerInRange(hooks.total_hits, 0, 512) ||
             !Array.isArray(hooks.hits) || hooks.hits.length > 128 || hooks.hits.length > hooks.total_hits ||
             !isSafeIntegerInRange(hooks.hit_evictions, 0, Number.MAX_SAFE_INTEGER) ||
+            !Array.isArray(hooks.requests) || hooks.requests.length > 128 ||
+            !isSafeIntegerInRange(hooks.request_evictions, 0, Number.MAX_SAFE_INTEGER) ||
             (hooks.last_failure !== null && !isBoundedText(hooks.last_failure, 512)) ||
             !isBoundedText(hooks.message, 512) || !isPlainObject(hooks.limits)) return false;
-        const limits = {definitions: 8, active_points: 64, return_points_per_definition: 32,
-          total_hits: 512, retained_hits: 128, bindings_per_hit: 32, binding_preview_bytes: 512,
-          condition_bytes: 1024, logic_bytes: 8 * 1024, return_bytes: 8 * 1024,
+        const limits = {definitions: 8, workers: 8, active_points: 64, return_points_per_definition: 32,
+          total_hits: 512, retained_hits: 128, retained_requests: 128, bindings_per_hit: 32, binding_preview_bytes: 512,
+          condition_bytes: 1024, function_expression_bytes: 1024, logic_bytes: 8 * 1024, return_bytes: 8 * 1024,
           evaluation_timeout_ms: 100};
         if (Object.keys(limits).some(key => hooks.limits[key] !== limits[key])) return false;
         const definitionIds = new Set(hooks.definitions.map(definition => definition.id));
@@ -759,7 +783,7 @@
             isSafeIntegerInRange(hit.occurred_at_ms, 1, Number.MAX_SAFE_INTEGER) &&
             isSafeIntegerInRange(hit.session_id, 1, Number.MAX_SAFE_INTEGER) &&
             isSafeIntegerInRange(hit.hook_id, 1, Number.MAX_SAFE_INTEGER) &&
-            isBoundedText(hit.target_id, 4 * 1024) && isBoundedText(hit.label, 128) &&
+            isBoundedText(hit.target_id, 4 * 1024) && ['page', 'worker'].includes(hit.target_type) && isBoundedText(hit.label, 128) &&
             isBoundedText(hit.source, 8 * 1024) && isBoundedText(hit.function, 256) &&
             ['entry', 'return'].includes(hit.category) &&
             ['observed', 'skipped', 'logic_run', 'return_overridden', 'failed'].includes(hit.operation) &&
@@ -771,10 +795,21 @@
             isRuntimeHookRemote(hit.replacement_return) &&
             (hit.error === null || isBoundedText(hit.error, 512)))) return false;
         if (hooks.hits.some((hit, index) => index > 0 && hooks.hits[index - 1].id >= hit.id)) return false;
+        if (!hooks.requests.every(request => isPlainObject(request) &&
+            isSafeIntegerInRange(request.id, 1, Number.MAX_SAFE_INTEGER) &&
+            isSafeIntegerInRange(request.occurred_at_ms, 1, Number.MAX_SAFE_INTEGER) &&
+            isBoundedText(request.target_id, 4 * 1024) && isBoundedText(request.request_id, 4 * 1024) &&
+            isBoundedText(request.url, 8 * 1024) && isBoundedText(request.method, 32) &&
+            isBoundedText(request.resource_type, 32) &&
+            (request.status === null || isSafeIntegerInRange(request.status, 100, 599)) &&
+            Array.isArray(request.related_hit_ids) && request.related_hit_ids.length <= 2 &&
+            request.related_hit_ids.every(id => isSafeIntegerInRange(id, 1, Number.MAX_SAFE_INTEGER)) &&
+            ['same-context temporal proximity, inferred', 'unlinked'].includes(request.relation))) return false;
+        if (hooks.requests.some((request, index) => index > 0 && hooks.requests[index - 1].id >= request.id)) return false;
         if (hooks.state === 'idle') return hooks.session_id === 0 && !hooks.isolated && hooks.target_id === null &&
-          hooks.definitions.length === 0 && hooks.hits.length === 0;
+          hooks.definitions.length === 0 && hooks.hits.length === 0 && hooks.requests.length === 0;
         if (hooks.state === 'disposed') return hooks.session_id > 0 && !hooks.isolated && hooks.target_id === null &&
-          hooks.definitions.length === 0 && hooks.hits.length === 0 && hooks.active_points === 0;
+          hooks.definitions.length === 0 && hooks.hits.length === 0 && hooks.requests.length === 0 && hooks.active_points === 0;
         return hooks.session_id > 0 && (hooks.state === 'attaching' || hooks.state === 'error' ||
           (hooks.isolated && typeof hooks.target_id === 'string' && hooks.target_id.length > 0));
       }

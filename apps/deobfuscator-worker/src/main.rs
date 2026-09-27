@@ -18,6 +18,8 @@ struct Request {
     source: String,
     #[serde(default)]
     assume_intrinsics: bool,
+    #[serde(default)]
+    function_at_byte: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -32,6 +34,8 @@ struct Response {
     transformations: Vec<Transformation>,
     transformations_truncated: bool,
     assumptions: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    function_location: Option<preflight::FunctionLocation>,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,6 +76,7 @@ fn error_response(message: impl Into<String>) -> Response {
         transformations: Vec::new(),
         transformations_truncated: false,
         assumptions: vec![],
+        function_location: None,
     }
 }
 
@@ -81,6 +86,28 @@ fn analyze(request: Request) -> Response {
         return error_response("source exceeds the deobfuscation byte limit");
     }
 
+    if let Some(offset) = request.function_at_byte {
+        return match preflight::function_at(&request.source, offset as usize) {
+            Ok(function_location) => Response {
+                schema: "reb-deobfuscator-worker-v1",
+                ok: true,
+                parsed: true,
+                source_bytes,
+                syntax_errors: vec![],
+                evidence: Evidence::default(),
+                derived_source: String::new(),
+                transformations: vec![],
+                transformations_truncated: false,
+                assumptions: vec![],
+                function_location,
+            },
+            Err(message) => {
+                let mut response = error_response(message);
+                response.source_bytes = source_bytes;
+                response
+            }
+        };
+    }
     if let Err(message) = preflight::check(&request.source) {
         let mut response = error_response(message);
         response.source_bytes = source_bytes;
@@ -151,6 +178,7 @@ fn analyze(request: Request) -> Response {
         } else {
             vec![]
         },
+        function_location: None,
     }
 }
 
@@ -232,6 +260,7 @@ mod tests {
         let response = analyze(Request {
             assume_intrinsics: false,
             source: "const value = 1 + 2 * 3; const unsafe = 1 / 0;".to_string(),
+            function_at_byte: None,
         });
 
         assert!(response.ok);
@@ -248,6 +277,7 @@ mod tests {
         let response = analyze(Request {
             assume_intrinsics: false,
             source: "const broken = ;".to_string(),
+            function_at_byte: None,
         });
 
         assert!(!response.ok);
@@ -262,6 +292,7 @@ mod tests {
         let response = analyze(Request {
             assume_intrinsics: false,
             source: "x".repeat(MAX_SOURCE_BYTES + 1),
+            function_at_byte: None,
         });
 
         assert!(!response.ok);

@@ -1974,6 +1974,7 @@
 
       function setExperimentMode(mode, focus = false) {
         if (!['interceptor', 'repeater', 'object', 'hooks', 'automation'].includes(mode)) return;
+        if (state.sourceHooksOpen) closeSourceHooks(false);
         state.experimentMode = mode;
         elements.interceptionWorkspace.hidden = mode !== 'interceptor';
         elements.repeaterWorkspace.hidden = mode !== 'repeater';
@@ -2912,7 +2913,7 @@
           ? `${definitions.length} ${definitions.length === 1 ? 'hook' : 'hooks'}` : 'Empty';
         elements.hooksDefinitionBadge.dataset.kind = definitions.length ? '' : 'offline';
         if (!definitions.length) {
-          elements.hooksDefinitions.replaceChildren(textElement('div', 'experiment-empty', 'No function hooks configured.'));
+          elements.hooksDefinitions.replaceChildren(textElement('div', 'experiment-empty', 'No hooks yet.'));
           return;
         }
         elements.hooksDefinitions.replaceChildren(...definitions.map(definition => {
@@ -2925,8 +2926,12 @@
             : '';
           const behavior = [definition.condition ? 'condition' : '', definition.entry_logic || definition.return_logic ? 'logic' : '',
             definition.return_mode !== 'none' ? `${definition.return_mode} override` : ''].filter(Boolean).join(' · ') || 'observe only';
+          const functionKind = definition.function_kind.replaceAll('_', ' ');
+          const location = definition.entry_mode === 'function'
+            ? `live function ${definition.function_expression}`
+            : `${functionKind} at ${definition.function_start.line + 1}:${definition.function_start.column + 1} · V8 entry search ${definition.target_line + 1}:${definition.target_column + 1}`;
           const meta = textElement('span', 'hook-definition-meta',
-            `${sourceName({url: definition.url, source_type: 'script', script_id: definition.script_id})}:${definition.line + 1}:${definition.column + 1}${resolved} · ${behavior}`);
+            `${definition.target_type} ${definition.target_id.slice(0, 12)} · ${sourceName({url: definition.url, source_type: 'script', script_id: definition.script_id})}:${definition.line + 1}:${definition.column + 1} · ${location}${resolved} · ${behavior}`);
           const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'hook-remove';
           remove.textContent = 'Remove'; remove.disabled = active || state.experimentPending || state.debuggerActionPending;
           remove.setAttribute('aria-label', `Remove ${definition.label}`);
@@ -2938,23 +2943,53 @@
 
       function renderRuntimeHookHits(hooks) {
         const hits = hooks?.hits ?? [];
+        const requests = hooks?.requests ?? [];
         const total = hooks?.total_hits ?? 0;
         elements.hooksHitCount.textContent = `${total} / ${hooks?.limits?.total_hits ?? 512}`;
         elements.hooksHitCount.dataset.kind = hooks?.last_failure ? 'error' : hits.length ? '' : 'offline';
-        elements.hooksHitMeta.textContent = hits.length
-          ? `${hits.length} retained · ${hooks.hit_evictions} evicted · metadata never enters evidence storage`
-          : 'Entry bindings and return outcomes stay in ephemeral session memory.';
-        if (!hits.length) {
+        const hitDetails = [];
+        if (hooks?.hit_evictions || hits.length !== total) hitDetails.push(`${hits.length} retained`);
+        if (hooks?.hit_evictions) hitDetails.push(`${hooks.hit_evictions} evicted`);
+        if (requests.length) hitDetails.push(`${requests.length} worker ${requests.length === 1 ? 'request' : 'requests'}`);
+        elements.hooksHitMeta.textContent = hitDetails.join(' · ');
+        elements.hooksHitMeta.hidden = !hitDetails.length;
+        const key = JSON.stringify([hits, requests, total, hooks?.hit_evictions, hooks?.last_failure]);
+        if (key === state.runtimeHookHitsKey) return;
+        state.runtimeHookHitsKey = key;
+        if (!hits.length && !requests.length) {
           elements.hooksHits.replaceChildren(textElement('div', 'experiment-empty', 'Arm a hook, then exercise the isolated page.'));
           return;
         }
-        elements.hooksHits.replaceChildren(...[...hits].reverse().map(hit => {
-          const row = document.createElement('div'); row.className = 'hook-hit-row';
+        const events = [
+          ...hits.map(hit => ({kind: 'hit', occurred_at_ms: hit.occurred_at_ms, id: hit.id, value: hit})),
+          ...requests.map(request => ({kind: 'request', occurred_at_ms: request.occurred_at_ms, id: request.id, value: request}))
+        ].sort((left, right) => left.occurred_at_ms - right.occurred_at_ms ||
+          (left.kind === right.kind ? left.id - right.id : left.kind === 'hit' ? -1 : 1));
+        const rows = events.map(event => {
+          if (event.kind === 'request') {
+            const request = event.value;
+            const row = document.createElement('button'); row.type = 'button'; row.className = 'hook-hit-row hook-hit-link';
+            row.setAttribute('aria-label', `Show ${request.method} worker request in Traffic`);
+            row.addEventListener('click', () => revealRuntimeHookRequest(request));
+            row.append(
+              textElement('span', 'hook-hit-title', `${request.method} ${request.url}`),
+              textElement('span', 'hook-hit-operation', request.status === null ? 'pending' : String(request.status)),
+              textElement('span', 'hook-hit-meta', `${new Date(request.occurred_at_ms).toLocaleTimeString()} · observed worker request ${request.target_id.slice(0, 12)} · ${request.resource_type || 'resource'}`),
+              textElement('span', 'hook-hit-bindings', request.related_hit_ids.length
+                ? `Related hits ${request.related_hit_ids.join(', ')} · ${request.relation}; not proof of a causal call chain`
+                : 'No hook hit linked to this request')
+            );
+            return row;
+          }
+          const hit = event.value;
+          const row = document.createElement('button'); row.type = 'button'; row.className = 'hook-hit-row hook-hit-link';
+          row.setAttribute('aria-label', `Show ${hit.label} ${hit.category} hit in Sources`);
+          row.addEventListener('click', () => revealRuntimeHookHit(hit));
           const title = textElement('span', 'hook-hit-title', `${hit.label} · ${hit.function}`);
           const operation = textElement('span', 'hook-hit-operation', hit.operation.replaceAll('_', ' '));
           const source = sourceName({url: hit.source, source_type: 'script', script_id: ''});
           const meta = textElement('span', 'hook-hit-meta',
-            `${new Date(hit.occurred_at_ms).toLocaleTimeString()} · ${hit.category} · ${source}:${hit.line + 1}:${hit.column + 1} · session ${hit.session_id} / hook ${hit.hook_id} / hit ${hit.id}`);
+            `${new Date(hit.occurred_at_ms).toLocaleTimeString()} · ${hit.target_type} ${hit.target_id.slice(0, 12)} · ${hit.category} · ${source}:${hit.line + 1}:${hit.column + 1} · session ${hit.session_id} / hook ${hit.hook_id} / hit ${hit.id}`);
           const values = hit.bindings.map(binding => `${binding.name}=${debuggerValueText(binding.value)}`);
           const returnText = hit.category === 'return'
             ? `return ${debuggerValueText(hit.original_return)}${hit.replacement_return ? ` → ${debuggerValueText(hit.replacement_return)}` : ''}` : '';
@@ -2963,7 +2998,75 @@
           row.append(title, operation, meta, bindings);
           if (hit.error) row.append(textElement('span', 'hook-hit-error', hit.error));
           return row;
-        }));
+        });
+        elements.hooksHits.replaceChildren(...rows);
+      }
+
+      function revealRuntimeHookRequest(request) {
+        state.selectedRuntimeHookRequest = {sessionId: runtimeHooksState()?.session_id, id: request.id};
+        state.runtimeHookTrafficKey = null;
+        showScreen('traffic');
+        renderRuntimeHookTraffic();
+        requestAnimationFrame(() => elements.runtimeHookTraffic.focus({preventScroll: true}));
+      }
+
+      function renderRuntimeHookTraffic() {
+        const selected = state.selectedRuntimeHookRequest;
+        elements.runtimeHookTraffic.hidden = !selected;
+        if (!selected) return;
+        const hooks = runtimeHooksState();
+        const request = hooks?.session_id === selected.sessionId
+          ? hooks.requests.find(candidate => candidate.id === selected.id) : null;
+        const related = request?.related_hit_ids.map(id => hooks.hits.find(hit => hit.id === id)).filter(Boolean) ?? [];
+        const key = JSON.stringify([selected, request, related]);
+        if (key === state.runtimeHookTrafficKey) return;
+        state.runtimeHookTrafficKey = key;
+        const close = document.createElement('button'); close.type = 'button'; close.className = 'source-tool';
+        close.textContent = 'Close'; close.setAttribute('aria-label', 'Close worker request trail');
+        close.addEventListener('click', () => {
+          state.selectedRuntimeHookRequest = null;
+          state.runtimeHookTrafficKey = null;
+          elements.runtimeHookTraffic.hidden = true;
+          elements.requestFilter.focus({preventScroll: true});
+        });
+        if (!request) {
+          elements.runtimeHookTraffic.replaceChildren(
+            textElement('span', 'runtime-hook-traffic-status', 'This ephemeral worker request is no longer available.'), close);
+          return;
+        }
+        const title = textElement('strong', 'runtime-hook-traffic-title', `${request.method} ${request.url}`);
+        const status = textElement('span', 'runtime-hook-traffic-status',
+          `${request.status ?? 'Pending'} · ${request.resource_type || 'resource'} · isolated worker ${request.target_id.slice(0, 12)}`);
+        const relation = textElement('span', 'runtime-hook-traffic-relation',
+          related.length ? `${request.relation}; not proof of a causal call chain`
+            : 'No retained hook hit is linked to this request.');
+        const heading = textElement('span', 'runtime-hook-traffic-heading', 'Isolated worker request trail · ephemeral, separate from captured requests');
+        const links = related.map(hit => {
+          const button = document.createElement('button'); button.type = 'button'; button.className = 'source-tool';
+          button.textContent = `Hit ${hit.id} · ${hit.category} in Sources`;
+          button.addEventListener('click', () => revealRuntimeHookHit(hit));
+          return button;
+        });
+        elements.runtimeHookTraffic.replaceChildren(heading, title, status, relation, ...links, close);
+      }
+
+      function revealRuntimeHookHit(hit) {
+        const definition = runtimeHooksState()?.definitions.find(candidate => candidate.id === hit.hook_id);
+        const source = liveSources().find(candidate => candidate.script_id === definition?.script_id) ??
+          liveSources().find(candidate => candidate.target_id === hit.target_id && candidate.url === hit.source);
+        if (!source) {
+          state.experimentError = 'The source for this hit is no longer attached.';
+          showScreen('sources');
+          if (!state.sourceHooksOpen) openSourceHooks(false, false);
+          else renderRuntimeHooks();
+          return;
+        }
+        showScreen('sources');
+        if (!state.sourceHooksOpen) openSourceHooks(false, false);
+        selectScript(source.script_id, hit.line);
+        state.sourceCursor = {scriptId: source.script_id, line: hit.line, column: hit.column};
+        elements.sourcePosition.textContent = `Line ${hit.line + 1}, Column ${hit.column + 1}`;
+        requestAnimationFrame(() => elements.sourceCodeWrap.focus({preventScroll: true}));
       }
 
       function renderRuntimeHooks() {
@@ -2985,15 +3088,21 @@
         const pageReady = contextReady && objectExperiment?.navigation_id > 0 && objectExperiment.url;
         const canDispose = experiment?.isolated && experiment.pending_requests === 0 && !active && !contextWorking;
         const editable = contextReady && !active && !contextWorking;
-        const scripts = (state.debuggerSession?.scripts ?? []).filter(script => {
+        const hookableScripts = (state.debuggerSession?.scripts ?? []).filter(script => {
           if (script.language !== 'JavaScript') return false;
           const url = script.url ?? '';
           return !url.startsWith('file:') && !url.startsWith('evaluate;') && !url.startsWith('pptr:');
-        }).slice(-256);
+        });
+        const workerScripts = hookableScripts.filter(script => script.target_type === 'worker').slice(-128);
+        const scripts = [
+          ...workerScripts,
+          ...hookableScripts.filter(script => script.target_type !== 'worker').slice(-(256 - workerScripts.length))
+        ];
+        elements.hooksWorkspace.dataset.sourceReady = String(Boolean(pageReady && scripts.length));
         const selectedScript = elements.hooksScript.value;
         const options = scripts.map(script => {
           const option = document.createElement('option'); option.value = script.script_id;
-          option.textContent = `${sourceName({...script, source_type: 'script'})} · lines ${script.start_line + 1}-${script.end_line + 1}`;
+          option.textContent = `${script.target_type === 'worker' ? `Worker ${script.target_id.slice(0, 12)}` : 'Page'} · ${sourceName({...script, source_type: 'script'})} · lines ${script.start_line + 1}-${script.end_line + 1}`;
           return option;
         });
         if (!options.length) {
@@ -3004,7 +3113,7 @@
         if (scripts.some(script => script.script_id === selectedScript)) elements.hooksScript.value = selectedScript;
 
         elements.experimentTitle.textContent = 'Runtime Hooks';
-        elements.experimentSubtitle.textContent = 'Observe function calls or test return values on a disposable page.';
+        elements.experimentSubtitle.textContent = 'Observe function calls or test return values on a disposable page or its worker.';
         if (state.experimentError) setExperimentNotice('error', state.experimentError);
         else if (!experiment || !hooks || !objectExperiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
         else if (contextWorking || ['arming', 'handling', 'stopping'].includes(hooks.state)) setExperimentNotice('working', hooks.message);
@@ -3017,7 +3126,12 @@
         elements.hooksContextBadge.textContent = experiment?.state === 'creating' ? 'Creating'
           : experiment?.state === 'disposing' ? 'Disposing' : hooks?.isolated ? 'Isolated'
             : hooks?.state === 'disposed' ? 'Disposed' : 'Not created';
-        elements.hooksContextMessage.textContent = hooks?.message ?? 'No disposable Experiment context exists.';
+        const workerCount = hooks?.workers?.length ?? 0;
+        const workerOverflow = hooks?.worker_overflow ?? 0;
+        elements.hooksContextMessage.textContent = workerCount || workerOverflow
+          ? `${workerCount} ${workerCount === 1 ? 'worker' : 'workers'} discovered${workerOverflow ? ` · ${workerOverflow} beyond the attachment limit` : ''}`
+          : '';
+        elements.hooksContextMessage.hidden = !(workerCount || workerOverflow);
         elements.hooksStorageState.textContent = hooks?.isolated ? 'Ephemeral and isolated'
           : hooks?.state === 'disposed' ? 'Deleted and erased' : 'Not allocated';
         elements.hooksPointUsage.textContent = `${hooks?.active_points ?? 0} / ${hooks?.limits?.active_points ?? 64}`;
@@ -3030,20 +3144,33 @@
 
         elements.hooksCreate.disabled = !attached || Boolean(experiment?.isolated) || contextWorking || state.debuggerActionPending;
         elements.hooksDispose.disabled = !canDispose || state.debuggerActionPending;
-        elements.hooksClear.disabled = !(hooks?.hits.length) || active || contextWorking || state.debuggerActionPending;
+        elements.hooksClear.disabled = !(hooks?.hits.length || hooks?.requests.length) || active || contextWorking || state.debuggerActionPending;
         elements.hooksPageUrl.disabled = !editable;
         elements.hooksNavigate.disabled = !editable || state.debuggerActionPending;
         elements.hooksDefinitionForm.querySelectorAll('input, select, textarea').forEach(field => { field.disabled = !editable; });
-        elements.hooksReturnValueField.hidden = elements.hooksReturnMode.value === 'none';
+        const functionMode = elements.hooksEntryMode.value === 'function';
+        elements.hooksSourceLocationFields.hidden = functionMode;
+        elements.hooksFunctionExpressionField.hidden = !functionMode;
+        elements.hooksReturnEnabled.disabled = !editable || functionMode;
+        elements.hooksReturnLogic.disabled = !editable || functionMode;
+        elements.hooksReturnMode.disabled = !editable || functionMode;
+        elements.hooksReturnValueField.hidden = functionMode || elements.hooksReturnMode.value === 'none';
         elements.hooksReturnValueField.firstChild.textContent = elements.hooksReturnMode.value === 'json'
           ? 'Replacement JSON' : 'Replacement frame expression';
         elements.hooksAdd.disabled = !editable || !scripts.length || !elements.hooksLabel.value.trim() ||
-          (!elements.hooksEntryEnabled.checked && !elements.hooksReturnEnabled.checked) || state.debuggerActionPending;
+          (!elements.hooksEntryEnabled.checked && !elements.hooksReturnEnabled.checked) ||
+          (functionMode && !elements.hooksFunctionExpression.value.trim()) || state.debuggerActionPending;
         elements.hooksConfirm.disabled = !contextReady || active || !hooks?.definitions.length || contextWorking;
         elements.hooksArm.disabled = !editable || !hooks?.definitions.length || !elements.hooksConfirm.checked || state.debuggerActionPending;
         elements.hooksDisarm.disabled = !active || state.debuggerActionPending;
         renderRuntimeHookDefinitions(hooks, active);
         renderRuntimeHookHits(hooks);
+        elements.sourceHooksNotice.dataset.kind = elements.experimentNotice.dataset.kind;
+        elements.sourceHooksNotice.textContent = hooks?.state === 'armed' && !state.experimentError && !hooks.last_failure
+          ? `Armed · ${hooks.total_hits} ${hooks.total_hits === 1 ? 'hit' : 'hits'}`
+          : elements.experimentNotice.textContent;
+        elements.sourceHooksNotice.hidden = !state.sourceHooksOpen ||
+          (contextReady && !active && !contextWorking && !state.experimentError && !hooks?.last_failure);
       }
 
       function parseAutomationVariables() {
@@ -3253,7 +3380,7 @@
         elements.interceptionWorkspace.hidden = state.experimentMode !== 'interceptor';
         elements.repeaterWorkspace.hidden = state.experimentMode !== 'repeater';
         elements.objectWorkspace.hidden = state.experimentMode !== 'object';
-        elements.hooksWorkspace.hidden = state.experimentMode !== 'hooks';
+        elements.hooksWorkspace.hidden = !state.sourceHooksOpen && state.experimentMode !== 'hooks';
         elements.automationWorkspace.hidden = state.experimentMode !== 'automation';
         renderActionScope();
         if (state.experimentMode === 'repeater') {
@@ -3584,6 +3711,8 @@
             action: 'add_runtime_hook',
             label: elements.hooksLabel.value.trim(),
             script_id: elements.hooksScript.value,
+            entry_mode: elements.hooksEntryMode.value,
+            function_expression: elements.hooksFunctionExpression.value.trim(),
             line: line - 1,
             column: column - 1,
             entry_enabled: elements.hooksEntryEnabled.checked,
@@ -3596,6 +3725,9 @@
           if (!request.label) throw new TypeError('Enter a short hook label.');
           if (!request.script_id) throw new TypeError('Choose one live JavaScript source.');
           if (!request.entry_enabled && !request.return_enabled) throw new TypeError('Enable entry, synchronous return, or both.');
+          if (request.entry_mode === 'function' && (!request.function_expression || !request.entry_enabled || request.return_enabled)) {
+            throw new TypeError('Live function targeting needs an expression and entry-only capture.');
+          }
           if (returnMode === 'json') {
             try { request.return_value = JSON.parse(elements.hooksReturnValue.value); }
             catch { throw new TypeError('Return replacement must be valid JSON.'); }
@@ -3608,6 +3740,7 @@
           if (response) {
             elements.hooksConfirm.checked = false;
             elements.hooksLabel.value = '';
+            elements.hooksFunctionExpression.value = '';
             elements.hooksCondition.value = '';
             elements.hooksEntryLogic.value = '';
             elements.hooksReturnLogic.value = '';
@@ -3621,21 +3754,63 @@
         }
       }
 
-      function pivotSourceToRuntimeHooks() {
-        const source = selectedSource();
+      function prefillHookFromSource(source) {
         const hooks = runtimeHooksState();
         if (source?.source_type !== 'script' || state.sourceDeobfuscated || state.sourceFormatted || !hooks?.isolated ||
-            hooks.target_id !== state.debuggerSession?.target?.id) return;
+            hooks.target_id !== state.debuggerSession?.target?.id) return false;
         const cursor = state.sourceCursor?.scriptId === source.script_id ? state.sourceCursor : null;
         const line = cursor?.line ?? source.start_line;
-        state.experimentMode = 'hooks';
-        showScreen('experiments');
         elements.hooksScript.value = source.script_id;
+        elements.hooksEntryMode.value = 'source';
         elements.hooksLine.value = String(line + 1);
         elements.hooksColumn.value = String((cursor?.column ?? sourceRuntimeColumn(source, 0)) + 1);
         if (!elements.hooksLabel.value) elements.hooksLabel.value = `${sourceName(source)}:${line + 1}`;
+        return true;
+      }
+
+      function openSourceHooks(prefill = true, focus = true) {
+        state.sourceHooksOpen = true;
+        state.experimentMode = 'hooks';
+        document.querySelector('#screen-sources').dataset.hooksOpen = 'true';
+        document.querySelector('#screen-sources').append(elements.hooksWorkspace);
+        elements.sourceHooksHits.append(elements.hooksHitsColumn);
+        elements.hooksWorkspace.hidden = false;
+        elements.sourceHooksHits.hidden = false;
+        elements.sourceHooksNotice.hidden = false;
+        elements.sourceHookPivot.setAttribute('aria-expanded', 'true');
+        renderSourceSidebar();
         renderRuntimeHooks();
-        requestAnimationFrame(() => elements.hooksLabel.focus());
+        if (prefill) {
+          prefillHookFromSource(selectedSource());
+          renderRuntimeHooks();
+        }
+        if (focus) requestAnimationFrame(() => {
+          const field = [elements.hooksLabel, elements.hooksCreate, elements.hooksDisarm, elements.sourceHooksClose]
+            .find(candidate => !candidate.disabled);
+          field?.focus({preventScroll: true});
+        });
+      }
+
+      function closeSourceHooks(restoreFocus = true) {
+        state.sourceHooksOpen = false;
+        document.querySelector('#screen-sources').dataset.hooksOpen = 'false';
+        elements.hooksHome.after(elements.hooksWorkspace);
+        elements.hooksHitsHome.after(elements.hooksHitsColumn);
+        elements.sourceHooksHits.hidden = true;
+        elements.sourceHooksNotice.hidden = true;
+        elements.sourceHookPivot.setAttribute('aria-expanded', 'false');
+        elements.hooksWorkspace.hidden = state.experimentMode !== 'hooks' || document.querySelector('#screen-experiments').hidden;
+        renderSourceSidebar();
+        if (restoreFocus) elements.sourceHookPivot.focus({preventScroll: true});
+      }
+
+      function pivotSourceToRuntimeHooks() {
+        if (state.sourceHooksOpen) {
+          closeSourceHooks();
+          return;
+        }
+        if (!['running', 'paused'].includes(state.debuggerSession?.state)) return;
+        openSourceHooks(Boolean(selectedSource()));
       }
 
       async function applyRepeaterVariables() {
@@ -5626,8 +5801,10 @@
             ...cached,
             source_type: 'script',
             key: `script:${script.script_id}`,
-            target_id: state.debuggerSession?.target?.id ?? '',
-            target_title: state.debuggerSession?.target?.title ?? '',
+            target_id: script.target_id ?? state.debuggerSession?.target?.id ?? '',
+            target_title: script.target_type === 'worker'
+              ? (runtimeHooksState()?.workers ?? []).find(worker => worker.id === script.target_id)?.title ?? 'Worker'
+              : state.debuggerSession?.target?.title ?? '',
             kind: script.language === 'WebAssembly' ? 'wasm' : 'javascript',
             mime_type: script.language === 'WebAssembly' ? 'application/wasm' : 'text/javascript',
             byte_size: script.length,
@@ -5662,7 +5839,7 @@
         if (source.source_type === 'script') {
           const language = source.language === 'WebAssembly' ? 'WASM' : 'JS';
           const context = source.execution_context_id > 0 ? `ctx ${source.execution_context_id}` : 'ctx unknown';
-          return `${language} · live · ${context}`;
+          return `${language} · ${source.target_type === 'worker' ? 'worker' : 'page'} · live · ${context}`;
         }
         return `${source.origin === 'sample' ? 'sample' : source.origin === 'demo' ? 'demo' : 'evidence'} · ${source.kind}`;
       }
@@ -6074,7 +6251,7 @@
           gutter.className = 'source-gutter';
           gutter.textContent = String((mappedLine ?? runtimeLine) + 1);
           const transformed = state.sourceDeobfuscated || state.sourceFormatted;
-          gutter.disabled = mappedLine === null && (source.source_type !== 'script' || transformed || !['running', 'paused'].includes(state.debuggerSession?.state) || memoryOriginTraceActive());
+          gutter.disabled = mappedLine === null && (source.source_type !== 'script' || source.target_type === 'worker' || transformed || !['running', 'paused'].includes(state.debuggerSession?.state) || memoryOriginTraceActive());
           gutter.title = mappedLine === null
             ? transformed ? 'Show original source to edit breakpoints' : ''
             : `Show original source at line ${mappedLine + 1}`;
@@ -6114,7 +6291,7 @@
         const source = selectedSource();
         if (source?.source_type !== 'script' || elements.sourceCode.hidden) return;
         const breakpointsByLine = breakpointLinesForSource(source);
-        const enabled = !state.sourceDeobfuscated && !state.sourceFormatted && ['running', 'paused'].includes(state.debuggerSession?.state) && !memoryOriginTraceActive();
+        const enabled = source.target_type !== 'worker' && !state.sourceDeobfuscated && !state.sourceFormatted && ['running', 'paused'].includes(state.debuggerSession?.state) && !memoryOriginTraceActive();
         elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row => {
           const runtimeLine = Number(row.dataset.line) - 1;
           const breakpoint = breakpointsByLine.get(runtimeLine) ?? null;
@@ -6155,10 +6332,8 @@
         elements.sourceDeob.setAttribute('aria-pressed', String(state.sourceDeobfuscated));
         elements.sourceDeob.setAttribute('aria-label', state.sourceDeobfuscated ? 'Show original evidence' : 'Show deobfuscated representation');
         elements.sourceDeob.title = state.sourceDeobfuscated ? 'Show original evidence' : 'Show deobfuscated representation';
-        const hooks = runtimeHooksState();
-        elements.sourceHookPivot.disabled = source?.source_type !== 'script' || state.sourceDeobfuscated || state.sourceFormatted ||
-          !hooks?.isolated || hooks.target_id !== state.debuggerSession?.target?.id ||
-          ['arming', 'armed', 'handling', 'stopping'].includes(hooks?.state);
+        elements.sourceHookPivot.disabled = !['running', 'paused'].includes(state.debuggerSession?.state);
+        elements.sourceHookPivot.setAttribute('aria-expanded', String(state.sourceHooksOpen));
         renderSourceContent(source, view);
         if ((source?.source_type === 'script' || source?.source_type === 'artifact') && source.kind === 'javascript') loadDeobfuscation(source);
         renderDeobfuscationReport(source);
@@ -6350,6 +6525,7 @@
         state.sourceFormatted = false;
         if (!state.openScriptIds.includes(scriptId)) state.openScriptIds.push(scriptId);
         renderSources();
+        if (state.sourceHooksOpen && line === null && prefillHookFromSource(source)) renderRuntimeHooks();
         loadScriptContent(source);
       }
 
@@ -7530,6 +7706,7 @@
         const paused = session?.state === 'paused';
         const running = session?.state === 'running';
         const attached = paused || running;
+        elements.sourceHookPivot.disabled = !attached;
         const originTraceActive = memoryOriginTraceActive();
         elements.debugResume.disabled = !paused || state.debuggerActionPending || originTraceActive;
         elements.debugPause.disabled = !running || state.debuggerActionPending || originTraceActive;
@@ -7671,6 +7848,8 @@
           }
           renderMemory();
           if (!document.querySelector('#screen-experiments').hidden) renderExperiment();
+          if (state.sourceHooksOpen) renderRuntimeHooks();
+          if (state.selectedRuntimeHookRequest) renderRuntimeHookTraffic();
           if (!document.querySelector('#screen-api-collection').hidden) renderApiCollection();
           const sourcesVisible = !document.querySelector('#screen-sources').hidden;
           if (sourcesVisible && !sourceRendered) {
@@ -7696,6 +7875,8 @@
           renderDebugger();
           renderMemory();
           if (!document.querySelector('#screen-experiments').hidden) renderExperiment();
+          if (state.sourceHooksOpen) renderRuntimeHooks();
+          if (state.selectedRuntimeHookRequest) renderRuntimeHookTraffic();
           if (!document.querySelector('#screen-api-collection').hidden) renderApiCollection();
         } finally {
           state.debuggerRefreshing = false;
@@ -7780,6 +7961,7 @@
 
       function showScreen(name, trigger = null) {
         const screenName = name === 'backtraces' ? 'backtrace' : name;
+        if (screenName !== 'sources' && state.sourceHooksOpen) closeSourceHooks(false);
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
         document.querySelectorAll('.nav-button').forEach(button => {
           const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence') || (button.dataset.screen === 'traffic' && screenName === 'vm');
@@ -7793,6 +7975,7 @@
           } else button.removeAttribute('aria-current');
         });
         if (screenName === 'signals') renderFingerprintActivity();
+        if (screenName === 'traffic') renderRuntimeHookTraffic();
         if (screenName === 'backtrace') renderBacktrace();
         if (screenName === 'experiments') renderExperiment();
         if (screenName === 'api-collection') {
@@ -8292,10 +8475,13 @@
         if (source?.source_type === 'script' && !transformed) {
           state.sourceCursor = {scriptId: source.script_id, line: runtimeLine, column};
           elements.sourceCode.querySelectorAll('.source-line').forEach(row => row.classList.toggle('cursor', row === line));
+          if (state.sourceHooksOpen && prefillHookFromSource(source)) renderRuntimeHooks();
         }
         elements.sourcePosition.textContent = `Line ${line.dataset.line}, Column ${column + 1}`;
       });
       elements.sourceHookPivot.addEventListener('click', pivotSourceToRuntimeHooks);
+      elements.sourceHooksClose.addEventListener('click', () => closeSourceHooks());
+      elements.sourceHooksExperiments.addEventListener('click', () => showScreen('experiments'));
       const setConsoleOpen = open => {
         state.consoleOpen = open;
         elements.consoleDrawer.hidden = !open;
@@ -8474,6 +8660,17 @@
         }
       });
       elements.hooksReturnMode.addEventListener('change', () => {
+        state.experimentError = null;
+        renderRuntimeHooks();
+      });
+      elements.hooksEntryMode.addEventListener('change', () => {
+        if (elements.hooksEntryMode.value === 'function') {
+          elements.hooksEntryEnabled.checked = true;
+          elements.hooksReturnEnabled.checked = false;
+          elements.hooksReturnMode.value = 'none';
+          elements.hooksReturnLogic.value = '';
+          elements.hooksReturnValue.value = '';
+        }
         state.experimentError = null;
         renderRuntimeHooks();
       });

@@ -208,7 +208,7 @@ class NativeDebuggerConnection:
 
 
 class ActionScopeTargetSession:
-    """One bounded CDP client for mutable rules on an isolated page target."""
+    """One bounded CDP client for an isolated page or worker target."""
 
     def __init__(
         self,
@@ -216,13 +216,21 @@ class ActionScopeTargetSession:
         event_handler: Any,
         close_handler: Any,
         debugger_transport_binary: Path,
+        *,
+        enable_page: bool = True,
+        enable_debugger: bool = False,
+        browser_url: Optional[str] = None,
     ) -> None:
         self.target = dict(target)
         self.target_id = target["id"]
         self._event_handler = event_handler
         self._close_handler = close_handler
+        self._enable_page = enable_page
+        self._enable_debugger = enable_debugger
+        self._browser_session = browser_url is not None
+        self._session_id: Optional[str] = None
         self._connection = NativeDebuggerConnection(
-            target["web_socket_url"], debugger_transport_binary
+            browser_url or target["web_socket_url"], debugger_transport_binary
         )
         self._lock = threading.RLock()
         self._pending: dict[int, PendingCommand] = {}
@@ -238,8 +246,24 @@ class ActionScopeTargetSession:
     def start(self) -> None:
         self._reader.start()
         try:
+            if self._browser_session:
+                attached = self.command(
+                    "Target.attachToTarget",
+                    {"targetId": self.target_id, "flatten": True},
+                    timeout=5.0,
+                )
+                session_id = attached.get("sessionId")
+                if not isinstance(session_id, str) or not session_id:
+                    raise ProtocolError("Browser omitted the worker debugger session")
+                self._session_id = session_id
             self.command("Runtime.enable")
-            self.command("Page.enable")
+            if self._enable_page:
+                self.command("Page.enable")
+            if self._enable_debugger:
+                self.command(
+                    "Debugger.enable",
+                    {"maxScriptsCacheSize": float(32 * 1024 * 1024)},
+                )
         except BaseException:
             self.close()
             raise
@@ -266,9 +290,10 @@ class ActionScopeTargetSession:
             pending = PendingCommand(threading.Event())
             self._pending[command_id] = pending
         try:
-            self._connection.send_json(
-                {"id": command_id, "method": method, "params": params or {}}
-            )
+            message = {"id": command_id, "method": method, "params": params or {}}
+            if self._session_id is not None:
+                message["sessionId"] = self._session_id
+            self._connection.send_json(message)
         except BaseException:
             with self._lock:
                 self._pending.pop(command_id, None)
@@ -304,9 +329,10 @@ class ActionScopeTargetSession:
             command_id = self._next_command_id
             self._next_command_id += 1
         try:
-            self._connection.send_json(
-                {"id": command_id, "method": method, "params": params or {}}
-            )
+            message = {"id": command_id, "method": method, "params": params or {}}
+            if self._session_id is not None:
+                message["sessionId"] = self._session_id
+            self._connection.send_json(message)
         except DebuggerBridgeError:
             return False
         return True
@@ -347,6 +373,16 @@ class ActionScopeTargetSession:
                     continue
                 method = message.get("method")
                 params = message.get("params", {})
+                if (
+                    self._browser_session
+                    and self._session_id is not None
+                    and method == "Target.detachedFromTarget"
+                    and isinstance(params, dict)
+                    and params.get("sessionId") == self._session_id
+                ):
+                    raise WebSocketClosed("Worker debugger target detached")
+                if self._browser_session and message.get("sessionId") != self._session_id:
+                    continue
                 if isinstance(method, str) and isinstance(params, dict):
                     self._event_handler(self, method, params)
         except (OSError, DebuggerBridgeError, json.JSONDecodeError) as exception:

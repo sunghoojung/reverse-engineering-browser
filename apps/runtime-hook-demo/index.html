@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Anonymous Function Lab · REB</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./demo.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">R</span><span>REB <strong>/ Function Lab</strong></span></div>
+      <span class="safety-pill">LOCAL DEMO · FAKE TOKENS ONLY</span>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="page-title">
+        <div class="eyebrow"><span class="pulse"></span> Runtime Hooks, made visible</div>
+        <h1 id="page-title">What happens inside an <em>anonymous function?</em></h1>
+        <p>Paste a toy token. This page splits it, runs every character through an unnamed callback, and checks a tiny checksum. Stop inside that callback to inspect its inputs and the closure value it uses.</p>
+        <div class="hero-note"><strong>Honest comparison:</strong> Chrome DevTools can break here too. REB’s current advantage is selecting that callback from a cursor and collecting bounded entry/return hits in a disposable experiment page. Neither approach makes this a secure token system.</div>
+      </section>
+
+      <div class="lab-grid">
+        <section class="panel workbench" aria-labelledby="workbench-title">
+          <div class="panel-top"><div><span class="step-label">01 / INPUT</span><h2 id="workbench-title">Token workbench</h2></div><span class="panel-icon" aria-hidden="true">⌘</span></div>
+          <p class="muted">Format: <code>LAB.PAYLOAD.CHECK</code>. The “check” is intentionally reversible and is not authentication.</p>
+          <form id="token-form">
+            <label for="token-input">Toy token</label>
+            <div class="input-row">
+              <input id="token-input" name="token" type="text" autocomplete="off" spellcheck="false" maxlength="64" aria-describedby="token-hint">
+              <button class="primary" type="submit">Process token <span aria-hidden="true">→</span></button>
+            </div>
+            <div class="input-actions"><button id="sample-button" class="text-button" type="button">Load valid sample</button><button id="tamper-button" class="text-button" type="button">Load tampered sample</button></div>
+            <p id="token-hint" class="hint">Use a sample first. Nothing is sent to a server or saved.</p>
+          </form>
+
+          <div id="result" class="result idle" role="status" aria-live="polite">
+            <span class="result-dot" aria-hidden="true"></span>
+            <div><strong id="result-title">Ready to inspect</strong><p id="result-detail">Load a sample, then process it.</p></div>
+          </div>
+        </section>
+
+        <section class="panel pipeline" aria-labelledby="pipeline-title">
+          <div class="panel-top"><div><span class="step-label">02 / OBSERVE</span><h2 id="pipeline-title">Processing path</h2></div><span id="run-count" class="run-count">0 runs</span></div>
+          <ol class="stages">
+            <li><span class="stage-number">1</span><div><strong>Split token</strong><p>Read prefix, payload, and supplied check.</p><code id="split-value">—</code></div></li>
+            <li class="active-stage"><span class="stage-number">2</span><div><strong>Anonymous callback × each character</strong><p>This is the hook target. It sees <code>character</code>, <code>index</code>, and closure-local <code>salt</code>.</p><code id="map-value">—</code></div></li>
+            <li><span class="stage-number">3</span><div><strong>Compare checks</strong><p>Turn the callback scores into a toy check code.</p><code id="check-value">—</code></div></li>
+          </ol>
+        </section>
+      </div>
+
+      <section class="source-panel" aria-labelledby="source-title">
+        <div class="source-heading"><div><span class="step-label">03 / BREAK INSIDE</span><h2 id="source-title">The line to investigate</h2></div><a href="./demo.js" target="_blank" rel="noopener">Open real demo.js ↗</a></div>
+        <pre><code>Array.from(payload).map((character, index) =&gt; {
+  const code = character.charCodeAt(0);
+  const weighted = (code * (index + 1) + salt) % 97; <span class="code-comment">← select here</span>
+  return weighted;
+});</code></pre>
+        <p>The callback has no name and is created inside a closure. That makes global <code>window.someFunction</code> wrapping awkward, <strong>not</strong> ordinary source debugging impossible.</p>
+      </section>
+
+      <section class="compare" aria-labelledby="compare-title">
+        <div class="section-heading"><span class="step-label">THE POINT</span><h2 id="compare-title">Two ways to watch the same call</h2></div>
+        <div class="compare-grid">
+          <article class="compare-card"><span class="card-kicker">BROWSER DEVTOOLS</span><h3>Interactive breakpoint</h3><p>Open Sources → <code>demo.js</code>, click the <code>const weighted</code> line, and process the token. The page pauses; inspect <code>character</code>, <code>index</code>, and <code>salt</code>, then resume.</p><span class="card-footer">Great for one call you inspect manually.</span></article>
+          <article class="compare-card accent"><span class="card-kicker">REB RUNTIME HOOKS · CDP TODAY</span><h3>Bounded experiment hits</h3><p>In Origin Trace’s isolated Experiment page, choose <code>demo.js</code> and a cursor on that same line. REB resolves the enclosing arrow function, arms entry/return breakpoints, records bounded hits, and resumes automatically.</p><span class="card-footer">Great for repeat calls and deliberate return experiments.</span></article>
+        </div>
+        <p class="footnote">A future native/V8 probe would sit below CDP. This demo does not claim REB already has one. JavaScript hooks also do not reveal the internals of native browser code or WebAssembly by themselves.</p>
+      </section>
+
+      <section class="source-panel" aria-labelledby="worker-title">
+        <div class="source-heading"><div><span class="step-label">NEXT / HARDER CASE</span><h2 id="worker-title">Obfuscated signer in a Web Worker</h2></div><a href="./ghostwire-worker/README.md" target="_blank" rel="noopener">Ghostwire fixture guide ↗</a></div>
+        <p>The companion fixture uses Ghostwire’s real obfuscated-worker example. A shipment message crosses from the page into a worker, where a closure-held secret and anonymous byte-mixing callback produce a <code>ws1.</code> payload. Chrome DevTools can debug the worker; Ghostwire follows it automatically with CDP. REB Runtime Hooks currently targets the page, not that worker.</p>
+        <pre><code>python3 apps/runtime-hook-demo/ghostwire-worker/lab.py --port 8766</code></pre>
+        <p>Then open <code>http://127.0.0.1:8766/</code>. The local backend issues a receipt but does not validate a signature.</p>
+      </section>
+    </main>
+    <footer>Reverse Engineering Browser · educational local fixture · no real credentials</footer>
+  </div>
+</body>
+</html>

@@ -1,0 +1,15 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Parcel - Create shipment</title>
+<style>body{font:15px/1.5 system-ui;margin:32px;color:#202020}header{border-bottom:1px solid #ddd;padding-bottom:16px}h1{font-size:24px;margin-top:48px}label{display:block;margin-top:22px}input,textarea{box-sizing:border-box;width:100%;padding:10px;font:inherit;border:1px solid #bbb}button{margin-top:24px;padding:10px 18px;cursor:pointer}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}small{color:#666}</style>
+<header><strong>Parcel</strong> <small> / Shipments</small></header><h1>Create a shipment</h1><p>Enter your delivery instructions to prepare a shipment request.</p><label for="message">Delivery instructions</label><textarea id="message" rows="4" maxlength="128">ultra secret payload 😀</textarea><label for="nonce">Shipment reference</label><input id="nonce" type="number" value="37" min="0" max="65535"><button id="send">Prepare shipment</button><p id="receipt" role="status"></p>
+<script>
+const signer = new Worker('/signer-worker.js');
+signer.onmessage = event => {
+  document.querySelector('#receipt').textContent = event.data.ok
+    ? 'Shipment request accepted. Reference: ' + event.data.receipt
+    : 'Shipment request failed.';
+};
+document.querySelector('#send').onclick = () => signer.postMessage({
+  message: document.querySelector('#message').value,
+  nonce: Number(document.querySelector('#nonce').value),
+});
+</script></html>

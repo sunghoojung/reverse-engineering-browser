@@ -1808,20 +1808,24 @@ const objectReady = {
 };
 const hooksIdle = {
   protocol_version: 1, session_id: 0, state: 'idle', isolated: false,
-  target_id: null, definitions: [], active_points: 0, total_hits: 0,
-  hits: [], hit_evictions: 0, last_failure: null,
+  target_id: null, workers: [], worker_overflow: 0, definitions: [],
+  active_points: 0, total_hits: 0, hits: [], hit_evictions: 0,
+  requests: [], request_evictions: 0, last_failure: null,
   message: 'Create an isolated Experiment context to use Runtime Hooks.',
-  limits: {definitions: 8, active_points: 64, return_points_per_definition: 32,
-    total_hits: 512, retained_hits: 128, bindings_per_hit: 32,
-    binding_preview_bytes: 512, condition_bytes: 1024, logic_bytes: 8192,
+  limits: {definitions: 8, workers: 8, active_points: 64, return_points_per_definition: 32,
+    total_hits: 512, retained_hits: 128, retained_requests: 128, bindings_per_hit: 32,
+    binding_preview_bytes: 512, condition_bytes: 1024, function_expression_bytes: 1024, logic_bytes: 8192,
     return_bytes: 8192, evaluation_timeout_ms: 100}
 };
 const hookRemote = {type: 'boolean', subtype: null, class_name: null,
   description: 'true', value: true, unserializable_value: null,
   value_truncated: false};
 const hookDefinition = {
-  id: 1, label: 'checkout guard', script_id: 'script-1', url: script.url,
+  id: 1, label: 'checkout guard', script_id: 'script-1', cdp_script_id: 'script-1',
+  target_id: 'page-1', target_type: 'page', entry_mode: 'source', function_expression: '', url: script.url,
   line: 3, column: 0, entry_enabled: true, return_enabled: true,
+  function_kind: 'arrow_function', function_start: {line: 2, column: 4},
+  function_end: {line: 6, column: 1}, target_line: 3, target_column: 0,
   condition: 'cart.total > 100', entry_logic: 'cart.reviewed = true;',
   return_logic: '', return_mode: 'json', return_expression: '',
   return_value: true, return_value_bytes: 4,
@@ -1829,7 +1833,7 @@ const hookDefinition = {
 };
 const hookHit = {
   id: 1, occurred_at_ms: 5, session_id: 4, hook_id: 1,
-  target_id: 'page-1', label: 'checkout guard', source: script.url,
+  target_id: 'page-1', target_type: 'page', label: 'checkout guard', source: script.url,
   function: 'checkout', category: 'return', operation: 'return_overridden',
   line: 3, column: 8,
   bindings: [{name: 'cart', value: hookRemote, accessor: false}],
@@ -1839,6 +1843,23 @@ const hookHit = {
 const hooksReady = {...hooksIdle, session_id: 4, state: 'armed', isolated: true,
   target_id: 'page-1', definitions: [hookDefinition], active_points: 2,
   total_hits: 1, hits: [hookHit], message: 'Runtime Hooks armed.'};
+const workerHookDefinition = {...hookDefinition, script_id: 'w:worker-1:12',
+  cdp_script_id: '12', target_id: 'worker-1', target_type: 'worker',
+  entry_mode: 'function', function_expression: 'self.onmessage',
+  function_kind: 'live_function_object', return_enabled: false,
+  return_mode: 'none', return_value: null, return_value_bytes: 0,
+  resolved: {entry_points: 1, return_points: 0}};
+const workerHookHit = {...hookHit, target_id: 'worker-1', target_type: 'worker',
+  source: 'https://checkout.test/signer-worker.js',
+  category: 'entry', operation: 'observed', original_return: null,
+  replacement_return: null};
+const workerRequest = {id: 1, occurred_at_ms: 6, target_id: 'worker-1',
+  request_id: 'request-1', url: 'https://checkout.test/api/submit',
+  method: 'POST', resource_type: 'Fetch', status: 200, related_hit_ids: [1],
+  relation: 'same-context temporal proximity, inferred'};
+const hooksWorkerReady = {...hooksReady, workers: [{id: 'worker-1', type: 'worker',
+  title: '', url: ''}], definitions: [workerHookDefinition], active_points: 1,
+  hits: [workerHookHit], requests: [workerRequest]};
 const automationIdle = {
   protocol_version: 1, session_id: 0, state: 'idle', isolated: false,
   target_id: null, recipes: [], source_bytes: 0, auto_armed: false,
@@ -1984,6 +2005,10 @@ process.stdout.write(JSON.stringify({
     target_id: 'page-1', file_bytes: 0, captured_at_ms: 1}}),
   badStateRejected: !isDebuggerResponse({...snapshot, state: 'owned'}),
   badScriptRejected: !isDebuggerResponse({...snapshot, scripts: [{...script, length: -1}]}),
+  workerScriptAccepted: isDebuggerResponse({...snapshot, scripts: [{...script,
+    script_id: 'w:worker-1:12', cdp_script_id: '12', target_id: 'worker-1', target_type: 'worker'}]}),
+  workerMissingTargetRejected: !isDebuggerResponse({...snapshot, scripts: [{...script,
+    script_id: 'w:worker-1:12', cdp_script_id: '12', target_type: 'worker'}]}),
   badFrameRejected: !isDebuggerResponse({...snapshot, paused: {...snapshot.paused,
     call_frames: [{...frame, location: {script_id: 'script-1', line: -1, column: 0}}]}}),
   badTargetRejected: !isDebuggerResponse({...snapshot, targets: [null]}),
@@ -2027,6 +2052,11 @@ process.stdout.write(JSON.stringify({
   objectSearchPairRequired: !isObjectExperiment({...objectReady, search: null}),
   missingObjectExperimentRejected: !isDebuggerResponse({...snapshot, object_experiment: undefined}),
   hooksReadyAccepted: isRuntimeHooks(hooksReady),
+  hooksWorkerAccepted: isRuntimeHooks(hooksWorkerReady),
+  hooksBadRelationRejected: !isRuntimeHooks({...hooksWorkerReady,
+    requests: [{...workerRequest, relation: 'observed causal chain'}]}),
+  hooksBadFunctionRejected: !isRuntimeHooks({...hooksReady, definitions: [{...hookDefinition,
+    function_kind: 'unknown'}]}),
   hooksPointBound: !isRuntimeHooks({...hooksReady, active_points: 65}),
   hooksBindingBound: !isRuntimeHooks({...hooksReady, hits: [{...hookHit,
     bindings: Array(33).fill(hookHit.bindings[0])}]}),
@@ -2089,6 +2119,8 @@ process.stdout.write(JSON.stringify({
                 "badBaselineRejected": True,
                 "badStateRejected": True,
                 "badScriptRejected": True,
+                "workerScriptAccepted": True,
+                "workerMissingTargetRejected": True,
                 "badFrameRejected": True,
                 "badTargetRejected": True,
                 "badLiveTabCountRejected": True,
@@ -2121,6 +2153,9 @@ process.stdout.write(JSON.stringify({
                 "objectSearchPairRequired": True,
                 "missingObjectExperimentRejected": True,
                 "hooksReadyAccepted": True,
+                "hooksWorkerAccepted": True,
+                "hooksBadRelationRejected": True,
+                "hooksBadFunctionRejected": True,
                 "hooksPointBound": True,
                 "hooksBindingBound": True,
                 "hooksPromiseOperationRejected": True,

@@ -276,8 +276,36 @@ Workspace and Overrides tabs are omitted until they provide a usable workflow.
 File rows reserve their remaining width for the filename, with full URLs in
 tooltips and source metadata in Details. Folder rows retain their item counts.
 Clicking original source records the UTF-16 column across syntax spans, so the
-Hook pivot can target a function inside a minified line. Inline script offsets
+Hooks panel can target a function inside a minified line. Inline script offsets
 are included; readable representations cannot change the runtime cursor.
+In a connected session, **Hooks** opens the shared Runtime Hooks workspace
+beside the Sources editor, with its ephemeral hit trail below the code. The
+panel creates and manages the same disposable Experiment context used by
+Experiments; its header labels the isolation and links back to Experiments.
+Targeting guidance stays in the **Targeting help** disclosure, while armed
+status uses a compact hit count.
+Selecting a hit returns to the original live source location when that script
+is still attached. Captured or pretty-printed sources cannot prefill a runtime
+location, and an unavailable script is reported rather than guessed.
+Runtime Hooks resolves a selected cursor against the original live JavaScript with
+the bundled Rust parser. It chooses the innermost function, including anonymous
+callbacks and arrows, and shows its start and V8 entry-search position before
+arming. A cursor outside a function is rejected rather than creating a hook at
+an unrelated statement. In an isolated Experiment context, Sources also lists
+dedicated-worker scripts with a Worker label. The Hooks panel can select one of
+those scripts; ordinary page-debugger gutters remain disabled for worker
+sources. Runtime Hooks can arm page and worker definitions together, with
+commands and hit records identified by target. Live-function-object mode takes
+a side-effect-free expression such as `self.onmessage` in the selected target
+and captures entry only; it does not discover closure-held functions
+automatically. Worker attachment runs off the page-target watcher; a failed
+attachment drops its scripts and retries with bounded backoff. The breakpoint
+active setting is shared with attached workers. While armed, worker requests
+appear as bounded, redacted metadata. Links to nearby hits are labeled
+temporal/inferred, not causal proof.
+Selecting one of these worker requests opens a separate ephemeral trail in
+Traffic, with links back to retained hits. It is not merged into the captured
+request ledger or presented as a proven initiator chain.
 Find counts literal, case-insensitive occurrences within rendered lines, including
 multiple matches on one minified line. Enter advances and Shift+Enter goes back,
 wrapping through the first 1000 matches with a visible `+` when results are capped.

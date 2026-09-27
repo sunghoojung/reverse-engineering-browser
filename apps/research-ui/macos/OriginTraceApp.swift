@@ -88,7 +88,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent("app.css")),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/app.js", "/app_state.js", "/evidence_models.js", "/source_syntax.js", "/traffic_view.js":
+      case "/app.js", "/app_state.js", "/evidence_models.js", "/source_syntax.js", "/traffic_view.js", "/request_value_test.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -1772,6 +1772,19 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           "hit_evictions": 0,
           "requests": [],
           "request_evictions": 0,
+          "field_test": [
+            "protocol_version": 2,
+            "enabled": false,
+            "url": "",
+            "method": "POST",
+            "kind": "json",
+            "pointer": "",
+            "observations": [],
+            "observation_evictions": 0,
+            "comparison": NSNull(),
+            "limits": ["body_bytes": 128 * 1_024, "pointer_bytes": 256,
+                       "preview_bytes": 256, "observations": 16],
+          ],
           "last_failure": NSNull(),
           "message": "Create an isolated Experiment context to use Runtime Hooks.",
           "limits": [

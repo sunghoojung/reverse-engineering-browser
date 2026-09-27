@@ -32,7 +32,7 @@ fi
 
 mkdir -p "${macos_path}" "${resources_path}"
 cp "${repo_root}/apps/research-ui/macos/Info.plist" "${contents_path}/Info.plist"
-for asset in index.html app.css app_state.js evidence_models.js source_syntax.js traffic_view.js app.js; do
+for asset in index.html app.css app_state.js evidence_models.js source_syntax.js traffic_view.js request_value_test.js app.js; do
   cp "${repo_root}/apps/research-ui/${asset}" "${resources_path}/${asset}"
 done
 mkdir -p "${research_ui_resources}/debugger"

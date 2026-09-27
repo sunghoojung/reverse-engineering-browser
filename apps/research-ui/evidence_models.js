@@ -752,6 +752,59 @@
           isSafeIntegerInRange(definition.resolved.return_points, 0, 32));
       }
 
+      function isRuntimeFieldTest(test) {
+        if (!isPlainObject(test) || test.protocol_version !== 2 || typeof test.enabled !== 'boolean' ||
+            !isBoundedText(test.url, 8 * 1024) || !isBoundedText(test.method, 32) ||
+            !['json', 'form', 'query', 'header', 'body'].includes(test.kind) ||
+            !isBoundedText(test.pointer, 256) || !Array.isArray(test.observations) ||
+            test.observations.length > 16 || !isSafeIntegerInRange(test.observation_evictions, 0, Number.MAX_SAFE_INTEGER) ||
+            !isPlainObject(test.limits) || test.limits.body_bytes !== 128 * 1024 ||
+            test.limits.pointer_bytes !== 256 || test.limits.preview_bytes !== 256 ||
+            test.limits.observations !== 16) return false;
+        if (test.enabled) {
+          let url;
+          try { url = new URL(test.url); } catch { return false; }
+          if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password ||
+              url.search || url.hash ||
+              (test.kind === 'json' && (!test.pointer.startsWith('/') ||
+                test.pointer.split('/').slice(1).some(part => /~(?![01])/u.test(part)))) ||
+              (['form', 'query', 'header'].includes(test.kind) && !test.pointer) ||
+              (test.kind === 'header' && !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(test.pointer)) ||
+              (test.kind === 'body' && test.pointer)) return false;
+        } else if (test.url || test.pointer || test.observations.length || test.comparison !== null) return false;
+        const ids = new Set();
+        for (const observation of test.observations) {
+          if (!isPlainObject(observation) || !isSafeIntegerInRange(observation.id, 1, Number.MAX_SAFE_INTEGER) ||
+              ids.has(observation.id) || !isSafeIntegerInRange(observation.occurred_at_ms, 1, Number.MAX_SAFE_INTEGER) ||
+              !isBoundedText(observation.target_id, 4 * 1024) || !['page', 'worker'].includes(observation.target_type) ||
+              !isBoundedText(observation.request_id, 4 * 1024) ||
+              observation.url !== test.url || observation.method !== test.method ||
+              (observation.query_context_sha256 !== null && !/^[0-9a-f]{64}$/.test(observation.query_context_sha256)) ||
+              !Array.isArray(observation.related_hit_ids) || observation.related_hit_ids.length > 2 ||
+              !observation.related_hit_ids.every(id => isSafeIntegerInRange(id, 1, Number.MAX_SAFE_INTEGER)) ||
+              !['pending', 'available', 'missing', 'invalid_json', 'invalid_pointer', 'body_too_large',
+                'value_too_large', 'unavailable', 'error', 'uncaptured', 'truncated', 'ambiguous'].includes(observation.status) ||
+              (observation.sha256 !== null && !/^[0-9a-f]{64}$/.test(observation.sha256)) ||
+              !isBoundedText(observation.preview, 256) || !isSafeIntegerInRange(observation.bytes, 0, 4096) ||
+              (observation.status === 'available') !== (observation.sha256 !== null) ||
+              (observation.status === 'available' && observation.bytes === 0 && test.kind !== 'body')) return false;
+          ids.add(observation.id);
+        }
+        const comparison = test.comparison;
+        const byId = new Map(test.observations.map(observation => [observation.id, observation]));
+        return comparison === null || (isPlainObject(comparison) &&
+          ids.has(comparison.baseline_id) && ids.has(comparison.variant_id) &&
+          comparison.baseline_id !== comparison.variant_id && typeof comparison.changed === 'boolean' &&
+          byId.get(comparison.baseline_id).status === 'available' && byId.get(comparison.variant_id).status === 'available' &&
+          comparison.changed === (byId.get(comparison.baseline_id).sha256 !== byId.get(comparison.variant_id).sha256) &&
+          typeof comparison.same_query_context === 'boolean' &&
+          comparison.same_query_context === (byId.get(comparison.baseline_id).query_context_sha256 ===
+            byId.get(comparison.variant_id).query_context_sha256) &&
+          (comparison.intervention_hit_id === null || isSafeIntegerInRange(comparison.intervention_hit_id, 1, Number.MAX_SAFE_INTEGER)) &&
+          typeof comparison.baseline_overridden === 'boolean' &&
+          ['intervention-associated', 'inconclusive'].includes(comparison.interpretation));
+      }
+
       function isRuntimeHooks(hooks) {
         const states = ['idle', 'attaching', 'ready', 'arming', 'armed', 'handling', 'stopping',
           'disarmed', 'disposing', 'disposed', 'error'];
@@ -769,6 +822,7 @@
             !isSafeIntegerInRange(hooks.hit_evictions, 0, Number.MAX_SAFE_INTEGER) ||
             !Array.isArray(hooks.requests) || hooks.requests.length > 128 ||
             !isSafeIntegerInRange(hooks.request_evictions, 0, Number.MAX_SAFE_INTEGER) ||
+            !isRuntimeFieldTest(hooks.field_test) ||
             (hooks.last_failure !== null && !isBoundedText(hooks.last_failure, 512)) ||
             !isBoundedText(hooks.message, 512) || !isPlainObject(hooks.limits)) return false;
         const limits = {definitions: 8, workers: 8, active_points: 64, return_points_per_definition: 32,
@@ -798,7 +852,8 @@
         if (!hooks.requests.every(request => isPlainObject(request) &&
             isSafeIntegerInRange(request.id, 1, Number.MAX_SAFE_INTEGER) &&
             isSafeIntegerInRange(request.occurred_at_ms, 1, Number.MAX_SAFE_INTEGER) &&
-            isBoundedText(request.target_id, 4 * 1024) && isBoundedText(request.request_id, 4 * 1024) &&
+            isBoundedText(request.target_id, 4 * 1024) && ['page', 'worker'].includes(request.target_type) &&
+            isBoundedText(request.request_id, 4 * 1024) &&
             isBoundedText(request.url, 8 * 1024) && isBoundedText(request.method, 32) &&
             isBoundedText(request.resource_type, 32) &&
             (request.status === null || isSafeIntegerInRange(request.status, 100, 599)) &&

@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -31,6 +32,7 @@ from debugger.errors import (
     WebSocketClosed,
 )
 from debugger.function_locator import locate_function
+from debugger.request_field import SELECTOR_KINDS, extract_request_value, query_context_digest
 from debugger.heap_snapshot import (
     HeapSnapshotCapture,
     HeapSnapshotCollector,
@@ -163,6 +165,8 @@ from debugger.requests import (
     resolve_repeater_request,
     validate_request_interception_url,
 )
+
+
 from debugger.runtime_scripts import (
     AUTOMATION_RECIPE_FUNCTION,
     LIVE_OBJECT_SEARCH_FUNCTION,
@@ -182,6 +186,24 @@ from debugger.validation import (
     runtime_result_object_id,
     truncate_text,
 )
+
+
+class _PageRuntimeNetworkSession:
+    """Use the currently attached isolated page for an opt-in post-data fetch."""
+
+    def __init__(self, bridge: "DebuggerBridge", target_id: str) -> None:
+        self.bridge = bridge
+        self.target_id = target_id
+
+    def command(self, method: str, params: dict[str, Any], timeout: float = 3.0) -> dict[str, Any]:
+        with self.bridge._lock:
+            if self.bridge._target is None or self.bridge._target["id"] != self.target_id:
+                raise DebuggerBridgeError("Page target changed")
+        result = self.bridge._command(method, params, timeout)
+        with self.bridge._lock:
+            if self.bridge._target is None or self.bridge._target["id"] != self.target_id:
+                raise DebuggerBridgeError("Page target changed")
+        return result
 
 
 class DebuggerBridge:
@@ -204,6 +226,7 @@ class DebuggerBridge:
         self._lock = threading.RLock()
         # Serialize worker registration with changes to the shared breakpoint state.
         self._runtime_hook_worker_control_lock = threading.Lock()
+        self._runtime_hook_page_network_control_lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -272,6 +295,9 @@ class DebuggerBridge:
         self._next_runtime_hook_id = 1
         self._next_runtime_hook_hit_id = 1
         self._next_runtime_hook_request_id = 1
+        self._next_runtime_field_observation_id = 1
+        self._runtime_field_processing = 0
+        self._runtime_field_query_key = os.urandom(32)
         self._runtime_hooks = self._empty_runtime_hooks()
         self._runtime_hook_points: dict[tuple[str, str], dict[str, Any]] = {}
         self._runtime_hook_processing = False
@@ -285,6 +311,7 @@ class DebuggerBridge:
         self._runtime_hook_worker_retry: dict[str, tuple[int, float]] = {}
         self._runtime_hook_worker_refreshing = False
         self._runtime_hook_worker_revision = 0
+        self._runtime_hook_page_network_enabled = False
         self._next_automation_recipe_id = 1
         self._next_automation_run_id = 1
         self._automation_recipes: list[dict[str, Any]] = []
@@ -669,6 +696,10 @@ class DebuggerBridge:
             return self._disarm_runtime_hooks()
         elif action == "clear_runtime_hook_hits":
             return self._clear_runtime_hook_hits()
+        elif action == "configure_runtime_field_test":
+            return self._configure_runtime_field_test(request)
+        elif action == "compare_runtime_field_test":
+            return self._compare_runtime_field_test(request)
         elif action == "add_automation_recipe":
             return self._add_automation_recipe(request)
         elif action == "update_automation_recipe":
@@ -1881,6 +1912,7 @@ class DebuggerBridge:
         point_specs: list[dict[str, Any]] = []
         installed: dict[tuple[str, str], dict[str, Any]] = {}
         try:
+            self._ensure_runtime_hook_page_network()
             for definition in definitions:
                 if definition["entry_mode"] == "function":
                     point_specs.append({
@@ -1990,6 +2022,7 @@ class DebuggerBridge:
                     self._runtime_hook_stop_requested = False
                     self._runtime_hook_deferred_pause = None
                     self._changed()
+            self._disable_runtime_hook_page_network_if_unused()
             raise
 
         with self._lock:
@@ -2007,6 +2040,54 @@ class DebuggerBridge:
             self._changed()
             hooks = copy.deepcopy(self._runtime_hooks)
         return {"ok": True, "runtime_hooks": hooks, "generation": self.generation()}
+
+    def _ensure_runtime_hook_page_network(self) -> None:
+        with self._runtime_hook_page_network_control_lock:
+            with self._lock:
+                if self._capture_network_content or self._runtime_hook_page_network_enabled:
+                    return
+                target_id = self._runtime_hooks["target_id"]
+                connection = self._connection
+            # Fetch post data only for the one matched request after explicit consent.
+            self._command("Network.enable", {"maxPostDataSize": 0})
+            with self._lock:
+                if (self._runtime_hooks["target_id"] != target_id or self._connection is not connection or
+                        self._target is None or self._target["id"] != target_id):
+                    raise DebuggerBridgeError("Isolated page changed while enabling request observation")
+                self._runtime_hook_page_network_enabled = True
+
+    def _disable_runtime_hook_page_network_if_unused(self) -> None:
+        with self._runtime_hook_page_network_control_lock:
+            with self._lock:
+                if (self._capture_network_content or not self._runtime_hook_page_network_enabled or
+                        self._runtime_hooks["field_test"]["enabled"] or
+                        self._runtime_hooks["state"] in {"arming", "armed", "handling", "stopping"}):
+                    return
+                connection = self._connection
+                target_id = self._runtime_hooks["target_id"]
+            self._command("Network.disable")
+            with self._lock:
+                if (self._connection is connection and self._runtime_hooks["target_id"] == target_id):
+                    self._runtime_hook_page_network_enabled = False
+
+    def _schedule_runtime_hook_page_network_disable(self) -> None:
+        with self._lock:
+            if self._capture_network_content or not self._runtime_hook_page_network_enabled:
+                return
+
+        def disable() -> None:
+            try:
+                self._disable_runtime_hook_page_network_if_unused()
+            except DebuggerBridgeError as error:
+                with self._lock:
+                    self._runtime_hooks["last_failure"] = truncate_text(
+                        f"Page request observation could not stop: {error}", 512
+                    )
+                    self._changed()
+
+        threading.Thread(
+            target=disable, name="reb-hook-page-network-disable", daemon=True
+        ).start()
 
     def _remove_runtime_hook_points(
         self, reason: str, expected_epoch: Optional[int] = None
@@ -2045,6 +2126,7 @@ class DebuggerBridge:
                     f"{failures} stale breakpoint removals could not be confirmed."
                 )
             self._changed()
+        self._disable_runtime_hook_page_network_if_unused()
 
     def _disarm_runtime_hooks(self) -> dict[str, Any]:
         with self._lock:
@@ -2093,11 +2175,149 @@ class DebuggerBridge:
             self._runtime_hooks["hit_evictions"] = 0
             self._runtime_hooks["requests"] = []
             self._runtime_hooks["request_evictions"] = 0
+            field_test = self._runtime_hooks["field_test"]
+            field_test["observations"] = []
+            field_test["observation_evictions"] = 0
+            field_test["comparison"] = None
             self._runtime_hooks["last_failure"] = None
             self._runtime_hooks["message"] = "Runtime Hooks hits and request links were cleared."
             self._changed()
             hooks = copy.deepcopy(self._runtime_hooks)
         return {"ok": True, "runtime_hooks": hooks, "generation": self.generation()}
+
+    def _configure_runtime_field_test(self, request: dict[str, Any]) -> dict[str, Any]:
+        enabled = request.get("enabled")
+        if not isinstance(enabled, bool):
+            raise DebuggerBridgeError("Field test enabled state must be boolean")
+        url = request.get("url", "")
+        method = request.get("method", "POST")
+        kind = request.get("kind", "json")
+        pointer = request.get("pointer", "")
+        if enabled:
+            if request.get("confirmed") is not True:
+                raise DebuggerBridgeError("Field capture requires explicit isolated-context confirmation")
+            if not isinstance(url, str) or not 1 <= len(url.encode("utf-8")) <= 8192:
+                raise DebuggerBridgeError("Field test needs a bounded exact request URL")
+            try:
+                parsed = urlparse(url)
+                valid_url = (parsed.scheme in {"http", "https"} and bool(parsed.hostname) and
+                             parsed.username is None and parsed.password is None and
+                             not parsed.query and not parsed.fragment and
+                             redacted_request_url(url) == url)
+            except ValueError:
+                valid_url = False
+            if not valid_url:
+                raise DebuggerBridgeError("Field test URL must omit credentials, query, and fragment")
+            if not isinstance(method, str) or not 1 <= len(method) <= 32 or not method.isascii() or not method.isalpha() or method != method.upper():
+                raise DebuggerBridgeError("Field test method must be an uppercase HTTP method")
+            if not isinstance(kind, str) or kind not in SELECTOR_KINDS:
+                raise DebuggerBridgeError("Choose a supported request value type")
+            if not isinstance(pointer, str) or len(pointer.encode("utf-8")) > 256:
+                raise DebuggerBridgeError("Request value selector is too long")
+            if kind == "json" and (not pointer.startswith("/") or
+                    any("~" in part.replace("~0", "").replace("~1", "")
+                        for part in pointer.split("/")[1:])):
+                raise DebuggerBridgeError("Field test needs a valid JSON pointer, such as /payload")
+            if kind in {"form", "query", "header"} and not pointer:
+                raise DebuggerBridgeError("A field name is required")
+            if kind == "body" and pointer:
+                raise DebuggerBridgeError("Raw body selection does not take a field name")
+            if kind == "header" and not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", pointer):
+                raise DebuggerBridgeError("Enter one valid HTTP header name")
+        with self._lock:
+            self._runtime_hook_target_ready_locked()
+            if self._runtime_hooks["state"] in {"arming", "armed", "handling", "stopping"}:
+                raise DebuggerBridgeError("Disarm Runtime Hooks before changing the field test")
+        if enabled:
+            self._ensure_runtime_hook_page_network()
+        try:
+            with self._lock:
+                self._runtime_hook_target_ready_locked()
+                if self._runtime_hooks["state"] in {"arming", "armed", "handling", "stopping"}:
+                    raise DebuggerBridgeError("Disarm Runtime Hooks before changing the field test")
+                field_test = self._empty_runtime_hooks()["field_test"]
+                self._runtime_field_query_key = os.urandom(32)
+                if enabled:
+                    field_test.update(enabled=True, url=url, method=method, kind=kind, pointer=pointer)
+                self._runtime_hooks["field_test"] = field_test
+                self._changed()
+                hooks = copy.deepcopy(self._runtime_hooks)
+        except BaseException:
+            self._disable_runtime_hook_page_network_if_unused()
+            raise
+        if not enabled:
+            self._disable_runtime_hook_page_network_if_unused()
+        return {"ok": True, "runtime_hooks": hooks, "generation": self.generation()}
+
+    def _compare_runtime_field_test(self, request: dict[str, Any]) -> dict[str, Any]:
+        baseline_id = request.get("baseline_id")
+        variant_id = request.get("variant_id")
+        if any(type(value) is not int or value <= 0 for value in (baseline_id, variant_id)) or baseline_id == variant_id:
+            raise DebuggerBridgeError("Choose two distinct field observations")
+        with self._lock:
+            self._runtime_hook_target_ready_locked()
+            field_test = self._runtime_hooks["field_test"]
+            observations = {item["id"]: item for item in field_test["observations"]}
+            baseline = observations.get(baseline_id)
+            variant = observations.get(variant_id)
+            if baseline is None or variant is None or baseline["status"] != "available" or variant["status"] != "available":
+                raise DebuggerBridgeError("Both field observations must be retained and available")
+            if baseline["url"] != variant["url"] or baseline["method"] != variant["method"] or baseline["target_id"] != variant["target_id"]:
+                raise DebuggerBridgeError("Field observations must belong to the same request target")
+            hits = {item["id"]: item for item in self._runtime_hooks["hits"]}
+            changed_hit = next((hits[hit_id] for hit_id in variant["related_hit_ids"]
+                                if hit_id in hits and hits[hit_id]["operation"] == "return_overridden" and
+                                hits[hit_id].get("category") == "return"), None)
+            baseline_hit = next((hits[hit_id] for hit_id in baseline["related_hit_ids"]
+                                 if hit_id in hits and hits[hit_id]["operation"] == "observed" and
+                                 hits[hit_id].get("category") == "return" and changed_hit is not None and
+                                 all(hits[hit_id].get(key) == changed_hit.get(key)
+                                     for key in ("target_id", "source", "function", "line", "column"))), None)
+            baseline_overridden = any(hit_id in hits and hits[hit_id]["operation"] == "return_overridden"
+                                      for hit_id in baseline["related_hit_ids"])
+            changed = baseline["sha256"] != variant["sha256"]
+            same_query_context = baseline["query_context_sha256"] == variant["query_context_sha256"]
+            field_test["comparison"] = {
+                "baseline_id": baseline_id, "variant_id": variant_id,
+                "changed": changed,
+                "same_query_context": same_query_context,
+                "intervention_hit_id": changed_hit["id"] if changed_hit else None,
+                "baseline_overridden": baseline_overridden,
+                "interpretation": "intervention-associated" if changed and same_query_context and changed_hit and baseline_hit and not baseline_overridden else "inconclusive",
+            }
+            self._changed()
+            hooks = copy.deepcopy(self._runtime_hooks)
+        return {"ok": True, "runtime_hooks": hooks, "generation": self.generation()}
+
+    def _extract_runtime_field_async(self, session_id: int, observation_id: int,
+                                     kind: str, pointer: str, body: Optional[str],
+                                     source: Any, request_id: str, raw_url: str,
+                                     headers: Any, has_extra_info: bool) -> None:
+        try:
+            try:
+                if kind in {"json", "form", "body"} and body is None:
+                    reply = source.command("Network.getRequestPostData", {"requestId": request_id}, timeout=1.0)
+                    body = reply.get("postData")
+                result = extract_request_value(kind, pointer,
+                                               body=body if isinstance(body, str) else None,
+                                               url=raw_url, headers=headers)
+                if kind == "header" and has_extra_info and result["status"] == "missing":
+                    result = {"status": "unavailable", "sha256": None, "preview": "", "bytes": 0}
+            except Exception:
+                result = {"status": "error", "sha256": None, "preview": "", "bytes": 0}
+            with self._lock:
+                field_test = self._runtime_hooks["field_test"]
+                if (self._runtime_hooks["session_id"] != session_id or
+                        field_test["pointer"] != pointer or field_test["kind"] != kind):
+                    return
+                for observation in field_test["observations"]:
+                    if observation["id"] == observation_id and observation["status"] == "pending":
+                        observation.update(result)
+                        self._changed()
+                        break
+        finally:
+            with self._lock:
+                self._runtime_field_processing -= 1
 
     def _handle_runtime_hook_navigation(self) -> None:
         with self._lock:
@@ -2135,6 +2355,7 @@ class DebuggerBridge:
                 name="reb-worker-hook-navigation-cleanup",
                 daemon=True,
             ).start()
+        self._schedule_runtime_hook_page_network_disable()
 
     def _remove_stale_hook_points(self, points: list[tuple[str, str]]) -> None:
         for breakpoint_id, target_id in points:
@@ -3435,6 +3656,19 @@ class DebuggerBridge:
             "hit_evictions": 0,
             "requests": [],
             "request_evictions": 0,
+            "field_test": {
+                "protocol_version": 2,
+                "enabled": False,
+                "url": "",
+                "method": "POST",
+                "kind": "json",
+                "pointer": "",
+                "observations": [],
+                "observation_evictions": 0,
+                "comparison": None,
+                "limits": {"body_bytes": 128 * 1024, "pointer_bytes": 256,
+                           "preview_bytes": 256, "observations": 16},
+            },
             "last_failure": None,
             "message": "Create an isolated Experiment context to use Runtime Hooks.",
             "limits": {
@@ -5436,6 +5670,7 @@ class DebuggerBridge:
             if not self._handle_runtime_hook_pause_async(params, target_id):
                 session.command_without_wait("Debugger.resume")
         elif method == "Network.requestWillBeSent":
+            field_task = None
             request = params.get("request")
             request_id = params.get("requestId")
             if not isinstance(request, dict) or not isinstance(request_id, str):
@@ -5450,11 +5685,20 @@ class DebuggerBridge:
             resource_type = params.get("type")
             occurred_at_ms = int(time.time() * 1_000)
             with self._lock:
-                if self._runtime_hooks["state"] not in {"armed", "handling"}:
+                field_test = self._runtime_hooks["field_test"]
+                try:
+                    parsed_url = urlparse(raw_url)
+                    safe_url = parsed_url.username is None and parsed_url.password is None and not parsed_url.fragment
+                except ValueError:
+                    safe_url = False
+                field_match = (field_test["enabled"] and safe_url and
+                               field_test["url"] == url and field_test["method"] == method_name)
+                hooks_active = self._runtime_hooks["state"] in {"armed", "handling"}
+                if not hooks_active and not field_match:
                     return
                 worker_hit_id = None
                 page_hit_id = None
-                for hit in reversed(self._runtime_hooks["hits"]):
+                for hit in reversed(self._runtime_hooks["hits"] if hooks_active else []):
                     age = occurred_at_ms - hit["occurred_at_ms"]
                     if age < 0 or age > 5_000:
                         continue
@@ -5472,6 +5716,7 @@ class DebuggerBridge:
                     "id": self._next_runtime_hook_request_id,
                     "occurred_at_ms": occurred_at_ms,
                     "target_id": target_id,
+                    "target_type": "page" if target_id == self._runtime_hooks["target_id"] else "worker",
                     "request_id": request_id,
                     "url": url,
                     "method": truncate_text(method_name, 32) if isinstance(method_name, str) else "",
@@ -5486,7 +5731,68 @@ class DebuggerBridge:
                 if len(requests) > MAX_RUNTIME_HOOK_REQUESTS:
                     requests.pop(0)
                     self._runtime_hooks["request_evictions"] += 1
+                if field_match:
+                    body = request.get("postData")
+                    kind = field_test["kind"]
+                    query_digest = query_context_digest(raw_url, kind, field_test["pointer"],
+                                                        self._runtime_field_query_key)
+                    observation_id = self._next_runtime_field_observation_id
+                    self._next_runtime_field_observation_id += 1
+                    status = "uncaptured"
+                    if kind in {"query", "header"} or isinstance(body, str) or request.get("hasPostData") is True:
+                        status = "pending" if self._runtime_field_processing < 2 else "unavailable"
+                        if kind in {"json", "form", "body"} and isinstance(body, str) and len(body.encode("utf-8")) > 128 * 1024:
+                            status = "truncated"
+                    if query_digest is None:
+                        status = "truncated"
+                    observation = {
+                        "id": observation_id, "occurred_at_ms": occurred_at_ms,
+                        "target_id": target_id, "request_id": request_id,
+                        "target_type": record["target_type"],
+                        "url": url, "method": record["method"],
+                        "query_context_sha256": query_digest,
+                        "related_hit_ids": related_hits,
+                        "status": status, "sha256": None, "preview": "", "bytes": 0,
+                    }
+                    observed = field_test["observations"]
+                    observed.append(observation)
+                    if len(observed) > 16:
+                        evicted = observed.pop(0)
+                        field_test["observation_evictions"] += 1
+                        comparison = field_test["comparison"]
+                        if comparison and (comparison["baseline_id"] == evicted["id"] or
+                                           comparison["variant_id"] == evicted["id"]):
+                            field_test["comparison"] = None
+                    if status == "pending":
+                        self._runtime_field_processing += 1
+                        field_task = (self._runtime_hooks["session_id"], observation_id,
+                                      kind, field_test["pointer"], body, session, request_id,
+                                      raw_url, request.get("headers"), params.get("hasExtraInfo") is True)
                 self._changed()
+            if field_task:
+                threading.Thread(target=self._extract_runtime_field_async, args=field_task,
+                                 name="reb-request-field-extract", daemon=True).start()
+        elif method == "Network.requestWillBeSentExtraInfo":
+            request_id = params.get("requestId")
+            headers = params.get("headers")
+            if not isinstance(request_id, str) or not isinstance(headers, dict):
+                return
+            with self._lock:
+                field_test = self._runtime_hooks["field_test"]
+                if not field_test["enabled"] or field_test["kind"] != "header":
+                    return
+                observation = next((item for item in reversed(field_test["observations"])
+                                    if item["target_id"] == target_id and item["request_id"] == request_id), None)
+                if observation is None:
+                    return
+                selected = extract_request_value("header", field_test["pointer"], headers=headers)
+                if selected["status"] == "available":
+                    if any(observation[key] != value for key, value in selected.items()):
+                        observation.update(selected)
+                        comparison = field_test["comparison"]
+                        if comparison and observation["id"] in (comparison["baseline_id"], comparison["variant_id"]):
+                            field_test["comparison"] = None
+                        self._changed()
         elif method == "Network.responseReceived":
             request_id = params.get("requestId")
             response = params.get("response")
@@ -5506,6 +5812,7 @@ class DebuggerBridge:
         self, target_id: str, error: BaseException
     ) -> None:
         stale_points: list[tuple[str, str]] = []
+        hooks_cleared = False
         with self._lock:
             self._runtime_hook_worker_sessions.pop(target_id, None)
             self._runtime_hook_worker_targets.pop(target_id, None)
@@ -5518,6 +5825,7 @@ class DebuggerBridge:
                 for target in self._runtime_hook_worker_targets.values()
             ]
             if any(item["target_id"] == target_id for item in self._runtime_hooks["definitions"]):
+                hooks_cleared = True
                 stale_points = [
                     (breakpoint_id, point_target_id)
                     for point_target_id, breakpoint_id in self._runtime_hook_points
@@ -5541,6 +5849,8 @@ class DebuggerBridge:
                 name="reb-hook-worker-detach-cleanup",
                 daemon=True,
             ).start()
+        if hooks_cleared:
+            self._schedule_runtime_hook_page_network_disable()
 
     def _close_runtime_hook_workers(self) -> None:
         with self._lock:
@@ -7470,6 +7780,7 @@ class DebuggerBridge:
         with self._lock:
             self._connection = connection
             self._target = public_target
+            self._runtime_hook_page_network_enabled = False
             self._scripts = {}
             self._network_requests = {}
             self._network_active_ids = {}
@@ -8080,8 +8391,18 @@ class DebuggerBridge:
                 if self._state == "crashed":
                     self._set_state("running", None)
             return
-        if self._capture_network_content and method.startswith("Network."):
-            self._handle_network_event(method, params)
+        if method.startswith("Network."):
+            if self._capture_network_content:
+                self._handle_network_event(method, params)
+            if method in {"Network.requestWillBeSent", "Network.requestWillBeSentExtraInfo", "Network.responseReceived"}:
+                with self._lock:
+                    page_id = self._target["id"] if self._target else None
+                    isolated_page = (page_id is not None and page_id == self._runtime_hooks["target_id"] and
+                                     (self._capture_network_content or self._runtime_hook_page_network_enabled))
+                if isolated_page:
+                    self._on_runtime_hook_worker_event(
+                        _PageRuntimeNetworkSession(self, page_id), method, params
+                    )
             return
         if method == "Runtime.bindingCalled":
             with self._lock:

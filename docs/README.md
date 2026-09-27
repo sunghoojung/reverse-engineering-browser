@@ -50,6 +50,8 @@ can include follow-up work, so confirm present behavior in source and tests.
 - [Repeater v1](./product/repeater-v1.md)
 - [Request Interception v1](./product/request-interception-v1.md)
 - [Request Origin Trace v1](./product/request-origin-trace-v1.md)
+- [Request Field Hypothesis Test v1](./product/request-field-hypothesis-test-v1.md)
+- [Request Value Test v2](./product/request-value-test-v2.md)
 - [Request Signal Profile v1](./product/request-signal-profile-v1.md)
 - [Runtime Hooks v1](./product/runtime-hooks-v1.md)
 - [Web Audio function-call capture v1](./product/web-audio-call-capture-v1.md)

@@ -3002,72 +3002,6 @@
         elements.hooksHits.replaceChildren(...rows);
       }
 
-      function renderRuntimeFieldTest(hooks, editable) {
-        const test = hooks?.field_test;
-        elements.hooksFieldBadge.textContent = test?.enabled ? `${test.observations.length} observed` : 'Off';
-        elements.hooksFieldBadge.dataset.kind = test?.enabled ? '' : 'offline';
-        elements.hooksFieldForm.querySelectorAll('input, select').forEach(field => { field.disabled = !editable; });
-        const kind = elements.hooksFieldKind.value;
-        elements.hooksFieldPointerLabel.firstChild.textContent = kind === 'json' ? 'JSON pointer' :
-          kind === 'body' ? 'No field name needed' : kind === 'header' ? 'Header name' : 'Field name';
-        elements.hooksFieldPointer.placeholder = kind === 'json' ? '/payload' : kind === 'header' ? 'X-Request-ID' :
-          kind === 'body' ? '' : 'payload';
-        elements.hooksFieldPointer.disabled = !editable || kind === 'body';
-        elements.hooksFieldConfigure.disabled = !editable || !elements.hooksFieldConfirm.checked ||
-          !elements.hooksFieldUrl.value.trim() || (kind !== 'body' && !elements.hooksFieldPointer.value.trim()) || state.debuggerActionPending;
-        elements.hooksFieldErase.disabled = !editable || !test?.enabled || state.debuggerActionPending;
-        const observations = test?.observations ?? [];
-        const key = JSON.stringify([observations, test?.comparison, test?.enabled]);
-        if (key !== state.runtimeFieldTestKey) {
-          state.runtimeFieldTestKey = key;
-          if (observations.length) {
-            elements.hooksFieldObservations.replaceChildren(...observations.map(observation => {
-              const row = document.createElement('div'); row.className = 'hook-hit-row';
-              row.append(textElement('span', 'hook-hit-title', `#${observation.id} · ${observation.method} ${observation.url}`),
-                textElement('span', 'hook-hit-operation', observation.status.replaceAll('_', ' ')),
-                textElement('span', 'hook-hit-meta', `${new Date(observation.occurred_at_ms).toLocaleTimeString()} · ${observation.target_type || 'worker'} ${observation.target_id.slice(0, 12)} · request ${observation.request_id}`),
-                textElement('span', 'hook-hit-bindings', observation.status === 'available'
-                  ? `${observation.preview || '(empty)'}${observation.bytes > new TextEncoder().encode(observation.preview).length ? '…' : ''} · SHA-256 ${observation.sha256}`
-                  : 'No complete selected value retained.'));
-              return row;
-            }));
-          } else elements.hooksFieldObservations.replaceChildren(textElement('div', 'experiment-empty',
-            test?.enabled ? 'Repeat the page or worker request. A return hook is optional for observation.' :
-              'Configure a value, then run the isolated page. Add a return hook to test an intervention.'));
-          const previousBaseline = elements.hooksFieldBaseline.value;
-          const previousVariant = elements.hooksFieldVariant.value;
-          const options = available => available.map(observation => {
-            const option = document.createElement('option'); option.value = String(observation.id);
-            option.textContent = `#${observation.id} · ${new Date(observation.occurred_at_ms).toLocaleTimeString()}`;
-            return option;
-          });
-          const available = observations.filter(observation => observation.status === 'available');
-          elements.hooksFieldBaseline.replaceChildren(...options(available));
-          elements.hooksFieldVariant.replaceChildren(...options(available));
-          if (available.some(observation => String(observation.id) === previousBaseline)) elements.hooksFieldBaseline.value = previousBaseline;
-          if (available.some(observation => String(observation.id) === previousVariant)) elements.hooksFieldVariant.value = previousVariant;
-          else if (available.length) elements.hooksFieldVariant.value = String(available[available.length - 1].id);
-          const comparison = test?.comparison;
-          elements.hooksFieldResult.replaceChildren();
-          if (comparison) {
-            elements.hooksFieldResult.append(document.createTextNode(
-              `#${comparison.baseline_id} → #${comparison.variant_id}: ${comparison.changed ? 'value changed' : 'value unchanged'} · ${comparison.interpretation.replaceAll('-', ' ')}${comparison.same_query_context ? '' : ' · other query input changed'}. This does not prove the full value-flow chain.`));
-            const hit = hooks.hits.find(candidate => candidate.id === comparison.intervention_hit_id);
-            if (hit) {
-              const sourceLink = document.createElement('button');
-              sourceLink.type = 'button';
-              sourceLink.className = 'source-tool';
-              sourceLink.textContent = `Override hit ${hit.id} in Sources`;
-              sourceLink.addEventListener('click', () => revealRuntimeHookHit(hit));
-              elements.hooksFieldResult.append(sourceLink);
-            }
-          }
-        }
-        elements.hooksFieldCompare.disabled = !editable || !test?.enabled || state.debuggerActionPending ||
-          !elements.hooksFieldBaseline.value || !elements.hooksFieldVariant.value ||
-          elements.hooksFieldBaseline.value === elements.hooksFieldVariant.value;
-      }
-
       function revealRuntimeHookRequest(request) {
         state.selectedRuntimeHookRequest = {sessionId: runtimeHooksState()?.session_id, id: request.id};
         state.runtimeHookTrafficKey = null;
@@ -3115,7 +3049,7 @@
         });
         const testField = document.createElement('button'); testField.type = 'button'; testField.className = 'source-tool';
         testField.textContent = ['arming', 'armed', 'handling', 'stopping'].includes(hooks?.state)
-          ? 'Disarm to test a field' : 'Test a field';
+          ? 'Disarm to test a value' : 'Test a request value';
         testField.addEventListener('click', async () => {
           if (['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state)) {
             const response = await runExperimentAction({action: 'disarm_runtime_hooks'});
@@ -3123,10 +3057,11 @@
           }
           elements.hooksFieldUrl.value = request.url;
           elements.hooksFieldMethod.value = request.method;
+          elements.hooksFieldConfirm.checked = false;
           showScreen('sources');
           if (!state.sourceHooksOpen) openSourceHooks(false, false);
           renderRuntimeHooks();
-          elements.hooksFieldPointer.focus();
+          focusRuntimeFieldTest();
         });
         elements.runtimeHookTraffic.replaceChildren(heading, title, status, relation, ...links, testField, close);
       }
@@ -3246,7 +3181,8 @@
         elements.hooksDisarm.disabled = !active || state.debuggerActionPending;
         renderRuntimeHookDefinitions(hooks, active);
         renderRuntimeHookHits(hooks);
-        renderRuntimeFieldTest(hooks, editable);
+        renderRuntimeFieldTest(hooks, editable, contextReady && !contextWorking &&
+          !['arming', 'handling', 'stopping'].includes(hooks?.state));
         elements.sourceHooksNotice.dataset.kind = elements.experimentNotice.dataset.kind;
         elements.sourceHooksNotice.textContent = hooks?.state === 'armed' && !state.experimentError && !hooks.last_failure
           ? `Armed · ${hooks.total_hits} ${hooks.total_hits === 1 ? 'hit' : 'hits'}`
@@ -8769,24 +8705,7 @@
         const response = await runExperimentAction({action: 'disarm_runtime_hooks'});
         if (response) elements.hooksConfirm.checked = false;
       });
-      elements.hooksFieldForm.addEventListener('submit', async event => {
-        event.preventDefault();
-        const response = await runExperimentAction({action: 'configure_runtime_field_test', enabled: true,
-          url: elements.hooksFieldUrl.value.trim(), method: elements.hooksFieldMethod.value.trim().toUpperCase(),
-          kind: elements.hooksFieldKind.value, pointer: elements.hooksFieldPointer.value.trim(),
-          confirmed: elements.hooksFieldConfirm.checked});
-        if (response) elements.hooksFieldConfirm.checked = false;
-      });
-      elements.hooksFieldForm.addEventListener('input', renderRuntimeHooks);
-      elements.hooksFieldKind.addEventListener('change', () => {
-        elements.hooksFieldPointer.value = '';
-        renderRuntimeHooks();
-      });
-      elements.hooksFieldErase.addEventListener('click', () => runExperimentAction({action: 'configure_runtime_field_test', enabled: false}));
-      elements.hooksFieldCompare.addEventListener('click', () => runExperimentAction({action: 'compare_runtime_field_test',
-        baseline_id: Number(elements.hooksFieldBaseline.value), variant_id: Number(elements.hooksFieldVariant.value)}));
-      elements.hooksFieldBaseline.addEventListener('change', renderRuntimeHooks);
-      elements.hooksFieldVariant.addEventListener('change', renderRuntimeHooks);
+      bindRuntimeFieldTest();
       elements.automationCreate.addEventListener('click', () => runExperimentAction({
         action: 'create_request_interception_experiment'
       }));

@@ -710,6 +710,7 @@
                     <div class="experiment-actions">
                       <button id="hooks-create" class="trace-button experiment-primary" type="button">Create isolated context</button>
                       <button id="hooks-dispose" class="secondary-button" type="button" disabled>Dispose and erase</button>
+                      <button id="hooks-field-jump" class="secondary-button" type="button">Test a request value</button>
                       <button id="hooks-clear" class="secondary-button" type="button" disabled>Clear hit records</button>
                     </div>
                   </div>
@@ -730,15 +731,23 @@
                     </form>
                   </div>
                 </article>
-                <article class="experiment-card">
-                  <header><div><h2>Session controls</h2></div><span id="hooks-state-badge" class="experiment-card-badge" data-kind="offline">Disarmed</span></header>
+                <article id="hooks-field-card" class="experiment-card" tabindex="-1" aria-label="Request value test">
+                  <header><div><h2>Request value test</h2><p>Observe first. Add a return hook only to test an intervention.</p></div><span id="hooks-field-badge" class="experiment-card-badge" data-kind="offline">Off</span></header>
                   <div class="experiment-body experiment-form">
-                    <label class="hook-confirm"><input id="hooks-confirm" type="checkbox" /> I confirm these hooks may mutate the isolated page</label>
-                    <div class="hook-control-actions">
-                      <button id="hooks-arm" class="trace-button" type="button" disabled>Arm all hooks</button>
-                      <button id="hooks-disarm" class="secondary-button" type="button" disabled>Disarm</button>
-                    </div>
-                    <details class="experiment-help"><summary>Restrictions</summary><p class="experiment-privacy">A hook pause is handled internally and always resumes. Promise return replacement is rejected.</p></details>
+                    <p id="hooks-field-status" class="experiment-privacy" role="status">1. Choose one request value. No hook is needed to observe it.</p>
+                    <form id="hooks-field-form" class="experiment-form">
+                      <label>Page or worker request URL (path only; query excluded)<input id="hooks-field-url" type="url" maxlength="8192" placeholder="https://example.test/api/submit" autocomplete="off" /></label>
+                      <div class="experiment-form-row"><label>Method<input id="hooks-field-method" type="text" maxlength="32" value="POST" autocomplete="off" /></label><label>Value type<select id="hooks-field-kind"><option value="json">JSON field</option><option value="form">Form field</option><option value="query">Query parameter</option><option value="header">Request header</option><option value="body">Raw text body</option></select></label></div>
+                      <label id="hooks-field-pointer-label">JSON pointer or field name<input id="hooks-field-pointer" type="text" maxlength="256" placeholder="/payload" autocomplete="off" /></label>
+                      <label class="hook-confirm"><input id="hooks-field-confirm" type="checkbox" /> Capture this selected value in the isolated page or worker</label>
+                      <div class="hook-control-actions"><button id="hooks-field-configure" class="trace-button" type="submit" disabled>Start value capture</button><button id="hooks-field-erase" class="secondary-button" type="button" disabled>Stop and erase</button></div>
+                    </form>
+                    <p class="experiment-privacy">Matches the chosen path and method even when query values vary. The selected value is previewed and hashed; unselected query input gets an ephemeral keyed digest for comparison. Full request bodies are not retained. Raw text body selection can reveal body content. Observe without a hook, or repeat the same input with a synchronous return override to test an intervention.</p>
+                    <div id="hooks-field-observations" class="hook-hit-list" role="log" aria-live="polite"><div class="experiment-empty">2. Repeat the request in the isolated page or worker to collect observations.</div></div>
+                    <p class="experiment-privacy">3. Select two observations from the same target. A value change alone is inconclusive. To test an intervention, collect a return-hook baseline, disarm, replace that hook with a synchronous return override, then re-arm and repeat the same input.</p>
+                    <div class="experiment-form-row"><label>Baseline<select id="hooks-field-baseline"></select></label><label>Variant<select id="hooks-field-variant"></select></label></div>
+                    <button id="hooks-field-compare" class="secondary-button" type="button" disabled>Compare observations</button>
+                    <div id="hooks-field-result" role="status" aria-live="polite"></div>
                   </div>
                 </article>
               </div>
@@ -754,9 +763,11 @@
                       <div id="hooks-source-location-fields" class="experiment-form-row"><label>Line<input id="hooks-line" type="number" min="1" max="2147483647" step="1" value="1" /></label><label>Column<input id="hooks-column" type="number" min="1" max="2147483647" step="1" value="1" /></label></div>
                       <label id="hooks-function-expression-field" hidden>Side-effect-free function expression<input id="hooks-function-expression" type="text" maxlength="1024" placeholder="self.onmessage" autocomplete="off" /></label>
                       <div class="hook-phase-options"><label><input id="hooks-entry-enabled" type="checkbox" checked /> Entry</label><label><input id="hooks-return-enabled" type="checkbox" checked /> Synchronous return</label></div>
+                      <details class="experiment-help"><summary>Conditions and custom logic · optional</summary>
                       <label>Side-effect-free condition<input id="hooks-condition" type="text" maxlength="1024" placeholder="cart.total &gt; 100" autocomplete="off" /></label>
                       <label>Entry logic<textarea id="hooks-entry-logic" maxlength="8192" spellcheck="false" placeholder="cart.reviewed = true;"></textarea></label>
                       <label>Return logic<textarea id="hooks-return-logic" maxlength="8192" spellcheck="false" placeholder="window.__labHits = (window.__labHits || 0) + 1;"></textarea></label>
+                      </details>
                       <label>Return replacement<select id="hooks-return-mode"><option value="none">Keep original</option><option value="json">Typed JSON value</option><option value="expression">Frame expression</option></select></label>
                       <label id="hooks-return-value-field" hidden>Replacement JSON or expression<textarea id="hooks-return-value" maxlength="8192" spellcheck="false" placeholder='{"allowed":true}'></textarea></label>
                       <button id="hooks-add" class="secondary-button" type="submit" disabled>Add hook</button>
@@ -767,29 +778,23 @@
                   <header><div><h2>Configured</h2><p>Edit while disarmed. Cleared on navigation.</p></div><span id="hooks-definition-badge" class="experiment-card-badge" data-kind="offline">Empty</span></header>
                   <div id="hooks-definitions" class="hook-definition-list"><div class="experiment-empty">No hooks yet.</div></div>
                 </article>
+                <article class="experiment-card">
+                  <header><div><h2>Hook controls · optional</h2></div><span id="hooks-state-badge" class="experiment-card-badge" data-kind="offline">Disarmed</span></header>
+                  <div class="experiment-body experiment-form">
+                    <label class="hook-confirm"><input id="hooks-confirm" type="checkbox" /> I confirm these hooks may mutate the isolated page</label>
+                    <div class="hook-control-actions">
+                      <button id="hooks-arm" class="trace-button" type="button" disabled>Arm all hooks</button>
+                      <button id="hooks-disarm" class="secondary-button" type="button" disabled>Disarm</button>
+                    </div>
+                    <details class="experiment-help"><summary>Restrictions</summary><p class="experiment-privacy">A hook pause is handled internally and always resumes. Promise return replacement is rejected.</p></details>
+                  </div>
+                </article>
               </div>
               <div id="hooks-hits-home" hidden></div>
               <div id="hooks-hits-column" class="experiment-column">
                 <article class="experiment-card hook-hits-card">
                   <header><div><h2>Hits</h2><p id="hooks-hit-meta" hidden></p></div><span id="hooks-hit-count" class="experiment-card-badge" data-kind="offline">0 / 512</span></header>
                   <div id="hooks-hits" class="hook-hit-list" role="log" aria-live="polite"><div class="experiment-empty">Arm a hook, then exercise the isolated page.</div></div>
-                </article>
-                <article class="experiment-card">
-                  <header><div><h2>Request value test</h2><p>Compare a request value before and after a return override.</p></div><span id="hooks-field-badge" class="experiment-card-badge" data-kind="offline">Off</span></header>
-                  <div class="experiment-body experiment-form">
-                    <form id="hooks-field-form" class="experiment-form">
-                      <label>Page or worker request URL (path only; query excluded)<input id="hooks-field-url" type="url" maxlength="8192" placeholder="https://example.test/api/submit" autocomplete="off" /></label>
-                      <div class="experiment-form-row"><label>Method<input id="hooks-field-method" type="text" maxlength="32" value="POST" autocomplete="off" /></label><label>Value type<select id="hooks-field-kind"><option value="json">JSON field</option><option value="form">Form field</option><option value="query">Query parameter</option><option value="header">Request header</option><option value="body">Raw text body</option></select></label></div>
-                      <label id="hooks-field-pointer-label">JSON pointer or field name<input id="hooks-field-pointer" type="text" maxlength="256" placeholder="/payload" autocomplete="off" /></label>
-                      <label class="hook-confirm"><input id="hooks-field-confirm" type="checkbox" /> Capture this selected value in the isolated page or worker</label>
-                      <div class="hook-control-actions"><button id="hooks-field-configure" class="trace-button" type="submit" disabled>Capture field</button><button id="hooks-field-erase" class="secondary-button" type="button" disabled>Stop and erase</button></div>
-                    </form>
-                    <p class="experiment-privacy">Matches the chosen path and method even when query values vary. The selected value is previewed and hashed; unselected query input gets an ephemeral keyed digest for comparison. Full request bodies are not retained. Raw text body selection can reveal body content. Observe without a hook, or repeat the same input with a synchronous return override to test an intervention.</p>
-                    <div id="hooks-field-observations" class="hook-hit-list" role="log" aria-live="polite"><div class="experiment-empty">Configure a field, arm a hook, then run the isolated page.</div></div>
-                    <div class="experiment-form-row"><label>Baseline<select id="hooks-field-baseline"></select></label><label>Variant<select id="hooks-field-variant"></select></label></div>
-                    <button id="hooks-field-compare" class="secondary-button" type="button" disabled>Compare selected field</button>
-                    <div id="hooks-field-result" role="status" aria-live="polite"></div>
-                  </div>
                 </article>
                 <details class="experiment-card experiment-disclosure">
                   <summary>Limits</summary>
@@ -1159,6 +1164,7 @@
     <script src="evidence_models.js"></script>
     <script src="source_syntax.js"></script>
     <script src="traffic_view.js"></script>
+    <script src="request_value_test.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

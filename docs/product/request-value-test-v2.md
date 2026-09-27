@@ -23,21 +23,32 @@ associated with a change in that value.
 
 ## Workflow
 
-1. Open a disposable Experiment page. If a candidate function is available in
-   Sources, add an observation-only return hook. Otherwise, use observation
-   mode without a hook.
-2. Reproduce the request. The hook request trail in Traffic offers **Test a
-   field** as a pivot when armed; the configuration can also be entered by hand.
-3. Disarm and configure a method, query-free request URL, value type, and field
-   name or JSON Pointer. Raw text body takes no field name. Explicitly confirm
-   selected-value capture.
-4. Repeat the same action/input to collect observations. If a candidate return
-   hook exists, collect an armed observation baseline, disarm, change the hook
-   to a typed synchronous return override, re-arm, and repeat.
-5. Compare the two observations. A pair without a matched controlled override
-   can show a value change, but is **inconclusive** about causation. For an
+1. In Runtime Hooks, create a disposable context and open the page. Choose
+   **Test a request value** in Session to jump to capture setup. No hook is
+   required for observation. An isolated request in Traffic offers the same
+   pivot with its method and query-free URL prefilled; active hooks are disarmed
+   before opening capture setup.
+2. Choose a method, query-free request URL, value type, and exact field name or
+   JSON Pointer. Raw text body takes no field name. Explicitly confirm
+   selected-value capture and select **Start value capture**. Editing a capture
+   setting clears confirmation. The active summary shows what is actually being
+   captured even when the form contains an unsubmitted draft.
+3. Repeat the request in the isolated page or dedicated worker to collect
+   observations. A distinct available pair from one target is selected
+   automatically; your chosen pair is preserved across refreshes. Older
+   observation evictions are visible in the capture summary. Restarting capture
+   erases the previous observations and comparison.
+4. Optionally add an observation-only synchronous return hook and collect an
+   armed baseline. Disarm, remove that hook, and add its return-override variant
+   at the same source location. Re-arm and repeat the same action/input. Entry
+   hooks and live-function-object mode cannot supply a return intervention.
+5. Select baseline and variant observations and **Compare observations**, even
+   while hooks remain armed. A pair without a matched controlled override can
+   show a value change, but is **inconclusive** about causation. For an
    intervention pair, follow the override-hit link to Sources. Removing the
    override and reproducing the original value is a useful reversal check.
+6. Disarm hooks before changing capture settings or selecting **Stop and erase**.
+   Disarming hooks alone does not stop an enabled selected-value capture.
 
 ## Boundaries and retention
 

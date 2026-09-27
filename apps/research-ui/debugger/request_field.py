@@ -103,19 +103,19 @@ def extract_field(body: str, pointer: str) -> dict:
         if result.returncode or len(result.stdout) > 8 * 1024:
             raise ValueError("worker result")
         document = json.loads(result.stdout)
+        if not isinstance(document, dict):
+            raise ValueError("worker response must be an object")
         status = document.get("status")
-        if document.get("schema") != "reb-request-field-v1" or status not in FIELD_STATUSES:
+        if (document.get("schema") != "reb-request-field-v1" or
+                not isinstance(status, str) or status not in FIELD_STATUSES):
             raise ValueError("worker response")
         value = document.get("value")
         if status == "available":
             if not isinstance(value, str) or len(value.encode("utf-8")) > 4 * 1024:
                 raise ValueError("worker value")
-            encoded_value = value.encode("utf-8")
-            preview = encoded_value[:MAX_PREVIEW_BYTES].decode("utf-8", "ignore")
-            return {"status": status, "sha256": hashlib.sha256(encoded_value).hexdigest(),
-                    "preview": preview, "bytes": len(encoded_value)}
+            return _selected_text(value)
         if value is not None:
             raise ValueError("unexpected worker value")
-        return {"status": status, "sha256": None, "preview": "", "bytes": 0}
+        return _empty(status)
     except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired):
         return {"status": "unavailable", "sha256": None, "preview": "", "bytes": 0}

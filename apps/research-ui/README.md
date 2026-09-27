@@ -153,6 +153,7 @@ input and output visible with transformation history available on demand.
 | --- | --- |
 | `index.html`, `app.css` | Document structure and visual layout |
 | `app_state.js`, `evidence_models.js`, `app.js` | Initial state and DOM bindings, evidence validation and projection, interaction and rendering |
+| `request_value_test.js` | Ephemeral request-value capture controls, observation selection, and comparison rendering |
 | `traffic_view.js` | Bounded request/response body views, explicit missing-data states, and labeled sample exchanges |
 | `source_syntax.js` | Source names, display formatting, and bounded tokenization without DOM or application state |
 | `server.py`, `evidence_store.py` | HTTP routing and responses, bounded evidence reads and validation |
@@ -307,11 +308,19 @@ Selecting one of these requests opens a separate ephemeral trail in
 Traffic, with links back to retained hits. It is not merged into the captured
 request ledger or presented as a proven initiator chain.
 The optional [Request Value Test](../../docs/product/request-value-test-v2.md)
-captures one selected JSON, form, query, header, or raw-text request value from
-the isolated page or a dedicated worker. Its baseline/variant comparison links
-a changed value to a successful synchronous return override when retained hits
-support that interpretation. It does not claim complete value provenance, and
-the value preview is erased with the disposable context.
+starts from **Test a request value** in Session or an isolated request's Traffic
+trail. Its controls stay with the disposable-page setup, separate from the hit
+trail. Select a method, query-free URL, and one JSON, form, query, header, or
+raw-text value, confirm capture, then reproduce the request. No hook is needed
+for observation. The active capture summary is separate from editable drafts;
+changing a draft requires fresh confirmation, and restarting capture erases the
+previous observations. Field names and JSON Pointers are used exactly as entered.
+The comparison defaults to distinct available observations from the same target,
+keeps a selected pair across refreshes, and remains usable while hooks are armed.
+For an intervention, first collect a return-hook baseline, then disarm and replace
+that hook with a synchronous return override before repeating the same input.
+A matched comparison is intervention-associated, never complete value provenance.
+The value preview is erased with the disposable context.
 Find counts literal, case-insensitive occurrences within rendered lines, including
 multiple matches on one minified line. Enter advances and Shift+Enter goes back,
 wrapping through the first 1000 matches with a visible `+` when results are capped.

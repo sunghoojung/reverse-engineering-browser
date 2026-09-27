@@ -35,6 +35,16 @@ class RequestFieldTests(unittest.TestCase):
         result = extract_field('{"a":"secret"}', "/a")
         self.assertEqual(result, {"status": "unavailable", "sha256": None, "preview": "", "bytes": 0})
 
+    @mock.patch("debugger.request_field.worker_path", return_value="/fixture/worker")
+    @mock.patch("debugger.request_field.subprocess.run")
+    def test_malformed_worker_shapes_are_unavailable(self, run, _path):
+        for document in ([], None, "result", 42,
+                         {"schema": "reb-request-field-v1", "status": []}):
+            with self.subTest(document=document):
+                run.return_value = subprocess.CompletedProcess([], 0, json.dumps(document).encode())
+                self.assertEqual(extract_field('{"a":1}', "/a"),
+                                 {"status": "unavailable", "sha256": None, "preview": "", "bytes": 0})
+
     def test_request_selectors_are_bounded_and_select_only_one_value(self):
         query = extract_request_value("query", "nonce", url="https://example.test/send?nonce=alpha&private=hidden")
         self.assertEqual(query["status"], "available")

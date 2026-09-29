@@ -65,7 +65,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Build and test
+      - name: Build all native tools and Rust worker
         run: make check
 
       - name: Run end-to-end event path

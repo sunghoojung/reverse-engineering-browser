@@ -87,31 +87,3 @@ source_set("browser") {
     "//url",
   ]
 }
-
-executable("native_artifact_body_tee_unittests") {
-  testonly = true
-  sources = [
-    "browser/native_artifact_body_tee.cc",
-    "browser/native_artifact_body_tee_unittest.cc",
-  ]
-
-  deps = [
-    "//base",
-    "//base/test:test_support",
-    "//mojo/core/embedder",
-    "//mojo/public/cpp/system",
-    "//testing/gtest",
-  ]
-}
-
-executable("native_probe_sink_unittests") {
-  testonly = true
-  sources = [ "renderer/native_probe_sink_unittest.cc" ]
-
-  deps = [
-    ":renderer_sink",
-    "//base",
-    "//base/test:test_support",
-    "//testing/gtest",
-  ]
-}

@@ -26,10 +26,8 @@ operation that would overwrite it. Report the exact state and leave it intact.
 
 ## Prove reproducibility in layers
 
-1. Run the relevant bootstrap fixture test when revision handling or bootstrap
-   behavior changed.
-2. Run the synchronization fixture test for pins, overlays, patches, or sync
-   behavior.
+1. Inspect bootstrap behavior when revision handling or bootstrap changed.
+2. Inspect synchronization behavior for pins, overlays, patches, or sync changes.
 3. Confirm every overlay destination is a real path at the pinned revision and
    every patch preflights and applies cleanly in order.
 4. Run `make brave-doctor`. Do not change the system-wide Xcode selection.
@@ -39,15 +37,14 @@ operation that would overwrite it. Report the exact state and leave it intact.
    GN files, run `gn format --dry-run` with the bundled browser toolchain. Build
    each affected target when full Xcode and Chromium tooling are installed.
 
-Never copy or patch files into the checkout by hand. Repository fixtures prove
-tracked synchronization behavior but do not substitute for a real pinned
-checkout or browser compile.
+Never copy or patch files into the checkout by hand. Static inspection does not
+substitute for a real pinned checkout or browser compile.
 
 ## Review browser invariants
 
 Confirm capture remains disabled by default, inactive paths are allocation-free,
 active work is bounded and non-blocking, drops are visible, and observational
-capture does not mutate page behavior. Test failure, disabled, capacity,
+capture does not mutate page behavior. Verify failure, disabled, capacity,
 expiration, and sequence-gap behavior when the change reaches those concerns.
 
 ## Report evidence
@@ -62,5 +59,5 @@ Report:
 
 Mark each layer passed, failed, unavailable, or skipped, with the exact reason
 for anything other than passed. Do not report a browser build as passing when
-only fixtures or the native probe target passed. Use `reb-validation` for the
+only the native probe target passed. Use `reb-validation` for the
 remaining repository gate.

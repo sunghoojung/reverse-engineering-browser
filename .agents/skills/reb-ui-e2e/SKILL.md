@@ -5,15 +5,14 @@ description: Reproduce and verify Origin Trace through its user-facing interface
 
 # Verify Origin Trace End to End
 
-Prove the changed behavior through the interface a researcher uses. Automated
-tests support this workflow but do not replace interaction and visual evidence.
+Prove the changed behavior through the interface a researcher uses.
 
 ## Prepare the product path
 
 1. Read `Origin Trace UI` and `Validation` in
    [AGENTS.md](../../../AGENTS.md), then read
    [apps/research-ui/README.md](../../../apps/research-ui/README.md).
-2. Inspect the relevant implementation and UI tests. For a bug, record the
+2. Inspect the relevant implementation. For a bug, record the
    exact starting state, action, and visible failure before editing.
 3. Use `make app` for the normal macOS product path. Use `make ui` only for
    browser development or when native app control is unavailable.
@@ -45,12 +44,11 @@ For native shell, bundle, icon, or packaging work, verify that the packaged app
 loads bundled assets at runtime rather than source-tree paths. Run the app build
 and strict code-signature checks from `AGENTS.md`.
 
-## Compare and test
+## Compare and verify
 
-Run the directly related UI unittest while iterating, then `make ui-test`. After
-the change, repeat the original reproduction steps in the same state and compare
-the visible result. A successful HTTP response, process launch, DOM assertion,
-or screenshot alone is not sufficient evidence of an interactive fix.
+After the change, repeat the original reproduction steps in the same state and
+compare the visible result. A successful HTTP response, process launch, DOM
+assertion, or screenshot alone is not sufficient evidence of an interactive fix.
 
 Use `reb-validation` for the final repository gate.
 

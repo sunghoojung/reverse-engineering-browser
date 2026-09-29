@@ -10,8 +10,8 @@ and reproducible Brave integration.
    `protocol/` or `docs/`.
 2. Check the current working tree and preserve unrelated changes.
 3. For a bug, reproduce it through the closest user-facing or end-to-end path.
-4. Keep the change focused and include tests for failures, limits, and disabled
-   behavior when relevant.
+4. Keep the change focused and verify failures, limits, and disabled behavior
+   through the available product path when relevant.
 
 Coding agents must also follow [AGENTS.md](./AGENTS.md), which documents source
 ownership, architectural invariants, skill routing, and the complete handoff

@@ -206,18 +206,16 @@ layer maps it to a 400 response and debugger failures to 409; an invalid
 - Identifier renaming, control-flow graphs, or any transform that changes the
   source rather than re-indenting it.
 
-## Contracts and tests
+## Contracts and validation
 
 `apps/research-ui/server.py` imports `SCHEMA`, `DeobfuscationError`,
 `analyze_source`, `derive_representation`, and `ensure_source`, and serves
 `/api/deobfuscation`. The Research UI reads `analysis.classification`,
 `analysis.representation`, `analysis.source`, and `analysis.evidence`.
 
-`tests/research_ui/test_deobfuscation.py` covers all four classification labels
-with their evidence, the derived-map invariants and offset mapping, the derived
-budget (including its UTF-8 byte accounting) and source bounds, escape-sequence,
-base64, and code-point string-table recovery (including per-entry offsets), and
-the acceptance and rejection of analysis documents.
+`make deob-benchmark` compares original and derived behavior for the bounded
+technique corpus. `make check` compiles the Rust worker, and `make lint`
+checks the Python adapter.
 
 ## Native integration and offset units
 

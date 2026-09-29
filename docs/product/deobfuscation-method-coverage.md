@@ -53,11 +53,10 @@ framed request after rejection. Adapter wall-clock deadlines remain five seconds
 
 ## Validation and engines
 
-`tests/research_ui/test_deobfuscation_methods.py` exercises the worker protocol,
-reconstructs every source map, checks positive and negative technique cases,
-and compares observable results of repository-owned fixtures in Node. The
-production worker never runs Node or any captured JavaScript. Native service
-tests verify the packaged response boundary, errors and deadline.
+`make deob-benchmark` compares observable results of repository-owned corpus
+programs in Node. The production worker never runs Node or any captured
+JavaScript. `make check` compiles the worker; the full handoff also builds
+the packaged app.
 
 The browser development server uses the same Rust worker when built, preferring
 `target/debug` then `target/release`, or an explicit

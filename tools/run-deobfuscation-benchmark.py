@@ -15,7 +15,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MANIFEST = ROOT / "tests/fixtures/deobfuscation-benchmark/corpus-v1.json"
+DEFAULT_MANIFEST = ROOT / "tools/fixtures/deobfuscation-benchmark/corpus-v1.json"
 DEFAULT_WORKER = ROOT / "apps/deobfuscator-worker/target/debug/reb-deobfuscator-worker"
 WORKER_TIMEOUT_SECONDS = 5
 NODE_TIMEOUT_SECONDS = 3

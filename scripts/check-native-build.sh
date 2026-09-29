@@ -28,4 +28,4 @@ if [[ "${status}" -ne 1 ]]; then
   exit 1
 fi
 
-echo "native_build_test passed"
+echo "Native build dependency check passed"

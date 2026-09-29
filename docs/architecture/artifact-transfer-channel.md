@@ -210,11 +210,6 @@ No runtime value is copied back into the immutable artifact store.
 
 ## Validation
 
-`tests/artifact_test.cpp` covers ABI parity, valid streaming, SHA-256, immutable
-manifest publication, duplicate identifiers, per-artifact and total limits,
-artifact-count and manifest limits, truncation, digest mismatch, authenticated
-session binding, and sensitive-capture policy. The socket E2E test covers
-authenticated acceptance, acknowledgment, permissions, hello and frame session
-mismatches, and oversized rejection. The live-session E2E test launches both
-receivers, produces correlated event and artifact evidence, verifies private
-store permissions, and covers capture with the Artifact category disabled.
+`make e2e` exercises the deterministic artifact producer and receiver path,
+checks the manifest and analysis output, and validates the event store. The
+native build check and compile gate cover the receiver and producer binaries.

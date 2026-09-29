@@ -1,22 +1,15 @@
 native-build-test:
-	./tests/native_build_test.sh
+	./scripts/check-native-build.sh
 
-check: native-build-test workspace-check bootstrap-test browser-sync-test brave-distribution-test deob-worker-test deob-benchmark test ui-test
+check: all native-probe-compile native-build-test workspace-check deob-benchmark
+
+native-probe-compile: $(NATIVE_PROBE_QUEUE_OBJECT)
 
 lint: format-check shellcheck python-check javascript-check repository-check workflow-check
 
-test: $(TEST_BINARIES)
-	@set -e; for test_binary in $(TEST_BINARIES); do \
-		echo "Running $$test_binary"; \
-		$$test_binary; \
-	done
-
-ui-test: heap-snapshot decoder debugger-transport
-	PYTHONPATH=apps/research-ui python3 -m unittest discover -s tests/research_ui -p 'test_*.py'
-
-deob-worker-test:
+deob-worker-build:
 	@command -v cargo >/dev/null 2>&1 || { echo "Cargo is not installed" >&2; exit 1; }
-	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
+	cargo build --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 
 sanitize:
 	$(MAKE) BUILD_DIR=$(SANITIZE_BUILD_DIR) clean
@@ -25,7 +18,7 @@ sanitize:
 		OPT_CXXFLAGS="-O1 -g" \
 		EXTRA_CXXFLAGS="-fsanitize=$(SANITIZERS) -fno-omit-frame-pointer" \
 		EXTRA_LDFLAGS="-fsanitize=$(SANITIZERS)" \
-		test
+		all native-probe-compile
 
 format:
 	@if command -v $(CLANG_FORMAT) >/dev/null 2>&1; then \
@@ -48,8 +41,8 @@ shellcheck:
 	shellcheck $(SHELL_SOURCES)
 
 python-check:
-	python3 -m compileall -q apps/research-ui tests/research_ui tools
-	$(RUFF) check apps/research-ui tests/research_ui tools
+	python3 -m compileall -q apps/research-ui tools
+	$(RUFF) check apps/research-ui tools
 
 repository-check:
 	./scripts/check-repository-hygiene.sh

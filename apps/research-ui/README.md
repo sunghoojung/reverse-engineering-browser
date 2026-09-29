@@ -161,14 +161,12 @@ input and output visible with transformation history available on demand.
 | `api_collection.py`, `local_analyst.py`, `durable_files.py` | Workspace contracts, explicit analyst execution, durable private file replacement |
 | `decoder_service.py`, `origin_trace.py`, `vm_analyzer.py` | Native decoder adapter, trace projection, and offline VM analysis |
 | `macos/` | Native shell, evidence readers, and helper processes |
-| [`tests/research_ui/`](../../tests/research_ui/) | Python, HTTP, protocol, and UI contract tests |
 
 The browser scripts load in the order declared in `index.html`. They use the
 same page scope so the native shell and browser development path share one
 implementation without a bundler. `evidence_models.js` contains evidence
 validation and projections; `source_syntax.js` owns source display algorithms.
-Live refresh and DOM updates belong in `app.js`. Source algorithm tests load
-the shipped script directly, independently of application startup.
+Live refresh and DOM updates belong in `app.js`.
 The native scheme handler and packaging script explicitly list shipped assets.
 
 Debugger support modules must not import the session coordinator or the HTTP
@@ -179,13 +177,9 @@ lifecycle transitions.
 ## Validate
 
 ```sh
-make ui-test
-```
-
-Run a focused module from the repository root with both source and test paths:
-
-```sh
-PYTHONPATH=apps/research-ui:tests/research_ui python3 -m unittest test_debugger_bridge
+make lint
+make check
+make e2e
 ```
 
 UI changes also require interaction through the native app. Run the complete

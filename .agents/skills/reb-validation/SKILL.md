@@ -1,6 +1,6 @@
 ---
 name: reb-validation
-description: Validate Reverse Engineering Browser changes and report evidence for handoff. Use for focused test selection, full local gates, or failure triage. Route user-visible Origin Trace work and Brave integration work to their dedicated skills.
+description: Validate Reverse Engineering Browser changes and report evidence for handoff. Use for focused build checks, full local gates, or failure triage. Route user-visible Origin Trace work and Brave integration work to their dedicated skills.
 ---
 
 # Validate Reverse Engineering Browser
@@ -26,17 +26,16 @@ Do not use `no-mistakes`, a remote gate, or a substitute validation pipeline.
 
 | Changed surface | First useful evidence |
 | --- | --- |
-| One C++ component | Its directly related test binary, then `make test` if shared code is involved |
-| Broker, IPC, producer, artifact transfer, or evidence store | Related native test plus the matching socket test or `make e2e` |
-| Research UI Python | The directly related unittest module, then `make ui-test` |
-| Origin Trace HTML, JavaScript, Swift, packaging, or assets | `reb-ui-e2e` plus the directly related automated tests |
-| Shell, Python, workflow, or repository tooling | The matching Makefile lint target and fixture test |
+| One C++ component | Its directly related executable build, then `make check` if shared code is involved |
+| Broker, IPC, producer, artifact transfer, or evidence store | `make e2e` for the deterministic producer and storage path |
+| Research UI Python | `make python-check`, then a relevant loopback or native UI flow |
+| Origin Trace HTML, JavaScript, Swift, packaging, or assets | `reb-ui-e2e` plus `make app-build` when packaging is affected |
+| Shell, Python, workflow, or repository tooling | The matching Makefile lint target and product command |
 | Documentation or repository skills | Workspace and repository hygiene checks, link inspection, skill validation, and `git diff --check` |
-| Brave integration or setup | Relevant fixture tests plus `reb-brave-verify` |
+| Brave integration or setup | `reb-brave-verify` |
 
-Prefer behavior and contract checks over tests that only match implementation
-wording. A syntax check does not replace the configured linter or an
-end-to-end path.
+Prefer behavior and contract checks through the product path. A syntax check
+does not replace the configured linter or an end-to-end path.
 
 ## Run the handoff gate
 

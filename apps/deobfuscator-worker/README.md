@@ -15,7 +15,7 @@ for the precise supported subsets and regression evidence.
 ## Run
 
 ```sh
-cargo test --manifest-path apps/deobfuscator-worker/Cargo.toml
+cargo build --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 cargo run --manifest-path apps/deobfuscator-worker/Cargo.toml
 make deob-benchmark
 ```
@@ -58,7 +58,7 @@ within one second. Excessive nesting returns a recoverable diagnostic and leaves
 the next JSON-line request usable. Both grammars must support the input syntax.
 
 `make deob-benchmark` runs the worker against the versioned technique corpus in
-`tests/fixtures/deobfuscation-benchmark/`.
+`tools/fixtures/deobfuscation-benchmark/`.
 Each case compares the original and derived observable result in Node, requires
 the expected transformation families, rejects budget truncation, and reports
 wall time, rewrite count, changed-source coverage, and child peak RSS. The

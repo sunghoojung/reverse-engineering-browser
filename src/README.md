@@ -20,20 +20,18 @@ executable entry points. Library components should not start services or depend
 on application code. Capture must not depend on storage or analysis. Preserve
 the [protocol contracts](../protocol/README.md) when changing public records.
 
-## Building and testing a component
+## Building a component
 
 [`mk/native.mk`](../mk/native.mk) declares each executable's object dependencies.
-Add a new implementation to its consumers explicitly. Do not link every native
-component into a test: doing so hides missing dependencies and allows unrelated
-changes to affect that test.
+Add a new implementation to its consumers explicitly. This keeps missing
+dependencies visible and avoids rebuilding unrelated executables.
 
-For example, build and run the broker unit test with:
+For example, build the broker and run the deterministic evidence path with:
 
 ```sh
-make build/tests/event_broker_test
-./build/tests/event_broker_test
+make broker
+make e2e
 ```
 
-Native tests live in `tests/`. Use `make socket-e2e` or
-`make artifact-socket-e2e` to exercise service boundaries, then run the complete
-[contribution gate](../CONTRIBUTING.md#quality-gate).
+The native dependency check runs through `make native-build-test`. Run the
+complete [contribution gate](../CONTRIBUTING.md#quality-gate) before handoff.

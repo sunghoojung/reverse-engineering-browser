@@ -10,8 +10,9 @@ storage contracts.
 1. Read `git status --short` and the relevant diff. Existing changes belong to
    the user unless proven otherwise. Never reset, clean, overwrite, or reformat
    unrelated work.
-2. Read the nearest subsystem README, public contract, and existing tests before
-   editing. Use `rg` and `rg --files`, excluding `browser/worktree/`.
+2. Read the nearest subsystem README, public contract, and relevant build
+   wiring before editing. Use `rg` and `rg --files`, excluding
+   `browser/worktree/`.
 3. Classify the affected surface and load the matching repository skill:
 
    | Surface | Required skill |
@@ -22,7 +23,7 @@ storage contracts.
 
 4. For bug fixes, reproduce the problem through the closest user-facing path
    before editing. Record the state, action, and visible or observable failure.
-5. Make the smallest coherent change, test it at the narrowest useful layer,
+5. Make the smallest coherent change, validate it at the narrowest useful layer,
    then run the complete handoff gate.
 
 Do not use the `no-mistakes` skill, remote gate, or alternate pipeline in this
@@ -60,8 +61,7 @@ docs/product/           Roadmap, feature catalog, and versioned designs
 include/reb/ and src/    Public C++ interfaces and implementations
 protocol/               Versioned event, trace, storage, and command contracts
 services/               Event broker and artifact receiver
-tests/                  Native, socket, fixture, integration, and UI tests
-tools/                  Offline validation and analysis utilities
+tools/                  Offline validation, benchmark data, and analysis utilities
 ```
 
 Ownership rules:
@@ -110,14 +110,14 @@ non-blocking, and observational unless a visibly enabled experiment authorizes
 mutation.
 
 Never lose evidence silently. A full queue must increment a visible drop
-counter or emit a gap marker as soon as capacity returns. Test disabled,
+counter or emit a gap marker as soon as capacity returns. Verify disabled,
 capacity, expiration, malformed-input, and sequence-gap behavior whenever a
 change can affect those states.
 
 Default capture to metadata, sizes, hashes, stable identifiers, and bounded
 previews. Do not capture credentials, authorization headers, cookies, request
 bodies, or personal content by default. Sensitive capture must be
-session-scoped, visibly enabled, documented, and covered by redaction tests.
+session-scoped, visibly enabled, documented, and covered by redaction checks.
 Never upload evidence automatically.
 
 ## Engineering standards
@@ -128,7 +128,7 @@ Never upload evidence automatically.
   architectural benefit.
 - Prefer value types, RAII, fixed-width integers, and explicit ownership.
 - Avoid exceptions and hidden allocation in probes and transports.
-- State concurrent invariants in names, comments, and tests. Use acquire and
+- State concurrent invariants in names and comments. Use acquire and
   release ordering only when the synchronization contract is documented.
 - Keep public protocol structs trivially copyable and protect their ABI with
   `static_assert` checks.
@@ -156,8 +156,8 @@ Never upload evidence automatically.
 - Keep shell and Python entry points deterministic, non-interactive by default,
   and explicit about missing tools or partial results.
 - Treat protocol schemas, public C++ structs, socket records, and evidence files
-  as versioned compatibility boundaries. Update producers, consumers, tests,
-  fixtures, and nearby documentation together.
+  as versioned compatibility boundaries. Update producers, consumers, build
+  checks, and nearby documentation together.
 - Document why a boundary or limit exists. Avoid comments and docs that merely
   restate the code.
 - Prefer relative repository links and verify them after moving or renaming
@@ -167,10 +167,12 @@ Never upload evidence automatically.
 
 1. Reproduce or characterize the current behavior at the closest end-to-end
    boundary.
-2. Inspect the relevant contract, producer, consumer, and tests.
+2. Inspect the relevant contract, producer, consumer, and build checks.
 3. Implement the smallest architectural change that preserves the invariants
    above.
-4. Add tests for success, failure, disabled behavior, and relevant limits.
+4. Verify success, failure, disabled behavior, and relevant limits through the
+   available product path. Keep a separate test file only when it directly
+   verifies compilation or build dependency behavior.
 5. Update the nearest README or versioned design when ownership, operation, or
    user-visible behavior changes.
 6. Review the final diff for unrelated edits, generated files, sensitive data,
@@ -204,7 +206,7 @@ codesign --verify --deep --strict "build/Origin Trace.app"
 For changes under `browser/integration/brave/`, browser pins, bootstrap, or
 synchronization:
 
-1. Verify fixture-based bootstrap or sync behavior as applicable.
+1. Inspect bootstrap or sync behavior as applicable.
 2. Verify overlay destinations exist at the pinned revision.
 3. Verify every patch preflights and applies cleanly.
 4. Run `make brave-doctor` without changing global Xcode selection.
@@ -228,7 +230,7 @@ A change is complete only when:
 
 - behavior works through the intended user-facing or system boundary;
 - limits, drops, malformed input, disabled behavior, and privacy controls are
-  tested where relevant;
+  verified where relevant;
 - documentation and contracts match the implementation;
 - no generated checkout, build output, sensitive capture, or unrelated user
   change is included;

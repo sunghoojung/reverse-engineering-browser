@@ -95,6 +95,6 @@ The broker rejects categories outside the mask before sequence accounting or
 storage, and closes its listener or browser connection when the monotonic
 deadline expires.
 
-Run `make socket-e2e` to validate authentication, permissions, ingestion, and
-socket cleanup without launching Brave. Run `make live` after a complete custom
+Run `make e2e` to validate deterministic ingestion and evidence storage without
+launching Brave. Run `make live` after a complete custom
 Brave app build to start the broker, Origin Trace, and Brave as one session.

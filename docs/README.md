@@ -1,7 +1,7 @@
 # Documentation
 
 This index separates the implemented architecture and operating guides from the
-broader product direction. Source, tests, and versioned protocol files are the
+broader product direction. Source and versioned protocol files are the
 final authority for current behavior.
 
 ## Start here
@@ -34,7 +34,8 @@ skills under `.agents/skills/`.
 
 The roadmap describes the intended product surface. Versioned feature documents
 below capture bounded designs and implementation contracts. A design document
-can include follow-up work, so confirm present behavior in source and tests.
+can include follow-up work, so confirm present behavior in source and the
+current product path.
 
 ## Versioned feature designs
 

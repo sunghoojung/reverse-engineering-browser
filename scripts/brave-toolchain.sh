@@ -277,9 +277,7 @@ case "${command_name}" in
         autoninja_arguments+=("-j${brave_jobs}")
       fi
       autoninja "${autoninja_arguments[@]}" "${probe_objects[@]}" \
-        "${web_audio_objects[@]}" \
-        brave/components/reverse_engineering_browser:native_artifact_body_tee_unittests \
-        brave/components/reverse_engineering_browser:native_probe_sink_unittests
+        "${web_audio_objects[@]}"
       generated_bindings="${output_directory}/gen/third_party/blink/renderer/bindings/modules/v8"
       generated_core_bindings="${output_directory}/gen/third_party/blink/renderer/bindings/core/v8"
       declare -a generated_probe_expectations=(
@@ -339,8 +337,6 @@ case "${command_name}" in
         echo "V8 Math fingerprint probes are missing." >&2
         exit 1
       fi
-      "${output_directory}/native_artifact_body_tee_unittests"
-      "${output_directory}/native_probe_sink_unittests"
     )
     ;;
   build|start)

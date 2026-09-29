@@ -43,7 +43,7 @@ Reverse Engineering Browser is a Brave-based research browser for authorized web
 - Observe navigation, storage, permissions, navigator properties, canvas, WebGL, Web Audio, GPU activity, and scoped network metadata.
 - Record which script, frame, worker, or WASM module accessed a browser capability.
 - Connect browser API results to later transformations and outgoing requests.
-- Redact sensitive data by default and require explicit permission for cookies, credentials, authorization headers, or response bodies.
+- Apply the capture and redaction policy in [`SAFETY.md`](../../SAFETY.md).
 
 ## Value tracing and correlation
 
@@ -91,13 +91,12 @@ Reverse Engineering Browser is a Brave-based research browser for authorized web
 - Run selected code in a throwaway origin and profile with explicit DOM, storage, input, permission, and response fixtures.
 - Replay an authorized page scenario in an isolated profile with explicit dependency stubs.
 - Compare experiment behavior with the captured session.
-- Keep experiments separate from the active website, production cookies, account state, and credentials.
+- Keep experiments isolated per the experiment scope in [`SAFETY.md`](../../SAFETY.md).
 
 ## Safety and reliability
 
-- Keep all control and evidence traffic local by default.
-- Authenticate local clients and enforce session scope before commands reach the browser.
-- Maintain audit logs for commands and sensitive capture.
+- Authorization, local-only operation, capture, and privacy rules are defined
+  in [`SAFETY.md`](../../SAFETY.md).
 - Never block the renderer for UI, storage, network delivery, or an agent.
 - Measure compatibility, performance, event drops, and resource usage against the matching official Brave release.
 - Treat observational equivalence as a measured engineering target, not an absolute guarantee.

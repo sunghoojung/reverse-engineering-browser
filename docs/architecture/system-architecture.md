@@ -39,7 +39,8 @@ is the editable diagram source.
 The current live transports are Unix sockets. Windows named pipes are part of
 the broader design, not a shipped transport. Capture policy enforces categories
 and expiration; the native event envelope does not yet provide the trustworthy
-origin identity needed for origin allowlisting.
+origin identity needed for origin allowlisting. Authorization and capture rules
+are defined in [`SAFETY.md`](../../SAFETY.md).
 
 Implementation and contracts:
 [native probes](../../browser/integration/brave/overlay/components/reverse_engineering_browser/README.md),

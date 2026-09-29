@@ -274,7 +274,7 @@ browser.interact(action)
 capture.export(format)
 ```
 
-Every session defines allowed origins, probe categories, data sensitivity, rate limits, and an expiration time.
+Every session defines allowed origins, probe categories, data sensitivity, rate limits, and an expiration time. These scopes implement the policy in [`SAFETY.md`](../../SAFETY.md).
 
 ## Artifact and code-analysis workspace
 

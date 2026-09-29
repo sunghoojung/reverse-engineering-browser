@@ -36,6 +36,9 @@ Build a local-first browser research harness for authorized reverse
 engineering. Connect low-level browser observations to a normalized evidence
 timeline that a researcher can inspect and work backward from.
 
+Authorization, capture, and privacy boundaries are defined in
+[`SAFETY.md`](SAFETY.md). Apply them to every change in this repository.
+
 Current project scope:
 
 1. Dependency-free C++ event and queue foundations.
@@ -99,10 +102,10 @@ native probe -> bounded renderer transport -> browser-process bridge
   parent identifiers across boundaries.
 - Keep capture separate from interpretation. Preserve raw evidence when an
   analyzer assigns or later revises meaning.
-- Keep all services on localhost or user-only local transports unless the user
-  explicitly changes the threat model.
+- Keep all services on localhost or user-only local transports. The exposure
+  and threat-model policy is in [`SAFETY.md`](SAFETY.md).
 
-## Hot-path, data, and privacy rules
+## Hot-path and data rules
 
 Browser probes run in sensitive execution paths. They must remain disabled by
 default, allocation-free while inactive, bounded in memory and per-event work,
@@ -114,11 +117,8 @@ counter or emit a gap marker as soon as capacity returns. Verify disabled,
 capacity, expiration, malformed-input, and sequence-gap behavior whenever a
 change can affect those states.
 
-Default capture to metadata, sizes, hashes, stable identifiers, and bounded
-previews. Do not capture credentials, authorization headers, cookies, request
-bodies, or personal content by default. Sensitive capture must be
-session-scoped, visibly enabled, documented, and covered by redaction checks.
-Never upload evidence automatically.
+Capture and privacy rules are defined in [`SAFETY.md`](SAFETY.md). Apply them
+whenever a change can affect captured data.
 
 ## Engineering standards
 

@@ -71,7 +71,9 @@ Headers, request bodies, response bodies, cookies, and credentials never enter
 the mutation audit or broker evidence store.
 
 Audit eviction is counted and visible. Results and audit records are ephemeral
-debugger state and disappear when cleared or when the live session ends.
+debugger state and disappear when cleared or when the live session ends. These
+limits and the preceding privacy rules implement the capture policy in
+[`SAFETY.md`](../../SAFETY.md).
 
 ## Verification
 

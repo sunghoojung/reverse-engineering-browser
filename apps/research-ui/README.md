@@ -2,7 +2,9 @@
 
 Origin Trace reads local event, trace, signal, and artifact stores. The macOS
 application is the normal product path; the Python server supports browser
-development and live debugger sessions.
+development and live debugger sessions. Project-wide authorization, capture,
+and privacy policy is in [SAFETY.md](../../SAFETY.md); this guide
+describes the product's current controls and limits.
 
 ## Run
 

@@ -3,6 +3,9 @@
 Decoder Tools provides the pinned WireBrowser decoder-chain and JWT workflows
 through Origin Trace's local, bounded architecture. It does not change captured
 evidence and does not run transforms automatically.
+Project-wide authorization and data-handling policy is defined in
+[`SAFETY.md`](../../SAFETY.md); this document describes the local decoder
+controls and their limits.
 
 ## Researcher workflow
 

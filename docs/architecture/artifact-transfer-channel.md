@@ -162,6 +162,10 @@ mode-0600 evidence files.
 
 ## Sensitive content
 
+Project-wide authorization, capture, and privacy rules are in
+[`SAFETY.md`](../../SAFETY.md). This section describes the artifact channel's
+specific enforcement contract.
+
 Response bodies and Canvas data URLs require both controls:
 
 1. the frame kind is `response_body` or `canvas_data_url` and its sensitive flag

@@ -5,6 +5,8 @@ Experiment BrowserContext. It matches the browser-script workflow pinned from
 WireBrowser commit `77e1e48ceb4acaef0356877ee2d09391763613cc`: async page-context
 JavaScript, manual execution, page-created execution, before-load execution,
 after-load execution, shared variables, and browser-side utility helpers.
+Project-wide authorization and experiment-isolation policy is in
+[`SAFETY.md`](../../SAFETY.md).
 
 The feature does not run on a Baseline target. It does not expose Node.js,
 Puppeteer, the filesystem, browser-wide target control, or arbitrary DevTools

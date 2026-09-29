@@ -4,6 +4,9 @@
 
 Reverse Engineering Browser is a Brave-based research browser for authorized website analysis. It helps a human researcher or an AI agent answer four questions:
 
+Authorization, capture, and privacy rules are defined in
+[`SAFETY.md`](../../SAFETY.md); this catalog describes product capabilities.
+
 1. What code and WebAssembly did this site run?
 2. What browser signals and data did it access?
 3. Where did a value come from, how did it change, and where did it go?

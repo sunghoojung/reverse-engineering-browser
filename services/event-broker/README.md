@@ -10,6 +10,10 @@ The event broker is the center of the system.
 - Serve a stable evidence model to the research UI and future authorized clients.
 - Record gaps whenever events are dropped or unavailable.
 
+Project-wide authorization, capture, and privacy policy is defined in
+[SAFETY.md](../../SAFETY.md); this README describes the broker's
+enforcement contract.
+
 ## Implemented vertical slice
 
 The broker accepts fixed 320-byte native records on standard input or an

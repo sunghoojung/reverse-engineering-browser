@@ -4,6 +4,9 @@ Web Audio Function-Call Capture records fingerprint-relevant Web Audio API
 operations as bounded native browser events. It makes live Web Audio activity
 visible in the evidence timeline and in the Request Signal Profile without
 copying audio content.
+Project-wide capture and privacy rules are defined in
+[`SAFETY.md`](../../SAFETY.md); this design describes the Web Audio fields that
+are retained.
 
 ## Captured calls
 

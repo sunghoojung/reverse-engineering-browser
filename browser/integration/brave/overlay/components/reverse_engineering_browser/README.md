@@ -1,7 +1,8 @@
 # Reverse Engineering Browser native probes
 
 This component owns renderer-side and browser-side boundaries for native probe
-events.
+events. Project-wide authorization, capture, and privacy policy is in
+[`SAFETY.md`](../../../../../../SAFETY.md).
 
 Generated Blink binding probes observe calls and property reads from an
 explicit 90-interface allowlist across Canvas, WebGL, WebGPU, Web Audio,

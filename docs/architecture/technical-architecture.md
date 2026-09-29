@@ -2,7 +2,11 @@
 
 ## Purpose
 
-Reverse Engineering Browser is a Brave-based browser harness for authorized website security research. AI agents and human researchers can observe browser behavior without injecting JavaScript wrappers into the page.
+Reverse Engineering Browser is a Brave-based browser harness for authorized
+website security research. AI agents and human researchers can observe browser
+behavior without injecting JavaScript wrappers into the page. The
+authorization, capture, and privacy policy is defined in
+[`SAFETY.md`](../../SAFETY.md).
 
 The browser preserves normal Brave behavior while native C++ probes report selected events through a private local transport.
 
@@ -182,7 +186,9 @@ Use V8 only for information Blink cannot provide. V8 instrumentation can disturb
 
 ### Network Service probes
 
-Observe request and response metadata inside Chromium's Network Service. Keep response bodies opt-in and size-limited. Credentials, cookies, and authorization headers require explicit session permission and must be redacted from ordinary logs.
+Observe request and response metadata inside Chromium's Network Service. Keep
+response bodies opt-in and size-limited. Apply the authorization,
+sensitive-capture, and redaction policy in [`SAFETY.md`](../../SAFETY.md).
 
 ### GPU process probes
 
@@ -274,7 +280,11 @@ browser.interact(action)
 capture.export(format)
 ```
 
-Every session defines allowed origins, probe categories, data sensitivity, rate limits, and an expiration time. These scopes implement the policy in [`SAFETY.md`](../../SAFETY.md).
+The intended session model includes allowed origins, probe categories, data
+sensitivity, rate limits, and an expiration time. Current native event records
+do not carry trustworthy origin identity, so origin allowlisting is not
+implemented. See [`SAFETY.md`](../../SAFETY.md) for the current policy and
+enforcement limits.
 
 ## Artifact and code-analysis workspace
 
@@ -306,7 +316,10 @@ Every claim has a confidence label:
 - **inferred**: an observed creation or mutation boundary strongly identifies the source;
 - **heuristic**: snapshot, replay, or structural-similarity analysis identifies the most likely origin.
 
-Network correlation links an outgoing request or response to the scripts, WASM modules, browser APIs, and value transformations involved in producing or consuming it. Sensitive values are redacted by default, and request or response bodies remain opt-in and size-limited.
+Network correlation links an outgoing request or response to the scripts, WASM
+modules, browser APIs, and value transformations involved in producing or
+consuming it. Sensitive values are redacted by default, and request or response
+bodies remain opt-in and size-limited under [`SAFETY.md`](../../SAFETY.md).
 
 The UI must support source-to-event and event-to-source navigation, exact and structural-similarity search, causal timelines, and comparison of two authorized runs.
 
@@ -320,7 +333,11 @@ The graph is evidence-based. Missing or ambiguous links remain visible as gaps r
 
 ## Experiment Lab
 
-The Experiment Lab lets a researcher create a controlled, disposable experiment from a selected script, function, WASM module, or captured request. It is separate from the active website document and never inherits production cookies, account state, or session credentials.
+The Experiment Lab lets a researcher create a controlled, disposable experiment
+from a selected script, function, WASM module, or captured request. It is
+separate from the active website document and never inherits production cookies,
+account state, or session credentials, consistent with the experiment policy in
+[`SAFETY.md`](../../SAFETY.md).
 
 Three modes are supported:
 
@@ -358,13 +375,16 @@ The engineering target is observational equivalence with the corresponding offic
 
 ## Security boundaries
 
+The policy governing these boundaries is in [`SAFETY.md`](../../SAFETY.md).
+
 Security requirements:
 
 - preserve Chromium's renderer sandbox;
 - authenticate the local harness connection;
 - validate every message and payload length;
-- enforce origin and session scope before commands reach probes;
-- maintain an audit log of agent commands and sensitive captures.
+- enforce implemented session scope before commands reach probes; origin
+  allowlisting remains unimplemented;
+- audit commands and sensitive capture where the feature provides that audit.
 
 ## Build and update pipeline
 

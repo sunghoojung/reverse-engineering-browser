@@ -2,7 +2,9 @@
 
 This directory is the tracked source of truth for changes applied to Brave.
 The large upstream checkout lives at `browser/worktree/src/brave` and remains
-ignored by the parent repository.
+ignored by the parent repository. Project-wide authorization and capture policy
+is in [SAFETY.md](../../../SAFETY.md); this guide describes the
+browser integration's enforcement details.
 
 ## Layout
 

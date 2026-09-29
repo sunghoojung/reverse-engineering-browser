@@ -3,7 +3,9 @@
 API Collection saves credential-free request templates for repeated authorized
 research. It extends the pinned WireBrowser folder, request-editor, variable,
 and execution-history workflow while preserving REB's local-first evidence and
-isolation boundaries.
+isolation boundaries. Project-wide authorization and data-handling policy is
+in [`SAFETY.md`](../../SAFETY.md); this document describes the collection's
+credential-free request contract and local persistence behavior.
 
 ## Workflow
 

@@ -1,73 +1,96 @@
 # Safety, Authorization, and Capture Policy
 
 Reverse Engineering Browser (REB) is a local-first research harness for
-inspecting systems you are authorized to test. This file is the single source of
-truth for the project's authorization, capture, privacy, and local-operation
-rules. Other documents link here instead of restating them.
+authorized website security research. This file is the source of truth for
+authorization, scope, capture, privacy, and local-operation policy. Other
+documents describe the implementation and link here for the policy that governs
+it.
 
-## Authorized use
+## Authorized targets and scope
 
-- Use REB only on systems you own or are explicitly authorized to inspect.
-- Comply with applicable law, contracts, and the terms that govern each system
-  you inspect.
-- Do not intercept, capture, or modify traffic on systems outside that
-  authorization.
+- Use REB only on systems you own or are explicitly authorized to test. A
+  friend's site or a capture-the-flag target is in scope only when its owner or
+  organizer authorizes the specific target and testing activity.
+- Follow applicable law, contracts, and the rules provided by the system owner
+  or challenge organizer.
+- Keep testing within the authorized target, methods, time window, and any
+  limits set by the owner or organizer. Permission to visit a site does not by
+  itself authorize security testing.
+- REB does not maintain a list of preapproved sites, verify ownership, or
+  determine whether a user has permission.
+- Current native event records do not carry a trustworthy origin identity, so
+  origin allowlisting is not implemented. Session category masks and expiration
+  do not enforce a domain boundary. Treat architecture documents that describe
+  origin-scoped sessions as intended design unless the implementation and its
+  contracts show otherwise.
+- Do not intercept, capture, or modify activity outside the authorization for
+  the target being tested. Agents and people follow the same scope.
 
 ## Default capture
 
-- Capture metadata, sizes, hashes, stable identifiers, and bounded previews.
+- Capture metadata, sizes, hashes, stable identifiers, and bounded previews by
+  default.
 - Do not capture credentials, authorization or proxy-authorization headers,
   cookies, `set-cookie` values, request bodies, response bodies, or personal
   content by default.
-- Redact sensitive fields by default at every capture and storage boundary.
+- Redact sensitive fields at capture and storage boundaries. Keep routine logs
+  free of secrets and personal content.
 
 ## Sensitive capture
 
-- Sensitive capture is disabled by default and is enabled per session.
-- Enabling it must be visible to the researcher, scoped to one session,
-  documented in the change that adds it, and covered by redaction tests.
-- A session may enable it only when the researcher's visible authorization scope
-  permits the specific data captured.
-- Commands and sensitive capture are audited.
+- Sensitive capture is disabled by default. Where a capture path supports it,
+  enable it visibly and for one session only.
+- Enable sensitive capture only when the authorization for that session
+  specifically covers the data being collected. Keep the capture bounded, audit
+  the action, and document new capture paths and their redaction checks.
+- Audit commands and sensitive capture where the feature provides that audit.
+- Do not treat a session category or expiration as proof of target
+  authorization. Current origin-scope limitations are described above.
 
-## Local-first operation
+## Observation and experiments
 
-- Keep all control and evidence traffic on `localhost` or another user-only
-  local transport.
-- The research HTTP API is intentionally unauthenticated and must stay local. Do
+- Probes remain disabled by default and observational. A visibly enabled
+  experiment and an explicit researcher action are required for browser
+  mutation.
+- Run mutable tools such as interception, automation, runtime hooks, replay, and
+  object changes only in a disposable experiment context and within its bounded
+  pages or exact selected page.
+- Experiments do not read or modify baseline tabs, production cookies, storage,
+  or credentials. Never execute extracted code automatically.
+
+## Local operation and evidence
+
+- Keep control and evidence traffic on `localhost` or another user-only local
+  transport. Keep the unauthenticated research HTTP API bound to loopback; do
   not expose it on a network interface. Remote access requires real
-  authentication and authorization first, which is a separate, explicitly
-  approved change to the threat model.
-- Socket transports use user-only permissions and a shared session token.
-- Authenticate local socket clients and enforce session scope before commands
-  reach the browser.
+  authentication and authorization and an explicitly approved threat-model
+  change.
+- Socket transports use user-only permissions and authenticate local clients
+  before enforcing session scope.
+- Keep evidence on the machine in the local session store. Never upload it
+  automatically.
+- Keep captured evidence and credentials out of commits, logs, and shared
+  artifacts.
 
-## Evidence handling
+## Enforcement status
 
-- Evidence stays on the machine in the local session store.
-- Never upload evidence automatically.
-- Keep captured evidence out of commits, logs, and shared artifacts.
+This policy states the project rules; it does not claim that REB verifies a
+researcher's authorization. The following implementation points enforce parts
+of the data-handling policy:
 
-## Disposable experiment scope
-
-- Mutable tools (interception, automation, runtime hooks, replay) run only in a
-  disposable experiment context, on its bounded pages or one exact page.
-- They never read or modify baseline tabs, production cookies, storage, or
-  credentials.
-
-## Enforcement map
-
-| Boundary | Enforced in |
+| Boundary | Enforcement point |
 | --- | --- |
 | Sensitive artifact rejection without an enabled session | `src/evidence/artifact.cpp` |
 | Loopback-only research API trust check | `apps/research-ui/server.py` |
 | Credential-free experiment request validation | `apps/research-ui/debugger/requests.py` |
 | Artifact receiver `--allow-sensitive` gate | `services/artifact-receiver/main.cpp` |
 | Capture category mask and session expiration | `protocol/README.md`, native probes |
+| Origin allowlisting | Not implemented; the native event envelope lacks trustworthy origin identity |
 
 ## Related documents
 
 - [`AGENTS.md`](AGENTS.md) is the coding-agent operating contract.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) describes the repository workflow.
 - [`docs/README.md`](docs/README.md) is the documentation index.
 - [`protocol/README.md`](protocol/README.md) owns the transport contracts that
   implement the capture boundaries above.

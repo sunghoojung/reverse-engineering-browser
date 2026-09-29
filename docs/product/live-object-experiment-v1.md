@@ -6,6 +6,9 @@ Live Object Experiment lets an authorized researcher search and patch JavaScript
 objects while preserving the captured baseline as immutable evidence. The feature
 uses the existing disposable Experiment BrowserContext. It never mutates the
 baseline debugger target, captured artifacts, broker records, or evidence store.
+Project-wide authorization and capture policy is in
+[`SAFETY.md`](../../SAFETY.md); this design describes the experiment's specific
+mutation boundary.
 
 ## Isolation and lifecycle
 

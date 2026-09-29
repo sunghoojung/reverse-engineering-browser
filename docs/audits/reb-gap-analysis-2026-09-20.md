@@ -47,7 +47,10 @@ Your own `docs/product/feature-list.md` promises these; code does not back them 
 
 ### D2 — links whose capability is deliberately outside REB's stated scope
 
-These need an explicit scope change before touching, since AGENTS.md says: do not optimize for bypassing access controls or concealing malicious activity.
+This audit records these capabilities as outside the product scope at the time
+of writing. Target authorization and data-handling rules are maintained in
+[`SAFETY.md`](../../SAFETY.md); a future product-scope change still needs an
+explicit project decision.
 
 - TLS/JA3/JA4 + HTTP/2 impersonation, embedded V8 realm running vendor code headlessly, SOCKS5/residential proxy rotation, PoW + captcha solving, farbling/persona simulation, commercial anti-bot solving APIs, bulk target scanning, batch proxy/captcha marketplaces (sneakerdev), abliterated LLM as a backend choice (@abliteration_ai).
 

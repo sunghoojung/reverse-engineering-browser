@@ -1,6 +1,9 @@
 # Origin Trace reference
 
 The research UI is the human-facing investigation workspace.
+Project-wide authorization, capture, and privacy policy is defined in
+[`SAFETY.md`](../../SAFETY.md). This reference describes implemented UI
+behavior and its specific limits.
 
 ## Design goals
 

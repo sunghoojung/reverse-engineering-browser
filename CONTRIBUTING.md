@@ -15,7 +15,8 @@ and reproducible Brave integration.
 
 Coding agents must also follow [AGENTS.md](./AGENTS.md), which documents source
 ownership, architectural invariants, skill routing, and the complete handoff
-contract.
+contract. The project-wide authorization, capture, and privacy policy is in
+[SAFETY.md](./SAFETY.md).
 
 ## Local development
 

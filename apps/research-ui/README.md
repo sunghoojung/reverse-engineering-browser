@@ -4,6 +4,18 @@ Origin Trace reads local event, trace, signal, and artifact stores. The macOS
 application is the normal product path; the Python server supports browser
 development and live debugger sessions.
 
+The Python server and debugger adapter are the Origin Trace backend targeted
+for a staged Rust migration. The native Brave evidence broker, artifact
+receiver, probes, and wire formats are intentionally not part of that rewrite.
+See the [backend boundary and migration sequence](../../docs/architecture/origin-trace-backend-boundary.md).
+
+The replacement now lives in [`apps/origin-trace-backend`](../origin-trace-backend/).
+It currently owns bounded evidence reads, health reporting, static assets, and
+the event, artifact, and signal-profile read APIs. Build and test this migration
+surface with `make origin-trace-backend`; `make ui` continues to use Python
+until the remaining write actions and live debugger state machine reach route
+parity.
+
 ## Run
 
 ```sh

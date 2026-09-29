@@ -6,6 +6,10 @@ health, event, artifact, and signal-profile APIs. It deliberately does not
 proxy unported routes back to Python: an unavailable route returns `501`, so
 migration gaps remain visible.
 
+The listener accepts only `127.0.0.1`, `localhost`, or `::1`. Static requests
+serve only the eight application HTML, CSS, and JavaScript assets from
+`apps/research-ui`; backend source and neighboring applications are unavailable.
+
 ```sh
 make origin-trace-backend
 cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml

@@ -24,6 +24,17 @@ const PUBLIC_ARTIFACT_FIELDS: [&str; 15] = [
     "sensitive",
 ];
 
+const UI_ASSETS: [&str; 8] = [
+    "index.html",
+    "app.css",
+    "app_state.js",
+    "evidence_models.js",
+    "source_syntax.js",
+    "traffic_view.js",
+    "request_value_test.js",
+    "app.js",
+];
+
 pub struct App {
     options: Options,
     ui_root: PathBuf,
@@ -34,7 +45,7 @@ impl App {
     pub fn new(options: Options, port: u16) -> Self {
         Self {
             options,
-            ui_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".."),
+            ui_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../research-ui"),
             port,
         }
     }
@@ -130,6 +141,9 @@ impl App {
         if relative
             .components()
             .any(|part| !matches!(part, Component::Normal(_)))
+            || !relative
+                .to_str()
+                .is_some_and(|asset| UI_ASSETS.contains(&asset))
         {
             return response::error("Not found", 404);
         }

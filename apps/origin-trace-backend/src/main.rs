@@ -4,7 +4,7 @@ use tiny_http::Server;
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let options = Options::parse();
-    let server = Server::http(options.address())?;
+    let server = Server::http(options.address()?)?;
     let endpoint = PublishedEndpoint::new(options.endpoint_file.as_deref(), server.server_addr())?;
     println!("Research UI: {}", endpoint.url());
 

@@ -4,10 +4,10 @@
 in `apps/research-ui/server.py`: 14 GET operations and five POST action
 operations. It is OpenAPI 3.1, uses JSON Schema 2020-12, and is JSON rather than
 YAML so existing Python tooling can read it without a parser dependency.
-Stable `operationId` values drive the included Python CLI and can support a
-later MCP adapter. No new server endpoint, authentication system, or MCP server
-is introduced. The existing server and new client remain Python; adding Go or
-Rust would not improve this small local-client boundary.
+Stable `operationId` values drive the included Python CLI. No new server
+endpoint or authentication system is introduced. The existing server and new
+client remain Python; adding Go or Rust would not improve this small
+local-client boundary.
 
 ## Start and call it
 
@@ -49,8 +49,7 @@ stdout body; `--show-headers` prints status, ETag and other response headers to
 stderr. HTTP errors exit nonzero and show the server's error text. Binary
 content requires `--output PATH` (or explicit `--output -` for stdout), and a
 file path is never overwritten. The importable `api_client.py` uses the same
-operation IDs and can be reused by a future MCP adapter; it does not provide
-an MCP server or additional permissions on its own.
+operation IDs. It does not provide additional permissions on its own.
 
 ```sh
 REB_API=$(cat /tmp/reb-api-endpoint)
@@ -88,6 +87,8 @@ without credentials, parameters, query or fragment, and with empty or `/` path.
 A CLI can omit Origin. These are local request checks, not user identity or
 remote-access authentication. The default bind is 127.0.0.1; do not expose it
 remotely as if it had credential-based access control.
+The client rejects redirects, so a response cannot send a request to a
+different host or local service.
 
 The native broker's socket token belongs to a **different transport**. The
 macOS `WKURLSchemeHandler`, C++/Unix sockets, CDP WebSockets, worker stdin/stdout
@@ -99,7 +100,8 @@ scheme behavior is not guaranteed to match the Python server in every detail.
 All current HTTP API routes, documented query parameters, body-size ceilings,
 conditional responses and caught error statuses are represented. Trace,
 request-signal and VM schemas are embedded from their versioned protocol files
-so the OpenAPI document is portable; the contract test checks for drift.
+so the OpenAPI document is portable. Update embedded schemas whenever their
+versioned source changes.
 The VM HTTP response additionally allows its actual optional `selection` field.
 
 The action routes are multiplexed, not invented REST resources:
@@ -146,7 +148,7 @@ Known behavior worth preserving in clients:
 - Some size constraints are UTF-8 bytes, not characters. `x-max-utf8-bytes`
   describes those checks without misusing JSON Schema `maxLength`.
 
-## CLI and future MCP integration
+## CLI usage guidance
 
 Use the OpenAPI operation IDs as CLI commands and pass the actual `action`
 discriminator for multiplexed commands. Preserve decimal-string 64-bit IDs.
@@ -155,22 +157,11 @@ predictable. Keep transport errors separate from structured `{error}` responses
 and successful HTTP responses containing an application failure. Do not blindly
 retry mutations after a timeout or dropped connection.
 
-A future MCP adapter can reuse these schemas and operation IDs but needs its
-own tool descriptions and capability/confirmation policy. Do not expose the
-entire debugger action object as an unrestricted generic tool. Separate read
-operations from script execution, navigation, interception, return overrides,
-workspace replacement and destructive capture clearing. Retain existing
-confirmation flags and isolation checks. Poll `/api/debugger` for state rather
-than assuming every action returns a snapshot. OpenAPI does not describe MCP
-transport or automatically make an MCP server available.
-
 ## Maintain and validate
 
-Run `make ui-test` (includes `test_openapi_contract`) and the repository handoff
-gate. Contract tests compare routes, action names, body ceilings and embedded
-schemas with the implementation, and exercise HTTP locality, ETags, errors and
-binary chunking. They are not a complete third-party OpenAPI meta-schema
-validator. To validate the document with one, use an OpenAPI 3.1-capable tool.
+Run `make lint`, `make check`, and `make e2e` as the repository handoff
+gate. Run `python3 apps/research-ui/api_cli.py list` to confirm the client
+loads the contract. Validate the document with an OpenAPI 3.1-capable tool.
 When changing the server, update the spec in the same change. Never update a
 schema to claim an endpoint or authorization mechanism that is not implemented.
 

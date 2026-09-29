@@ -19,6 +19,11 @@ class ApiClientError(Exception):
     """A local contract, transport, or response error."""
 
 
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        raise ApiClientError("API server redirects are not allowed")
+
+
 @dataclass(frozen=True)
 class Operation:
     operation_id: str
@@ -116,7 +121,9 @@ class ApiClient:
         if not math.isfinite(timeout) or timeout <= 0:
             raise ApiClientError("timeout must be a positive finite number")
         self.timeout = timeout
-        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        self._opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _RejectRedirects()
+        )
 
     def call(self, operation_id, parameters=None, body=None):
         operation = self.contract.operation(operation_id)

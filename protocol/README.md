@@ -166,5 +166,5 @@ profile across the existing request-ID bridge.
 
 [`openapi.json`](openapi.json) describes the existing Python research UI HTTP
 API for CLI clients. See [HTTP API usage and gaps](http-api.md) for endpoint
-discovery, local request checks, schema coverage and future MCP boundaries.
+discovery, local request checks, and schema coverage.
 Socket and native custom-scheme transports remain separate contracts.

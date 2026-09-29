@@ -1,5 +1,11 @@
 # Documentation
 
+## Architecture decisions
+
+- [Origin Trace backend boundary](architecture/origin-trace-backend-boundary.md)
+  defines the Rust migration target while keeping the Brave evidence backend
+  and native protocols stable.
+
 This index separates the implemented architecture and operating guides from the
 broader product direction. Source and versioned protocol files are the
 final authority for current behavior.

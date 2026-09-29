@@ -2,10 +2,13 @@ native-build-test:
 	./scripts/check-native-build.sh
 
 check: all native-probe-compile native-build-test workspace-check deob-benchmark
+	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 
 native-probe-compile: $(NATIVE_PROBE_QUEUE_OBJECT)
 
 lint: format-check shellcheck python-check javascript-check repository-check workflow-check
+	cargo fmt --check --manifest-path apps/origin-trace-backend/Cargo.toml
+	cargo clippy --locked --manifest-path apps/origin-trace-backend/Cargo.toml -- -D warnings
 
 deob-worker-build:
 	@command -v cargo >/dev/null 2>&1 || { echo "Cargo is not installed" >&2; exit 1; }

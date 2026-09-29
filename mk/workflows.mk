@@ -65,6 +65,9 @@ ui: e2e heap-snapshot decoder
 		--trace-store $(BUILD_DIR)/sessions/origin-trace.jsonl \
 		--signal-store $(BUILD_DIR)/sessions/request-signals.jsonl
 
+origin-trace-backend:
+	cargo build --locked --manifest-path apps/origin-trace-backend/Cargo.toml
+
 app-build: heap-snapshot decoder broker artifact-receiver debugger-transport
 	./scripts/build-research-app.sh
 

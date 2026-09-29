@@ -161,3 +161,10 @@ same session, process, navigation, and frame are only `correlated`. Profiles
 carry a 32-event parent bound, deterministic retention state, and an optional
 renderer initiator reference when the browser-process request inherits its
 profile across the existing request-ID bridge.
+
+## Local HTTP API
+
+[`openapi.json`](openapi.json) describes the existing Python research UI HTTP
+API for CLI clients. See [HTTP API usage and gaps](http-api.md) for endpoint
+discovery, local request checks, and schema coverage.
+Socket and native custom-scheme transports remain separate contracts.

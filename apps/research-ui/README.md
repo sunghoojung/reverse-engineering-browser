@@ -399,3 +399,14 @@ The production Rust AST passes and their ReverseJS comparison are documented in
 server uses a built worker when available (debug before release), or the explicit
 `REB_DEOBFUSCATOR_WORKER` executable. Worker failures remain errors; a missing
 worker retains the labelled Python lexical mode. Deob stays inside Sources.
+
+## Programmatic HTTP access
+
+The Python server's existing endpoints are described in the
+[OpenAPI 3.1 specification](../../protocol/openapi.json). Run
+`python3 apps/research-ui/api_cli.py list` from the repository root to discover
+CLI operations. The `call` command requires an explicit loopback URL or the
+server's `--endpoint-file`; see the [HTTP API guide](../../protocol/http-api.md)
+for examples, locality checks, and known gaps. The CLI does not start or control
+an installed native app session, and the native custom-scheme interface is not
+itself an HTTP server.

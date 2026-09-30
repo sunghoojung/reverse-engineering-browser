@@ -10,7 +10,8 @@ HEAP_SNAPSHOT_BINARY := $(BUILD_DIR)/reb-heap-snapshot
 DECODER_BINARY := $(BUILD_DIR)/reb-decoder
 DEBUGGER_TRANSPORT_BINARY := $(BUILD_DIR)/reb-debugger-transport
 NATIVE_PROBE_QUEUE_OBJECT := $(BUILD_DIR)/browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_probe_queue.o
-VM_ANALYZER := apps/research-ui/vm_analyzer.py
+ORIGIN_TRACE_BACKEND := apps/origin-trace-backend/target/debug/origin-trace-backend
+VM_ANALYZER := apps/origin-trace-backend/target/debug/origin-trace-vm
 
 APP_BINARIES := \
 	$(DEMO_BINARY) \

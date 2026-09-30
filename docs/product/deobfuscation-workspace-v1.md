@@ -8,27 +8,21 @@ it, a derived representation with an exact derived-range to original-source map,
 and recovered string tables with a replayable transformation log.
 
 Every derived position maps back to a source range, so a consumer can always return
-to the original evidence. The module never executes analyzed code, resolves
-identifiers, or claims semantics the evidence does not support.
+to the original evidence. The module never executes analyzed code or claims semantics the evidence does
+not support. Supported static rewrites have explicit assumptions and omissions.
 
 ## Scope of v1
 
-`apps/research-ui/deobfuscation.py` implements three products over one captured
-source body:
+`apps/origin-trace-backend/src/deobfuscation.rs` owns classification, literal
+string-table recovery, and validation of the Rust/Oxc worker's static AST
+rewrites. It composes the `deobfuscation-analysis-v1` response and verifies the
+worker schema, assumptions, rewrite boundaries, and reconstructed output before
+returning it. Captured source is never executed.
 
-1. `classify_source` labels a source `readable`, `minified`, `packed`, or
-   `obfuscated` and reports the weighted evidence that produced the label.
-2. `derive_representation` renders a re-indented reading view and a segment map
-   from derived offsets to original offsets.
-3. `recover_string_tables` recovers literal string arrays and code-point arrays
-   without running them.
-
-`analyze_source` composes all three into the `deobfuscation-analysis-v1`
-document. `verify_deobfuscation_document` revalidates a document before use.
-
-The server exposes this work at `/api/deobfuscation` with `script_id` and
-`mode=analysis|derived`. The `analysis` mode returns the document; `derived`
-also returns the representation text and segment map.
+The server exposes `/api/deobfuscation` with exactly one of `script_id` or
+`artifact_id` and `mode=analysis|derived`. Derived mode also returns the
+representation text and segment map. The packaged application and development
+server use the same Rust backend and analysis worker.
 
 ## Sources presentation
 
@@ -54,7 +48,7 @@ The document is a JSON object with schema identifier
 `deobfuscation-analysis-v1`:
 
 - `source`: `url`, `sha256`, `byte_size`, `lines`. The digest is SHA-256 over
-  the UTF-8 source bytes unless the caller supplies one.
+  the UTF-8 source bytes.
 - `classification`: `label`, `confidence`, `scores`, `evidence`,
   `alternatives`.
 - `stats`: the raw metrics used by classification, including byte and character
@@ -64,16 +58,13 @@ The document is a JSON object with schema identifier
   flag, and the blob-decoder count.
 - `representation`: `status` (`derived` or `unchanged`), `derived_bytes`,
   `segment_count`, `truncated`, and the `transformations` log. The derived text
-  and segment map are produced by `derive_representation`, not stored here.
+  and segment map are returned separately in derived mode.
 - `string_tables`: recovered tables, sorted by source offset.
 - `limits`: the named caps that applied to this analysis.
 
-`verify_deobfuscation_document` accepts a document only when the schema
-identifier matches, `source.sha256` is a string, `source.byte_size` is an
-integer, `classification` is an object with a known label and a list of
-evidence, `representation` is an object with a valid status and a
-transformations list, `string_tables` is a list, and `limits` is an object.
-Anything else raises `DeobfuscationError`.
+The HTTP contract and UI validators check the returned schema. The adapter
+rejects malformed worker records, overlapping or invalid UTF-8 source ranges,
+and output that does not match reconstruction from the declared rewrites.
 
 ## Classification labels and evidence
 
@@ -107,39 +98,20 @@ Evidence is capped at 32 entries.
 
 ## Derived representation map
 
-`derive_representation` re-indents the token stream; it never rewrites a token.
-The returned `text` and `segments` obey these invariants:
+The AST worker emits `verbatim` and `replacement` segments with UTF-8 byte
+boundaries. Segments cover the derived text, and verbatim slices match the
+original source exactly. A replacement maps to its entire original expression;
+positions within it map to that expression's start. The adapter rebuilds the
+output from these records and rejects inconsistencies. Safe rewrites and their
+limits are documented in [method coverage](deobfuscation-method-coverage.md).
 
-- Segments are contiguous and cover the derived text exactly:
-  `segments[i].derived_end == segments[i+1].derived_start`,
-  `segments[0].derived_start == 0`, and
-  `segments[-1].derived_end == len(text)`.
-- A `verbatim` segment is an identity slice of the source:
-  `source[original_start:original_end] == text[derived_start:derived_end]`.
-  Comments, identifiers, numbers, regexps, strings, and templates are always
-  copied byte-for-byte.
-- A `synthetic` segment is a zero-width insertion point in the original:
-  `original_start == original_end`. Only whitespace, a space before an opening
-  brace, a space after a comma, and token separators are synthesized.
-- `original_offset_for_derived(segments, derived_offset)` maps a derived offset
-  to its original offset: an exact source offset inside a verbatim segment, the
-  insertion point inside a synthetic segment, and `None` outside the map or for
-  an empty segment list.
-
-The `transformations` log records `{id, kind, detail, count, original_start,
-reversible}` per applied transformation. Kinds are `format` for whitespace work,
-`identity` for the byte-for-byte token copy that is always reported, and `no-op`
-when the source needed no formatting. The log is capped at 64 entries. A
-`truncated` flag and the effective `limits` are reported whenever the derived
-byte budget or the segment cap stopped the derivation; no partial segment is
-retained past the budget. The budget counts the UTF-8 bytes of the emitted text,
-so `derived_bytes` never exceeds `max_derived_bytes`, even for multi-byte
-sources. Segment `derived_start` and `derived_end` remain character offsets into
-the derived text.
+Display pretty printing has a separate UTF-16 map and can introduce synthetic
+whitespace. The UI composes that map with the AST map when both controls are
+active. Formatting and rewriting never change retained artifact bytes.
 
 ## String-table recovery
 
-`recover_string_tables` recovers two shapes without evaluating them:
+Literal recovery recognizes two shapes without evaluating them:
 
 - `string-array`: a bracketed array holding at least eight string literals.
   Each entry reports `index`, `offset`, `raw`, `encoding`, and `value`. Offsets
@@ -169,69 +141,29 @@ them.
 
 ## Limits and failure behavior
 
-| Resource | Limit |
-| --- | ---: |
-| Source | 4 MiB |
-| Derived text budget | 2 MiB of UTF-8 bytes, minimum 1024 bytes |
-| Mapped segments | 250,000 |
-| String tables | 64 |
-| String entries | 2,048 |
-| Transformations | 64 |
-| Evidence entries | 32 |
-| Decoded literal | 4,096 characters |
+Sources are capped at 4 MiB, worker output at 32 MiB, rewrites at 4,096, and
+worker execution at five seconds. Literal recovery returns at most 64 tables,
+2,048 entries, and 4,096 characters per decoded value. The worker preserves
+unchanged remainder and reports truncation when its rewrite budget is reached.
 
-`DeobfuscationError` is raised for a non-string, empty, or oversized source, for
-a derived budget below 1024, and for an invalid analysis document. The HTTP
-layer maps it to a 400 response and debugger failures to 409; an invalid
-`mode` is rejected before any source is read.
-
-## Non-goals
-
-- No code execution, sandboxed or otherwise.
-- No identifier resolution or de-aliasing.
-- No control-flow unflattening.
-- No packer unpacking. The classic packer shape is detected and labelled; its
-  payload is not extracted.
-- No value flow or constant propagation.
-- No semantics beyond the recorded evidence.
-
-## Not yet built
-
-- Unpacking the detected packer payload, or decoding base64 and percent blobs
-  beyond counting them in `stats`.
-- Resolving string-array index access or accessor call sites to recovered
-  values.
-- A persisted evidence-store artifact for the analysis document; the document is
-  returned to the caller only.
-- Identifier renaming, control-flow graphs, or any transform that changes the
-  source rather than re-indenting it.
+Invalid input returns 400, missing artifacts 404, unavailable live debugging or
+busy analysis 409, parse failures 422, worker failures 502, and timeouts 408.
+A missing packaged worker returns 503. Original evidence survives analysis
+failure; the UI retains its previous successful representation on retry failure.
 
 ## Contracts and validation
 
-`apps/research-ui/server.py` imports `SCHEMA`, `DeobfuscationError`,
-`analyze_source`, `derive_representation`, and `ensure_source`, and serves
-`/api/deobfuscation`. The Research UI reads `analysis.classification`,
-`analysis.representation`, `analysis.source`, and `analysis.evidence`.
+`apps/origin-trace-backend/src/app.rs` composes the analysis service and serves
+`/api/deobfuscation`. The UI consumes the classification, measurements, literal
+tables, mapped representation, assumptions, and omissions.
 
 `make deob-benchmark` compares original and derived behavior for the bounded
-technique corpus. `make check` compiles the Rust worker, and `make lint`
-checks the Python adapter.
+technique corpus. `make check` compiles the Rust worker and runs backend tests;
+`make lint` checks the adapter. The live browser fixture verifies analysis over
+captured scripts through the HTTP API.
 
-## Native integration and offset units
-
-The native application uses its packaged Rust/Oxc process for bounded static AST
-rewriting and serves `/api/deobfuscation?artifact_id=...&mode=derived`. This engine
-reports `unclassified` with null confidence and an explicit omission for
-classification and dynamic decoding. The development server uses the same
-Rust derivation when built, alongside the Python classification described above.
-Without a worker it retains the labelled Python lexical mode. The supported
-passes and unresolved cases are specified in
-[method coverage](deobfuscation-method-coverage.md). Responses name their engine and retain the
-original source for comparison; neither engine executes it.
-
-Python segment offsets are Unicode code points (`unicode-code-point`), not
-UTF-8 bytes. Native segment offsets are `utf-8-byte`. The UI converts either to
-UTF-16 boundaries before performing location arithmetic. Native `replacement`
-segments map to the start of the rewritten expression; they do not imply a
-one-to-one character correspondence. The shared contract lives in
-[`protocol/deobfuscation-v1.md`](../../protocol/deobfuscation-v1.md).
+Representation segment offsets use `utf-8-byte`; literal-table offsets retain
+Unicode code-point indexing for compatibility. The UI converts representation
+boundaries to UTF-16 before performing location arithmetic. Legacy recorded
+`python-lexical` responses retain their original code-point maps. The shared
+contract lives in [`protocol/deobfuscation-v1.md`](../../protocol/deobfuscation-v1.md).

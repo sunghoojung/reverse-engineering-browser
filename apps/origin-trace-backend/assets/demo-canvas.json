@@ -1,0 +1,79 @@
+[
+  {
+    "id": "canvas#1",
+    "context": "2D",
+    "width": 240,
+    "height": 60,
+    "readback": "toDataURL",
+    "operationHash": "a87c19e4",
+    "calls": [
+      {
+        "name": "fillStyle",
+        "arguments": [
+          "#f60"
+        ],
+        "property": true
+      },
+      {
+        "name": "fillRect",
+        "arguments": [
+          125,
+          1,
+          62,
+          20
+        ]
+      },
+      {
+        "name": "fillStyle",
+        "arguments": [
+          "#069"
+        ],
+        "property": true
+      },
+      {
+        "name": "font",
+        "arguments": [
+          "11pt Times New Roman"
+        ],
+        "property": true
+      },
+      {
+        "name": "textBaseline",
+        "arguments": [
+          "alphabetic"
+        ],
+        "property": true
+      },
+      {
+        "name": "fillText",
+        "arguments": [
+          "Cwm fjordbank gly 😃",
+          2,
+          15
+        ]
+      },
+      {
+        "name": "fillStyle",
+        "arguments": [
+          "rgba(102, 204, 0, 0.7)"
+        ],
+        "property": true
+      },
+      {
+        "name": "font",
+        "arguments": [
+          "18pt Arial"
+        ],
+        "property": true
+      },
+      {
+        "name": "fillText",
+        "arguments": [
+          "Cwm fjordbank gly 😃",
+          4,
+          45
+        ]
+      }
+    ]
+  }
+]

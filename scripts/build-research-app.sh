@@ -35,12 +35,15 @@ cp "${repo_root}/apps/research-ui/macos/Info.plist" "${contents_path}/Info.plist
 for asset in index.html app.css app_state.js evidence_models.js source_syntax.js traffic_view.js request_value_test.js app.js; do
   cp "${repo_root}/apps/research-ui/${asset}" "${resources_path}/${asset}"
 done
-mkdir -p "${research_ui_resources}/debugger"
-find "${repo_root}/apps/research-ui" -maxdepth 1 -type f \
-  \( -name '*.py' -o -name '*.js' -o -name '*.html' -o -name '*.css' \) \
-  -exec cp {} "${research_ui_resources}/" \;
-find "${repo_root}/apps/research-ui/debugger" -maxdepth 1 -type f -name '*.py' \
-  -exec cp {} "${research_ui_resources}/debugger/" \;
+mkdir -p "${research_ui_resources}"
+for asset in index.html app.css app_state.js evidence_models.js source_syntax.js traffic_view.js request_value_test.js app.js analyst_runner_core.js analyst_runner_node.js; do
+  cp "${repo_root}/apps/research-ui/${asset}" "${research_ui_resources}/${asset}"
+done
+cargo build --locked --release --manifest-path "${repo_root}/apps/origin-trace-backend/Cargo.toml"
+cp "${repo_root}/apps/origin-trace-backend/target/release/origin-trace-backend" "${macos_path}/OriginTraceBackend"
+cp "${repo_root}/apps/origin-trace-backend/target/release/origin-trace-vm" "${macos_path}/OriginTraceVMAnalyzer"
+cp "${repo_root}/apps/origin-trace-backend/target/release/reb-api" "${macos_path}/OriginTraceAPI"
+chmod 755 "${macos_path}/OriginTraceBackend" "${macos_path}/OriginTraceVMAnalyzer" "${macos_path}/OriginTraceAPI"
 cp "${repo_root}/scripts/run-live-session.sh" "${resources_path}/run-live-session.sh"
 chmod 755 "${resources_path}/run-live-session.sh"
 cp "${analyst_runner_core}" "${resources_path}/analyst_runner_core.js"

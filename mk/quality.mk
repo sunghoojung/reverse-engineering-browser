@@ -2,10 +2,13 @@ native-build-test:
 	./scripts/check-native-build.sh
 
 check: all native-probe-compile native-build-test workspace-check deob-benchmark
+	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 
 native-probe-compile: $(NATIVE_PROBE_QUEUE_OBJECT)
 
 lint: format-check shellcheck python-check javascript-check repository-check workflow-check
+	cargo fmt --check --manifest-path apps/origin-trace-backend/Cargo.toml
+	cargo clippy --locked --manifest-path apps/origin-trace-backend/Cargo.toml -- -D warnings
 
 deob-worker-build:
 	@command -v cargo >/dev/null 2>&1 || { echo "Cargo is not installed" >&2; exit 1; }
@@ -41,8 +44,8 @@ shellcheck:
 	shellcheck $(SHELL_SOURCES)
 
 python-check:
-	python3 -m compileall -q apps/research-ui tools
-	$(RUFF) check apps/research-ui tools
+	python3 -m compileall -q tools
+	$(RUFF) check tools
 
 repository-check:
 	./scripts/check-repository-hygiene.sh
@@ -58,4 +61,4 @@ clean:
 
 javascript-check:
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is not installed" >&2; exit 1; }
-	@set -e; for source in apps/research-ui/*.js; do node --check "$$source"; done
+	@set -e; for source in apps/research-ui/*.js apps/runtime-hook-demo/*.mjs tools/*.mjs; do node --check "$$source"; done

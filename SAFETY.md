@@ -81,8 +81,8 @@ of the data-handling policy:
 | Boundary | Enforcement point |
 | --- | --- |
 | Sensitive artifact rejection without an enabled session | `src/evidence/artifact.cpp` |
-| Loopback-only research API trust check | `apps/research-ui/server.py` |
-| Credential-free experiment request validation | `apps/research-ui/debugger/requests.py` |
+| Loopback-only research API trust check | [`config.rs`](apps/origin-trace-backend/src/config.rs) and [`app.rs`](apps/origin-trace-backend/src/app.rs) |
+| Credential-free experiment request validation | [`requests.rs`](apps/origin-trace-backend/src/debugger/requests.rs) |
 | Artifact receiver `--allow-sensitive` gate | `services/artifact-receiver/main.cpp` |
 | Capture category mask and session expiration | `protocol/README.md`, native probes |
 | Origin allowlisting | Not implemented; the native event envelope lacks trustworthy origin identity |

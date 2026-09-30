@@ -32,7 +32,7 @@ decoder: $(DECODER_BINARY)
 
 debugger-transport: $(DEBUGGER_TRANSPORT_BINARY)
 
-e2e: producer broker artifact-producer artifact-receiver debugger-transport heap-snapshot decoder
+e2e: origin-trace-backend producer broker artifact-producer artifact-receiver debugger-transport heap-snapshot decoder
 	@mkdir -p $(BUILD_DIR)/sessions
 	$(PRODUCER_BINARY) | $(BROKER_BINARY) \
 		--store $(BUILD_DIR)/sessions/demo.jsonl \
@@ -40,7 +40,7 @@ e2e: producer broker artifact-producer artifact-receiver debugger-transport heap
 		--signal-store $(BUILD_DIR)/sessions/request-signals.jsonl
 	$(RM) -r "$(BUILD_DIR)/sessions/artifacts"
 	$(ARTIFACT_PRODUCER_BINARY) | $(ARTIFACT_RECEIVER_BINARY) --store $(BUILD_DIR)/sessions/artifacts
-	python3 $(VM_ANALYZER) --artifacts $(BUILD_DIR)/sessions/artifacts --events $(BUILD_DIR)/sessions/demo.jsonl
+	$(VM_ANALYZER) --artifacts $(BUILD_DIR)/sessions/artifacts --events $(BUILD_DIR)/sessions/demo.jsonl
 	test "$$(wc -l < $(BUILD_DIR)/sessions/demo.jsonl | tr -d ' ')" = "14"
 	test "$$(wc -l < $(BUILD_DIR)/sessions/origin-trace.jsonl | tr -d ' ')" = "12"
 	test "$$(wc -l < $(BUILD_DIR)/sessions/request-signals.jsonl | tr -d ' ')" = "2"
@@ -58,12 +58,18 @@ e2e: producer broker artifact-producer artifact-receiver debugger-transport heap
 	test "$$(python3 -c 'import json; print(json.load(open("$(BUILD_DIR)/sessions/artifacts/analysis/vm-analysis-v1.json"))["summary"]["likely_vm_count"])')" = "1"
 	python3 tools/validate-evidence-store.py $(BUILD_DIR)/sessions/demo.jsonl
 
-ui: e2e heap-snapshot decoder
-	python3 apps/research-ui/server.py \
+ui: e2e heap-snapshot decoder deob-worker-build
+	$(ORIGIN_TRACE_BACKEND) \
 		--demo-evidence \
 		--store $(BUILD_DIR)/sessions/demo.jsonl \
 		--trace-store $(BUILD_DIR)/sessions/origin-trace.jsonl \
 		--signal-store $(BUILD_DIR)/sessions/request-signals.jsonl
+
+origin-trace-backend:
+	cargo build --locked --manifest-path apps/origin-trace-backend/Cargo.toml
+
+backend-e2e: origin-trace-backend debugger-transport heap-snapshot decoder deob-worker-build
+	node tools/check-origin-trace-debugger.mjs
 
 app-build: heap-snapshot decoder broker artifact-receiver debugger-transport
 	./scripts/build-research-app.sh

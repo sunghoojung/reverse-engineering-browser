@@ -56,7 +56,7 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs:do_GET"
+        "x-source": "apps/origin-trace-backend/src/app.rs"
       }
     },
     "/api/decoder": {
@@ -97,7 +97,7 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs:do_GET"
+        "x-source": "apps/origin-trace-backend/src/app.rs"
       }
     },
     "/api/api-collection": {
@@ -169,7 +169,7 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs:do_GET",
+        "x-source": "apps/origin-trace-backend/src/app.rs",
         "parameters": [
           {
             "name": "If-None-Match",
@@ -252,7 +252,7 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs:do_GET",
+        "x-source": "apps/origin-trace-backend/src/app.rs",
         "parameters": [
           {
             "name": "If-None-Match",
@@ -304,7 +304,7 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs:do_GET"
+        "x-source": "apps/origin-trace-backend/src/app.rs"
       }
     },
     "/api/debugger": {
@@ -376,7 +376,7 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs:do_GET",
+        "x-source": "apps/origin-trace-backend/src/app.rs",
         "parameters": [
           {
             "name": "wait_ms",
@@ -460,7 +460,7 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs:do_GET",
+        "x-source": "apps/origin-trace-backend/src/app.rs",
         "parameters": [
           {
             "name": "script_id",
@@ -582,7 +582,7 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs:do_GET",
+        "x-source": "apps/origin-trace-backend/src/app.rs",
         "parameters": [
           {
             "name": "script_id",
@@ -712,7 +712,7 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs:do_GET",
+        "x-source": "apps/origin-trace-backend/src/app.rs",
         "parameters": [
           {
             "name": "request_id",
@@ -844,7 +844,7 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs:do_GET",
+        "x-source": "apps/origin-trace-backend/src/app.rs",
         "parameters": [
           {
             "name": "session_id",
@@ -965,7 +965,7 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs:do_GET",
+        "x-source": "apps/origin-trace-backend/src/app.rs",
         "parameters": [
           {
             "name": "limit",
@@ -1058,7 +1058,7 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs:do_GET",
+        "x-source": "apps/origin-trace-backend/src/app.rs",
         "parameters": [
           {
             "name": "limit",
@@ -1151,7 +1151,7 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs:do_GET",
+        "x-source": "apps/origin-trace-backend/src/app.rs",
         "parameters": [
           {
             "name": "request_id",
@@ -1269,7 +1269,7 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs:do_GET",
+        "x-source": "apps/origin-trace-backend/src/app.rs",
         "parameters": [
           {
             "name": "artifact_id",
@@ -1371,7 +1371,7 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs:do_POST",
+        "x-source": "apps/origin-trace-backend/src/app.rs",
         "requestBody": {
           "required": true,
           "description": "JSON object. Explicit decimal Content-Length required; 1..256 encoded bytes. Chunked request bodies are not supported.",
@@ -1464,7 +1464,7 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs:do_POST",
+        "x-source": "apps/origin-trace-backend/src/app.rs",
         "requestBody": {
           "required": true,
           "description": "JSON object. Explicit decimal Content-Length required; 1..1572864 encoded bytes. Chunked request bodies are not supported.",
@@ -1553,7 +1553,7 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs:do_POST",
+        "x-source": "apps/origin-trace-backend/src/app.rs",
         "requestBody": {
           "required": true,
           "description": "JSON object. Explicit decimal Content-Length required; 1..2162688 encoded bytes. Chunked request bodies are not supported.",
@@ -1652,7 +1652,7 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs:do_POST",
+        "x-source": "apps/origin-trace-backend/src/app.rs",
         "requestBody": {
           "required": true,
           "description": "JSON object. Explicit decimal Content-Length required; 1..1114112 encoded bytes. Chunked request bodies are not supported.",
@@ -1735,7 +1735,7 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs:do_POST",
+        "x-source": "apps/origin-trace-backend/src/app.rs",
         "requestBody": {
           "required": true,
           "description": "JSON object. Explicit decimal Content-Length required; 1..131072 encoded bytes. Chunked request bodies are not supported.",
@@ -4728,9 +4728,9 @@
               "source"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_add_automation_recipe",
-              "apps/origin-trace-backend/src/debugger/automation.rs:normalize_automation_recipe"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/automation.rs"
             ],
             "description": "Adds one recipe. Label is trimmed, source retained verbatim; both need non-whitespace text. Library limits: 16 recipes, 65536 source bytes.",
             "x-result-schema": "#/components/schemas/DebuggerRecipeAutomationRecipesResult"
@@ -4821,9 +4821,9 @@
               "line"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_add_runtime_hook",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_normalize_runtime_hook_definition"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Original live JavaScript location with zero-based line/UTF-16 column. At least one phase must be enabled. function mode requires function_expression, entry_enabled=true and return_enabled=false, no return logic/override; source mode requires empty function_expression. json override requires return_value; expression override requires nonempty return_expression. Any override requires return_enabled. Nested JSON value has bounded validation. Returns ok,runtime_hooks,generation. Worker target is derived from script_id, not supplied separately.",
             "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult"
@@ -4846,7 +4846,7 @@
               "expression"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -4871,9 +4871,9 @@
               "confirmed"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_arm_automation_recipes",
-              "apps/origin-trace-backend/src/debugger/automation.rs:normalize_automation_variables"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/automation.rs"
             ],
             "description": "Requires at least one enabled non-manual recipe and an attached isolated target/scope.",
             "x-result-schema": "#/components/schemas/DebuggerAutomationRecipesResult"
@@ -4895,8 +4895,8 @@
               "confirmed"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_arm_runtime_hooks"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Requires an attached isolated page, at least one definition and active breakpoints. Returns ok,runtime_hooks,generation.",
             "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult"
@@ -4913,7 +4913,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerAutomationRecipesResult"
@@ -4930,7 +4930,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerRepeaterResult"
@@ -4947,7 +4947,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerBaselineResult"
@@ -4964,7 +4964,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerAutomationRecipesResult"
@@ -4981,7 +4981,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -4998,7 +4998,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -5015,7 +5015,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -5032,7 +5032,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerRepeaterResult"
@@ -5049,7 +5049,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -5066,7 +5066,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult"
@@ -5089,8 +5089,8 @@
               "target_id"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_close_experiment_page"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
             "x-result-schema": "#/components/schemas/DebuggerActionScopeResult"
@@ -5107,7 +5107,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerDiffResult"
@@ -5134,8 +5134,8 @@
               "current_id"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_compare_repeater_history"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "IDs must differ and both identify retained successful responses.",
             "x-result-schema": "#/components/schemas/DebuggerRepeaterResult"
@@ -5162,8 +5162,8 @@
               "variant_id"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_compare_runtime_field_test"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "IDs must differ and refer to retained available observations with equal URL, method and target. Current action dispatcher rejects this while hooks are armed (409), even though UI enables comparison. Disarm first. Returns ok,runtime_hooks,generation; comparison is intervention-associated or inconclusive, never causal proof.",
             "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult"
@@ -5183,9 +5183,9 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_configure_repeater_variables",
-              "apps/origin-trace-backend/src/debugger/requests.rs:normalize_repeater_variables"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/requests.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
             "x-result-schema": "#/components/schemas/DebuggerRepeaterResult"
@@ -5232,9 +5232,9 @@
               "url_pattern"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_configure_request_interception",
-              "apps/origin-trace-backend/src/debugger/requests.rs:normalize_request_interception_rule"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/requests.rs"
             ],
             "description": "rewrite requires at least one nonempty normalized override. fulfill supplies default content-type for empty headers and adds access-control-allow-origin if absent; at 64 headers that header must already be present. Unused mode fields are ignored.",
             "x-schema-completeness": "partial",
@@ -5330,8 +5330,8 @@
               "enabled"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_configure_runtime_field_test"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "When enabled=true, confirmed=true and exact credential-free HTTP(S) URL without query/fragment are required. JSON selector must start / and use valid ~0/~1 escapes; form/query/header require a nonempty exact field name, header must be a token, body requires empty pointer. Disabled ignores selector fields. Requires isolated page and disarmed hooks. Reconfiguration erases observations. Returns ok,runtime_hooks,generation.",
             "allOf": [
@@ -5403,8 +5403,8 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_create_experiment_page"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Adds a page to an existing isolated Experiment context. Other URLs must pass credential-free HTTP(S) validation. Returns ok,target_id,action_scope,generation, not a full snapshot.",
             "x-result-schema": "#/components/schemas/DebuggerTargetIdActionScopeResult"
@@ -5421,7 +5421,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerExperimentActionScopeObjectExperimentRuntimeHooksAutomationRecipesRepeaterResult"
@@ -5438,7 +5438,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerAutomationRecipesResult"
@@ -5455,7 +5455,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult"
@@ -5472,7 +5472,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerExperimentActionScopeObjectExperimentRuntimeHooksAutomationRecipesRepeaterResult"
@@ -5495,7 +5495,7 @@
               "call_frame_id"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -5545,9 +5545,9 @@
               "property"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_mutate_object_experiment",
-              "apps/origin-trace-backend/src/debugger/heap.rs:normalize_object_experiment_value"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/heap.rs"
             ],
             "description": "Only current retained Object Lab results are mutable. set value is finite JSON, max depth 8, total entries 256, string/key UTF-8 bytes 4096, integer magnitude <=2^53-1, canonical encoded bytes <=16384. delete forbids value.",
             "x-schema-completeness": "partial",
@@ -5600,8 +5600,8 @@
               "url"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_navigate_object_experiment"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Navigate the attached disposable page to a credential-free HTTP(S) URL. Returns ok,object_experiment,generation. Does not navigate the ordinary browsing target.",
             "x-result-schema": "#/components/schemas/DebuggerObjectExperimentResult"
@@ -5618,7 +5618,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -5639,9 +5639,9 @@
               "recipe_id"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_remove_automation_recipe",
-              "apps/origin-trace-backend/src/debugger/automation.rs:automation_recipe_id"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/automation.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
             "x-result-schema": "#/components/schemas/DebuggerAutomationRecipesResult"
@@ -5664,7 +5664,7 @@
               "breakpoint_id"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -5687,7 +5687,7 @@
               "event_name"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -5709,8 +5709,8 @@
               "hook_id"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_remove_runtime_hook"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "",
             "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult"
@@ -5733,7 +5733,7 @@
               "watch_id"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -5756,7 +5756,7 @@
               "pattern"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -5779,7 +5779,7 @@
               "call_frame_id"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -5796,7 +5796,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -5825,9 +5825,9 @@
               "confirmed"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_run_automation_recipe",
-              "apps/origin-trace-backend/src/debugger/automation.rs:normalize_automation_variables"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/automation.rs"
             ],
             "description": "Explicitly execute the selected recipe in the isolated target/scope. Automatic recipes must be disarmed.",
             "x-result-schema": "#/components/schemas/DebuggerRunRunsAutomationRecipesResult"
@@ -5881,9 +5881,9 @@
               "url"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_run_repeater_request",
-              "apps/origin-trace-backend/src/debugger/requests.rs:normalize_repeater_template"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/requests.rs"
             ],
             "description": "Resolves {{variables}} in the isolated session. Resolved URL/method/headers/body are validated again; GET/HEAD cannot have a nonempty body. Returns initial execution state, not necessarily completed response.",
             "x-result-schema": "#/components/schemas/DebuggerRepeaterResult"
@@ -5923,9 +5923,9 @@
               "url"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_run_request_interception",
-              "apps/origin-trace-backend/src/debugger/requests.rs:normalize_request_interception_request"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/requests.rs"
             ],
             "description": "GET/HEAD after normalization cannot have a nonempty body. If scoped targets exist, target_id must identify one in active scope; absent/null selects the first. Outside scoped mode target_id is ignored.",
             "x-result-schema": "#/components/schemas/DebuggerExperimentResult"
@@ -5962,8 +5962,8 @@
               "query"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_search_heap_snapshot"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Query is stripped before use; captures a bounded heap snapshot and searches it.",
             "x-result-schema": "#/components/schemas/DebuggerSnapshotResult"
@@ -6019,9 +6019,9 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_search_live_objects",
-              "apps/origin-trace-backend/src/debugger/heap.rs:live_object_search_criteria"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/heap.rs"
             ],
             "description": "At least one nonempty property_query, value_query or class_query, or a nonblank shape JSON object/array is required. Object Lab additionally requires a navigated isolated target.",
             "x-schema-completeness": "partial",
@@ -6123,9 +6123,9 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_search_object_experiment",
-              "apps/origin-trace-backend/src/debugger/heap.rs:live_object_search_criteria"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/heap.rs"
             ],
             "description": "At least one nonempty property_query, value_query or class_query, or a nonblank shape JSON object/array is required. Object Lab additionally requires a navigated isolated target.",
             "x-schema-completeness": "partial",
@@ -6194,7 +6194,7 @@
               "target_id"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -6231,8 +6231,8 @@
               "mode"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_set_action_scope"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Requires an isolated context. target mode ID must exist in scope.",
             "allOf": [
@@ -6330,8 +6330,8 @@
               "line"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_set_breakpoint"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "url is required but may be empty; nonempty url or nonempty script_id is required. Empty script_id is accepted only with nonempty url. kind defaults to conditional if condition is truthy, otherwise line. expression falls back to condition or empty string and must be text; non-line kind requires nonempty expression. Logpoint wrapping must also fit 4096 UTF-8 bytes.",
             "x-schema-completeness": "partial",
@@ -6376,7 +6376,7 @@
               "active"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -6399,7 +6399,7 @@
               "event_name"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -6425,7 +6425,7 @@
               "mode"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -6448,8 +6448,8 @@
               "pattern"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_set_xhr_breakpoint"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -6498,8 +6498,8 @@
               "query"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_start_memory_origin_trace"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Requires a running target; trace controls debugger until stopped or completed.",
             "x-result-schema": "#/components/schemas/DebuggerTraceResult"
@@ -6516,7 +6516,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -6533,7 +6533,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -6550,7 +6550,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -6567,7 +6567,7 @@
               "action"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
             "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -6616,9 +6616,9 @@
               "source"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action",
-              "apps/origin-trace-backend/src/debugger/mod.rs:_update_automation_recipe",
-              "apps/origin-trace-backend/src/debugger/automation.rs:normalize_automation_recipe"
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/mod.rs",
+              "apps/origin-trace-backend/src/debugger/automation.rs"
             ],
             "description": "Replaces the selected recipe definition; library must be editable.",
             "x-result-schema": "#/components/schemas/DebuggerRecipeAutomationRecipesResult"
@@ -6661,7 +6661,7 @@
               "expression"
             ],
             "x-source": [
-              "apps/origin-trace-backend/src/debugger/mod.rs:action"
+              "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Uses existing URL/location. Missing or null kind resolves to line. expression is required because dispatch passes request.get(expression) explicitly into replacement validation. Non-line kind requires nonempty expression; wrapped logpoint condition must fit 4096 UTF-8 bytes.",
             "x-schema-completeness": "partial",
@@ -7395,7 +7395,7 @@
           "generation"
         ],
         "additionalProperties": false,
-        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs:_set_breakpoint"
+        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs"
       },
       "DebuggerSearchResult": {
         "type": "object",
@@ -7417,7 +7417,7 @@
           "generation"
         ],
         "additionalProperties": false,
-        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs:_search_live_objects"
+        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs"
       },
       "DebuggerSnapshotResult": {
         "type": "object",
@@ -7439,7 +7439,7 @@
           "generation"
         ],
         "additionalProperties": false,
-        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs:_search_heap_snapshot"
+        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs"
       },
       "DebuggerTraceResult": {
         "type": "object",
@@ -7463,7 +7463,7 @@
           "generation"
         ],
         "additionalProperties": false,
-        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs:_start_memory_origin_trace"
+        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs"
       },
       "DebuggerActionScopeResult": {
         "type": "object",
@@ -7487,7 +7487,7 @@
           "generation"
         ],
         "additionalProperties": false,
-        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs:_close_experiment_page"
+        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs"
       },
       "DebuggerExperimentActionScopeObjectExperimentRuntimeHooksAutomationRecipesRepeaterResult": {
         "type": "object",
@@ -7539,7 +7539,7 @@
           "generation"
         ],
         "additionalProperties": false,
-        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs:_dispose_request_interception_experiment"
+        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs"
       },
       "DebuggerTargetIdActionScopeResult": {
         "type": "object",
@@ -7567,7 +7567,7 @@
           "generation"
         ],
         "additionalProperties": false,
-        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs:_create_experiment_page"
+        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs"
       },
       "DebuggerObjectExperimentResult": {
         "type": "object",
@@ -7591,7 +7591,7 @@
           "generation"
         ],
         "additionalProperties": false,
-        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs:_mutate_object_experiment"
+        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs"
       },
       "DebuggerRuntimeHooksResult": {
         "type": "object",
@@ -7613,7 +7613,7 @@
           "generation"
         ],
         "additionalProperties": false,
-        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs:_compare_runtime_field_test"
+        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs"
       },
       "DebuggerRecipeAutomationRecipesResult": {
         "type": "object",
@@ -7643,7 +7643,7 @@
           "generation"
         ],
         "additionalProperties": false,
-        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs:_update_automation_recipe"
+        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs"
       },
       "DebuggerAutomationRecipesResult": {
         "type": "object",
@@ -7667,7 +7667,7 @@
           "generation"
         ],
         "additionalProperties": false,
-        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs:_clear_automation_runs"
+        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs"
       },
       "DebuggerRunRunsAutomationRecipesResult": {
         "type": "object",
@@ -7713,7 +7713,7 @@
           "generation"
         ],
         "additionalProperties": false,
-        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs:_run_automation_recipe"
+        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs"
       },
       "DebuggerExperimentResult": {
         "type": "object",
@@ -7737,7 +7737,7 @@
           "generation"
         ],
         "additionalProperties": false,
-        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs:_run_request_interception"
+        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs"
       },
       "DebuggerRepeaterResult": {
         "type": "object",
@@ -7761,7 +7761,7 @@
           "generation"
         ],
         "additionalProperties": false,
-        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs:_clear_repeater_history"
+        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs"
       },
       "DebuggerBaselineResult": {
         "type": "object",
@@ -7785,7 +7785,7 @@
           "generation"
         ],
         "additionalProperties": false,
-        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs:_capture_heap_diff_baseline"
+        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs"
       },
       "DebuggerDiffResult": {
         "type": "object",
@@ -7809,7 +7809,7 @@
           "generation"
         ],
         "additionalProperties": false,
-        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs:_compare_heap_diff"
+        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs"
       },
       "DebuggerAcknowledgementResult": {
         "type": "object",
@@ -7827,7 +7827,7 @@
           "generation"
         ],
         "additionalProperties": false,
-        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs:action"
+        "x-source": "apps/origin-trace-backend/src/debugger/mod.rs"
       },
       "FieldObservation": {
         "type": "object",

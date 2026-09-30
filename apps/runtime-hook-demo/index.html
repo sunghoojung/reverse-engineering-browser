@@ -74,7 +74,7 @@
       <section class="source-panel" aria-labelledby="worker-title">
         <div class="source-heading"><div><span class="step-label">NEXT / HARDER CASE</span><h2 id="worker-title">Obfuscated signer in a Web Worker</h2></div><a href="./ghostwire-worker/README.md" target="_blank" rel="noopener">Ghostwire fixture guide ↗</a></div>
         <p>The companion fixture uses Ghostwire’s real obfuscated-worker example. A shipment message crosses from the page into a worker, where a closure-held secret and anonymous byte-mixing callback produce a <code>ws1.</code> payload. Chrome DevTools can debug the worker; Ghostwire follows it automatically with CDP. REB Runtime Hooks currently targets the page, not that worker.</p>
-        <pre><code>python3 apps/runtime-hook-demo/ghostwire-worker/lab.py --port 8766</code></pre>
+        <pre><code>node apps/runtime-hook-demo/lab.mjs --port 8766</code></pre>
         <p>Then open <code>http://127.0.0.1:8766/</code>. The local backend issues a receipt but does not validate a signature.</p>
       </section>
     </main>

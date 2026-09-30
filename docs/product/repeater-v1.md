@@ -4,6 +4,9 @@ Repeater turns an observed request target into an editable, repeatable experimen
 without reusing the authorized baseline page's cookies or storage. It shares the
 disposable request-lab BrowserContext introduced by Request Interception, so an
 armed interception rule can be exercised by the same explicit Repeater request.
+Project-wide authorization and data-handling policy is in
+[`SAFETY.md`](../../SAFETY.md); this document describes Repeater's request
+contract and isolation behavior.
 
 ## Isolation and lifecycle
 

@@ -6,6 +6,8 @@ This document is the authoritative product and architecture specification for
 the first virtual-machine detection milestone. It records the decisions made
 during the design interview and defines the boundary between this milestone,
 later opcode reconstruction, and later exact value tracing.
+Authorization and capture boundaries for research sessions are defined in
+[`SAFETY.md`](../../SAFETY.md).
 
 ## Release promise
 

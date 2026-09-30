@@ -4,7 +4,8 @@ Action Scope gives mutable browser tools one shared policy for either every
 disposable page or one exact disposable page. It completes the page-selector
 workflow pinned from WireBrowser commit
 `77e1e48ceb4acaef0356877ee2d09391763613cc` without allowing rules to reach
-the baseline browsing context.
+the baseline browsing context. The authorization and capture policy this
+boundary implements is in [`SAFETY.md`](../../SAFETY.md).
 
 ## Scope boundary
 

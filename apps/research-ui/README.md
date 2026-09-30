@@ -6,6 +6,10 @@ serves browser development and live debugger sessions, with the same HTTP
 contracts and tools. The native Brave broker, artifact receiver, probes, and
 wire formats remain C++. See the [backend boundary](../../docs/architecture/origin-trace-backend-boundary.md).
 
+Project-wide authorization, capture, and privacy policy is in
+[SAFETY.md](../../SAFETY.md); this guide describes the product's current controls
+and limits.
+
 ## Run
 
 ```sh

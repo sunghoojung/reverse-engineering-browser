@@ -1,7 +1,8 @@
 # Shared Protocol
 
 This directory owns contracts shared across the browser, event broker, and
-research UI.
+research UI. Authorization, capture, and privacy rules are defined in
+[`SAFETY.md`](../SAFETY.md).
 
 ## Two representations
 

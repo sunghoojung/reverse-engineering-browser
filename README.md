@@ -179,5 +179,5 @@ make live
 Sources, breakpoints, stepping, watches, the console, full URLs, headers, and
 bodies are unavailable in native quiet mode.
 
-Use this project only on systems you own or are explicitly authorized to
-inspect.
+Usage, authorization, capture, and privacy boundaries are defined in
+[`SAFETY.md`](SAFETY.md).

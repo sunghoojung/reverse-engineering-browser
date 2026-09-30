@@ -82,8 +82,8 @@ every POST checks the exact listening port in `Host` and permits only
 If supplied, `Origin` must be HTTP with a local hostname and matching port,
 without credentials, parameters, query or fragment, and with empty or `/` path.
 A CLI can omit Origin. These are local request checks, not user identity or
-remote-access authentication. The default bind is 127.0.0.1; do not expose it
-remotely as if it had credential-based access control.
+remote-access authentication. The default bind is 127.0.0.1; the local-only
+rule is defined in [`SAFETY.md`](../SAFETY.md).
 The client rejects redirects, so a response cannot send a request to a
 different host or local service.
 

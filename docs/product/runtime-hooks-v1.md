@@ -15,6 +15,10 @@ continuations are outside this contract.
 
 ## Safety boundary
 
+Project-wide authorization and capture policy is defined in
+[`SAFETY.md`](../../SAFETY.md). This section describes Runtime Hooks' specific
+isolation and retention limits.
+
 - Hooks may be armed only on the page or dedicated workers owned by the
   disposable Experiment BrowserContext. Browser target metadata must confirm
   the worker's `browserContextId` before a CDP session is opened.

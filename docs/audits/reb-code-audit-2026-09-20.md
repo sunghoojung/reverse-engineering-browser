@@ -80,7 +80,11 @@ Date: 2026-09-20 · Method: shallow clone of `main` at `/tmp/reb-inspect`, five 
 
 ### 2.6 Session scope in the native envelope
 - Present: `session_id`, category mask, monotonic expiry, enforced in renderer, browser session and broker.
-- Missing: any origin field (the overlay README says origin allowlisting is intentionally not adopted for lack of trustworthy origin identity), sensitivity as an event field (artifact-stream flag only), and rate limits (only a bounded queue with drops).
+- Missing: any origin field (origin allowlisting is not implemented because the
+  event envelope lacks trustworthy origin identity; see
+  [`SAFETY.md`](../../SAFETY.md)), sensitivity as an event field
+  (artifact-stream flag only), and rate limits (only a bounded queue with
+  drops).
 
 ### 2.7 Export / reproducible bundles — absent
 - Repo-wide grep for export/bundle/archive/zip/tar/sign/reproduce finds no endpoint or command. `server.py` exposes read APIs plus capture stop/clear only (`server.py:174-637`). Durable on-disk storage + validator ≠ export.

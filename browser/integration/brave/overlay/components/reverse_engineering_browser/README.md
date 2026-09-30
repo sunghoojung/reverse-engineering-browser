@@ -1,7 +1,8 @@
 # Reverse Engineering Browser native probes
 
 This component owns renderer-side and browser-side boundaries for native probe
-events.
+events. Project-wide authorization, capture, and privacy policy is in
+[`SAFETY.md`](../../../../../../SAFETY.md).
 
 Generated Blink binding probes observe calls and property reads from an
 explicit 90-interface allowlist across Canvas, WebGL, WebGPU, Web Audio,
@@ -78,7 +79,8 @@ thread drains a 16-artifact, 32 MiB queue to the authenticated artifact socket.
 Successful evidence is emitted only after receiver acknowledgment; every local
 or remote rejection becomes an `artifact_capture_failed` event. Artifact bytes
 do not enter the renderer event ring, and arbitrary response bodies still
-require explicit sensitive-capture authorization.
+require explicit sensitive-capture authorization under
+[`SAFETY.md`](../../../../../../SAFETY.md).
 
 Bounded VM investigation metadata uses `NativeVmFindingPayload` from
 `common/native_vm_finding.h` inside the existing event record. The record keeps

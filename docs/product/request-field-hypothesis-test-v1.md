@@ -3,6 +3,9 @@
 This is a guided, ephemeral comparison inside Runtime Hooks, not general value
 provenance. It answers a bounded question: when an isolated worker function's
 synchronous return is changed, does one selected JSON request field change?
+Project-wide authorization and capture policy is in
+[`SAFETY.md`](../../SAFETY.md); this design describes the selected-field test
+scope.
 
 ## Researcher workflow
 

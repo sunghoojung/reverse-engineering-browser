@@ -7,6 +7,9 @@ even when it has no strong path from a V8 root. It extends snapshot search with
 explicit reachability and bounded incoming-reference evidence. It does not
 execute page code, invoke accessors, mutate the target, or persist captured heap
 content.
+Project-wide authorization and capture policy is in
+[`SAFETY.md`](../../SAFETY.md); this feature reads bounded data from the
+authorized live target.
 
 ## User workflow
 

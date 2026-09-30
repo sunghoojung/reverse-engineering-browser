@@ -1,5 +1,9 @@
 # Feature List
 
+This is the intended product direction. The current authorization, capture,
+privacy, and implementation limits are documented in
+[`SAFETY.md`](../../SAFETY.md).
+
 ## Native capture
 
 - Authorized sessions scoped by origin, tab, frame, worker, feature, sensitivity, and expiration.

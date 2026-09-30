@@ -13,6 +13,7 @@ final authority for current behavior.
 ## Start here
 
 - [Project overview and quick start](../README.md)
+- [Safety, authorization, and capture policy](../SAFETY.md)
 - [Technical architecture](./architecture/technical-architecture.md)
 - [System architecture](./architecture/system-architecture.md)
 - [Feature roadmap](./product/feature-list.md)

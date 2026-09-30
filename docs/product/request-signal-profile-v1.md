@@ -3,6 +3,9 @@
 Request Signal Profile answers one bounded question from a selected network
 request: which fingerprint-relevant browser surfaces were observed or
 correlated before this request?
+Project-wide authorization and capture policy is in
+[`SAFETY.md`](../../SAFETY.md); this design defines which signals the profile
+can retain.
 
 ## Research basis
 

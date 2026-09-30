@@ -117,8 +117,8 @@ final class LiveSessionCoordinator {
     let scriptURL = resourcesURL.appendingPathComponent("run-live-session.sh")
     let requiredFiles = [
       scriptURL,
-      researchUIURL.appendingPathComponent("server.py"),
-      researchUIURL.appendingPathComponent("vm_analyzer.py"),
+      macOSURL.appendingPathComponent("OriginTraceBackend"),
+      macOSURL.appendingPathComponent("OriginTraceVMAnalyzer"),
       macOSURL.appendingPathComponent("OriginTraceEventBroker"),
       macOSURL.appendingPathComponent("OriginTraceArtifactReceiver"),
       macOSURL.appendingPathComponent("OriginTraceDebuggerTransport"),
@@ -132,12 +132,6 @@ final class LiveSessionCoordinator {
     guard FileManager.default.isExecutableFile(atPath: braveExecutableURL.path) else {
       throw sessionError("Brave Browser Development is not executable")
     }
-    guard let pythonURL = pythonExecutableURL() else {
-      throw sessionError(
-        "Python 3 is required for the live debugger. Install Python 3 and reopen Origin Trace."
-      )
-    }
-
     let applicationSupportURL =
       FileManager.default.urls(
         for: .applicationSupportDirectory,
@@ -199,7 +193,6 @@ final class LiveSessionCoordinator {
     environment["REB_BRAVE_BINARY"] = braveExecutableURL.path
     environment["REB_CDP_NETWORK_CAPTURE"] = captureNetworkContent ? "1" : "0"
     environment["REB_USE_SYSTEM_KEYCHAIN"] = useSystemKeychain ? "1" : "0"
-    environment["REB_PYTHON_BINARY"] = pythonURL.path
     environment["REB_BROKER_BINARY"] =
       macOSURL.appendingPathComponent(
         "OriginTraceEventBroker"
@@ -224,14 +217,8 @@ final class LiveSessionCoordinator {
       macOSURL.appendingPathComponent(
         "OriginTraceDeobfuscator"
       ).path
-    environment["REB_RESEARCH_UI_SERVER"] =
-      researchUIURL.appendingPathComponent(
-        "server.py"
-      ).path
-    environment["REB_VM_ANALYZER"] =
-      researchUIURL.appendingPathComponent(
-        "vm_analyzer.py"
-      ).path
+    environment["REB_ORIGIN_TRACE_BACKEND"] = macOSURL.appendingPathComponent("OriginTraceBackend").path
+    environment["REB_VM_ANALYZER"] = macOSURL.appendingPathComponent("OriginTraceVMAnalyzer").path
     environment["REB_API_COLLECTION_STORE"] =
       originTraceURL.appendingPathComponent(
         "api-collection-v1.json"
@@ -339,23 +326,6 @@ final class LiveSessionCoordinator {
     lock.lock()
     defer { lock.unlock() }
     return generation == currentGeneration
-  }
-
-  private func pythonExecutableURL() -> URL? {
-    var candidates: [String] = []
-    if let configured = ProcessInfo.processInfo.environment["REB_PYTHON_BINARY"],
-      !configured.isEmpty
-    {
-      candidates.append(configured)
-    }
-    candidates.append(contentsOf: [
-      "/usr/bin/python3",
-      "/opt/homebrew/bin/python3",
-      "/usr/local/bin/python3",
-    ])
-    return candidates.lazy.map(URL.init(fileURLWithPath:)).first {
-      FileManager.default.isExecutableFile(atPath: $0.path)
-    }
   }
 
   private func validatedLoopbackURL(_ value: String) -> URL? {

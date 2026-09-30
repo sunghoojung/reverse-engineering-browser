@@ -12,8 +12,8 @@ readonly artifact_receiver_binary="${REB_ARTIFACT_RECEIVER_BINARY:-${repository_
 readonly debugger_transport_binary="${REB_DEBUGGER_TRANSPORT_BINARY:-${repository_root}/build/reb-debugger-transport}"
 readonly heap_snapshot_binary="${REB_HEAP_SNAPSHOT_BINARY:-${repository_root}/build/reb-heap-snapshot}"
 readonly decoder_binary="${REB_DECODER_BINARY:-${repository_root}/build/reb-decoder}"
-readonly research_ui_server="${REB_RESEARCH_UI_SERVER:-${repository_root}/apps/research-ui/server.py}"
-readonly vm_analyzer="${REB_VM_ANALYZER:-${repository_root}/apps/research-ui/vm_analyzer.py}"
+readonly research_ui_server="${REB_ORIGIN_TRACE_BACKEND:-${repository_root}/apps/origin-trace-backend/target/debug/origin-trace-backend}"
+readonly vm_analyzer="${REB_VM_ANALYZER:-${repository_root}/apps/origin-trace-backend/target/debug/origin-trace-vm}"
 readonly origin_trace_app="${REB_ORIGIN_TRACE_APP:-${repository_root}/build/Origin Trace.app}"
 session_id="$(od -An -N8 -tu8 /dev/urandom | tr -d '[:space:]')"
 if [[ -z "${session_id}" || "${session_id}" == 0 ]]; then
@@ -39,7 +39,6 @@ readonly use_system_keychain="${REB_USE_SYSTEM_KEYCHAIN:-1}"
 readonly embedded_session="${REB_EMBEDDED_SESSION:-0}"
 readonly session_handshake="${REB_SESSION_HANDSHAKE:-}"
 readonly session_owner_pid="${REB_SESSION_OWNER_PID:-}"
-readonly python_binary="${REB_PYTHON_BINARY:-python3}"
 readonly api_collection_store="${REB_API_COLLECTION_STORE:-${live_session_root}/../api-collection-v1.json}"
 readonly local_analyst_store="${REB_LOCAL_ANALYST_STORE:-${live_session_root}/../local-analyst-workspace-v1.json}"
 
@@ -135,12 +134,8 @@ if [[ ! -x "${decoder_binary}" ]]; then
   echo "Decoder is missing. Run: make decoder" >&2
   exit 1
 fi
-if [[ ! -f "${research_ui_server}" ]]; then
+if [[ ! -x "${research_ui_server}" || ! -x "${vm_analyzer}" ]]; then
   echo "Research UI server is missing: ${research_ui_server}" >&2
-  exit 1
-fi
-if ! command -v "${python_binary}" >/dev/null 2>&1; then
-  echo "Python 3 is required to run the live research UI." >&2
   exit 1
 fi
 if [[ "${embedded_session}" == 0 && ! -d "${origin_trace_app}" ]]; then
@@ -197,7 +192,9 @@ cleanup() {
     rm -f "${session_handshake}"
   fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 "${broker_binary}" --store "${store_path}" --trace-store "${trace_store_path}" \
   --signal-store "${signal_store_path}" \
@@ -273,7 +270,7 @@ analyze_captured_artifacts() {
       current_signature="missing"
     fi
     if [[ "${current_signature}" != "${previous_signature}" ]]; then
-      "${python_binary}" "${vm_analyzer}" --artifacts "${artifact_store_path}" --events "${store_path}" >>"${analyzer_log}" 2>&1 &
+      "${vm_analyzer}" --artifacts "${artifact_store_path}" --events "${store_path}" >>"${analyzer_log}" 2>&1 &
       worker_pid=$!
       if ! wait "${worker_pid}"; then
         echo "VM analysis failed for input state ${current_signature}" >>"${analyzer_log}"
@@ -308,7 +305,7 @@ if [[ "${native_quiet_mode}" == 0 ]]; then
     ui_arguments+=(--capture-network-content)
   fi
 fi
-"${python_binary}" -u "${research_ui_server}" \
+"${research_ui_server}" \
   "${ui_arguments[@]}" \
   >"${ui_log}" 2>&1 &
 ui_pid=$!

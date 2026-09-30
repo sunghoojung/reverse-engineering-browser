@@ -12,47 +12,26 @@ end-to-end and sanitizer gates. Rewriting those services does not simplify the
 Origin Trace application and would create a second implementation of its most
 sensitive wire and storage contracts.
 
-## Migrate the Origin Trace control plane
+## Origin Trace control plane
 
-The migration target is the Python control plane under `apps/research-ui/`:
+The Rust crate under `apps/origin-trace-backend/` replaces the former Python
+services. `app.rs` owns loopback HTTP routing and application composition;
+`evidence.rs`, `origin_trace.rs`, and `workspace.rs` own stored evidence,
+projections, and durable workspaces. `debugger/` owns CDP session state, page
+and worker connections, bounded events, experiment ownership, hooks, and
+cancellation. Adapters invoke the Rust deobfuscator and existing native workers.
 
-- `server.py` owns loopback HTTP routing and application composition;
-- `evidence_store.py`, `origin_trace.py`, and `api_collection.py` own bounded
-  reads and projections over stored evidence;
-- `debugger_bridge.py` and `debugger/` own the live CDP session state machine;
-- adapters invoke the existing Rust deobfuscator and native decoder, heap, and
-  debugger-transport workers.
+The macOS app bundles `OriginTraceBackend` and `OriginTraceVMAnalyzer` and the
+live-session launcher invokes them directly. `make ui` uses the same backend.
+The OpenAPI-backed Rust CLI preserves operation IDs and explicit endpoint
+selection. There is one production owner per route and no runtime proxy.
 
-Rust is preferred over Go for this boundary. The repository already ships a
-Rust worker, Cargo can build static helper executables for the native app, and
-Rust makes request schemas, process ownership, cancellation, and bounded byte
-buffers explicit without adding a second managed runtime to the macOS bundle.
-
-## Migration sequence
-
-The control plane must be replaced behind its existing HTTP and helper-process
-contracts rather than by changing browser capture at the same time.
-
-1. **Freeze compatibility fixtures.** Record every route in `protocol/openapi.json`
-   plus malformed input, unavailable worker, timeout, cancellation, and stale
-   evidence behavior. Exercise the same fixtures against Python and Rust.
-2. **Extract pure services.** Port evidence-store reads, Origin Trace
-   projection, API collection, and durable-file replacement first. These have
-   deterministic inputs and do not require a live browser.
-3. **Add worker supervision.** Move bounded subprocess invocation, deadlines,
-   cancellation, output caps, and shutdown into one Rust supervisor while
-   retaining the current Rust, Node, and native workers.
-4. **Port live debugger orchestration last.** Replace the CDP state machine
-   only after recorded transport transcripts cover attach, navigation,
-   renderer crash, reconnect, pause, and stop behavior.
-5. **Switch packaging once.** Change the native app and live launcher to the
-   Rust server only when the compatibility suite passes. Remove the Python
-   runtime requirement and old implementation in that same change.
-
-During migration there must still be one production owner for each route. Do
-not introduce a permanent Python-to-Rust proxy, duplicate evidence stores, or
-an alternate API. A temporary comparison harness may run both implementations
-against immutable fixtures, but only one may serve the application.
+Migration verification compared deterministic HTTP fixtures and disposable
+browser workflows against a frozen copy of the released implementation outside
+the repository. The regression fixture in `tools/check-origin-trace-debugger.mjs`
+exercises public APIs against synthetic localhost content with a fresh profile.
+Builds and packaged sessions no longer depend on Python. Python remains for
+repository-only benchmark and evidence validation tooling.
 
 ## Compatibility requirements
 

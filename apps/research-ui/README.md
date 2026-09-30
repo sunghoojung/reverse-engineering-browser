@@ -1,20 +1,10 @@
 # Origin Trace
 
 Origin Trace reads local event, trace, signal, and artifact stores. The macOS
-application is the normal product path; the Python server supports browser
-development and live debugger sessions.
-
-The Python server and debugger adapter are the Origin Trace backend targeted
-for a staged Rust migration. The native Brave evidence broker, artifact
-receiver, probes, and wire formats are intentionally not part of that rewrite.
-See the [backend boundary and migration sequence](../../docs/architecture/origin-trace-backend-boundary.md).
-
-The replacement now lives in [`apps/origin-trace-backend`](../origin-trace-backend/).
-It currently owns bounded evidence reads, health reporting, static assets, and
-the event, artifact, and signal-profile read APIs. Build and test this migration
-surface with `make origin-trace-backend`; `make ui` continues to use Python
-until the remaining write actions and live debugger state machine reach route
-parity.
+application is the normal product path. The [Rust backend](../origin-trace-backend/)
+serves browser development and live debugger sessions, with the same HTTP
+contracts and tools. The native Brave broker, artifact receiver, probes, and
+wire formats remain C++. See the [backend boundary](../../docs/architecture/origin-trace-backend-boundary.md).
 
 ## Run
 
@@ -41,8 +31,8 @@ Trace/sessions/live/`.
 
 Origin Trace looks beside its app bundle, in the local `browser/worktree/`
 build output, and among registered applications for Brave Browser Development.
-A `REB_BRAVE_BINARY` override takes precedence. Python 3 is currently required
-for the bundled live debugger service. A startup problem is shown explicitly
+A `REB_BRAVE_BINARY` override takes precedence. The app bundles its Rust live
+debugger and VM analyzer, so Python is not required. A startup problem is shown explicitly
 and leaves the stored-evidence interface available offline.
 Pass an explicit evidence-store or demo argument, or set
 `REB_DISABLE_AUTOMATIC_LIVE_SESSION=1`, when opening the native stored-evidence
@@ -168,10 +158,10 @@ input and output visible with transformation history available on demand.
 | `request_value_test.js` | Ephemeral request-value capture controls, observation selection, and comparison rendering |
 | `traffic_view.js` | Bounded request/response body views, explicit missing-data states, and labeled sample exchanges |
 | `source_syntax.js` | Source names, display formatting, and bounded tokenization without DOM or application state |
-| `server.py`, `evidence_store.py` | HTTP routing and responses, bounded evidence reads and validation |
-| `debugger_bridge.py`, `debugger/` | Session orchestration, transport, request validation, limits, and fixed runtime programs |
-| `api_collection.py`, `local_analyst.py`, `durable_files.py` | Workspace contracts, explicit analyst execution, durable private file replacement |
-| `decoder_service.py`, `origin_trace.py`, `vm_analyzer.py` | Native decoder adapter, trace projection, and offline VM analysis |
+| `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |
+| `../origin-trace-backend/src/debugger/` | CDP sessions, transport ownership, request validation, hooks, experiments, and automation |
+| `../origin-trace-backend/src/workspace.rs`, `analyst.rs`, `durable.rs` | Workspace contracts, explicit analyst execution, private durable replacement |
+| `../origin-trace-backend/src/decoder.rs`, `origin_trace.rs`, `vm.rs` | Native decoder adapter, trace projection, and VM analysis |
 | `macos/` | Native shell, evidence readers, and helper processes |
 
 The browser scripts load in the order declared in `index.html`. They use the
@@ -393,10 +383,9 @@ input guards.
 **Details > Deobfuscation** shows analysis, limits, omissions, and retry actions. The native app ships a Rust/Oxc worker for bounded static AST rewriting
 over captured artifacts. It needs no Python runtime. Building the app
 requires a current stable Rust toolchain (`rustup toolchain install stable`).
-The browser development server retains Python classification, formatting, and
-literal-table analysis for captured artifacts and live scripts. The Deobfuscation details
-name the engine. Rust classification and dynamic decoding remain
-unimplemented and are reported as omissions. Static table substitution is
+The Rust backend preserves classification, formatting, and literal-table
+analysis for captured artifacts and live scripts. The Deobfuscation details
+name the engine. Dynamic decoding remains unimplemented and is reported as an omission. Static table substitution is
 restricted to non-escaping local tables with proven own-index reads.
 
 Failed analysis remains visible until **Retry analysis** is selected. A failed
@@ -410,13 +399,13 @@ The production Rust AST passes and their ReverseJS comparison are documented in
 [method coverage](../../docs/product/deobfuscation-method-coverage.md). The browser
 server uses a built worker when available (debug before release), or the explicit
 `REB_DEOBFUSCATOR_WORKER` executable. Worker failures remain errors; a missing
-worker retains the labelled Python lexical mode. Deob stays inside Sources.
+worker makes AST operations unavailable with an explicit error. Deob stays inside Sources.
 
 ## Programmatic HTTP access
 
-The Python server's existing endpoints are described in the
+The Rust backend's endpoints are described in the
 [OpenAPI 3.1 specification](../../protocol/openapi.json). Run
-`python3 apps/research-ui/api_cli.py list` from the repository root to discover
+`apps/origin-trace-backend/target/debug/reb-api list` from the repository root to discover
 CLI operations. The `call` command requires an explicit loopback URL or the
 server's `--endpoint-file`; see the [HTTP API guide](../../protocol/http-api.md)
 for examples, locality checks, and known gaps. The CLI does not start or control

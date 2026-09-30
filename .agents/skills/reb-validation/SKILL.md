@@ -28,7 +28,7 @@ Do not use `no-mistakes`, a remote gate, or a substitute validation pipeline.
 | --- | --- |
 | One C++ component | Its directly related executable build, then `make check` if shared code is involved |
 | Broker, IPC, producer, artifact transfer, or evidence store | `make e2e` for the deterministic producer and storage path |
-| Research UI Python | `make python-check`, then a relevant loopback or native UI flow |
+| Origin Trace Rust backend | `cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml`, then `make backend-e2e` for debugger changes |
 | Origin Trace HTML, JavaScript, Swift, packaging, or assets | `reb-ui-e2e` plus `make app-build` when packaging is affected |
 | Shell, Python, workflow, or repository tooling | The matching Makefile lint target and product command |
 | Documentation or repository skills | Workspace and repository hygiene checks, link inspection, skill validation, and `git diff --check` |

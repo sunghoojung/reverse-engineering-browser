@@ -38,3 +38,9 @@ runs two independent executables in a
 temporary directory, checks that a repeat build does no work, and verifies that
 an artifact header change invalidates its consumer without rebuilding the event
 demo. `make check` includes this regression check.
+
+`origin-trace-backend` builds the Rust HTTP service, VM analyzer, and API CLI.
+`ui` starts that service after deterministic evidence generation. `backend-e2e`
+uses a disposable Chromium-compatible profile and synthetic localhost fixtures;
+set `ORIGIN_TRACE_TEST_BROWSER` for a nonstandard browser executable. App builds
+bundle Rust executables and static UI assets, with no Python runtime dependency.

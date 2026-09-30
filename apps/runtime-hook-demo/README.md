@@ -8,7 +8,7 @@ fake inputs only.
 Run from the REB repository root:
 
 ```sh
-python3 -m http.server 7320 --bind 127.0.0.1 --directory apps/runtime-hook-demo
+node apps/runtime-hook-demo/lab.mjs --page callback --port 7320
 ```
 
 Open `http://127.0.0.1:7320/`. The sample token
@@ -34,13 +34,13 @@ the explanation is the intended contract, not a claimed screenshot result.
 
 ## 2. Obfuscated worker signer: Ghostwire's stronger example
 
-The exact upstream `examples/obfuscated_app` fixture is copied into
+The upstream HTML and worker from `examples/obfuscated_app` are copied into
 [ghostwire-worker](ghostwire-worker/) from Ghostwire commit
 `c3377f8be59fc2b2f2a620bbae75714902b0c114` (MIT license; see its
 `LICENSE`). Run it from the REB repository root:
 
 ```sh
-python3 apps/runtime-hook-demo/ghostwire-worker/lab.py --port 8766
+node apps/runtime-hook-demo/lab.mjs --port 8766
 ```
 
 Open `http://127.0.0.1:8766/`, leave the synthetic message and nonce at

@@ -1,13 +1,10 @@
 # Origin Trace HTTP API
 
-[`openapi.json`](openapi.json) describes the **existing Python loopback server**
-in `apps/research-ui/server.py`: 14 GET operations and five POST action
-operations. It is OpenAPI 3.1, uses JSON Schema 2020-12, and is JSON rather than
-YAML so existing Python tooling can read it without a parser dependency.
-Stable `operationId` values drive the included Python CLI. No new server
-endpoint or authentication system is introduced. The existing server and new
-client remain Python; adding Go or Rust would not improve this small
-local-client boundary.
+[`openapi.json`](openapi.json) describes the Rust loopback backend in
+`apps/origin-trace-backend`: 14 GET operations and five POST action operations.
+It is OpenAPI 3.1 with JSON Schema 2020-12. Stable `operationId` values drive the
+included Rust CLI. The routes and stored evidence contracts are unchanged by
+the implementation migration.
 
 ## Start and call it
 
@@ -15,7 +12,7 @@ From the repository root, `make ui` starts browser development on port 7319.
 For an explicitly managed server and machine-readable endpoint discovery:
 
 ```sh
-python3 apps/research-ui/server.py --port 0 --endpoint-file /tmp/reb-api-endpoint
+apps/origin-trace-backend/target/debug/origin-trace-backend --port 0 --endpoint-file /tmp/reb-api-endpoint
 ```
 
 Use the printed URL or the endpoint file for **that server**. Live/native
@@ -23,18 +20,18 @@ sessions use ephemeral ports and their own endpoint files. Do not assume the
 installed app uses port 7319 or start a competing server over its stores.
 The endpoint file contains a URL, not an authentication token.
 
-The dependency-free CLI reads this specification for operation IDs, routes,
+The CLI embeds this specification for operation IDs, routes,
 parameters and request-body limits. It requires an explicit local server URL or
 endpoint file, so it will not silently target an installed app session:
 
 ```sh
-python3 apps/research-ui/api_cli.py list
-python3 apps/research-ui/api_cli.py describe debugger_action
-python3 apps/research-ui/api_cli.py call get_events \
+apps/origin-trace-backend/target/debug/reb-api list
+apps/origin-trace-backend/target/debug/reb-api describe debugger_action
+apps/origin-trace-backend/target/debug/reb-api call get_events \
   --endpoint-file /tmp/reb-api-endpoint --param limit=50 --show-headers
-printf '%s' '{"action":"pause"}' | python3 apps/research-ui/api_cli.py call debugger_action \
+printf '%s' '{"action":"pause"}' | apps/origin-trace-backend/target/debug/reb-api call debugger_action \
   --endpoint-file /tmp/reb-api-endpoint --body-file -
-python3 apps/research-ui/api_cli.py call get_artifact_content \
+apps/origin-trace-backend/target/debug/reb-api call get_artifact_content \
   --endpoint-file /tmp/reb-api-endpoint --param artifact_id=1 \
   --param offset=0 --param limit=2097152 --output artifact-chunk.bin --show-headers
 ```
@@ -93,7 +90,7 @@ different host or local service.
 The native broker's socket token belongs to a **different transport**. The
 macOS `WKURLSchemeHandler`, C++/Unix sockets, CDP WebSockets, worker stdin/stdout
 protocols and static UI assets are not OpenAPI HTTP endpoints. Native custom
-scheme behavior is not guaranteed to match the Python server in every detail.
+scheme behavior is not guaranteed to match the Rust backend in every detail.
 
 ## Contract coverage and known gaps
 
@@ -160,7 +157,7 @@ retry mutations after a timeout or dropped connection.
 ## Maintain and validate
 
 Run `make lint`, `make check`, and `make e2e` as the repository handoff
-gate. Run `python3 apps/research-ui/api_cli.py list` to confirm the client
+gate. Run `apps/origin-trace-backend/target/debug/reb-api list` to confirm the client
 loads the contract. Validate the document with an OpenAPI 3.1-capable tool.
 When changing the server, update the spec in the same change. Never update a
 schema to claim an endpoint or authorization mechanism that is not implemented.

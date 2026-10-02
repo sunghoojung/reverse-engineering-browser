@@ -1,7 +1,7 @@
 use super::{Debugger, parse, requests, workers::Session};
 use crate::{
     error::{Error, Result},
-    validation, worker,
+    provenance, validation, worker,
 };
 use serde_json::{Value, json};
 use std::{
@@ -62,13 +62,22 @@ fn source_label(s: &str) -> String {
         .to_owned();
     validation::truncate(&s, 8192)
 }
-fn preview(v: &Value) -> Value {
+fn preview(v: &Value, capture: bool) -> Value {
     let Some(mut p) = parse::remote(v) else {
         return Value::Null;
     };
     let object = p.as_object_mut().unwrap();
     object.remove("object_id");
     object.remove("preview");
+    object.insert(
+        "string_sha256".into(),
+        if capture && v["type"] == "string" {
+            provenance::project(&json!({"operation":"string_digest","value":v["value"]}))
+                .unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        },
+    );
     for key in ["value", "description", "unserializable_value", "class_name"] {
         if let Some(text) = object[key].as_str() {
             let truncated = text.len() > 512;
@@ -611,8 +620,9 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
                     return Ok(());
                 }
                 let phase = phase.as_str().unwrap();
+                let capture = self.snapshot()["runtime_hooks"]["field_test"]["enabled"] == true;
                 let original = if phase == "return" {
-                    preview(&frame["returnValue"])
+                    preview(&frame["returnValue"], capture)
                 } else {
                     Value::Null
                 };
@@ -621,9 +631,9 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
                 let mut truncated = false;
                 let mut operation = "observed";
                 let executed=async {if hook["condition"]!="" {let result=evaluate(&session,frame_id,&format!("Boolean(({}))",hook["condition"].as_str().unwrap()),true,true).await?;if result["value"]!=true {operation="skipped";return Ok::<_,Error>(());}}
-                if let Some(scope)=frame["scopeChain"].as_array().into_iter().flatten().take(12).find(|s|s["type"]=="local")&& let Some(id)=scope["object"]["objectId"].as_str().filter(|s|s.len()<=4096) {let properties=session.command("Runtime.getProperties",json!({"objectId":id,"ownProperties":true,"accessorPropertiesOnly":false,"generatePreview":true}),Duration::from_secs(1)).await?;let a=properties["result"].as_array().ok_or_else(||Error::protocol("Malformed hook bindings"))?;truncated=a.len()>32;for property in a.iter().take(32) {let Some(name)=property["name"].as_str() else {continue;};let accessor=property["get"].is_object()||property["set"].is_object();let value=if property["value"].is_object() {preview(&property["value"])} else {json!({"type":if accessor {"accessor"} else {"unavailable"},"subtype":null,"class_name":null,"description":if accessor {"Accessor not invoked"} else {"Not initialized or unavailable"},"value":null,"unserializable_value":null,"value_truncated":false})};bindings.push(json!({"name":validation::truncate(name,256),"value":value,"accessor":accessor}));}}
+                if let Some(scope)=frame["scopeChain"].as_array().into_iter().flatten().take(12).find(|s|s["type"]=="local")&& let Some(id)=scope["object"]["objectId"].as_str().filter(|s|s.len()<=4096) {let properties=session.command("Runtime.getProperties",json!({"objectId":id,"ownProperties":true,"accessorPropertiesOnly":false,"generatePreview":true}),Duration::from_secs(1)).await?;let a=properties["result"].as_array().ok_or_else(||Error::protocol("Malformed hook bindings"))?;truncated=a.len()>32;for property in a.iter().take(32) {let Some(name)=property["name"].as_str() else {continue;};let accessor=property["get"].is_object()||property["set"].is_object();let value=if property["value"].is_object() {preview(&property["value"], capture)} else {json!({"type":if accessor {"accessor"} else {"unavailable"},"subtype":null,"class_name":null,"description":if accessor {"Accessor not invoked"} else {"Not initialized or unavailable"},"value":null,"unserializable_value":null,"value_truncated":false})};bindings.push(json!({"name":validation::truncate(name,256),"value":value,"accessor":accessor}));}}
                 if self.hooks.epoch.load(Ordering::Acquire)!=p.epoch {return Ok(());}let logic=&hook[if phase=="entry" {"entry_logic"} else {"return_logic"}];if logic!="" {let result=evaluate(&session,frame_id,&format!("(()=>{{\n{}\n}})()",logic.as_str().unwrap()),false,false).await?;if result["subtype"]=="promise" {return Err(Error::bad("Injected logic returned a Promise; only synchronous logic is supported"));}operation="logic_run";}
-                if phase=="return"&&hook["return_mode"]!="none" {if frame["returnValue"]["subtype"]=="promise" {return Err(Error::bad("Promise return values cannot be synchronously replaced"));}let argument=if hook["return_mode"]=="json" {let value=&hook["return_value"];let kind=match value {Value::Null=>"null",Value::Bool(_)=>"bool",Value::Number(n) if n.is_i64()||n.is_u64()=>"int",Value::Number(_)=>"float",Value::String(_)=>"str",Value::Array(_)=>"list",Value::Object(_)=>"dict"};replacement=json!({"type":kind,"subtype":null,"class_name":null,"description":validation::truncate(&value.to_string(),512),"value":if value.is_array()||value.is_object() {Value::Null} else {value.clone()},"unserializable_value":null,"value_truncated":hook["return_value_bytes"].as_u64().unwrap()>512});json!({"value":value})} else {let result=evaluate(&session,frame_id,hook["return_expression"].as_str().unwrap(),false,false).await?;if result["subtype"]=="promise" {return Err(Error::bad("A Promise cannot be a synchronous return replacement"));}replacement=preview(&result);if let Some(value)=result.get("value") {json!({"value":value})}else if let Some(value)=result.get("unserializableValue") {json!({"unserializableValue":value})}else if let Some(id)=result.get("objectId") {json!({"objectId":id})}else {return Err(Error::bad("Hook expression result cannot be returned"));}};if self.hooks.epoch.load(Ordering::Acquire)!=p.epoch {return Ok(());}session.command("Debugger.setReturnValue",json!({"newValue":argument}),Duration::from_secs(3)).await?;operation="return_overridden";}Ok(())}.await;
+                if phase=="return"&&hook["return_mode"]!="none" {if frame["returnValue"]["subtype"]=="promise" {return Err(Error::bad("Promise return values cannot be synchronously replaced"));}let argument=if hook["return_mode"]=="json" {let value=&hook["return_value"];let kind=match value {Value::Null=>"null",Value::Bool(_)=>"bool",Value::Number(n) if n.is_i64()||n.is_u64()=>"int",Value::Number(_)=>"float",Value::String(_)=>"str",Value::Array(_)=>"list",Value::Object(_)=>"dict"};replacement=json!({"string_sha256":if capture {provenance::project(&json!({"operation":"string_digest","value":value})).unwrap_or(Value::Null)} else {Value::Null},"type":kind,"subtype":null,"class_name":null,"description":validation::truncate(&value.to_string(),512),"value":if value.is_array()||value.is_object() {Value::Null} else {value.clone()},"unserializable_value":null,"value_truncated":hook["return_value_bytes"].as_u64().unwrap()>512});json!({"value":value})} else {let result=evaluate(&session,frame_id,hook["return_expression"].as_str().unwrap(),false,false).await?;if result["subtype"]=="promise" {return Err(Error::bad("A Promise cannot be a synchronous return replacement"));}replacement=preview(&result, capture);if let Some(value)=result.get("value") {json!({"value":value})}else if let Some(value)=result.get("unserializableValue") {json!({"unserializableValue":value})}else if let Some(id)=result.get("objectId") {json!({"objectId":id})}else {return Err(Error::bad("Hook expression result cannot be returned"));}};if self.hooks.epoch.load(Ordering::Acquire)!=p.epoch {return Ok(());}session.command("Debugger.setReturnValue",json!({"newValue":argument}),Duration::from_secs(3)).await?;operation="return_overridden";}Ok(())}.await;
                 if self.hooks.epoch.load(Ordering::Acquire) != p.epoch {
                     return Ok(());
                 }
@@ -633,7 +643,7 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
                 }
                 let location = parse::location(&frame["location"])
                     .unwrap_or(json!({"line":hook["line"],"column":hook["column"]}));
-                self.update(|s| {let hit=json!({"id":self.hooks.hit.fetch_add(1,Ordering::Relaxed),"occurred_at_ms":validation::now_ms(),"session_id":s["runtime_hooks"]["session_id"],"hook_id":hook["id"],"target_id":hook["target_id"],"target_type":hook["target_type"],"label":hook["label"],"source":if hook["entry_mode"]=="function" {source_label(frame["url"].as_str().unwrap_or(""))} else {hook["url"].as_str().unwrap().into()},"function":validation::truncate(frame["functionName"].as_str().filter(|s|!s.is_empty()).unwrap_or("(anonymous)"),256),"category":phase,"operation":operation,"line":location["line"],"column":location["column"],"bindings":bindings,"bindings_truncated":truncated,"original_return":original,"replacement_return":replacement,"error":error.as_ref().map(|e|validation::truncate(e,512))});let h=&mut s["runtime_hooks"];h["total_hits"]=json!(h["total_hits"].as_u64().unwrap()+1);let a=h["hits"].as_array_mut().unwrap();let evicted=a.len()==128;if evicted {a.remove(0);}a.push(hit);if evicted {h["hit_evictions"]=json!(h["hit_evictions"].as_u64().unwrap()+1);}
+                self.update(|s| {let source_hash=s["scripts"].as_array().into_iter().flatten().find(|script| script["script_id"]==hook["script_id"] && (script["target_id"].is_null() || script["target_id"]==hook["target_id"])).map(|script|script["hash"].clone()).unwrap_or(Value::Null);let hit=json!({"script_id":hook["script_id"],"source_hash":source_hash,"id":self.hooks.hit.fetch_add(1,Ordering::Relaxed),"occurred_at_ms":validation::now_ms(),"session_id":s["runtime_hooks"]["session_id"],"hook_id":hook["id"],"target_id":hook["target_id"],"target_type":hook["target_type"],"label":hook["label"],"source":if hook["entry_mode"]=="function" {source_label(frame["url"].as_str().unwrap_or(""))} else {hook["url"].as_str().unwrap().into()},"function":validation::truncate(frame["functionName"].as_str().filter(|s|!s.is_empty()).unwrap_or("(anonymous)"),256),"category":phase,"operation":operation,"line":location["line"],"column":location["column"],"bindings":bindings,"bindings_truncated":truncated,"original_return":original,"replacement_return":replacement,"error":error.as_ref().map(|e|validation::truncate(e,512))});let h=&mut s["runtime_hooks"];h["total_hits"]=json!(h["total_hits"].as_u64().unwrap()+1);let a=h["hits"].as_array_mut().unwrap();let evicted=a.len()==128;if evicted {a.remove(0);}a.push(hit);if evicted {h["hit_evictions"]=json!(h["hit_evictions"].as_u64().unwrap()+1);}
 if error.is_some() {h["last_failure"]=json!(error);}});
             }
         }

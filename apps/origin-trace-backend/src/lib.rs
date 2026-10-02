@@ -9,6 +9,7 @@ mod endpoint;
 mod error;
 mod evidence;
 mod origin_trace;
+mod provenance;
 mod validation;
 pub mod vm;
 mod worker;

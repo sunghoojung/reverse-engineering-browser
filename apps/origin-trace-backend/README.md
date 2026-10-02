@@ -38,3 +38,10 @@ The API CLI embeds the versioned OpenAPI document and requires an explicit
 loopback URL or endpoint file. The VM analyzer reads bounded input prefixes,
 reports omissions, and writes private analysis documents. Its executable is
 `origin-trace-vm --artifacts DIR --events FILE`.
+
+Request Field Trace uses `src/provenance.rs` for bounded in-process projection of
+request call sites and same-target primitive string matches. Hashes are captured
+only while selected-value capture is enabled. Request-time snapshots survive
+hook eviction; session and capture revision guards prevent late results from
+restoring erased observations. See the
+[feature design](../../docs/product/request-field-provenance-v1.md).

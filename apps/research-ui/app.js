@@ -1552,7 +1552,7 @@
             showScreen('tools');
             setToolsTab('decoder');
             requestAnimationFrame(() => toolsElements.input.focus({preventScroll: true}));
-          });
+          }, openFieldProvenance);
           return;
         }
         elements.requestInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
@@ -3068,8 +3068,8 @@
 
       function revealRuntimeHookHit(hit) {
         const definition = runtimeHooksState()?.definitions.find(candidate => candidate.id === hit.hook_id);
-        const source = liveSources().find(candidate => candidate.script_id === definition?.script_id) ??
-          liveSources().find(candidate => candidate.target_id === hit.target_id && candidate.url === hit.source);
+        const source = liveSources().find(candidate => candidate.script_id === (hit.script_id ?? definition?.script_id) && (!hit.source_hash || candidate.hash === hit.source_hash)) ??
+          liveSources().find(candidate => candidate.target_id === hit.target_id && candidate.url === hit.source && (!hit.source_hash || candidate.hash === hit.source_hash));
         if (!source) {
           state.experimentError = 'The source for this hit is no longer attached.';
           showScreen('sources');
@@ -5810,10 +5810,15 @@
         }
       }
 
+      function liveScriptIdentity(script) {
+        return JSON.stringify([script.target_id ?? state.debuggerSession?.target?.id ?? '', script.hash]);
+      }
+
       function liveSources() {
         const staleScriptIds = state.staleScriptIds ?? new Set();
         return (state.debuggerSession?.scripts ?? []).filter(script => !staleScriptIds.has(script.script_id)).map(script => {
-          const cached = state.liveScriptContent.get(script.script_id) ?? {};
+          const entry = state.liveScriptContent.get(script.script_id);
+          const cached = entry?.identity === liveScriptIdentity(script) ? entry : {};
           return {
             ...script,
             ...cached,
@@ -6572,13 +6577,18 @@
       }
 
       async function loadScriptContent(source) {
+        const identity = liveScriptIdentity(source);
         const existing = state.liveScriptContent.get(source.script_id);
-        if (existing?.content !== undefined || existing?.loading) return;
-        state.liveScriptContent.set(source.script_id, { loading: true, loadError: null });
+        if (existing?.identity === identity && (existing.content !== undefined || existing.loading)) return;
+        const pending = { identity, loading: true, loadError: null };
+        state.liveScriptContent.set(source.script_id, pending);
+        const stillCurrent = () => state.liveScriptContent.get(source.script_id) === pending &&
+          (state.debuggerSession?.scripts ?? []).some(script => script.script_id === source.script_id && liveScriptIdentity(script) === identity);
         renderSources();
         try {
           const response = await fetch(`/api/debugger/source?script_id=${encodeURIComponent(source.script_id)}`, { cache: 'no-store' });
           const body = await response.json();
+          if (!stillCurrent()) return;
           const responseError = body?.error || `Debugger returned ${response.status}`;
           if (!response.ok) {
             if (/^No script for id:/i.test(responseError)) {
@@ -6593,9 +6603,10 @@
           const content = source.kind === 'wasm'
             ? body.source
             : body.source + (body.truncated ? '\n\n[Live source preview limited to the first 2 MB]' : '');
-          state.liveScriptContent.set(source.script_id, { loading: false, loadError: null, content, contentTruncated: body.truncated });
+          state.liveScriptContent.set(source.script_id, { identity, loading: false, loadError: null, content, contentTruncated: body.truncated });
         } catch (error) {
-          state.liveScriptContent.set(source.script_id, { loading: false, loadError: `Live source is unavailable: ${error.message}` });
+          if (!stillCurrent()) return;
+          state.liveScriptContent.set(source.script_id, { identity, loading: false, loadError: `Live source is unavailable: ${error.message}` });
           state.sourceNoticeKind = 'warning';
           state.sourceNotice = `Live source ${sourceDisplayName(source)} could not be loaded. The last debugger catalog remains visible.`;
         }
@@ -7868,6 +7879,7 @@
           if (!document.querySelector('#screen-experiments').hidden) renderExperiment();
           if (state.sourceHooksOpen) renderRuntimeHooks();
           if (state.selectedRuntimeHookRequest) renderRuntimeHookTraffic();
+          renderFieldProvenance();
           if (!document.querySelector('#screen-api-collection').hidden) renderApiCollection();
           const sourcesVisible = !document.querySelector('#screen-sources').hidden;
           if (sourcesVisible && !sourceRendered) {
@@ -7895,6 +7907,7 @@
           if (!document.querySelector('#screen-experiments').hidden) renderExperiment();
           if (state.sourceHooksOpen) renderRuntimeHooks();
           if (state.selectedRuntimeHookRequest) renderRuntimeHookTraffic();
+          renderFieldProvenance();
           if (!document.querySelector('#screen-api-collection').hidden) renderApiCollection();
         } finally {
           state.debuggerRefreshing = false;
@@ -7982,7 +7995,7 @@
         if (screenName !== 'sources' && state.sourceHooksOpen) closeSourceHooks(false);
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
         document.querySelectorAll('.nav-button').forEach(button => {
-          const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence') || (button.dataset.screen === 'traffic' && screenName === 'vm');
+          const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence') || (button.dataset.screen === 'traffic' && ['vm', 'field-provenance'].includes(screenName));
           if (active) {
             button.setAttribute('aria-current', 'page');
             const group = button.closest('details');

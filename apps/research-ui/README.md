@@ -159,6 +159,7 @@ input and output visible with transformation history available on demand.
 | --- | --- |
 | `index.html`, `app.css` | Document structure and visual layout |
 | `app_state.js`, `evidence_models.js`, `app.js` | Initial state and DOM bindings, evidence validation and projection, interaction and rendering |
+| `field_provenance.js`, `../origin-trace-backend/src/provenance.rs` | Selected request strings, bounded source candidates, replay evidence, source identity checks, and explicit value-flow gaps |
 | `request_value_test.js` | Ephemeral request-value capture controls, observation selection, and comparison rendering |
 | `traffic_view.js` | Bounded request/response body views, explicit missing-data states, and labeled sample exchanges |
 | `source_syntax.js` | Source names, display formatting, and bounded tokenization without DOM or application state |
@@ -321,6 +322,12 @@ For an intervention, first collect a return-hook baseline, then disarm and repla
 that hook with a synchronous return override before repeating the same input.
 A matched comparison is intervention-associated, never complete value provenance.
 The value preview is erased with the disposable context.
+[Request Field Provenance v1](../../docs/product/request-field-provenance-v1.md)
+connects Traffic's JSON tree and Query selection to that workflow through
+**Trace value**. It shows observed request call sites, bounded original-source
+text candidates, and equal-string replay hook candidates. **Test value** prefills
+the exact selector; **Field trace** returns from the test. Source links require
+retained target, script, and source hash identity.
 Find counts literal, case-insensitive occurrences within rendered lines, including
 multiple matches on one minified line. Enter advances and Shift+Enter goes back,
 wrapping through the first 1000 matches with a visible `+` when results are capped.

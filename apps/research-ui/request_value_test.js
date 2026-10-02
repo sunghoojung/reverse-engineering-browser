@@ -3,12 +3,14 @@
 
       function renderRuntimeFieldTest(hooks, editable, comparable) {
         const test = hooks?.field_test;
+        document.querySelector('#hooks-field-provenance').disabled = !fieldProvenanceSelection;
         elements.hooksFieldBadge.textContent = test?.enabled ? `${test.observations.length} observed` : 'Off';
         elements.hooksFieldBadge.dataset.kind = test?.enabled ? '' : 'offline';
         elements.hooksFieldStatus.textContent = test?.enabled
-          ? `Capturing ${test.method} ${test.url} · ${test.kind} ${test.pointer || '(whole body)'}. ${editable ? 'Starting a new capture erases these observations.' : 'Disarm hooks to change capture or stop and erase.'}${test.observation_evictions ? ` ${test.observation_evictions} older observations evicted.` : ''}`
-          : '1. Choose one request value. No hook is needed to observe it.';
-        elements.hooksFieldConfigure.textContent = test?.enabled ? 'Restart capture and erase' : 'Start value capture';
+          ? `${test.method} ${test.pointer || '(body)'} · ${editable ? 'Capturing' : 'Hooks armed'}${test.observation_evictions ? ` · ${test.observation_evictions} evicted` : ''}`
+          : 'Choose a field to capture.';
+        elements.hooksFieldStatus.title = test?.enabled ? test.url : '';
+        elements.hooksFieldConfigure.textContent = test?.enabled ? 'Restart and erase' : 'Capture';
         elements.hooksFieldForm.querySelectorAll('input, select').forEach(field => { field.disabled = !editable; });
         const kind = elements.hooksFieldKind.value;
         elements.hooksFieldPointerLabel.firstChild.textContent = kind === 'json' ? 'JSON pointer' :
@@ -24,19 +26,22 @@
         if (key !== state.runtimeFieldTestKey) {
           state.runtimeFieldTestKey = key;
           if (observations.length) {
-            elements.hooksFieldObservations.replaceChildren(...observations.map(observation => {
-              const row = document.createElement('div'); row.className = 'hook-hit-row';
-              row.append(textElement('span', 'hook-hit-title', `#${observation.id} · ${observation.method} ${observation.url}`),
-                textElement('span', 'hook-hit-operation', observation.status.replaceAll('_', ' ')),
-                textElement('span', 'hook-hit-meta', `${new Date(observation.occurred_at_ms).toLocaleTimeString()} · ${observation.target_type || 'worker'} ${observation.target_id.slice(0, 12)} · request ${observation.request_id}`),
-                textElement('span', 'hook-hit-bindings', observation.status === 'available'
-                  ? `${observation.preview || '(empty)'}${observation.bytes > new TextEncoder().encode(observation.preview).length ? '…' : ''} · SHA-256 ${observation.sha256}`
-                  : 'No complete selected value retained.'));
+            const disclosures = new Map([...elements.hooksFieldObservations.querySelectorAll('details')]
+              .map(row => [row.dataset.provenanceDisclosure, row.open]));
+            const rows = [...observations].reverse().map(observation => {
+              const row = document.createElement('details'); row.className = 'field-provenance-observation';
+              row.dataset.provenanceDisclosure = `field-${observation.id}`;
+              row.open = disclosures.get(row.dataset.provenanceDisclosure) ?? false;
+              const summary = textElement('summary', '', `#${observation.id} · ${new Date(observation.occurred_at_ms).toLocaleTimeString()} · ${observation.status === 'available' ? 'Captured' : observation.status.replaceAll('_', ' ')}`);
+              summary.dataset.provenanceFocus = row.dataset.provenanceDisclosure;
+              row.append(summary, textElement('pre', 'field-provenance-replay-value', observation.preview || 'Value unavailable.'));
+              row.append(textElement('pre', 'hook-hit-meta', `${observation.target_type} ${observation.target_id}\nrequest ${observation.request_id}\n${observation.bytes} bytes\nSHA-256 ${observation.sha256 || 'unavailable'}`));
               return row;
-            }));
+            });
+            preserveProvenanceFocus(elements.hooksFieldObservations, () => elements.hooksFieldObservations.replaceChildren(...rows));
           } else elements.hooksFieldObservations.replaceChildren(textElement('div', 'experiment-empty',
-            test?.enabled ? 'Repeat the page or worker request. A return hook is optional for observation.' :
-              'Configure a value, then run the isolated page. Add a return hook to test an intervention.'));
+            test?.enabled ? 'Repeat the request.' :
+              'No observations.'));
           const selection = runtimeFieldSelection(observations, elements.hooksFieldBaseline.value, elements.hooksFieldVariant.value);
           const options = available => available.map(observation => {
             const option = document.createElement('option'); option.value = String(observation.id);
@@ -52,7 +57,7 @@
           elements.hooksFieldResult.replaceChildren();
           if (comparison) {
             elements.hooksFieldResult.append(document.createTextNode(
-              `#${comparison.baseline_id} → #${comparison.variant_id}: ${comparison.changed ? 'value changed' : 'value unchanged'} · ${comparison.interpretation.replaceAll('-', ' ')}${comparison.same_query_context ? '' : ' · other query input changed'}. This does not prove the full value-flow chain.`));
+              `#${comparison.baseline_id} → #${comparison.variant_id} · ${comparison.changed ? 'Changed' : 'Unchanged'} · ${comparison.interpretation.replaceAll('-', ' ')}${comparison.same_query_context ? '' : ' · query context differs'} `));
             const hit = hooks.hits.find(candidate => candidate.id === comparison.intervention_hit_id);
             if (hit) {
               const sourceLink = document.createElement('button');
@@ -70,6 +75,10 @@
       }
 
       function bindRuntimeFieldTest() {
+        document.querySelector('#hooks-field-provenance').addEventListener('click', () => {
+          showScreen('field-provenance'); renderFieldProvenance();
+          requestAnimationFrame(() => provenanceUI.back.focus({preventScroll: true}));
+        });
         elements.hooksFieldForm.addEventListener('submit', async event => {
           event.preventDefault();
           const response = await runExperimentAction({action: 'configure_runtime_field_test', enabled: true,

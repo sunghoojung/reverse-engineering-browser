@@ -169,3 +169,22 @@ profile across the existing request-ID bridge.
 API for CLI clients. See [HTTP API usage and gaps](http-api.md) for endpoint
 discovery, local request checks, and schema coverage.
 Socket and native custom-scheme transports remain separate contracts.
+
+## Request field provenance
+
+The optional `FieldProvenance` v1 extension on ephemeral field-test observations
+in [`openapi.json`](openapi.json) preserves bounded synchronous request call
+sites, same-target equal-string hook candidates, source hashes, and named gaps.
+Call sites are observed execution context; equality is correlated, never a
+producer-to-request value-flow proof. The production HTTP route remains the
+existing debugger state/actions interface. See the
+[feature design](../docs/product/request-field-provenance-v1.md) for bounds and
+compatibility with field-test v2 responses that lack the extension.
+The bounded projection runs directly inside the Rust debugger.
+
+General network records may carry optional `initiator` sites with the same
+bounded location model. Runtime hook hits carry optional `script_id` and
+`source_hash` identity snapshots. Their primitive previews may carry a nullable
+`string_sha256`, computed over complete UTF-8 strings up to 4 KiB only while
+selected-value capture is enabled. These extensible nested fields do not change
+the existing capture or action envelope versions.

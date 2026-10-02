@@ -403,6 +403,7 @@
 
       function isDebuggerNetworkRequest(request) {
         if (!isPlainObject(request) || !isBoundedText(request.id, 12 * 1024) || !request.id ||
+            (request.initiator !== undefined && !isFieldCallSites(request.initiator)) ||
             !isBoundedText(request.protocol_request_id, 4 * 1024) || !request.protocol_request_id ||
             !isBoundedText(request.target_id, 4 * 1024) || !isBoundedText(request.target_title, 64 * 1024) ||
             !isBoundedText(request.url, 64 * 1024) || !request.url || typeof request.url_truncated !== 'boolean' ||
@@ -699,7 +700,7 @@
       }
 
       function isRuntimeHookRemote(value) {
-        return value === null || (isPlainObject(value) && isBoundedText(value.type, 256) &&
+        return value === null || (isPlainObject(value) && (value.string_sha256 === undefined || value.string_sha256 === null || /^[0-9a-f]{64}$/.test(value.string_sha256)) && isBoundedText(value.type, 256) &&
           (value.subtype === null || isBoundedText(value.subtype, 256)) &&
           (value.class_name === null || isBoundedText(value.class_name, 512)) &&
           (value.description === null || isBoundedText(value.description, 512)) &&
@@ -752,6 +753,36 @@
           isSafeIntegerInRange(definition.resolved.return_points, 0, 32));
       }
 
+      function isFieldSite(site) {
+        return isPlainObject(site) && isBoundedText(site.script_id, 4096) && Boolean(site.script_id) &&
+          (site.source_hash === undefined || site.source_hash === null || isBoundedText(site.source_hash, 256)) && isBoundedText(site.target_id, 4096) && isBoundedText(site.source, 8192) &&
+          isBoundedText(site.function, 256) && isSafeIntegerInRange(site.line, 0, 0x7fffffff) &&
+          isSafeIntegerInRange(site.column, 0, 0x7fffffff);
+      }
+
+      function isFieldCallSites(value) {
+        return isPlainObject(value) && Array.isArray(value.sites) && value.sites.length <= 16 &&
+          value.sites.every(isFieldSite) && Array.isArray(value.gaps) && value.gaps.length <= 8 &&
+          value.gaps.every(gap => ['initiator_unavailable', 'malformed_call_site', 'call_site_limit', 'async_parent_unresolved'].includes(gap));
+      }
+
+      function isFieldProvenance(value) {
+        return isPlainObject(value) && value.protocol_version === 1 && value.window_ms === 5000 &&
+          Array.isArray(value.call_sites) && value.call_sites.length <= 16 && value.call_sites.every(isFieldSite) &&
+          Array.isArray(value.candidates) && value.candidates.length <= 32 && value.candidates.every(candidate =>
+            isPlainObject(candidate) && isSafeIntegerInRange(candidate.hit_id, 1, Number.MAX_SAFE_INTEGER) &&
+            isBoundedText(candidate.script_id, 4096) && (candidate.source_hash === null || isBoundedText(candidate.source_hash, 256)) && isBoundedText(candidate.target_id, 4096) && isBoundedText(candidate.source, 8192) &&
+            isBoundedText(candidate.function, 256) && isSafeIntegerInRange(candidate.line, 0, 0x7fffffff) &&
+            isSafeIntegerInRange(candidate.column, 0, 0x7fffffff) && ['entry', 'return'].includes(candidate.phase) &&
+            ['observed', 'return_overridden'].includes(candidate.operation) && candidate.confidence === 'correlated' &&
+            Array.isArray(candidate.matched_values) && candidate.matched_values.length > 0 && candidate.matched_values.length <= 34 &&
+            candidate.matched_values.every(name => isBoundedText(name, 256))) &&
+          Array.isArray(value.gaps) && value.gaps.length <= 16 && value.gaps.every(gap =>
+            ['initiator_unavailable', 'malformed_call_site', 'call_site_limit', 'async_parent_unresolved',
+              'value_flow_unobserved', 'transforms_unobserved', 'async_worker_wasm_flow_unobserved',
+              'complete_string_unavailable', 'no_matching_runtime_value', 'candidate_hit_limit'].includes(gap));
+      }
+
       function isRuntimeFieldTest(test) {
         if (!isPlainObject(test) || test.protocol_version !== 2 || typeof test.enabled !== 'boolean' ||
             !isBoundedText(test.url, 8 * 1024) || !isBoundedText(test.method, 32) ||
@@ -775,6 +806,7 @@
         const ids = new Set();
         for (const observation of test.observations) {
           if (!isPlainObject(observation) || !isSafeIntegerInRange(observation.id, 1, Number.MAX_SAFE_INTEGER) ||
+              (observation.provenance !== undefined && !isFieldProvenance(observation.provenance)) ||
               ids.has(observation.id) || !isSafeIntegerInRange(observation.occurred_at_ms, 1, Number.MAX_SAFE_INTEGER) ||
               !isBoundedText(observation.target_id, 4 * 1024) || !['page', 'worker'].includes(observation.target_type) ||
               !isBoundedText(observation.request_id, 4 * 1024) ||
@@ -798,7 +830,7 @@
           byId.get(comparison.baseline_id).status === 'available' && byId.get(comparison.variant_id).status === 'available' &&
           comparison.changed === (byId.get(comparison.baseline_id).sha256 !== byId.get(comparison.variant_id).sha256) &&
           typeof comparison.same_query_context === 'boolean' &&
-          comparison.same_query_context === (byId.get(comparison.baseline_id).query_context_sha256 ===
+          comparison.same_query_context === (byId.get(comparison.baseline_id).query_context_sha256 !== null && byId.get(comparison.baseline_id).query_context_sha256 ===
             byId.get(comparison.variant_id).query_context_sha256) &&
           (comparison.intervention_hit_id === null || isSafeIntegerInRange(comparison.intervention_hit_id, 1, Number.MAX_SAFE_INTEGER)) &&
           typeof comparison.baseline_overridden === 'boolean' &&
@@ -1610,6 +1642,8 @@
             firstTimestamp: BigInt(Math.max(0, Math.round(record.started_monotonic_ms * 1e6))),
             lastTimestamp: BigInt(Math.max(0, Math.round((record.started_monotonic_ms + (record.duration_ms ?? 0)) * 1e6))),
             protocolRequestId: record.protocol_request_id,
+            initiator: record.initiator,
+            urlTruncated: record.url_truncated,
             exchange: {
               request: networkBodyFromDebugger(record.request.body, record.request.headers),
               response: networkBodyFromDebugger(record.response.body, record.response.headers)

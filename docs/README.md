@@ -53,6 +53,7 @@ current product path.
 - [Decoder Tools v1](./product/decoder-tools-v1.md)
 - [Heap Reference Inspection v2](./product/heap-reference-inspection-v2.md)
 - [HTML Response Preview v1](./product/html-response-preview-v1.md)
+- [Traffic Content Search v1](./product/traffic-content-search-v1.md)
 - [Live Object Experiment v1](./product/live-object-experiment-v1.md)
 - [Local Analyst Workspace v1](./product/local-analyst-workspace-v1.md)
 - [Memory Origin Trace v1](./product/memory-origin-trace-v1.md)

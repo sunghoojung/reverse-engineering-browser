@@ -47,7 +47,11 @@
             <div class="traffic-grid">
               <div class="request-pane">
                 <div class="network-tools">
-                  <label class="filter-box"><input id="request-filter" type="search" placeholder="Search requests…" aria-label="Filter requests" /></label>
+                  <label class="filter-box"><input id="request-filter" type="search" maxlength="512" placeholder="Search requests…" aria-label="Filter requests" /></label>
+                  <select id="request-search-scope" class="request-search-scope" aria-label="Search request content">
+                    <option value="url">URL / method / status</option>
+                    <option value="content">Include headers and bodies</option>
+                  </select>
                   <details class="request-filters" id="request-filters">
                     <summary id="request-filter-label">All types</summary>
                   <div class="type-filters" aria-label="Resource type filters">
@@ -66,6 +70,7 @@
                   </details>
                 </div>
 
+                <div id="request-search-status" class="request-search-status" role="status" aria-live="polite" hidden></div>
                 <div id="network-notice" class="network-notice" data-kind="loading" role="status" aria-live="polite">Connecting to the local evidence broker…</div>
 
                 <div class="request-scope" aria-label="Captured request scope">

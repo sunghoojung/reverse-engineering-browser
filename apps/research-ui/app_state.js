@@ -268,6 +268,8 @@
         requestSummary: document.querySelector('#request-summary'),
         sampleStatus: document.querySelector('#sample-status'),
         requestFilter: document.querySelector('#request-filter'),
+        requestSearchScope: document.querySelector('#request-search-scope'),
+        requestSearchStatus: document.querySelector('#request-search-status'),
         requestRows: document.querySelector('#request-rows'),
         runtimeHookTraffic: document.querySelector('#runtime-hook-traffic'),
         requestLatest: document.querySelector('#request-latest'),

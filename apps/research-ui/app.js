@@ -3068,8 +3068,11 @@
 
       function revealRuntimeHookHit(hit) {
         const definition = runtimeHooksState()?.definitions.find(candidate => candidate.id === hit.hook_id);
-        const source = liveSources().find(candidate => candidate.script_id === (hit.script_id ?? definition?.script_id) && (!hit.source_hash || candidate.hash === hit.source_hash)) ??
-          liveSources().find(candidate => candidate.target_id === hit.target_id && candidate.url === hit.source && (!hit.source_hash || candidate.hash === hit.source_hash));
+        const sources = liveSources().filter(candidate => candidate.target_id === hit.target_id);
+        const source = hit.script_id !== undefined
+          ? sources.find(candidate => hit.script_id && hit.source_hash && candidate.script_id === hit.script_id && candidate.hash === hit.source_hash)
+          : sources.find(candidate => candidate.script_id === definition?.script_id) ??
+            sources.find(candidate => candidate.url === hit.source);
         if (!source) {
           state.experimentError = 'The source for this hit is no longer attached.';
           showScreen('sources');

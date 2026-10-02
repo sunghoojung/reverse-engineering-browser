@@ -2942,6 +2942,7 @@
 .field-provenance-arrow { color: var(--accent); }
 .field-provenance-observation { border-bottom: 1px solid var(--line); padding: 10px 0; }
 .field-provenance-observation > summary { cursor: pointer; font: 11px/1.6 var(--mono); overflow-wrap: anywhere; }
+.field-provenance-observation > pre { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .field-provenance-replay-value { margin: 10px 0; padding: 10px 12px; background: var(--panel-2); border-left: 2px solid var(--line); }
 .field-provenance-empty { color: var(--muted); margin: 8px 0; }
 .field-provenance-comparison { color: var(--accent); }

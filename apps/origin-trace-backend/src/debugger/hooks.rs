@@ -643,8 +643,72 @@ if d["return_enabled"]==true&&returns==0 {return Err(Error::bad("Hook has no syn
                 }
                 let location = parse::location(&frame["location"])
                     .unwrap_or(json!({"line":hook["line"],"column":hook["column"]}));
-                self.update(|s| {let source_hash=s["scripts"].as_array().into_iter().flatten().find(|script| script["script_id"]==hook["script_id"] && (script["target_id"].is_null() || script["target_id"]==hook["target_id"])).map(|script|script["hash"].clone()).unwrap_or(Value::Null);let hit=json!({"script_id":hook["script_id"],"source_hash":source_hash,"id":self.hooks.hit.fetch_add(1,Ordering::Relaxed),"occurred_at_ms":validation::now_ms(),"session_id":s["runtime_hooks"]["session_id"],"hook_id":hook["id"],"target_id":hook["target_id"],"target_type":hook["target_type"],"label":hook["label"],"source":if hook["entry_mode"]=="function" {source_label(frame["url"].as_str().unwrap_or(""))} else {hook["url"].as_str().unwrap().into()},"function":validation::truncate(frame["functionName"].as_str().filter(|s|!s.is_empty()).unwrap_or("(anonymous)"),256),"category":phase,"operation":operation,"line":location["line"],"column":location["column"],"bindings":bindings,"bindings_truncated":truncated,"original_return":original,"replacement_return":replacement,"error":error.as_ref().map(|e|validation::truncate(e,512))});let h=&mut s["runtime_hooks"];h["total_hits"]=json!(h["total_hits"].as_u64().unwrap()+1);let a=h["hits"].as_array_mut().unwrap();let evicted=a.len()==128;if evicted {a.remove(0);}a.push(hit);if evicted {h["hit_evictions"]=json!(h["hit_evictions"].as_u64().unwrap()+1);}
-if error.is_some() {h["last_failure"]=json!(error);}});
+                self.update(|s| {
+                    // CDP IDs are local to a target. Live-function hooks can execute
+                    // in a different script from the one selected during setup.
+                    let script = s["scripts"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .find(|script| {
+                            script["target_id"]
+                                .as_str()
+                                .unwrap_or(s["target"]["id"].as_str().unwrap_or(""))
+                                == p.target
+                                && script.get("cdp_script_id").unwrap_or(&script["script_id"])
+                                    == &location["script_id"]
+                        });
+                    let script_id = script
+                        .map(|script| script["script_id"].clone())
+                        .unwrap_or(json!(""));
+                    let source_hash = script
+                        .map(|script| script["hash"].clone())
+                        .unwrap_or(Value::Null);
+                    let source = source_label(
+                        script
+                            .and_then(|script| script["url"].as_str())
+                            .or(frame["url"].as_str())
+                            .unwrap_or(""),
+                    );
+                    let hit = json!({
+                        "script_id": script_id,
+                        "source_hash": source_hash,
+                        "id": self.hooks.hit.fetch_add(1, Ordering::Relaxed),
+                        "occurred_at_ms": validation::now_ms(),
+                        "session_id": s["runtime_hooks"]["session_id"],
+                        "hook_id": hook["id"],
+                        "target_id": hook["target_id"],
+                        "target_type": hook["target_type"],
+                        "label": hook["label"],
+                        "source": source,
+                        "function": validation::truncate(
+                            frame["functionName"].as_str().filter(|s| !s.is_empty())
+                                .unwrap_or("(anonymous)"), 256),
+                        "category": phase,
+                        "operation": operation,
+                        "line": location["line"],
+                        "column": location["column"],
+                        "bindings": bindings,
+                        "bindings_truncated": truncated,
+                        "original_return": original,
+                        "replacement_return": replacement,
+                        "error": error.as_ref().map(|e| validation::truncate(e, 512)),
+                    });
+                    let h = &mut s["runtime_hooks"];
+                    h["total_hits"] = json!(h["total_hits"].as_u64().unwrap() + 1);
+                    let hits = h["hits"].as_array_mut().unwrap();
+                    let evicted = hits.len() == 128;
+                    if evicted {
+                        hits.remove(0);
+                    }
+                    hits.push(hit);
+                    if evicted {
+                        h["hit_evictions"] = json!(h["hit_evictions"].as_u64().unwrap() + 1);
+                    }
+                    if error.is_some() {
+                        h["last_failure"] = json!(error);
+                    }
+                });
             }
         }
         Ok(())

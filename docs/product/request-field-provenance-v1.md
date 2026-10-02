@@ -57,6 +57,9 @@ and retains at most 32 text occurrences. Unavailable or changed sources and
 limits remain visible. Links require both target/script identity and the
 retained source hash, preventing reuse of a script ID after navigation from
 opening different code.
+Live-function hook hits identify the executing frame's script in its exact
+target, which may differ from the source selected when configuring the hook.
+If that script is unavailable, its source link stays unavailable.
 
 Replay retains the existing 16-observation, 256-byte preview, 128 KiB body,
 4 KiB selected-value, two-extraction-worker, and private ephemeral limits. Each

@@ -87,7 +87,7 @@ privacy, and implementation limits are documented in
 - Request and response capture, filtering, search, highlighting, and inspection.
 - Optional size-limited body capture with sensitive fields redacted by default.
 - Request and response editing, blocking, forwarding, dropping, and replacement.
-- HTML response preview.
+- [Isolated HTML response preview](./html-response-preview-v1.md) over retained content.
 - Links from network values to memory, source, fingerprints, WASM, and Value Trace.
 - Editable Repeater with cancellation, history, variables, and response comparison.
 - API Collection with folders, scoped variables, saved requests, and execution history.

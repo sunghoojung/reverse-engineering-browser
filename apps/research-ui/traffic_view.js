@@ -1,6 +1,67 @@
 /* Body views consume explicit capture states. Missing bytes are never inferred from a URL. */
 const TRAFFIC_BODY_LIMIT = 128 * 1024;
 const TRAFFIC_TREE_LIMIT = 1000;
+const TRAFFIC_PREVIEW_DEPTH = 24;
+// Rebuild a presentation-only tree. Never attach the captured tree to a live document.
+const TRAFFIC_PREVIEW_TAGS = new Set(('a abbr article aside b bdi bdo blockquote br button caption code col colgroup dd del details div dl dt em fieldset figcaption figure footer h1 h2 h3 h4 h5 h6 header hr i input label legend li main mark nav ol option p pre s section select small span strong sub summary sup table tbody td textarea th thead time tr u ul').split(' '));
+const TRAFFIC_PREVIEW_STYLES = ('color background-color font-family font-size font-style font-weight line-height text-align text-decoration white-space overflow-wrap word-break display margin margin-top margin-right margin-bottom margin-left padding padding-top padding-right padding-bottom padding-left border border-color border-style border-width border-radius width max-width min-width height max-height min-height').split(' ');
+
+function trafficHtmlPreview(text) {
+  const template = document.createElement('template');
+  template.innerHTML = text;
+  const output = document.createElement('div');
+  let count = 0;
+  let limited = false;
+  function copy(source, target, depth) {
+    if (++count > TRAFFIC_TREE_LIMIT || depth > TRAFFIC_PREVIEW_DEPTH) { limited = true; return; }
+    if (source.nodeType === Node.TEXT_NODE) { target.append(document.createTextNode(source.textContent)); return; }
+    if (source.nodeType !== Node.ELEMENT_NODE || source.namespaceURI !== 'http://www.w3.org/1999/xhtml') return;
+    const tag = source.localName;
+    if (tag === 'img') {
+      target.append(trafficNode('span', '', `[Image omitted${source.getAttribute('alt') ? ': ' + source.getAttribute('alt') : ''}]`));
+      return;
+    }
+    // Forms keep their static layout, but no submission or captured actions survive.
+    if (tag !== 'form' && !TRAFFIC_PREVIEW_TAGS.has(tag)) return;
+    const node = document.createElement(tag === 'form' ? 'div' : tag);
+    for (const attribute of ['title', 'lang', 'dir', 'value']) {
+      const value = source.getAttribute(attribute);
+      if (value !== null && value.length <= 1024) node.setAttribute(attribute, value);
+    }
+    for (const attribute of ['colspan', 'rowspan']) {
+      const value = source.getAttribute(attribute);
+      if (/^[1-9][0-9]?$/.test(value ?? '') && Number(value) <= 64) node.setAttribute(attribute, value);
+    }
+    if (['button', 'input', 'select', 'textarea', 'option', 'fieldset'].includes(tag)) node.setAttribute('disabled', '');
+    // Simple presentation values and numeric colors only: no URLs, escapes,
+    // custom properties, positioning, animation, or external stylesheets.
+    for (const property of TRAFFIC_PREVIEW_STYLES) {
+      const value = source.style.getPropertyValue(property);
+      const simple = /^[a-zA-Z0-9\s#%.,/-]+$/.test(value);
+      const color = ['color', 'background-color', 'border-color'].includes(property) && /^(?:rgba?|hsla?)\([0-9\s%.,/+-]+\)$/.test(value);
+      const bounded = [...value.matchAll(/\d+(?:\.\d+)?/g)].every(match => Number(match[0]) <= 4096);
+      if (value.length <= 256 && bounded && (simple || color)) node.style.setProperty(property, value);
+    }
+    target.append(node);
+    for (const child of source.childNodes) {
+      if (count >= TRAFFIC_TREE_LIMIT) { limited = true; break; }
+      copy(child, node, depth + 1);
+    }
+  }
+  for (const child of template.content.childNodes) {
+    if (count >= TRAFFIC_TREE_LIMIT) { limited = true; break; }
+    copy(child, output, 0);
+  }
+  const policy = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
+  return {
+    limited,
+    empty: !output.textContent.trim() && !output.querySelector('hr, input, textarea, select, table'),
+    document: '<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="' + policy + '">' +
+      '<style>html{color-scheme:light}body{margin:16px;background:#fff;color:#202124;font:14px/1.5 system-ui,sans-serif;overflow-wrap:anywhere}' +
+      '*{box-sizing:border-box;max-width:100%}pre{white-space:pre-wrap}table{border-collapse:collapse}td,th{padding:4px 8px;border:1px solid #ddd}' +
+      'a{color:#185abc;text-decoration:underline}input,button,select,textarea{pointer-events:none}</style></head><body>' + output.innerHTML + '</body></html>'
+  };
+}
 function trafficTargetParts(request) {
   const target = String(request?.path ?? '').trim();
   if (request?.hostOnly) return {name: target || 'Unknown host', host: 'Host-only metadata'};
@@ -139,8 +200,10 @@ function createTrafficPane(side, record, request, onDecode, onTrace) {
   controls.hidden = true;
   const tabs = trafficNode('div', 'exchange-tabs');
   tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', `${side} view`);
+  const model = trafficBodyModel(record, side);
+  const htmlResponse = side === 'Response' && record?.mime?.split(';')[0].trim().toLowerCase() === 'text/html';
   const mode = {value: 'formatted'};
-  const modes = [['headers', 'Header'], ...(side === 'Request' ? [['query', 'Query']] : []), ['formatted', 'Body'], ['raw', 'Raw body']];
+  const modes = [['headers', 'Header'], ...(side === 'Request' ? [['query', 'Query']] : []), ['formatted', 'Body'], ['raw', 'Raw body'], ...(htmlResponse ? [['preview', 'Preview']] : [])];
   const tabButtons = modes.map(([value, label]) => {
     const button = trafficNode('button', 'exchange-tab', label); button.type = 'button';
     button.setAttribute('role', 'tab'); button.setAttribute('aria-selected', String(value === mode.value));
@@ -180,7 +243,6 @@ function createTrafficPane(side, record, request, onDecode, onTrace) {
   const content = trafficNode('div', 'exchange-content'); content.tabIndex = 0;
   content.setAttribute('aria-label', `${side} body viewer`);
   const selection = trafficNode('div', 'exchange-selection'); selection.hidden = true;
-  const model = trafficBodyModel(record, side);
   let wrapping = true;
   let renderedMode;
   let renderedSearch;
@@ -232,6 +294,9 @@ function createTrafficPane(side, record, request, onDecode, onTrace) {
       button.setAttribute('aria-selected', String(selected)); button.tabIndex = selected ? 0 : -1;
     });
     copy.hidden = !['formatted', 'raw'].includes(mode.value);
+    options.hidden = mode.value === 'preview';
+    if (mode.value === 'preview') options.open = false;
+    content.classList.toggle('showing-html-preview', mode.value === 'preview');
     search.placeholder = mode.value === 'headers' ? 'Find header' : mode.value === 'query' ? 'Find parameter' : 'Find in body';
     meta.textContent = model.message ? trafficOriginLabel(request) : `${request?.origin === 'sample' ? 'Sample · ' : request?.origin === 'demo' ? 'Demo · ' : request?.origin === 'live' ? 'Live · ' : ''}${model.mime} · ${model.bytes.toLocaleString()} bytes${model.binary ? ' · Hex view' : ''}${model.truncated ? ' · Truncated: showing first 128 KiB or retained prefix' : ''}${model.malformed ? ' · Invalid JSON: showing text' : ''}${model.formatted?.limited ? ' · Formatting limit: showing raw text' : ''}`;
     function message(text) {
@@ -262,6 +327,20 @@ function createTrafficPane(side, record, request, onDecode, onTrace) {
     }
     if (model.message) return message(model.message);
     if (!model.text.length) return message(`Captured ${side.toLowerCase()} body is empty (0 bytes).`);
+    if (mode.value === 'preview') {
+      const preview = trafficHtmlPreview(model.text);
+      if (preview.empty) return message('No supported HTML content to preview. Inspect Raw body for the retained source.');
+      const notice = trafficNode('p', 'exchange-preview-notice', 'Isolated HTML preview. Scripts, links, forms, images, and external styles are disabled. Basic inline styling only.');
+      if (model.truncated) notice.append(document.createTextNode(' Captured content is truncated; this preview is incomplete.'));
+      if (preview.limited) notice.append(document.createTextNode(' Rendering limited to 1,000 nodes and 24 levels. Inspect Raw body for the retained source.'));
+      const frame = trafficNode('iframe', 'exchange-html-preview');
+      frame.title = 'Isolated HTML response preview';
+      frame.setAttribute('sandbox', '');
+      frame.referrerPolicy = 'no-referrer';
+      frame.srcdoc = preview.document;
+      content.append(notice, frame);
+      return;
+    }
     if (mode.value === 'formatted' && treeMode && model.json !== undefined) {
       let count = 0;
       let exhausted = false;
@@ -318,7 +397,8 @@ function createTrafficPane(side, record, request, onDecode, onTrace) {
 function renderTrafficExchange(container, request, onDecode, onTrace) {
   const key = `${request?.origin}:${request?.id}:${request?.method}:${request?.status}:` +
     `${request?.exchange?.request?.state}:${request?.exchange?.request?.text?.length ?? request?.exchange?.request?.bytes?.length ?? 0}:` +
-    `${request?.exchange?.response?.state}:${request?.exchange?.response?.text?.length ?? request?.exchange?.response?.bytes?.length ?? 0}`;
+    `${request?.exchange?.response?.state}:${request?.exchange?.response?.mime}:${request?.exchange?.response?.truncated}:` +
+    `${request?.exchange?.response?.text?.length ?? request?.exchange?.response?.bytes?.length ?? 0}`;
   if (container.dataset.selection === key) return;
   container.dataset.selection = key;
   if (!request) {

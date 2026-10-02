@@ -19,6 +19,9 @@ redacted, failed, empty, or unsupported content displays a reason instead of
 fabricated output. Truncated capture is explicitly incomplete. Search, wrapping,
 copying, and decoding continue to operate on the source views, not the derived
 frame. Preview selection survives unchanged live refreshes.
+Supported elements remain previewable even without text, including blocks drawn
+with inline backgrounds or borders. Capture and rendering-limit warnings also
+remain visible when no supported content survives the inspected prefix.
 
 ## Rendering boundary
 

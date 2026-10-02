@@ -55,7 +55,8 @@ function trafficHtmlPreview(text) {
   const policy = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
   return {
     limited,
-    empty: !output.textContent.trim() && !output.querySelector('hr, input, textarea, select, table'),
+    // Retained elements can paint through borders or backgrounds without text.
+    empty: !output.textContent.trim() && output.childElementCount === 0,
     document: '<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="' + policy + '">' +
       '<style>html{color-scheme:light}body{margin:16px;background:#fff;color:#202124;font:14px/1.5 system-ui,sans-serif;overflow-wrap:anywhere}' +
       '*{box-sizing:border-box;max-width:100%}pre{white-space:pre-wrap}table{border-collapse:collapse}td,th{padding:4px 8px;border:1px solid #ddd}' +
@@ -329,10 +330,14 @@ function createTrafficPane(side, record, request, onDecode, onTrace) {
     if (!model.text.length) return message(`Captured ${side.toLowerCase()} body is empty (0 bytes).`);
     if (mode.value === 'preview') {
       const preview = trafficHtmlPreview(model.text);
-      if (preview.empty) return message('No supported HTML content to preview. Inspect Raw body for the retained source.');
+      const warnings = [];
+      if (model.truncated) warnings.push('Captured content is truncated; this preview is incomplete.');
+      if (preview.limited) warnings.push('Rendering limited to 1,000 nodes and 24 levels.');
+      if (preview.empty) return message([...warnings,
+        warnings.length ? 'No supported HTML content was rendered from the inspected prefix.' : 'No supported HTML content to preview.',
+        'Inspect Raw body for the retained source.'].join(' '));
       const notice = trafficNode('p', 'exchange-preview-notice', 'Isolated HTML preview. Scripts, links, forms, images, and external styles are disabled. Basic inline styling only.');
-      if (model.truncated) notice.append(document.createTextNode(' Captured content is truncated; this preview is incomplete.'));
-      if (preview.limited) notice.append(document.createTextNode(' Rendering limited to 1,000 nodes and 24 levels. Inspect Raw body for the retained source.'));
+      if (warnings.length) notice.append(document.createTextNode(` ${warnings.join(' ')} Inspect Raw body for the retained source.`));
       const frame = trafficNode('iframe', 'exchange-html-preview');
       frame.title = 'Isolated HTML response preview';
       frame.setAttribute('sandbox', '');

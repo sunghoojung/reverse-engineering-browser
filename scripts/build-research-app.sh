@@ -32,11 +32,11 @@ fi
 
 mkdir -p "${macos_path}" "${resources_path}"
 cp "${repo_root}/apps/research-ui/macos/Info.plist" "${contents_path}/Info.plist"
-for asset in index.html app.css app_state.js evidence_models.js source_syntax.js traffic_view.js request_value_test.js app.js; do
+for asset in index.html app.css app_state.js evidence_models.js source_syntax.js traffic_view.js request_value_test.js field_provenance.js app.js; do
   cp "${repo_root}/apps/research-ui/${asset}" "${resources_path}/${asset}"
 done
 mkdir -p "${research_ui_resources}"
-for asset in index.html app.css app_state.js evidence_models.js source_syntax.js traffic_view.js request_value_test.js app.js analyst_runner_core.js analyst_runner_node.js; do
+for asset in index.html app.css app_state.js evidence_models.js source_syntax.js traffic_view.js request_value_test.js field_provenance.js app.js analyst_runner_core.js analyst_runner_node.js; do
   cp "${repo_root}/apps/research-ui/${asset}" "${research_ui_resources}/${asset}"
 done
 cargo build --locked --release --manifest-path "${repo_root}/apps/origin-trace-backend/Cargo.toml"

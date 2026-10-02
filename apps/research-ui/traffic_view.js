@@ -129,7 +129,7 @@ function trafficOriginLabel(request) {
         : request?.origin === 'live' ? 'Live metadata' : 'Local evidence';
 }
 
-function createTrafficPane(side, record, request, onDecode) {
+function createTrafficPane(side, record, request, onDecode, onTrace) {
   const pane = trafficNode('section', 'exchange-pane');
   pane.dataset.origin = request?.origin ?? 'none';
   pane.setAttribute('aria-label', `${side} content`);
@@ -199,7 +199,7 @@ function createTrafficPane(side, record, request, onDecode) {
     wrapping = !wrapping; wrap.setAttribute('aria-pressed', String(wrapping));
     content.classList.toggle('no-wrap', !wrapping);
   });
-  function selectValue(path, value, row) {
+  function selectValue(path, value, row, descriptor = null) {
     content.querySelectorAll('[aria-pressed]').forEach(node => node.setAttribute('aria-pressed', String(node === row)));
     selection.hidden = false;
     const pathLabel = trafficNode('span', 'exchange-value-path', path); pathLabel.title = path;
@@ -212,7 +212,13 @@ function createTrafficPane(side, record, request, onDecode) {
     close.addEventListener('click', () => { selection.hidden = true; row.setAttribute('aria-pressed', 'false'); row.focus(); });
     const full = trafficNode('pre', 'exchange-selected-value', valueText);
     full.tabIndex = 0;
-    selection.replaceChildren(pathLabel, valueCopy, decode, close, full);
+    const trace = trafficNode('button', 'exchange-button', 'Trace value'); trace.type = 'button';
+    trace.disabled = side !== 'Request' || request?.urlTruncated || !descriptor || typeof value !== 'string' ||
+      new TextEncoder().encode(value).length > 4096 || !descriptor.selector ||
+      new TextEncoder().encode(descriptor.selector).length > 256;
+    trace.title = trace.disabled ? 'Select one complete request string in a JSON field or unique query parameter (up to 4 KiB).' : 'Inspect evidence and test this value in an isolated replay';
+    trace.addEventListener('click', () => onTrace({...descriptor, value, label: path, request}));
+    selection.replaceChildren(pathLabel, valueCopy, decode, ...(side === 'Request' ? [trace] : []), close, full);
   }
   function render() {
     const query = search.value.toLowerCase();
@@ -238,15 +244,18 @@ function createTrafficPane(side, record, request, onDecode) {
       let rows = record?.headers;
       if (mode.value === 'query') {
         // The live event contract retains the host only. Do not claim its query was empty.
-        rows = request?.origin === 'sample' ? [...new URL(request.path, 'https://checkout.acme.test').searchParams] : undefined;
+        try { rows = request?.origin === 'sample' || request?.exchange && !request.hostOnly
+          ? [...new URL(request.path, 'https://checkout.acme.test').searchParams] : undefined; } catch { rows = undefined; }
       }
       meta.textContent = rows ? `${rows.length} ${mode.value === 'headers' ? 'headers' : 'parameters'} · ${request?.origin === 'sample' ? 'sample data' : request?.origin === 'demo' ? 'demo evidence' : request?.origin === 'live' ? 'live metadata' : 'captured'}` : 'Not captured';
       if (!rows) return message(`${mode.value === 'headers' ? side + ' headers were' : 'Query parameters were'} not captured.`);
       const matches = rows.filter(([key, value]) => `${key} ${value}`.toLowerCase().includes(query));
+      const nameCounts = new Map();
+      for (const [name] of rows) nameCounts.set(name, (nameCounts.get(name) || 0) + 1);
       for (const [key, value] of matches) {
         const row = trafficNode('button', 'exchange-leaf'); row.type = 'button'; row.setAttribute('aria-pressed', 'false');
         row.append(trafficNode('span', 'exchange-key', key), trafficNode('span', 'exchange-value', value));
-        row.addEventListener('click', () => selectValue(key, value, row)); content.append(row);
+        row.addEventListener('click', () => selectValue(key, value, row, mode.value === 'query' && nameCounts.get(key) === 1 ? {kind: 'query', selector: key} : null)); content.append(row);
       }
       if (!matches.length) message(query ? 'No matches.' : mode.value === 'headers' ? 'No headers.' : 'No query parameters.');
       return;
@@ -256,7 +265,7 @@ function createTrafficPane(side, record, request, onDecode) {
     if (mode.value === 'formatted' && treeMode && model.json !== undefined) {
       let count = 0;
       let exhausted = false;
-      function tree(value, key, path, depth) {
+      function tree(value, key, path, depth, pointer) {
         if (++count > TRAFFIC_TREE_LIMIT || depth > 24) { exhausted = true; return null; }
         if (value !== null && typeof value === 'object') {
           const branch = trafficNode('details', 'exchange-branch'); branch.open = depth < 2 || Boolean(query);
@@ -265,7 +274,7 @@ function createTrafficPane(side, record, request, onDecode) {
           branch.append(summary);
           for (const [childKey, child] of entries) {
             if (count >= TRAFFIC_TREE_LIMIT) { exhausted = true; break; }
-            const node = tree(child, childKey, `${path}[${JSON.stringify(childKey)}]`, depth + 1);
+            const node = tree(child, childKey, `${path}[${JSON.stringify(childKey)}]`, depth + 1, `${pointer}/${childKey.replaceAll('~', '~0').replaceAll('/', '~1')}`);
             if (node) branch.append(node);
           }
           if (query && branch.children.length === 1 && !`${key} ${path}`.toLowerCase().includes(query)) return null;
@@ -275,10 +284,10 @@ function createTrafficPane(side, record, request, onDecode) {
         if (query && !`${path} ${text}`.toLowerCase().includes(query)) return null;
         const row = trafficNode('button', 'exchange-leaf'); row.type = 'button'; row.setAttribute('aria-pressed', 'false');
         row.append(trafficNode('span', 'exchange-key', key), trafficNode('span', `exchange-value value-${value === null ? 'null' : typeof value}`, text.length > 180 ? text.slice(0, 180) + '…' : text));
-        row.addEventListener('click', () => selectValue(path, value, row));
+        row.addEventListener('click', () => selectValue(path, value, row, {kind: 'json', selector: pointer}));
         return row;
       }
-      const root = tree(model.json, '$', '$', 0);
+      const root = tree(model.json, '$', '$', 0, '');
       if (root) content.append(root); else message('No matches.');
       if (exhausted) content.append(trafficNode('p', 'exchange-limit', 'Tree limited to 1,000 nodes and 24 levels. Use Raw body to inspect the retained text.'));
     } else {
@@ -306,7 +315,7 @@ function createTrafficPane(side, record, request, onDecode) {
   return pane;
 }
 
-function renderTrafficExchange(container, request, onDecode) {
+function renderTrafficExchange(container, request, onDecode, onTrace) {
   const key = `${request?.origin}:${request?.id}:${request?.method}:${request?.status}:` +
     `${request?.exchange?.request?.state}:${request?.exchange?.request?.text?.length ?? request?.exchange?.request?.bytes?.length ?? 0}:` +
     `${request?.exchange?.response?.state}:${request?.exchange?.response?.text?.length ?? request?.exchange?.response?.bytes?.length ?? 0}`;
@@ -330,5 +339,5 @@ function renderTrafficExchange(container, request, onDecode) {
     });
     switcher.append(button);
   }
-  container.replaceChildren(switcher, createTrafficPane('Request', exchange.request, request, onDecode), createTrafficPane('Response', exchange.response, request, onDecode));
+  container.replaceChildren(switcher, createTrafficPane('Request', exchange.request, request, onDecode, onTrace), createTrafficPane('Response', exchange.response, request, onDecode, onTrace));
 }

@@ -1,7 +1,7 @@
 use super::{Debugger, requests};
 use crate::{
     error::{Error, Result},
-    validation, worker,
+    provenance, validation, worker,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -48,11 +48,19 @@ impl Fields {
 fn empty(status: &str) -> Value {
     json!({"status":status,"sha256":null,"preview":"","bytes":0})
 }
-fn selected(s: &str) -> Value {
+fn selected(s: &str, raw: bool) -> Value {
     if s.len() > 4096 {
         return empty("value_too_large");
     }
-    json!({"status":"available","sha256":hex::encode(Sha256::digest(s.as_bytes())),"preview":validation::truncate(s,256),"bytes":s.len()})
+    let string_value = if raw {
+        json!(s)
+    } else {
+        serde_json::from_str::<Value>(s).unwrap_or(Value::Null)
+    };
+    let string_digest =
+        provenance::project(&json!({"operation":"string_digest","value":string_value}))
+            .unwrap_or(Value::Null);
+    json!({"status":"available","string_sha256":string_digest,"sha256":hex::encode(Sha256::digest(s.as_bytes())), "preview":validation::truncate(s,256),"bytes":s.len()})
 }
 fn context_digest(address: &str, kind: &str, selector: &str, key: &[u8; 32]) -> Option<String> {
     let u = url::Url::parse(address).ok()?;
@@ -107,7 +115,7 @@ fn select_header(headers: &Value, selector: &str) -> Value {
     if matches[0].as_str().unwrap().len() > 4096 {
         return empty("value_too_large");
     }
-    selected(&matches[0].to_string())
+    selected(&matches[0].to_string(), false)
 }
 fn select_pairs(source: &str, selector: &str) -> Value {
     if source.len() > 131072 {
@@ -128,7 +136,7 @@ fn select_pairs(source: &str, selector: &str) -> Value {
     if matches.len() != 1 {
         return empty("ambiguous");
     }
-    selected(&json!(matches[0]).to_string())
+    selected(&json!(matches[0]).to_string(), false)
 }
 impl Debugger {
     pub(super) async fn configure_field(&self, r: &Value) -> Result<Value> {
@@ -253,7 +261,18 @@ impl Debugger {
                 && h["operation"] == "observed"
                 && h["category"] == "return"
                 && changed_hit.is_some_and(|c| {
-                    ["target_id", "source", "function", "line", "column"]
+                    h["source_hash"]
+                        .as_str()
+                        .is_some_and(|hash| !hash.is_empty())
+                        && [
+                            "target_id",
+                            "source",
+                            "script_id",
+                            "source_hash",
+                            "function",
+                            "line",
+                            "column",
+                        ]
                         .iter()
                         .all(|key| h[*key] == c[*key])
                 })
@@ -262,7 +281,8 @@ impl Debugger {
             .iter()
             .any(|h| related(baseline, &h["id"]) && h["operation"] == "return_overridden");
         let changed = baseline["sha256"] != variant["sha256"];
-        let context = baseline["query_context_sha256"] == variant["query_context_sha256"];
+        let context = baseline["query_context_sha256"].is_string()
+            && baseline["query_context_sha256"] == variant["query_context_sha256"];
         self.update(|s|s["runtime_hooks"]["field_test"]["comparison"]=json!({"baseline_id":a,"variant_id":b,"changed":changed,"same_query_context":context,"intervention_hit_id":changed_hit.map(|h|h["id"].clone()),"baseline_overridden":overridden,"interpretation":if changed&&context&&changed_hit.is_some()&&baseline_hit.is_some()&&!overridden {"intervention-associated"} else {"inconclusive"}}));
         Ok(self.group_response("runtime_hooks"))
     }
@@ -287,7 +307,7 @@ impl Debugger {
                     if b.len() > 131072 {
                         empty("truncated")
                     } else {
-                        selected(b)
+                        selected(b, true)
                     }
                 },
             ),
@@ -341,7 +361,7 @@ impl Debugger {
                 }
                 if status == "available" {
                     match v["value"].as_str().filter(|s| s.len() <= 4096) {
-                        Some(value) => selected(value),
+                        Some(value) => selected(value, false),
                         None => empty("unavailable"),
                     }
                 } else if v["value"].is_null() {
@@ -383,8 +403,14 @@ impl Debugger {
         }
         if method == "Network.requestWillBeSentExtraInfo" {
             if field["enabled"] == true && field["kind"] == "header" {
-                let result = select_header(&p["headers"], field["pointer"].as_str().unwrap());
+                let mut result = select_header(&p["headers"], field["pointer"].as_str().unwrap());
+                let digest = result
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("string_sha256")
+                    .unwrap_or(Value::Null);
                 if result["status"] == "available" {
+                    let s_snapshot = s.clone();
                     self.update(|s| {
                         let field = &mut s["runtime_hooks"]["field_test"];
                         if let Some(o) = field["observations"]
@@ -395,6 +421,13 @@ impl Debugger {
                             .find(|o| o["target_id"] == target && o["request_id"] == request_id)
                         {
                             let id = o["id"].clone();
+                            // ExtraInfo can arrive after the original extraction. Keep its
+                            // request-time cutoff and observed call sites when updating a header.
+                            let retained = provenance::project(&json!({"operation":"snapshot","hits":s_snapshot["runtime_hooks"]["hits"],"target_id":target,"occurred_at_ms":o["occurred_at_ms"]}));
+                            if let Ok(retained) = retained {
+                                let gaps = o["provenance"]["gaps"].as_array().into_iter().flatten().filter(|gap| matches!(gap.as_str(),Some("initiator_unavailable"|"malformed_call_site"|"call_site_limit"|"async_parent_unresolved"))).cloned().collect::<Vec<_>>();
+                                if let Ok(projection) = provenance::project(&json!({"operation":"build","selected_digest":digest,"hits":retained["hits"],"limited":retained["limited"],"call_sites":{"sites":o["provenance"]["call_sites"],"gaps":gaps}})) { o["provenance"] = projection; }
+                            }
                             for (k, v) in result.as_object().unwrap() {
                                 o[k] = v.clone();
                             }
@@ -502,8 +535,31 @@ impl Debugger {
         } else {
             None
         };
+        let mut provenance_input = if matched {
+            let retained = provenance::project(
+                &json!({"operation":"snapshot","hits":if active {json!(hits)} else {json!([])},"target_id":target,"occurred_at_ms":now}),
+            );
+            let sites = provenance::project(
+                &json!({"operation":"call_sites","initiator":p["initiator"],"target_id":target,"scripts":provenance::catalog(&s)}),
+            );
+            match (retained, sites) {
+                (Ok(retained), Ok(sites)) => Some(
+                    json!({"operation":"build","hits":retained["hits"],"limited":retained["limited"],"call_sites":sites,"selected_digest":null}),
+                ),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let initial_provenance = provenance_input
+            .as_ref()
+            .and_then(|input| provenance::project(input).ok());
+        if matched && initial_provenance.is_none() {
+            status = "error";
+            permit = None;
+        }
         self.update(|s| {let h=&mut s["runtime_hooks"];let target_type=if h["target_id"]==target {"page"} else {"worker"};let record=json!({"id":self.fields.request.fetch_add(1,Ordering::Relaxed),"occurred_at_ms":now,"target_id":target,"target_type":if h["target_id"]==target {"page"} else {"worker"},"request_id":request_id,"url":address,"method":validation::truncate(method,32),"resource_type":validation::truncate(p["type"].as_str().unwrap_or(""),32),"status":null,"related_hit_ids":related,"relation":if related.is_empty() {"unlinked"} else {"same-context temporal proximity, inferred"}});let requests=h["requests"].as_array_mut().unwrap();let evicted=requests.len()==128;if evicted {requests.remove(0);}requests.push(record);if evicted {h["request_evictions"]=json!(h["request_evictions"].as_u64().unwrap()+1);}
-if let Some(id)=observation {let field=&mut h["field_test"];let o=json!({"id":id,"occurred_at_ms":now,"target_id":target,"request_id":request_id,"target_type":target_type,"url":address,"method":validation::truncate(method,32),"query_context_sha256":query,"related_hit_ids":related,"status":status,"sha256":null,"preview":"","bytes":0});let observations=field["observations"].as_array_mut().unwrap();let evicted=if observations.len()==16 {Some(observations.remove(0)["id"].clone())} else {None};observations.push(o);if let Some(id)=evicted {field["observation_evictions"]=json!(field["observation_evictions"].as_u64().unwrap()+1);if field["comparison"]["baseline_id"]==id||field["comparison"]["variant_id"]==id {field["comparison"]=Value::Null;}}}});
+if let Some(id)=observation {let mut o=json!({"id":id,"occurred_at_ms":now,"target_id":target,"request_id":request_id,"target_type":target_type,"url":address,"method":validation::truncate(method,32),"query_context_sha256":query,"related_hit_ids":related,"status":status,"sha256":null,"preview":"","bytes":0});if let Some(projection)=&initial_provenance {o["provenance"]=projection.clone();}else {h["last_failure"]=json!("Field provenance projection rejected malformed evidence");}let field=&mut h["field_test"];let observations=field["observations"].as_array_mut().unwrap();let evicted=if observations.len()==16 {Some(observations.remove(0)["id"].clone())} else {None};observations.push(o);if let Some(id)=evicted {field["observation_evictions"]=json!(field["observation_evictions"].as_u64().unwrap()+1);if field["comparison"]["baseline_id"]==id||field["comparison"]["variant_id"]==id {field["comparison"]=Value::Null;}}}});
         if let (Some(permit), Some(id)) = (permit, observation) {
             let weak = Arc::downgrade(self);
             let target = target.to_owned();
@@ -553,6 +609,18 @@ if let Some(id)=observation {let field=&mut h["field_test"];let o=json!({"id":id
                     .await;
                 if kind == "header" && extra && result["status"] == "missing" {
                     result = empty("unavailable");
+                }
+                let digest = result
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("string_sha256")
+                    .unwrap_or(Value::Null);
+                if let Some(input) = &mut provenance_input {
+                    input["selected_digest"] = digest;
+                    match provenance::project(input) {
+                        Ok(projection) => result["provenance"] = projection,
+                        Err(_) => result = empty("error"),
+                    }
                 }
                 if d.fields.revision.load(Ordering::Acquire) != revision
                     || d.snapshot()["runtime_hooks"]["session_id"] != session

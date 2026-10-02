@@ -2902,7 +2902,8 @@
 #screen-traffic:not([hidden]) { display: grid; grid-template-rows: auto minmax(0, 1fr); }
 #screen-traffic .traffic-grid { grid-row: 2; height: auto; min-height: 0; }
 @media (max-height: 650px) {
-  #screen-traffic .traffic-grid:has(.exchange-html-preview) { grid-template-rows: 240px minmax(320px, 1fr); overflow-y: auto; }
+  #screen-traffic .traffic-grid:has(.exchange-html-preview) { grid-template-rows: minmax(min-content, 240px) minmax(320px, 1fr); overflow-y: auto; }
+  #screen-traffic .traffic-grid:has(.exchange-html-preview) .request-rows { min-height: 46px; }
 }
 .runtime-hook-traffic { position: relative; display: flex; flex-wrap: wrap; gap: 5px 10px; align-items: center; max-height: 145px; padding: 9px 72px 9px 12px; overflow: auto; border-bottom: 1px solid var(--line); background: var(--accent-soft); }
 .runtime-hook-traffic[hidden] { display: none; }

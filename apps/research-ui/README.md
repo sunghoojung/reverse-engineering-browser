@@ -76,6 +76,15 @@ proxy-authorization, and set-cookie values are always redacted. Request and
 response bodies are retained only in memory by the local UI bridge, limited to
 128 KiB per side, and discarded when the live session ends. The Origin Trace
 title bar visibly changes to `Live content` while this mode is active.
+The content-capture label remains visible during connection failures. If the
+native broker disconnects while CDP capture continues, the shell shows
+`Network only`; Traffic reports both the broker failure and ongoing bounded
+network capture. Broker gaps, queue drops, and network-window evictions remain
+visible across either refresh path. A debugger failure retains recorded requests
+and explicitly reports that network capture is unavailable.
+Failed refreshes request a complete validated response on retry, so an unchanged
+ETag cannot leave the connection warning stuck after recovery.
+Short windows keep at least one request row visible when status warnings wrap.
 
 The live launcher disables Brave background networking, component updates, and
 sync for its isolated research profile. Browser diagnostics are retained in the

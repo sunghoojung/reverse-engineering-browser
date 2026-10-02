@@ -379,6 +379,18 @@ it with matching native events when their host, method, and monotonic timing
 agree. CDP body retrieval can still report unavailable content for streaming,
 evicted, cached, or protocol-internal responses rather than inventing bytes.
 
+Captured `text/html` responses also expose **Preview** beside **Raw body**.
+Preview reconstructs a bounded, presentation-only HTML tree inside an opaque
+sandboxed frame. It blocks scripts, navigation, submission, network resources,
+and external stylesheets; supported inline presentation styles survive.
+Short windows scroll the request ledger and inspector instead of collapsing
+the preview beneath its controls.
+Omitted images appear as text placeholders. Capture truncation and the
+1,000-node / 24-level rendering limits remain visible. Preview never fetches
+the original URL, changes captured bytes, or enables content capture. Body and
+Raw body continue to show inert source text. See
+[HTML Response Preview v1](../../docs/product/html-response-preview-v1.md).
+
 ## Deobfuscation engines
 
 Deobfuscation stays inside **Sources**. Select a JavaScript source and use the

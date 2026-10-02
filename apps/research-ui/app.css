@@ -2505,6 +2505,10 @@
       .no-wrap .exchange-code-line code { white-space: pre; overflow-wrap: normal; }
       .no-wrap .exchange-value { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .exchange-limit { color: var(--amber); font: 11px/1.5 var(--sans); }
+      .exchange-content.showing-html-preview { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+      .exchange-pane:has(.showing-html-preview) > .exchange-controls { display: none; }
+      .exchange-preview-notice { flex: 0 0 auto; margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--line); color: var(--muted); font: 11px/1.5 var(--sans); }
+      .exchange-html-preview { flex: 1 1 0; min-height: 0; width: 100%; border: 0; background: #fff; }
       .exchange-selection { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--line); background: var(--panel-2); max-height: 180px; overflow: auto; }
       .exchange-value-path { flex: 1 0 100%; overflow-wrap: anywhere; color: var(--accent); font: 10px var(--mono); }
       .exchange-selected-value { flex: 1 0 100%; margin: 0; max-height: 90px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--mono); }
@@ -2896,7 +2900,10 @@
 .hook-hit-link { width: 100%; border: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
 .hook-hit-link:hover, .hook-hit-link:focus-visible { background: var(--accent-soft); }
 #screen-traffic:not([hidden]) { display: grid; grid-template-rows: auto minmax(0, 1fr); }
-#screen-traffic .traffic-grid { height: auto; min-height: 0; }
+#screen-traffic .traffic-grid { grid-row: 2; height: auto; min-height: 0; }
+@media (max-height: 650px) {
+  #screen-traffic .traffic-grid:has(.exchange-html-preview) { grid-template-rows: 240px minmax(320px, 1fr); overflow-y: auto; }
+}
 .runtime-hook-traffic { position: relative; display: flex; flex-wrap: wrap; gap: 5px 10px; align-items: center; max-height: 145px; padding: 9px 72px 9px 12px; overflow: auto; border-bottom: 1px solid var(--line); background: var(--accent-soft); }
 .runtime-hook-traffic[hidden] { display: none; }
 .runtime-hook-traffic-heading, .runtime-hook-traffic-title { flex: 1 0 100%; min-width: 0; overflow-wrap: anywhere; }

@@ -33,6 +33,69 @@
         elements.networkNotice.hidden = false;
       }
 
+      function networkContentCaptureEnabled() {
+        return state.sessionMode === 'live' && state.debuggerSession?.network?.capture_enabled === true;
+      }
+
+      function networkContentCaptureActive() {
+        return networkContentCaptureEnabled() && !state.debuggerRefreshFailed &&
+          ['running', 'paused'].includes(state.debuggerSession?.state);
+      }
+
+      // Both refresh paths project the same status so neither can erase the other's gaps.
+      function renderNetworkNotice() {
+        const contentCapture = networkContentCaptureEnabled();
+        const active = networkContentCaptureActive();
+        const gapCount = countSequenceGaps(state.events);
+        const reportedDrops = countReportedQueueDrops(state.events);
+        const messages = [];
+        let kind = 'empty';
+        if (state.eventFailureKind === 'malformed') {
+          kind = 'malformed';
+          messages.push('The broker returned malformed event data.');
+        } else if (state.broker === 'unavailable') {
+          kind = 'disconnected';
+          messages.push('The local evidence broker is disconnected.');
+        }
+        if (state.eventsLimited) {
+          if (kind === 'empty') kind = 'gap';
+          messages.push('Showing the last 5,000 evidence events; older events remain recorded on disk.');
+        }
+        if (gapCount > 0n) {
+          if (kind === 'empty') kind = 'gap';
+          messages.push(`${gapCount} captured event ${gapCount === 1n ? 'ID is' : 'IDs are'} missing. Native evidence may be incomplete.`);
+        }
+        if (reportedDrops > 0n) {
+          if (kind === 'empty') kind = 'gap';
+          messages.push(`The queue reports ${reportedDrops} dropped ${reportedDrops === 1n ? 'event' : 'events'}${gapCount > 0n ? '; counts may overlap sequence gaps' : '; no sequence jump is visible in this window'}.`);
+        }
+        if (contentCapture) {
+          if (active) {
+            if (kind === 'empty') kind = 'active';
+            messages.push('Recording live requests and responses · sensitive headers redacted · 128 KiB body limit');
+          } else {
+            if (kind !== 'malformed') kind = 'disconnected';
+            messages.push(state.debuggerRefreshFailed ? 'The live debugger is disconnected.'
+              : state.debuggerSession?.state === 'crashed' ? 'The captured browser target crashed.'
+                : 'Network capture is waiting for an attached browser target.');
+            messages.push(state.requests.length ? 'The last recorded requests remain visible.' : 'No captured network requests are available.');
+          }
+          const dropped = state.debuggerSession.network.dropped;
+          if (dropped) {
+            if (kind === 'active') kind = 'gap';
+            messages.push(`${dropped} older requests evicted from the 1,000-request window.`);
+          }
+        } else if (kind === 'malformed' || kind === 'disconnected') {
+          messages.push(state.events.length ? 'The last valid evidence remains visible.' : 'No live broker evidence is available.');
+        } else if (!messages.length) {
+          if (state.sessionMode === 'live' && !state.events.length) messages.push('No live requests yet. Start a capture in the attached browser.');
+          else if (state.sessionMode === 'demo') messages.push('Developer evidence loaded. It does not represent a live capture.');
+          else if (state.sessionMode === 'idle') messages.push('No evidence is bundled. Start a live capture to populate the workspace.');
+        }
+        if (messages.length) setNetworkNotice(kind, messages.join(' '));
+        else elements.networkNotice.hidden = true;
+      }
+
       function textElement(tag, className, value) {
         const element = document.createElement(tag);
         if (className) element.className = className;
@@ -611,7 +674,7 @@
 
       function renderLiveBrowserTabCount() {
         const count = state.debuggerSession?.live_tab_count;
-        const available = state.sessionMode === 'live' && !state.debuggerError &&
+        const available = state.sessionMode === 'live' && !state.debuggerRefreshFailed &&
           Number.isInteger(count) && count >= 0;
         elements.signalLiveTabs.textContent = available
           ? `${count} open ${count === 1 ? 'tab' : 'tabs'}`
@@ -822,11 +885,13 @@
           (!state.artifactReceiverConnected || state.artifactReceiverError);
         const offline = brokerOffline;
         const connecting = live && state.broker === 'connecting';
-        const contentCapture = live && state.debuggerSession?.network?.capture_enabled;
-        const modeLabel = live ? (offline ? 'Live offline' : artifactOffline ? 'Live degraded'
-          : contentCapture ? 'Live content' : 'Live session')
+        const contentCapture = networkContentCaptureEnabled();
+        const networkActive = networkContentCaptureActive();
+        const modeLabel = live ? (contentCapture ? 'Live content' : offline ? 'Live offline'
+          : artifactOffline ? 'Live degraded' : 'Live session')
           : idle ? 'Ready' : preview ? 'Preview' : 'Demo evidence';
-        const captureLabel = connecting ? 'Connecting' : offline ? 'Offline' : artifactOffline ? 'Artifacts offline'
+        const captureLabel = networkActive && (offline || connecting) ? 'Network only'
+          : connecting ? 'Connecting' : offline ? 'Offline' : artifactOffline ? 'Artifacts offline'
           : live ? 'Capturing' : idle ? 'No session' : preview ? 'Preview' : 'Demo';
         elements.sessionMode.textContent = modeLabel;
         elements.sessionMode.dataset.kind = state.sessionMode;
@@ -850,12 +915,17 @@
             : live ? 'broker connected' : idle ? 'no capture session'
               : preview ? 'standalone preview' : 'demo evidence loaded';
         elements.sampleStatus.textContent = live
-          ? offline
-            ? state.events.length ? 'last live evidence retained' : 'no live evidence'
+          ? networkActive && (offline || connecting) ? 'network capture only'
+            : offline
+            ? state.requests.length ? 'last requests retained' : state.events.length ? 'last live evidence retained' : 'no live evidence'
             : artifactOffline ? 'artifact capture offline'
             : 'sample rows hidden'
           : idle || preview ? 'no bundled evidence' : 'developer evidence';
-        if (!state.lastUpdatedLabel) {
+        if (networkActive && (offline || connecting)) {
+          elements.updated.textContent = 'network capture active';
+        } else if (contentCapture && offline && state.requests.length) {
+          elements.updated.textContent = 'last recorded requests retained';
+        } else if (!state.lastUpdatedLabel) {
           elements.updated.textContent = connecting ? 'waiting for evidence'
             : offline ? state.events.length ? 'last valid evidence retained' : 'no live evidence'
               : artifactOffline ? 'artifact capture unavailable'
@@ -7828,6 +7898,7 @@
           applyMemoryOriginTrace(body.memory_origin_trace);
           state.debuggerEtag = response.headers.get('ETag');
           state.debuggerError = null;
+          state.debuggerRefreshFailed = false;
           renderLiveBrowserTabCount();
           state.staleScriptIds ??= new Set();
           if ((previousSession?.target?.id ?? '') !== (body.target?.id ?? '')) {
@@ -7868,13 +7939,10 @@
           renderDebugger();
           const selectedTrafficRequest = state.requests.find(request => request.id === state.selectedRequestId) ?? null;
           if (!selectedTrafficRequest && state.selectedRequestId !== null) resetRequestSelection();
+          renderShellStatus();
+          renderNetworkNotice();
           if (!document.querySelector('#screen-traffic').hidden) {
-            renderShellStatus();
             renderRequests();
-            if (body.network?.capture_enabled && state.broker === 'connected') {
-              const dropped = body.network.dropped;
-              setNetworkNotice(dropped ? 'gap' : 'active', `Recording live requests and responses · sensitive headers redacted · 128 KiB body limit${dropped ? ` · ${dropped} older requests evicted from the 1,000-request window` : ''}`);
-            }
             updateSelectionSummary(selectedTrafficRequest);
             renderInspector();
           }
@@ -7901,9 +7969,12 @@
           }
         } catch (error) {
           state.debuggerError = error instanceof TypeError ? 'The debugger returned malformed state. The last valid pause is retained.' : error.message;
-          if (!document.querySelector('#screen-traffic').hidden && state.debuggerSession?.network?.capture_enabled) {
-            setNetworkNotice('disconnected', 'The live debugger is disconnected. The last recorded requests remain visible.');
-          }
+          // Rejected actions and clipboard errors do not describe capture health.
+          state.debuggerRefreshFailed = true;
+          // A 304 cannot clear a failed refresh; recovery needs a validated body.
+          state.debuggerEtag = null;
+          renderShellStatus();
+          renderNetworkNotice();
           renderLiveBrowserTabCount();
           renderDebugger();
           renderMemory();
@@ -8113,28 +8184,7 @@
           const reportedDrops = countReportedQueueDrops(state.events);
           elements.gaps.textContent = `${gapCount} missing event ${gapCount === 1n ? 'ID' : 'IDs'}` +
             (reportedDrops > 0n ? ` · ${reportedDrops} reported queue ${reportedDrops === 1n ? 'drop' : 'drops'} (may overlap)` : '');
-          if (!brokerConnected) {
-            setNetworkNotice('disconnected', `The local evidence broker is disconnected. ${state.events.length > 0 ? 'The last valid evidence remains visible.' : 'No live requests are available.'}`);
-          } else if (state.eventsLimited) {
-            setNetworkNotice('gap', `Showing the last 5,000 evidence events; older request rows remain recorded on disk.${gapCount > 0n ? ` ${gapCount} sequence ${gapCount === 1n ? 'gap is' : 'gaps are'} also recorded.` : ''}`);
-          } else if (gapCount > 0n) {
-            setNetworkNotice('gap', `${gapCount} captured event ${gapCount === 1n ? 'ID is' : 'IDs are'} missing. Request rows may be incomplete.${reportedDrops > 0n ? ` The queue also reports ${reportedDrops} drops; these counts may overlap.` : ''}`);
-          } else if (reportedDrops > 0n) {
-            setNetworkNotice('gap', `The queue reports ${reportedDrops} dropped ${reportedDrops === 1n ? 'event' : 'events'}. No sequence jump is visible in the current event window.`);
-          } else if (state.debuggerSession?.network?.capture_enabled && !state.debuggerError) {
-            const dropped = state.debuggerSession.network.dropped;
-            setNetworkNotice(dropped ? 'gap' : 'active', `Recording live requests and responses · sensitive headers redacted · 128 KiB body limit${dropped ? ` · ${dropped} older requests evicted from the 1,000-request window` : ''}`);
-          } else if (state.debuggerSession?.network?.capture_enabled && state.debuggerError) {
-            setNetworkNotice('disconnected', 'The live debugger is disconnected. The last recorded requests remain visible.');
-          } else if (state.sessionMode === 'live' && state.events.length === 0) {
-            setNetworkNotice('empty', 'No live requests yet. Start a capture in the attached browser.');
-          } else if (state.sessionMode === 'demo') {
-            setNetworkNotice('empty', 'Developer evidence loaded. It does not represent a live capture.');
-          } else if (state.sessionMode === 'idle') {
-            setNetworkNotice('empty', 'No evidence is bundled. Start a live capture to populate the workspace.');
-          } else {
-            elements.networkNotice.hidden = true;
-          }
+          renderNetworkNotice();
           renderRequests();
           renderInspector();
           renderEvidence();
@@ -8145,17 +8195,13 @@
           renderVmLab();
         } catch (error) {
           state.broker = 'unavailable';
+          state.eventEtag = null;
           const malformed = error instanceof TypeError && error.message === 'Malformed broker response';
           state.eventFailureKind = malformed ? 'malformed' : 'disconnected';
           const retainedEvidence = state.events.length > 0;
           state.lastUpdatedLabel = retainedEvidence ? 'last valid evidence retained' : 'no live evidence';
           renderShellStatus();
-          setNetworkNotice(
-            malformed ? 'malformed' : 'disconnected',
-            malformed
-              ? `The broker returned malformed event data. ${retainedEvidence ? 'The last valid evidence remains visible.' : 'No live requests are available.'}`
-              : `The local evidence broker is disconnected. ${retainedEvidence ? 'The last valid evidence remains visible.' : 'No live requests are available.'}`
-          );
+          renderNetworkNotice();
           renderRequests();
           renderInspector();
           renderEvidence();

@@ -85,6 +85,7 @@ privacy, and implementation limits are documented in
 ## Network Workspace
 
 - Request and response capture, filtering, search, highlighting, and inspection.
+- [Bounded retained-content search](./traffic-content-search-v1.md) with match locations and explicit partial coverage.
 - Optional size-limited body capture with sensitive fields redacted by default.
 - Request and response editing, blocking, forwarding, dropping, and replacement.
 - [Isolated HTML response preview](./html-response-preview-v1.md) over retained content.

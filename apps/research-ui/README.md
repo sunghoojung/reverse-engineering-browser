@@ -144,6 +144,17 @@ search to filter by resource type. Escape closes an open navigation or filter
 disclosure and restores focus. Request and response content retain their own
 tabs and scroll areas.
 
+Choose **Include headers and bodies** beside Traffic search to find a literal,
+case-insensitive value in retained request or response text. Each result names
+its first matching location; selecting a content match opens that side's Header
+or Raw body view with Find filled in. URL, method, and status remain searchable.
+Tab, domain, and resource filters scope the search before content is inspected.
+Search never enables capture or fetches missing bodies. Binary and uncaptured
+bodies are excluded, and retained prefixes and redacted headers limit coverage.
+Large captures use an explicit 8-million UTF-16-unit search budget, newest
+requests first. A partial-search notice reports inspected and omitted coverage
+and suggests narrowing filters. See the [content search design](../../docs/product/traffic-content-search-v1.md).
+
 The dark theme uses [Rosé Pine Moon](https://rosepinetheme.com/palette/), with
 slightly brighter secondary labels for legibility. Appearance switches to the
 existing light theme.

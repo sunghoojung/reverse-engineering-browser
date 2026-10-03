@@ -1245,16 +1245,27 @@
         document.querySelector('#request-filter-label').textContent = state.requestType === 'all' ? 'All types' : typeLabel;
         renderRequestScopes();
         const needle = elements.requestFilter.value.trim().toLowerCase();
-        const visible = state.requests.filter(request =>
+        const includeContent = elements.requestSearchScope.value === 'content';
+        const scoped = state.requests.filter(request =>
           (state.requestTabId === 'all' ||
             (request.tabId && request.tabId !== '0' ? request.tabId : 'unattributed') === state.requestTabId) &&
           (state.requestDomain === 'all' || requestDomain(request) === state.requestDomain) &&
-          (state.requestType === 'all' || request.type === state.requestType) &&
-          (!needle || `${request.method} ${request.path} ${request.status}`.toLowerCase().includes(needle))
+          (state.requestType === 'all' || request.type === state.requestType)
         );
-        const filterKey = JSON.stringify([state.requestTabId, state.requestDomain, state.requestType, needle]);
-        if (filterKey !== state.trafficFilterKey) state.trafficPendingCount = 0;
+        const search = trafficSearchRequests(scoped, needle, includeContent);
+        state.trafficSearchMatches = search.matches;
+        const visible = scoped.filter(request => search.matches.has(request.id));
+        const filterKey = JSON.stringify([state.requestTabId, state.requestDomain, state.requestType, needle, includeContent]);
+        const filterChanged = filterKey !== state.trafficFilterKey;
+        if (filterChanged) state.trafficPendingCount = 0;
         state.trafficFilterKey = filterKey;
+        elements.requestSearchStatus.hidden = !includeContent;
+        elements.requestSearchStatus.dataset.kind = search.omitted ? 'partial' : '';
+        const searchMessage = !needle ? 'Search retained headers and text bodies. Content capture is unchanged.'
+          : `${visible.length} matching ${visible.length === 1 ? 'request' : 'requests'} · ` +
+            (search.omitted ? `Partial content search: ${search.inspected} of ${scoped.length} requests inspected, newest first. Narrow tab, domain, or type to search the rest. ` : '') +
+            'Retained text only; truncated prefixes, redacted headers, and uncaptured or binary bodies limit coverage.';
+        if (elements.requestSearchStatus.textContent !== searchMessage) elements.requestSearchStatus.textContent = searchMessage;
         const selectedIsVisible = visible.some(request => request.id === state.selectedRequestId);
         const selectionCleared = state.selectedRequestId !== null && !selectedIsVisible;
         if (selectionCleared) resetRequestSelection();
@@ -1272,7 +1283,8 @@
           empty.textContent = state.requests.length === 0
             ? state.sessionMode === 'live' ? 'No live requests yet. Start a capture in the attached browser.'
               : state.sessionMode === 'demo' ? 'No developer evidence is available.' : 'No capture session is running.'
-            : 'No requests match the current filters. Clear the filter or choose another type.';
+            : search.omitted ? 'No matches in inspected content. Narrow the filters to search the omitted requests.'
+              : 'No requests match the current filters. Clear the filter or choose another type.';
           elements.requestRows.replaceChildren(empty);
           state.trafficPendingCount = 0;
           elements.requestLatest.hidden = true;
@@ -1287,9 +1299,10 @@
         const previousRows = new Map([...elements.requestRows.querySelectorAll('.request-row')]
           .map(row => [row.dataset.requestId, row]));
         const rows = visible.map((request, index) => {
+          const match = includeContent && needle ? search.matches.get(request.id) : null;
           const renderKey = JSON.stringify([request.path, request.method, request.status, request.time,
             request.type, request.origin, request.hostOnly, request.failed, request.id === state.selectedRequestId,
-            !selectedIsVisible && index === 0]);
+            !selectedIsVisible && index === 0, match?.label]);
           const previous = previousRows.get(String(request.id));
           if (previous?.dataset.renderKey === renderKey) return previous;
           const row = document.createElement('button');
@@ -1304,7 +1317,7 @@
           if (newIds.has(request.id)) row.classList.add('is-new');
           const origin = requestOriginLabel(request.origin);
           const targetDescription = request.hostOnly ? 'host-only metadata' : 'request target';
-          row.setAttribute('aria-label', `${origin} ${targetDescription}: ${request.method} ${request.path}, ${request.status}, ${request.time}, request ${request.id}`);
+          row.setAttribute('aria-label', `${origin} ${targetDescription}: ${request.method} ${request.path}, ${request.status}, ${request.time}, request ${request.id}${match ? ', match in ' + match.label : ''}`);
           row.tabIndex = request.id === state.selectedRequestId || !selectedIsVisible && index === 0 ? 0 : -1;
 
           const target = trafficTargetParts(request);
@@ -1314,6 +1327,10 @@
             : `${origin} ${request.method} ${request.path} · network · ${request.operation ?? 'sample'} · ${request.id}`;
           const resource = document.createElement('span'); resource.className = 'request-resource'; resource.textContent = target.name;
           const host = document.createElement('span'); host.className = 'request-host'; host.textContent = target.host || (request.origin === 'demo' ? 'Developer evidence' : '');
+          if (match) {
+            const location = document.createElement('span'); location.className = 'request-match'; location.textContent = ` · ${match.label}`;
+            host.append(location); host.title = host.textContent;
+          }
           name.append(resource, host);
           const method = document.createElement('span'); method.className = 'request-method'; method.textContent = request.method;
           const status = document.createElement('span');
@@ -1357,7 +1374,7 @@
           updateSelectionSummary(null);
           renderInspector();
           renderEvidence();
-        }
+        } else if (filterChanged && selectedIsVisible) renderInspector();
       }
 
       function updateSelectionSummary(request) {
@@ -1385,6 +1402,7 @@
       }
 
       function selectRequest(id) {
+        if (elements.requestSearchScope.value === 'content' && state.trafficSearchMatches?.get(id)?.side) state.inspectorTab = 'exchange';
         const request = state.requests.find(candidate => candidate.id === id);
         if (!request) return;
         state.selectedRequestId = id;
@@ -1622,7 +1640,8 @@
             showScreen('tools');
             setToolsTab('decoder');
             requestAnimationFrame(() => toolsElements.input.focus({preventScroll: true}));
-          }, openFieldProvenance);
+          }, openFieldProvenance, elements.requestSearchScope.value === 'content' && state.trafficSearchMatches?.get(request?.id)?.side
+            ? {...state.trafficSearchMatches.get(request.id), query: elements.requestFilter.value.trim()} : null);
           return;
         }
         elements.requestInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
@@ -8404,6 +8423,7 @@
         elements.backtraceSteps.querySelector('.trace-row')?.focus();
       });
       elements.requestFilter.addEventListener('input', renderRequests);
+      elements.requestSearchScope.addEventListener('change', renderRequests);
       elements.requestRows.addEventListener('scroll', () => {
         if (elements.requestRows.scrollHeight - elements.requestRows.scrollTop - elements.requestRows.clientHeight < 40) {
           state.trafficPendingCount = 0;

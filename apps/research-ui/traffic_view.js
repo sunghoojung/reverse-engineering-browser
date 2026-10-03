@@ -119,6 +119,52 @@ function trafficExchange(request) {
   };
 }
 
+// Bound transient case folding to 8 million UTF-16 units per search. Search the
+// newest scoped records first and report omitted records instead of false negatives.
+const TRAFFIC_SEARCH_LIMIT = 8 * 1024 * 1024;
+function trafficSearchRequests(requests, needle, includeContent) {
+  const matches = new Map();
+  let remaining = TRAFFIC_SEARCH_LIMIT;
+  let inspected = 0;
+  let omitted = 0;
+  for (let index = requests.length - 1; index >= 0; index -= 1) {
+    const request = requests[index];
+    if (!needle || `${request.method} ${request.path} ${request.status}`.toLowerCase().includes(needle)) {
+      matches.set(request.id, {label: 'URL / method / status'});
+    }
+    if (!needle || !includeContent) continue;
+    const exchange = trafficExchange(request);
+    const records = ['Request', 'Response'].map(side => {
+      const record = exchange[side.toLowerCase()];
+      const bytes = record?.bytes instanceof Uint8Array;
+      const mime = (record?.mime ?? '').split(';')[0].trim().toLowerCase();
+      const body = record?.state === 'available' && (!bytes || /^text\/|json|javascript|xml/.test(mime));
+      return {side, record, bytes, body};
+    });
+    // Preflight before decoding bytes or joining headers, including records we
+    // omit. The search budget bounds work as well as temporary string storage.
+    const size = records.reduce((total, {record, bytes, body}) => total +
+      (record?.headers ?? []).reduce((sum, [name, value]) => sum + name.length + value.length + 1, 0) +
+      (body ? bytes ? Math.min(record.bytes.length, TRAFFIC_BODY_LIMIT) : (record.text ?? '').length : 0), 0);
+    if (size > remaining) { omitted += 1; continue; }
+    remaining -= size;
+    inspected += 1;
+    if (matches.has(request.id)) continue;
+    const fields = [];
+    for (const {side, record, bytes, body} of records) {
+      for (const [name, value] of record?.headers ?? []) {
+        fields.push({side, mode: 'headers', label: `${side} header`, text: `${name} ${value}`});
+      }
+      if (!body) continue;
+      const text = bytes ? new TextDecoder().decode(record.bytes.subarray(0, TRAFFIC_BODY_LIMIT)) : record.text ?? '';
+      fields.push({side, mode: 'raw', label: `${side} body`, text});
+    }
+    const field = fields.find(candidate => candidate.text.toLowerCase().includes(needle));
+    if (field) matches.set(request.id, {side: field.side, mode: field.mode, label: field.label});
+  }
+  return {matches, inspected, omitted};
+}
+
 // Format lexical tokens so large numbers, duplicate keys, and escape sequences survive.
 function trafficPrettyJson(text) {
   const tokens = text.match(/"(?:\\.|[^"\\])*"|[^\s{}\[\],:]+|[{}\[\],:]/g) || [];
@@ -191,7 +237,7 @@ function trafficOriginLabel(request) {
         : request?.origin === 'live' ? 'Live metadata' : 'Local evidence';
 }
 
-function createTrafficPane(side, record, request, onDecode, onTrace) {
+function createTrafficPane(side, record, request, onDecode, onTrace, searchMatch = null) {
   const pane = trafficNode('section', 'exchange-pane');
   pane.dataset.origin = request?.origin ?? 'none';
   pane.setAttribute('aria-label', `${side} content`);
@@ -203,7 +249,7 @@ function createTrafficPane(side, record, request, onDecode, onTrace) {
   tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', `${side} view`);
   const model = trafficBodyModel(record, side);
   const htmlResponse = side === 'Response' && record?.mime?.split(';')[0].trim().toLowerCase() === 'text/html';
-  const mode = {value: 'formatted'};
+  const mode = {value: searchMatch?.side === side ? searchMatch.mode : 'formatted'};
   const modes = [['headers', 'Header'], ...(side === 'Request' ? [['query', 'Query']] : []), ['formatted', 'Body'], ['raw', 'Raw body'], ...(htmlResponse ? [['preview', 'Preview']] : [])];
   const tabButtons = modes.map(([value, label]) => {
     const button = trafficNode('button', 'exchange-tab', label); button.type = 'button';
@@ -233,6 +279,7 @@ function createTrafficPane(side, record, request, onDecode, onTrace) {
   tree.addEventListener('click', () => { treeMode = !treeMode; tree.setAttribute('aria-pressed', String(treeMode)); renderedMode = undefined; options.open = false; mode.value = 'formatted'; render(); });
   const search = trafficNode('input', 'exchange-search');
   search.type = 'search'; search.placeholder = 'Find in body'; search.setAttribute('aria-label', `Find in ${side.toLowerCase()}`);
+  if (searchMatch?.side === side) { search.value = searchMatch.query; controls.hidden = false; }
   const wrap = trafficNode('button', 'exchange-button', 'Wrap');
   wrap.type = 'button'; wrap.setAttribute('aria-pressed', 'true');
   const copy = trafficNode('button', 'exchange-button', 'Copy body'); copy.type = 'button';
@@ -399,11 +446,11 @@ function createTrafficPane(side, record, request, onDecode, onTrace) {
   return pane;
 }
 
-function renderTrafficExchange(container, request, onDecode, onTrace) {
+function renderTrafficExchange(container, request, onDecode, onTrace, find = null) {
   const key = `${request?.origin}:${request?.id}:${request?.method}:${request?.status}:` +
     `${request?.exchange?.request?.state}:${request?.exchange?.request?.text?.length ?? request?.exchange?.request?.bytes?.length ?? 0}:` +
     `${request?.exchange?.response?.state}:${request?.exchange?.response?.mime}:${request?.exchange?.response?.truncated}:` +
-    `${request?.exchange?.response?.text?.length ?? request?.exchange?.response?.bytes?.length ?? 0}`;
+    `${request?.exchange?.response?.text?.length ?? request?.exchange?.response?.bytes?.length ?? 0}:` + JSON.stringify(find);
   if (container.dataset.selection === key) return;
   container.dataset.selection = key;
   if (!request) {
@@ -414,15 +461,15 @@ function renderTrafficExchange(container, request, onDecode, onTrace) {
   const exchange = trafficExchange(request);
   const switcher = trafficNode('div', 'exchange-mobile-switch');
   switcher.setAttribute('role', 'group'); switcher.setAttribute('aria-label', 'Visible content pane');
-  container.dataset.side = 'request';
+  container.dataset.side = find?.side?.toLowerCase() ?? 'request';
   for (const side of ['Request', 'Response']) {
     const button = trafficNode('button', 'exchange-button', side); button.type = 'button';
-    button.setAttribute('aria-pressed', String(side === 'Request'));
+    button.setAttribute('aria-pressed', String(side.toLowerCase() === container.dataset.side));
     button.addEventListener('click', () => {
       container.dataset.side = side.toLowerCase();
       switcher.querySelectorAll('button').forEach(node => node.setAttribute('aria-pressed', String(node === button)));
     });
     switcher.append(button);
   }
-  container.replaceChildren(switcher, createTrafficPane('Request', exchange.request, request, onDecode, onTrace), createTrafficPane('Response', exchange.response, request, onDecode, onTrace));
+  container.replaceChildren(switcher, createTrafficPane('Request', exchange.request, request, onDecode, onTrace, find), createTrafficPane('Response', exchange.response, request, onDecode, onTrace, find));
 }

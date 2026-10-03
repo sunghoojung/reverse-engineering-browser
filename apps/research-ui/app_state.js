@@ -109,6 +109,7 @@
         debuggerRefreshTimer: null,
         debuggerActionPending: false,
         debuggerError: null,
+        debuggerRefreshFailed: false,
         debuggerRenderKeys: {},
         renderedConsoleSignature: null,
         selectedCallFrameId: null,

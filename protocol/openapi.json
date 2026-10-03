@@ -7061,8 +7061,7 @@
             "additionalProperties": true
           },
           "repeater": {
-            "type": "object",
-            "additionalProperties": true
+            "$ref": "#/components/schemas/RepeaterState"
           },
           "settings": {
             "type": "object",
@@ -7520,9 +7519,7 @@
             "description": "Nested state is only partially modeled; authoritative normalization/state helpers live in apps/origin-trace-backend/src/debugger/."
           },
           "repeater": {
-            "type": "object",
-            "additionalProperties": true,
-            "description": "Nested state is only partially modeled; authoritative normalization/state helpers live in apps/origin-trace-backend/src/debugger/."
+            "$ref": "#/components/schemas/RepeaterState"
           },
           "generation": {
             "type": "integer"
@@ -7747,9 +7744,7 @@
             "type": "boolean"
           },
           "repeater": {
-            "type": "object",
-            "additionalProperties": true,
-            "description": "Nested state is only partially modeled; authoritative normalization/state helpers live in apps/origin-trace-backend/src/debugger/."
+            "$ref": "#/components/schemas/RepeaterState"
           },
           "generation": {
             "type": "integer"
@@ -8312,6 +8307,152 @@
           "gaps"
         ],
         "description": "Optional v1 evidence projection. Request sites are observed execution context; matching primitive string hashes within one target and five seconds are correlated candidates, never proven value flow."
+      },
+      "RepeaterBodyDiffLine": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "enum": [
+              "context",
+              "added",
+              "removed"
+            ]
+          },
+          "baseline_line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 1000
+          },
+          "current_line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 1000
+          },
+          "text": {
+            "type": "string",
+            "x-max-utf8-bytes": 4096
+          },
+          "ending": {
+            "enum": [
+              "lf",
+              "crlf",
+              "none"
+            ]
+          },
+          "text_truncated": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "baseline_line",
+          "current_line",
+          "text",
+          "ending",
+          "text_truncated"
+        ]
+      },
+      "RepeaterBodyDiff": {
+        "type": "object",
+        "properties": {
+          "protocol_version": {
+            "type": "integer",
+            "const": 1
+          },
+          "baseline_lines": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "current_lines": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "baseline_inspected": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "current_inspected": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "added": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000
+          },
+          "removed": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000
+          },
+          "partial": {
+            "type": "boolean"
+          },
+          "limits_reached": {
+            "type": "array",
+            "maxItems": 4,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "capture_truncated",
+                "line_limit",
+                "output_limit",
+                "line_text_limit"
+              ]
+            }
+          },
+          "lines": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "$ref": "#/components/schemas/RepeaterBodyDiffLine"
+            }
+          }
+        },
+        "required": [
+          "protocol_version",
+          "baseline_lines",
+          "current_lines",
+          "baseline_inspected",
+          "current_inspected",
+          "added",
+          "removed",
+          "partial",
+          "limits_reached",
+          "lines"
+        ],
+        "additionalProperties": false,
+        "description": "Optional v1 comparison extension. Deterministic line alignment of retained UTF-8 text, capped at 1000 input lines per body, 200 output rows, 32768 total UTF-8 text bytes and 4096 bytes per row. Exact equality bypasses alignment. Line totals cover retained bodies; change counts cover inspected prefixes, not omitted capture. Source terminators participate in equality; text excludes LF/CRLF. Source numbers increase per side; context has both, added has null baseline, removed has null current. partial equals a nonempty limits_reached. Rows include two nearby edit records of context; line-number gaps identify omitted context. Raw bodies and digests remain unchanged."
+      },
+      "RepeaterState": {
+        "type": "object",
+        "properties": {
+          "comparison": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "body_diff": {
+                "$ref": "#/components/schemas/RepeaterBodyDiff"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true,
+        "description": "Partial model of ephemeral Repeater state. body_diff is optional for compatibility with older backends."
       }
     }
   },

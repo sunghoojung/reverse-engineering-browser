@@ -116,7 +116,82 @@ impl Debugger {
                 return;
             }
             let response=result.unwrap_or_else(|e| {let cancelled=s["repeater"]["active_execution"]["cancel_requested"]==true;json!({"protocol_version":1,"ok":false,"status":0,"status_text":"","url":"","headers":[],"headers_truncated":false,"body":"","body_truncated":false,"error":if cancelled {"Request cancelled".to_owned()} else {validation::truncate(&e.message,512)},"duration_ms":clock.elapsed().as_millis().min(35000) as u64,"cancelled":cancelled,"timed_out":false,"body_sha256":hex::encode(Sha256::digest(b""))})});
-            debugger.update(|s| {let state=if response["ok"]==true {"complete"} else if response["cancelled"]==true {"cancelled"} else if response["timed_out"]==true {"timed_out"} else {"error"};let mut entry=json!({"id":execution,"started_at_ms":started,"completed_at_ms":validation::now_ms().max(started),"state":state,"collection_request_id":template["collection_request_id"],"variable_names":names,"request":template,"resolved_request":resolved,"response":response});let bytes=serde_json::to_vec(&entry).unwrap().len();entry["stored_bytes"]=json!(bytes);let r=&mut s["repeater"];let mut retained=r["history_bytes"].as_u64().unwrap() as usize;let mut evictions=0;let history=r["history"].as_array_mut().unwrap();while !history.is_empty()&&(history.len()>=24||retained+bytes>524288) {let old=history.remove(0);retained=retained.saturating_sub(old["stored_bytes"].as_u64().unwrap() as usize);evictions+=1;}history.push(entry);retained+=bytes;let successful=history.iter().filter(|e|e["response"]["ok"]==true).collect::<Vec<_>>();let comparison=if successful.len()>=2 {Some(requests::compare(successful[successful.len()-2],successful[successful.len()-1]))} else {None};let ids=history.iter().map(|e|e["id"].clone()).collect::<Vec<_>>();r["history_bytes"]=json!(retained);r["history_evictions"]=json!(r["history_evictions"].as_u64().unwrap()+evictions);if let Some(c)=comparison {r["comparison"]=c;} else if !r["comparison"].is_null()&&(!ids.contains(&r["comparison"]["baseline_id"])||!ids.contains(&r["comparison"]["current_id"])) {r["comparison"]=Value::Null;}r["active_execution"]=Value::Null;r["state"]=json!("ready");r["message"]=json!(if response["ok"]==true {format!("Repeater request completed with status {}.",response["status"])} else if response["cancelled"]==true {"Repeater request was cancelled.".into()} else if response["timed_out"]==true {"Repeater request reached its timeout.".into()} else {format!("Repeater request failed: {}",response["error"])});});
+            let state = if response["ok"] == true {
+                "complete"
+            } else if response["cancelled"] == true {
+                "cancelled"
+            } else if response["timed_out"] == true {
+                "timed_out"
+            } else {
+                "error"
+            };
+            let mut entry = json!({"id":execution,"started_at_ms":started,"completed_at_ms":validation::now_ms().max(started),"state":state,"collection_request_id":template["collection_request_id"],"variable_names":names,"request":template,"resolved_request":resolved,"response":response});
+            let bytes = serde_json::to_vec(&entry).unwrap().len();
+            entry["stored_bytes"] = json!(bytes);
+            // Alignment reads immutable snapshots outside the shared state lock.
+            let mut successful = s["repeater"]["history"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| e["response"]["ok"] == true)
+                .collect::<Vec<_>>();
+            if response["ok"] == true {
+                successful.push(&entry);
+            }
+            let comparison = (successful.len() >= 2).then(|| {
+                requests::compare(
+                    successful[successful.len() - 2],
+                    successful[successful.len() - 1],
+                )
+            });
+            debugger.update(|s| {
+                // A detach or disposal may have happened while alignment ran.
+                if s["repeater"]["session_id"] != session
+                    || s["repeater"]["active_execution"]["execution_id"] != execution
+                {
+                    return;
+                }
+                let r = &mut s["repeater"];
+                let mut retained = r["history_bytes"].as_u64().unwrap() as usize;
+                let mut evictions = 0;
+                let history = r["history"].as_array_mut().unwrap();
+                while !history.is_empty() && (history.len() >= 24 || retained + bytes > 524288) {
+                    let old = history.remove(0);
+                    retained =
+                        retained.saturating_sub(old["stored_bytes"].as_u64().unwrap() as usize);
+                    evictions += 1;
+                }
+                history.push(entry);
+                retained += bytes;
+                let ids = history.iter().map(|e| e["id"].clone()).collect::<Vec<_>>();
+                r["history_bytes"] = json!(retained);
+                r["history_evictions"] =
+                    json!(r["history_evictions"].as_u64().unwrap() + evictions);
+                if let Some(c) = comparison
+                    .filter(|c| ids.contains(&c["baseline_id"]) && ids.contains(&c["current_id"]))
+                {
+                    r["comparison"] = c;
+                } else if !r["comparison"].is_null()
+                    && (!ids.contains(&r["comparison"]["baseline_id"])
+                        || !ids.contains(&r["comparison"]["current_id"]))
+                {
+                    r["comparison"] = Value::Null;
+                }
+                r["active_execution"] = Value::Null;
+                r["state"] = json!("ready");
+                r["message"] = json!(if response["ok"] == true {
+                    format!(
+                        "Repeater request completed with status {}.",
+                        response["status"]
+                    )
+                } else if response["cancelled"] == true {
+                    "Repeater request was cancelled.".into()
+                } else if response["timed_out"] == true {
+                    "Repeater request reached its timeout.".into()
+                } else {
+                    format!("Repeater request failed: {}", response["error"])
+                });
+            });
         });
         Ok(self.group_response("repeater"))
     }
@@ -169,8 +244,8 @@ impl Debugger {
                 "Repeater comparison requires distinct identifiers",
             ));
         }
-        let s = self.snapshot();
-        let history = s["repeater"]["history"].as_array().unwrap();
+        let snapshot = self.snapshot();
+        let history = snapshot["repeater"]["history"].as_array().unwrap();
         let a = history
             .iter()
             .find(|e| e["id"] == a && e["response"]["ok"] == true)
@@ -179,7 +254,18 @@ impl Debugger {
             .iter()
             .find(|e| e["id"] == b && e["response"]["ok"] == true)
             .ok_or_else(|| Error::conflict("Current response is unavailable"))?;
-        self.update(|s| s["repeater"]["comparison"] = requests::compare(a, b));
+        let comparison = requests::compare(a, b);
+        self.update(|s| {
+            if s["repeater"]["session_id"] != snapshot["repeater"]["session_id"] {
+                return;
+            }
+            let history = s["repeater"]["history"].as_array().unwrap();
+            if history.iter().any(|e| e["id"] == comparison["baseline_id"])
+                && history.iter().any(|e| e["id"] == comparison["current_id"])
+            {
+                s["repeater"]["comparison"] = comparison;
+            }
+        });
         Ok(self.group_response("repeater"))
     }
     pub(super) fn clear_repeater(&self) -> Result<Value> {

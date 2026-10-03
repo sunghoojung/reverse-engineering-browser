@@ -564,6 +564,7 @@
         repeaterCompare: document.querySelector('#repeater-compare'),
         repeaterComparisonBadge: document.querySelector('#repeater-comparison-badge'),
         repeaterComparison: document.querySelector('#repeater-comparison'),
+        repeaterBodyDiff: document.querySelector('#repeater-body-diff'),
         collectionGeneration: document.querySelector('#collection-generation'),
         collectionNotice: document.querySelector('#collection-notice'),
         collectionCount: document.querySelector('#collection-count'),

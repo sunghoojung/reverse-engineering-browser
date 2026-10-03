@@ -1112,6 +1112,46 @@
           (entry.state === 'timed_out') === entry.response.timed_out;
       }
 
+      function isRepeaterBodyDiff(diff) {
+        const limits = ['capture_truncated', 'line_limit', 'output_limit', 'line_text_limit'];
+        if (!isPlainObject(diff) || diff.protocol_version !== 1 ||
+            !['baseline_lines', 'current_lines'].every(key => isSafeIntegerInRange(diff[key], 0, 65536)) ||
+            !['baseline_inspected', 'current_inspected'].every(key =>
+              isSafeIntegerInRange(diff[key], 0, diff[key.replace('_inspected', '_lines')])) ||
+            !isSafeIntegerInRange(diff.added, 0, Math.min(1000, diff.current_inspected)) ||
+            !isSafeIntegerInRange(diff.removed, 0, Math.min(1000, diff.baseline_inspected)) ||
+            typeof diff.partial !== 'boolean' || !Array.isArray(diff.limits_reached) ||
+            diff.limits_reached.length > limits.length ||
+            new Set(diff.limits_reached).size !== diff.limits_reached.length ||
+            !diff.limits_reached.every(limit => limits.includes(limit)) ||
+            diff.partial !== (diff.limits_reached.length > 0) ||
+            !Array.isArray(diff.lines) || diff.lines.length > 200) return false;
+        let baseline = 0, current = 0, bytes = 0, added = 0, removed = 0;
+        for (const line of diff.lines) {
+          if (!isPlainObject(line) || !['context', 'added', 'removed'].includes(line.kind) ||
+              typeof line.text !== 'string' || line.text.includes('\n') ||
+              typeof line.text_truncated !== 'boolean' || !['lf', 'crlf', 'none'].includes(line.ending)) return false;
+          const size = new TextEncoder().encode(line.text).length;
+          bytes += size;
+          if (size > 4096 || bytes > 32768 || (line.text_truncated && !diff.partial)) return false;
+          if (line.kind === 'added') {
+            if (line.baseline_line !== null) return false;
+            added++;
+          } else {
+            if (!isSafeIntegerInRange(line.baseline_line, baseline + 1, diff.baseline_inspected)) return false;
+            baseline = line.baseline_line;
+            if (line.kind === 'removed') removed++;
+          }
+          if (line.kind === 'removed') {
+            if (line.current_line !== null) return false;
+          } else {
+            if (!isSafeIntegerInRange(line.current_line, current + 1, diff.current_inspected)) return false;
+            current = line.current_line;
+          }
+        }
+        return added <= diff.added && removed <= diff.removed;
+      }
+
       function isRepeaterComparison(comparison, retainedIds) {
         if (comparison === null) return true;
         const headerList = value => Array.isArray(value) && value.length <= 64 &&
@@ -1132,7 +1172,9 @@
           typeof comparison.current_body_sha256 === 'string' && /^[0-9a-f]{64}$/.test(comparison.current_body_sha256) &&
           typeof comparison.body_changed === 'boolean' && headerList(comparison.headers_added) &&
           headerList(comparison.headers_removed) && headerList(comparison.headers_changed) &&
-          typeof comparison.partial === 'boolean';
+          typeof comparison.partial === 'boolean' &&
+          (comparison.body_diff === undefined || (isRepeaterBodyDiff(comparison.body_diff) &&
+            (!comparison.body_diff.partial || comparison.partial)));
       }
 
       function isRepeater(repeater) {

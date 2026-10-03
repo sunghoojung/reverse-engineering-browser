@@ -2678,10 +2678,66 @@
         elements.repeaterResponseBadge.textContent = response.ok ? 'Complete' : entry.state.replaceAll('_', ' ');
       }
 
+      function renderRepeaterBodyDiff(comparison) {
+        const panel = elements.repeaterBodyDiff;
+        const diff = comparison?.body_diff;
+        panel.hidden = !diff;
+        const key = JSON.stringify([comparison?.baseline_id, comparison?.current_id, diff]);
+        // Polling must preserve keyboard focus and the researcher's scroll position.
+        if (panel.dataset.renderKey === key) return;
+        panel.dataset.renderKey = key;
+        panel.replaceChildren();
+        if (!diff) return;
+        const heading = document.createElement('h3'); heading.textContent = 'Body line changes';
+        const summary = document.createElement('p');
+        summary.textContent = `+${diff.added} added · −${diff.removed} removed${diff.partial ? ' · Partial' : ''}`;
+        const coverage = document.createElement('p'); coverage.className = 'repeater-diff-coverage';
+        const reasons = {
+          capture_truncated: 'A captured response was truncated.',
+          line_limit: 'Only the first 1,000 lines of each response were aligned.',
+          output_limit: 'The excerpt is limited to 200 rows and 32 KiB of text.',
+          line_text_limit: 'Long lines are clipped to 4 KiB.'
+        };
+        coverage.textContent = diff.limits_reached.map(limit => reasons[limit]).join(' ') ||
+          'Baseline and current line numbers. Two nearby rows of context; unmarked endings are LF.';
+        panel.append(heading, summary, coverage);
+        if (!diff.lines.length) {
+          const empty = document.createElement('p');
+          empty.textContent = comparison.body_changed ? 'No changed lines in the inspected prefixes.' : 'Captured response bodies are identical.';
+          panel.append(empty); return;
+        }
+        const rows = document.createElement('ol'); rows.className = 'repeater-diff-lines';
+        rows.tabIndex = 0; rows.setAttribute('aria-label', 'Body diff. Baseline line, current line, change, and text');
+        let baseline = 0, current = 0;
+        for (const line of diff.lines) {
+          if ((line.baseline_line !== null && line.baseline_line > baseline + 1) ||
+              (line.current_line !== null && line.current_line > current + 1)) {
+            const gap = document.createElement('li'); gap.className = 'repeater-diff-gap';
+            gap.textContent = '⋯ unchanged context omitted'; rows.append(gap);
+          }
+          const row = document.createElement('li'); row.dataset.kind = line.kind;
+          const oldNumber = document.createElement('span'); oldNumber.textContent = line.baseline_line ?? '';
+          const newNumber = document.createElement('span'); newNumber.textContent = line.current_line ?? '';
+          const marker = document.createElement('span');
+          marker.textContent = line.kind === 'added' ? '+' : line.kind === 'removed' ? '−' : ' ';
+          marker.setAttribute('aria-label', line.kind);
+          const text = document.createElement('code'); text.textContent = line.text;
+          const notes = [line.ending === 'crlf' ? 'CRLF' : line.ending === 'none' ? 'no final newline' : '',
+            line.text_truncated ? 'text clipped' : ''].filter(Boolean);
+          if (notes.length) {
+            const note = document.createElement('em'); note.textContent = ` [${notes.join(' · ')}]`; text.append(note);
+          }
+          row.append(oldNumber, newNumber, marker, text); rows.append(row);
+          baseline = line.baseline_line ?? baseline; current = line.current_line ?? current;
+        }
+        panel.append(rows);
+      }
+
       function renderRepeaterComparison(repeater) {
         const successful = (repeater?.history ?? []).filter(entry => entry.response.ok);
         const retained = new Set(successful.map(entry => entry.id));
         const comparison = repeater?.comparison ?? null;
+        renderRepeaterBodyDiff(comparison);
         const comparisonKey = comparison ? `${comparison.baseline_id}:${comparison.current_id}` : null;
         if (comparison && comparisonKey !== state.repeaterComparisonKey) {
           state.repeaterCompareBaselineId = comparison.baseline_id;
@@ -2695,8 +2751,12 @@
           option.textContent = `Run ${entry.id} · ${entry.response.status} · ${entry.response.duration_ms} ms`;
           return option;
         });
-        elements.repeaterCompareBaseline.replaceChildren(...options.map(option => option.cloneNode(true)));
-        elements.repeaterCompareCurrent.replaceChildren(...options);
+        const optionKey = options.map(option => `${option.value}:${option.textContent}`).join('|');
+        if (elements.repeaterCompareBaseline.dataset.optionKey !== optionKey) {
+          elements.repeaterCompareBaseline.dataset.optionKey = optionKey;
+          elements.repeaterCompareBaseline.replaceChildren(...options.map(option => option.cloneNode(true)));
+          elements.repeaterCompareCurrent.replaceChildren(...options);
+        }
         elements.repeaterCompareBaseline.value = state.repeaterCompareBaselineId === null ? '' : String(state.repeaterCompareBaselineId);
         elements.repeaterCompareCurrent.value = state.repeaterCompareCurrentId === null ? '' : String(state.repeaterCompareCurrentId);
         elements.repeaterCompare.disabled = successful.length < 2 ||
@@ -2723,7 +2783,9 @@
           experimentFact('Body', comparison.body_changed ? 'Digest changed' : 'Exact digest match'),
           experimentFact('Body size', `${signed(comparison.body_bytes_delta)} bytes`),
           experimentFact('Header names', headerDetail),
-          experimentFact('Coverage', comparison.partial ? 'Partial due to truncation' : 'Complete within limits')
+          experimentFact('Coverage', comparison.partial
+            ? comparison.body_diff?.partial ? 'Partial; inspect limits below' : 'Partial due to response truncation'
+            : 'Complete within limits')
         );
         elements.repeaterComparison.lastElementChild.classList.add('repeater-comparison-detail');
         elements.repeaterComparisonBadge.dataset.kind = comparison.partial ? 'error' : '';
@@ -9198,3 +9260,5 @@
         scheduleDebuggerRefresh();
         setInterval(refresh, 2000);
       }
+
+      initializePaneLayout();

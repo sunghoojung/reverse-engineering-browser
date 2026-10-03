@@ -405,5 +405,10 @@ pub fn compare(a: &Value, b: &Value) -> Value {
     let bh = map(br);
     let ab = ar["body"].as_str().unwrap().len();
     let bb = br["body"].as_str().unwrap().len();
-    json!({"protocol_version":1,"baseline_id":a["id"],"current_id":b["id"],"baseline_status":ar["status"],"current_status":br["status"],"status_changed":ar["status"]!=br["status"],"duration_delta_ms":br["duration_ms"].as_i64().unwrap()-ar["duration_ms"].as_i64().unwrap(),"baseline_body_bytes":ab,"current_body_bytes":bb,"body_bytes_delta":bb as i64-ab as i64,"baseline_body_sha256":ar["body_sha256"],"current_body_sha256":br["body_sha256"],"body_changed":ar["body_sha256"]!=br["body_sha256"],"headers_added":bh.keys().filter(|k|!ah.contains_key(*k)).collect::<Vec<_>>(),"headers_removed":ah.keys().filter(|k|!bh.contains_key(*k)).collect::<Vec<_>>(),"headers_changed":bh.iter().filter(|(k,v)|ah.get(*k).is_some_and(|old|old!=*v)).map(|(k,_)|k).collect::<Vec<_>>(),"partial":([&ar["headers_truncated"],&ar["body_truncated"],&br["headers_truncated"],&br["body_truncated"]].contains(&&json!(true)))})
+    let body_diff = super::body_diff::compare(
+        ar["body"].as_str().unwrap(),
+        br["body"].as_str().unwrap(),
+        ar["body_truncated"] == true || br["body_truncated"] == true,
+    );
+    json!({"body_diff":body_diff,"protocol_version":1,"baseline_id":a["id"],"current_id":b["id"],"baseline_status":ar["status"],"current_status":br["status"],"status_changed":ar["status"]!=br["status"],"duration_delta_ms":br["duration_ms"].as_i64().unwrap()-ar["duration_ms"].as_i64().unwrap(),"baseline_body_bytes":ab,"current_body_bytes":bb,"body_bytes_delta":bb as i64-ab as i64,"baseline_body_sha256":ar["body_sha256"],"current_body_sha256":br["body_sha256"],"body_changed":ar["body_sha256"]!=br["body_sha256"],"headers_added":bh.keys().filter(|k|!ah.contains_key(*k)).collect::<Vec<_>>(),"headers_removed":ah.keys().filter(|k|!bh.contains_key(*k)).collect::<Vec<_>>(),"headers_changed":bh.iter().filter(|(k,v)|ah.get(*k).is_some_and(|old|old!=*v)).map(|(k,_)|k).collect::<Vec<_>>(),"partial":body_diff.partial || ([&ar["headers_truncated"],&ar["body_truncated"],&br["headers_truncated"],&br["body_truncated"]].contains(&&json!(true)))})
 }

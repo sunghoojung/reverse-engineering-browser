@@ -181,6 +181,7 @@ input and output visible with transformation history available on demand.
 | `app_state.js`, `evidence_models.js`, `app.js` | Initial state and DOM bindings, evidence validation and projection, interaction and rendering |
 | `field_provenance.js`, `../origin-trace-backend/src/provenance.rs` | Selected request strings, bounded source candidates, replay evidence, source identity checks, and explicit value-flow gaps |
 | `request_value_test.js` | Ephemeral request-value capture controls, observation selection, and comparison rendering |
+| `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
 | `traffic_view.js` | Bounded request/response body views, explicit missing-data states, and labeled sample exchanges |
 | `source_syntax.js` | Source names, display formatting, and bounded tokenization without DOM or application state |
 | `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |
@@ -370,7 +371,9 @@ preserves form drafts and disclosure state. Scope is shown only for Interceptor
 and Automation, which support it.
 
 Repeater keeps method, URL, and Send in one command row above a persistent
-request-response split. Session actions appear only after a browser target is
+request-response split. Compare responses includes a Rust-generated body line diff
+with source line numbers, nearby context, newline markers, and explicit limits.
+Polling preserves the diff's focus and scroll position. Session actions appear only after a browser target is
 connected. Request tabs share the pane header, while idle badges and footers stay
 hidden until they contain useful state. Headers and query parameters use compact
 key-value rows with per-row enable and remove controls; query rows preserve
@@ -454,3 +457,20 @@ server's `--endpoint-file`; see the [HTTP API guide](../../protocol/http-api.md)
 for examples, locality checks, and known gaps. The CLI does not start or control
 an installed native app session, and the native custom-scheme interface is not
 itself an HTTP server.
+
+## Pane sizes
+
+Drag the shared borders in Traffic, Request/Response, Repeater, Sources navigator,
+Memory criteria/results/details, and Tools Decoder to resize adjacent panes.
+The divider shows an accent on hover or keyboard focus. Tab to a divider and use
+the arrow keys along its axis; Shift changes the step from 10 to 50 pixels.
+Home or double-click restores that split's default. Escape cancels an active
+drag. Sizes persist as proportions in the local `origin-trace.layout.v1`
+preference, independently of evidence and backend state.
+
+Minimum pane sizes keep controls and empty states usable. The Sources toolbar
+wraps within the editor; its narrow debugger overlay starts below those controls. Saved widths are suspended when the
+responsive layout stacks panes, shows a single exchange side, or lacks enough
+space. Returning to a wide window restores them. Handles follow scrolling and
+are clipped to the active workspace. `pane_layout.js` owns the shared layout controller;
+no captured evidence is modified by resizing.

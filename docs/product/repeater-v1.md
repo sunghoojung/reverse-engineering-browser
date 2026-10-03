@@ -56,10 +56,24 @@ Any two retained successful responses can be compared. The comparison reports:
 - duration and retained-body-size deltas;
 - exact retained-body digest equality;
 - added, removed, and changed response-header names;
-- whether response truncation makes the comparison partial.
+- added and removed body lines with baseline/current line numbers and nearby context;
+- whether capture truncation or diff limits make the comparison partial.
 
 Header values are used only to determine whether a retained header changed. The
-comparison record exposes header names, not their values.
+comparison record exposes header names, not their values. Rust computes the optional
+v1 `body_diff` extension from immutable retained response text outside the state
+lock. Alignment includes LF, CRLF, and a missing final newline, so terminator
+changes are visible. The UI renders captured values as inert text and marks
+omitted context, clipped lines, and each limit explicitly. Exact equality returns
+an empty excerpt without alignment. A partial excerpt never replaces the stored
+body or changes its digest.
+
+Alignment inspects at most 1,000 lines per body with a bounded LCS table (about
+2 MiB). The excerpt retains at most 200 rows, 32 KiB of UTF-8 text total, and
+4 KiB per row; clipping preserves UTF-8 boundaries. Added/removed counts cover
+the inspected prefixes. Large bodies can therefore differ beyond those prefixes
+while reporting no changed lines in the inspected portion. The OpenAPI
+`RepeaterBodyDiff` schema owns the wire fields and limits.
 
 ## Hard limits
 

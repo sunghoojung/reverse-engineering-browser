@@ -11,15 +11,128 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
-const root = process.argv[2] || new URL("..", import.meta.url).pathname;
-const temporary = await mkdtemp(join(tmpdir(), "origin-trace-debugger-"));
-const resources = [];
-const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const fieldsOnly = process.argv[2] === "--field-provenance-only";
+const root = process.argv[fieldsOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
 const ui = runInNewContext(
   (await readFile(join(root, "apps/research-ui/evidence_models.js"), "utf8")) +
     ";({isDebuggerResponse,isRequestInterception,isActionScope,isObjectExperiment,isRuntimeHooks,isAutomationRecipes,isRepeater})",
   { TextEncoder, URL },
 );
+// The decoded-field handoff must never silently rebind a chain to edited input
+// or another request, or turn a binary/preview result into a source-text match.
+const fieldHandoff = runInNewContext(
+  (await readFile(join(root, "apps/research-ui/field_provenance.js"), "utf8")) +
+    `;function decoderCurrentInputKey() {return currentKey;}
+    function liveSources() {return sourceCatalog;}
+    function liveScriptIdentity(source) {return source.target_id + ':' + source.script_id + ':' + source.hash;}
+    function loadScriptContent() {return loadGate;}
+    ({decodedFieldCandidate, fieldSourceMatches, clearDecoderFieldOrigin, provenanceDecoderBytes, searchFieldSources,
+      setup(selection, steps, selected, key = 'original') {
+        fieldProvenanceSelection = selection;
+        decoderFieldOrigin = {selection, key: 'original'};
+        state.decoderSteps = steps; state.decoderSelectedStepId = selected;
+        state.decoderPending = false; currentKey = key;
+      }, changeField() {fieldProvenanceSelection = {};}, pending() {state.decoderPending = true;},
+      setSearch(selection, sources, loaded, gate) {
+        fieldProvenanceSelection = selection; sourceCatalog = sources; loadGate = gate;
+        state.liveScriptContent = new Map(loaded.map(([source, record]) => [source.script_id,
+          {...record, identity: liveScriptIdentity(source)}]));
+      }, setCatalog(sources) {sourceCatalog = sources;}})`,
+  {
+    TextDecoder,
+    TextEncoder,
+    URL,
+    document: { querySelector: () => ({ hidden: true, addEventListener() {} }) },
+    state: {},
+    currentKey: "original",
+    sourceCatalog: [],
+    loadGate: null,
+    decoderBase64ToBytes: (value) => new Uint8Array(Buffer.from(value, "base64")),
+  },
+);
+const candidateStep = (id, value) => ({
+  id, operation: "base64-decode", input_bytes: 32,
+  output_bytes: Buffer.byteLength(value), output_base64: Buffer.from(value).toString("base64"),
+});
+const field = { value: "original", selector: "/payload" };
+const steps = [candidateStep(1, "intermediate"), candidateStep(2, "\ufeff雪\r\n<script>inert</script>")];
+fieldHandoff.setup(field, steps, 2);
+const candidate = fieldHandoff.decodedFieldCandidate();
+assert.equal(candidate.value, "\ufeff雪\r\n<script>inert</script>");
+assert.equal(candidate.steps.length, 2);
+assert.equal(field.value, "original");
+fieldHandoff.setup(field, steps, 1);
+assert.equal(fieldHandoff.decodedFieldCandidate().steps.length, 1);
+fieldHandoff.setup(field, steps, null);
+assert.match(fieldHandoff.decodedFieldCandidate().error, /completed transformation/);
+fieldHandoff.setup(field, steps, 2, "edited");
+assert.match(fieldHandoff.decodedFieldCandidate().error, /Input changed/);
+fieldHandoff.setup(field, steps, 2);
+fieldHandoff.changeField();
+assert.match(fieldHandoff.decodedFieldCandidate().error, /field changed/);
+fieldHandoff.setup(field, steps, 2);
+fieldHandoff.pending();
+assert.match(fieldHandoff.decodedFieldCandidate().error, /Wait/);
+fieldHandoff.setup(field, [candidateStep(1, "x".repeat(4096))], 1);
+assert.equal(fieldHandoff.decodedFieldCandidate().value.length, 4096);
+for (const value of ["", "雪".repeat(1366)]) {
+  fieldHandoff.setup(field, [candidateStep(1, value)], 1);
+  assert.match(fieldHandoff.decodedFieldCandidate().error, /4 KiB/);
+}
+fieldHandoff.setup(field, [{ ...candidateStep(1, "x"), output_base64: "/w==" }], 1);
+assert.match(fieldHandoff.decodedFieldCandidate().error, /Binary/);
+fieldHandoff.clearDecoderFieldOrigin();
+assert.match(fieldHandoff.decodedFieldCandidate().error, /Start from/);
+const matches = fieldHandoff.fieldSourceMatches("雪\nfixture-origin", "fixture-origin", {
+  script_id: "fixture", target_id: "target", hash: "hash", url: "http://127.0.0.1/source.js?redact=yes",
+});
+assert.equal(matches[0].line, 1);
+assert.equal(matches[0].column, 0);
+assert.equal(matches[0].source, "http://127.0.0.1/source.js");
+assert.equal(fieldHandoff.provenanceDecoderBytes("\ud800"), null);
+assert.equal(fieldHandoff.provenanceDecoderBytes("\udc00"), null);
+assert.equal(new TextDecoder("utf-8", {ignoreBOM: true}).decode(
+  fieldHandoff.provenanceDecoderBytes("\ufeff雪\r\n😀")), "\ufeff雪\r\n😀");
+const source = {script_id: "script", target_id: "target", hash: "hash", kind: "javascript",
+  length: 128, url: "http://127.0.0.1/source.js"};
+const searchSelection = (value, derived) => ({value, derivedSearch: derived ? {value: derived} : null,
+  request: {tabId: "target"}, candidates: [], gaps: []});
+let selection = searchSelection("encoded-original", "decoded-result");
+fieldHandoff.setSearch(selection, [source], [[source, {content: "decoded-result", sourceTextLength: 14}]]);
+await fieldHandoff.searchFieldSources();
+assert.equal(selection.candidates.length, 1);
+assert.equal(selection.candidates[0].source_hash, "hash");
+selection = searchSelection("viewer-only-notice");
+fieldHandoff.setSearch(selection, [source], [[source, {content: "original\nviewer-only-notice",
+  sourceTextLength: 8, contentTruncated: true}]]);
+await fieldHandoff.searchFieldSources();
+assert.equal(selection.candidates.length, 0);
+assert(selection.gaps.includes("Partial source."));
+selection = searchSelection("decoded-result");
+fieldHandoff.setSearch(selection, [source], [[{...source, target_id: "other"}, {content: "decoded-result"}]]);
+await fieldHandoff.searchFieldSources();
+assert.equal(selection.candidates.length, 0);
+assert(selection.gaps.includes("Sources changed. Retry."));
+let release;
+let gate = new Promise(resolve => {release = resolve;});
+selection = searchSelection("encoded-original", "decoded-result");
+fieldHandoff.setSearch(selection, [source], [[source, {content: "decoded-result", sourceTextLength: 14}]], gate);
+let searching = fieldHandoff.searchFieldSources();
+fieldHandoff.changeField(); release(); await searching;
+assert.equal(selection.candidates.length, 0);
+assert.equal(selection.searching, false);
+gate = new Promise(resolve => {release = resolve;});
+selection = searchSelection("decoded-result");
+fieldHandoff.setSearch(selection, [source], [[source, {content: "decoded-result", sourceTextLength: 14}]], gate);
+searching = fieldHandoff.searchFieldSources();
+fieldHandoff.setCatalog([{...source, hash: "new-hash"}]); release(); await searching;
+assert.equal(selection.candidates.length, 0);
+assert(selection.gaps.includes("Sources changed. Retry."));
+console.log("PASS decoded field identity, chain prefix, UTF-8, source identity, cancellation, and bounds");
+if (fieldsOnly) process.exit(0);
+const temporary = await mkdtemp(join(tmpdir(), "origin-trace-debugger-"));
+const resources = [];
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const fixture = createServer((req, res) => {
   if (process.env.ORIGIN_TRACE_FIXTURE_LOG)
     console.log("FIXTURE", req.method, req.url);

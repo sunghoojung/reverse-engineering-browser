@@ -5550,6 +5550,7 @@
       }
 
       function renderDecoder() {
+        renderDecoderFieldOrigin();
         toolsElements.engineBadge.textContent = state.decoderEngine.available ? (state.decoderEngine.busy ? 'Engine busy' : 'Native engine ready') : 'Engine unavailable';
         toolsElements.engineBadge.dataset.kind = state.decoderEngine.available ? '' : 'offline';
         let parsedInput = null;
@@ -5685,6 +5686,7 @@
       }
 
       function resetDecoderChain(message = 'Decoder chain cleared. Input was preserved.') {
+        clearDecoderFieldOrigin();
         state.decoderInputSnapshot = null;
         state.decoderSteps = [];
         state.decoderSelectedStepId = null;
@@ -6757,7 +6759,8 @@
           const content = source.kind === 'wasm'
             ? body.source
             : body.source + (body.truncated ? '\n\n[Live source preview limited to the first 2 MB]' : '');
-          state.liveScriptContent.set(source.script_id, { identity, loading: false, loadError: null, content, contentTruncated: body.truncated });
+          state.liveScriptContent.set(source.script_id, { identity, loading: false, loadError: null, content,
+            sourceTextLength: body.source.length, contentTruncated: body.truncated });
         } catch (error) {
           if (!stillCurrent()) return;
           state.liveScriptContent.set(source.script_id, { identity, loading: false, loadError: `Live source is unavailable: ${error.message}` });
@@ -8436,6 +8439,14 @@
         disclosure.querySelector('summary').focus();
         event.preventDefault();
       });
+      // A desktop group becomes a floating menu at narrow widths. Do not let
+      // resizing into that layout cover the active workflow with a stale menu.
+      window.matchMedia('(max-width: 800px)').addEventListener('change', event => {
+        if (!event.matches) return;
+        const navigation = document.querySelector('#advanced-navigation');
+        if (navigation.contains(document.activeElement)) navigation.querySelector('summary').focus();
+        navigation.open = false;
+      });
       document.addEventListener('click', event => {
         const filters = document.querySelector('#request-filters');
         if (filters.open && !filters.contains(event.target)) filters.open = false;
@@ -9095,6 +9106,7 @@
       toolsElements.inputEncoding.addEventListener('change', scheduleDecoderInputRender);
       toolsElements.operation.addEventListener('change', renderTools);
       toolsElements.useField.addEventListener('click', useSelectedFieldInDecoder);
+      toolsElements.findSources.addEventListener('click', searchDecodedFieldSources);
       toolsElements.removeAfter.addEventListener('click', () => {
         const index = state.decoderSteps.findIndex(step => step.id === state.decoderSelectedStepId);
         if (index < 0) return;

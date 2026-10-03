@@ -22,6 +22,13 @@ The Tools workspace has two explicit modes:
 
 Traffic can copy a selected request value into a fresh decoder chain. This is
 an ephemeral text pivot. It does not modify or persist the request value.
+Starting from **Decode value** in Request Field Trace also retains the original
+field identity. **Find sources for result** searches attached sources for a
+complete selected UTF-8 result of up to 4 KiB, retaining the explicit chain as
+researcher-applied transformations. Binary results, changed inputs, pending
+transforms, and changed field selections cannot use this handoff. Source matches
+remain candidates, and replay continues to use the original field. See
+[Request Field Provenance](./request-field-provenance-v1.md).
 
 ## Transform set
 

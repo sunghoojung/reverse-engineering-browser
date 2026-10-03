@@ -20,6 +20,9 @@ Object Lab, breakpoints, heap analysis, Memory Origin Trace, page and worker
 hooks, request-field comparisons, and automation through the public HTTP API.
 The fixture serves only synthetic localhost content. After `make app-build`,
 `node tools/check-origin-trace-launcher.mjs` verifies packaged startup and shutdown.
+`make javascript-check` also runs the field-provenance projection checks without
+a browser, covering exact UTF-8 handoffs, source identity, search cancellation,
+chain prefixes, and bounds. These checks run in CI through `make lint`.
 `cargo test` covers HTTP
 contracts, locality, bounded reads, durable state conflicts, and worker shutdown.
 

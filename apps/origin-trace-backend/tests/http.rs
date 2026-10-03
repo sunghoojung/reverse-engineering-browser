@@ -137,6 +137,21 @@ async fn locality_static_allowlist_and_malformed_actions() {
         );
     }
     assert_eq!(server.get("/index.html").await.status(), 200);
+    let layout = server.get("/pane_layout.js").await;
+    assert_eq!(layout.status(), 200);
+    assert!(
+        layout.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/javascript")
+    );
+    assert!(
+        layout
+            .text()
+            .await
+            .unwrap()
+            .contains("function initializePaneLayout")
+    );
     assert_eq!(
         server
             .action("/api/debugger/actions", json!({"action":"unknown"}))

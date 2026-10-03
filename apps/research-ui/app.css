@@ -1200,11 +1200,11 @@
         min-width: 0;
         min-height: 0;
         display: grid;
-        grid-template-rows: 35px 32px minmax(0, 1fr) 27px;
+        grid-template-rows: 35px auto minmax(0, 1fr) 27px;
         background: var(--panel);
       }
       .sources-editor.console-open {
-        grid-template-rows: 35px 32px minmax(160px, 1fr) 27px minmax(130px, 34%);
+        grid-template-rows: 35px auto minmax(160px, 1fr) 27px minmax(130px, 34%);
       }
       .source-editor-tab {
         display: flex;
@@ -1233,9 +1233,11 @@
       .source-editor-toolbar {
         min-width: 0;
         display: flex;
+        flex-wrap: wrap;
+        min-height: 32px;
         align-items: center;
         gap: 4px;
-        padding: 0 7px;
+        padding: 4px 7px;
         border-bottom: 1px solid var(--line);
         background: var(--panel-2);
       }
@@ -2400,7 +2402,7 @@
       @media (max-width: 900px) {
         #screen-sources:not([hidden]) { position: relative; grid-template-columns: 180px minmax(0, 1fr); }
         #screen-sources[data-sidebar-open="false"]:not([hidden]) { grid-template-columns: 180px minmax(0, 1fr); }
-        .sources-debugger:not([hidden]) { display: grid; position: absolute; z-index: 4; top: 68px; right: 0; bottom: 0; width: min(340px, 100%); border-left: 1px solid var(--line); }
+        .sources-debugger:not([hidden]) { display: grid; position: absolute; z-index: 4; top: var(--source-toolbar-bottom, 68px); right: 0; bottom: 0; width: min(340px, 100%); border-left: 1px solid var(--line); }
       }
 
       .sources-debugger[data-attached="false"] .debug-controls,
@@ -2972,3 +2974,30 @@
 .field-provenance-metadata { margin-top: 10px; color: var(--muted); }
 .field-provenance-body :is(button, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 @media (max-width: 800px) { #screen-field-provenance .screen-head { flex-wrap: wrap; padding: 12px; } .field-provenance-body { padding: 16px; } }
+
+/* Diff text remains inert and scrolls without pushing the workspace wider. */
+.repeater-body-diff { min-width: 0; padding: 12px 10px; border-top: 1px solid var(--line); }
+.repeater-body-diff h3 { margin: 0; font: 600 12px var(--sans); }
+.repeater-body-diff p { margin: 6px 0; color: var(--muted); font: 11px/1.5 var(--sans); }
+.repeater-body-diff .repeater-diff-coverage { color: var(--faint); }
+.repeater-diff-lines { margin: 10px 0 0; padding: 4px 0; max-height: 280px; overflow: auto; list-style: none; background: var(--panel); border: 1px solid var(--line-soft); }
+.repeater-diff-lines:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.repeater-diff-lines > li { display: grid; grid-template-columns: 34px 34px 16px minmax(max-content, 1fr); min-width: max-content; font: 11px/1.6 var(--mono); }
+.repeater-diff-lines > li > span { padding: 0 4px; text-align: right; color: var(--faint); user-select: none; }
+.repeater-diff-lines code { padding-right: 8px; white-space: pre; }
+.repeater-diff-lines em { color: var(--muted); font: 10px var(--mono); }
+.repeater-diff-lines [data-kind="added"] { background: color-mix(in srgb, var(--green) 12%, transparent); }
+.repeater-diff-lines [data-kind="removed"] { background: color-mix(in srgb, var(--red) 12%, transparent); }
+.repeater-diff-lines > .repeater-diff-gap { display: block; padding: 4px 8px; color: var(--faint); }
+
+/* The hit target straddles an existing border; panes retain all available space. */
+.pane-divider { position: fixed; z-index: 5; touch-action: none; outline: none; }
+.pane-divider[data-axis="x"] { cursor: col-resize; }
+.pane-divider[data-axis="y"] { cursor: row-resize; }
+.pane-divider::after { content: ''; position: absolute; background: var(--line); transition: background .12s; }
+.pane-divider[data-axis="x"]::after { inset: 0 3px; }
+.pane-divider[data-axis="y"]::after { inset: 3px 0; }
+.pane-divider:hover::after, .pane-divider:focus-visible::after { background: var(--accent); }
+.pane-divider:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); background: var(--accent-soft); }
+body.resizing-panes-x, body.resizing-panes-x * { cursor: col-resize !important; user-select: none !important; }
+body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; user-select: none !important; }

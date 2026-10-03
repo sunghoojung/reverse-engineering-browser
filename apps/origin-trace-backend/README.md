@@ -15,7 +15,7 @@ make backend-e2e
 
 `backend-e2e` uses Node.js 22 or newer and a disposable browser profile. Set
 `ORIGIN_TRACE_TEST_BROWSER` to a Chromium-compatible executable on other hosts.
-It exercises isolation and disposal, interception, Repeater timeout and cancel,
+It exercises isolation and disposal, interception, Repeater timeout, cancel, bounded response line diffs, and UI contract rejection,
 Object Lab, breakpoints, heap analysis, Memory Origin Trace, page and worker
 hooks, request-field comparisons, and automation through the public HTTP API.
 The fixture serves only synthetic localhost content. After `make app-build`,
@@ -25,7 +25,7 @@ contracts, locality, bounded reads, durable state conflicts, and worker shutdown
 
 The listener accepts only `127.0.0.1`, `localhost`, or `::1`; every API request
 validates Host, Origin, and fetch-site headers. Static serving allowlists the
-eight application assets. Stored identifiers and public response schemas follow
+application assets explicitly. Stored identifiers and public response schemas follow
 [`protocol/openapi.json`](../../protocol/openapi.json).
 
 Each browser connection owns a native transport process, a bounded event queue,

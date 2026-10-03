@@ -39,6 +39,11 @@ const fixture = createServer((req, res) => {
     }, 5000);
     return;
   }
+  if (req.url === "/diff") {
+    res.setHeader("Content-Type", "text/plain");
+    res.end("fixture response\n<script>inert</script>\r\nlast");
+    return;
+  }
   if (req.url === "/worker.js") {
     res.setHeader("Content-Type", "text/javascript");
     res.end(
@@ -344,6 +349,8 @@ try {
     });
     s = await get();
     assert.equal(s.repeater.comparison.body_changed, false);
+    assert.equal(s.repeater.comparison.body_diff.partial, false);
+    assert.equal(s.repeater.comparison.body_diff.lines.length, 0);
     console.log(`PASS ${name} repeater variables/history/comparison`);
     passed++;
     await action("run_repeater_request", {
@@ -735,6 +742,24 @@ try {
     result = await pendingAnalyst;
     assert.equal(result.outcome, "cancelled");
     console.log(`PASS ${name} analyst success/timeout/cancellation`);
+    passed++;
+    await action("run_repeater_request", { url: fixtureUrl + "/diff", method: "GET", timeout_ms: 1000 });
+    s = await until(s => !s.repeater.active_execution && s.repeater.history.at(-1)?.response.url === fixtureUrl + "/diff");
+    const diff = s.repeater.comparison.body_diff;
+    assert.equal(s.repeater.comparison.body_changed, true);
+    assert.equal(diff.partial, false);
+    assert.equal(diff.added, 3);
+    assert.equal(diff.removed, 1);
+    assert.equal(diff.lines[2].text, "<script>inert</script>");
+    assert.equal(diff.lines[2].ending, "crlf");
+    assert.equal(diff.lines[3].ending, "none");
+    const malformed = structuredClone(s.repeater);
+    malformed.comparison.body_diff.lines[2].current_line = 0;
+    assert.equal(ui.isRepeater(malformed), false);
+    malformed.comparison.body_diff.lines[2].current_line = 2;
+    malformed.comparison.body_diff.lines[2].text = "x".repeat(4097);
+    assert.equal(ui.isRepeater(malformed), false);
+    console.log(`PASS ${name} Rust response diff and UI contract rejection`);
     passed++;
     await action("clear_automation_runs");
     await action("clear_repeater_history");

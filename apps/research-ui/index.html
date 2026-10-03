@@ -209,7 +209,13 @@
             <header class="screen-head"><div><h1>Field trace</h1><p id="field-provenance-target"></p></div><button id="field-provenance-back" class="secondary-button" type="button">Traffic</button></header>
             <div class="field-provenance-body">
               <pre id="field-provenance-value" class="field-provenance-value" tabindex="0" aria-label="Selected value preview"></pre>
-              <div class="field-provenance-actions"><button id="field-provenance-search" class="secondary-button" type="button">Find sources</button><button id="field-provenance-test" class="trace-button" type="button">Test value</button></div>
+              <section id="field-provenance-derived" class="field-provenance-derived" aria-label="Derived source search" hidden>
+                <h2>Decoded search value</h2>
+                <pre id="field-provenance-derived-value" tabindex="0"></pre>
+                <p>Researcher-applied transformations. Source matches are candidates; page value flow remains unobserved. Test value uses the original request field.</p>
+                <details><summary>Transformation history</summary><pre id="field-provenance-derived-steps"></pre></details>
+              </section>
+              <div class="field-provenance-actions"><button id="field-provenance-search" class="secondary-button" type="button">Find sources</button><button id="field-provenance-decode" class="secondary-button" type="button">Decode value</button><button id="field-provenance-original" class="secondary-button" type="button" hidden>Use original value</button><button id="field-provenance-test" class="trace-button" type="button">Test value</button></div>
               <section aria-label="Source candidates"><div class="field-provenance-section-head"><h2>Sources</h2><span id="field-provenance-notice" role="status"></span></div><div id="field-provenance-candidates"></div></section>
               <section aria-label="Replay evidence"><h2>Replay</h2><div id="field-provenance-replay"></div></section>
               <details class="field-provenance-coverage"><summary>Coverage</summary><ul id="field-provenance-gaps"></ul></details>
@@ -1119,6 +1125,11 @@
                         <div class="decoder-view-tabs" role="group" aria-label="Output representation"><button class="secondary-button" type="button" data-decoder-view="text" aria-pressed="true">UTF-8</button><button class="secondary-button" type="button" data-decoder-view="hex" aria-pressed="false">Hex dump</button><button class="secondary-button" type="button" data-decoder-view="base64" aria-pressed="false">Base64</button></div>
                         <pre id="decoder-output" tabindex="0" data-empty-label="No bytes to display. Enter input to begin.">No bytes selected.</pre>
                         <div class="decoder-actions"><button id="decoder-copy-output" class="secondary-button" type="button" disabled>Copy visible output</button></div>
+                        <section id="decoder-field-origin" class="decoder-field-origin" aria-label="Request field source search" hidden>
+                          <p id="decoder-field-origin-label"></p>
+                          <button id="decoder-find-sources" class="secondary-button" type="button" disabled>Find sources for result</button>
+                          <p id="decoder-field-origin-notice" role="status"></p>
+                        </section>
                       </div>
                       <details class="tool-detail-disclosure"><summary>Result details</summary>
                       <div class="decoder-facts"><div class="decoder-fact"><span>Selected bytes</span><strong id="decoder-selected-bytes">0 B</strong></div><div class="decoder-fact"><span>Retained</span><strong id="decoder-retained-bytes">0 B / 4 MiB</strong></div><div class="decoder-fact"><span>Engine time</span><strong id="decoder-duration">Not run</strong></div><div class="decoder-fact"><span>Execution</span><strong>Explicit only</strong></div></div>

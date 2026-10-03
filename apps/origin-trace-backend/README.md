@@ -25,7 +25,7 @@ contracts, locality, bounded reads, durable state conflicts, and worker shutdown
 
 The listener accepts only `127.0.0.1`, `localhost`, or `::1`; every API request
 validates Host, Origin, and fetch-site headers. Static serving allowlists the
-eight application assets. Stored identifiers and public response schemas follow
+application assets explicitly. Stored identifiers and public response schemas follow
 [`protocol/openapi.json`](../../protocol/openapi.json).
 
 Each browser connection owns a native transport process, a bounded event queue,

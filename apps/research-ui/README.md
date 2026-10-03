@@ -84,6 +84,8 @@ visible across either refresh path. A debugger failure retains recorded requests
 and explicitly reports that network capture is unavailable.
 Failed refreshes request a complete validated response on retry, so an unchanged
 ETag cannot leave the connection warning stuck after recovery.
+Rejected debugger actions, including a full Watch list, retain their own error
+without marking active network capture or the live tab count disconnected.
 Short windows keep at least one request row visible when status warnings wrap.
 
 The live launcher disables Brave background networking, component updates, and

@@ -38,7 +38,7 @@
       }
 
       function networkContentCaptureActive() {
-        return networkContentCaptureEnabled() && !state.debuggerError &&
+        return networkContentCaptureEnabled() && !state.debuggerRefreshFailed &&
           ['running', 'paused'].includes(state.debuggerSession?.state);
       }
 
@@ -75,7 +75,7 @@
             messages.push('Recording live requests and responses · sensitive headers redacted · 128 KiB body limit');
           } else {
             if (kind !== 'malformed') kind = 'disconnected';
-            messages.push(state.debuggerError ? 'The live debugger is disconnected.'
+            messages.push(state.debuggerRefreshFailed ? 'The live debugger is disconnected.'
               : state.debuggerSession?.state === 'crashed' ? 'The captured browser target crashed.'
                 : 'Network capture is waiting for an attached browser target.');
             messages.push(state.requests.length ? 'The last recorded requests remain visible.' : 'No captured network requests are available.');
@@ -674,7 +674,7 @@
 
       function renderLiveBrowserTabCount() {
         const count = state.debuggerSession?.live_tab_count;
-        const available = state.sessionMode === 'live' && !state.debuggerError &&
+        const available = state.sessionMode === 'live' && !state.debuggerRefreshFailed &&
           Number.isInteger(count) && count >= 0;
         elements.signalLiveTabs.textContent = available
           ? `${count} open ${count === 1 ? 'tab' : 'tabs'}`
@@ -7979,6 +7979,7 @@
           applyMemoryOriginTrace(body.memory_origin_trace);
           state.debuggerEtag = response.headers.get('ETag');
           state.debuggerError = null;
+          state.debuggerRefreshFailed = false;
           renderLiveBrowserTabCount();
           state.staleScriptIds ??= new Set();
           if ((previousSession?.target?.id ?? '') !== (body.target?.id ?? '')) {
@@ -8049,6 +8050,8 @@
           }
         } catch (error) {
           state.debuggerError = error instanceof TypeError ? 'The debugger returned malformed state. The last valid pause is retained.' : error.message;
+          // Rejected actions and clipboard errors do not describe capture health.
+          state.debuggerRefreshFailed = true;
           // A 304 cannot clear a failed refresh; recovery needs a validated body.
           state.debuggerEtag = null;
           renderShellStatus();

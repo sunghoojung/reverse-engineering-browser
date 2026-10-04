@@ -30,7 +30,7 @@ use std::{
 };
 use tokio::sync::{Mutex, Semaphore};
 
-const UI_ASSETS: [&str; 11] = [
+const UI_ASSETS: [&str; 12] = [
     "index.html",
     "app.css",
     "app_state.js",
@@ -42,6 +42,7 @@ const UI_ASSETS: [&str; 11] = [
     "app.js",
     "pane_layout.js",
     "native_console.js",
+    "native_console_completion.js",
 ];
 pub struct App {
     options: Options,

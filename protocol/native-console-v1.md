@@ -14,7 +14,7 @@ Build the custom browser from the pinned integration before using this feature.
 Set `REB_BRAVE_BINARY` to its executable and launch Origin Trace's live backend.
 Open **Console**, enter an authorized HTTP or HTTPS URL, start a session, refresh
 if the page is still loading, and select a document explicitly. Enter JavaScript
-such as `window.location.href`, then use Run or Enter (Command/Ctrl+Enter also
+such as `window.location.href`, then use Enter (Command/Ctrl+Enter also
 works). Shift+Enter inserts a new line. Up/Down recalls commands still present in
 the bounded output. Refreshing
 invalidates the selection. Navigation, closure, and document replacement reject
@@ -34,6 +34,17 @@ dragging, arrow-key resizing, and Home to reset the saved height. The prompt
 follows the output in the same scroll area. The compact toolbar keeps session
 setup, refresh and disconnect in a connection menu. Enter submits the plain `>`
 prompt without a separate Run button.
+
+The prompt offers a local catalog of common built-in JavaScript and browser
+APIs. It suggests methods and properties for known chains, including common DOM
+method return types. Up/Down selects, Tab or Enter accepts, Escape dismisses, and
+Ctrl+Space requests suggestions. Command/Ctrl+Enter submits immediately, even
+with suggestions open. The catalog processes at most 8192 input characters and
+shows at most 24 suggestions. Completion inserts text only and respects the
+8192-byte command limit. It never enumerates page objects, invokes getters,
+evaluates an expression, or sends completion traffic to the browser. Page-defined
+globals, local bindings, and actual runtime availability require a future native
+completion contract; these static hints do not assert that a page exposes an API.
 
 The existing debugger console drawer remains a log viewer. This panel uses
 native associated Mojo messages and V8, without creating an Inspector session,
@@ -60,7 +71,7 @@ reports eviction. It inserts every value as inert text.
 
 Execution is synchronous. Primitive results are copied; objects, functions,
 symbols, and promises receive generic previews with no retained V8 handles.
-There is no property enumeration, custom formatting, autocomplete, or promise
+There is no runtime property enumeration, custom formatting, or promise
 awaiting. Primitive thrown strings are copied; other exceptions receive a generic
 message so formatting cannot invoke page accessors or `Error.prepareStackTrace`.
 

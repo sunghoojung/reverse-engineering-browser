@@ -13,6 +13,33 @@ import { createServer } from "node:http";
 import assert from "node:assert/strict";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
 const root = process.argv[fieldsOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
+const complete = runInNewContext(
+  (await readFile(join(root, "apps/research-ui/source_syntax.js"), "utf8")) +
+    (await readFile(join(root, "apps/research-ui/native_console_completion.js"), "utf8")) +
+    ";nativeConsoleSuggestions",
+);
+const suggestions = text => complete(text, text.length)?.items.map(item => item.name) ?? [];
+assert.deepEqual(Array.from(suggestions("document.que")), ["querySelector", "querySelectorAll"]);
+assert.ok(suggestions('window.document.querySelector("main").classList.').includes("toggle"));
+assert.ok(suggestions('document.querySelector(document.querySelector("a")).sty').includes("style"));
+assert.ok(suggestions("window?.navigator.clipboard.re").includes("readText"));
+assert.ok(suggestions("new Map().").includes("get"));
+assert.ok(suggestions("[1, 2].ma").includes("map"));
+assert.ok(suggestions('"snow 雪".toU').includes("toUpperCase"));
+assert.ok(suggestions("Promise.resolve(1).th").includes("then"));
+for (const text of ['"document.que', "'document.que", "`document.que", "// document.que", "/* document.que", "/document.que", "const pattern = /document.que", "customPageObject.", "window[pageGetter()]."]) {
+  assert.equal(complete(text, text.length), null, text);
+}
+assert.ok(suggestions("/* inert */ document.que").includes("querySelector"));
+assert.ok(suggestions("// inert\nMath.ra").includes("random"));
+const middle = complete('"雪"; document.querySelectorAll("main")', 19);
+assert.equal(middle.start, 14);
+assert.equal(middle.end, 30);
+assert.ok(middle.items.some(item => item.name === "querySelector"));
+assert.equal(complete("a".repeat(8193), 8193), null);
+assert.ok(complete("", 0, true).items.length <= 24);
+assert.equal(complete("document.", -1), null);
+console.log("PASS bounded local console completions, lexical exclusions, property chains and UTF-16 replacement");
 const ui = runInNewContext(
   (await readFile(join(root, "apps/research-ui/evidence_models.js"), "utf8")) +
     ";({isDebuggerResponse,isRequestInterception,isActionScope,isObjectExperiment,isRuntimeHooks,isAutomationRecipes,isRepeater,isWasmInspection})",

@@ -189,6 +189,7 @@
     controls.source.style.height = `${Math.min(66, Math.max(26, controls.source.scrollHeight))}px`;
     colorInput();
   }
+  const completion = createNativeConsoleCompletion(controls.source, element('highlight'), root);
   controls.source.addEventListener('scroll', syncInputMirror);
   new ResizeObserver(syncInputMirror).observe(controls.source);
   controls.source.addEventListener('input', () => { historyIndex = null; sizeInput(); renderControls(); });
@@ -202,12 +203,14 @@
     if (pending || !session || !controls.target.value) return;
     const source = controls.source.value;
     if (!source.trim() || encoder.encode(source).length > 8192) { notice('Enter 1 to 8192 UTF-8 bytes of JavaScript.', true); return; }
+    completion.close();
     historyIndex = null;
     const target = controls.target.value;
     perform('evaluate', {target_id: target, source}, value => { result(value, source); controls.source.value = ''; sizeInput(); });
   });
   controls.source.addEventListener('keydown', event => {
     if (event.isComposing) return;
+    if (completion.keydown(event)) return;
     if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); controls.form.requestSubmit(); return; }
     // Recall only commands already present in the bounded output, without a
     // second history buffer or persistent command storage.
@@ -234,7 +237,7 @@
     toggle.setAttribute('aria-expanded', String(open));
     toggle.setAttribute('aria-pressed', String(open));
     if (open) { sizeInput(); focusPrompt(); }
-    else { controls.connection.open = false; toggle.focus(); }
+    else { completion.close(); controls.connection.open = false; toggle.focus(); }
   }
   toggle.addEventListener('click', () => setOpen(root.hidden));
   element('close').addEventListener('click', () => setOpen(false));

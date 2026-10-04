@@ -31,6 +31,14 @@ Toggle the dock with Console or Command/Ctrl+J while keeping the current workspa
 Drag its top divider or use the focused divider's arrow keys to resize; Home resets
 the saved height. Enter runs, Shift+Enter adds a line, and Command/Ctrl+Enter also
 submits multiline input. Up/Down recalls commands from the bounded visible output.
+Typing a built-in name or a dot opens API suggestions at the caret. Up/Down
+selects a suggestion; Tab or Enter accepts it; Escape dismisses it. Command/Ctrl+Enter
+still submits immediately. Ctrl+Space requests suggestions explicitly. The list
+uses a local catalog for common JavaScript and browser methods and properties,
+including known return-type chains. It does not enumerate page-defined objects,
+execute code, read getters, or query the native browser. Strings and comments
+do not trigger suggestions. At most 24 suggestions and 8192 input characters are
+processed; selecting a completion also enforces the 8192-byte command limit.
 Closing the dock preserves the session; Disconnect in the connection menu ends it. The Sources toolbar's Logs
 drawer shows captured debugger messages. Commands can mutate pages and read
 sensitive values. Results stay in bounded panel memory. See
@@ -219,6 +227,7 @@ input and output visible with transformation history available on demand.
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
 | `traffic_view.js` | Bounded request/response body views, explicit missing-data states, and labeled sample exchanges |
 | `source_syntax.js` | Source names, display formatting, and bounded tokenization without DOM or application state |
+| `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion |
 | `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |
 | `../origin-trace-backend/src/debugger/` | CDP sessions, transport ownership, request validation, hooks, experiments, and automation |
 | `../origin-trace-backend/src/workspace.rs`, `analyst.rs`, `durable.rs` | Workspace contracts, explicit analyst execution, private durable replacement |

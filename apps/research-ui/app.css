@@ -1530,7 +1530,7 @@
       .native-console-input:focus-within { box-shadow: inset 2px 0 var(--accent); }
       .native-console-prompt { align-self: flex-start; width: 13px; color: var(--accent); font: 15px/26px var(--mono); }
       .native-console-editor { position: relative; flex: 1; min-width: 0; }
-      .native-console-editor textarea, #native-console-highlight { margin: 0; padding: 4px 0; white-space: pre-wrap; overflow-wrap: break-word; tab-size: 2; letter-spacing: 0; font: 12px/18px var(--mono); }
+      .native-console-editor textarea, #native-console-highlight, .native-console-caret-measure { margin: 0; padding: 4px 0; white-space: pre-wrap; overflow-wrap: break-word; tab-size: 2; letter-spacing: 0; font: 12px/18px var(--mono); }
       .native-console-editor textarea { display: block; position: relative; width: 100%; height: 26px; max-height: 66px; border: 0; border-radius: 0; resize: none; background: transparent; -webkit-text-fill-color: transparent; color: transparent; caret-color: var(--text); }
       .native-console-editor textarea:focus-visible { outline: 0; }
       .native-console-editor textarea::placeholder { -webkit-text-fill-color: var(--faint); color: var(--faint); }
@@ -1544,6 +1544,17 @@
       .native-console-result[data-status]:not([data-status="ok"]) { background: color-mix(in srgb, var(--red) 4%, transparent); }
       .native-console-result[data-status]:not([data-status="ok"]) .native-console-value { color: var(--red); }
       #native-console-input-help { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; white-space: nowrap; clip-path: inset(50%); }
+      .native-console-caret-measure { position: absolute; top: 0; left: 0; height: 26px; overflow: hidden; visibility: hidden; pointer-events: none; }
+      .native-console-completions { position: fixed; z-index: 100; overflow: auto; overscroll-behavior: contain; padding: 3px; border: 1px solid var(--line); border-radius: 4px; background: var(--chrome); box-shadow: 0 5px 18px var(--shadow); font: 12px/22px var(--mono); }
+      .native-console-completions[hidden] { display: none; }
+      .native-console-completion { display: flex; align-items: center; gap: 8px; min-height: 23px; padding: 0 6px; border-radius: 2px; cursor: pointer; color: var(--text); }
+      .native-console-completion[aria-selected="true"] { background: var(--accent-soft); box-shadow: inset 2px 0 var(--accent); }
+      .native-console-completion:hover { background: var(--panel-3); }
+      .native-console-completion-icon { flex: 0 0 12px; color: var(--cyan); font-size: 12px; text-align: center; }
+      .native-console-completion[data-kind="function"] .native-console-completion-icon { color: var(--accent); font-style: italic; }
+      .native-console-completion-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .native-console-completion-name strong { color: var(--cyan); font-weight: 500; }
+      .native-console-completion-kind { color: var(--faint); font: 9px var(--sans); }
       @media (max-width: 600px) { .native-console-head { gap: 4px; padding: 0 7px; } .native-console-head select { flex: 1; width: 0; } .native-console-head-spacer { flex: 0; } }
       .console-drawer { min-height: 0; display: grid; grid-template-rows: 29px minmax(0, 1fr); border-top: 1px solid var(--line); background: var(--chrome); }
       .console-drawer[hidden] { display: none; }

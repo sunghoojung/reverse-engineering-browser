@@ -6,7 +6,9 @@ use crate::{
     deobfuscation::Deobfuscator,
     durable,
     error::{Error, Result},
-    evidence, origin_trace, validation, vm, wasm,
+    evidence,
+    native_console::NativeConsole,
+    origin_trace, validation, vm, wasm,
     workspace::{Kind, Store},
 };
 use axum::{
@@ -28,7 +30,7 @@ use std::{
 };
 use tokio::sync::{Mutex, Semaphore};
 
-const UI_ASSETS: [&str; 10] = [
+const UI_ASSETS: [&str; 12] = [
     "index.html",
     "app.css",
     "app_state.js",
@@ -39,6 +41,8 @@ const UI_ASSETS: [&str; 10] = [
     "field_provenance.js",
     "app.js",
     "pane_layout.js",
+    "native_console.js",
+    "native_console_completion.js",
 ];
 pub struct App {
     options: Options,
@@ -50,6 +54,7 @@ pub struct App {
     analyst: Analyst,
     deobfuscator: Deobfuscator,
     pub debugger: Arc<Debugger>,
+    native_console: NativeConsole,
     capture_stopped: AtomicBool,
     capture: Mutex<()>,
     io: Arc<Semaphore>,
@@ -59,6 +64,7 @@ impl App {
     pub async fn stop(&self) {
         self.analyst.stop();
         self.debugger.stop().await;
+        self.native_console.stop().await;
     }
     pub async fn new(options: Options, port: u16) -> Arc<Self> {
         let app = Arc::new(Self {
@@ -78,6 +84,7 @@ impl App {
                 "apps/deobfuscator-worker/target/debug/reb-deobfuscator-worker",
             )),
             debugger: Debugger::new(&options),
+            native_console: NativeConsole::new(&options),
             options,
             capture_stopped: AtomicBool::new(false),
             capture: Mutex::new(()),
@@ -120,6 +127,7 @@ impl App {
                 json!({"status":"ok","store":self.options.store,"store_exists":self.options.store.exists(),"trace_store":self.options.trace_store,"trace_store_exists":self.options.trace_store.exists(),"signal_store":self.options.signal_store,"signal_store_exists":self.options.signal_store.exists(),"artifact_store":self.options.artifacts,"artifact_store_exists":self.options.artifacts.exists(),"artifact_receiver_configured":self.options.artifact_socket.is_some(),"artifact_receiver_connected":self.receiver_connected().await,"api_collection_store":self.collection.path,"api_collection_store_exists":self.collection.path.exists(),"local_analyst_store":self.workspace.path,"local_analyst_store_exists":self.workspace.path.exists(),"local_analyst_runner_available":self.analyst.state()["available"],"decoder_available":self.decoder.state()["available"],"broker_connected":self.broker_connected().await,"capture_mode":self.options.capture_mode(),"debugger_state":self.debugger.snapshot()["state"]})
             }
             "/api/decoder" => self.decoder.state(),
+            "/api/native-console" => self.native_console.state().await,
             "/api/wasm" => {
                 let id = q.required("artifact_id")?.to_owned();
                 let root = self.options.artifacts.clone();
@@ -502,6 +510,7 @@ impl App {
                 _ => Err(Error::bad("Analyst workspace action is invalid")),
             },
             "/api/debugger/actions" => self.debugger.action(value).await,
+            "/api/native-console/actions" => self.native_console.action(value).await,
             "/api/capture/actions" => {
                 let _guard = self.capture.lock().await;
                 let pid = self

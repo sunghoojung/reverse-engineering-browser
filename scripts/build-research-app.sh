@@ -33,11 +33,11 @@ fi
 
 mkdir -p "${macos_path}" "${resources_path}"
 cp "${repo_root}/apps/research-ui/macos/Info.plist" "${contents_path}/Info.plist"
-for asset in index.html app.css app_state.js evidence_models.js source_syntax.js traffic_view.js request_value_test.js field_provenance.js pane_layout.js app.js; do
+for asset in index.html app.css app_state.js evidence_models.js source_syntax.js traffic_view.js request_value_test.js field_provenance.js pane_layout.js native_console_completion.js native_console.js app.js; do
   cp "${repo_root}/apps/research-ui/${asset}" "${resources_path}/${asset}"
 done
 mkdir -p "${research_ui_resources}"
-for asset in index.html app.css app_state.js evidence_models.js source_syntax.js traffic_view.js request_value_test.js field_provenance.js pane_layout.js app.js analyst_runner_core.js analyst_runner_node.js; do
+for asset in index.html app.css app_state.js evidence_models.js source_syntax.js traffic_view.js request_value_test.js field_provenance.js pane_layout.js native_console_completion.js native_console.js app.js analyst_runner_core.js analyst_runner_node.js; do
   cp "${repo_root}/apps/research-ui/${asset}" "${research_ui_resources}/${asset}"
 done
 cargo build --locked --release --manifest-path "${repo_root}/apps/origin-trace-backend/Cargo.toml"
@@ -55,6 +55,8 @@ chmod 755 "${macos_path}/OriginTraceDecoder"
 cp "${repo_root}/build/reb-event-broker" "${macos_path}/OriginTraceEventBroker"
 cp "${repo_root}/build/reb-artifact-receiver" "${macos_path}/OriginTraceArtifactReceiver"
 cp "${repo_root}/build/reb-debugger-transport" "${macos_path}/OriginTraceDebuggerTransport"
+cp "${repo_root}/build/reb-console" "${macos_path}/OriginTraceNativeConsole"
+chmod 755 "${macos_path}/OriginTraceNativeConsole"
 cp "${repo_root}/build/reb-heap-snapshot" "${macos_path}/OriginTraceHeapSnapshot"
 chmod 755 \
   "${macos_path}/OriginTraceEventBroker" \

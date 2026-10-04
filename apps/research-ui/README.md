@@ -10,6 +10,70 @@ Project-wide authorization, capture, and privacy policy is in
 [SAFETY.md](../../SAFETY.md); this guide describes the product's current controls
 and limits.
 
+## Native console
+
+The **Console** bottom dock starts a separate disposable custom Brave session for
+explicit main-world JavaScript commands. Set `REB_BRAVE_BINARY` to a rebuilt
+custom browser and use the live backend. Open the connection menu to connect a
+disposable browser, then select a document before entering commands.
+Workspace tabs sit across the top, with Console beside Sources. Commands are
+syntax colored while typing and in the transcript; primitive results use colors
+for their value types. Coloring uses inert text spans and a bounded tokenizer.
+The toolbar contains a clear action, document selector, and small connection menu.
+Connection, refresh and disconnect actions live inside that menu. Commands, page messages and
+results appear in that order as consecutive console lines, with the plain `>` prompt directly
+after the output in the same scroll area. Result metadata is available through
+the ellipsis on hover or keyboard focus; expanded details expose type, status,
+session and document IDs, and preview truncation. Truncation, actionable errors
+and output eviction stay visible. There is no Run button or inline help strip;
+Enter runs, and the prompt's accessible description explains multiline input.
+An empty prompt has no placeholder text. Fully typed built-in names do not open
+automatic suggestions, so Enter runs them unchanged; Ctrl+Space can still request
+their completions explicitly.
+Toggle the dock with Console or Command/Ctrl+J while keeping the current workspace visible.
+Drag its top divider or use the focused divider's arrow keys to resize; Home resets
+the saved height. Enter runs, Shift+Enter adds a line, and Command/Ctrl+Enter also
+submits multiline input. Up/Down recalls a separate bounded command history at the first/last line.
+Clearing output preserves history; Forget command history removes it. Undo/redo
+works for typing and completion insertion. An incomplete bracketed expression
+continues on Enter; Command/Ctrl+Enter explicitly submits. The next draft remains
+editable while a request runs.
+
+Completion combines built-in hints with bounded native properties and global
+lexical bindings. Calls, computed keys, strings and comments never cross the
+completion boundary. Native traversal stops at accessors and proxies. Suggestions
+include function argument counts where available. Fully typed names submit
+unchanged; Ctrl+Space explicitly requests completion.
+
+Results expand into property pages, DOM element previews, function source and
+source locations. Getters remain labeled, proxies are opaque, and retained values
+expire after 60 seconds. Explicit actions copy bounded property previews, store a
+value as `window.tempN`, or release it. `$_` reads the previous result. `copy(value)`,
+`inspect(value)`, `getEventListeners(element)`, `monitorEvents(element)` and
+`unmonitorEvents(element)` are standalone console utilities. They evaluate their
+argument once. Event monitoring is explicit and lasts at most 60 seconds.
+
+Top-level await and promise controls show resolved/rejected values. Stopping a
+wait releases its handle; it does not cancel previously scheduled page work.
+Page messages appear separately from evaluation results. For example,
+`console.log("hello")` shows a `hello` message and an `undefined` return value.
+Command/Ctrl+F opens console filtering. Levels, timestamps and session-only
+snippets are available without a permanent toolbar expansion.
+
+The document selector identifies top frames, named child frames, titles and
+URLs in the owned disposable browser. Navigation rejects old IDs and clears
+retained handles. Experiment activity opens a separate Traffic view of bounded
+native resource-completion metadata. It contains session/document/resource IDs
+and the last evaluation request ID; observation order does not prove causation.
+Paths, queries, headers and bodies are excluded. Source links look up corresponding
+URLs in the existing evidence workspace and report absent source explicitly.
+
+Closing the dock preserves the session; Disconnect removes its browser/profile.
+The Sources Logs drawer remains the debugger log viewer. Console values and
+history remain ephemeral. See [Native Console v2](../../protocol/native-console-v2.md)
+for exact operation, bounds, contracts and required post-build verification.
+The synthetic wire fixture supplies scripted responses and never executes JS.
+
 ## Run
 
 ```sh
@@ -192,6 +256,7 @@ input and output visible with transformation history available on demand.
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
 | `traffic_view.js` | Bounded request/response body views, explicit missing-data states, and labeled sample exchanges |
 | `source_syntax.js` | Source names, display formatting, and bounded tokenization without DOM or application state |
+| `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion |
 | `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |
 | `../origin-trace-backend/src/debugger/` | CDP sessions, transport ownership, request validation, hooks, experiments, and automation |
 | `../origin-trace-backend/src/workspace.rs`, `analyst.rs`, `durable.rs` | Workspace contracts, explicit analyst execution, private durable replacement |

@@ -8,6 +8,7 @@ mod durable;
 mod endpoint;
 mod error;
 mod evidence;
+mod native_console;
 mod origin_trace;
 mod provenance;
 mod validation;

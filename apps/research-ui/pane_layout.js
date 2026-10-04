@@ -2,6 +2,7 @@
 function initializePaneLayout() {
   const storageKey = 'origin-trace.layout.v1';
   const configurations = [
+    { id: 'native-console', parent: '#workspace', panes: ['.main', '#native-console-panel'], axis: 'y', minimum: [180, 190], label: 'workspace and console' },
     { id: 'traffic', parent: '.traffic-grid', panes: ['.request-pane', '.detail-pane'], axis: 'y', minimum: [220, 220], label: 'Traffic list and inspector' },
     { id: 'exchange', parent: '#exchange-inspector', panes: ['.exchange-pane:nth-child(2)', '.exchange-pane:last-child'], axis: 'x', minimum: [220, 220], label: 'Request and response' },
     { id: 'repeater', parent: '.repeater-split', panes: ['.repeater-request-pane', '.repeater-response-pane'], axis: 'x', minimum: [320, 260], label: 'Repeater request and response' },
@@ -181,6 +182,7 @@ function initializePaneLayout() {
   observer.observe(document.querySelector('main'), { subtree: true, attributes: true,
     attributeFilter: ['hidden', 'data-empty', 'data-sidebar-open', 'data-hooks-open'] });
   observer.observe(document.querySelector('#exchange-inspector'), { childList: true });
+  observer.observe(document.querySelector('#native-console-panel'), { attributes: true, attributeFilter: ['hidden'] });
   window.addEventListener('resize', schedule);
   document.addEventListener('scroll', schedule, true);
   window.addEventListener('blur', () => dragging?.layout.finish(false));

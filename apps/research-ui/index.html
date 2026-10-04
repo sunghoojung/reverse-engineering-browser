@@ -23,6 +23,7 @@
           <button class="nav-button" data-screen="traffic" aria-current="page"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h10M3 15h14"/></svg><span>Traffic</span></button>
           <button class="nav-button" data-screen="api-collection"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4h6l2 3h6v10H3z"/></svg><span>Collection</span></button>
           <button class="nav-button" data-screen="sources"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 5-5 5 5 5m6-10 5 5-5 5"/></svg><span>Sources</span></button>
+          <button id="native-console-toggle" class="nav-button" aria-controls="native-console-panel" aria-expanded="false" aria-pressed="false" title="Toggle console (⌘ / Ctrl + J)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3 5 5 5-5 5m8 0h6"/></svg><span>Console</span></button>
           <button class="nav-button" data-screen="signals"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10a6 6 0 0 1 12 0m-9 0a3 3 0 0 1 6 0v4m-3-4v7M4 13v2m12-2v2"/></svg><span>Fingerprinting</span></button>
           <details id="advanced-navigation" class="advanced-navigation">
             <summary>Advanced</summary>
@@ -43,6 +44,11 @@
       <div id="workspace" class="workspace">
         <main class="main">
           <section id="screen-traffic" class="screen" aria-label="Traffic">
+            <section id="console-experiment-traffic" class="console-experiment-traffic" aria-label="Console experiment activity" hidden>
+              <header><strong id="console-traffic-title">Console experiment activity</strong><button id="console-traffic-back" class="secondary-button" type="button">Back to captured traffic</button></header>
+              <p id="console-traffic-notice" role="status"></p>
+              <div id="console-traffic-events" class="console-traffic-events" role="log" aria-label="Experiment resource events"></div>
+            </section>
             <section id="runtime-hook-traffic" class="runtime-hook-traffic" aria-label="Isolated worker request trail" tabindex="-1" hidden></section>
             <div class="traffic-grid">
               <div class="request-pane">
@@ -242,7 +248,7 @@
                 <button id="source-deob" class="source-tool" type="button" aria-label="Show deobfuscated representation" title="Show deobfuscated representation" disabled>Deob</button>
                 <button id="source-hook-pivot" class="source-tool" type="button" aria-controls="hooks-workspace" aria-expanded="false" title="Open Runtime Hooks beside source" disabled>Hooks</button>
                 <button id="source-sidebar-toggle" class="source-tool" type="button" aria-controls="source-sidebar" aria-expanded="false">Details</button>
-                <button id="console-toggle" class="source-tool" type="button" aria-label="Toggle console drawer" title="Toggle console drawer (Escape)">Console</button>
+                <button id="console-toggle" class="source-tool" type="button" aria-label="Toggle debugger logs" title="Toggle debugger logs (Escape)">Logs</button>
               </div>
               <div id="source-code-wrap" class="source-code-wrap" tabindex="0">
                 <div id="source-code-empty" class="source-empty">Select a JavaScript file, WASM module, source map, or approved response body.</div>
@@ -255,8 +261,8 @@
                 <span id="source-language">Plain text</span>
                 <span id="source-hash" class="source-hash"></span>
               </div>
-              <section id="console-drawer" class="console-drawer" aria-label="Console drawer" hidden>
-                <div class="console-head"><strong>Console</strong><span id="console-count">0 messages</span><button id="console-clear" type="button">Clear</button></div>
+              <section id="console-drawer" class="console-drawer" aria-label="Debugger logs" hidden>
+                <div class="console-head"><strong>Logs</strong><span id="console-count">0 messages</span><button id="console-clear" type="button">Clear</button></div>
                 <div id="console-entries" class="console-entries" role="log" aria-live="polite"></div>
               </section>
               <div id="quick-open" class="quick-open" role="dialog" aria-label="Open a source file" hidden>
@@ -1177,6 +1183,46 @@
             </div>
           </section>
         </main>
+        <section id="native-console-panel" class="native-console-panel" aria-label="Native JavaScript console" hidden>
+          <header class="native-console-head">
+            <button id="native-console-clear" type="button" class="icon-button" aria-label="Clear console" title="Clear console">⊘</button>
+            <select id="native-console-target" aria-label="Console document" disabled><option value="">Select a document</option></select>
+            <div id="native-console-filter-row" class="native-console-filter-row" hidden><input id="native-console-filter" type="search" aria-label="Filter console" placeholder="Filter" maxlength="256" /><select id="native-console-level" aria-label="Console message level"><option value="all">All levels</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="info">Info</option><option value="debug">Debug</option></select></div>
+            <span class="native-console-head-spacer"></span>
+            <details id="native-console-connection" class="native-console-connection">
+              <summary aria-label="Console connection settings" title="Console connection settings"><span id="native-console-badge" class="native-console-badge">idle</span><span aria-hidden="true">⌄</span></summary>
+              <div class="native-console-connection-body">
+                <strong>Disposable browser session</strong>
+                <div class="native-console-controls">
+                  <input id="native-console-url" type="url" aria-label="Authorized page URL" maxlength="4096" placeholder="https://your-authorized-site.example" autocomplete="off" spellcheck="false" />
+                  <button id="native-console-start" type="button" class="native-console-button native-console-primary" disabled>Connect</button>
+                </div>
+                <div class="native-console-session-actions">
+                  <button id="native-console-refresh" type="button" class="native-console-button" disabled>Refresh documents</button>
+                  <button id="native-console-stop" type="button" class="native-console-button" disabled>Disconnect</button>
+                </div>
+                <label class="native-console-setting"><input id="native-console-timestamps" type="checkbox" /> Show timestamps</label>
+                <button id="native-console-search" type="button" class="native-console-button">Find in console (⌘ / Ctrl + F)</button>
+                <details class="native-console-utilities"><summary>Research utilities</summary><p><code>$_</code> reads the last result. Expand a value to copy it, store it as <code>temp1</code>, or inspect its source. <code>await</code> accepts an async expression. Up/Down recalls history at the first/last line. Command history stays in memory after clearing output.</p><select id="native-console-snippets" aria-label="Console snippets" disabled><option>No snippets saved</option></select><button id="native-console-load-snippet" type="button" class="native-console-button">Load snippet</button><button id="native-console-forget" type="button" class="native-console-button">Forget command history</button></details>
+                <p>Commands run in the selected document and can change page state. Disconnect removes this disposable browser and profile.</p>
+              </div>
+            </details>
+            <button id="native-console-close" type="button" class="icon-button" aria-label="Close console panel" title="Close panel (⌘ / Ctrl + J)">×</button>
+          </header>
+          <div id="native-console-notice" class="native-console-notice" role="status" aria-live="polite">Open this panel to check the native console connection.</div>
+          <div class="native-console-scroll" id="native-console-scroll">
+            <div id="native-console-output" class="native-console-output" role="log" aria-live="polite" aria-label="Console results"><p class="native-console-empty">Start a session, then select the document whose <code>window</code> you want to inspect.</p></div>
+            <form id="native-console-form" class="native-console-input">
+              <span class="native-console-prompt" aria-hidden="true">&gt;</span>
+              <div class="native-console-editor">
+                <pre id="native-console-highlight" aria-hidden="true"></pre>
+                <textarea id="native-console-source" aria-label="JavaScript command" rows="1" maxlength="8192" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" aria-describedby="native-console-input-help" disabled></textarea>
+              </div>
+              <span id="native-console-input-help">Enter to run · Shift + Enter for a new line · Up/Down selects suggestions · Tab or Enter accepts · Escape dismisses · Ctrl + Space shows property suggestions</span>
+              <button id="native-console-run" type="submit" disabled hidden>Run</button>
+            </form>
+          </div>
+        </section>
       </div>
 
       <footer class="statusbar">
@@ -1196,6 +1242,8 @@
     <script src="request_value_test.js"></script>
     <script src="field_provenance.js"></script>
     <script src="pane_layout.js"></script>
+    <script src="native_console_completion.js"></script>
+    <script src="native_console.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

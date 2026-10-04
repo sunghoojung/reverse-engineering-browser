@@ -29,6 +29,10 @@ pub struct Options {
     #[arg(long)]
     pub debugger_transport: Option<PathBuf>,
     #[arg(long)]
+    pub native_console: Option<PathBuf>,
+    #[arg(long, env = "REB_BRAVE_BINARY")]
+    pub brave_binary: Option<PathBuf>,
+    #[arg(long)]
     pub heap_snapshot: Option<PathBuf>,
     #[arg(long, env = "REB_DEOBFUSCATOR_WORKER")]
     pub deobfuscator: Option<PathBuf>,
@@ -82,6 +86,8 @@ impl Options {
         for path in [
             &mut self.decoder,
             &mut self.debugger_transport,
+            &mut self.native_console,
+            &mut self.brave_binary,
             &mut self.heap_snapshot,
             &mut self.deobfuscator,
             &mut self.analyst_runner,

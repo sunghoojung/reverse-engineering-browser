@@ -1,0 +1,52 @@
+diff --git a/src/debug/debug-interface.cc b/src/debug/debug-interface.cc
+index 64559d1..97d5e22 100644
+--- a/src/debug/debug-interface.cc
++++ b/src/debug/debug-interface.cc
+@@ -1317,6 +1317,31 @@ void GlobalLexicalScopeNames(v8::Local<v8::Context> v8_context,
+   }
+ }
+ 
++void GetConsoleLexicalNames(v8::Local<v8::Context> v8_context,
++                            std::vector<v8::Global<v8::String>>* names,
++                            uint32_t limit) {
++  auto context = Utils::OpenDirectHandle(*v8_context);
++  i::Isolate* isolate = i::Isolate::Current();
++  i::DirectHandle<i::ScriptContextTable> table(
++      context->native_context()->script_context_table(), isolate);
++  const uint32_t len = table->length(kAcquireLoad).value();
++  uint32_t scanned = 0;
++  for (uint32_t i = 0; i < len && i < limit; i++) {
++    i::DirectHandle<i::Context> script_context(table->get(i), isolate);
++    DCHECK(script_context->IsScriptContext());
++    i::DirectHandle<i::ScopeInfo> scope_info(script_context->scope_info(),
++                                             isolate);
++    for (auto it : i::ScopeInfo::IterateLocalNames(scope_info)) {
++      if (++scanned > limit || names->size() >= limit)
++        return;
++      if (i::ScopeInfo::VariableIsSynthetic(it->name()))
++        continue;
++      names->emplace_back(reinterpret_cast<Isolate*>(isolate),
++                          Utils::ToLocal(direct_handle(it->name(), isolate)));
++    }
++  }
++}
++
+ void SetReturnValue(v8::Isolate* v8_isolate, v8::Local<v8::Value> value) {
+   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
+   isolate->debug()->set_return_value(*Utils::OpenDirectHandle(*value));
+diff --git a/src/debug/debug-interface.h b/src/debug/debug-interface.h
+index a8227d3..80b6b86 100644
+--- a/src/debug/debug-interface.h
++++ b/src/debug/debug-interface.h
+@@ -547,6 +547,11 @@ class V8_EXPORT_PRIVATE StackTraceIterator {
+                                              bool throw_on_side_effect) = 0;
+ };
+ 
++V8_EXPORT_PRIVATE void GetConsoleLexicalNames(
++    v8::Local<v8::Context> context,
++    std::vector<v8::Global<v8::String>>* names,
++    uint32_t limit);
++
+ void GlobalLexicalScopeNames(v8::Local<v8::Context> context,
+                              std::vector<v8::Global<v8::String>>* names);
+ 

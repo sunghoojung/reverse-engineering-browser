@@ -6,6 +6,19 @@ ignored by the parent repository. Project-wide authorization and capture policy
 is in [SAFETY.md](../../../SAFETY.md); this guide describes the
 browser integration's enforcement details.
 
+## Native console
+
+The disabled-by-default native console is a separate mutation path. Patch 0011
+wires the browser session and per-frame renderer agent; the overlay owns their
+Mojo contract and bounded local transport. It evaluates explicit commands in a
+selected main-world context inside a disposable browser profile. It creates no
+CDP endpoint and makes no undetectability guarantee. See
+[Native Console v2](../../../protocol/native-console-v2.md) for ownership,
+wire layouts, limits, and real-browser checks after rebuilding.
+Eligible HTTP and HTTPS documents must belong to a profile directory immediately
+inside the owned user-data root, including the fresh browser's `Default` profile.
+The user-data root itself is not a BrowserContext profile path.
+
 ## Layout
 
 - `overlay/` contains complete authored files, mirroring their `brave-core`

@@ -31,6 +31,13 @@ validates Host, Origin, and fetch-site headers. Static serving allowlists the
 application assets explicitly. Stored identifiers and public response schemas follow
 [`protocol/openapi.json`](../../protocol/openapi.json).
 
+The native Console panel uses `src/native_console.rs` and the bundled C++
+`OriginTraceNativeConsole` bridge. `REB_BRAVE_BINARY` or `--brave-binary` selects
+the rebuilt custom browser; `--native-console` can override the bridge. This
+separate session uses no CDP connection. It owns a temporary profile and both
+process groups, validates bounded replies, and retires ambiguous exchanges. See
+[Native Console v2](../../protocol/native-console-v2.md).
+
 Each browser connection owns a native transport process, a bounded event queue,
 and command deadlines. Experiment actions verify browser-context ownership.
 Disposal stops owned pages, workers, recipes, requests, and retained objects.

@@ -6,7 +6,10 @@
 import("//mojo/public/tools/bindings/mojom.gni")
 
 mojom("mojom") {
-  sources = [ "common/native_probe_transport.mojom" ]
+  sources = [
+    "common/native_console.mojom",
+    "common/native_probe_transport.mojom",
+  ]
 
   public_deps = [ "//mojo/public/mojom/base" ]
 }
@@ -16,6 +19,10 @@ source_set("queue") {
     "common/native_probe_queue.cc",
     "common/native_probe_queue.h",
   ]
+}
+
+source_set("console_protocol") {
+  sources = [ "common/native_console_protocol.h" ]
 }
 
 component("renderer_sink") {
@@ -35,18 +42,25 @@ component("renderer_sink") {
 static_library("renderer") {
   sources = [
     "common/native_vm_finding.h",
+    "renderer/native_console_agent.cc",
+    "renderer/native_console_agent.h",
+    "renderer/native_console_runtime.cc",
+    "renderer/native_console_runtime.h",
     "renderer/native_probe_transport.cc",
     "renderer/native_probe_transport.h",
   ]
 
   deps = [
+    ":console_protocol",
     ":mojom",
     ":queue",
     ":renderer_sink",
     "//base",
+    "//content/public/renderer",
     "//mojo/public/cpp/base",
     "//mojo/public/cpp/bindings",
     "//third_party/blink/public:blink",
+    "//v8",
   ]
 }
 
@@ -58,6 +72,8 @@ source_set("browser") {
     "browser/native_artifact_capture_sink.h",
     "browser/native_artifact_socket_client.cc",
     "browser/native_artifact_socket_client.h",
+    "browser/native_console_session.cc",
+    "browser/native_console_session.h",
     "browser/native_local_ipc_client.cc",
     "browser/native_local_ipc_client.h",
     "browser/native_network_capture_sink.cc",
@@ -69,12 +85,15 @@ source_set("browser") {
     "browser/native_probe_socket_client.cc",
     "browser/native_probe_socket_client.h",
     "common/native_artifact_header.h",
+    "common/native_console_io.cc",
+    "common/native_console_io.h",
     "common/native_probe_event.h",
     "common/native_probe_ipc.h",
     "common/native_vm_finding.h",
   ]
 
   deps = [
+    ":console_protocol",
     ":mojom",
     ":queue",
     "//base",

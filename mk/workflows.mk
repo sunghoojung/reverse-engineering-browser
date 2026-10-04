@@ -32,7 +32,15 @@ decoder: $(DECODER_BINARY)
 
 debugger-transport: $(DEBUGGER_TRANSPORT_BINARY)
 
-e2e: origin-trace-backend producer broker artifact-producer artifact-receiver debugger-transport heap-snapshot decoder
+native-console-build: $(NATIVE_CONSOLE_BINARY)
+
+native-console: native-console-build
+	./scripts/run-native-console.sh
+
+native-console-check: native-console-build origin-trace-backend
+	python3 tools/check-native-console.py --binary $(NATIVE_CONSOLE_BINARY) --backend $(ORIGIN_TRACE_BACKEND)
+
+e2e: origin-trace-backend producer broker artifact-producer artifact-receiver debugger-transport heap-snapshot decoder native-console-check
 	@mkdir -p $(BUILD_DIR)/sessions
 	$(PRODUCER_BINARY) | $(BROKER_BINARY) \
 		--store $(BUILD_DIR)/sessions/demo.jsonl \
@@ -71,7 +79,7 @@ origin-trace-backend:
 backend-e2e: origin-trace-backend debugger-transport heap-snapshot decoder deob-worker-build
 	node tools/check-origin-trace-debugger.mjs
 
-app-build: heap-snapshot decoder broker artifact-receiver debugger-transport
+app-build: heap-snapshot decoder broker artifact-receiver debugger-transport native-console-build
 	./scripts/build-research-app.sh
 
 app: app-build

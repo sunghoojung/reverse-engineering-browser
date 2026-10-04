@@ -1833,6 +1833,155 @@
           }
         }
       }
+    },
+    "/api/native-console": {
+      "get": {
+        "operationId": "get_native_console",
+        "summary": "Native console availability and session state",
+        "tags": [
+          "native-console"
+        ],
+        "responses": {
+          "200": {
+            "description": "Current ephemeral native console session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeConsoleState"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/native_console.rs"
+      }
+    },
+    "/api/native-console/actions": {
+      "post": {
+        "operationId": "native_console_action",
+        "summary": "Explicit native console session and evaluation actions",
+        "description": "Starts a fresh disposable browser without CDP. Commands are never retried automatically. Console values remain ephemeral. Session and document identifiers must be selected explicitly. A timeout does not roll back side effects.",
+        "tags": [
+          "native-console"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeConsoleAction"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session action or JavaScript outcome; exceptions and execution timeouts are result statuses.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/NativeConsoleStopped"
+                    },
+                    {
+                      "$ref": "#/components/schemas/NativeConsoleTargets"
+                    },
+                    {
+                      "$ref": "#/components/schemas/NativeConsoleEvaluation"
+                    },
+                    {
+                      "$ref": "#/components/schemas/NativeConsoleRuntime"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or oversized input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Transport deadline expired; execution may have occurred.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Busy, changed, unavailable or retired session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Malformed native protocol reply.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Local process or I/O failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Rebuilt browser or native helper unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-max-body-bytes": 65536,
+        "x-source": "apps/origin-trace-backend/src/native_console.rs"
+      }
     }
   },
   "components": {
@@ -8696,6 +8845,801 @@
             }
           }
         }
+      },
+      "NativeConsoleState": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "const": 2,
+            "type": "integer"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "ready"
+            ]
+          },
+          "session_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "description": "Canonical nonzero uint64 decimal identifier."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract_version",
+          "state",
+          "session_id",
+          "available",
+          "message"
+        ]
+      },
+      "NativeConsoleStopped": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "const": 2,
+            "type": "integer"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "ready"
+            ]
+          },
+          "session_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "description": "Canonical nonzero uint64 decimal identifier."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "contract_version",
+          "state",
+          "session_id"
+        ]
+      },
+      "NativeConsoleTargets": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "const": 2,
+            "type": "integer"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "ready"
+            ]
+          },
+          "session_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "description": "Canonical nonzero uint64 decimal identifier."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "targets": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]{0,19}$",
+                  "description": "Canonical nonzero uint64 decimal identifier."
+                },
+                "origin": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "truncated": {
+                  "type": "boolean"
+                },
+                "label": {
+                  "type": "string",
+                  "x-max-utf8-bytes": 128
+                },
+                "url": {
+                  "type": "string",
+                  "x-max-utf8-bytes": 512
+                },
+                "main_frame": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "id",
+                "origin",
+                "truncated",
+                "label",
+                "url",
+                "main_frame"
+              ]
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "contract_version",
+          "state",
+          "session_id",
+          "targets",
+          "truncated"
+        ]
+      },
+      "NativeConsoleEvaluation": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "const": 2,
+            "type": "integer"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "ready"
+            ]
+          },
+          "session_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "description": "Canonical nonzero uint64 decimal identifier."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "malformed",
+              "stale_target",
+              "forbidden",
+              "exception",
+              "timeout",
+              "disconnected"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "undefined",
+              "null",
+              "boolean",
+              "number",
+              "string",
+              "bigint",
+              "symbol",
+              "function",
+              "object",
+              "promise"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 8192,
+            "x-max-utf8-bytes": 8192
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "contract_version",
+          "state",
+          "session_id",
+          "status",
+          "type",
+          "text",
+          "truncated"
+        ]
+      },
+      "NativeConsoleAction": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "start",
+                "type": "string"
+              },
+              "url": {
+                "type": "string",
+                "maxLength": 4096,
+                "description": "Explicit authorized HTTP(S) target without embedded credentials."
+              }
+            },
+            "required": [
+              "action",
+              "url"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "stop",
+                "type": "string"
+              },
+              "session_id": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[1-9][0-9]{0,19}$",
+                    "description": "Canonical nonzero uint64 decimal identifier."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "action",
+              "session_id"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "targets",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "description": "Canonical nonzero uint64 decimal identifier."
+              }
+            },
+            "required": [
+              "action",
+              "session_id"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "evaluate",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "description": "Canonical nonzero uint64 decimal identifier."
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "description": "Canonical nonzero uint64 decimal identifier."
+              },
+              "source": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 8192,
+                "x-max-utf8-bytes": 8192
+              }
+            },
+            "required": [
+              "action",
+              "session_id",
+              "target_id",
+              "source"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "runtime"
+              },
+              "session_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "command": {
+                "$ref": "#/components/schemas/NativeConsoleRuntimeCommand"
+              }
+            },
+            "required": [
+              "action",
+              "session_id",
+              "target_id",
+              "command"
+            ]
+          }
+        ]
+      },
+      "NativeConsoleRuntimeCommand": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "type": "string",
+                "enum": [
+                  "evaluate"
+                ]
+              },
+              "source": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 8192
+              }
+            },
+            "required": [
+              "operation",
+              "source"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "type": "string",
+                "enum": [
+                  "inspect"
+                ]
+              },
+              "handle": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65536
+              }
+            },
+            "required": [
+              "operation",
+              "handle",
+              "offset"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "type": "string",
+                "enum": [
+                  "complete"
+                ]
+              },
+              "path": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                  "type": "string",
+                  "x-max-utf8-bytes": 128
+                }
+              },
+              "prefix": {
+                "type": "string",
+                "x-max-utf8-bytes": 128
+              }
+            },
+            "required": [
+              "operation",
+              "path",
+              "prefix"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "type": "string",
+                "enum": [
+                  "await",
+                  "release",
+                  "cancel",
+                  "store",
+                  "source",
+                  "listeners",
+                  "monitor",
+                  "unmonitor"
+                ]
+              },
+              "handle": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              }
+            },
+            "required": [
+              "operation",
+              "handle"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "type": "string",
+                "enum": [
+                  "poll",
+                  "clear",
+                  "last",
+                  "traffic"
+                ]
+              }
+            },
+            "required": [
+              "operation"
+            ]
+          }
+        ]
+      },
+      "NativeConsoleValue": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "enum": [
+              "undefined",
+              "null",
+              "boolean",
+              "number",
+              "string",
+              "bigint",
+              "symbol",
+              "function",
+              "object",
+              "promise",
+              "accessor"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "x-max-utf8-bytes": 2048
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "handle": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "location": {
+            "$ref": "#/components/schemas/NativeConsoleLocation"
+          }
+        },
+        "required": [
+          "type",
+          "text",
+          "truncated"
+        ]
+      },
+      "NativeConsoleLocation": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string",
+            "x-max-utf8-bytes": 2048
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "column": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "function": {
+            "type": "string",
+            "x-max-utf8-bytes": 2048
+          }
+        },
+        "required": [
+          "url",
+          "line"
+        ]
+      },
+      "NativeConsoleProperty": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "x-max-utf8-bytes": 2048
+          },
+          "accessor": {
+            "type": "boolean"
+          },
+          "value": {
+            "$ref": "#/components/schemas/NativeConsoleValue"
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ]
+      },
+      "NativeConsoleMessage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string",
+            "x-max-utf8-bytes": 2048
+          },
+          "url": {
+            "type": "string",
+            "x-max-utf8-bytes": 512
+          },
+          "stack": {
+            "type": "string",
+            "x-max-utf8-bytes": 2048
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "level": {
+            "enum": [
+              "debug",
+              "info",
+              "warning",
+              "error"
+            ]
+          },
+          "time": {
+            "type": "number"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "text",
+          "url",
+          "stack",
+          "line",
+          "level",
+          "time",
+          "truncated"
+        ]
+      },
+      "NativeConsoleActivity": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "document_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "resource_id": {
+            "type": "string"
+          },
+          "after_request_id": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$"
+          },
+          "origin": {
+            "type": "string",
+            "x-max-utf8-bytes": 256
+          },
+          "method": {
+            "type": "string",
+            "x-max-utf8-bytes": 16
+          },
+          "status": {
+            "type": "integer"
+          },
+          "network_error": {
+            "type": "integer"
+          },
+          "cached": {
+            "type": "boolean"
+          },
+          "time": {
+            "type": "number"
+          },
+          "operation": {
+            "const": "resource_load_complete"
+          }
+        },
+        "required": [
+          "event_id",
+          "document_id",
+          "resource_id",
+          "after_request_id",
+          "origin",
+          "method",
+          "status",
+          "network_error",
+          "cached",
+          "time",
+          "operation"
+        ]
+      },
+      "NativeConsoleRuntime": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "const": 2
+          },
+          "session_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "state": {
+            "const": "ready"
+          },
+          "runtime": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "status": {
+                "enum": [
+                  "ok",
+                  "error",
+                  "exception",
+                  "pending",
+                  "rejected"
+                ]
+              },
+              "text": {
+                "type": "string",
+                "x-max-utf8-bytes": 8192
+              },
+              "value": {
+                "$ref": "#/components/schemas/NativeConsoleValue"
+              },
+              "properties": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "$ref": "#/components/schemas/NativeConsoleProperty"
+                }
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65536
+              },
+              "more": {
+                "type": "boolean"
+              },
+              "truncated": {
+                "type": "boolean"
+              },
+              "location": {
+                "$ref": "#/components/schemas/NativeConsoleLocation"
+              },
+              "stack": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "$ref": "#/components/schemas/NativeConsoleLocation"
+                }
+              },
+              "messages": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "$ref": "#/components/schemas/NativeConsoleMessage"
+                }
+              },
+              "dropped": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "events": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "$ref": "#/components/schemas/NativeConsoleActivity"
+                }
+              },
+              "items": {
+                "type": "array",
+                "maxItems": 24,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z_$][\\w$]{0,127}$"
+                    },
+                    "kind": {
+                      "enum": [
+                        "property",
+                        "function"
+                      ]
+                    },
+                    "signature": {
+                      "type": "string",
+                      "maxLength": 128
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "kind"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "status"
+            ]
+          }
+        },
+        "required": [
+          "contract_version",
+          "session_id",
+          "request_id",
+          "state",
+          "runtime"
+        ]
       }
     }
   },

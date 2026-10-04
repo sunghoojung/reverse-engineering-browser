@@ -83,11 +83,12 @@
     const empty = controls.output.querySelector('.native-console-empty');
     if (empty) empty.remove();
     const follow = controls.output.scrollHeight - controls.output.scrollTop - controls.output.clientHeight < 40;
-    const row = document.createElement('article'); row.className = 'native-console-result'; row.dataset.status = value.status;
-    const input = document.createElement('pre'); input.className = 'native-console-expression'; input.textContent = `› ${source}`;
+    const row = document.createElement('article'); row.className = 'native-console-result'; row.dataset.status = value.status; row.dataset.type = value.type;
+    const input = document.createElement('pre'); input.className = 'native-console-expression';
+    input.append(document.createTextNode('› ')); appendCommandColors(input, source);
     const label = document.createElement('span'); label.className = 'native-console-result-type'; label.textContent = `${value.status === 'ok' ? value.type : value.status} · document ${controls.target.value}${value.truncated ? ' · truncated' : ''}`;
     label.title = `Session ${value.session_id} · document ${controls.target.value}`;
-    const output = document.createElement('pre'); output.textContent = value.text;
+    const output = document.createElement('pre'); output.className = 'native-console-value'; output.textContent = value.text;
     row.append(input, label, output);
     const bytes = encoder.encode(source).length + encoder.encode(value.text).length;
     row.dataset.bytes = bytes;
@@ -122,10 +123,47 @@
   controls.stop.addEventListener('click', () => perform('stop', {}, () => { session = null; clearTargets(); notice('Session stopped. The disposable browser and profile were removed.'); }));
   controls.refresh.addEventListener('click', () => perform('targets', {}, targets));
   controls.target.addEventListener('change', () => { renderControls(); if (!controls.source.disabled) controls.source.focus(); });
+  // Tokenize at most the command limit and reuse the existing source tokenizer.
+  // Spans contain text only; coloring cannot interpret captured HTML or evaluate JS.
+  function appendCommandColors(container, source) {
+    const tokenizer = createSourceTokenizer({kind: 'javascript'});
+    tokenizer.coloredTokens = SOURCE_HIGHLIGHT_TOKEN_LIMIT - 1024;
+    const fragment = document.createDocumentFragment();
+    let plain = '';
+    const flush = () => { if (plain) fragment.append(document.createTextNode(plain)); plain = ''; };
+    source.slice(0, 8192).split('\n').forEach((line, index) => {
+      if (index) plain += '\n';
+      if (!line) return;
+      for (const token of sourceSyntaxTokens(line, tokenizer)) {
+        if (token.type === 'plain') plain += token.text;
+        else {
+          flush();
+          const span = document.createElement('span'); span.className = `syntax-${token.type}`;
+          span.textContent = token.text; fragment.append(span);
+        }
+      }
+    });
+    plain += source.slice(8192); flush(); container.append(fragment);
+  }
+  function syncInputMirror() {
+    const mirror = element('highlight');
+    mirror.style.width = `${controls.source.clientWidth}px`;
+    mirror.style.height = `${controls.source.clientHeight}px`;
+    mirror.scrollTop = controls.source.scrollTop; mirror.scrollLeft = controls.source.scrollLeft;
+  }
+  function colorInput() {
+    const mirror = element('highlight');
+    mirror.replaceChildren(); appendCommandColors(mirror, controls.source.value);
+    // Preserve the last empty line's geometry and native textarea wrapping.
+    mirror.append(document.createTextNode('\n')); syncInputMirror();
+  }
   function sizeInput() {
     controls.source.style.height = '26px';
     controls.source.style.height = `${Math.min(66, Math.max(26, controls.source.scrollHeight + 2))}px`;
+    colorInput();
   }
+  controls.source.addEventListener('scroll', syncInputMirror);
+  new ResizeObserver(syncInputMirror).observe(controls.source);
   controls.source.addEventListener('input', () => { historyIndex = null; sizeInput(); renderControls(); });
   controls.clear.addEventListener('click', () => {
     const empty = document.createElement('p'); empty.className = 'native-console-empty'; empty.textContent = 'Output cleared.';

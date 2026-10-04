@@ -1197,7 +1197,10 @@
           <div id="native-console-output" class="native-console-output" role="log" aria-live="polite" aria-label="Console results"><p class="native-console-empty">Start a session, then select the document whose <code>window</code> you want to inspect.</p></div>
           <form id="native-console-form" class="native-console-input">
             <span class="native-console-prompt" aria-hidden="true">›</span>
-            <textarea id="native-console-source" aria-label="JavaScript command" rows="1" maxlength="8192" spellcheck="false" placeholder="window.location.href" aria-describedby="native-console-input-help" disabled></textarea>
+            <div class="native-console-editor">
+              <pre id="native-console-highlight" aria-hidden="true"></pre>
+              <textarea id="native-console-source" aria-label="JavaScript command" rows="1" maxlength="8192" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" placeholder="window.location.href" aria-describedby="native-console-input-help" disabled></textarea>
+            </div>
             <span id="native-console-input-help">Enter to run · Shift + Enter for a new line</span>
             <button id="native-console-run" type="submit" class="native-console-button native-console-primary" disabled>Run</button>
           </form>

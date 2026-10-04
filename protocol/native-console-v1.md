@@ -21,7 +21,9 @@ invalidates the selection. Navigation, closure, and document replacement reject
 old IDs. Stop kills the owned browser process group and removes its profile.
 The offline bundled interface reports the required live backend explicitly.
 
-Console opens as a bottom dock beneath the current workspace. Command/Ctrl+J
+Console in the top workspace strip opens a bottom dock beneath the current workspace.
+The prompt and submitted commands are syntax colored with inert text spans;
+primitive results are colored by type. Coloring never evaluates page code. Command/Ctrl+J
 toggles it; closing the dock keeps the session alive. Its top divider supports
 dragging, arrow-key resizing, and Home to reset the saved height. The prompt
 stays pinned while output scrolls.

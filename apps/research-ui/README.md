@@ -15,7 +15,10 @@ and limits.
 The **Console** bottom dock starts a separate disposable custom Brave session for
 explicit main-world JavaScript commands. Set `REB_BRAVE_BINARY` to a rebuilt
 custom browser and use the live backend. Select a document before Run.
-Toggle it with Console or Command/Ctrl+J while keeping the current workspace visible.
+Workspace tabs sit across the top, with Console beside Sources. Commands are
+syntax colored while typing and in the transcript; primitive results use colors
+for their value types. Coloring uses inert text spans and a bounded tokenizer.
+Toggle the dock with Console or Command/Ctrl+J while keeping the current workspace visible.
 Drag its top divider or use the focused divider's arrow keys to resize; Home resets
 the saved height. Enter runs, Shift+Enter adds a line, and Command/Ctrl+Enter also
 submits multiline input. Up/Down recalls commands from the bounded visible output.

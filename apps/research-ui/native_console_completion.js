@@ -124,6 +124,9 @@ function nativeConsoleSuggestions(source, caret, explicit = false) {
   // are UTF-16, matching the textarea, source lexer and native selection API.
   let end = caret;
   while (end < source.length && /[\w$]/.test(source[end])) ++end;
+  // A fully typed API name is ready to run. Do not replace it with a longer
+  // prefix match when Enter submits; explicit completion still includes it.
+  if (!explicit && caret === end && group.has(prefix)) return null;
   const items = [...group.values()].filter(entry => entry.name.startsWith(prefix) &&
     (explicit || entry.name !== source.slice(start, end))).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0).slice(0, 24);
   return items.length ? {items, start, end, prefix, source, caret} : null;

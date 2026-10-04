@@ -27,6 +27,9 @@ the ellipsis on hover or keyboard focus; expanded details expose type, status,
 session and document IDs, and preview truncation. Truncation, actionable errors
 and output eviction stay visible. There is no Run button or inline help strip;
 Enter runs, and the prompt's accessible description explains multiline input.
+An empty prompt has no placeholder text. Fully typed built-in names do not open
+automatic suggestions, so Enter runs them unchanged; Ctrl+Space can still request
+their completions explicitly.
 Toggle the dock with Console or Command/Ctrl+J while keeping the current workspace visible.
 Drag its top divider or use the focused divider's arrow keys to resize; Home resets
 the saved height. Enter runs, Shift+Enter adds a line, and Command/Ctrl+Enter also
@@ -44,6 +47,10 @@ drawer shows captured debugger messages. Commands can mutate pages and read
 sensitive values. Results stay in bounded panel memory. See
 [Native Console v1](../../protocol/native-console-v1.md) for operation,
 transport, limits, and required post-build verification.
+The panel currently displays evaluation return values, not page console messages.
+For example, `console.log("hello")` logs to the page console but evaluates to
+`undefined`; evaluating `"hello"` returns the string directly. The synthetic
+transport test peer can echo expressions and does not execute JavaScript.
 
 ## Run
 

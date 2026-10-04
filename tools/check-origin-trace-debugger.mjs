@@ -20,6 +20,12 @@ const complete = runInNewContext(
 );
 const suggestions = text => complete(text, text.length)?.items.map(item => item.name) ?? [];
 assert.deepEqual(Array.from(suggestions("document.que")), ["querySelector", "querySelectorAll"]);
+for (const text of ["document.querySelector", "document.querySelectorAll", "window", "Math.log", "document.body"]) {
+  assert.equal(complete(text, text.length), null, text);
+  assert.equal(complete(text, text.length, true).items[0].name, text.split(".").at(-1), text);
+}
+const longerIdentifier = "document.querySelectorAll";
+assert.ok(complete(longerIdentifier, "document.querySelector".length).items.some(item => item.name === "querySelector"));
 assert.ok(suggestions('window.document.querySelector("main").classList.').includes("toggle"));
 assert.ok(suggestions('document.querySelector(document.querySelector("a")).sty').includes("style"));
 assert.ok(suggestions("window?.navigator.clipboard.re").includes("readText"));

@@ -74,6 +74,10 @@ symbols, and promises receive generic previews with no retained V8 handles.
 There is no runtime property enumeration, custom formatting, or promise
 awaiting. Primitive thrown strings are copied; other exceptions receive a generic
 message so formatting cannot invoke page accessors or `Error.prepareStackTrace`.
+Page console messages are not forwarded by this contract. `console.log("hello")`
+emits a page console message and evaluates to `undefined`; only the evaluation
+result is returned here. The synthetic wire peer does not execute JavaScript and
+must not be presented as proof of page execution.
 
 A renderer watchdog requests V8 termination after 200 ms and clears its own
 termination before returning. This is a soft synchronous budget, not a hard CPU

@@ -80,7 +80,7 @@ class Session final {
     started_ = true;
     retired_ = std::move(retired);
     const auto& command = *base::CommandLine::ForCurrentProcess();
-    profile_ = command.GetSwitchValuePath("user-data-dir");
+    user_data_dir_ = command.GetSwitchValuePath("user-data-dir");
     std::uint64_t id = 0;
     if (!base::StringToUint64(command.GetSwitchValueASCII("reb-native-console-session-id"), &id) ||
         !id)
@@ -174,8 +174,10 @@ class Session final {
   }
 
   bool Eligible(content::RenderFrameHost* frame) const {
+    // BrowserContext paths identify profiles (for example <user-data-dir>/Default),
+    // not the user-data root. Only profiles inside the owned disposable root qualify.
     return frame && frame->IsActive() && frame->IsRenderFrameLive() &&
-           frame->GetBrowserContext()->GetPath() == profile_ &&
+           frame->GetBrowserContext()->GetPath().DirName() == user_data_dir_ &&
            (frame->GetLastCommittedOrigin().scheme() == "http" ||
             frame->GetLastCommittedOrigin().scheme() == "https");
   }
@@ -315,7 +317,7 @@ class Session final {
   }
 
   // Metadata and weak document references only; no V8 objects are retained.
-  base::FilePath profile_;
+  base::FilePath user_data_dir_;
   std::vector<Target> targets_;
   std::uint64_t next_target_ = 1;
   std::size_t pending_ = 0;

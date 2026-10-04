@@ -6198,6 +6198,13 @@
           return tab;
         });
         elements.sourceEditorTabs.replaceChildren(...tabs);
+        const selectedTab = tabs.find(tab => tab.getAttribute('aria-selected') === 'true');
+        if (selectedTab) {
+          const tabBounds = selectedTab.getBoundingClientRect();
+          const stripBounds = elements.sourceEditorTabs.getBoundingClientRect();
+          if (tabBounds.left < stripBounds.left) elements.sourceEditorTabs.scrollLeft += tabBounds.left - stripBounds.left;
+          else if (tabBounds.right > stripBounds.right) elements.sourceEditorTabs.scrollLeft += tabBounds.right - stripBounds.right;
+        }
       }
 
       function renderSourceFacts(source) {
@@ -6223,6 +6230,8 @@
               ['Parent', source.parent_artifact_id], ['MIME', source.mime_type], ['SHA-256', source.sha256],
               ['Sensitive', source.sensitive ? 'approved' : 'no']
             ];
+        const wasm = source.kind === 'wasm' ? state.wasmCache.get(wasmKey(source)) : null;
+        if (wasm) facts.push(['Inspection', wasm.notice], ['Coverage', wasm.status === 'partial' ? wasm.omissions.join(' ') : 'All sections and function bodies decoded.'], ['Limits', '2 MiB input, 8,192 rows, 128 sections, 2 seconds.']);
         facts.forEach(([label, value]) => {
           const term = document.createElement('dt'); term.textContent = label;
           const detail = document.createElement('dd'); detail.textContent = String(value);
@@ -6363,6 +6372,14 @@
       }
 
       function sourceDisplayView(source) {
+        if (state.sourceWasm && source.kind === 'wasm' && source.source_type === 'artifact') {
+          const report = state.wasmCache.get(wasmKey(source));
+          if (report) {
+            const headings = ['Static inspection. The module is never executed.', `${report.status === 'partial' ? 'Partial' : 'Decoded'} · ${report.sections} sections · ${report.imported_functions} imported · ${report.defined_functions} defined · ${report.instructions} instructions`, ...report.omissions];
+            const rows = [...headings.map(text => ({text, byte_offset: null})), ...report.rows];
+            return {content: rows.map(row => row.byte_offset === null ? `;; ${row.text}` : `${row.kind === 'instruction' ? `func ${row.function_index}`.padEnd(11) : row.kind.padEnd(11)} ${row.text}`).join('\n'), lineMap: null, wasmRows: rows};
+          }
+        }
         const original = source.deobfuscation?.original_source ?? source.content ?? '';
         const derived = state.sourceDeobfuscated && source.kind === 'javascript' ? sourceDerivedView(source) : null;
         const active = derived?.text ?? original;
@@ -6389,6 +6406,24 @@
           elements.sourceCodeEmpty.textContent = 'Select a JavaScript file, WASM module, source map, or approved response body.';
           return;
         }
+        if (state.sourceWasm && source.kind === 'wasm' && source.source_type === 'artifact' && !state.wasmCache.has(wasmKey(source))) {
+          const request = state.wasmRequests.get(wasmKey(source));
+          elements.sourceLanguage.textContent = 'WebAssembly';
+          elements.sourceCode.hidden = true;
+          elements.sourceCodeEmpty.hidden = false;
+          elements.sourceCodeEmpty.textContent = request?.status === 'error' ? request.error : 'Inspecting immutable module bytes…';
+          if (request?.status === 'error') {
+            const retry = textElement('button', 'secondary-button', 'Retry inspection');
+            retry.type = 'button';
+            retry.addEventListener('click', () => loadWasmInspection(source, true));
+            const panel = document.createElement('div');
+            panel.className = 'wasm-inspection-error';
+            panel.setAttribute('role', 'alert');
+            panel.append(textElement('p', '', request.error), retry);
+            elements.sourceCodeEmpty.replaceChildren(panel);
+          }
+          return;
+        }
         if (source.loading) {
           elements.sourceLanguage.textContent = 'Detecting syntax';
           elements.sourceCode.hidden = true;
@@ -6409,7 +6444,7 @@
         const lines = content.split('\n');
         const renderedLines = lines.slice(0, 20000);
         const breakpointsByLine = breakpointLinesForSource(source);
-        const tokenizer = createSourceTokenizer(source);
+        const tokenizer = createSourceTokenizer(view.wasmRows ? {kind: 'plain', mime_type: 'text/plain'} : source);
         const nodes = renderedLines.map((line, index) => {
           const runtimeLine = sourceRuntimeLine(source, index);
           const mapped = lineMap ? lineMap[index] ?? null : null;
@@ -6439,9 +6474,24 @@
             : `Show original source at line ${mappedLine + 1}`);
           gutter.addEventListener('click', event => {
             event.stopPropagation();
+            if (view.wasmRows) return;
             if (mappedLine !== null) { revealOriginalLine(source, mappedLine, mapped?.originalColumn ?? 0); return; }
             toggleLineBreakpoint(source, runtimeLine, sourceRuntimeColumn(source, index), breakpointAt(source, runtimeLine));
           });
+          if (view.wasmRows) {
+            const offset = view.wasmRows[index]?.byte_offset;
+            gutter.textContent = offset == null ? '' : offset.toString(16).padStart(6, '0');
+            gutter.disabled = offset == null || offset >= 20000 * 16;
+            gutter.setAttribute('aria-label', offset == null ? 'Inspection notice' : `Show original bytes at offset ${offset}`);
+            gutter.title = offset == null ? '' : offset >= 20000 * 16 ? `Byte offset ${offset} is beyond the first 20,000 hex rows shown in Sources` : `Original byte offset ${offset} (0x${offset.toString(16)})`;
+            gutter.addEventListener('click', () => {
+              if (offset == null) return;
+              state.sourceWasm = false;
+              renderSources();
+              const hexRow = elements.sourceCode.children[Math.floor(offset / 16)];
+              if (hexRow) { hexRow.tabIndex = -1; hexRow.focus({preventScroll: true}); hexRow.scrollIntoView({block: 'center'}); }
+            });
+          }
           const text = document.createElement('span');
           text.className = 'source-text';
           appendSourceSyntax(text, sourceSyntaxTokens(line, tokenizer));
@@ -6458,7 +6508,7 @@
           nodes.push(notice);
         }
         elements.sourceCode.replaceChildren(...nodes);
-        elements.sourceLanguage.textContent = `${sourceSyntaxLabel(tokenizer.language)}${tokenizer.truncated ? ' · color limit reached' : ''}`;
+        elements.sourceLanguage.textContent = view.wasmRows ? 'WASM disassembly · byte offsets' : `${sourceSyntaxLabel(tokenizer.language)}${tokenizer.truncated ? ' · color limit reached' : ''}`;
         elements.sourceCode.hidden = false;
         elements.sourceCodeEmpty.hidden = true;
         elements.sourceCodeWrap.scrollTop = 0;
@@ -6503,6 +6553,11 @@
         elements.sourceSize.textContent = source ? formatByteSize(source.byte_size) : '0 bytes';
         elements.sourceHash.textContent = source?.sha256 ? `${source.source_type === 'script' ? 'hash' : 'sha256'} ${source.sha256}` : '';
         elements.sourceViewKind.textContent = sourceViewLabel(source, view);
+        elements.sourceWasm.hidden = source?.kind !== 'wasm' || source?.source_type !== 'artifact';
+        elements.sourceWasm.setAttribute('aria-pressed', String(state.sourceWasm));
+        elements.sourceWasm.setAttribute('aria-label', state.sourceWasm ? 'Show original WASM hex' : 'Inspect WebAssembly module');
+        elements.sourceWasm.textContent = state.sourceWasm ? 'Hex' : 'Inspect';
+        elements.sourceCode.classList.toggle('wasm-inspection', Boolean(view?.wasmRows));
         elements.sourcePretty.disabled = !source?.content || !sourcePrettySupported(source);
         elements.sourcePretty.setAttribute('aria-pressed', String(state.sourceFormatted));
         elements.sourcePretty.setAttribute('aria-label', state.sourceFormatted ? 'Show source without pretty printing' : 'Pretty print source');
@@ -6519,6 +6574,11 @@
       }
 
       function sourceViewLabel(source, view = null) {
+        if (state.sourceWasm && source?.kind === 'wasm' && source.source_type === 'artifact') {
+          const report = state.wasmCache.get(wasmKey(source));
+          const request = state.wasmRequests.get(wasmKey(source));
+          return report ? `${report.status === 'partial' ? 'Partial' : 'Static'} inspection · original byte offsets` : request?.status === 'error' ? 'Inspection failed · original bytes preserved' : 'Inspection pending';
+        }
         view ??= source?.content !== undefined ? sourceDisplayView(source) : null;
         const original = source?.source_type === 'script' ? 'Live runtime source' : 'Original evidence';
         if (view?.formatError) return `${original} · ${view.formatError}`;
@@ -6679,6 +6739,39 @@
         }
       }
 
+      function wasmKey(source) {
+        return `${source.artifact_id}:${source.sha256}`;
+      }
+
+      async function loadWasmInspection(source, retry = false) {
+        const key = wasmKey(source);
+        if (state.wasmRequests.get(key)?.status === 'loading' || (!retry && state.wasmCache.has(key))) return;
+        state.wasmRequests.set(key, {status: 'loading'});
+        while (state.wasmRequests.size > 128) {
+          const retired = [...state.wasmRequests].find(([id, request]) => id !== key && request.status !== 'loading');
+          if (!retired) break;
+          state.wasmRequests.delete(retired[0]);
+        }
+        renderSources();
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        try {
+          const response = await fetch(`/api/wasm?artifact_id=${encodeURIComponent(source.artifact_id)}`, {cache: 'no-store', signal: controller.signal});
+          const report = await response.json();
+          if (!response.ok) throw new Error(report.error || `Inspection returned ${response.status}`);
+          if (!isWasmInspection(report, source)) throw new Error('The WASM inspector returned an invalid document.');
+          state.wasmCache.delete(key);
+          state.wasmCache.set(key, report);
+          while (state.wasmCache.size > 4) state.wasmCache.delete(state.wasmCache.keys().next().value);
+          state.wasmRequests.set(key, {status: 'ready'});
+        } catch (error) {
+          state.wasmRequests.set(key, {status: 'error', error: error.name === 'AbortError' ? 'Inspection timed out. Original bytes are preserved.' : error.message});
+        } finally {
+          clearTimeout(timeout);
+          if (wasmKey(selectedSource() ?? {}) === key) renderSources();
+        }
+      }
+
       function selectArtifact(artifactId) {
         const artifact = state.artifacts.find(candidate => candidate.artifact_id === artifactId);
         if (!artifact) return;
@@ -6688,6 +6781,7 @@
         state.pendingSourceLine = null;
         state.sourceDeobfuscated = false;
         state.sourceFormatted = false;
+        state.sourceWasm = false;
         if (!state.openArtifactIds.includes(artifactId)) state.openArtifactIds.push(artifactId);
         renderSources();
         loadArtifactContent(artifact);
@@ -6702,6 +6796,7 @@
         state.pendingSourceLine = line === null ? null : { scriptId, line };
         state.sourceDeobfuscated = false;
         state.sourceFormatted = false;
+        state.sourceWasm = false;
         if (!state.openScriptIds.includes(scriptId)) state.openScriptIds.push(scriptId);
         renderSources();
         if (state.sourceHooksOpen && line === null && prefillHookFromSource(source)) renderRuntimeHooks();
@@ -6729,6 +6824,7 @@
         state.pendingSourceLine = null;
         state.sourceDeobfuscated = false;
         state.sourceFormatted = false;
+        state.sourceWasm = false;
         renderSources();
       }
 
@@ -8112,7 +8208,8 @@
           }
           const existing = new Map(state.artifacts.map(artifact => [artifact.artifact_id, artifact]));
           state.artifacts = body.artifacts.map(artifact => {
-            const cached = existing.get(artifact.artifact_id);
+            const prior = existing.get(artifact.artifact_id);
+            const cached = prior?.sha256 === artifact.sha256 ? prior : null;
             return {
               ...artifact,
               origin: state.sessionMode === 'live' ? 'live' : 'demo',
@@ -8133,7 +8230,10 @@
           }
           renderSources();
           const selected = state.artifacts.find(artifact => artifact.artifact_id === state.selectedArtifactId);
-          if (selected) loadArtifactContent(selected);
+          if (selected) {
+            loadArtifactContent(selected);
+            if (state.sourceWasm && selected.kind === 'wasm') loadWasmInspection(selected);
+          }
           if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
         } catch (error) {
           if (!state.artifactReceiverConfigured && state.artifacts.every(artifact => artifact.origin === 'sample')) {
@@ -8622,6 +8722,13 @@
       });
       elements.sourceDeob.addEventListener('click', () => {
         state.sourceDeobfuscated = !state.sourceDeobfuscated;
+        renderSources();
+      });
+      elements.sourceWasm.addEventListener('click', () => {
+        const source = selectedSource();
+        if (source?.kind !== 'wasm' || source.source_type !== 'artifact') return;
+        state.sourceWasm = !state.sourceWasm;
+        if (state.sourceWasm) loadWasmInspection(source);
         renderSources();
       });
       elements.sourcePretty.addEventListener('click', () => {

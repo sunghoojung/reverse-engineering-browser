@@ -46,6 +46,8 @@ current product path.
 
 ## Versioned feature designs
 
+- [WASM captured module inspection v1](./product/wasm-inspection-v1.md)
+
 - [Action Scope Policy v1](./product/action-scope-policy-v1.md)
 - [Anti-bot VM detection v1](./product/anti-bot-vm-detection-v1.md)
 - [API Collection v1](./product/api-collection-v1.md)

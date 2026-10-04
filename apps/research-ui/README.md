@@ -482,3 +482,10 @@ responsive layout stacks panes, shows a single exchange side, or lacks enough
 space. Returning to a wide window restores them. Handles follow scrolling and
 are clipped to the active workspace. `pane_layout.js` owns the shared layout controller;
 no captured evidence is modified by resizing.
+
+Captured WASM opens in Hex. **Inspect** shows bounded sections, types, imports,
+exports and function disassembly with byte-offset links back to original bytes.
+Function indexes include imports. **Find** searches the active view; failures
+provide **Retry inspection**. Partial coverage and display limits are explicit.
+The native shell ships `WasmService.swift` and `OriginTraceWasmInspector`, using
+the same Rust provider as HTTP. See [WASM Inspection v1](../../protocol/wasm-inspection-v1.md).

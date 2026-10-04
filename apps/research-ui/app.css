@@ -3007,3 +3007,20 @@
 .pane-divider:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); background: var(--accent-soft); }
 body.resizing-panes-x, body.resizing-panes-x * { cursor: col-resize !important; user-select: none !important; }
 body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; user-select: none !important; }
+
+/* Binary coordinates need a wider gutter than decimal source line numbers. */
+.source-code.wasm-inspection .source-line {
+  grid-template-columns: 74px minmax(max-content, 1fr);
+}
+
+.wasm-inspection-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  max-width: 640px;
+  padding: 24px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.wasm-inspection-error p { margin: 0; }

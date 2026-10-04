@@ -48,3 +48,10 @@ only while selected-value capture is enabled. Request-time snapshots survive
 hook eviction; session and capture revision guards prevent late results from
 restoring erased observations. See the
 [feature design](../../docs/product/request-field-provenance-v1.md).
+
+Captured WASM inspection uses `src/wasm.rs` and the shared `origin-trace-wasm`
+helper. `GET /api/wasm?artifact_id=ID` verifies the complete artifact before
+bounded inert decoding. The native app bundles the same helper; see
+[WASM Inspection v1](../../protocol/wasm-inspection-v1.md) for limits and
+coverage semantics. HTTP tests verify offsets, imported function numbering,
+CLI parity, malformed and oversized input, partial coverage, and corruption.

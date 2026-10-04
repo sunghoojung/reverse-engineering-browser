@@ -279,3 +279,211 @@ fn vm_reports_malformed_input_and_preserves_valid_evidence() {
     );
     assert!(Path::new(&root.path().join("analysis/vm-analysis-v1.json")).is_file());
 }
+
+#[tokio::test]
+async fn wasm_inspection_preserves_offsets_identity_limits_and_original_bytes() {
+    let server = Server::start().await;
+    fn leb(mut n: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        loop {
+            let byte = (n & 127) as u8;
+            n >>= 7;
+            bytes.push(byte | if n > 0 { 128 } else { 0 });
+            if n == 0 {
+                break;
+            }
+        }
+        bytes
+    }
+    fn section(module: &mut Vec<u8>, id: u8, data: &[u8]) {
+        module.push(id);
+        module.extend(leb(data.len()));
+        module.extend(data);
+    }
+    fn module(nops: usize) -> Vec<u8> {
+        let mut bytes = b"\0asm\x01\0\0\0".to_vec();
+        section(&mut bytes, 1, &[1, 0x60, 0, 1, 0x7f]);
+        section(
+            &mut bytes,
+            2,
+            &[1, 3, b'e', b'n', b'v', 4, b's', b'e', b'e', b'd', 0, 0],
+        );
+        section(&mut bytes, 3, &[1, 0]);
+        section(&mut bytes, 7, &[1, 3, b'r', b'u', b'n', 0, 1]);
+        let mut body = vec![0, 0x10, 0, 0x41, 7, 0x6a];
+        body.extend(vec![1; nops]);
+        body.push(0x0b);
+        let mut code = vec![1];
+        code.extend(leb(body.len()));
+        code.extend(body);
+        section(&mut bytes, 10, &code);
+        bytes
+    }
+    let put = |bytes: &[u8], kind: &str| {
+        let hash = hex::encode(Sha256::digest(bytes));
+        let artifact = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":kind,"url":"https://example.test/module.wasm","mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+        server.file(
+            "artifacts/manifest.jsonl",
+            format!("{artifact}\n").as_bytes(),
+        );
+        server.file(&format!("artifacts/blobs/{hash}.bin"), bytes);
+        hash
+    };
+    let bytes = module(0);
+    let hash = put(&bytes, "wasm");
+    let response = server.get("/api/wasm?artifact_id=1").await;
+    assert_eq!(response.status(), 200);
+    let report: Value = response.json().await.unwrap();
+    let spec: Value = serde_json::from_str(include_str!("../../../protocol/openapi.json")).unwrap();
+    jsonschema::validator_for(&spec["components"]["schemas"]["WasmInspection"])
+        .unwrap()
+        .validate(&report)
+        .unwrap();
+    assert_eq!(report["status"], "decoded");
+    assert_eq!(report["sha256"], hash);
+    assert_eq!(report["imported_functions"], 1);
+    assert_eq!(report["defined_functions"], 1);
+    let rows = report["rows"].as_array().unwrap();
+    let op = rows
+        .iter()
+        .find(|r| {
+            r["kind"] == "instruction" && r["text"].as_str().unwrap().starts_with("i32.const")
+        })
+        .unwrap();
+    assert_eq!(op["function_index"], 1);
+    let start = op["byte_offset"].as_u64().unwrap() as usize;
+    let end = op["byte_end"].as_u64().unwrap() as usize;
+    assert_eq!(&bytes[start..end], &[0x41, 7]);
+    let repeated: Value = server
+        .get("/api/wasm?artifact_id=1")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(repeated, report);
+    assert_eq!(
+        server
+            .get("/api/artifacts/1/content")
+            .await
+            .bytes()
+            .await
+            .unwrap()
+            .as_ref(),
+        bytes
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_origin-trace-wasm"))
+        .arg("--artifacts")
+        .arg(server.root.path().join("artifacts"))
+        .args(["--artifact-id", "1"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        report
+    );
+    // Names may contain newlines. They must not create additional display rows
+    // and silently shift instruction links to unrelated original bytes.
+    let mut multiline = bytes.clone();
+    let name = multiline.windows(3).position(|w| w == b"env").unwrap();
+    multiline[name..name + 3].copy_from_slice(b"\n\r\t");
+    put(&multiline, "wasm");
+    let escaped: Value = server
+        .get("/api/wasm?artifact_id=1")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let escaped_rows = escaped["rows"].as_array().unwrap();
+    assert!(escaped_rows.iter().all(|r| {
+        !r["text"]
+            .as_str()
+            .unwrap()
+            .contains(['\n', '\r', '\t', '\u{2028}', '\u{2029}'])
+    }));
+    assert!(
+        escaped_rows
+            .iter()
+            .any(|r| r["kind"] == "import" && r["text"].as_str().unwrap().contains("\\n\\r\\t"))
+    );
+    assert_eq!(
+        escaped_rows
+            .iter()
+            .find(|r| r["kind"] == "instruction"
+                && r["text"].as_str().unwrap().starts_with("i32.const")),
+        Some(op)
+    );
+    let mut unicode_name = bytes.clone();
+    unicode_name[name..name + 3].copy_from_slice("\u{2028}".as_bytes());
+    put(&unicode_name, "wasm");
+    let escaped: Value = server
+        .get("/api/wasm?artifact_id=1")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        escaped["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["kind"] == "import" && r["text"].as_str().unwrap().contains("\\u{2028}"))
+    );
+    put(&bytes, "wasm");
+    for query in [
+        "",
+        "?artifact_id=01",
+        "?artifact_id=0",
+        "?artifact_id=1&artifact_id=1",
+    ] {
+        assert_eq!(server.get(&format!("/api/wasm{query}")).await.status(), 400);
+    }
+    assert_eq!(server.get("/api/wasm?artifact_id=2").await.status(), 404);
+    put(&bytes, "javascript");
+    assert_eq!(server.get("/api/wasm?artifact_id=1").await.status(), 400);
+    put(&module(10000), "wasm");
+    let partial: Value = server
+        .get("/api/wasm?artifact_id=1")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(partial["status"], "partial");
+    assert_eq!(partial["rows"].as_array().unwrap().len(), 8192);
+    assert!(!partial["omissions"].as_array().unwrap().is_empty());
+    put(&vec![0; 2 * 1024 * 1024 + 1], "wasm");
+    assert_eq!(server.get("/api/wasm?artifact_id=1").await.status(), 400);
+    put(b"\0asm\x01\0\0\0", "wasm");
+    let empty: Value = server
+        .get("/api/wasm?artifact_id=1")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(empty["status"], "decoded");
+    assert_eq!(empty["instructions"], 0);
+    for malformed in [
+        vec![],
+        vec![0, 97, 115, 109],
+        b"\0asm\x01\0\0\0\x0a\x02\x01\x7f".to_vec(),
+    ] {
+        put(&malformed, "wasm");
+        assert_eq!(server.get("/api/wasm?artifact_id=1").await.status(), 422);
+    }
+    let mut missing_end = bytes.clone();
+    missing_end.pop();
+    let code = bytes.windows(4).position(|w| w == [0x0a, 9, 1, 7]).unwrap();
+    missing_end[code + 1] -= 1;
+    missing_end[code + 3] -= 1;
+    put(&missing_end, "wasm");
+    assert_eq!(server.get("/api/wasm?artifact_id=1").await.status(), 422);
+    let mut trailing = bytes.clone();
+    trailing.extend([0xff]);
+    put(&trailing, "wasm");
+    assert_eq!(server.get("/api/wasm?artifact_id=1").await.status(), 422);
+    let hash = put(&bytes, "wasm");
+    let mut corrupt = bytes.clone();
+    corrupt[0] = 1;
+    server.file(&format!("artifacts/blobs/{hash}.bin"), &corrupt);
+    assert_eq!(server.get("/api/wasm?artifact_id=1").await.status(), 500);
+}

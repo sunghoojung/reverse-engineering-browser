@@ -12,6 +12,7 @@ mod origin_trace;
 mod provenance;
 mod validation;
 pub mod vm;
+pub mod wasm;
 mod worker;
 mod workspace;
 pub use app::App;

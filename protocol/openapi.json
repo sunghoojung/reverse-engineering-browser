@@ -1749,6 +1749,90 @@
         },
         "x-max-body-bytes": 131072
       }
+    },
+    "/api/wasm": {
+      "get": {
+        "operationId": "inspect_wasm",
+        "summary": "Inspect a captured WebAssembly module",
+        "description": "Inert bounded decoding of a hash-verified core WASM artifact. Never executes the module. Partial results name unvisited coverage; decoded does not assert type validity or runtime behavior.",
+        "tags": [
+          "artifacts"
+        ],
+        "parameters": [
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$",
+              "description": "Canonical nonzero unsigned 64-bit artifact ID"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Versioned static inspection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WasmInspection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier, unsupported input, missing artifact, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid identifier, unsupported input, missing artifact, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Invalid identifier, unsupported input, missing artifact, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid identifier, unsupported input, missing artifact, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Invalid identifier, unsupported input, missing artifact, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -8453,6 +8537,165 @@
         },
         "additionalProperties": true,
         "description": "Partial model of ephemeral Repeater state. body_diff is optional for compatibility with older backends."
+      },
+      "WasmInspection": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "artifact_id",
+          "sha256",
+          "byte_size",
+          "status",
+          "sections",
+          "defined_functions",
+          "imported_functions",
+          "instructions",
+          "rows",
+          "omissions",
+          "notice",
+          "limits"
+        ],
+        "properties": {
+          "schema": {
+            "const": "wasm-inspection-v1"
+          },
+          "artifact_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "byte_size": {
+            "type": "integer",
+            "minimum": 8,
+            "maximum": 2097152
+          },
+          "status": {
+            "enum": [
+              "decoded",
+              "partial"
+            ]
+          },
+          "sections": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "defined_functions": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "imported_functions": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "instructions": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rows": {
+            "type": "array",
+            "maxItems": 8192,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "byte_offset",
+                "byte_end",
+                "function_index",
+                "text",
+                "text_truncated"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "section",
+                    "type",
+                    "import",
+                    "table",
+                    "memory",
+                    "global",
+                    "tag",
+                    "export",
+                    "start",
+                    "function",
+                    "local",
+                    "instruction",
+                    "data",
+                    "element",
+                    "custom"
+                  ]
+                },
+                "byte_offset": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "byte_end": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "function_index": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "text": {
+                  "type": "string",
+                  "maxLength": 540
+                },
+                "text_truncated": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "omissions": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          "notice": {
+            "type": "string",
+            "maxLength": 512
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "max_bytes",
+              "max_rows",
+              "max_sections",
+              "max_text_bytes",
+              "deadline_ms"
+            ],
+            "properties": {
+              "max_bytes": {
+                "const": 2097152
+              },
+              "max_rows": {
+                "const": 8192
+              },
+              "max_sections": {
+                "const": 128
+              },
+              "max_text_bytes": {
+                "const": 512
+              },
+              "deadline_ms": {
+                "const": 2000
+              }
+            }
+          }
+        }
       }
     }
   },

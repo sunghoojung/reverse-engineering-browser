@@ -22,6 +22,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let deobfuscationTasksLock = NSLock()
   private var deobfuscationTasks = Set<ObjectIdentifier>()
   private let deobfuscationService: NativeDeobfuscationService
+  private let wasmService: NativeWasmService
   private let decoderService: NativeDecoderService
   private let brokerSocketURL: URL?
   private let demoEvidenceEnabled: Bool
@@ -57,6 +58,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     self.analystRunnerCoreURL = analystRunnerCoreURL
     decoderService = NativeDecoderService(executableURL: decoderExecutableURL)
     deobfuscationService = NativeDeobfuscationService(executableURL: decoderExecutableURL.deletingLastPathComponent().appendingPathComponent("OriginTraceDeobfuscator"))
+    wasmService = NativeWasmService(executableURL: decoderExecutableURL.deletingLastPathComponent().appendingPathComponent("OriginTraceWasmInspector"))
     self.brokerSocketURL = brokerSocketURL
     self.demoEvidenceEnabled = demoEvidenceEnabled
   }
@@ -97,6 +99,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         response = (try healthResponse(), "application/json; charset=utf-8", 200, [:])
       case "/api/deobfuscation":
         handleDeobfuscation(requestURL, to: urlSchemeTask)
+        return
+      case "/api/wasm":
+        guard urlSchemeTask.request.httpMethod == "GET" else {
+          throw LocalHTTPError(status: 405, message: "WASM inspection requires GET")
+        }
+        handleWasm(requestURL, to: urlSchemeTask)
         return
       case "/api/decoder":
         response = (try decoderService.state(), "application/json; charset=utf-8", 200, [:])
@@ -2045,6 +2053,30 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     }
   }
 
+  private func handleWasm(_ url: URL, to task: WKURLSchemeTask) {
+    deobfuscationTasksLock.lock()
+    deobfuscationTasks.insert(ObjectIdentifier(task))
+    deobfuscationTasksLock.unlock()
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let ids = items.filter { $0.name == "artifact_id" }
+        guard ids.count == 1, let id = ids.first?.value, UInt64(id) != nil,
+          id.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil else {
+          throw NativeDecoderError(status: 400, message: "One canonical nonzero artifact ID is required")
+        }
+        let body = try self.wasmService.inspect(root: self.artifactStoreURL, artifactID: id)
+        self.completeDeobfuscation(body, status: 200, to: task)
+      } catch let error as NativeDecoderError {
+        let body = (try? JSONSerialization.data(withJSONObject: ["error": error.message])) ?? Data()
+        self.completeDeobfuscation(body, status: error.status, to: task)
+      } catch {
+        let body = (try? JSONSerialization.data(withJSONObject: ["error": "WASM inspection is unavailable"])) ?? Data()
+        self.completeDeobfuscation(body, status: 500, to: task)
+      }
+    }
+  }
+
   private func handleDeobfuscation(_ url: URL, to task: WKURLSchemeTask) {
     deobfuscationTasksLock.lock()
     deobfuscationTasks.insert(ObjectIdentifier(task))
@@ -3189,6 +3221,13 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
             }
             window.__rebSmokeDeobfuscation = analysis;
           }
+          const wasm = artifacts.artifacts?.find(artifact => artifact.kind === 'wasm');
+          if (wasm) {
+            const response = await fetch(`/api/wasm?artifact_id=${encodeURIComponent(wasm.artifact_id)}`);
+            const inspection = await response.json();
+            if (!response.ok || !isWasmInspection(inspection, wasm)) throw new Error('Packaged WASM inspection failed');
+            window.__rebSmokeWasm = inspection;
+          }
           const decoder = await fetch('/api/decoder', {cache: 'no-store'}).then(response => {
             if (!response.ok) throw new Error(`Decoder GET returned ${response.status}`);
             return response.json();
@@ -3349,6 +3388,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
               decoderAvailable: window.__rebSmokeDecoder?.decoder?.available === true,
               decoderTransformText: window.__rebSmokeDecoder?.transform?.utf8_text ?? null,
               decoderSignatureStatus: window.__rebSmokeDecoder?.verification?.signature_status ?? null,
+              nativeWasmStatus: window.__rebSmokeWasm?.status ?? null,
+              nativeWasmInstructions: window.__rebSmokeWasm?.instructions ?? null,
               nativeDeobfuscationEngine: window.__rebSmokeDeobfuscation?.engine ?? null,
               nativeDeobfuscationText: window.__rebSmokeDeobfuscation?.representation?.text ?? null,
               smokeExerciseError: window.__rebSmokeExerciseError,

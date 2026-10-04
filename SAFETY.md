@@ -58,6 +58,14 @@ it.
 - Experiments do not read or modify baseline tabs, production cookies, storage,
   or credentials. Never execute extracted code automatically.
 
+- The native Console panel visibly opts into arbitrary JavaScript in a separate
+  disposable browser profile. Expressions and primitive results may contain
+  sensitive values; they stay in bounded, ephemeral panel memory and are not
+  automatically captured, redacted, logged, exported, or added to evidence.
+  Clear output before sharing the interface. Commands require an explicit
+  document selection and are never automatically retried. See
+  [Native Console v1](protocol/native-console-v1.md) for these limits.
+
 ## Local operation and evidence
 
 - Keep control and evidence traffic on `localhost` or another user-only local

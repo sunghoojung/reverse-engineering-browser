@@ -7,6 +7,9 @@ research UI. Authorization, capture, and privacy rules are defined in
 [WASM Inspection v1](wasm-inspection-v1.md) defines bounded static module
 inspection and its original-byte coordinates.
 
+[Native Console v1](native-console-v1.md) defines the opt-in mutable console,
+its disposable browser ownership, wire layouts, and limits.
+
 ## Two representations
 
 1. Native hot paths use the fixed 320-byte C++ `EventRecord` in

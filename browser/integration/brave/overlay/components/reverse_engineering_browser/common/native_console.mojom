@@ -1,0 +1,17 @@
+// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this file,
+// You can obtain one at https://mozilla.org/MPL/2.0/.
+
+module reb.mojom;
+
+import "mojo/public/mojom/base/unguessable_token.mojom";
+
+// Frame-associated ordering plus an exact document token prevents a console
+// request queued before navigation from executing in the replacement page.
+interface NativeConsoleAgent {
+  Describe() => (mojo_base.mojom.UnguessableToken? document);
+  Evaluate(mojo_base.mojom.UnguessableToken document,
+           uint64 expires_at_monotonic_us,
+           string source) => (uint16 status, uint16 type, string text, bool truncated);
+};

@@ -1479,6 +1479,39 @@
       }
       .quick-open-row:hover, .quick-open-row:focus { background: var(--accent-soft); }
       .quick-open-row small { color: var(--faint); font: 10px var(--mono); }
+      .workspace[data-console-open="true"] { grid-template-rows: minmax(0, 1fr) clamp(190px, 38%, 300px); }
+      .nav-button[aria-pressed="true"] { color: var(--text); background: var(--accent-soft); }
+      .native-console-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; border-top: 1px solid var(--line); background: var(--panel); overflow: hidden; }
+      .native-console-panel[hidden] { display: none; }
+      .native-console-head { display: flex; flex: 0 0 34px; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid var(--line-soft); background: var(--chrome); }
+      .native-console-tab { align-self: stretch; display: flex; align-items: center; border-bottom: 2px solid var(--accent); font-size: 11px; font-weight: 600; }
+      .native-console-badge { color: var(--faint); font: 10px var(--mono); white-space: nowrap; }
+      .native-console-head-spacer { flex: 1; }
+      .native-console-head select { width: min(38%, 310px); height: 24px; min-width: 0; padding: 0 5px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); color: var(--text); font: 10px var(--mono); }
+      .native-console-panel[data-session="idle"] .native-console-head select, .native-console-panel[data-session="idle"] #native-console-refresh, .native-console-panel[data-session="idle"] #native-console-stop { display: none; }
+      .native-console-panel[data-session="ready"] .native-console-controls { display: none; }
+      .native-console-button { height: 25px; flex-shrink: 0; padding: 0 8px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel-2); color: var(--text); font: 10px var(--sans); }
+      .native-console-button:hover:enabled { background: var(--panel-3); }
+      .native-console-primary { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+      .native-console-controls { display: flex; flex-shrink: 0; gap: 8px; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--line-soft); }
+      .native-console-controls input { flex: 1; min-width: 0; height: 26px; padding: 0 7px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); color: var(--text); font: 11px var(--mono); }
+      .native-console-scope { color: var(--faint); font-size: 10px; }
+      .native-console-notice { flex-shrink: 0; max-height: 40px; padding: 4px 10px; overflow: auto; color: var(--muted); font: 10px/1.5 var(--sans); overflow-wrap: anywhere; border-bottom: 1px solid var(--line-soft); }
+      .native-console-notice[data-kind="error"] { color: var(--red); }
+      .native-console-output { flex: 1; min-height: 0; overflow: auto; }
+      .native-console-empty { margin: 0; padding: 14px 12px; color: var(--faint); font: 11px/1.6 var(--mono); }
+      .native-console-result { position: relative; padding: 5px 12px; border-bottom: 1px solid var(--line-soft); }
+      .native-console-result pre { margin: 0; font: 11px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+      .native-console-result pre:last-child { padding-left: 13px; color: var(--text); }
+      .native-console-expression { color: var(--muted); }
+      .native-console-result-type { display: block; padding-left: 13px; color: var(--faint); font: 9px/1.6 var(--mono); }
+      .native-console-result[data-status]:not([data-status="ok"]) pre:last-child, .native-console-result[data-status]:not([data-status="ok"]) .native-console-result-type { color: var(--red); }
+      .native-console-input { display: flex; flex-shrink: 0; align-items: center; gap: 8px; padding: 6px 10px; border-top: 1px solid var(--line); background: var(--panel-2); }
+      .native-console-prompt { align-self: flex-start; color: var(--accent); font: 17px/26px var(--mono); }
+      .native-console-input textarea { flex: 1; min-width: 0; height: 26px; max-height: 66px; padding: 4px 3px; border: 1px solid transparent; border-radius: 3px; resize: none; background: transparent; color: var(--text); font: 12px/18px var(--mono); }
+      #native-console-input-help { color: var(--faint); font-size: 10px; white-space: nowrap; }
+      @media (max-width: 1000px) { .native-console-scope { display: none; } #native-console-input-help { font-size: 0; } #native-console-input-help::after { content: 'Shift ↵'; font-size: 10px; } }
+      @media (max-width: 600px) { .native-console-head { gap: 5px; padding: 0 7px; } .native-console-badge { display: none; } .native-console-head select { flex: 1; width: 0; } .native-console-head-spacer { flex: 0; } }
       .console-drawer { min-height: 0; display: grid; grid-template-rows: 29px minmax(0, 1fr); border-top: 1px solid var(--line); background: var(--chrome); }
       .console-drawer[hidden] { display: none; }
       .console-head { display: flex; align-items: center; gap: 8px; padding: 0 8px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11px; }

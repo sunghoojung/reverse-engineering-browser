@@ -23,6 +23,7 @@
           <button class="nav-button" data-screen="traffic" aria-current="page"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h10M3 15h14"/></svg><span>Traffic</span></button>
           <button class="nav-button" data-screen="api-collection"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4h6l2 3h6v10H3z"/></svg><span>Collection</span></button>
           <button class="nav-button" data-screen="sources"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 5-5 5 5 5m6-10 5 5-5 5"/></svg><span>Sources</span></button>
+          <button id="native-console-toggle" class="nav-button" aria-controls="native-console-panel" aria-expanded="false" aria-pressed="false" title="Toggle console (⌘ / Ctrl + J)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3 5 5 5-5 5m8 0h6"/></svg><span>Console</span></button>
           <button class="nav-button" data-screen="signals"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10a6 6 0 0 1 12 0m-9 0a3 3 0 0 1 6 0v4m-3-4v7M4 13v2m12-2v2"/></svg><span>Fingerprinting</span></button>
           <details id="advanced-navigation" class="advanced-navigation">
             <summary>Advanced</summary>
@@ -242,7 +243,7 @@
                 <button id="source-deob" class="source-tool" type="button" aria-label="Show deobfuscated representation" title="Show deobfuscated representation" disabled>Deob</button>
                 <button id="source-hook-pivot" class="source-tool" type="button" aria-controls="hooks-workspace" aria-expanded="false" title="Open Runtime Hooks beside source" disabled>Hooks</button>
                 <button id="source-sidebar-toggle" class="source-tool" type="button" aria-controls="source-sidebar" aria-expanded="false">Details</button>
-                <button id="console-toggle" class="source-tool" type="button" aria-label="Toggle console drawer" title="Toggle console drawer (Escape)">Console</button>
+                <button id="console-toggle" class="source-tool" type="button" aria-label="Toggle debugger logs" title="Toggle debugger logs (Escape)">Logs</button>
               </div>
               <div id="source-code-wrap" class="source-code-wrap" tabindex="0">
                 <div id="source-code-empty" class="source-empty">Select a JavaScript file, WASM module, source map, or approved response body.</div>
@@ -255,8 +256,8 @@
                 <span id="source-language">Plain text</span>
                 <span id="source-hash" class="source-hash"></span>
               </div>
-              <section id="console-drawer" class="console-drawer" aria-label="Console drawer" hidden>
-                <div class="console-head"><strong>Console</strong><span id="console-count">0 messages</span><button id="console-clear" type="button">Clear</button></div>
+              <section id="console-drawer" class="console-drawer" aria-label="Debugger logs" hidden>
+                <div class="console-head"><strong>Logs</strong><span id="console-count">0 messages</span><button id="console-clear" type="button">Clear</button></div>
                 <div id="console-entries" class="console-entries" role="log" aria-live="polite"></div>
               </section>
               <div id="quick-open" class="quick-open" role="dialog" aria-label="Open a source file" hidden>
@@ -1177,6 +1178,30 @@
             </div>
           </section>
         </main>
+        <section id="native-console-panel" class="native-console-panel" aria-label="Native JavaScript console" hidden>
+          <header class="native-console-head">
+            <strong class="native-console-tab">Console</strong><span id="native-console-badge" class="native-console-badge">Native · idle</span>
+            <select id="native-console-target" aria-label="Console document" disabled><option value="">Select a document</option></select>
+            <button id="native-console-refresh" type="button" class="icon-button" aria-label="Refresh documents" title="Refresh documents" disabled>↻</button>
+            <button id="native-console-stop" type="button" class="native-console-button" disabled>Stop</button>
+            <span class="native-console-head-spacer"></span>
+            <button id="native-console-clear" type="button" class="native-console-button">Clear</button>
+            <button id="native-console-close" type="button" class="icon-button" aria-label="Close console panel" title="Close panel (⌘ / Ctrl + J)">×</button>
+          </header>
+          <div class="native-console-controls">
+            <input id="native-console-url" type="url" aria-label="Authorized page URL" maxlength="4096" placeholder="https://your-authorized-site.example" autocomplete="off" spellcheck="false" />
+            <button id="native-console-start" type="button" class="native-console-button native-console-primary" disabled>Start session</button>
+            <span class="native-console-scope">Disposable browser · commands can change page state</span>
+          </div>
+          <div id="native-console-notice" class="native-console-notice" role="status" aria-live="polite">Open this panel to check the native console connection.</div>
+          <div id="native-console-output" class="native-console-output" role="log" aria-live="polite" aria-label="Console results"><p class="native-console-empty">Start a session, then select the document whose <code>window</code> you want to inspect.</p></div>
+          <form id="native-console-form" class="native-console-input">
+            <span class="native-console-prompt" aria-hidden="true">›</span>
+            <textarea id="native-console-source" aria-label="JavaScript command" rows="1" maxlength="8192" spellcheck="false" placeholder="window.location.href" aria-describedby="native-console-input-help" disabled></textarea>
+            <span id="native-console-input-help">Enter to run · Shift + Enter for a new line</span>
+            <button id="native-console-run" type="submit" class="native-console-button native-console-primary" disabled>Run</button>
+          </form>
+        </section>
       </div>
 
       <footer class="statusbar">
@@ -1196,6 +1221,7 @@
     <script src="request_value_test.js"></script>
     <script src="field_provenance.js"></script>
     <script src="pane_layout.js"></script>
+    <script src="native_console.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

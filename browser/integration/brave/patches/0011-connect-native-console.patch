@@ -1,0 +1,60 @@
+diff --git a/browser/brave_content_browser_client.cc b/browser/brave_content_browser_client.cc
+index 4e0f62e..0d614e4 100644
+--- a/browser/brave_content_browser_client.cc
++++ b/browser/brave_content_browser_client.cc
+@@ -89,6 +89,7 @@
+ #include "brave/components/password_strength_meter/password_strength_meter.mojom.h"
+ #include "brave/components/playlist/core/common/buildflags/buildflags.h"
+ #include "brave/components/psst/buildflags/buildflags.h"
++#include "brave/components/reverse_engineering_browser/browser/native_console_session.h"
+ #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
+ #include "brave/components/reverse_engineering_browser/browser/native_probe_socket_client.h"
+ #include "brave/components/request_otr/common/buildflags/buildflags.h"
+@@ -110,6 +111,7 @@
+ #include "chrome/browser/chrome_content_browser_client.h"
+ #include "chrome/browser/content_settings/cookie_settings_factory.h"
+ #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
++#include "chrome/browser/lifetime/application_lifetime.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_io_data.h"
+ #include "chrome/browser/search_engines/template_url_service_factory.h"
+@@ -568,6 +570,9 @@ void BraveContentBrowserClient::BrowserURLHandlerCreated(
+ 
+ void BraveContentBrowserClient::RenderProcessWillLaunch(
+     content::RenderProcessHost* host) {
++  if (reb::IsNativeConsoleEnabled()) {
++    reb::StartNativeConsoleSession(base::BindOnce(&chrome::ExitIgnoreUnloadHandlers));
++  }
+   static_cast<void>(
+       reb::NativeProbeSocketClient::Get().StartFromCommandLine());
+   Profile* profile = Profile::FromBrowserContext(host->GetBrowserContext());
+@@ -1125,6 +1130,9 @@ void BraveContentBrowserClient::AppendExtraCommandLineSwitches(
+   std::string process_type =
+       command_line->GetSwitchValueASCII(switches::kProcessType);
+   if (process_type == switches::kRendererProcess) {
++    if (reb::IsNativeConsoleEnabled()) {
++      command_line->AppendSwitch("reb-native-console");
++    }
+ #if BUILDFLAG(BRAVE_V8_ENABLE_DRUMBRAKE)
+     if (base::FeatureList::IsEnabled(features::kBraveWebAssemblyJitless)) {
+       content::RenderProcessHost* process =
+diff --git a/renderer/brave_content_renderer_client.cc b/renderer/brave_content_renderer_client.cc
+index dea4990..05261e5 100644
+--- a/renderer/brave_content_renderer_client.cc
++++ b/renderer/brave_content_renderer_client.cc
+@@ -18,6 +18,7 @@
+ #include "brave/components/cosmetic_filters/renderer/cosmetic_filters_js_render_frame_observer.h"
+ #include "brave/components/misc_metrics/renderer/web3_metrics_render_frame_observer.h"
+ #include "brave/components/playlist/core/common/buildflags/buildflags.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_console_agent.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
+ #include "brave/components/safe_builtins/renderer/safe_builtins.h"
+ #include "brave/components/script_injector/renderer/script_injector_render_frame_observer.h"
+@@ -159,6 +160,7 @@ void BraveContentRendererClient::RenderThreadStarted() {
+ void BraveContentRendererClient::RenderFrameCreated(
+     content::RenderFrame* render_frame) {
+   ChromeContentRendererClient::RenderFrameCreated(render_frame);
++  reb::NativeConsoleAgent::CreateIfEnabled(render_frame);
+   auto* rfo = new BraveRenderFrameObserver(render_frame);
+   auto* registry = rfo->registry();
+ 

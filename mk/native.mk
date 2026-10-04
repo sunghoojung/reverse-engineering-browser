@@ -9,6 +9,8 @@ ARTIFACT_RECEIVER_BINARY := $(BUILD_DIR)/reb-artifact-receiver
 HEAP_SNAPSHOT_BINARY := $(BUILD_DIR)/reb-heap-snapshot
 DECODER_BINARY := $(BUILD_DIR)/reb-decoder
 DEBUGGER_TRANSPORT_BINARY := $(BUILD_DIR)/reb-debugger-transport
+NATIVE_CONSOLE_BINARY := $(BUILD_DIR)/reb-console
+NATIVE_CONSOLE_IO_OBJECT := $(BUILD_DIR)/browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_console_io.o
 NATIVE_PROBE_QUEUE_OBJECT := $(BUILD_DIR)/browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_probe_queue.o
 ORIGIN_TRACE_BACKEND := apps/origin-trace-backend/target/debug/origin-trace-backend
 VM_ANALYZER := apps/origin-trace-backend/target/debug/origin-trace-vm
@@ -21,7 +23,8 @@ APP_BINARIES := \
 	$(ARTIFACT_RECEIVER_BINARY) \
 	$(HEAP_SNAPSHOT_BINARY) \
 	$(DECODER_BINARY) \
-	$(DEBUGGER_TRANSPORT_BINARY)
+	$(DEBUGGER_TRANSPORT_BINARY) \
+	$(NATIVE_CONSOLE_BINARY)
 $(DEMO_BINARY): $(BUILD_DIR)/apps/reb-event-demo/main.o \
 	$(BUILD_DIR)/src/capture/event.o
 $(PRODUCER_BINARY): $(BUILD_DIR)/apps/reb-event-producer/main.o \
@@ -46,6 +49,8 @@ $(DECODER_BINARY): $(BUILD_DIR)/apps/reb-decoder/main.o \
 	$(BUILD_DIR)/src/analysis/decoder.o
 $(DEBUGGER_TRANSPORT_BINARY): $(BUILD_DIR)/apps/reb-debugger-transport/main.o \
 	$(BUILD_DIR)/src/transport/debugger_transport.o
+$(NATIVE_CONSOLE_BINARY): $(BUILD_DIR)/apps/native-console/main.o $(NATIVE_CONSOLE_IO_OBJECT)
+$(BUILD_DIR)/apps/native-console/main.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
 $(DECODER_BINARY): LDLIBS += $(ZLIB_LIBS)
 
 $(APP_BINARIES):
@@ -67,7 +72,7 @@ $(BUILD_DIR)/%.o: %.cc
 # Discover dependency files without adding sources to any link target implicitly.
 NATIVE_CPP_SOURCES := $(wildcard src/*/*.cpp apps/*/main.cpp services/*/main.cpp)
 NATIVE_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(NATIVE_CPP_SOURCES)) \
-	$(NATIVE_PROBE_QUEUE_OBJECT)
+	$(NATIVE_PROBE_QUEUE_OBJECT) $(NATIVE_CONSOLE_IO_OBJECT)
 
 $(NATIVE_OBJECTS): mk/config.mk mk/native.mk
 $(APP_BINARIES): mk/native.mk

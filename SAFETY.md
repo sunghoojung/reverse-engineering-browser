@@ -64,7 +64,7 @@ it.
   automatically captured, redacted, logged, exported, or added to evidence.
   Clear output before sharing the interface. Commands require an explicit
   document selection and are never automatically retried. See
-  [Native Console v1](protocol/native-console-v1.md) for these limits.
+  [Native Console v2](protocol/native-console-v2.md) for these limits.
 
 ## Local operation and evidence
 

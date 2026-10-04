@@ -14,16 +14,16 @@
 namespace reb {
 
 inline constexpr std::uint32_t kNativeConsoleMagic = 0x43424552;
-inline constexpr std::uint16_t kNativeConsoleVersion = 1;
+inline constexpr std::uint16_t kNativeConsoleVersion = 2;
 inline constexpr std::uint32_t kNativeConsoleSourceLimit = 8192;
 inline constexpr std::uint32_t kNativeConsoleTextLimit = 8192;
 inline constexpr std::uint32_t kNativeConsoleTargetLimit = 64;
-inline constexpr std::uint32_t kNativeConsolePayloadLimit = 64 * 272;
+inline constexpr std::uint32_t kNativeConsolePayloadLimit = 65536;
 inline constexpr int kNativeConsoleExecutionMillis = 200;
 inline constexpr int kNativeConsoleReplyMillis = 2000;
 inline constexpr char kNativeConsoleSwitch[] = "reb-native-console";
 
-enum class NativeConsoleOperation : std::uint16_t { kTargets = 1, kEvaluate = 2 };
+enum class NativeConsoleOperation : std::uint16_t { kTargets = 1, kEvaluate = 2, kRuntime = 3 };
 enum class NativeConsoleStatus : std::uint16_t {
   kOk,
   kMalformed,
@@ -45,6 +45,7 @@ enum class NativeConsoleType : std::uint16_t {
   kObject,
   kPromise,
   kTargets,
+  kRuntime,
 };
 inline constexpr std::uint16_t kNativeConsoleTruncated = 1;
 
@@ -78,6 +79,11 @@ struct NativeConsoleTarget final {
   std::uint16_t flags = 0;
   std::uint32_t reserved = 0;
   std::array<char, 256> origin{};
+  std::uint16_t label_bytes = 0;
+  std::uint16_t url_bytes = 0;
+  std::array<char, 128> label{};
+  std::array<char, 512> url{};
+  std::uint32_t tail_reserved = 0;
 };
 
 [[nodiscard]] inline bool IsNativeConsoleRequest(const NativeConsoleRequest& request) noexcept {
@@ -88,8 +94,12 @@ struct NativeConsoleTarget final {
   if (request.operation == NativeConsoleOperation::kTargets) {
     return request.target_id == 0 && request.source_bytes == 0;
   }
-  return request.operation == NativeConsoleOperation::kEvaluate && request.target_id != 0 &&
-         request.source_bytes > 0 && request.source_bytes <= kNativeConsoleSourceLimit;
+  return (request.operation == NativeConsoleOperation::kEvaluate ||
+          request.operation == NativeConsoleOperation::kRuntime) &&
+         request.target_id != 0 && request.source_bytes > 0 &&
+         request.source_bytes <= (request.operation == NativeConsoleOperation::kRuntime
+                                      ? kNativeConsolePayloadLimit
+                                      : kNativeConsoleSourceLimit);
 }
 
 [[nodiscard]] inline bool IsNativeConsoleResponse(const NativeConsoleResponse& response,
@@ -97,7 +107,7 @@ struct NativeConsoleTarget final {
   if (response.magic != kNativeConsoleMagic || response.version != kNativeConsoleVersion ||
       response.request_id != request_id || response.reserved != 0 ||
       response.status > NativeConsoleStatus::kDisconnected ||
-      response.type > NativeConsoleType::kTargets ||
+      response.type > NativeConsoleType::kRuntime ||
       (response.flags & ~kNativeConsoleTruncated) != 0) {
     return false;
   }
@@ -106,13 +116,29 @@ struct NativeConsoleTarget final {
            response.item_count <= kNativeConsoleTargetLimit &&
            response.payload_bytes == response.item_count * sizeof(NativeConsoleTarget);
   }
-  return response.item_count == 0 && response.payload_bytes <= kNativeConsoleTextLimit;
+  return response.item_count == 0 &&
+         response.payload_bytes <= (response.type == NativeConsoleType::kRuntime
+                                        ? kNativeConsolePayloadLimit
+                                        : kNativeConsoleTextLimit);
+}
+
+[[nodiscard]] inline bool IsNativeConsoleResponseFor(const NativeConsoleResponse& response,
+                                                     const NativeConsoleRequest& request) noexcept {
+  if (!IsNativeConsoleResponse(response, request.request_id))
+    return false;
+  if (response.status != NativeConsoleStatus::kOk)
+    return response.type == NativeConsoleType::kUndefined;
+  if (request.operation == NativeConsoleOperation::kTargets)
+    return response.type == NativeConsoleType::kTargets;
+  if (request.operation == NativeConsoleOperation::kRuntime)
+    return response.type == NativeConsoleType::kRuntime;
+  return response.type < NativeConsoleType::kTargets;
 }
 
 static_assert(std::endian::native == std::endian::little);
 static_assert(sizeof(NativeConsoleRequest) == 32);
 static_assert(sizeof(NativeConsoleResponse) == 32);
-static_assert(sizeof(NativeConsoleTarget) == 272);
+static_assert(sizeof(NativeConsoleTarget) == 920);
 static_assert(std::is_trivially_copyable_v<NativeConsoleRequest>);
 static_assert(std::is_trivially_copyable_v<NativeConsoleResponse>);
 static_assert(std::is_trivially_copyable_v<NativeConsoleTarget>);

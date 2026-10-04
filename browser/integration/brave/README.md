@@ -13,7 +13,7 @@ wires the browser session and per-frame renderer agent; the overlay owns their
 Mojo contract and bounded local transport. It evaluates explicit commands in a
 selected main-world context inside a disposable browser profile. It creates no
 CDP endpoint and makes no undetectability guarantee. See
-[Native Console v1](../../../protocol/native-console-v1.md) for ownership,
+[Native Console v2](../../../protocol/native-console-v2.md) for ownership,
 wire layouts, limits, and real-browser checks after rebuilding.
 Eligible HTTP and HTTPS documents must belong to a profile directory immediately
 inside the owned user-data root, including the fresh browser's `Default` profile.

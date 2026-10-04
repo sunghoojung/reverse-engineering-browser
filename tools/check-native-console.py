@@ -26,7 +26,7 @@ MAGIC = 0x43424552
 REQUEST = struct.Struct("<IHHQQII")
 RESPONSE = struct.Struct("<IHHQHHIII")
 HELLO = struct.Struct("<IHHQ32s16s")
-TARGET = struct.Struct("<QHHI256s")
+TARGET = struct.Struct("<QHHI256sHH128s512sI")
 
 
 def exact(stream, count):
@@ -55,7 +55,7 @@ def connect(path):
 
 
 def response(stream, request, kind, payload=b"", status=0, count=0, flags=0):
-    stream.sendall(RESPONSE.pack(MAGIC, 1, status, request, kind, flags, count, len(payload), 0) + payload)
+    stream.sendall(RESPONSE.pack(MAGIC, 2, status, request, kind, flags, count, len(payload), 0) + payload)
 
 
 def fake_browser(arguments):
@@ -71,18 +71,100 @@ def fake_browser(arguments):
     stream.settimeout(None)
     origin = b"http://127.0.0.1:fixture"
     target_id = 0
+    handles = {}
+    pending_handles = set()
+    logs = []
+    next_handle = 0
+    last = None
     try:
         while True:
             magic, version, operation, request, target, size, reserved = REQUEST.unpack(exact(stream, 32))
-            assert magic == MAGIC and version == 1 and reserved == 0 and size <= 8192
+            assert magic == MAGIC and version == 2 and reserved == 0 and size <= (65536 if operation == 3 else 8192)
             source = exact(stream, size).decode()
             if operation == 1:
                 target_id += 1
-                response(stream, request, 10, TARGET.pack(target_id, len(origin), 0, 0, origin), count=1)
+                response(stream, request, 10, TARGET.pack(target_id, len(origin), 2, 0, origin, 27, 29, b"Synthetic transport fixture", b"http://127.0.0.1:fixture/page", 0), count=1)
             elif target != target_id:
                 response(stream, request, 0, b"Selected document changed", status=2)
+            elif operation == 3:
+                command = json.loads(source)
+                op = command["operation"]
+                value = {"status": "ok"}
+                if op == "evaluate":
+                    expression = command["source"]
+                    if expression == "while (true) {}":
+                        response(stream, request, 0, b"fixture execution timeout", status=5)
+                        continue
+                    elif expression == "__malformed_native_reply__":
+                        stream.sendall(RESPONSE.pack(MAGIC, 2, 0, request, 11, 0, 0, 0xFFFFFFFF, 0))
+                        continue
+                    elif expression.startswith("throw "):
+                        value = {"status": "exception", "text": "Error: fixture exception", "location": {"url": "reb-console", "line": 1, "column": 7}, "stack": [{"url": "reb-console", "line": 1, "column": 7}]}
+                    else:
+                        kind, text = "string", expression
+                        if expression == "window.fixture + 1":
+                            kind, text = "number", "42"
+                        elif expression == "console.log(\"hello\")":
+                            kind, text = "undefined", "undefined"
+                            logs.append({"text": "hello", "url": "reb-console", "line": 1, "level": "info", "time": 1, "stack": "", "truncated": False})
+                        elif expression.startswith("await ") or expression == "new Promise(() => {})":
+                            kind, text = "promise", "Promise {<pending>}"
+                        elif expression == "window.previewObject":
+                            kind, text = "object", "Object"
+                        elif expression == "document.body":
+                            kind, text = "object", "<BODY>"
+                        elif expression == "document.querySelector":
+                            kind, text = "function", "ƒ querySelector(…)"
+                        elif expression == "$_" and last:
+                            kind, text = last["type"], last["text"]
+                        preview = {"type": kind, "text": text, "truncated": False}
+                        if kind in ["object", "function", "promise"]:
+                            next_handle += 1
+                            preview["handle"] = str(next_handle)
+                            handles[str(next_handle)] = preview
+                            if expression == "new Promise(() => {})":
+                                pending_handles.add(str(next_handle))
+                        if kind == "function":
+                            preview["location"] = {"url": "https://checkout.acme.test/assets/cart.js", "line": 1, "column": 1}
+                        value["value"] = preview
+                        last = preview
+                elif op == "poll":
+                    value.update(messages=logs.copy(), dropped=0)
+                    logs.clear()
+                elif op == "traffic":
+                    value.update(events=[{"event_id": "1", "document_id": str(target), "resource_id": "81", "after_request_id": "2", "origin": "http://127.0.0.1", "method": "GET", "status": 200, "network_error": 0, "cached": False, "time": 1, "operation": "resource_load_complete"}], dropped=0)
+                elif op == "clear":
+                    handles.clear()
+                    logs.clear()
+                    last = None
+                elif op == "complete":
+                    entries = ["fixture", "previewObject"] if not command["path"] else ["value", "toString"]
+                    value["items"] = [{"name": name, "kind": "function" if name == "toString" else "property"} for name in entries if name.startswith(command["prefix"])]
+                elif op == "last":
+                    value["value"] = last
+                elif command.get("handle") not in handles:
+                    value = {"status": "error", "text": "Value expired, was released, or belongs to another document"}
+                elif op == "inspect":
+                    properties = [{"name": "value", "accessor": True, "value": {"type": "accessor", "text": "[Getter / Setter]", "truncated": False}}, {"name": "fixture", "value": {"type": "number", "text": "41", "truncated": False}}] if command["offset"] == 0 else []
+                    value.update(properties=properties, more=False, offset=2)
+                elif op == "await" and command["handle"] in pending_handles:
+                    value["status"] = "pending"
+                elif op == "await":
+                    value["value"] = {"type": "number", "text": "42", "truncated": False}
+                elif op in ["release", "cancel"]:
+                    handles.pop(command["handle"])
+                    value["text"] = "Value released"
+                elif op == "store":
+                    value["text"] = "window.temp1"
+                elif op == "source":
+                    value["text"] = "function querySelector(selector) { /* synthetic fixture */ }"
+                elif op == "listeners":
+                    value.update(properties=[], more=False, offset=0, truncated=False)
+                elif op in ["monitor", "unmonitor"]:
+                    value["text"] = "Synthetic event monitor response"
+                response(stream, request, 11, json.dumps(value).encode())
             elif source == "__malformed_native_reply__":
-                stream.sendall(RESPONSE.pack(MAGIC, 1, 0, request, 4, 0, 0, 0xFFFFFFFF, 0))
+                stream.sendall(RESPONSE.pack(MAGIC, 2, 0, request, 4, 0, 0, 0xFFFFFFFF, 0))
             elif source.startswith("throw "):
                 response(stream, request, 0, b"fixture exception", status=4)
             elif source == "while (true) {}":
@@ -142,12 +224,12 @@ def bridge(binary, browser=None, binary_mode=True):
 
 def exchange(process, request, operation=1, target=0, source=""):
     encoded = source.encode()
-    process.stdin.write(REQUEST.pack(MAGIC, 1, operation, request, target, len(encoded), 0) + encoded)
+    process.stdin.write(REQUEST.pack(MAGIC, 2, operation, request, target, len(encoded), 0) + encoded)
     process.stdin.flush()
     header = process.stdout.read(32)
     assert len(header) == 32, "C++ bridge closed before a response"
     fields = RESPONSE.unpack(header)
-    assert fields[:2] == (MAGIC, 1) and fields[3] == request and fields[8] == 0
+    assert fields[:2] == (MAGIC, 2) and fields[3] == request and fields[8] == 0
     payload = process.stdout.read(fields[7])
     assert len(payload) == fields[7]
     return fields, payload
@@ -168,7 +250,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
 
 def check(binary, browser):
     for flag in ["--version", "-v", "-V"]:
-        assert subprocess.check_output([binary, flag]) == b"1\n"
+        assert subprocess.check_output([binary, flag]) == b"2\n"
     invalid = subprocess.run([binary, "--unexpected"], capture_output=True)
     assert invalid.returncode == 2 and b"USAGE" in invalid.stdout
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
@@ -189,7 +271,7 @@ def check(binary, browser):
                     break
                 assert time.monotonic() < deadline, "HTTP fixture never became an eligible frame"
                 time.sleep(0.1)
-            target = TARGET.unpack(payload[:272])[0]
+            target = TARGET.unpack(payload[:TARGET.size])[0]
             header, payload = run(2, target, "window.fixture + 1")
             assert header[2] == 0 and header[4] == 3 and payload == b"42"
             header, _ = run(2, target, "throw 'fixture'")
@@ -206,6 +288,60 @@ def check(binary, browser):
                 header, payload = run(2, target, "'雪'.repeat(8192)")
                 assert header[5] == 1 and len(payload) <= 8192
                 payload.decode("utf-8", errors="strict")
+                def runtime(operation, **fields):
+                    header, data = run(3, target, json.dumps({"operation": operation, **fields}))
+                    assert header[4] == 11 and header[2] == 0, (header, data)
+                    return json.loads(data)
+                assert runtime("evaluate", source='console.log("hello")')["value"]["type"] == "undefined"
+                assert any(message["text"] == "hello" for message in runtime("poll")["messages"])
+                obj = runtime("evaluate", source="window.previewObject")["value"]
+                properties = runtime("inspect", handle=obj["handle"], offset=0)["properties"]
+                assert next(p for p in properties if p["name"] == "value")["accessor"]
+                assert runtime("evaluate", source="window.previewCalls")["value"]["text"] == "0"
+                runtime("evaluate", source="let consoleLexical = {method() {return 1}}")
+                assert any(item["name"] == "consoleLexical" for item in runtime("complete", path=[], prefix="consoleLex" )["items"])
+                assert any(item["name"] == "method" for item in runtime("complete", path=["consoleLexical"], prefix="met")["items"])
+                promise = runtime("evaluate", source="await Promise.resolve(42)")["value"]
+                assert runtime("await", handle=promise["handle"])["value"]["text"] == "42"
+                runtime("release", handle=obj["handle"])
+                assert runtime("inspect", handle=obj["handle"], offset=0)["status"] == "error"
+                stored = runtime("store", handle=promise["handle"])["text"]
+                assert stored.startswith("window.temp")
+                assert runtime("evaluate", source=stored)["value"]["type"] == "promise"
+                function = runtime("evaluate", source="function consoleSample(a) {return a}; consoleSample")["value"]
+                assert "consoleSample" in runtime("source", handle=function["handle"])["text"]
+                dom = runtime("evaluate", source="document.body")["value"]
+                runtime("evaluate", source="document.body.addEventListener('click', function fixtureClick() {})")
+                assert any(prop["name"].startswith("click") and prop["value"]["type"] == "function" for prop in runtime("listeners", handle=dom["handle"])["properties"])
+                runtime("monitor", handle=dom["handle"])
+                runtime("evaluate", source="document.body.click()")
+                assert any(message["text"] == "event: click" for message in runtime("poll")["messages"])
+                # Standalone unmonitorEvents reevaluates the Element and gets a
+                # new handle. Monitoring follows native node identity, not IDs.
+                same_dom = runtime("evaluate", source="document.body")["value"]
+                runtime("unmonitor", handle=same_dom["handle"])
+                runtime("evaluate", source="document.body.click()")
+                assert not any(message["text"] == "event: click" for message in runtime("poll")["messages"])
+                pending = runtime("evaluate", source="new Promise(() => {})")["value"]
+                assert runtime("await", handle=pending["handle"])["status"] == "pending"
+                runtime("cancel", handle=pending["handle"])
+                assert runtime("await", handle=pending["handle"])["status"] == "error"
+                typed = runtime("evaluate", source="new Uint8Array(65537)")["value"]
+                assert runtime("inspect", handle=typed["handle"], offset=65520)["truncated"]
+                runtime("evaluate", source="for (let i=0;i<40;i++) console.log('queue-' + i)")
+                messages = runtime("poll")
+                assert len(messages["messages"]) <= 32 and messages["dropped"] > 0
+                runtime("evaluate", source="fetch('/console-resource')")
+                deadline = time.monotonic() + 5
+                while True:
+                    activity = runtime("traffic")
+                    if activity["events"]:
+                        break
+                    assert time.monotonic() < deadline, "No browser resource completion metadata"
+                    time.sleep(.05)
+                assert all(event["document_id"] == str(target) and event["operation"] == "resource_load_complete" for event in activity["events"])
+                assert runtime("evaluate", source="throw new Error('console failure')")["status"] == "exception"
+                runtime("clear")
                 run(2, target, "location.href = '/next'; 1")
                 time.sleep(0.3)
             else:
@@ -219,14 +355,14 @@ def check(binary, browser):
         with bridge(binary) as process:
             _, targets = exchange(process, 1)
             target = TARGET.unpack(targets)[0]
-            process.stdin.write(REQUEST.pack(MAGIC, 1, 2, 2, target, 8193, 0))
+            process.stdin.write(REQUEST.pack(MAGIC, 2, 2, 2, target, 8193, 0))
             process.stdin.flush()
             assert process.wait(timeout=5) == 1, "Oversized input was accepted"
         with bridge(binary) as process:
             _, targets = exchange(process, 1)
             target = TARGET.unpack(targets)[0]
             malformed = b"__malformed_native_reply__"
-            process.stdin.write(REQUEST.pack(MAGIC, 1, 2, 2, target, len(malformed), 0) + malformed)
+            process.stdin.write(REQUEST.pack(MAGIC, 2, 2, 2, target, len(malformed), 0) + malformed)
             process.stdin.flush()
             assert process.wait(timeout=7) == 1, "Oversized peer response was accepted"
         with bridge(binary, binary_mode=False) as process:
@@ -289,6 +425,38 @@ def check_backend(binary, backend):
             assert call({**base, "source": "throw 'fixture'"})["status"] == "exception"
             assert call({**base, "source": "while (true) {}"})["status"] == "timeout"
             assert call({**base, "source": "window.fixture + 1"})["text"] == "42"
+            runtime = {"action": "runtime", "session_id": session, "target_id": target}
+            def command(operation, **fields):
+                return call({**runtime, "command": {"operation": operation, **fields}})["runtime"]
+            assert command("evaluate", source="window.fixture + 1")["value"]["text"] == "42"
+            assert command("evaluate", source='console.log("hello")')["value"]["type"] == "undefined"
+            assert command("poll")["messages"][0]["text"] == "hello"
+            assert command("poll")["messages"] == []
+            obj = command("evaluate", source="window.previewObject")["value"]
+            assert command("inspect", handle=obj["handle"], offset=0)["properties"][0]["accessor"]
+            assert command("complete", path=[], prefix="fix")["items"][0]["name"] == "fixture"
+            assert command("store", handle=obj["handle"])["text"] == "window.temp1"
+            command("release", handle=obj["handle"])
+            assert command("inspect", handle=obj["handle"], offset=0)["status"] == "error"
+            promise = command("evaluate", source="await Promise.resolve(42)")["value"]
+            assert command("await", handle=promise["handle"])["value"]["text"] == "42"
+            command("cancel", handle=promise["handle"])
+            assert command("await", handle=promise["handle"])["status"] == "error"
+            for invalid in [{"operation": "complete", "path": "window", "prefix": ""}, {"operation": "complete", "path": ["a"] * 9, "prefix": ""}, {"operation": "inspect", "handle": "01", "offset": 0}, {"operation": "inspect", "handle": "1", "offset": -1}, {"operation": "poll", "source": "1"}]:
+                call({**runtime, "command": invalid}, 400)
+            activity = command("traffic")
+            assert activity["events"][0]["document_id"] == target and activity["dropped"] == 0
+            fn = command("evaluate", source="document.querySelector")["value"]
+            assert "synthetic fixture" in command("source", handle=fn["handle"])["text"]
+            dom = command("evaluate", source="document.body")["value"]
+            assert command("listeners", handle=dom["handle"])["properties"] == []
+            command("monitor", handle=dom["handle"])
+            command("unmonitor", handle=dom["handle"])
+            waiting = command("evaluate", source="new Promise(() => {})")["value"]
+            assert command("await", handle=waiting["handle"])["status"] == "pending"
+            command("cancel", handle=waiting["handle"])
+            assert command("await", handle=waiting["handle"])["status"] == "error"
+            command("clear")
             call({"action": "targets", "session_id": session})
             assert call({**base, "source": "1"})["status"] == "stale_target"
             # Locate only our authenticated synthetic child; verify both the

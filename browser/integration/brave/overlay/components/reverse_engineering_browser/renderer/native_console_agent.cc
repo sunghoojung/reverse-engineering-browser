@@ -16,6 +16,7 @@
 #include "base/functional/bind.h"
 #include "base/no_destructor.h"
 #include "base/strings/string_util.h"
+#include "base/strings/utf_string_conversions.h"
 #include "base/synchronization/condition_variable.h"
 #include "base/synchronization/lock.h"
 #include "base/task/thread_pool.h"
@@ -204,6 +205,71 @@ void NativeConsoleAgent::Describe(DescribeCallback callback) {
   std::move(callback).Run(frame && !frame->IsProvisional()
                               ? std::optional(frame->GetDocument().Token().value())
                               : std::nullopt);
+}
+
+void NativeConsoleAgent::WillReleaseScriptContext(v8::Local<v8::Context> context, int world_id) {
+  if (world_id == 0)
+    runtime_.Reset();
+}
+void NativeConsoleAgent::DetailedConsoleMessageAdded(const std::u16string& message,
+                                                     const std::u16string& source,
+                                                     const std::u16string& stack,
+                                                     uint32_t line,
+                                                     blink::mojom::ConsoleMessageLevel level) {
+  runtime_.Message(base::UTF16ToUTF8(message.substr(0, 2048)),
+                   base::UTF16ToUTF8(source.substr(0, 512)),
+                   base::UTF16ToUTF8(stack.substr(0, 2048)), line, static_cast<int>(level),
+                   message.size() > 2048 || source.size() > 512 || stack.size() > 2048);
+}
+void NativeConsoleAgent::Runtime(const base::UnguessableToken& document,
+                                 std::uint64_t expires_at_monotonic_us,
+                                 const std::string& command,
+                                 RuntimeCallback callback) {
+  auto reply = [&callback](NativeConsoleStatus status, const char* text) {
+    std::move(callback).Run(static_cast<uint16_t>(status),
+                            static_cast<uint16_t>(NativeConsoleType::kUndefined), text, false);
+  };
+  auto* frame = render_frame() ? render_frame()->GetWebFrame() : nullptr;
+  if (!frame || frame->IsProvisional() || document.is_empty() ||
+      frame->GetDocument().Token().value() != document) {
+    reply(NativeConsoleStatus::kStaleTarget, "Selected document changed");
+    return;
+  }
+  if (expires_at_monotonic_us <=
+      static_cast<uint64_t>(base::TimeTicks::Now().since_origin().InMicroseconds())) {
+    reply(NativeConsoleStatus::kTimeout, "Request expired before dispatch");
+    return;
+  }
+  auto* isolate = frame->GetAgentGroupScheduler()->Isolate();
+  v8::HandleScope handles(isolate);
+  auto context = frame->MainWorldScriptContext();
+  if (context.IsEmpty() || isolate->IsExecutionTerminating()) {
+    reply(NativeConsoleStatus::kForbidden, "Page context unavailable");
+    return;
+  }
+  v8::Context::Scope entered(context);
+  auto& deadline = ExecutionDeadline::Get();
+  if (!deadline.Begin(isolate)) {
+    reply(NativeConsoleStatus::kForbidden, "Watchdog unavailable");
+    return;
+  }
+  v8::TryCatch terminated(isolate);
+  std::string result;
+  {
+    // Explicit commands can schedule promise continuations. Run their checkpoint
+    // inside the synchronous watchdog, rather than outside its 200 ms budget.
+    v8::MicrotasksScope microtasks(isolate, context->GetMicrotaskQueue(),
+                                   v8::MicrotasksScope::kRunMicrotasks);
+    result = runtime_.Run(isolate, context, frame, command);
+  }
+  if (deadline.Finish()) {
+    terminated.Reset();
+    reply(NativeConsoleStatus::kTimeout,
+          "Synchronous execution exceeded 200 ms; changes are not rolled back");
+    return;
+  }
+  std::move(callback).Run(static_cast<uint16_t>(NativeConsoleStatus::kOk),
+                          static_cast<uint16_t>(NativeConsoleType::kRuntime), result, false);
 }
 
 void NativeConsoleAgent::Evaluate(const base::UnguessableToken& document,

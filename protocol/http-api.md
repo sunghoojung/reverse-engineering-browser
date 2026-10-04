@@ -1,7 +1,7 @@
 # Origin Trace HTTP API
 
 [`openapi.json`](openapi.json) describes the Rust loopback backend in
-`apps/origin-trace-backend`, including the [native console](native-console-v1.md)
+`apps/origin-trace-backend`, including the [native console](native-console-v2.md)
 state and action routes.
 It is OpenAPI 3.1 with JSON Schema 2020-12. Stable `operationId` values drive the
 included Rust CLI. The routes and stored evidence contracts are unchanged by

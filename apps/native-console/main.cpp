@@ -155,8 +155,8 @@ const char* StatusName(reb::NativeConsoleStatus status) {
   return names[static_cast<std::size_t>(status)];
 }
 const char* TypeName(reb::NativeConsoleType type) {
-  constexpr std::array names{"undefined", "null",     "boolean", "number",  "string", "bigint",
-                             "symbol",    "function", "object",  "promise", "targets"};
+  constexpr std::array names{"undefined", "null",     "boolean", "number",  "string",  "bigint",
+                             "symbol",    "function", "object",  "promise", "targets", "runtime"};
   return names[static_cast<std::size_t>(type)];
 }
 
@@ -180,7 +180,8 @@ class Console final {
                   sizeof(reb::NativeConsoleTarget));
       const auto& target = targets_[i];
       if (target.id == 0 || target.origin_bytes > target.origin.size() || target.reserved != 0 ||
-          (target.flags & ~reb::kNativeConsoleTruncated) != 0)
+          target.tail_reserved != 0 || target.label_bytes > target.label.size() ||
+          target.url_bytes > target.url.size() || (target.flags & ~3) != 0)
         return Fail("Malformed target listing");
       for (std::size_t j = 0; j < i; ++j)
         if (targets_[j].id == target.id)
@@ -245,7 +246,7 @@ class Console final {
         !reb::NativeConsoleWrite(socket_, std::as_bytes(std::span(source.data(), source.size())),
                                  deadline) ||
         !reb::NativeConsoleRead(socket_, reb::NativeConsoleBytes(response_), deadline) ||
-        !reb::IsNativeConsoleResponse(response_, request.request_id) ||
+        !reb::IsNativeConsoleResponseFor(response_, request) ||
         !reb::NativeConsoleRead(socket_, std::span(payload_).first(response_.payload_bytes),
                                 deadline)) {
       return Fail("Native console disconnected, timed out, or returned a malformed response");
@@ -306,7 +307,7 @@ int Bridge(int socket) {
     if (!reb::NativeConsoleWrite(socket, reb::NativeConsoleBytes(request), deadline) ||
         !reb::NativeConsoleWrite(socket, std::span(buffer).first(request.source_bytes), deadline) ||
         !reb::NativeConsoleRead(socket, reb::NativeConsoleBytes(response), deadline) ||
-        !reb::IsNativeConsoleResponse(response, request.request_id) ||
+        !reb::IsNativeConsoleResponseFor(response, request) ||
         !reb::NativeConsoleRead(socket, std::span(buffer).first(response.payload_bytes), deadline))
       return 1;
     std::cout.write(reinterpret_cast<const char*>(&response), sizeof(response));
@@ -328,7 +329,7 @@ int main(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     const std::string_view argument = argv[i];
     if (argument == "--version" || argument == "-v" || argument == "-V") {
-      std::cout << "1\n";
+      std::cout << reb::kNativeConsoleVersion << "\n";
       return 0;
     }
     if (argument == "--help") {

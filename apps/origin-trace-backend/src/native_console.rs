@@ -22,7 +22,8 @@ const MAGIC: u32 = 0x43424552;
 const SOURCE_LIMIT: usize = 8192;
 const TEXT_LIMIT: usize = 8192;
 const TARGET_LIMIT: usize = 64;
-const TARGET_SIZE: usize = 272;
+const TARGET_SIZE: usize = 920;
+const RUNTIME_LIMIT: usize = 65536;
 
 // Own both process groups, including Chromium descendants. kill_on_drop alone
 // stops only the immediate process and can leave renderer/profile owners alive.
@@ -90,7 +91,7 @@ impl Session {
             .ok_or_else(|| Error::conflict("Native request IDs exhausted"))?;
         let mut header = [0u8; 32];
         header[0..4].copy_from_slice(&MAGIC.to_le_bytes());
-        header[4..6].copy_from_slice(&1u16.to_le_bytes());
+        header[4..6].copy_from_slice(&2u16.to_le_bytes());
         header[6..8].copy_from_slice(&operation.to_le_bytes());
         header[8..16].copy_from_slice(&id.to_le_bytes());
         header[16..24].copy_from_slice(&target.to_le_bytes());
@@ -105,7 +106,9 @@ impl Session {
             let parsed = ResponseHeader::parse(&response, id, operation)?;
             let mut payload = vec![0; parsed.bytes];
             self.output.read_exact(&mut payload).await?;
-            parsed.value(&payload, &self.id)
+            let mut value = parsed.value(&payload, &self.id)?;
+            if parsed.kind == 11 { value["request_id"] = json!(id.to_string()); }
+            Ok(value)
         }).await.map_err(|_| Error::new(408, "Native console timed out; execution may have occurred. Restart the session"))?
           .map_err(|e: Error| Error::new(e.status, if e.status == 500 { "Native browser or console disconnected; rebuild Brave with native console support".to_owned() } else { e.message }))?;
         self.poisoned = false;
@@ -132,11 +135,13 @@ impl ResponseHeader {
             bytes: u32_at(24) as usize,
         };
         if u32_at(0) != MAGIC
-            || u16_at(4) != 1
+            || u16_at(4) != 2
             || u64::from_le_bytes(bytes[8..16].try_into().unwrap()) != request
             || u32_at(28) != 0
             || parsed.status > 6
-            || parsed.kind > 10
+            || parsed.kind > 11
+            || (parsed.kind == 11 && operation != 3)
+            || (operation == 3 && parsed.status == 0 && parsed.kind != 11)
             || u16_at(18) > 1
             || (parsed.kind == 10
                 && (operation != 1
@@ -145,7 +150,12 @@ impl ResponseHeader {
                     || parsed.bytes != parsed.count * TARGET_SIZE))
             || (parsed.kind != 10
                 && (parsed.count != 0
-                    || parsed.bytes > TEXT_LIMIT
+                    || parsed.bytes
+                        > if parsed.kind == 11 {
+                            RUNTIME_LIMIT
+                        } else {
+                            TEXT_LIMIT
+                        }
                     || (operation == 1 && parsed.status == 0)))
         {
             return Err(Error::protocol(
@@ -172,16 +182,40 @@ impl ResponseHeader {
                 let id = u64::from_le_bytes(record[..8].try_into().unwrap());
                 let size = u16::from_le_bytes(record[8..10].try_into().unwrap()) as usize;
                 let flags = u16::from_le_bytes(record[10..12].try_into().unwrap());
-                if id == 0 || size > 256 || flags > 1 || record[12..16] != [0; 4] || !ids.insert(id)
+                if id == 0
+                    || size > 256
+                    || flags > 3
+                    || record[916..920] != [0; 4]
+                    || record[12..16] != [0; 4]
+                    || !ids.insert(id)
                 {
                     return Err(Error::protocol("Native target listing is malformed"));
                 }
                 let origin = std::str::from_utf8(&record[16..16 + size])
                     .map_err(|_| Error::protocol("Native origin is not UTF-8"))?;
-                targets.push(json!({"id":id.to_string(),"origin":origin,"truncated":flags != 0}));
+                let label_size = u16::from_le_bytes(record[272..274].try_into().unwrap()) as usize;
+                let url_size = u16::from_le_bytes(record[274..276].try_into().unwrap()) as usize;
+                if label_size > 128 || url_size > 512 {
+                    return Err(Error::protocol("Native context metadata is oversized"));
+                }
+                let label = std::str::from_utf8(&record[276..276 + label_size])
+                    .map_err(|_| Error::protocol("Native label is not UTF-8"))?;
+                let url = std::str::from_utf8(&record[404..404 + url_size])
+                    .map_err(|_| Error::protocol("Native URL is not UTF-8"))?;
+                targets.push(json!({"id":id.to_string(),"origin":origin,"label":label,"url":url,"main_frame":flags & 2 != 0,"truncated":flags & 1 != 0}));
             }
             return Ok(
-                json!({"contract_version":1,"session_id":session,"state":"ready","targets":targets,"truncated":self.truncated}),
+                json!({"contract_version":2,"session_id":session,"state":"ready","targets":targets,"truncated":self.truncated}),
+            );
+        }
+        if self.kind == 11 {
+            let runtime: Value = serde_json::from_slice(payload)
+                .map_err(|_| Error::protocol("Native runtime result is not JSON"))?;
+            if !runtime.is_object() || self.status != 0 {
+                return Err(Error::protocol("Invalid runtime envelope"));
+            }
+            return Ok(
+                json!({"contract_version":2,"session_id":session,"state":"ready","runtime":runtime}),
             );
         }
         let types = [
@@ -208,7 +242,7 @@ impl ResponseHeader {
         let text = std::str::from_utf8(payload)
             .map_err(|_| Error::protocol("Native result is not UTF-8"))?;
         Ok(
-            json!({"contract_version":1,"session_id":session,"state":"ready","status":statuses[self.status as usize],
+            json!({"contract_version":2,"session_id":session,"state":"ready","status":statuses[self.status as usize],
             "type":types[self.kind as usize],"text":text,"truncated":self.truncated}),
         )
     }
@@ -246,7 +280,7 @@ impl NativeConsole {
             guard.take().unwrap().stop().await;
         }
         let id = guard.as_ref().map(|s| s.id.as_str());
-        json!({"contract_version":1,"available":self.available(),"state":if id.is_some() {"ready"} else {"idle"},
+        json!({"contract_version":2,"available":self.available(),"state":if id.is_some() {"ready"} else {"idle"},
             "session_id":id,"message":if self.available() {"Native console uses a separate disposable browser profile"} else {"Configure a rebuilt custom Brave executable using REB_BRAVE_BINARY"}})
     }
     pub async fn stop(&self) {
@@ -306,10 +340,12 @@ impl NativeConsole {
             if let Some(session) = guard.take() {
                 session.stop().await;
             }
-            return Ok(json!({"contract_version":1,"state":"idle","session_id":null}));
+            return Ok(json!({"contract_version":2,"state":"idle","session_id":null}));
         }
         let allowed = if action == "targets" {
             vec!["action", "session_id"]
+        } else if action == "runtime" {
+            vec!["action", "session_id", "target_id", "command"]
         } else if action == "evaluate" {
             vec!["action", "session_id", "target_id", "source"]
         } else {
@@ -331,8 +367,20 @@ impl NativeConsole {
                 "Native console session ended; start another session",
             ));
         }
+        let runtime_source;
         let (operation, target, source) = if action == "targets" {
             (1, 0, "")
+        } else if action == "runtime" {
+            validate_command(&request["command"])?;
+            runtime_source = serde_json::to_string(&request["command"])?;
+            if runtime_source.len() > RUNTIME_LIMIT {
+                return Err(Error::bad("Runtime command exceeds 65536 bytes"));
+            }
+            (
+                3,
+                validation::canonical(&request["target_id"], 64, true, "Console target")?,
+                runtime_source.as_str(),
+            )
         } else {
             let source =
                 validation::text(&request["source"], "JavaScript", SOURCE_LIMIT, false, true)?;
@@ -426,4 +474,45 @@ impl NativeConsole {
             started: Instant::now(),
         })
     }
+}
+
+// Runtime inspection commands have exact fields. Source is only accepted by
+// explicit evaluation; completion never receives an executable expression.
+fn validate_command(command: &Value) -> Result<()> {
+    let operation = command["operation"].as_str().unwrap_or("");
+    let fields: &[&str] = match operation {
+        "evaluate" => &["operation", "source"],
+        "inspect" => &["operation", "handle", "offset"],
+        "complete" => &["operation", "path", "prefix"],
+        "await" | "release" | "store" | "cancel" | "source" | "listeners" | "monitor"
+        | "unmonitor" => &["operation", "handle"],
+        "poll" | "clear" | "last" | "traffic" => &["operation"],
+        _ => return Err(Error::bad("Invalid runtime operation")),
+    };
+    validation::fields(command, fields, "Runtime command")?;
+    if operation == "evaluate" {
+        let source = validation::text(&command["source"], "JavaScript", SOURCE_LIMIT, false, true)?;
+        if source.is_empty() || source.contains('\0') {
+            return Err(Error::bad("JavaScript must be nonempty without NUL"));
+        }
+    }
+    if fields.contains(&"handle") {
+        validation::canonical(&command["handle"], 64, true, "Value handle")?;
+    }
+    if operation == "inspect" && !command["offset"].as_u64().is_some_and(|n| n <= 65536) {
+        return Err(Error::bad("Property offset must be 0 to 65536"));
+    }
+    if operation == "complete" {
+        let path = command["path"]
+            .as_array()
+            .ok_or_else(|| Error::bad("Completion path must be an array"))?;
+        if path.len() > 8 {
+            return Err(Error::bad("Completion path has more than 8 components"));
+        }
+        for key in path {
+            validation::text(key, "Completion component", 128, false, false)?;
+        }
+        validation::text(&command["prefix"], "Completion prefix", 128, true, false)?;
+    }
+    Ok(())
 }

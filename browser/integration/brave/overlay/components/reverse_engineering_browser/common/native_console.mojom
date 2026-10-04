@@ -11,6 +11,9 @@ import "mojo/public/mojom/base/unguessable_token.mojom";
 // request queued before navigation from executing in the replacement page.
 interface NativeConsoleAgent {
   Describe() => (mojo_base.mojom.UnguessableToken? document);
+  Runtime(mojo_base.mojom.UnguessableToken document,
+          uint64 expires_at_monotonic_us,
+          string command) => (uint16 status, uint16 type, string text, bool truncated);
   Evaluate(mojo_base.mojom.UnguessableToken document,
            uint64 expires_at_monotonic_us,
            string source) => (uint16 status, uint16 type, string text, bool truncated);

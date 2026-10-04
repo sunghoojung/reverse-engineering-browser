@@ -1899,6 +1899,9 @@
                     },
                     {
                       "$ref": "#/components/schemas/NativeConsoleEvaluation"
+                    },
+                    {
+                      "$ref": "#/components/schemas/NativeConsoleRuntime"
                     }
                   ]
                 }
@@ -8848,7 +8851,7 @@
         "additionalProperties": false,
         "properties": {
           "contract_version": {
-            "const": 1,
+            "const": 2,
             "type": "integer"
           },
           "state": {
@@ -8890,7 +8893,7 @@
         "additionalProperties": false,
         "properties": {
           "contract_version": {
-            "const": 1,
+            "const": 2,
             "type": "integer"
           },
           "state": {
@@ -8924,7 +8927,7 @@
         "additionalProperties": false,
         "properties": {
           "contract_version": {
-            "const": 1,
+            "const": 2,
             "type": "integer"
           },
           "state": {
@@ -8964,12 +8967,26 @@
                 },
                 "truncated": {
                   "type": "boolean"
+                },
+                "label": {
+                  "type": "string",
+                  "x-max-utf8-bytes": 128
+                },
+                "url": {
+                  "type": "string",
+                  "x-max-utf8-bytes": 512
+                },
+                "main_frame": {
+                  "type": "boolean"
                 }
               },
               "required": [
                 "id",
                 "origin",
-                "truncated"
+                "truncated",
+                "label",
+                "url",
+                "main_frame"
               ]
             }
           },
@@ -8990,7 +9007,7 @@
         "additionalProperties": false,
         "properties": {
           "contract_version": {
-            "const": 1,
+            "const": 2,
             "type": "integer"
           },
           "state": {
@@ -9155,7 +9172,473 @@
               "target_id",
               "source"
             ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "runtime"
+              },
+              "session_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "command": {
+                "$ref": "#/components/schemas/NativeConsoleRuntimeCommand"
+              }
+            },
+            "required": [
+              "action",
+              "session_id",
+              "target_id",
+              "command"
+            ]
           }
+        ]
+      },
+      "NativeConsoleRuntimeCommand": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "type": "string",
+                "enum": [
+                  "evaluate"
+                ]
+              },
+              "source": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 8192
+              }
+            },
+            "required": [
+              "operation",
+              "source"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "type": "string",
+                "enum": [
+                  "inspect"
+                ]
+              },
+              "handle": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65536
+              }
+            },
+            "required": [
+              "operation",
+              "handle",
+              "offset"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "type": "string",
+                "enum": [
+                  "complete"
+                ]
+              },
+              "path": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                  "type": "string",
+                  "x-max-utf8-bytes": 128
+                }
+              },
+              "prefix": {
+                "type": "string",
+                "x-max-utf8-bytes": 128
+              }
+            },
+            "required": [
+              "operation",
+              "path",
+              "prefix"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "type": "string",
+                "enum": [
+                  "await",
+                  "release",
+                  "cancel",
+                  "store",
+                  "source",
+                  "listeners",
+                  "monitor",
+                  "unmonitor"
+                ]
+              },
+              "handle": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              }
+            },
+            "required": [
+              "operation",
+              "handle"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "type": "string",
+                "enum": [
+                  "poll",
+                  "clear",
+                  "last",
+                  "traffic"
+                ]
+              }
+            },
+            "required": [
+              "operation"
+            ]
+          }
+        ]
+      },
+      "NativeConsoleValue": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "enum": [
+              "undefined",
+              "null",
+              "boolean",
+              "number",
+              "string",
+              "bigint",
+              "symbol",
+              "function",
+              "object",
+              "promise",
+              "accessor"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "x-max-utf8-bytes": 2048
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "handle": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "location": {
+            "$ref": "#/components/schemas/NativeConsoleLocation"
+          }
+        },
+        "required": [
+          "type",
+          "text",
+          "truncated"
+        ]
+      },
+      "NativeConsoleLocation": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string",
+            "x-max-utf8-bytes": 2048
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "column": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "function": {
+            "type": "string",
+            "x-max-utf8-bytes": 2048
+          }
+        },
+        "required": [
+          "url",
+          "line"
+        ]
+      },
+      "NativeConsoleProperty": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "x-max-utf8-bytes": 2048
+          },
+          "accessor": {
+            "type": "boolean"
+          },
+          "value": {
+            "$ref": "#/components/schemas/NativeConsoleValue"
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ]
+      },
+      "NativeConsoleMessage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string",
+            "x-max-utf8-bytes": 2048
+          },
+          "url": {
+            "type": "string",
+            "x-max-utf8-bytes": 512
+          },
+          "stack": {
+            "type": "string",
+            "x-max-utf8-bytes": 2048
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "level": {
+            "enum": [
+              "debug",
+              "info",
+              "warning",
+              "error"
+            ]
+          },
+          "time": {
+            "type": "number"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "text",
+          "url",
+          "stack",
+          "line",
+          "level",
+          "time",
+          "truncated"
+        ]
+      },
+      "NativeConsoleActivity": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "document_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "resource_id": {
+            "type": "string"
+          },
+          "after_request_id": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$"
+          },
+          "origin": {
+            "type": "string",
+            "x-max-utf8-bytes": 256
+          },
+          "method": {
+            "type": "string",
+            "x-max-utf8-bytes": 16
+          },
+          "status": {
+            "type": "integer"
+          },
+          "network_error": {
+            "type": "integer"
+          },
+          "cached": {
+            "type": "boolean"
+          },
+          "time": {
+            "type": "number"
+          },
+          "operation": {
+            "const": "resource_load_complete"
+          }
+        },
+        "required": [
+          "event_id",
+          "document_id",
+          "resource_id",
+          "after_request_id",
+          "origin",
+          "method",
+          "status",
+          "network_error",
+          "cached",
+          "time",
+          "operation"
+        ]
+      },
+      "NativeConsoleRuntime": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "const": 2
+          },
+          "session_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "state": {
+            "const": "ready"
+          },
+          "runtime": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "status": {
+                "enum": [
+                  "ok",
+                  "error",
+                  "exception",
+                  "pending",
+                  "rejected"
+                ]
+              },
+              "text": {
+                "type": "string",
+                "x-max-utf8-bytes": 8192
+              },
+              "value": {
+                "$ref": "#/components/schemas/NativeConsoleValue"
+              },
+              "properties": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "$ref": "#/components/schemas/NativeConsoleProperty"
+                }
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65536
+              },
+              "more": {
+                "type": "boolean"
+              },
+              "truncated": {
+                "type": "boolean"
+              },
+              "location": {
+                "$ref": "#/components/schemas/NativeConsoleLocation"
+              },
+              "stack": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "$ref": "#/components/schemas/NativeConsoleLocation"
+                }
+              },
+              "messages": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "$ref": "#/components/schemas/NativeConsoleMessage"
+                }
+              },
+              "dropped": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "events": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "$ref": "#/components/schemas/NativeConsoleActivity"
+                }
+              },
+              "items": {
+                "type": "array",
+                "maxItems": 24,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z_$][\\w$]{0,127}$"
+                    },
+                    "kind": {
+                      "enum": [
+                        "property",
+                        "function"
+                      ]
+                    },
+                    "signature": {
+                      "type": "string",
+                      "maxLength": 128
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "kind"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "status"
+            ]
+          }
+        },
+        "required": [
+          "contract_version",
+          "session_id",
+          "request_id",
+          "state",
+          "runtime"
         ]
       }
     }

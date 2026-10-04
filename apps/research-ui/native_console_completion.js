@@ -132,10 +132,38 @@ function nativeConsoleSuggestions(source, caret, explicit = false) {
   return items.length ? {items, start, end, prefix, source, caret} : null;
 }
 
-function createNativeConsoleCompletion(source, mirror, root) {
+// Only identifier chains cross the native completion boundary. Calls,
+// computed keys, strings and comments are excluded rather than evaluated.
+function nativeConsoleCompletionQuery(source, caret, explicit = false) {
+  if (source.length > 8192 || caret < 0 || caret > source.length) return null;
+  const lexed = sourcePrettyTokens(source.slice(0, caret) + '\u0001', 'javascript');
+  if (lexed.at(-1)?.text !== '\u0001' || lexed.at(-1)?.kind !== 'operator') return null;
+  let previous = null;
+  for (const token of lexed) {
+    if (['whitespace', 'comment', 'line-comment'].includes(token.kind)) continue;
+    if (token.text === '/' && sourcePrettyMayStartRegex(previous) && sourcePrettyRegexEnd(source.slice(0, caret), token.start) === token.start + 1) return null;
+    previous = token;
+  }
+  const tokens = lexed.slice(0, -1).filter(token => !['whitespace', 'comment', 'line-comment'].includes(token.kind));
+  let index = tokens.length - 1;
+  const word = tokens[index]?.kind === 'word' && tokens[index].end === caret ? tokens[index--] : null;
+  const prefix = word?.text || '', start = word?.start ?? caret;
+  const path = [];
+  while (['.', '?.'].includes(tokens[index]?.text)) {
+    const owner = tokens[index - 1];
+    if (owner?.kind !== 'word' || !/^[A-Za-z_$][\w$]*$/.test(owner.text)) return null;
+    path.unshift(owner.text); index -= 2;
+  }
+  if (path.length > 8 || path.some(component => component.length > 128) || prefix.length > 128 || !path.length && !prefix && !explicit) return null;
+  if (tokens[index] && ['.', '?.', ')', ']'].includes(tokens[index].text)) return null;
+  let end = caret; while (end < source.length && /[\w$]/.test(source[end])) ++end;
+  return {path, prefix, start, end, source, caret};
+}
+
+function createNativeConsoleCompletion(source, mirror, root, provider = null) {
   const list = document.createElement('div');
   list.id = 'native-console-completions'; list.className = 'native-console-completions';
-  list.hidden = true; list.setAttribute('role', 'listbox'); list.setAttribute('aria-label', 'Built-in JavaScript API suggestions');
+  list.hidden = true; list.setAttribute('role', 'listbox'); list.setAttribute('aria-label', 'JavaScript property suggestions');
   document.body.append(list);
   source.setAttribute('role', 'combobox'); source.setAttribute('aria-autocomplete', 'list');
   source.setAttribute('aria-controls', list.id); source.setAttribute('aria-expanded', 'false');
@@ -147,7 +175,10 @@ function createNativeConsoleCompletion(source, mirror, root) {
   let scheduled = false;
   let composing = false;
   let dismissed = false;
+  let revision = 0;
+  let timer = null;
   function close() {
+    ++revision; clearTimeout(timer);
     current = null; list.hidden = true; list.replaceChildren(); before.data = '';
     source.setAttribute('aria-expanded', 'false'); source.removeAttribute('aria-activedescendant');
   }
@@ -180,7 +211,21 @@ function createNativeConsoleCompletion(source, mirror, root) {
     if (composing || source.disabled || root.hidden || document.activeElement !== source ||
         source.selectionStart !== source.selectionEnd || dismissed && !explicit) { close(); return; }
     const suggestion = nativeConsoleSuggestions(source.value, source.selectionStart, explicit);
-    if (!suggestion) { close(); return; }
+    const query = nativeConsoleCompletionQuery(source.value, source.selectionStart, explicit);
+    const version = ++revision;
+    clearTimeout(timer);
+    if (provider && query) timer = setTimeout(async () => {
+      const items = await provider(query);
+      if (version !== revision || source.value !== query.source || source.selectionStart !== query.caret || document.activeElement !== source || dismissed && !explicit) return;
+      if (items?.length && (explicit || !items.some(item => item.name === query.prefix && query.caret === query.end))) {
+        render({...query, items: items.filter(item => explicit || item.name !== source.value.slice(query.start, query.end))});
+      }
+    }, explicit ? 0 : 180);
+    if (!suggestion) { current = null; list.hidden = true; source.setAttribute('aria-expanded', 'false'); return; }
+    render(suggestion);
+  }
+  function render(suggestion) {
+    if (!suggestion.items.length) return;
     const previous = current?.items[selected]?.name;
     current = suggestion;
     const rows = current.items.map((item, index) => {
@@ -191,7 +236,7 @@ function createNativeConsoleCompletion(source, mirror, root) {
       const label = document.createElement('span'); label.className = 'native-console-completion-name';
       const match = document.createElement('strong'); match.textContent = current.prefix;
       label.append(match, document.createTextNode(item.name.slice(current.prefix.length)));
-      const kind = document.createElement('span'); kind.className = 'native-console-completion-kind'; kind.textContent = item.kind;
+      const kind = document.createElement('span'); kind.className = 'native-console-completion-kind'; kind.textContent = item.signature || item.kind;
       row.append(icon, label, kind);
       row.addEventListener('pointerdown', event => { event.preventDefault(); select(index); accept(); });
       return row;
@@ -212,7 +257,9 @@ function createNativeConsoleCompletion(source, mirror, root) {
     const item = current.items[selected];
     const next = source.value.slice(0, current.start) + item.name + source.value.slice(current.end);
     if (next.length > 8192 || new TextEncoder().encode(next).length > 8192) { close(); return; }
-    source.setRangeText(item.name, current.start, current.end, 'end');
+    source.focus(); source.setSelectionRange(current.start, current.end);
+    // The native editing command participates in WebKit's undo stack.
+    if (!document.execCommand('insertText', false, item.name)) source.setRangeText(item.name, current.start, current.end, 'end');
     close(); source.dispatchEvent(new Event('input', {bubbles: true})); dismissed = true;
   }
   source.addEventListener('input', () => { dismissed = false; schedule(); });

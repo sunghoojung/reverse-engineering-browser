@@ -98,7 +98,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       case "/api/health":
         response = (try healthResponse(), "application/json; charset=utf-8", 200, [:])
       case "/api/native-console":
-        response = (Data("{\"contract_version\":1,\"available\":false,\"state\":\"idle\",\"session_id\":null,\"message\":\"Open a live workspace to use the native console\"}".utf8), "application/json; charset=utf-8", 200, [:])
+        response = (Data("{\"contract_version\":2,\"available\":false,\"state\":\"idle\",\"session_id\":null,\"message\":\"Open a live workspace to use the native console\"}".utf8), "application/json; charset=utf-8", 200, [:])
       case "/api/deobfuscation":
         handleDeobfuscation(requestURL, to: urlSchemeTask)
         return
@@ -3128,6 +3128,10 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
 
     let editMenuItem = NSMenuItem()
     let editMenu = NSMenu(title: "Edit")
+    editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+    let redoItem = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+    redoItem.keyEquivalentModifierMask = [.command, .shift]
+    editMenu.addItem(.separator())
     editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
     editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
     editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")

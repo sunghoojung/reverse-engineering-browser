@@ -45,6 +45,16 @@ assert.ok(middle.items.some(item => item.name === "querySelector"));
 assert.equal(complete("a".repeat(8193), 8193), null);
 assert.ok(complete("", 0, true).items.length <= 24);
 assert.equal(complete("document.", -1), null);
+const completionQuery = runInNewContext(
+  (await readFile(join(root, "apps/research-ui/source_syntax.js"), "utf8")) +
+  (await readFile(join(root, "apps/research-ui/native_console_completion.js"), "utf8")) +
+  ";nativeConsoleCompletionQuery",
+);
+assert.deepEqual(Array.from(completionQuery("customPageObject.method", 23).path), ["customPageObject"]);
+for (const text of ['"customPageObject.', "// obj.", "/* obj.", "/obj.", "const pattern = /obj.", "obj[pageGetter()].", "obj.method()."]) assert.equal(completionQuery(text, text.length), null, text);
+assert.equal(completionQuery("a".repeat(8193), 8193), null);
+assert.equal(completionQuery("window.", -1), null);
+assert.equal(completionQuery("a".repeat(129) + ".", 130), null);
 console.log("PASS bounded local console completions, lexical exclusions, property chains and UTF-16 replacement");
 const ui = runInNewContext(
   (await readFile(join(root, "apps/research-ui/evidence_models.js"), "utf8")) +

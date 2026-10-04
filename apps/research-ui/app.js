@@ -6772,7 +6772,7 @@
         }
       }
 
-      function selectArtifact(artifactId) {
+      function selectArtifact(artifactId, line = null) {
         const artifact = state.artifacts.find(candidate => candidate.artifact_id === artifactId);
         if (!artifact) return;
         state.sourceCollection = 'captured';
@@ -6784,7 +6784,12 @@
         state.sourceWasm = false;
         if (!state.openArtifactIds.includes(artifactId)) state.openArtifactIds.push(artifactId);
         renderSources();
-        loadArtifactContent(artifact);
+        loadArtifactContent(artifact).then(() => {
+          if (line !== null && state.sourceCollection === 'captured' && state.selectedArtifactId === artifactId) {
+            const source = selectedSource();
+            if (source?.content !== undefined) revealOriginalLine(source, line, 0);
+          }
+        });
       }
 
       function selectScript(scriptId, line = null) {
@@ -9300,7 +9305,51 @@
       elements.memoryCaptureBaseline.addEventListener('click', captureHeapDiffBaseline);
       elements.memoryClearBaseline.addEventListener('click', clearHeapDiffBaseline);
       elements.memoryCompareSnapshot.addEventListener('click', runHeapSnapshotDiff);
+      const consoleTraffic = new Map();
+      document.querySelector('#console-traffic-back').addEventListener('click', () => {
+        delete document.querySelector('#screen-traffic').dataset.consoleTraffic;
+        document.querySelector('#console-experiment-traffic').hidden = true;
+      });
+      document.addEventListener('reb-console-traffic', event => {
+        const {session, target, events, dropped} = event.detail;
+        if (!/^[1-9][0-9]{0,19}$/.test(session) || !/^[1-9][0-9]{0,19}$/.test(target) || !Array.isArray(events) || events.length > 64) return;
+        for (const record of events) {
+          if (!/^[1-9][0-9]{0,19}$/.test(record.event_id) || record.document_id !== target || typeof record.origin !== 'string' || record.origin.length > 256 || typeof record.method !== 'string' || record.method.length > 16 || !Number.isInteger(record.status) || !Number.isFinite(record.time)) continue;
+          consoleTraffic.set(`${session}:${target}:${record.event_id}`, {...record, session});
+        }
+        while (consoleTraffic.size > 128) consoleTraffic.delete(consoleTraffic.keys().next().value);
+        showScreen('traffic'); document.querySelector('#screen-traffic').dataset.consoleTraffic = 'true';
+        document.querySelector('#console-experiment-traffic').hidden = false;
+        document.querySelector('#console-traffic-title').textContent = `Console experiment · document ${target}`;
+        document.querySelector('#console-traffic-notice').textContent = `Session ${session}. Metadata only; paths, queries, headers and bodies are excluded. “After command” indicates observation order, not proven causation.${dropped ? ` ${dropped} events dropped before delivery.` : ''}`;
+        const container = document.querySelector('#console-traffic-events'); container.replaceChildren();
+        const records = [...consoleTraffic.values()].filter(record => record.session === session && record.document_id === target);
+        if (!records.length) container.textContent = 'No completed resources observed in this document since connection. Run a request, then open Experiment activity again.';
+        for (const record of records) {
+          const row = document.createElement('article'); row.className = 'console-traffic-event';
+          const overview = document.createElement('div'); overview.className = 'console-traffic-overview';
+          for (const text of [record.method, record.status || `error ${record.network_error}`, record.origin]) { const item = document.createElement('span'); item.textContent = String(text); overview.append(item); }
+          const command = document.createElement('button'); command.type = 'button'; command.className = 'native-console-location'; command.textContent = record.after_request_id === '0' ? 'Background activity' : `After command #${record.after_request_id}`;
+          command.addEventListener('click', () => {
+            if (!/^[1-9][0-9]{0,19}$/.test(record.after_request_id)) return;
+            const result = document.querySelector(`#native-console-output [data-request-id="${record.after_request_id}"]`);
+            result?.scrollIntoView({block: 'center'});
+          });
+          overview.append(command);
+          const details = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = `Event #${record.event_id} · resource ${record.resource_id}`;
+          const metadata = document.createElement('pre'); metadata.textContent = JSON.stringify(record, null, 2); details.append(summary, metadata); row.append(overview, details); container.append(row);
+        }
+      });
+      document.addEventListener('reb-console-location', event => {
+        const {url, line} = event.detail;
+        const script = liveSources().find(source => source.url === url);
+        const artifact = capturedSources().find(source => source.url === url);
+        if (script) { showScreen('sources'); selectScript(script.script_id, Math.max(0, line - 1)); }
+        else if (artifact) { showScreen('sources'); selectArtifact(artifact.artifact_id, Math.max(0, line - 1)); }
+        else event.detail.unavailable = true;
+      });
       document.addEventListener('keydown', event => {
+        if (event.defaultPrevented || event.target.closest?.('#native-console-panel')) return;
         const sourcesVisible = !document.querySelector('#screen-sources').hidden;
         if (sourcesVisible && event.key === 'Escape' && elements.quickOpen.hidden) {
           event.preventDefault();

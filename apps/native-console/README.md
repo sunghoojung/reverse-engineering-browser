@@ -11,7 +11,7 @@ make native-console-check
 
 The check uses a synthetic browser wire peer. Actual Blink/V8 checks require a
 rebuilt custom browser and the command in
-[Native Console v1](../../protocol/native-console-v1.md).
+[Native Console v2](../../protocol/native-console-v2.md).
 
 For optional terminal development, set `REB_BRAVE_BINARY` to that executable
 and run `make native-console`. Select a document using `:targets` and `:use ID`;

@@ -36,7 +36,7 @@ The native Console panel uses `src/native_console.rs` and the bundled C++
 the rebuilt custom browser; `--native-console` can override the bridge. This
 separate session uses no CDP connection. It owns a temporary profile and both
 process groups, validates bounded replies, and retires ambiguous exchanges. See
-[Native Console v1](../../protocol/native-console-v1.md).
+[Native Console v2](../../protocol/native-console-v2.md).
 
 Each browser connection owns a native transport process, a bounded event queue,
 and command deadlines. Experiment actions verify browser-context ownership.

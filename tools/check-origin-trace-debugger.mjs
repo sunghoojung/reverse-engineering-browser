@@ -15,9 +15,29 @@ const fieldsOnly = process.argv[2] === "--field-provenance-only";
 const root = process.argv[fieldsOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
 const ui = runInNewContext(
   (await readFile(join(root, "apps/research-ui/evidence_models.js"), "utf8")) +
-    ";({isDebuggerResponse,isRequestInterception,isActionScope,isObjectExperiment,isRuntimeHooks,isAutomationRecipes,isRepeater})",
+    ";({isDebuggerResponse,isRequestInterception,isActionScope,isObjectExperiment,isRuntimeHooks,isAutomationRecipes,isRepeater,isWasmInspection})",
   { TextEncoder, URL },
 );
+// Reject foreign, malformed and unbounded binary listings before rendering them.
+const wasmSource = {artifact_id: "1", sha256: "a".repeat(64), byte_size: 32};
+const wasmReport = {schema: "wasm-inspection-v1", ...wasmSource, status: "decoded",
+  sections: 1, defined_functions: 1, imported_functions: 0, instructions: 1,
+  notice: "Static only", omissions: [], rows: [{kind: "instruction", byte_offset: 12,
+    byte_end: 14, function_index: 0, text: "i32.const {value: 7}", text_truncated: false}]};
+assert.equal(ui.isWasmInspection(wasmReport, wasmSource), true);
+for (const patch of [{sha256: "b".repeat(64)}, {artifact_id: "2"}, {byte_size: 33},
+  {status: "confirmed"}, {rows: Array(8193).fill(wasmReport.rows[0])},
+  {rows: [{...wasmReport.rows[0], byte_end: 33}]},
+  {rows: [{...wasmReport.rows[0], byte_offset: -1}]},
+  {rows: [{...wasmReport.rows[0], text: "x".repeat(541)}]},
+  {rows: [{...wasmReport.rows[0], text: "import e\nv"}]},
+  {rows: [{...wasmReport.rows[0], text: "import e\rv"}]},
+  {rows: [{...wasmReport.rows[0], text: "import e\u2028v"}]},
+  {rows: [{...wasmReport.rows[0], text: "import e\u2029v"}]},
+  {omissions: [null]}, {instructions: NaN}]) {
+  assert.equal(ui.isWasmInspection({...wasmReport, ...patch}, wasmSource), false);
+}
+console.log("PASS WASM inspection identity, coordinate and resource bounds");
 // The decoded-field handoff must never silently rebind a chain to edited input
 // or another request, or turn a binary/preview result into a source-text match.
 const fieldHandoff = runInNewContext(
@@ -379,7 +399,7 @@ try {
         await wait(50);
       }
       throw Error(
-        `${name} state timeout ${JSON.stringify(((s) => ({ state: s.state, error: s.error, target: s.target, targets: s.targets, workers: s.runtime_hooks.workers, hooks: s.runtime_hooks, console: s.console, interception: s.request_interception }))(await get()))}`,
+        `${name} state timeout ${JSON.stringify(((s) => ({ state: s.state, error: s.error, target: s.target, targets: s.targets, workers: s.runtime_hooks.workers, hooks: s.runtime_hooks, console: s.console, interception: s.request_interception, automation: s.automation_recipes, scope: s.action_scope }))(await get()))}`,
       );
     };
     await until((s) => s.state === "running");

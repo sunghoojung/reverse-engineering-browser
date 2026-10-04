@@ -1838,6 +1838,20 @@
         return findings.sort((left, right) => (right.analysis?.vm_score ?? 0) - (left.analysis?.vm_score ?? 0));
       }
 
+      function isWasmInspection(value, source) {
+        return value?.schema === 'wasm-inspection-v1' && value.artifact_id === source.artifact_id &&
+          value.sha256 === source.sha256 && value.byte_size === source.byte_size &&
+          ['decoded', 'partial'].includes(value.status) && Array.isArray(value.rows) && value.rows.length <= 8192 &&
+          typeof value.notice === 'string' && value.notice.length <= 512 &&
+          Array.isArray(value.omissions) && value.omissions.length <= 128 && value.omissions.every(v => typeof v === 'string' && v.length <= 512) &&
+          ['sections', 'defined_functions', 'imported_functions', 'instructions'].every(key => Number.isSafeInteger(value[key]) && value[key] >= 0) &&
+          value.rows.every(row => row && typeof row.kind === 'string' && row.kind.length <= 32 &&
+            typeof row.text === 'string' && row.text.length <= 540 && !/[\r\n\u2028\u2029]/u.test(row.text) && typeof row.text_truncated === 'boolean' &&
+            Number.isSafeInteger(row.byte_offset) && row.byte_offset >= 0 && row.byte_offset <= value.byte_size &&
+            Number.isSafeInteger(row.byte_end) && row.byte_end >= row.byte_offset && row.byte_end <= value.byte_size &&
+            (row.function_index === null || (Number.isSafeInteger(row.function_index) && row.function_index >= 0)));
+      }
+
       function retainVmAnalysisOnFailure(targetState, status, errorMessage) {
         targetState.vmAnalysisStatus = status;
         targetState.vmAnalysisError = errorMessage;

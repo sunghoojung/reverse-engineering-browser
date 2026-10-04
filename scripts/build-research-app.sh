@@ -20,6 +20,7 @@ live_session_source="${repo_root}/apps/research-ui/macos/LiveSessionCoordinator.
 decoder_service_source="${repo_root}/apps/research-ui/macos/DecoderService.swift"
 decoder_binary="${repo_root}/build/reb-decoder"
 deobfuscation_service_source="${repo_root}/apps/research-ui/macos/DeobfuscationService.swift"
+wasm_service_source="${repo_root}/apps/research-ui/macos/WasmService.swift"
 cargo build --locked --release --manifest-path "${repo_root}/apps/deobfuscator-worker/Cargo.toml"
 deobfuscation_binary="${repo_root}/apps/deobfuscator-worker/target/release/reb-deobfuscator-worker"
 icon_source="${repo_root}/apps/research-ui/macos/assets/origin-trace-icon.png"
@@ -43,6 +44,8 @@ cargo build --locked --release --manifest-path "${repo_root}/apps/origin-trace-b
 cp "${repo_root}/apps/origin-trace-backend/target/release/origin-trace-backend" "${macos_path}/OriginTraceBackend"
 cp "${repo_root}/apps/origin-trace-backend/target/release/origin-trace-vm" "${macos_path}/OriginTraceVMAnalyzer"
 cp "${repo_root}/apps/origin-trace-backend/target/release/reb-api" "${macos_path}/OriginTraceAPI"
+cp "${repo_root}/apps/origin-trace-backend/target/release/origin-trace-wasm" "${macos_path}/OriginTraceWasmInspector"
+chmod 755 "${macos_path}/OriginTraceWasmInspector"
 chmod 755 "${macos_path}/OriginTraceBackend" "${macos_path}/OriginTraceVMAnalyzer" "${macos_path}/OriginTraceAPI"
 cp "${repo_root}/scripts/run-live-session.sh" "${resources_path}/run-live-session.sh"
 chmod 755 "${resources_path}/run-live-session.sh"
@@ -86,7 +89,7 @@ xcrun swiftc \
   -parse-as-library \
   -framework Cocoa \
   -framework WebKit \
-  "${swift_source}" "${trace_document_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${live_session_source}" \
+  "${swift_source}" "${trace_document_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${live_session_source}" \
   -o "${macos_path}/OriginTrace"
 
 xcrun swiftc \

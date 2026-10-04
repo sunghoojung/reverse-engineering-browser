@@ -51,7 +51,7 @@ privacy, and implementation limits are documented in
 - Detect network-loaded modules and modules compiled from runtime bytes.
 - Preserve module bytes, hashes, origin, creator artifact, and lifecycle events.
 - Display imports, exports, types, functions, tables, memories, globals, strings, data segments, and custom sections.
-- Provide disassembly and a readable derived representation.
+- [Captured module inspection and byte-offset disassembly](./wasm-inspection-v1.md) are implemented in Sources. Higher-level readable reconstruction remains planned.
 - Record compilation, instantiation, exported calls, imported calls, traps, and memory growth.
 - Connect JavaScript-to-WASM and WASM-to-JavaScript crossings.
 - Search for values moving between WASM, JavaScript, browser APIs, and network requests.

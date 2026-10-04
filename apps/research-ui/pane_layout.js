@@ -27,7 +27,17 @@ function initializePaneLayout() {
   const schedule = () => {
     if (scheduled) return;
     scheduled = true;
-    requestAnimationFrame(() => { scheduled = false; layouts.forEach(layout => layout.refresh()); });
+    let frame, timeout;
+    const refresh = () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(timeout);
+      scheduled = false;
+      layouts.forEach(layout => layout.refresh());
+    };
+    frame = requestAnimationFrame(refresh);
+    // WebKit can suspend animation frames for an inactive native window while
+    // continuing input and DOM updates. Hidden-screen dividers must still retire.
+    timeout = setTimeout(refresh, 50);
   };
   const layouts = configurations.map(configuration => {
     const parent = document.querySelector(configuration.parent);

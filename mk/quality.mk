@@ -62,3 +62,4 @@ clean:
 javascript-check:
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is not installed" >&2; exit 1; }
 	@set -e; for source in apps/research-ui/*.js apps/runtime-hook-demo/*.mjs tools/*.mjs; do node --check "$$source"; done
+	node tools/check-origin-trace-debugger.mjs --field-provenance-only

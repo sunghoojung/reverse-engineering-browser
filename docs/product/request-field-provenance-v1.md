@@ -44,6 +44,28 @@ return replacement keep their existing explicit confirmations.
 7. Stop and erase capture or dispose the context to erase replay observations.
    Original captured request evidence is unchanged.
 
+For an encoded string, choose **Decode value** in Field trace, apply explicit
+Decoder transformations, then choose **Find sources for result**. Search uses
+the complete selected step's UTF-8 output, including whitespace and an initial
+BOM, rather than its display preview. Field trace retains the original captured
+string above the decoded search value and an expandable operation history with
+input/output byte counts. **Use original value** returns to the original search.
+**Test value** continues to select the original request field.
+
+Decoded source matches are labeled **Decoded candidate**. The transformation
+chain describes researcher actions, not transformations observed in the page.
+Search accepts nonempty valid UTF-8 output of at most 4 KiB and preserves the
+existing target, script, source-hash, eight-source, 2 MiB, and 32-match bounds.
+Binary and oversized output cannot start source search. Editing the Decoder
+input or its format, resetting the chain, or choosing a different request field
+invalidates this handoff. Selecting an earlier completed step searches only the
+chain prefix that produced it. Pending transforms cannot be handed off. The
+chain and search projection remain ephemeral UI state and add no capture path,
+storage, or wire contract.
+Strings containing unpaired UTF-16 surrogates cannot start a Decoder handoff
+because UTF-8 conversion would change the original string. Source search checks
+the loaded source identity and excludes viewer-added truncation notices.
+
 ## Bounds and compatibility
 
 Selections require a complete string of at most 4 KiB and a selector of at most

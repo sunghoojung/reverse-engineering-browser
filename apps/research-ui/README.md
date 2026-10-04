@@ -159,6 +159,12 @@ The dark theme uses [Rosé Pine Moon](https://rosepinetheme.com/palette/), with
 slightly brighter secondary labels for legibility. Appearance switches to the
 existing light theme.
 
+Field trace can send its original request string through explicit Decoder steps
+and search attached sources for the selected result. Original evidence remains
+visible beside a derived search value and transformation history; matches are
+labeled decoded candidates. The handoff rejects binary or oversized results,
+edited inputs, and changed field selections.
+
 Fingerprinting starts with an Overview of active surfaces and captured Canvas
 output. **Show inactive surfaces** reveals the rest of the supported families.
 Surface chips open filtered Activity. Each Canvas card keeps replay comparison,

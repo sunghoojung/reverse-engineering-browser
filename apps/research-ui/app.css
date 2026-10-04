@@ -2951,6 +2951,12 @@
 .field-provenance-body p, .field-provenance-body li { font: 11px/1.6 var(--sans); overflow-wrap: anywhere; }
 .field-provenance-body pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 var(--mono); }
 .field-provenance-value { background: var(--panel-2); border: 1px solid var(--line); border-left: 3px solid var(--accent); padding: 12px 14px; margin: 0 0 12px; }
+.field-provenance-body .field-provenance-derived { margin: 0 0 16px; padding: 12px 14px; background: var(--panel-2); border: 1px solid var(--line); }
+.field-provenance-derived > pre { max-height: 160px; overflow: auto; }
+.field-provenance-derived summary { cursor: pointer; font: 11px/1.6 var(--sans); }
+.decoder-field-origin { margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-left: 3px solid var(--accent); }
+.decoder-field-origin p { margin: 0 0 10px; overflow-wrap: anywhere; font: 11px/1.6 var(--sans); color: var(--muted); }
+.decoder-field-origin p:last-child { margin: 10px 0 0; }
 .field-provenance-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .field-provenance-actions .trace-button { margin-left: 0; }
 .field-provenance-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }

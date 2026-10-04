@@ -1180,30 +1180,39 @@
         </main>
         <section id="native-console-panel" class="native-console-panel" aria-label="Native JavaScript console" hidden>
           <header class="native-console-head">
-            <strong class="native-console-tab">Console</strong><span id="native-console-badge" class="native-console-badge">Native · idle</span>
+            <button id="native-console-clear" type="button" class="icon-button" aria-label="Clear console" title="Clear console">⊘</button>
             <select id="native-console-target" aria-label="Console document" disabled><option value="">Select a document</option></select>
-            <button id="native-console-refresh" type="button" class="icon-button" aria-label="Refresh documents" title="Refresh documents" disabled>↻</button>
-            <button id="native-console-stop" type="button" class="native-console-button" disabled>Stop</button>
             <span class="native-console-head-spacer"></span>
-            <button id="native-console-clear" type="button" class="native-console-button">Clear</button>
+            <details id="native-console-connection" class="native-console-connection">
+              <summary aria-label="Console connection settings" title="Console connection settings"><span id="native-console-badge" class="native-console-badge">idle</span><span aria-hidden="true">⌄</span></summary>
+              <div class="native-console-connection-body">
+                <strong>Disposable browser session</strong>
+                <div class="native-console-controls">
+                  <input id="native-console-url" type="url" aria-label="Authorized page URL" maxlength="4096" placeholder="https://your-authorized-site.example" autocomplete="off" spellcheck="false" />
+                  <button id="native-console-start" type="button" class="native-console-button native-console-primary" disabled>Connect</button>
+                </div>
+                <div class="native-console-session-actions">
+                  <button id="native-console-refresh" type="button" class="native-console-button" disabled>Refresh documents</button>
+                  <button id="native-console-stop" type="button" class="native-console-button" disabled>Disconnect</button>
+                </div>
+                <p>Commands run in the selected document and can change page state. Disconnect removes this disposable browser and profile.</p>
+              </div>
+            </details>
             <button id="native-console-close" type="button" class="icon-button" aria-label="Close console panel" title="Close panel (⌘ / Ctrl + J)">×</button>
           </header>
-          <div class="native-console-controls">
-            <input id="native-console-url" type="url" aria-label="Authorized page URL" maxlength="4096" placeholder="https://your-authorized-site.example" autocomplete="off" spellcheck="false" />
-            <button id="native-console-start" type="button" class="native-console-button native-console-primary" disabled>Start session</button>
-            <span class="native-console-scope">Disposable browser · commands can change page state</span>
-          </div>
           <div id="native-console-notice" class="native-console-notice" role="status" aria-live="polite">Open this panel to check the native console connection.</div>
-          <div id="native-console-output" class="native-console-output" role="log" aria-live="polite" aria-label="Console results"><p class="native-console-empty">Start a session, then select the document whose <code>window</code> you want to inspect.</p></div>
-          <form id="native-console-form" class="native-console-input">
-            <span class="native-console-prompt" aria-hidden="true">›</span>
-            <div class="native-console-editor">
-              <pre id="native-console-highlight" aria-hidden="true"></pre>
-              <textarea id="native-console-source" aria-label="JavaScript command" rows="1" maxlength="8192" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" placeholder="window.location.href" aria-describedby="native-console-input-help" disabled></textarea>
-            </div>
-            <span id="native-console-input-help">Enter to run · Shift + Enter for a new line</span>
-            <button id="native-console-run" type="submit" class="native-console-button native-console-primary" disabled>Run</button>
-          </form>
+          <div class="native-console-scroll" id="native-console-scroll">
+            <div id="native-console-output" class="native-console-output" role="log" aria-live="polite" aria-label="Console results"><p class="native-console-empty">Start a session, then select the document whose <code>window</code> you want to inspect.</p></div>
+            <form id="native-console-form" class="native-console-input">
+              <span class="native-console-prompt" aria-hidden="true">&gt;</span>
+              <div class="native-console-editor">
+                <pre id="native-console-highlight" aria-hidden="true"></pre>
+                <textarea id="native-console-source" aria-label="JavaScript command" rows="1" maxlength="8192" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" placeholder="window.location.href" aria-describedby="native-console-input-help" disabled></textarea>
+              </div>
+              <span id="native-console-input-help">Enter to run · Shift + Enter for a new line</span>
+              <button id="native-console-run" type="submit" disabled hidden>Run</button>
+            </form>
+          </div>
         </section>
       </div>
 

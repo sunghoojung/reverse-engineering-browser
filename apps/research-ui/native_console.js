@@ -1,7 +1,7 @@
 (() => {
   const root = document.querySelector('#native-console-panel');
   const element = name => document.querySelector(`#native-console-${name}`);
-  const controls = Object.fromEntries(['url', 'start', 'stop', 'notice', 'target', 'refresh', 'clear', 'output', 'form', 'source', 'run'].map(name => [name, element(name)]));
+  const controls = Object.fromEntries(['url', 'start', 'stop', 'notice', 'target', 'refresh', 'clear', 'output', 'scroll', 'connection', 'form', 'source', 'run'].map(name => [name, element(name)]));
   const toggle = element('toggle');
   let historyIndex = null;
   let draft = '';
@@ -12,6 +12,7 @@
   let initialized = false;
   let outputBytes = 0;
   let removed = 0;
+  let partialTargets = false;
   const encoder = new TextEncoder();
   const numberId = value => typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value) && BigInt(value) <= 18446744073709551615n;
   const validState = value => value?.contract_version === 1 && ['ready', 'idle'].includes(value.state) &&
@@ -21,10 +22,14 @@
     controls.notice.textContent = message;
     controls.notice.title = message;
     controls.notice.dataset.kind = error ? 'error' : 'status';
+    controls.notice.hidden = !message;
   }
   function renderControls() {
     root.dataset.session = session ? 'ready' : 'idle';
-    element('badge').textContent = `Native · ${pending ? 'working' : session ? disconnected ? 'disconnected' : 'connected' : initialized && !available ? 'unavailable' : 'idle'}`;
+    const status = pending ? 'working' : session ? disconnected ? 'disconnected' : 'connected' : initialized && !available ? 'unavailable' : 'idle';
+    const badge = element('badge'); badge.textContent = status; badge.dataset.state = status;
+    badge.title = `Native browser console: ${status}`;
+    controls.connection.querySelector('summary').setAttribute('aria-label', `Console connection: ${status}. Session settings`);
     controls.start.disabled = pending || !available || !!session;
     controls.stop.disabled = pending || !session;
     controls.refresh.disabled = pending || !session;
@@ -32,12 +37,13 @@
     controls.url.disabled = pending || !!session;
     controls.source.disabled = pending || !session || !controls.target.value;
     controls.run.disabled = controls.source.disabled || !controls.source.value.trim();
-    controls.run.textContent = pending ? '…' : 'Run';
+    controls.run.textContent = pending ? 'Working' : 'Run';
   }
   function clearTargets() {
     const option = document.createElement('option');
     option.value = ''; option.textContent = 'Select a document';
     controls.target.replaceChildren(option);
+    controls.target.title = 'Select a document';
   }
   async function request(action, fields = {}) {
     const response = await fetch('/api/native-console/actions', {
@@ -60,7 +66,11 @@
       // results but retire selection until the researcher checks session state.
       clearTargets(); disconnected = true;
       notice(`${error.message}. Commands are never retried automatically.`, true);
-    } finally { pending = false; renderControls(); if (action === 'evaluate' && !controls.source.disabled) controls.source.focus(); }
+    } finally {
+      pending = false; renderControls();
+      if (action === 'evaluate' && !controls.source.disabled) controls.source.focus();
+      else if (['start', 'targets'].includes(action) && !disconnected) focusPrompt();
+    }
   }
   function targets(value) {
     if (!Array.isArray(value.targets) || value.targets.length > 64 || typeof value.truncated !== 'boolean' ||
@@ -68,9 +78,13 @@
           encoder.encode(target.origin).length > 256 || typeof target.truncated !== 'boolean') ||
         new Set(value.targets.map(target => target.id)).size !== value.targets.length) throw new TypeError('Malformed document listing');
     clearTargets();
+    partialTargets = value.truncated;
+    const origins = new Map();
+    for (const target of value.targets) origins.set(target.origin, (origins.get(target.origin) || 0) + 1);
     for (const target of value.targets) {
       const option = document.createElement('option');
-      option.value = target.id; option.textContent = `${target.origin} · document ${target.id}${target.truncated ? '…' : ''}`;
+      option.value = target.id; option.textContent = `${target.origin}${origins.get(target.origin) > 1 ? ` (#${target.id})` : ''}${target.truncated ? '…' : ''}`;
+      option.title = `Document ${target.id} · ${target.origin}`;
       controls.target.append(option);
     }
     notice(value.targets.length ? `Select a document in the disposable browser.${value.truncated ? ' Document listing is partial.' : ''}`
@@ -82,14 +96,19 @@
         typeof value.text !== 'string' || encoder.encode(value.text).length > 8192 || typeof value.truncated !== 'boolean') throw new TypeError('Malformed console result');
     const empty = controls.output.querySelector('.native-console-empty');
     if (empty) empty.remove();
-    const follow = controls.output.scrollHeight - controls.output.scrollTop - controls.output.clientHeight < 40;
+    const follow = controls.scroll.scrollHeight - controls.scroll.scrollTop - controls.scroll.clientHeight < 40;
     const row = document.createElement('article'); row.className = 'native-console-result'; row.dataset.status = value.status; row.dataset.type = value.type;
+    row.dataset.truncated = String(value.truncated);
     const input = document.createElement('pre'); input.className = 'native-console-expression';
-    input.append(document.createTextNode('› ')); appendCommandColors(input, source);
-    const label = document.createElement('span'); label.className = 'native-console-result-type'; label.textContent = `${value.status === 'ok' ? value.type : value.status} · document ${controls.target.value}${value.truncated ? ' · truncated' : ''}`;
-    label.title = `Session ${value.session_id} · document ${controls.target.value}`;
+    input.append(document.createTextNode('> ')); appendCommandColors(input, source);
+    const details = document.createElement('details'); details.className = 'native-console-result-details';
+    const summary = document.createElement('summary'); summary.textContent = value.truncated ? 'Truncated' : '⋯';
+    summary.setAttribute('aria-label', `Result details: ${value.status}, ${value.type}, document ${controls.target.value}`);
+    const label = document.createElement('span'); label.className = 'native-console-result-type';
+    label.textContent = `${value.type} · ${value.status} · session ${value.session_id} · document ${controls.target.value}${value.truncated ? ' · preview truncated' : ''}`;
+    details.append(summary, label);
     const output = document.createElement('pre'); output.className = 'native-console-value'; output.textContent = value.text;
-    row.append(input, label, output);
+    row.append(input, output, details);
     const bytes = encoder.encode(source).length + encoder.encode(value.text).length;
     row.dataset.bytes = bytes;
     controls.output.append(row); outputBytes += bytes;
@@ -97,11 +116,12 @@
       const oldest = controls.output.firstElementChild;
       outputBytes -= Number(oldest.dataset.bytes || 0); oldest.remove(); ++removed;
     }
-    const message = value.status === 'ok' ? `Executed in document ${controls.target.value}.`
-      : `${value.text}${value.status === 'stale_target' ? ' Refresh documents to select the current page.' : ''}`;
-    notice(`${message}${removed ? ` ${removed} older entries removed from this bounded output.` : ''}`, value.status !== 'ok');
+    // Results already explain execution failures. Keep this strip for actions
+    // the researcher must take and visible bounded-output eviction notices.
+    const message = value.status === 'stale_target' ? 'The document changed. Refresh documents and select the current page.' : '';
+    notice(`${message}${removed ? `${message ? ' ' : ''}${removed} older entries removed from this bounded output.` : ''}`, value.status === 'stale_target');
     if (value.status === 'stale_target') clearTargets();
-    if (follow) controls.output.scrollTop = controls.output.scrollHeight;
+    if (follow) controls.scroll.scrollTop = controls.scroll.scrollHeight;
   }
   async function initialize() {
     if (initialized || pending) return;
@@ -111,18 +131,25 @@
       const value = await response.json();
       if (!response.ok || !validState(value) || typeof value.available !== 'boolean' || typeof value.message !== 'string') throw new TypeError('Native console is unavailable');
       available = value.available; session = value.session_id; initialized = true;
-      notice(value.message);
+      notice(value.available ? '' : value.message, !value.available);
       if (session) controls.output.querySelector('.native-console-empty').textContent = 'Refresh documents and select a page to begin.';
     } catch (error) { notice(error.message, true); }
     finally { pending = false; renderControls(); if (!root.hidden) focusPrompt(); }
   }
   controls.start.addEventListener('click', () => {
     if (!controls.url.reportValidity() || !controls.url.value.trim()) { notice('Enter the URL of a page you are authorized to inspect.', true); controls.url.focus(); return; }
-    perform('start', {url: controls.url.value.trim()}, value => { session = value.session_id; targets(value); });
+    perform('start', {url: controls.url.value.trim()}, value => { session = value.session_id; targets(value); controls.connection.open = false; });
   });
   controls.stop.addEventListener('click', () => perform('stop', {}, () => { session = null; clearTargets(); notice('Session stopped. The disposable browser and profile were removed.'); }));
-  controls.refresh.addEventListener('click', () => perform('targets', {}, targets));
-  controls.target.addEventListener('change', () => { renderControls(); if (!controls.source.disabled) controls.source.focus(); });
+  controls.refresh.addEventListener('click', () => perform('targets', {}, value => { targets(value); controls.connection.open = false; }));
+  controls.target.addEventListener('change', () => {
+    renderControls();
+    if (controls.target.value) notice(partialTargets ? 'Document listing is partial.' : '');
+    controls.target.title = controls.target.selectedOptions[0]?.title || 'Select a document';
+    const empty = controls.output.querySelector('.native-console-empty');
+    if (empty) { empty.textContent = 'Select a document to begin.'; empty.hidden = !!controls.target.value; }
+    if (!controls.source.disabled) controls.source.focus();
+  });
   // Tokenize at most the command limit and reuse the existing source tokenizer.
   // Spans contain text only; coloring cannot interpret captured HTML or evaluate JS.
   function appendCommandColors(container, source) {
@@ -159,15 +186,16 @@
   }
   function sizeInput() {
     controls.source.style.height = '26px';
-    controls.source.style.height = `${Math.min(66, Math.max(26, controls.source.scrollHeight + 2))}px`;
+    controls.source.style.height = `${Math.min(66, Math.max(26, controls.source.scrollHeight))}px`;
     colorInput();
   }
   controls.source.addEventListener('scroll', syncInputMirror);
   new ResizeObserver(syncInputMirror).observe(controls.source);
   controls.source.addEventListener('input', () => { historyIndex = null; sizeInput(); renderControls(); });
   controls.clear.addEventListener('click', () => {
-    const empty = document.createElement('p'); empty.className = 'native-console-empty'; empty.textContent = 'Output cleared.';
+    const empty = document.createElement('p'); empty.className = 'native-console-empty'; empty.textContent = 'Select a document to begin.'; empty.hidden = !!controls.target.value;
     controls.output.replaceChildren(empty); outputBytes = 0; removed = 0; historyIndex = null;
+    if (!disconnected && session && controls.target.value) notice(partialTargets ? 'Document listing is partial.' : '');
   });
   controls.form.addEventListener('submit', event => {
     event.preventDefault();
@@ -196,6 +224,8 @@
     sizeInput(); renderControls();
   });
   function focusPrompt() {
+    if (!session) controls.connection.open = true;
+    else if (controls.target.disabled && controls.source.disabled) controls.connection.open = true;
     (session ? controls.source.disabled ? controls.target.disabled ? controls.refresh : controls.target : controls.source : controls.url).focus();
   }
   function setOpen(open) {
@@ -204,11 +234,13 @@
     toggle.setAttribute('aria-expanded', String(open));
     toggle.setAttribute('aria-pressed', String(open));
     if (open) { sizeInput(); focusPrompt(); }
-    else toggle.focus();
+    else { controls.connection.open = false; toggle.focus(); }
   }
   toggle.addEventListener('click', () => setOpen(root.hidden));
   element('close').addEventListener('click', () => setOpen(false));
+  document.addEventListener('pointerdown', event => { if (!controls.connection.contains(event.target)) controls.connection.open = false; });
   document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && controls.connection.open) { event.preventDefault(); event.stopImmediatePropagation(); controls.connection.open = false; controls.connection.querySelector('summary').focus(); }
     if (event.key.toLowerCase() === 'j' && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey) {
       event.preventDefault(); setOpen(root.hidden);
     }

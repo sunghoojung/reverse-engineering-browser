@@ -18,15 +18,22 @@ such as `window.location.href`, then use Run or Enter (Command/Ctrl+Enter also
 works). Shift+Enter inserts a new line. Up/Down recalls commands still present in
 the bounded output. Refreshing
 invalidates the selection. Navigation, closure, and document replacement reject
-old IDs. Stop kills the owned browser process group and removes its profile.
+old IDs. Disconnect in the connection menu kills the owned browser process group
+and removes its profile.
 The offline bundled interface reports the required live backend explicitly.
 
 Console in the top workspace strip opens a bottom dock beneath the current workspace.
 The prompt and submitted commands are syntax colored with inert text spans;
-primitive results are colored by type. Coloring never evaluates page code. Command/Ctrl+J
-toggles it; closing the dock keeps the session alive. Its top divider supports
+primitive results are colored by type. Coloring never evaluates page code.
+Each result exposes type, status, session and document IDs, and truncation through
+an expandable ellipsis on hover or keyboard focus. Truncated previews keep their
+label visible. Routine execution status is shown by the result;
+actionable connection errors, stale selections and output eviction remain visible.
+Command/Ctrl+J toggles it; closing the dock keeps the session alive. Its top divider supports
 dragging, arrow-key resizing, and Home to reset the saved height. The prompt
-stays pinned while output scrolls.
+follows the output in the same scroll area. The compact toolbar keeps session
+setup, refresh and disconnect in a connection menu. Enter submits the plain `>`
+prompt without a separate Run button.
 
 The existing debugger console drawer remains a log viewer. This panel uses
 native associated Mojo messages and V8, without creating an Inspector session,

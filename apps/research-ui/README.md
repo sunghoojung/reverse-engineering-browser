@@ -14,15 +14,24 @@ and limits.
 
 The **Console** bottom dock starts a separate disposable custom Brave session for
 explicit main-world JavaScript commands. Set `REB_BRAVE_BINARY` to a rebuilt
-custom browser and use the live backend. Select a document before Run.
+custom browser and use the live backend. Open the connection menu to connect a
+disposable browser, then select a document before entering commands.
 Workspace tabs sit across the top, with Console beside Sources. Commands are
 syntax colored while typing and in the transcript; primitive results use colors
 for their value types. Coloring uses inert text spans and a bounded tokenizer.
+The toolbar contains a clear action, document selector, and small connection menu.
+Connection, refresh and disconnect actions live inside that menu. Commands and
+results appear as consecutive console lines, with the plain `>` prompt directly
+after the output in the same scroll area. Result metadata is available through
+the ellipsis on hover or keyboard focus; expanded details expose type, status,
+session and document IDs, and preview truncation. Truncation, actionable errors
+and output eviction stay visible. There is no Run button or inline help strip;
+Enter runs, and the prompt's accessible description explains multiline input.
 Toggle the dock with Console or Command/Ctrl+J while keeping the current workspace visible.
 Drag its top divider or use the focused divider's arrow keys to resize; Home resets
 the saved height. Enter runs, Shift+Enter adds a line, and Command/Ctrl+Enter also
 submits multiline input. Up/Down recalls commands from the bounded visible output.
-Closing the dock preserves the session; Stop ends it. The Sources toolbar's Logs
+Closing the dock preserves the session; Disconnect in the connection menu ends it. The Sources toolbar's Logs
 drawer shows captured debugger messages. Commands can mutate pages and read
 sensitive values. Results stay in bounded panel memory. See
 [Native Console v1](../../protocol/native-console-v1.md) for operation,

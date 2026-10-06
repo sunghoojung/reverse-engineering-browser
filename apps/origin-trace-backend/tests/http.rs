@@ -899,6 +899,424 @@ fn vm_reports_malformed_input_and_preserves_valid_evidence() {
     assert!(Path::new(&root.path().join("analysis/vm-analysis-v1.json")).is_file());
 }
 
+fn vm_artifact(root: &Path, source: &[u8], frame: &str) -> Value {
+    let hash = hex::encode(Sha256::digest(source));
+    std::fs::create_dir_all(root.join("blobs")).unwrap();
+    std::fs::write(root.join(format!("blobs/{hash}.bin")), source).unwrap();
+    let artifact = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"2","frame_id":frame,"parent_artifact_id":"0","creator_event_id":"0","kind":"javascript","url":"https://synthetic.test/source.js","mime_type":"text/javascript","byte_size":source.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+    std::fs::write(
+        root.join("manifest.jsonl"),
+        jsonl(std::slice::from_ref(&artifact)),
+    )
+    .unwrap();
+    artifact
+}
+fn vm_event(category: &str, sequence: u64, process: u32, artifact: &str) -> Value {
+    let mut event = metadata_event(sequence);
+    event["navigation_id"] = json!("2");
+    event["frame_id"] = json!("3");
+    event["artifact_id"] = json!(artifact);
+    event["process_id"] = json!(process);
+    event["category"] = json!(category);
+    event["type"] = json!(if category == "network" {
+        "request_started"
+    } else {
+        "api_call"
+    });
+    event
+}
+fn assert_vm_document(document: &Value) {
+    let schema: Value =
+        serde_json::from_str(include_str!("../../../protocol/vm-analysis-v1.schema.json")).unwrap();
+    jsonschema::validator_for(&schema)
+        .unwrap()
+        .validate(document)
+        .unwrap();
+    let spec = specification();
+    assert_schema(
+        &spec,
+        &spec["components"]["schemas"]["VmAnalysis"],
+        document,
+        "VM analysis",
+    );
+    let mut original = document.clone();
+    let digest = original
+        .as_object_mut()
+        .unwrap()
+        .remove("document_digest")
+        .unwrap();
+    assert_eq!(
+        digest,
+        hex::encode(Sha256::digest(
+            origin_trace_backend::vm::canonical(&original).unwrap()
+        ))
+    );
+}
+fn analyze_vm(root: &Path, events: &[Value]) -> Value {
+    let path = root.join("events.jsonl");
+    std::fs::write(&path, jsonl(events)).unwrap();
+    let document = origin_trace_backend::vm::store(root, &path).unwrap();
+    assert_vm_document(&document);
+    document
+}
+#[test]
+fn vm_runtime_audio_is_bounded_relevance_not_vm_structure_or_value_capture() {
+    for source in [
+        "function run(code) { let pc=0, stack=[]; while (pc<code.length) { switch(code[pc++]) { case 1: stack.push(1); break; default: return; } } }",
+        "const answer = 42;",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let artifact = vm_artifact(root.path(), source.as_bytes(), "3");
+        let manifest = std::fs::read(root.path().join("manifest.jsonl")).unwrap();
+        let baseline = analyze_vm(root.path(), &[]);
+        let mut events = vec![
+            vm_event("web_audio", 1, 10, "0"),
+            vm_event("web_audio", 2, 10, "1"),
+            vm_event("web_audio", 3, 10, "1"),
+        ];
+        // Unused captured fields must not become analysis content.
+        events[1]["private_sample"] = json!("must-not-copy-audio-samples-or-parameters");
+        for (sequence, key, value) in [
+            (4, "type", "request_started"),
+            (5, "frame_id", "9"),
+            (6, "session_id", "9"),
+            (7, "navigation_id", "9"),
+            (8, "category", "unknown"),
+        ] {
+            let mut event = vm_event("web_audio", sequence, 10, "1");
+            event[key] = json!(value);
+            events.push(event);
+        }
+        let document = analyze_vm(root.path(), &events);
+        let result = &document["results"][0];
+        for key in [
+            "vm_score",
+            "tier",
+            "evidence_families",
+            "observations",
+            "finding_id",
+        ] {
+            assert_eq!(result[key], baseline["results"][0][key], "{key}");
+        }
+        assert_eq!(result["anti_bot_score"], 25);
+        let observations = result["anti_bot_observations"].as_array().unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0]["rule_id"], "antibot.runtime-web-audio");
+        assert_eq!(observations[0]["state"], "observed");
+        assert_eq!(
+            observations[0]["event"],
+            json!({"session_id":"1","process_id":10,"sequence_number":"2"})
+        );
+        assert!(observations[0].get("coordinate").is_none());
+        let nodes = result["graph"]["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 5);
+        assert!(nodes.iter().any(|n| n["id"] == "event:1:10:1"));
+        assert!(
+            result["graph"]["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["from"] == "event:1:10:1" && e["state"] == "correlated")
+        );
+        assert!(!document.to_string().contains("must-not-copy"));
+        assert_eq!(document["producer"]["version"], "1.1.0");
+        assert_eq!(
+            document["profile"]["runtime_rule_weights"]["antibot.runtime-web-audio"],
+            25
+        );
+        assert_eq!(analyze_vm(root.path(), &events), document);
+        assert_eq!(
+            std::fs::read(root.path().join("manifest.jsonl")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            std::fs::read(root.path().join(artifact["content_path"].as_str().unwrap())).unwrap(),
+            source.as_bytes()
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("events.jsonl")).unwrap(),
+            jsonl(&events)
+        );
+    }
+}
+#[test]
+fn vm_runtime_identity_disambiguates_processes_and_rejects_conflicts() {
+    let root = tempfile::tempdir().unwrap();
+    vm_artifact(root.path(), b"const answer=42;", "3");
+    let canvas = vm_event("canvas", 1, 10, "1");
+    let mut events = vec![canvas.clone(), vm_event("navigator", 1, 11, "1"), canvas];
+    for process in [10, 11] {
+        let mut event = vm_event("network", 2, process, "0");
+        event["request_id"] = json!("55");
+        events.push(event);
+    }
+    let audio = vm_event("web_audio", 3, 10, "1");
+    let mut conflict = audio.clone();
+    conflict["category"] = json!("canvas");
+    events.extend([audio.clone(), conflict, audio]);
+    for (key, value) in [
+        ("process_id", json!(0)),
+        ("process_id", json!(4294967296u64)),
+        ("process_id", Value::Null),
+        ("sequence_number", json!("0")),
+        ("session_id", json!("0")),
+        ("protocol_version", json!(99)),
+        ("protocol_version", Value::Null),
+    ] {
+        let mut event = vm_event("web_audio", 4, 10, "1");
+        event[key] = value;
+        events.push(event);
+    }
+    let document = analyze_vm(root.path(), &events);
+    assert_eq!(document["input_coverage"]["complete"], false);
+    assert_eq!(
+        document["input_coverage"]["omissions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        8
+    );
+    assert_eq!(
+        document["input_coverage"]["omissions"][0]["reason"],
+        "conflicting-event-identity"
+    );
+    let result = &document["results"][0];
+    assert_eq!(result["anti_bot_score"], 50);
+    assert_eq!(result["related_request_ids"], json!(["55"]));
+    let nodes = result["graph"]["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 6);
+    let ids = nodes
+        .iter()
+        .map(|n| n["id"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(ids.len(), nodes.len());
+    for id in [
+        "event:1:10:1",
+        "event:1:11:1",
+        "request:1:10:2",
+        "request:1:11:2",
+    ] {
+        assert!(ids.contains(id), "{id}");
+    }
+    assert!(!ids.contains("event:1:10:3"));
+}
+#[test]
+fn vm_native_gap_markers_preserve_preceding_signal_identity() {
+    let root = tempfile::tempdir().unwrap();
+    vm_artifact(root.path(), b"const answer=42;", "3");
+    let mut audio = vm_event("web_audio", 1, 10, "1");
+    audio["protocol_version"] = json!(2);
+    let mut gap = audio.clone();
+    gap["type"] = json!("gap");
+    gap["frame_id"] = json!("0");
+    gap["navigation_id"] = json!("0");
+    gap["artifact_id"] = json!("0");
+    gap["payload"] = json!(hex::encode("2"));
+    gap["payload_size"] = json!(1);
+    for events in [vec![audio.clone(), gap.clone()], vec![gap, audio]] {
+        let document = analyze_vm(root.path(), &events);
+        assert_eq!(
+            document["input_coverage"]["omissions"],
+            json!([{"reason":"capture-gap","observed_records":1}])
+        );
+        let result = &document["results"][0];
+        assert_eq!(result["anti_bot_score"], 25);
+        assert_eq!(result["status"], "partial");
+        assert_eq!(result["graph"]["nodes"].as_array().unwrap().len(), 3);
+        assert_eq!(result["anti_bot_observations"][0]["event_sequence"], "1");
+    }
+}
+#[test]
+fn vm_runtime_unknown_frames_do_not_invent_shared_context() {
+    let root = tempfile::tempdir().unwrap();
+    let mut artifact = vm_artifact(root.path(), b"const answer=42;", "0");
+    let mut event = vm_event("web_audio", 1, 10, "0");
+    event["frame_id"] = json!("0");
+    let document = analyze_vm(root.path(), &[event.clone()]);
+    let result = &document["results"][0];
+    assert_eq!(result["anti_bot_score"], 0);
+    assert_eq!(result["status"], "partial");
+    assert_eq!(
+        result["coverage"]["omissions"],
+        json!([{"reason":"runtime-frame-attribution-unavailable","omitted_records":1}])
+    );
+    event["artifact_id"] = json!("1");
+    let document = analyze_vm(root.path(), &[event.clone()]);
+    assert_eq!(
+        document["results"][0]["anti_bot_observations"][0]["state"],
+        "observed"
+    );
+    assert_eq!(document["results"][0]["anti_bot_score"], 25);
+    artifact["artifact_id"] = json!("0");
+    std::fs::write(root.path().join("manifest.jsonl"), jsonl(&[artifact])).unwrap();
+    event["artifact_id"] = json!("0");
+    assert_eq!(
+        analyze_vm(root.path(), &[event])["results"][0]["anti_bot_score"],
+        0
+    );
+}
+#[test]
+fn vm_runtime_graph_limit_is_explicit_and_preserves_representative() {
+    let root = tempfile::tempdir().unwrap();
+    vm_artifact(root.path(), b"const answer=42;", "3");
+    let mut events = (1..=1030)
+        .map(|sequence| vm_event("web_audio", sequence, 10, "0"))
+        .collect::<Vec<_>>();
+    // Stronger attribution remains visible even when it arrived after the cap.
+    events[1029]["artifact_id"] = json!("1");
+    events.push(vm_event("network", 1031, 10, "0"));
+    let document = analyze_vm(root.path(), &events);
+    let result = &document["results"][0];
+    assert_eq!(result["anti_bot_score"], 25);
+    assert_eq!(result["status"], "partial");
+    assert_eq!(result["graph"]["edges"].as_array().unwrap().len(), 1024);
+    assert_eq!(result["graph"]["nodes"].as_array().unwrap().len(), 1025);
+    assert_eq!(result["anti_bot_observations"][0]["event_sequence"], "1030");
+    assert!(
+        result["graph"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == "event:1:10:1030")
+    );
+    assert_eq!(
+        result["coverage"]["omissions"],
+        json!([{"reason":"runtime-graph-edge-limit","omitted_records":8}])
+    );
+    assert_eq!(result["related_request_ids"], json!([]));
+}
+#[tokio::test]
+async fn vm_http_refreshes_event_only_changes_and_agrees_with_cli() {
+    let server = Server::start().await;
+    let root = server.root.path().join("artifacts");
+    vm_artifact(&root, b"const answer=42;", "3");
+    server.file("events.jsonl", b"");
+    let response = server.get("/api/analysis/vm").await;
+    assert_eq!(response.status(), 200);
+    let initial_etag = response.headers()["etag"].clone();
+    let baseline: Value = response.json().await.unwrap();
+    assert_vm_document(&baseline);
+    let mut events = vec![vm_event("web_audio", 1, 10, "1")];
+    server.file("events.jsonl", &jsonl(&events));
+    let response = server
+        .client
+        .get(format!("{}/api/analysis/vm", server.url))
+        .header("If-None-Match", &initial_etag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let etag = response.headers()["etag"].clone();
+    assert_ne!(etag, initial_etag);
+    let document: Value = response.json().await.unwrap();
+    assert_vm_document(&document);
+    assert_eq!(document["results"][0]["anti_bot_score"], 25);
+    assert_ne!(
+        document["inputs"]["event_store_digest"],
+        baseline["inputs"]["event_store_digest"]
+    );
+    let response = server
+        .client
+        .get(format!("{}/api/analysis/vm", server.url))
+        .header("If-None-Match", &etag)
+        .send()
+        .await
+        .unwrap();
+    assert_contract_response(response, "get", "/api/analysis/vm", 304).await;
+    // Restored/copied evidence can preserve size and mtime. Atomic replacement
+    // must still invalidate the cached attribution through file identity.
+    let event_path = server.root.path().join("events.jsonl");
+    let metadata = event_path.metadata().unwrap();
+    let modified = metadata.modified().unwrap();
+    events[0]["artifact_id"] = json!("0");
+    let replacement = server.root.path().join("replacement.jsonl");
+    std::fs::write(&replacement, jsonl(&events)).unwrap();
+    std::fs::File::open(&replacement)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    assert_eq!(replacement.metadata().unwrap().len(), metadata.len());
+    assert_eq!(
+        replacement.metadata().unwrap().modified().unwrap(),
+        modified
+    );
+    std::fs::rename(&replacement, &event_path).unwrap();
+    let response = server
+        .client
+        .get(format!("{}/api/analysis/vm", server.url))
+        .header("If-None-Match", &etag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let document: Value = response.json().await.unwrap();
+    assert_vm_document(&document);
+    assert_eq!(
+        document["results"][0]["anti_bot_observations"][0]["state"],
+        "correlated"
+    );
+    let output = server.root.path().join("cli.json");
+    let status = Command::new(env!("CARGO_BIN_EXE_origin-trace-vm"))
+        .arg("--artifacts")
+        .arg(&root)
+        .arg("--events")
+        .arg(server.root.path().join("events.jsonl"))
+        .arg("--output")
+        .arg(&output)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(output).unwrap()).unwrap(),
+        document
+    );
+    // In-place changes with restored mtime are distinguished by change time.
+    events[0]["artifact_id"] = json!("1");
+    server.file("events.jsonl", &jsonl(&events));
+    std::fs::File::open(&event_path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    let rewritten: Value = server.get("/api/analysis/vm").await.json().await.unwrap();
+    assert_eq!(
+        rewritten["results"][0]["anti_bot_observations"][0]["state"],
+        "observed"
+    );
+    assert_vm_document(&rewritten);
+    #[cfg(unix)]
+    {
+        // A cached regular file cannot be exchanged for a symlink, even when
+        // its target presents the same bytes, size, and modification time.
+        let linked = server.root.path().join("linked-evidence.jsonl");
+        std::fs::write(&linked, jsonl(&events)).unwrap();
+        std::fs::File::open(&linked)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        std::fs::remove_file(&event_path).unwrap();
+        std::os::unix::fs::symlink(&linked, &event_path).unwrap();
+        assert_contract_response(
+            server.get("/api/analysis/vm").await,
+            "get",
+            "/api/analysis/vm",
+            500,
+        )
+        .await;
+        std::fs::remove_file(&event_path).unwrap();
+    }
+    server.file("events.jsonl", b"not-json\n");
+    let malformed: Value = server.get("/api/analysis/vm").await.json().await.unwrap();
+    assert_eq!(malformed["input_coverage"]["complete"], false);
+    assert_eq!(malformed["results"][0]["anti_bot_score"], 0);
+    assert_vm_document(&malformed);
+    server.file("events.jsonl", b"");
+    let cleared: Value = server.get("/api/analysis/vm").await.json().await.unwrap();
+    assert_eq!(cleared, baseline);
+    std::fs::remove_file(server.root.path().join("events.jsonl")).unwrap();
+    let missing: Value = server.get("/api/analysis/vm").await.json().await.unwrap();
+    assert_eq!(missing, baseline);
+}
+
 #[tokio::test]
 async fn wasm_inspection_preserves_offsets_identity_limits_and_original_bytes() {
     let server = Server::start().await;

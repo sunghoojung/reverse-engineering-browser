@@ -58,6 +58,7 @@
   },
   "$defs": {
     "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "eventReference": {"type": "object", "additionalProperties": false, "required": ["session_id", "process_id", "sequence_number"], "properties": {"session_id": {"allOf": [{"$ref": "#/$defs/uint64"}, {"not": {"const": "0"}}]}, "process_id": {"type": "integer", "minimum": 1, "maximum": 4294967295}, "sequence_number": {"allOf": [{"$ref": "#/$defs/uint64"}, {"not": {"const": "0"}}]}}},
     "findingId": {"type": "string", "pattern": "^[0-9a-f]{24}$"},
     "uint64": {"type": "string", "minLength": 1, "maxLength": 20, "pattern": "^(?:0|[1-9][0-9]*)$"},
     "profile": {
@@ -66,6 +67,8 @@
       "required": ["profile_id", "candidate_threshold", "likely_vm_threshold", "likely_vm_required_families", "rule_weights", "limits"],
       "properties": {
         "profile_id": {"const": "anti-bot-vm-detection-v1"},
+        "runtime_evidence_version": {"const": 2, "description": "Identity-aware retained runtime relevance; independent of structural VM scoring."},
+        "runtime_rule_weights": {"type": "object", "additionalProperties": false, "required": ["antibot.runtime-canvas-webgl", "antibot.runtime-navigator-device", "antibot.runtime-web-audio"], "properties": {"antibot.runtime-canvas-webgl": {"type": "integer", "minimum": 0, "maximum": 100}, "antibot.runtime-navigator-device": {"type": "integer", "minimum": 0, "maximum": 100}, "antibot.runtime-web-audio": {"type": "integer", "minimum": 0, "maximum": 100}}},
         "candidate_threshold": {"type": "integer", "minimum": 0},
         "likely_vm_threshold": {"type": "integer", "minimum": 0},
         "likely_vm_required_families": {"type": "integer", "minimum": 1},
@@ -126,7 +129,8 @@
     "observation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["rule_id", "weight", "coordinate", "detail"],
+      "required": ["rule_id", "weight", "detail"],
+      "anyOf": [{"required": ["coordinate"]}, {"required": ["event"]}],
       "properties": {
         "rule_id": {"type": "string", "minLength": 1},
         "family": {"type": "string", "minLength": 1},
@@ -136,6 +140,7 @@
         "match_count": {"type": "integer", "minimum": 1},
         "matches_truncated": {"type": "boolean"},
         "function_region": {"$ref": "#/$defs/coordinate"},
+        "event": {"$ref": "#/$defs/eventReference"},
         "event_sequence": {"$ref": "#/$defs/uint64"},
         "state": {"enum": ["observed", "correlated"]}
       }
@@ -149,7 +154,8 @@
         "line": {"type": "integer", "minimum": 0},
         "observed_bytes": {"type": "integer", "minimum": 0},
         "total_bytes": {"type": "integer", "minimum": 0},
-        "observed_records": {"type": "integer", "minimum": 0}
+        "observed_records": {"type": "integer", "minimum": 0},
+        "omitted_records": {"type": "integer", "minimum": 0}
       }
     },
     "coverage": {
@@ -192,6 +198,7 @@
         "id": {"type": "string", "minLength": 1},
         "kind": {"enum": ["artifact", "vm-candidate", "browser-signal", "request"]},
         "label": {"type": "string"},
+        "event": {"$ref": "#/$defs/eventReference"},
         "event_sequence": {"$ref": "#/$defs/uint64"},
         "request_id": {"$ref": "#/$defs/uint64"}
       }

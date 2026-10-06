@@ -3029,6 +3029,36 @@
                     "minimum": 1
                   }
                 }
+              },
+              "runtime_evidence_version": {
+                "const": 2,
+                "description": "Identity-aware retained runtime relevance; independent of structural VM scoring."
+              },
+              "runtime_rule_weights": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "antibot.runtime-canvas-webgl",
+                  "antibot.runtime-navigator-device",
+                  "antibot.runtime-web-audio"
+                ],
+                "properties": {
+                  "antibot.runtime-canvas-webgl": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "antibot.runtime-navigator-device": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "antibot.runtime-web-audio": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  }
+                }
               }
             }
           },
@@ -3068,7 +3098,6 @@
             "required": [
               "rule_id",
               "weight",
-              "coordinate",
               "detail"
             ],
             "properties": {
@@ -3109,8 +3138,23 @@
                   "observed",
                   "correlated"
                 ]
+              },
+              "event": {
+                "$ref": "#/components/schemas/VmAnalysis/$defs/eventReference"
               }
-            }
+            },
+            "anyOf": [
+              {
+                "required": [
+                  "coordinate"
+                ]
+              },
+              {
+                "required": [
+                  "event"
+                ]
+              }
+            ]
           },
           "omission": {
             "type": "object",
@@ -3136,6 +3180,10 @@
                 "minimum": 0
               },
               "observed_records": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "omitted_records": {
                 "type": "integer",
                 "minimum": 0
               }
@@ -3257,6 +3305,9 @@
               },
               "request_id": {
                 "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+              },
+              "event": {
+                "$ref": "#/components/schemas/VmAnalysis/$defs/eventReference"
               }
             }
           },
@@ -3591,6 +3642,46 @@
               },
               "boundary": {
                 "$ref": "#/components/schemas/VmAnalysis/$defs/edge"
+              }
+            }
+          },
+          "eventReference": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "session_id",
+              "process_id",
+              "sequence_number"
+            ],
+            "properties": {
+              "session_id": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+                  },
+                  {
+                    "not": {
+                      "const": "0"
+                    }
+                  }
+                ]
+              },
+              "process_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295
+              },
+              "sequence_number": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+                  },
+                  {
+                    "not": {
+                      "const": "0"
+                    }
+                  }
+                ]
               }
             }
           }

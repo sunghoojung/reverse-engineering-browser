@@ -67,3 +67,23 @@ The probe does not capture audio samples, rendered buffers, analyser output,
 node parameters, return values, credentials, or page content. It is
 observational and does not change the value returned to the page or Brave's
 existing audio farbling behavior.
+
+## Retained VM relevance
+
+The offline VM analyzer and `GET /api/analysis/vm` also consume retained Web Audio
+call metadata. One runtime audio family contributes at most 25 anti-bot relevance
+points per artifact; it cannot change structural VM confidence or establish that
+the site fingerprints users. Static audio keyword matching is not used.
+
+Each observation keeps the original session, process, and sequence identity.
+An explicit nonzero artifact match is labeled observed. Matching known-frame
+metadata without script attribution is labeled correlated. Zero/unknown frames
+cannot connect unrelated artifacts. Current native operation probes do not
+capture script identity or stacks, so ordinary live audio is usually correlated
+and worker attribution can be unavailable. Partial graphs and invalid/conflicting
+event identities remain explicit omissions. Event-only capture changes refresh
+the analysis without waiting for another artifact.
+
+The analyzer copies no audio content or API arguments and never infers an audio
+result, signal value, CPU model, or exact request provenance. See
+[the retained-evidence contract and limits](anti-bot-vm-detection-v1.md#retained-runtime-evidence-implementation).

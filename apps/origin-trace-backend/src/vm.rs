@@ -508,6 +508,64 @@ fn finding(hash: &str, rules: &[String]) -> String {
 fn failure(artifact: &Value, code: &str, message: &str) -> Value {
     json!({"artifact_id":artifact["artifact_id"],"artifact_sha256":artifact["sha256"],"runtime":if artifact["kind"]=="javascript" {"javascript"} else {"webassembly"},"status":"failed","error":{"code":code,"message":message},"coverage":{"complete":false,"omissions":[{"reason":code}]}})
 }
+type EventReference = (String, u32, String);
+fn event_reference(event: &Value) -> Option<EventReference> {
+    if !["session_id", "sequence_number"]
+        .iter()
+        .all(|key| evidence::canonical(&event[key], 64, true))
+    {
+        return None;
+    }
+    let process = event["process_id"]
+        .as_u64()
+        .filter(|id| *id > 0 && *id <= u64::from(u32::MAX))?;
+    Some((
+        event["session_id"].as_str()?.into(),
+        process as u32,
+        event["sequence_number"].as_str()?.into(),
+    ))
+}
+fn event_value(event: &Value) -> Value {
+    json!({"session_id":event["session_id"],"process_id":event["process_id"],"sequence_number":event["sequence_number"]})
+}
+fn event_node(prefix: &str, event: &Value) -> String {
+    format!(
+        "{prefix}:{}:{}:{}",
+        event["session_id"].as_str().unwrap(),
+        event["process_id"].as_u64().unwrap(),
+        event["sequence_number"].as_str().unwrap()
+    )
+}
+fn runtime_rule(event: &Value) -> Option<&'static str> {
+    match (event["category"].as_str()?, event["type"].as_str()?) {
+        ("canvas" | "webgl", "api_call" | "property_read") => Some("antibot.runtime-canvas-webgl"),
+        ("navigator", "api_call" | "property_read") => Some("antibot.runtime-navigator-device"),
+        ("web_audio", "api_call") => Some("antibot.runtime-web-audio"),
+        _ => None,
+    }
+}
+fn runtime_weights() -> Value {
+    json!({"antibot.runtime-canvas-webgl":25,"antibot.runtime-navigator-device":25,"antibot.runtime-web-audio":25})
+}
+fn graph_entry(
+    nodes: &mut Vec<Value>,
+    edges: &mut Vec<Value>,
+    seen: &mut BTreeSet<String>,
+    node: Value,
+    edge: Value,
+) -> bool {
+    let id = node["id"].as_str().unwrap();
+    if seen.contains(id) {
+        return true;
+    }
+    if edges.len() >= CONFIG["MAX_GRAPH_EDGES"].as_u64().unwrap() as usize {
+        return false;
+    }
+    seen.insert(id.into());
+    nodes.push(node);
+    edges.push(edge);
+    true
+}
 fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
     let runtime = if artifact["kind"] == "javascript" {
         "javascript"
@@ -528,7 +586,7 @@ fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
     } else {
         ""
     };
-    let (observations, frontend, omissions) = if runtime == "javascript" {
+    let (observations, frontend, mut omissions) = if runtime == "javascript" {
         match js(source) {
             Ok((obs, omissions)) => (obs, json!({"replacement_character_count":0}), omissions),
             Err(e) => return failure(artifact, "malformed-artifact", &e.message),
@@ -576,46 +634,91 @@ fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
         json!({"from":artifact_node,"to":finding_node,"state":"inferred","reason":"Deterministic static analysis produced this candidate."}),
     ];
     let mut requests = Vec::<String>::new();
-    let mut seen = BTreeSet::new();
+    let mut runtime_events = Vec::new();
+    let mut request_events = Vec::new();
+    let mut representatives = BTreeMap::<&str, (&Value, bool)>::new();
+    let mut unavailable = 0usize;
     for event in events.iter().filter(|e| {
-        ["session_id", "navigation_id", "frame_id"]
-            .iter()
-            .all(|key| e[key] == artifact[key])
+        e["session_id"] == artifact["session_id"] && e["navigation_id"] == artifact["navigation_id"]
     }) {
-        let category = event["category"].as_str().unwrap_or("");
-        let observed = event["artifact_id"] == artifact["artifact_id"];
-        let state = if observed { "observed" } else { "correlated" };
-        let sequence = event["sequence_number"].as_str().unwrap_or("0");
-        let rule = match category {
-            "canvas" | "webgl" => Some(("antibot.runtime-canvas-webgl", 25)),
-            "navigator" => Some(("antibot.runtime-navigator-device", 25)),
-            _ => None,
-        };
-        if let Some((rule, weight)) = rule
-            && seen.insert(rule)
-        {
-            anti.push(json!({"rule_id":rule,"weight":weight,"coordinate":{"byte_offset":0,"byte_size":1},"event_sequence":sequence,"state":state,"detail":if observed {"A captured browser-signal event is attributed to this artifact."} else {"A captured browser-signal event shares this artifact's session and frame."}}));
-        }
-        if edges.len() >= 1024 {
-            continue;
-        }
-        if rule.is_some() {
-            let node = format!("event:{sequence}");
-            nodes.push(json!({"id":node,"kind":"browser-signal","label":format!("{category} {}",event["type"].as_str().unwrap_or("")),"event_sequence":sequence}));
-            edges.push(json!({"from":node,"to":finding_node,"state":state,"reason":if observed {"Captured artifact attribution."} else {"Same session and frame."}}));
-        }
-        if category == "network"
+        let rule = runtime_rule(event);
+        let request = event["category"] == "network"
             && ["request_started", "request_initiated"]
                 .contains(&event["type"].as_str().unwrap_or(""))
-        {
-            let request = event["request_id"].as_str().unwrap_or("0");
-            if request != "0" && !requests.iter().any(|r| r == request) {
-                requests.push(request.into());
-                let node = format!("request:{request}");
-                nodes.push(json!({"id":node,"kind":"request","label":format!("request {request}"),"request_id":request}));
-                edges.push(json!({"from":finding_node,"to":node,"state":"correlated","reason":"Same session and frame. Exact value provenance is not claimed."}));
+            && event["request_id"].as_str().is_some_and(|id| id != "0");
+        if rule.is_none() && !request {
+            continue;
+        }
+        let observed =
+            artifact["artifact_id"] != "0" && event["artifact_id"] == artifact["artifact_id"];
+        // Zero frame IDs mean unavailable attribution (for example a worker),
+        // not a shared frame. Explicit captured artifact attribution can still
+        // identify a signal when both frame IDs are unavailable.
+        if event["frame_id"] != artifact["frame_id"] {
+            continue;
+        }
+        if artifact["frame_id"] == "0" && (!observed || rule.is_none()) {
+            unavailable += 1;
+            continue;
+        }
+        if let Some(rule) = rule {
+            runtime_events.push((event, observed));
+            let representative = representatives.entry(rule).or_insert((event, observed));
+            if observed && !representative.1 {
+                *representative = (event, true);
             }
         }
+        if request {
+            request_events.push(event);
+        }
+    }
+    let weights = runtime_weights();
+    for (rule, (event, observed)) in &representatives {
+        // Runtime evidence has an event coordinate, never an invented source
+        // byte range. It changes relevance only, not structural VM scoring.
+        anti.push(json!({"rule_id":rule,"weight":weights[*rule],"event":event_value(event),"event_sequence":event["sequence_number"],"state":if *observed {"observed"} else {"correlated"},"detail":if *observed {"A captured browser-signal event explicitly names this artifact. API use alone does not establish fingerprinting or anti-bot behavior."} else {"A captured browser-signal event shares this artifact's session, navigation metadata, and nonzero frame. Script attribution and causality are unknown; API use alone does not establish fingerprinting or anti-bot behavior."}}));
+    }
+    let mut graph_ids = BTreeSet::new();
+    let mut graph_omitted = 0usize;
+    // Keep the scoring representatives first, so every retained relevance
+    // explanation has a graph node even when later context exceeds the cap.
+    for (event, observed) in representatives.values().copied().chain(runtime_events) {
+        let node = event_node("event", event);
+        if !graph_entry(
+            &mut nodes,
+            &mut edges,
+            &mut graph_ids,
+            json!({"id":node,"kind":"browser-signal","label":format!("{} {}",event["category"].as_str().unwrap(),event["type"].as_str().unwrap()),"event":event_value(event),"event_sequence":event["sequence_number"]}),
+            json!({"from":node,"to":finding_node,"state":if observed {"observed"} else {"correlated"},"reason":if observed {"Captured nonzero artifact attribution; no value flow is claimed."} else {"Matching session, navigation metadata, and nonzero frame; script attribution and causality remain unknown."}}),
+        ) {
+            graph_omitted += 1;
+        }
+    }
+    for event in request_events {
+        let request = event["request_id"].as_str().unwrap();
+        let node = event_node("request", event);
+        if graph_entry(
+            &mut nodes,
+            &mut edges,
+            &mut graph_ids,
+            json!({"id":node,"kind":"request","label":format!("request {request}"),"request_id":request,"event":event_value(event),"event_sequence":event["sequence_number"]}),
+            json!({"from":finding_node,"to":node,"state":"correlated","reason":"Matching session, navigation metadata, and nonzero frame. Exact value provenance and causal ordering are not claimed."}),
+        ) {
+            if !requests.iter().any(|r| r == request) {
+                requests.push(request.into());
+            }
+        } else {
+            graph_omitted += 1;
+        }
+    }
+    if unavailable > 0 {
+        omissions.push(
+            json!({"reason":"runtime-frame-attribution-unavailable","omitted_records":unavailable}),
+        );
+    }
+    if graph_omitted > 0 {
+        omissions
+            .push(json!({"reason":"runtime-graph-edge-limit","omitted_records":graph_omitted}));
     }
     let mut result = json!({"artifact_id":artifact["artifact_id"],"artifact_sha256":artifact["sha256"],"runtime":runtime,"status":if omissions.is_empty() {"complete"} else {"partial"},"finding_id":id,"tier":tier,"vm_score":score,"vm_threshold":60,"required_family_count":3,"evidence_families":observations.iter().map(|o|o["family"].as_str().unwrap()).collect::<BTreeSet<_>>(),"observations":observations,"anti_bot_score":anti.iter().map(|o|o["weight"].as_u64().unwrap()).sum::<u64>().min(100),"anti_bot_observations":anti,"related_request_ids":requests,"graph":{"nodes":nodes,"edges":edges},"coverage":{"complete":omissions.is_empty(),"observed_bytes":bytes.len(),"total_bytes":bytes.len(),"omissions":omissions,"residual_unknowns":["Static evidence does not confirm guest dispatch at runtime.","Request edges are correlation, not exact value provenance."]},"frontend":frontend});
     if runtime == "javascript" && tier != "none" {
@@ -742,11 +845,16 @@ pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
             artifacts.push(artifact);
         }
     }
-    let mut events = Vec::new();
+    let mut events = Vec::<Option<Value>>::new();
+    let mut event_ids = BTreeMap::<EventReference, Option<usize>>::new();
+    let mut capture_gaps = 0usize;
     for (line, event) in event_records {
-        if !["session_id", "sequence_number", "navigation_id", "frame_id"]
-            .iter()
-            .all(|k| evidence::canonical(&event[k], 64, false))
+        let reference = event_reference(&event);
+        if reference.is_none()
+            || !matches!(event["protocol_version"].as_u64(), Some(2 | 3))
+            || !["navigation_id", "frame_id"]
+                .iter()
+                .all(|k| evidence::canonical(&event[k], 64, false))
             || !["category", "type"].iter().all(|k| event[k].is_string())
             || ["artifact_id", "request_id"].iter().any(|k| {
                 event
@@ -755,10 +863,34 @@ pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
             })
         {
             omissions.push(json!({"reason":"invalid-event-contract","line":line}));
-        } else {
-            events.push(event);
+            continue;
+        }
+        // Transport gap markers intentionally reuse the preceding retained
+        // event's sequence. They are coverage evidence, not conflicting events.
+        if event["type"] == "gap" {
+            capture_gaps += 1;
+            continue;
+        }
+        let reference = reference.unwrap();
+        match event_ids.get_mut(&reference) {
+            Some(Some(index)) if events[*index].as_ref() != Some(&event) => {
+                events[*index] = None;
+                *event_ids.get_mut(&reference).unwrap() = None;
+                omissions.push(json!({"reason":"conflicting-event-identity","line":line}));
+            }
+            Some(_) => (),
+            None => {
+                event_ids.insert(reference, Some(events.len()));
+                events.push(Some(event));
+            }
         }
     }
+    if capture_gaps > 0 {
+        // This counts markers, not dropped events: queue reports and sequence
+        // gaps can overlap and must never be added into a fabricated loss total.
+        omissions.push(json!({"reason":"capture-gap","observed_records":capture_gaps}));
+    }
+    let events = events.into_iter().flatten().collect::<Vec<_>>();
     let mut limits = serde_json::Map::new();
     for (key, value) in CONFIG.as_object().unwrap() {
         if let Some(name) = key.strip_prefix("MAX_")
@@ -767,7 +899,7 @@ pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
             limits.insert(format!("max_{}", name.to_ascii_lowercase()), value.clone());
         }
     }
-    let profile = json!({"profile_id":PROFILE,"candidate_threshold":20,"likely_vm_threshold":60,"likely_vm_required_families":3,"rule_weights":CONFIG["RULE_WEIGHTS"],"limits":limits});
+    let profile = json!({"profile_id":PROFILE,"candidate_threshold":20,"likely_vm_threshold":60,"likely_vm_required_families":3,"rule_weights":CONFIG["RULE_WEIGHTS"],"runtime_evidence_version":2,"runtime_rule_weights":runtime_weights(),"limits":limits});
     let mut results = failures;
     for artifact in &artifacts {
         if !["javascript", "wasm"].contains(&artifact["kind"].as_str().unwrap_or("")) {
@@ -820,7 +952,7 @@ pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
             mixed.push(json!({"finding_id":finding(&format!("{}:{}",js["artifact_sha256"].as_str().unwrap(),wasm["artifact_sha256"].as_str().unwrap()),&rules),"runtime":"mixed","tier":if js["tier"]=="likely-vm" || wasm["tier"]=="likely-vm" {"likely-vm"} else {"candidate"},"artifact_ids":[parent,wasm["artifact_id"]],"vm_score":js["vm_score"].as_u64().unwrap()+wasm["vm_score"].as_u64().unwrap(),"anti_bot_score":js["anti_bot_score"],"evidence_families":js["evidence_families"].as_array().unwrap().iter().chain(wasm["evidence_families"].as_array().unwrap()).map(|v|v.as_str().unwrap()).collect::<BTreeSet<_>>(),"boundary":{"state":"observed","reason":"The WASM artifact manifest names the JavaScript artifact as its creator."}}));
         }
     }
-    let mut document = json!({"contract_version":1,"document_kind":"vm-analysis","producer":{"id":"origin-trace-vm-detector","version":"1.0.0"},"profile_digest":digest(&profile)?,"profile":profile,"inputs":{"artifact_manifest_digest":manifest_digest,"event_store_digest":event_digest},"input_coverage":{"complete":omissions.is_empty(),"omissions":omissions},"summary":{"analyzed_artifacts":results.len(),"candidate_count":results.iter().filter(|r|r["tier"]=="candidate").count(),"likely_vm_count":results.iter().filter(|r|r["tier"]=="likely-vm").count(),"failed_count":results.iter().filter(|r|r["status"]=="failed").count(),"mixed_count":mixed.len()},"results":results,"mixed_findings":mixed});
+    let mut document = json!({"contract_version":1,"document_kind":"vm-analysis","producer":{"id":"origin-trace-vm-detector","version":"1.1.0"},"profile_digest":digest(&profile)?,"profile":profile,"inputs":{"artifact_manifest_digest":manifest_digest,"event_store_digest":event_digest},"input_coverage":{"complete":omissions.is_empty(),"omissions":omissions},"summary":{"analyzed_artifacts":results.len(),"candidate_count":results.iter().filter(|r|r["tier"]=="candidate").count(),"likely_vm_count":results.iter().filter(|r|r["tier"]=="likely-vm").count(),"failed_count":results.iter().filter(|r|r["status"]=="failed").count(),"mixed_count":mixed.len()},"results":results,"mixed_findings":mixed});
     document["document_digest"] = json!(digest(&document)?);
     durable::write_private(
         &root.join("analysis/vm-analysis-v1.json"),

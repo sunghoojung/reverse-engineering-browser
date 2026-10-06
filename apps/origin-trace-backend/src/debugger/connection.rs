@@ -1,5 +1,5 @@
 use crate::{
-    error::{Error, Result},
+    error::{Cause, Code, Error, Reason, Result},
     validation, worker,
 };
 use serde_json::{Value, json};
@@ -49,7 +49,8 @@ impl Connection {
             return Err(Error::new(
                 503,
                 "Native debugger transport is unavailable; run make debugger-transport",
-            ));
+            )
+            .with_code(Code::DependencyUnavailable));
         }
         let mut child = Command::new(path)
             .args(["--url", url])
@@ -60,6 +61,7 @@ impl Connection {
             .spawn()
             .map_err(|e| {
                 Error::conflict(format!("Native debugger transport could not start: {e}"))
+                    .with_code(Code::DependencyUnavailable)
             })?;
         let stdin = child
             .stdin
@@ -166,6 +168,7 @@ impl Connection {
                     failure.message,
                     validation::truncate(&detail, 4096)
                 ))
+                .with_reason(failure.reason)
             };
             let _ = sender
                 .send(Event::Message(
@@ -173,7 +176,7 @@ impl Connection {
                     None,
                 ))
                 .await;
-            fail_pending(&weak, &failure.message).await;
+            fail_pending(&weak, &failure).await;
             if let Some(connection) = weak.upgrade() {
                 let _ = connection.closed.send(true);
                 let mut child = connection.child.lock().await;
@@ -213,7 +216,8 @@ impl Connection {
         }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         if id == u64::MAX {
-            return Err(Error::conflict("Debugger command identifier exhausted"));
+            return Err(Error::conflict("Debugger command identifier exhausted")
+                .with_code(Code::ResourceLimit));
         }
         let mut message = json!({"id":id,"method":method,"params":params});
         if let Some(session) = session {
@@ -221,15 +225,16 @@ impl Connection {
         }
         let body = serde_json::to_vec(&message)?;
         if body.len() > 16 * 1024 * 1024 {
-            return Err(Error::bad("Debugger command is oversized"));
+            return Err(Error::bad("Debugger command is oversized").with_code(Code::ResourceLimit));
         }
         let (sender, receiver) = oneshot::channel();
         {
             let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             if pending.len() >= 256 {
-                return Err(Error::conflict(
-                    "Debugger pending command capacity exceeded",
-                ));
+                return Err(
+                    Error::conflict("Debugger pending command capacity exceeded")
+                        .with_code(Code::ResourceLimit),
+                );
             }
             pending.insert(id, sender);
         }
@@ -253,7 +258,8 @@ impl Connection {
             self.close().await;
             return Err(Error::conflict(
                 "Native debugger transport command pipe failed or timed out",
-            ));
+            )
+            .with_reason(Reason::uncertain(Cause::TransportFailure)));
         }
         let result = tokio::time::timeout(deadline, receiver).await;
         self.pending
@@ -261,15 +267,30 @@ impl Connection {
             .unwrap_or_else(|e| e.into_inner())
             .remove(&id);
         let value = result
-            .map_err(|_| Error::conflict(format!("Debugger command {method} timed out")))?
-            .map_err(|_| Error::conflict("Debugger target disconnected"))??;
+            .map_err(|_| {
+                Error::conflict(format!("Debugger command {method} timed out"))
+                    .with_reason(Reason::uncertain(Cause::Timeout))
+            })?
+            .map_err(|_| {
+                Error::conflict("Debugger target disconnected")
+                    .with_reason(Reason::uncertain(Cause::Disconnected))
+            })??;
         if value["error"].is_object() {
+            let reason = if value["error"]["code"].as_i64().is_some()
+                && value["error"]["message"].is_string()
+                && value.get("result").is_none()
+            {
+                Reason::new(Code::ApplicationFailed)
+            } else {
+                Reason::uncertain(Cause::InvalidReply)
+            };
             return Err(Error::conflict(validation::truncate(
                 value["error"]["message"]
                     .as_str()
                     .unwrap_or("Debugger command failed"),
                 512,
-            )));
+            ))
+            .with_reason(reason));
         }
         let result = value
             .get("result")
@@ -278,6 +299,7 @@ impl Connection {
                 Error::protocol(format!(
                     "Debugger command {method} returned malformed output"
                 ))
+                .with_reason(Reason::uncertain(Cause::InvalidReply))
             })?;
         Ok(result.clone())
     }
@@ -288,12 +310,19 @@ impl Connection {
         let _ = child.wait().await;
     }
 }
-async fn fail_pending(connection: &Weak<Connection>, message: &str) {
+async fn fail_pending(connection: &Weak<Connection>, failure: &Error) {
     if let Some(connection) = connection.upgrade() {
         let pending =
             std::mem::take(&mut *connection.pending.lock().unwrap_or_else(|e| e.into_inner()));
+        let cause = if failure.reason.code == Code::ProtocolError {
+            Cause::InvalidReply
+        } else {
+            Cause::Disconnected
+        };
         for (_, sender) in pending {
-            let _ = sender.send(Err(Error::conflict(message)));
+            let _ = sender.send(Err(
+                Error::conflict(&failure.message).with_reason(Reason::uncertain(cause))
+            ));
         }
     }
 }
@@ -333,4 +362,171 @@ pub fn local_websocket(value: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    // This fixture consumes one full command and acknowledges its receipt.
+    // It never starts a browser or evaluates the submitted synthetic expression.
+    async fn fixture(
+        reply: Option<Value>,
+        disconnect: bool,
+    ) -> (tempfile::TempDir, Arc<Connection>, mpsc::Receiver<Event>) {
+        fn printf(bytes: &[u8]) -> String {
+            let escaped = bytes
+                .iter()
+                .map(|b| format!("\\{b:03o}"))
+                .collect::<String>();
+            format!("printf '{escaped}'\n")
+        }
+        fn framed(bytes: &[u8]) -> String {
+            let mut frame = b"REB\x01".to_vec();
+            frame.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            frame.extend_from_slice(bytes);
+            printf(&frame)
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("transport");
+        let body = serde_json::to_vec(
+            &json!({"id":1,"method":"Runtime.evaluate","params":{"expression":"synthetic_secret"}}),
+        )
+        .unwrap();
+        let mut script = String::from("#!/bin/sh\n");
+        script.push_str(&framed(b""));
+        script.push_str(&format!(
+            "dd bs=1 count={} of=/dev/null 2>/dev/null\nprintf received > '{}'/received\n",
+            body.len() + 8,
+            directory.path().display()
+        ));
+        script.push_str(&framed(br#"{"method":"Fixture.received","params":{}}"#));
+        if let Some(reply) = reply {
+            let body = serde_json::to_vec(&reply).unwrap();
+            script.push_str(&framed(&body));
+        }
+        script.push_str(if disconnect {
+            "exit 0\n"
+        } else {
+            "exec sleep 60\n"
+        });
+        std::fs::write(&executable, script).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (connection, events) = Connection::open(&executable, "ws://127.0.0.1:1")
+            .await
+            .unwrap();
+        (directory, connection, events)
+    }
+    async fn assert_received(directory: &Path, events: &mut mpsc::Receiver<Event>) {
+        // A deadline can expire after writing but before the child gets CPU to
+        // consume the pipe. Receipt is independently acknowledged, not timed.
+        let event = tokio::time::timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("Synthetic transport did not acknowledge command receipt")
+            .expect("Synthetic transport event stream closed before receipt");
+        let Event::Message(Ok(value), _) = event else {
+            panic!("Synthetic transport failed before command receipt");
+        };
+        assert_eq!(value, json!({"method":"Fixture.received","params":{}}));
+        assert!(directory.join("received").exists());
+    }
+    #[tokio::test]
+    async fn sent_commands_with_lost_or_invalid_replies_have_unknown_outcomes() {
+        for (reply, disconnect, status, cause) in [
+            (None, false, 409, "timeout"),
+            (None, true, 409, "disconnected"),
+            (
+                Some(json!({"id":1,"result":"malformed"})),
+                false,
+                422,
+                "invalid_reply",
+            ),
+            (
+                Some(json!({"id":1,"error":{}})),
+                false,
+                409,
+                "invalid_reply",
+            ),
+            (
+                Some(json!({"id":1,"error":{"message":"Synthetic application failure"}})),
+                false,
+                409,
+                "invalid_reply",
+            ),
+            (
+                Some(json!({"id":1,"error":{"code":-32000,"message":"failure"},"result":{}})),
+                false,
+                409,
+                "invalid_reply",
+            ),
+        ] {
+            let (directory, connection, mut events) = fixture(reply, disconnect).await;
+            let deadline = if cause == "timeout" {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_secs(2)
+            };
+            let error = connection
+                .command(
+                    "Runtime.evaluate",
+                    json!({"expression":"synthetic_secret"}),
+                    deadline,
+                )
+                .await
+                .unwrap_err();
+            assert_received(directory.path(), &mut events).await;
+            assert_eq!(error.status, status);
+            assert_eq!(error.reason.code, Code::CommandOutcomeUnknown);
+            let value = serde_json::to_value(error).unwrap();
+            assert_eq!(
+                value["details"],
+                json!({"phase":"command_exchange","cause":cause})
+            );
+            assert!(!value["details"].to_string().contains("synthetic_secret"));
+            connection.close().await;
+        }
+    }
+    #[tokio::test]
+    async fn explicit_reply_and_pre_send_capacity_remain_distinct() {
+        let (directory, connection, mut events) = fixture(
+            Some(json!({"id":1,"error":{"code":-32000,"message":"Synthetic application failure"}})),
+            false,
+        )
+        .await;
+        let error = connection
+            .command(
+                "Runtime.evaluate",
+                json!({"expression":"synthetic_secret"}),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap_err();
+        assert_received(directory.path(), &mut events).await;
+        assert_eq!(error.status, 409);
+        assert_eq!(error.message, "Synthetic application failure");
+        assert_eq!(error.reason.code, Code::ApplicationFailed);
+        connection.close().await;
+
+        let (directory, connection, _events) = fixture(None, false).await;
+        for id in 100..356 {
+            connection
+                .pending
+                .lock()
+                .unwrap()
+                .insert(id, oneshot::channel().0);
+        }
+        let error = connection
+            .command(
+                "Runtime.evaluate",
+                json!({"expression":"synthetic_secret"}),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 409);
+        assert_eq!(error.reason.code, Code::ResourceLimit);
+        assert!(!directory.path().join("received").exists());
+        connection.close().await;
+    }
 }

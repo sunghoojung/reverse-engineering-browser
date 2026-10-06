@@ -4,7 +4,7 @@ use super::{
     requests,
 };
 use crate::{
-    error::{Error, Result},
+    error::{Code, Error, Result},
     validation,
 };
 use base64::Engine;
@@ -62,9 +62,10 @@ impl Debugger {
     }
     pub(super) fn isolated_target(&self, group: &str, navigated: bool) -> Result<String> {
         let s = self.snapshot();
-        let id = s[group]["target_id"]
-            .as_str()
-            .ok_or_else(|| Error::conflict("The disposable experiment page is unavailable"))?;
+        let id = s[group]["target_id"].as_str().ok_or_else(|| {
+            Error::conflict("The disposable experiment page is unavailable")
+                .with_code(Code::TargetUnavailable)
+        })?;
         if self.experiment.context().is_none()
             || s[group]["isolated"] != true
             || s["target"]["id"] != id
@@ -404,7 +405,8 @@ impl Debugger {
     ) -> Result<()> {
         let pages = self.experiment.pages.lock().await.clone();
         if pages.is_empty() {
-            return Err(Error::conflict("No isolated page session is connected"));
+            return Err(Error::conflict("No isolated page session is connected")
+                .with_code(Code::TargetUnavailable));
         }
         for (id, c) in pages {
             let matched = scope_matches(mode, selected, &id);
@@ -453,9 +455,10 @@ impl Debugger {
                 .iter()
                 .any(|t| t["id"] == selected)
         {
-            return Err(Error::conflict(
-                "Action scope requires an owned disposable page",
-            ));
+            return Err(
+                Error::conflict("Action scope requires an owned disposable page")
+                    .with_code(Code::TargetUnavailable),
+            );
         }
         let old = self.snapshot()["action_scope"].clone();
         let rule = self
@@ -537,7 +540,9 @@ impl Debugger {
             .len()
             >= 8
         {
-            return Err(Error::conflict("Disposable page limit reached"));
+            return Err(
+                Error::conflict("Disposable page limit reached").with_code(Code::ResourceLimit)
+            );
         }
         let address = r
             .get("url")
@@ -623,7 +628,10 @@ impl Debugger {
                     .find(|t| t["matched"] == true && t["connected"] == true)
                     .and_then(|t| t["id"].as_str().map(str::to_owned))
             })
-            .ok_or_else(|| Error::conflict("No matched isolated page is connected"))?;
+            .ok_or_else(|| {
+                Error::conflict("No matched isolated page is connected")
+                    .with_code(Code::TargetUnavailable)
+            })?;
         if !scope_matches(&scope["mode"], &scope["target_id"], &id) {
             return Err(Error::conflict(
                 "Request target is outside the configured scope",

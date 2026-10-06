@@ -1,5 +1,5 @@
 use crate::{
-    error::{Error, Result},
+    error::{Code, Error, Result},
     worker,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -37,10 +37,10 @@ impl Deobfuscator {
             ));
         }
         if !worker::executable(&self.path) {
-            return Err(Error::new(
-                503,
-                "The Rust JavaScript analysis worker is unavailable",
-            ));
+            return Err(
+                Error::new(503, "The Rust JavaScript analysis worker is unavailable")
+                    .with_code(Code::DependencyUnavailable),
+            );
         }
         let _guard = self.lock.try_lock().map_err(|_| {
             Error::conflict("Deobfuscation worker is busy; retry when analysis finishes")

@@ -208,6 +208,45 @@ function appSection(start, end) {
   assert(offset >= 0 && boundary > offset, `Missing fixture boundary: ${start}`);
   return appSource.slice(offset, boundary);
 }
+// Additive machine-readable failure reasons must not make the bundled UI
+// reject its existing application result envelope. Exercise the actual validators.
+const applicationResults = runInNewContext(
+  (await readFile(join(root, "apps/research-ui/evidence_models.js"), "utf8")) +
+  appSection("      const analystExactKeys =", "      function isLocalAnalystWorkspace") +
+  appSection("      function isLocalAnalystResult", "      function analystFolder(") +
+  appSection("      function isJwtInspection", "      function decoderBytesToBase64") +
+  ";({isLocalAnalystResult,isJwtInspection,isJwtCreation})", {TextEncoder},
+);
+const analystResult = {protocol_version: 1, run_id: 1, script_id: 1, library_generation: 1,
+  ok: false, outcome: "failed", result_type: "error", result_text: "", result_truncated: false,
+  logs: [], logs_truncated: false, duration_ms: 1, error: "Synthetic failure"};
+for (const [outcome, code] of [["failed", "application_failed"], ["cancelled", "cancelled"], ["timed_out", "timeout"]]) {
+  const legacy = {...analystResult, outcome};
+  const annotated = {...legacy, code, details: {phase: "worker"}};
+  assert(applicationResults.isLocalAnalystResult(legacy, legacy));
+  assert(applicationResults.isLocalAnalystResult(annotated, legacy));
+  for (const patch of [{code: "invented"}, {details: {}}, {details: {phase: "worker", raw: "private"}}, {details: {phase: "command_exchange"}}]) {
+    assert.equal(applicationResults.isLocalAnalystResult({...annotated, ...patch}, legacy), false);
+  }
+}
+const completedAnalyst = {...analystResult, ok: true, outcome: "completed", error: ""};
+assert(applicationResults.isLocalAnalystResult(completedAnalyst, completedAnalyst));
+assert.equal(applicationResults.isLocalAnalystResult({...completedAnalyst, code: "application_failed", details: {phase: "worker"}}, completedAnalyst), false);
+const jwtCommon = {protocol_version: 1, ok: false, error: "Synthetic failure", duration_us: 1};
+for (const [validate, legacy] of [
+  [applicationResults.isJwtInspection, {...jwtCommon, algorithm: "", signature_status: "invalid", header_json: "", payload_json: "", token_bytes: 0, signature_bytes: 0}],
+  [applicationResults.isJwtCreation, {...jwtCommon, token: ""}],
+]) {
+  assert(validate(legacy));
+  const annotated = {...legacy, code: "application_failed", details: {}};
+  assert(validate(annotated));
+  for (const patch of [{code: "invented"}, {details: {raw: "private"}}, {code: undefined}, {details: undefined}, {ok: true}]) {
+    assert.equal(validate({...annotated, ...patch}), false);
+  }
+  assert(validate({...legacy, ok: true, error: ""}));
+}
+console.log("PASS legacy and annotated Analyst/JWT failures, unchanged successes and bounded reason rejection");
+
 const sourceState = {liveScriptContent: new Map(), staleScriptIds: new Set(), openScriptIds: [], openArtifactIds: [],
   debuggerRefreshing: false, debuggerEtag: null, debuggerSession: null, selectedScriptId: null,
   editingBreakpointId: null, selectedRequestId: null, requests: []};
@@ -1261,6 +1300,8 @@ try {
     analystGeneration = 2;
     result = await analyst(analystRequest(2, "while(true){}"));
     assert.equal(result.outcome, "timed_out");
+    assert.equal(result.code, "timeout");
+    assert.deepEqual(result.details, {phase: "worker"});
     const pendingAnalyst = analyst(analystRequest(3, "while(true){}"));
     for (let i = 0; i < 100; i++) {
       const state = await (
@@ -1272,6 +1313,8 @@ try {
     await analyst({ action: "cancel_local_analyst_script", run_id: 3 });
     result = await pendingAnalyst;
     assert.equal(result.outcome, "cancelled");
+    assert.equal(result.code, "cancelled");
+    assert.deepEqual(result.details, {phase: "worker"});
     console.log(`PASS ${name} analyst success/timeout/cancellation`);
     passed++;
     await action("run_repeater_request", { url: fixtureUrl + "/diff", method: "GET", timeout_ms: 1000 });

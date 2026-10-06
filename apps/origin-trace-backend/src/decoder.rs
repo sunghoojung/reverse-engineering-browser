@@ -1,5 +1,5 @@
 use crate::{
-    error::{Error, Result},
+    error::{Code, Error, Reason, Result},
     validation, worker,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -114,10 +114,10 @@ impl Decoder {
             _ => return Err(Error::bad("Decoder action is unsupported")),
         }
         if !worker::executable(&self.path) {
-            return Err(Error::new(
-                503,
-                "The native decoder executable is unavailable",
-            ));
+            return Err(
+                Error::new(503, "The native decoder executable is unavailable")
+                    .with_code(Code::DependencyUnavailable),
+            );
         }
         let _guard = tokio::time::timeout(Duration::from_secs(2), self.lock.lock())
             .await
@@ -179,6 +179,9 @@ impl Decoder {
             )
             .map_err(|e| Error::protocol(e.message))?;
             value["duration_us"] = json!(output.duration_us);
+            if value["ok"] == false {
+                Reason::new(Code::ApplicationFailed).annotate(&mut value);
+            }
             Ok(value)
         }
     }

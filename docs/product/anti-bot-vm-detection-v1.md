@@ -48,8 +48,8 @@ first; excluded graph records produce an explicit `runtime-graph-edge-limit`
 omission and partial coverage. Request roots also keep composite event identity,
 while `related_request_ids` remains a legacy ID-only summary.
 
-Producer `1.1.0` and runtime evidence profile version `2` bind the new relevance
-weights and identity semantics. The HTTP analysis cache tracks changes to both
+Runtime evidence profile version `2`, introduced in producer `1.1.0`, binds the
+relevance weights and identity semantics. The HTTP analysis cache tracks changes to both
 the artifact manifest and event store, including event-only appends, replacement,
 and clearing. On Unix it includes file identity and change time, so same-size
 replacement or rewriting with a restored modification time cannot reuse stale
@@ -214,6 +214,26 @@ Every score contains its contributing rule identifiers, weights, evidence
 references, evidence-family coverage, threshold, and analyzer profile. Exact
 weights are fixture-driven and versioned rather than treated as universal
 truth.
+
+The current JavaScript implementation scores bounded, approximately delimited
+function regions using regular-expression rules over a same-length mask. Block
+and line comments, single- and double-quoted strings, and raw template text do
+not contribute generic VM observations. Masking preserves original UTF-8 byte
+coordinates; artifact bytes and the original-source input to literal bytecode
+extraction are unchanged. The separate static anti-bot relevance heuristics
+continue to inspect the original source.
+
+This mask is not a complete JavaScript lexer or AST analysis: it masks entire
+templates, including executable interpolations, and does not model regular
+expression literals. Structural parsing, syntax/binding validation, and
+multiple candidate-region output remain later work. These limits prevent any
+claim of complete executable-code recognition or semantic VM detection.
+
+Producer `1.1.1` emits `profile.javascript_scoring_version: 2` for the masked
+scoring correction. This field changes the profile and document digests (and
+therefore the HTTP ETag), including when unchanged executable evidence produces
+the same score. The v1 contracts accept earlier documents without the field;
+the `profile_id` remains `anti-bot-vm-detection-v1`.
 
 The generic JavaScript signal families include:
 

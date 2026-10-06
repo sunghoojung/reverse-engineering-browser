@@ -203,7 +203,9 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
             break;
         }
         work += end - start;
-        let mut bytes = source.as_bytes()[start..end].to_vec();
+        // Keep byte coordinates while excluding masked comments and quoted
+        // text. Original source remains available for bytecode extraction.
+        let mut bytes = masked.as_bytes()[start..end].to_vec();
         for (a, b) in children.get(&(start, end)).into_iter().flatten() {
             bytes[a - start..b - start].fill(b' ');
         }
@@ -899,7 +901,7 @@ pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
             limits.insert(format!("max_{}", name.to_ascii_lowercase()), value.clone());
         }
     }
-    let profile = json!({"profile_id":PROFILE,"candidate_threshold":20,"likely_vm_threshold":60,"likely_vm_required_families":3,"rule_weights":CONFIG["RULE_WEIGHTS"],"runtime_evidence_version":2,"runtime_rule_weights":runtime_weights(),"limits":limits});
+    let profile = json!({"profile_id":PROFILE,"javascript_scoring_version":2,"candidate_threshold":20,"likely_vm_threshold":60,"likely_vm_required_families":3,"rule_weights":CONFIG["RULE_WEIGHTS"],"runtime_evidence_version":2,"runtime_rule_weights":runtime_weights(),"limits":limits});
     let mut results = failures;
     for artifact in &artifacts {
         if !["javascript", "wasm"].contains(&artifact["kind"].as_str().unwrap_or("")) {
@@ -952,7 +954,7 @@ pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
             mixed.push(json!({"finding_id":finding(&format!("{}:{}",js["artifact_sha256"].as_str().unwrap(),wasm["artifact_sha256"].as_str().unwrap()),&rules),"runtime":"mixed","tier":if js["tier"]=="likely-vm" || wasm["tier"]=="likely-vm" {"likely-vm"} else {"candidate"},"artifact_ids":[parent,wasm["artifact_id"]],"vm_score":js["vm_score"].as_u64().unwrap()+wasm["vm_score"].as_u64().unwrap(),"anti_bot_score":js["anti_bot_score"],"evidence_families":js["evidence_families"].as_array().unwrap().iter().chain(wasm["evidence_families"].as_array().unwrap()).map(|v|v.as_str().unwrap()).collect::<BTreeSet<_>>(),"boundary":{"state":"observed","reason":"The WASM artifact manifest names the JavaScript artifact as its creator."}}));
         }
     }
-    let mut document = json!({"contract_version":1,"document_kind":"vm-analysis","producer":{"id":"origin-trace-vm-detector","version":"1.1.0"},"profile_digest":digest(&profile)?,"profile":profile,"inputs":{"artifact_manifest_digest":manifest_digest,"event_store_digest":event_digest},"input_coverage":{"complete":omissions.is_empty(),"omissions":omissions},"summary":{"analyzed_artifacts":results.len(),"candidate_count":results.iter().filter(|r|r["tier"]=="candidate").count(),"likely_vm_count":results.iter().filter(|r|r["tier"]=="likely-vm").count(),"failed_count":results.iter().filter(|r|r["status"]=="failed").count(),"mixed_count":mixed.len()},"results":results,"mixed_findings":mixed});
+    let mut document = json!({"contract_version":1,"document_kind":"vm-analysis","producer":{"id":"origin-trace-vm-detector","version":"1.1.1"},"profile_digest":digest(&profile)?,"profile":profile,"inputs":{"artifact_manifest_digest":manifest_digest,"event_store_digest":event_digest},"input_coverage":{"complete":omissions.is_empty(),"omissions":omissions},"summary":{"analyzed_artifacts":results.len(),"candidate_count":results.iter().filter(|r|r["tier"]=="candidate").count(),"likely_vm_count":results.iter().filter(|r|r["tier"]=="likely-vm").count(),"failed_count":results.iter().filter(|r|r["status"]=="failed").count(),"mixed_count":mixed.len()},"results":results,"mixed_findings":mixed});
     document["document_digest"] = json!(digest(&document)?);
     durable::write_private(
         &root.join("analysis/vm-analysis-v1.json"),

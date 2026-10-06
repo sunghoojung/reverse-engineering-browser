@@ -65,15 +65,12 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Build all native tools and Rust worker
+      - name: Build and test native tools and Rust components
         run: make check
 
       - name: Run end-to-end event path
         if: matrix.os == 'ubuntu-latest'
         run: make e2e
-
-      - name: Validate Origin Trace backend
-        run: cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 
       - name: Run sanitizers
         if: matrix.os == 'ubuntu-latest'

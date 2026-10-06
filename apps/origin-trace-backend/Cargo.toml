@@ -17,7 +17,7 @@ hex = "0.4"
 tempfile = "3"
 libc = "0.2"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 jsonschema = { version = "0.33", default-features = false }
 unicode-casefold = "0.2"
 wasmparser = "0.240"

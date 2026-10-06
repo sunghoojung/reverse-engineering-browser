@@ -1335,6 +1335,17 @@
                 }
               }
             }
+          },
+          "408": {
+            "description": "Artifact manifest lookup exceeded its five-second deadline, or full artifact verification exceeded its thirty-second deadline.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "x-source": "apps/origin-trace-backend/src/evidence.rs"
           }
         },
         "x-source": "apps/origin-trace-backend/src/app.rs",

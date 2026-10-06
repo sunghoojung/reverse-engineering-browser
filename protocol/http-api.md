@@ -83,6 +83,8 @@ Artifact content uses `offset` and `limit` query arguments and always returns
 `X-Artifact-Total-Bytes`; `X-Artifact-Truncated` is the string `true` when bytes
 remain and `false` at the end. An offset equal to the total returns an empty
 chunk; a negative, malformed, or beyond-end offset returns 400.
+Artifact lookup or full-content verification can return a JSON 408 when its
+five-second manifest or thirty-second verification deadline expires.
 This is not HTTP Range/206 pagination. Events and artifacts expose a bounded
 recent tail, not a cursor or stable exhaustive export.
 

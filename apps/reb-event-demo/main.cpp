@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <string>
 #include <string_view>
 #include <thread>
 
@@ -63,6 +64,86 @@ bool RunEventDemo() {
     return false;
   }
 
+  return true;
+}
+
+bool CheckEventJson() {
+  reb::EventRecord event = reb::MakeEvent(reb::EventCategory::kRuntime, reb::EventType::kApiCall,
+                                          std::numeric_limits<std::uint64_t>::max(),
+                                          std::numeric_limits<std::uint64_t>::max(),
+                                          std::numeric_limits<std::uint64_t>::max());
+  event.header.process_id = std::numeric_limits<std::uint32_t>::max();
+  event.header.thread_id = std::numeric_limits<std::uint32_t>::max();
+  event.header.tab_id = std::numeric_limits<std::uint32_t>::max();
+  event.header.navigation_id = std::numeric_limits<std::uint64_t>::max();
+  event.header.frame_id = std::numeric_limits<std::uint64_t>::max();
+  event.header.artifact_id = std::numeric_limits<std::uint64_t>::max();
+  event.header.parent_event_id = std::numeric_limits<std::uint64_t>::max();
+  event.header.request_id = std::numeric_limits<std::uint64_t>::max();
+  event.header.browser_context_id_high = std::numeric_limits<std::uint64_t>::max();
+  event.header.browser_context_id_low = std::numeric_limits<std::uint64_t>::max();
+  event.header.encoded_data_length = std::numeric_limits<std::int64_t>::min();
+  event.header.decoded_body_length = std::numeric_limits<std::int64_t>::max();
+  event.header.status_code = std::numeric_limits<std::int32_t>::max();
+  event.header.error_code = std::numeric_limits<std::int32_t>::min();
+  event.header.resource_type = std::numeric_limits<std::uint16_t>::max();
+  event.header.flags = 7;
+  event.header.initiator_request_id = std::numeric_limits<std::uint32_t>::max();
+  event.header.initiator_process_id = std::numeric_limits<std::uint32_t>::max();
+  constexpr std::string_view kPrefix =
+      "{\"protocol_version\":3,\"session_id\":\"18446744073709551615\","
+      "\"sequence_number\":\"18446744073709551615\",\"monotonic_time_ns\":\"18446744073709551615\","
+      "\"process_id\":4294967295,\"thread_id\":4294967295,\"tab_id\":4294967295,"
+      "\"navigation_id\":\"18446744073709551615\",\"frame_id\":\"18446744073709551615\","
+      "\"artifact_id\":\"18446744073709551615\",\"parent_event_id\":\"18446744073709551615\","
+      "\"request_id\":\"18446744073709551615\",\"browser_context_id_high\":"
+      "\"18446744073709551615\","
+      "\"browser_context_id_low\":\"18446744073709551615\","
+      "\"encoded_data_length\":\"-9223372036854775808\",\"decoded_body_length\":"
+      "\"9223372036854775807\","
+      "\"status_code\":2147483647,\"error_code\":-2147483648,\"resource_type\":65535,\"flags\":7,"
+      "\"initiator_request_id\":4294967295,\"initiator_process_id\":4294967295,"
+      "\"payload_truncated\":true,\"category\":\"runtime\",\"type\":\"api_call\",\"payload_size\":";
+  constexpr std::string_view kHex = "0123456789abcdef";
+  std::size_t checked = 0;
+  for (unsigned offset = 0; offset < 256; ++offset) {
+    for (std::size_t index = 0; index < event.inline_payload.size(); ++index) {
+      event.inline_payload[index] = static_cast<std::byte>((offset + index) % 256);
+    }
+    std::string expected_payload;
+    for (std::size_t size = 0; size <= event.inline_payload.size(); ++size) {
+      event.header.payload_size = static_cast<std::uint32_t>(size);
+      const auto matches_json = [&] {
+        const std::string expected =
+            std::string(kPrefix) + std::to_string(event.header.payload_size) +
+            ",\"payload_encoding\":\"hex\",\"payload\":\"" + expected_payload + "\"}";
+        return reb::EventToJson(event) == expected;
+      };
+      if (!reb::IsValidEvent(event) || !matches_json()) {
+        return false;
+      }
+      ++checked;
+      if (size == event.inline_payload.size()) {
+        // Invalid lengths remain rejected, and direct callers still encode only
+        // the bounded inline bytes without overflowing the output size.
+        for (const std::uint32_t invalid_size :
+             {static_cast<std::uint32_t>(reb::kInlinePayloadSize + 1),
+              std::numeric_limits<std::uint32_t>::max()}) {
+          event.header.payload_size = invalid_size;
+          if (reb::IsValidEvent(event) || !matches_json()) {
+            return false;
+          }
+          ++checked;
+        }
+        break;
+      }
+      const unsigned value = std::to_integer<unsigned>(event.inline_payload[size]);
+      expected_payload.push_back(kHex[value / 16]);
+      expected_payload.push_back(kHex[value % 16]);
+    }
+  }
+  std::cout << "Event JSON: checked=" << checked
+            << " all_payload_sizes=passed all_byte_values=passed oversized=passed\n";
   return true;
 }
 
@@ -253,8 +334,9 @@ int main(const int argc, char* argv[]) {
     std::cerr << "Usage: " << argv[0] << " [--queue-iterations COUNT]\n";
     return 2;
   }
-  if (!RunEventDemo() || !CheckNativeQueueLimits() || !CheckNativeQueueProducers() ||
-      !MeasureNativeQueueReuse(iterations) || !CheckNativeQueueNotifications(iterations)) {
+  if (!RunEventDemo() || !CheckEventJson() || !CheckNativeQueueLimits() ||
+      !CheckNativeQueueProducers() || !MeasureNativeQueueReuse(iterations) ||
+      !CheckNativeQueueNotifications(iterations)) {
     std::cerr << "Native event queue validation failed\n";
     return 1;
   }

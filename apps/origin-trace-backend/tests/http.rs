@@ -263,6 +263,17 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
             action,
         );
     }
+    // Source-backed fixtures for the disk-read deadlines in evidence.rs. The
+    // HTTP suite does not deliberately stall artifact I/O for thirty seconds.
+    let deadline_schema = &spec["paths"]["/api/artifacts/{artifact_id}/content"]["get"]["responses"]
+        ["408"]["content"]["application/json"]["schema"];
+    assert_eq!(deadline_schema["$ref"], "#/components/schemas/Error");
+    for message in [
+        "Artifact manifest read exceeded its deadline",
+        "Artifact verification exceeded its deadline",
+    ] {
+        assert_schema(&spec, deadline_schema, &json!({"error":message}), message);
+    }
 }
 #[tokio::test]
 async fn openapi_responses_match_live_local_http_and_conditional_reads() {
@@ -491,6 +502,173 @@ async fn openapi_request_body_deadline_is_a_documented_json_error() {
             assert_schema(&spec, schema, &value, route);
         }
     }
+}
+fn metadata_event(sequence: u64) -> Value {
+    json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),"monotonic_time_ns":(sequence*1000).to_string(),"navigation_id":"1","frame_id":"1","artifact_id":"0","request_id":sequence.to_string(),"process_id":100,"thread_id":101,"tab_id":1,"category":"network","type":"request_started","payload_encoding":"hex","payload":hex::encode("GET fixture.local"),"payload_size":17,"parent_event_id":"0","browser_context_id_high":"1","browser_context_id_low":"2","initiator_request_id":0,"initiator_process_id":0,"status_code":0,"error_code":0,"resource_type":13,"flags":0,"payload_truncated":false,"encoded_data_length":"0","decoded_body_length":"0"})
+}
+fn jsonl(records: &[Value]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for record in records {
+        serde_json::to_writer(&mut bytes, record).unwrap();
+        bytes.push(b'\n');
+    }
+    bytes
+}
+async fn assert_poll_response(server: &Server, path: &str, expected: Value) {
+    let response = server.get(path).await;
+    assert_eq!(response.status(), 200);
+    let etag = response.headers()["etag"].clone();
+    assert_eq!(
+        response.bytes().await.unwrap().as_ref(),
+        serde_json::to_vec(&expected).unwrap()
+    );
+    let unchanged = server
+        .client
+        .get(format!("{}{path}", server.url))
+        .header("If-None-Match", etag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unchanged.status(), 304);
+    assert!(unchanged.bytes().await.unwrap().is_empty());
+}
+fn event_response(events: &[Value]) -> Value {
+    json!({"count":events.len(),"events":events,"broker_connected":true,"capture_mode":"idle","capture_stopped":false,"capture_controls_available":false})
+}
+#[tokio::test]
+async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
+    let server = Server::start().await;
+    assert_poll_response(&server, "/api/events", event_response(&[])).await;
+    let mut events: Vec<_> = (1..=5001).map(metadata_event).collect();
+    server.file("events.jsonl", &jsonl(&events));
+    assert_poll_response(
+        &server,
+        "/api/events?limit=2",
+        event_response(&events[4999..]),
+    )
+    .await;
+    assert_poll_response(
+        &server,
+        "/api/events?limit=9999",
+        event_response(&events[1..]),
+    )
+    .await;
+    let response = server.get("/api/events?limit=2").await;
+    let previous_etag = response.headers()["etag"].clone();
+    drop(response);
+    // The next poll sees appended evidence, including a complete final record
+    // without a newline, rather than retaining an earlier response tree.
+    events.push(metadata_event(5002));
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(server.root.path().join("events.jsonl"))
+            .unwrap();
+        file.write_all(&serde_json::to_vec(events.last().unwrap()).unwrap())
+            .unwrap();
+    }
+    let response = server
+        .client
+        .get(format!("{}/api/events?limit=2", server.url))
+        .header("If-None-Match", previous_etag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.bytes().await.unwrap().as_ref(),
+        serde_json::to_vec(&event_response(&events[5000..])).unwrap()
+    );
+    server.file("rotated.jsonl", &jsonl(&[metadata_event(9000)]));
+    std::fs::rename(
+        server.root.path().join("rotated.jsonl"),
+        server.root.path().join("events.jsonl"),
+    )
+    .unwrap();
+    assert_poll_response(
+        &server,
+        "/api/events",
+        event_response(&[metadata_event(9000)]),
+    )
+    .await;
+    server.file("events.jsonl", b"");
+    assert_poll_response(&server, "/api/events", event_response(&[])).await;
+    for bad in [b"not-json\n".to_vec(), b"[]\n".to_vec(), vec![b'x'; 4097]] {
+        server.file("events.jsonl", &bad);
+        assert_eq!(server.get("/api/events").await.status(), 500);
+    }
+    let mut invalid = metadata_event(1);
+    invalid["payload"] = json!("not-hex");
+    server.file("events.jsonl", &jsonl(&[invalid]));
+    assert_eq!(server.get("/api/events").await.status(), 500);
+    server.file("events.jsonl", &jsonl(&[metadata_event(2)]));
+    assert_poll_response(&server, "/api/events", event_response(&[metadata_event(2)])).await;
+    #[cfg(unix)]
+    {
+        std::fs::remove_file(server.root.path().join("events.jsonl")).unwrap();
+        std::os::unix::fs::symlink(
+            server.root.path().join("endpoint"),
+            server.root.path().join("events.jsonl"),
+        )
+        .unwrap();
+        assert_eq!(server.get("/api/events").await.status(), 500);
+    }
+}
+#[tokio::test]
+async fn artifact_polling_preserves_public_fields_and_validation() {
+    let server = Server::start().await;
+    let response = |artifacts: &[Value]| json!({"count":artifacts.len(),"artifacts":artifacts,"artifact_receiver_configured":false,"artifact_receiver_connected":false});
+    assert_poll_response(&server, "/api/artifacts", response(&[])).await;
+    let hash = "a".repeat(64);
+    let records: Vec<_> = (1..=5001).map(|id| {
+        let mut record = json!({"protocol_version":1,"artifact_id":id.to_string(),"session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"javascript","url":format!("http://fixture.local/script-{id}.js"),"mime_type":"text/javascript","byte_size":1024,"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin"),"fixture_private_field":"must-not-be-disclosed"});
+        if id % 2 == 0 {
+            record["execution_context_id"] = json!("7");
+            record["capture_origin"] = json!("dynamic_javascript");
+        }
+        record
+    }).collect();
+    let expected: Vec<_> = records
+        .iter()
+        .cloned()
+        .map(|mut record| {
+            let object = record.as_object_mut().unwrap();
+            object.remove("content_path");
+            object.remove("fixture_private_field");
+            object.entry("execution_context_id").or_insert(json!("0"));
+            object.entry("capture_origin").or_insert(json!("unknown"));
+            record
+        })
+        .collect();
+    server.file("artifacts/manifest.jsonl", &jsonl(&records));
+    assert_poll_response(
+        &server,
+        "/api/artifacts?limit=2",
+        response(&expected[4999..]),
+    )
+    .await;
+    assert_poll_response(
+        &server,
+        "/api/artifacts?limit=9999",
+        response(&expected[1..]),
+    )
+    .await;
+    server.file(
+        "artifacts/manifest.jsonl",
+        &jsonl(&[records[0].clone(), records[0].clone()]),
+    );
+    assert_eq!(server.get("/api/artifacts").await.status(), 500);
+    for bad in [b"not-json\n".to_vec(), b"[]\n".to_vec(), vec![b'x'; 8193]] {
+        server.file("artifacts/manifest.jsonl", &bad);
+        assert_eq!(server.get("/api/artifacts").await.status(), 500);
+    }
+    let mut invalid = records[0].clone();
+    invalid["sensitive"] = json!(true);
+    server.file("artifacts/manifest.jsonl", &jsonl(&[invalid]));
+    assert_eq!(server.get("/api/artifacts").await.status(), 500);
+    server.file("artifacts/manifest.jsonl", b"");
+    assert_poll_response(&server, "/api/artifacts", response(&[])).await;
 }
 #[tokio::test]
 async fn locality_static_allowlist_and_malformed_actions() {

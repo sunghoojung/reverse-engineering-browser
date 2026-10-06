@@ -249,7 +249,10 @@ impl App {
                         Ok(events)
                     })
                     .await?;
-                let mut result = json!({"count":events.len(),"events":events,"broker_connected":connected,"capture_mode":self.options.capture_mode(),"capture_stopped":stopped,"capture_controls_available":self.options.broker_pid.is_some()});
+                let mut result = json!({"count":events.len(),"broker_connected":connected,"capture_mode":self.options.capture_mode(),"capture_stopped":stopped,"capture_controls_available":self.options.broker_pid.is_some()});
+                // json! serializes borrowed values; move the retained window instead
+                // of allocating a second complete evidence tree on every refresh.
+                result["events"] = Value::Array(events);
                 if self.options.capture_mode() == "demo" {
                     result["canvas_render_captures"] =
                         serde_json::from_str(include_str!("../assets/demo-canvas.json"))
@@ -269,10 +272,18 @@ impl App {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
                 let root = self.options.artifacts.clone();
-                let artifacts = self
+                let mut artifacts = self
                     .blocking(move || evidence::artifacts(&root, limit))
                     .await?;
-                json!({"count":artifacts.len(),"artifacts":artifacts.iter().map(evidence::public_artifact).collect::<Vec<_>>(),"artifact_receiver_configured":configured,"artifact_receiver_connected":connected})
+                for artifact in &mut artifacts {
+                    artifact
+                        .as_object_mut()
+                        .expect("Validated artifact object")
+                        .retain(|key, _| evidence::PUBLIC_ARTIFACT_FIELDS.contains(&key.as_str()));
+                }
+                let mut result = json!({"count":artifacts.len(),"artifact_receiver_configured":configured,"artifact_receiver_connected":connected});
+                result["artifacts"] = Value::Array(artifacts);
+                result
             }
             "/api/origin-trace" => {
                 let request = q.required("request_id")?.to_owned();

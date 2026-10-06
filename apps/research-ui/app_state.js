@@ -76,6 +76,7 @@
         canvasRenderCaptures: [],
         canvasImageCaptureEnabled,
         nativeRequests: [],
+        debuggerNetworkBodyCache: new Map(),
         requests: standalonePreview ? [...sampleRequests] : [],
         artifacts: standalonePreview ? [...sampleArtifacts] : [],
         openArtifactIds: [],

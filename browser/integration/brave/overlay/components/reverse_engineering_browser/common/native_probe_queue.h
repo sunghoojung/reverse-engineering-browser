@@ -134,18 +134,18 @@ class alignas(64) NativeProbeQueue final {
 
   // Returns true only for the producer that changes the queue from an
   // unannounced to an announced state. That producer should send one Mojo
-  // wake-up. Other producers only copy their record into shared memory.
+  // wake-up. Every producer must release-publish its slot through this RMW,
+  // including when a notification is already pending. A load-only fast path
+  // would allow the consumer to clear the flag and miss that producer's slot.
   [[nodiscard]] bool MarkNotificationPending() noexcept {
-    if (notification_pending_.load(std::memory_order_acquire)) {
-      return false;
-    }
-    bool expected = false;
-    return notification_pending_.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
-                                                         std::memory_order_acquire);
+    return !notification_pending_.exchange(true, std::memory_order_acq_rel);
   }
 
   void ClearNotificationPending() noexcept {
-    notification_pending_.store(false, std::memory_order_release);
+    // The acquire observes all announcements preceding this clear, so Empty()
+    // sees their published slots. An announcement after the clear either owns
+    // a new wake-up or follows the consumer's own continuation announcement.
+    static_cast<void>(notification_pending_.exchange(false, std::memory_order_acq_rel));
   }
 
   [[nodiscard]] bool Empty() const noexcept {
@@ -184,6 +184,8 @@ class alignas(64) NativeProbeQueue final {
                 "Queue capacity must be a power of two");
   static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
                 "Probe queue counters must be lock-free");
+  static_assert(std::atomic<bool>::is_always_lock_free,
+                "Probe queue notifications must be lock-free");
 
   const std::uint32_t magic_ = kNativeProbeQueueMagic;
   const std::uint16_t version_ = kNativeProbeQueueVersion;

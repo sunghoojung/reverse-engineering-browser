@@ -26,7 +26,8 @@ APP_BINARIES := \
 	$(DEBUGGER_TRANSPORT_BINARY) \
 	$(NATIVE_CONSOLE_BINARY)
 $(DEMO_BINARY): $(BUILD_DIR)/apps/reb-event-demo/main.o \
-	$(BUILD_DIR)/src/capture/event.o
+	$(BUILD_DIR)/src/capture/event.o $(NATIVE_PROBE_QUEUE_OBJECT)
+$(BUILD_DIR)/apps/reb-event-demo/main.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
 $(PRODUCER_BINARY): $(BUILD_DIR)/apps/reb-event-producer/main.o \
 	$(BUILD_DIR)/src/capture/event.o \
 	$(BUILD_DIR)/src/transport/local_ipc.o \

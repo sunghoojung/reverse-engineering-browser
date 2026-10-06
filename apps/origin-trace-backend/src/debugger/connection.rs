@@ -369,18 +369,24 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    // This fixture consumes one full command and records that it was received.
+    // This fixture consumes one full command and acknowledges its receipt.
     // It never starts a browser or evaluates the submitted synthetic expression.
     async fn fixture(
         reply: Option<Value>,
         disconnect: bool,
-    ) -> (tempfile::TempDir, Arc<Connection>) {
+    ) -> (tempfile::TempDir, Arc<Connection>, mpsc::Receiver<Event>) {
         fn printf(bytes: &[u8]) -> String {
             let escaped = bytes
                 .iter()
                 .map(|b| format!("\\{b:03o}"))
                 .collect::<String>();
             format!("printf '{escaped}'\n")
+        }
+        fn framed(bytes: &[u8]) -> String {
+            let mut frame = b"REB\x01".to_vec();
+            frame.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            frame.extend_from_slice(bytes);
+            printf(&frame)
         }
         let directory = tempfile::tempdir().unwrap();
         let executable = directory.path().join("transport");
@@ -389,18 +395,16 @@ mod tests {
         )
         .unwrap();
         let mut script = String::from("#!/bin/sh\n");
-        script.push_str(&printf(b"REB\x01\0\0\0\0"));
+        script.push_str(&framed(b""));
         script.push_str(&format!(
             "dd bs=1 count={} of=/dev/null 2>/dev/null\nprintf received > '{}'/received\n",
             body.len() + 8,
             directory.path().display()
         ));
+        script.push_str(&framed(br#"{"method":"Fixture.received","params":{}}"#));
         if let Some(reply) = reply {
             let body = serde_json::to_vec(&reply).unwrap();
-            let mut frame = b"REB\x01".to_vec();
-            frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
-            frame.extend_from_slice(&body);
-            script.push_str(&printf(&frame));
+            script.push_str(&framed(&body));
         }
         script.push_str(if disconnect {
             "exit 0\n"
@@ -409,10 +413,23 @@ mod tests {
         });
         std::fs::write(&executable, script).unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let (connection, _events) = Connection::open(&executable, "ws://127.0.0.1:1")
+        let (connection, events) = Connection::open(&executable, "ws://127.0.0.1:1")
             .await
             .unwrap();
-        (directory, connection)
+        (directory, connection, events)
+    }
+    async fn assert_received(directory: &Path, events: &mut mpsc::Receiver<Event>) {
+        // A deadline can expire after writing but before the child gets CPU to
+        // consume the pipe. Receipt is independently acknowledged, not timed.
+        let event = tokio::time::timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("Synthetic transport did not acknowledge command receipt")
+            .expect("Synthetic transport event stream closed before receipt");
+        let Event::Message(Ok(value), _) = event else {
+            panic!("Synthetic transport failed before command receipt");
+        };
+        assert_eq!(value, json!({"method":"Fixture.received","params":{}}));
+        assert!(directory.join("received").exists());
     }
     #[tokio::test]
     async fn sent_commands_with_lost_or_invalid_replies_have_unknown_outcomes() {
@@ -444,16 +461,21 @@ mod tests {
                 "invalid_reply",
             ),
         ] {
-            let (directory, connection) = fixture(reply, disconnect).await;
+            let (directory, connection, mut events) = fixture(reply, disconnect).await;
+            let deadline = if cause == "timeout" {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_secs(2)
+            };
             let error = connection
                 .command(
                     "Runtime.evaluate",
                     json!({"expression":"synthetic_secret"}),
-                    Duration::from_millis(100),
+                    deadline,
                 )
                 .await
                 .unwrap_err();
-            assert!(directory.path().join("received").exists());
+            assert_received(directory.path(), &mut events).await;
             assert_eq!(error.status, status);
             assert_eq!(error.reason.code, Code::CommandOutcomeUnknown);
             let value = serde_json::to_value(error).unwrap();
@@ -467,7 +489,7 @@ mod tests {
     }
     #[tokio::test]
     async fn explicit_reply_and_pre_send_capacity_remain_distinct() {
-        let (_directory, connection) = fixture(
+        let (directory, connection, mut events) = fixture(
             Some(json!({"id":1,"error":{"code":-32000,"message":"Synthetic application failure"}})),
             false,
         )
@@ -480,12 +502,13 @@ mod tests {
             )
             .await
             .unwrap_err();
+        assert_received(directory.path(), &mut events).await;
         assert_eq!(error.status, 409);
         assert_eq!(error.message, "Synthetic application failure");
         assert_eq!(error.reason.code, Code::ApplicationFailed);
         connection.close().await;
 
-        let (directory, connection) = fixture(None, false).await;
+        let (directory, connection, _events) = fixture(None, false).await;
         for id in 100..356 {
             connection
                 .pending

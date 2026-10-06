@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { runInNewContext } from "node:vm";
 import {
   readFile,
+  rm,
   mkdtemp,
   mkdir,
   writeFile,
@@ -11,8 +12,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
+const trafficBrowser = process.argv[2] === "--traffic-ui-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
-const root = process.argv[fieldsOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
+const root = process.argv[fieldsOnly || trafficBrowser ? 3 : 2] || new URL("..", import.meta.url).pathname;
 const complete = runInNewContext(
   (await readFile(join(root, "apps/research-ui/source_syntax.js"), "utf8")) +
     (await readFile(join(root, "apps/research-ui/native_console_completion.js"), "utf8")) +
@@ -199,6 +201,122 @@ assert.equal(networkModels.requestsFromDebuggerNetwork({...binaryNetwork, captur
 assert.equal(bodyCache.size, 0);
 console.log("PASS indexed Traffic correlation, stable ties, body reuse, current-window eviction, capture-off and content search");
 
+// A minimal DOM verifies the real reconciliation code and bounded state, not
+// pixels. --traffic-ui-browser below is the separate rendered interaction path.
+class TrafficFixtureNode {
+  constructor(tag = "div") {
+    this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.attributes = new Map();
+    this.listeners = new Map(); this.className = ""; this._text = ""; this.value = ""; this.scrollTop = 0; this.parentNode = null;
+    this.classList = {add: name => {if (!this.className.split(" ").includes(name)) this.className += ` ${name}`;},
+      remove: name => {this.className = this.className.split(" ").filter(value => value !== name).join(" ");},
+      toggle: (name, active) => active ? this.classList.add(name) : this.classList.remove(name),
+      contains: name => this.className.split(" ").includes(name)};
+  }
+  set textContent(value) {this._text = String(value); this.children.forEach(node => {node.parentNode = null;}); this.children = [];}
+  get textContent() {return this._text + this.children.map(node => node.textContent).join("");}
+  get lastElementChild() {return this.children.at(-1);}
+  get offsetTop() {return Math.max(0, this.parentNode?.children.indexOf(this) ?? 0) * 28;}
+  get offsetHeight() {return 28;}
+  get isConnected() {return true;}
+  setAttribute(key, value) {this.attributes.set(key, String(value));}
+  getAttribute(key) {return this.attributes.get(key) ?? null;}
+  removeAttribute(key) {this.attributes.delete(key);}
+  addEventListener(key, callback) {this.listeners.set(key, [...(this.listeners.get(key) ?? []), callback]);}
+  append(...nodes) {for (const node of nodes) this.insertBefore(node, null);}
+  insertBefore(node, next) {node.remove(); node.parentNode = this; const index = next ? this.children.indexOf(next) : -1; this.children.splice(index < 0 ? this.children.length : index, 0, node);}
+  replaceChildren(...nodes) {this._text = ""; this.children.forEach(node => {node.parentNode = null;}); this.children = []; this.append(...nodes);}
+  remove() {if (this.parentNode) {if (this.contains(trafficDocument.activeElement)) trafficDocument.activeElement = null; const index = this.parentNode.children.indexOf(this); this.parentNode.children.splice(index, 1); this.parentNode = null;}}
+  contains(node) {return node === this || this.children.some(child => child.contains(node));}
+  matches(selector) {return selector[0] === "." ? this.classList.contains(selector.slice(1)) : selector === "[aria-pressed]" ? this.attributes.has("aria-pressed") : this.tagName.toLowerCase() === selector;}
+  querySelectorAll(selector) {return this.children.flatMap(node => [...(node.matches(selector) ? [node] : []), ...node.querySelectorAll(selector)]);}
+  querySelector(selector) {return this.querySelectorAll(selector)[0] ?? null;}
+  focus() {trafficDocument.activeElement = this;}
+  click() {for (const callback of this.listeners.get("click") ?? []) callback({target: this, currentTarget: this});}
+}
+const trafficDocument = {activeElement: null, createElement: tag => new TrafficFixtureNode(tag), createTextNode: text => {
+  const node = new TrafficFixtureNode("text"); node.textContent = text; return node;
+}};
+const trafficSource = await readFile(join(root, "apps/research-ui/traffic_view.js"), "utf8");
+const trafficUI = runInNewContext(trafficSource + ";({trafficSortedRequests,trafficWindow,renderTrafficRows,renderTrafficDetails,trafficPaneSignature,TRAFFIC_ROW_LIMIT})", {
+  document: trafficDocument, URL, TextEncoder, TextDecoder, Uint8Array, queueMicrotask,
+  navigator: {clipboard: {writeText: async () => {}}}, setTimeout: () => 0,
+  createSourceTokenizer: () => ({}), sourceSyntaxTokens: text => [{type: "plain", text}],
+});
+const uiRequest = (id, patch = {}) => ({id, path: `https://fixture.invalid/${id}`, method: "GET", status: "pending",
+  time: "pending", type: "xhr", origin: "live", tabId: "fixture-tab", operation: "cdp_pending", events: [],
+  exchange: {request: {state: "empty", headers: []}, response: {state: "loading", headers: []}}, ...patch});
+const retainedTraffic = Array.from({length: 5000}, (_, index) => uiRequest(String(index), {time: index % 20}));
+assert.equal(trafficUI.TRAFFIC_ROW_LIMIT, 500);
+assert.equal(trafficUI.trafficWindow(retainedTraffic, 0).rows.length, 500);
+assert.equal(trafficUI.trafficWindow(retainedTraffic, 5000).start, 4500);
+assert.equal(trafficUI.trafficWindow(retainedTraffic.slice(30), 300, "300").start, 270);
+for (const direction of [1, -1]) {
+  const sorted = trafficUI.trafficSortedRequests(retainedTraffic, "time", direction);
+  assert.equal(sorted[0].time, direction === 1 ? 0 : 19);
+  assert.equal(sorted[0].id, direction === 1 ? "0" : "19");
+}
+assert.equal(trafficUI.trafficSortedRequests([uiRequest("pending"), uiRequest("done", {time: 2})], "time", -1)[0].id, "done");
+assert.deepEqual(Array.from(trafficUI.trafficSortedRequests([uiRequest("native", {time: "12.300 ms"}), uiRequest("cdp", {time: 2})], "time"), request => request.id), ["cdp", "native"]);
+const ledger = new TrafficFixtureNode();
+const rowOptions = {selectedId: "3", newIds: new Set(["3"]), onSelect() {}, onKey() {}};
+trafficUI.renderTrafficRows(ledger, retainedTraffic.slice(0, 500), rowOptions);
+const selectedRow = ledger.children[3];
+selectedRow.focus(); ledger.scrollTop = 84;
+assert(selectedRow.classList.contains("is-new"));
+for (const callback of selectedRow.listeners.get("animationend")) callback();
+const pendingName = selectedRow.children[0];
+trafficUI.renderTrafficRows(ledger, retainedTraffic.slice(0, 500), rowOptions);
+assert.equal(ledger.children[3], selectedRow);
+assert.equal(selectedRow.children[0], pendingName);
+assert(!selectedRow.classList.contains("is-new"));
+for (const patch of [{status: 200, time: 4}, {status: 503, failed: true, time: 6}]) {
+  const changed = retainedTraffic.slice(0, 500); changed[3] = {...changed[3], ...patch};
+  trafficUI.renderTrafficRows(ledger, changed, rowOptions);
+  assert.equal(ledger.children[3], selectedRow);
+  assert.equal(trafficDocument.activeElement, selectedRow);
+  assert.equal(ledger.scrollTop, 84);
+  assert(!selectedRow.classList.contains("is-new"));
+}
+assert.equal(selectedRow.children[1].textContent, "(failed)");
+trafficUI.renderTrafficRows(ledger, retainedTraffic.slice(1, 501), rowOptions);
+assert.equal(ledger.children[2], selectedRow);
+assert.equal(ledger.scrollTop, 56, "Retained-window eviction preserves the first visible row anchor");
+assert.equal(trafficDocument.activeElement, selectedRow);
+trafficUI.renderTrafficRows(ledger, retainedTraffic.slice(4, 504), rowOptions);
+assert.equal(trafficDocument.activeElement, ledger.children[0]);
+assert.equal(ledger.children.length, 500);
+const details = new TrafficFixtureNode();
+let selectedTraffic = uiRequest("inspect", {exchange: {request: {state: "empty", headers: []}, response: {state: "available", mime: "text/plain", text: "first", headers: [["x-version", "one"]]}}});
+trafficUI.renderTrafficDetails(details, selectedTraffic, "response", () => {}, () => {});
+const responsePane = details.querySelector(".exchange-pane");
+const responseViewer = responsePane.querySelector(".exchange-content");
+const responseSearch = responsePane.querySelector(".exchange-search");
+responseSearch.focus(); responseViewer.scrollTop = 28;
+selectedTraffic = {...selectedTraffic, exchange: {...selectedTraffic.exchange, response: {...selectedTraffic.exchange.response, text: "other"}}};
+trafficUI.renderTrafficDetails(details, selectedTraffic, "response", () => {}, () => {});
+await Promise.resolve();
+assert.equal(details.querySelector(".exchange-pane"), responsePane);
+assert.match(responseViewer.textContent, /other/);
+assert.equal(responseViewer.scrollTop, 28);
+assert.equal(trafficDocument.activeElement, responseSearch);
+trafficUI.renderTrafficDetails(details, selectedTraffic, "headers", () => {}, () => {});
+assert.match(details.textContent, /x-versionone/);
+selectedTraffic.exchange.response.headers = [["x-version", "two"]];
+trafficUI.renderTrafficDetails(details, selectedTraffic, "headers", () => {}, () => {});
+assert.match(details.textContent, /x-versiontwo/);
+for (const [state, expected] of [["loading", /Loading response/], ["error", /could not be loaded/], ["empty", /No response body/], ["missing", /not captured/], ["redacted", /redacted/]]) {
+  selectedTraffic.exchange.response = {state, headers: []};
+  trafficUI.renderTrafficDetails(details, selectedTraffic, "response", () => {}, () => {});
+  assert.match(details.textContent, expected);
+}
+selectedTraffic.exchange.response = {state: "available", mime: "application/json", text: "{malformed", headers: []};
+trafficUI.renderTrafficDetails(details, selectedTraffic, "preview", () => {}, () => {});
+assert.match(details.textContent, /Invalid JSON/);
+assert.match(details.textContent, /malformed/);
+trafficUI.renderTrafficDetails(details, null, "headers", () => {}, () => {}, null, "Selected request left the retained window.");
+assert.match(details.textContent, /left the retained window/);
+console.log("PASS Traffic 500-row paging, sorting, anchored eviction, stable lifecycle focus, one-shot arrivals, equal-length body/header updates, and explicit capture states (DOM fixture; not rendered QA)");
+
 // Run the actual source load/refresh lifecycle with rendering and transport
 // stubbed. This verifies retention and races, not browser interaction or pixels.
 const appSource = await readFile(join(root, "apps/research-ui/app.js"), "utf8");
@@ -246,6 +364,34 @@ for (const [validate, legacy] of [
   assert(validate({...legacy, ok: true, error: ""}));
 }
 console.log("PASS legacy and annotated Analyst/JWT failures, unchanged successes and bounded reason rejection");
+
+const pivotProfile = {signals: [{category: "canvas", event_count: "1", confidence: "observed", relation: "parent_chain"}]};
+const pivotState = {requests: [uiRequest("selected")], selectedRequestId: "selected", signalProfile: pivotProfile,
+  signalProfileStatus: "ready", trafficDetailOpen: false, inspectorTab: "headers"};
+const pivotElements = {signalRequestProfile: new TrafficFixtureNode(), signalDetail: new TrafficFixtureNode()};
+const signalTab = new TrafficFixtureNode("button");
+let pivotScreen;
+let pivotInspectorOpen = false;
+const signalPivots = runInNewContext(appSection("      function renderSignalRequestProfile()", "      function signalTabKey(") +
+  ";({renderSignalRequestProfile,renderFingerprintDetail})", {
+  state: pivotState, elements: pivotElements, document: {...trafficDocument, querySelector: () => signalTab},
+  textElement: (tag, className, text) => {const node = new TrafficFixtureNode(tag); node.className = className; node.textContent = text; return node;},
+  fingerprintSignalLabels: new Map([["canvas", "Canvas"]]), signalCoverageLabel: () => "Bounded",
+  decodePayload: () => "getImageData", signalTypeLabel: value => value, signalTabKey: () => "tab",
+  matchingSignalProfileFamily: () => pivotProfile.signals[0], signalEventKey: () => "event", integerText: () => "1",
+  showScreen: screen => {pivotScreen = screen;}, renderInspector: () => {pivotInspectorOpen = pivotState.trafficDetailOpen;},
+  refreshRequestSignalProfile() {}, requestAnimationFrame: callback => callback(),
+});
+for (const render of [() => signalPivots.renderSignalRequestProfile(), () => signalPivots.renderFingerprintDetail({category: "canvas", type: "api_call", thread_id: 1})]) {
+  pivotState.trafficDetailOpen = false; pivotInspectorOpen = false; render();
+  const root = pivotElements.signalDetail.children.length ? pivotElements.signalDetail : pivotElements.signalRequestProfile;
+  root.querySelector("button").click();
+  assert.equal(pivotScreen, "traffic");
+  assert.equal(pivotInspectorOpen, true, "Explicit fingerprint pivots reopen a previously dismissed inspector");
+  assert.equal(pivotState.inspectorTab, "signals");
+  assert.equal(pivotState.signalProfile, pivotProfile, "Pivots retain the already loaded signal profile");
+}
+console.log("PASS Fingerprinting request-profile and event-detail pivots reopen dismissed Traffic details without resetting evidence");
 
 const sourceState = {liveScriptContent: new Map(), staleScriptIds: new Set(), openScriptIds: [], openArtifactIds: [],
   debuggerRefreshing: false, debuggerEtag: null, debuggerSession: null, selectedScriptId: null,
@@ -586,6 +732,198 @@ fieldHandoff.setCatalog([{...source, hash: "new-hash"}]); release(); await searc
 assert.equal(selection.candidates.length, 0);
 assert(selection.gaps.includes("Sources changed. Retry."));
 console.log("PASS decoded field identity, chain prefix, UTF-8, source identity, cancellation, and bounds");
+// Real, synthetic UI QA using the runner's installed Chromium and Node's CDP
+// WebSocket. No package install, network capture, sandbox override, or backend
+// exposure is needed. Do not substitute these screenshots for native macOS QA.
+async function checkTrafficBrowser() {
+  const executable = process.env.REB_UI_CHROMIUM;
+  assert(executable, "Set REB_UI_CHROMIUM to the installed Chrome/Chromium executable. Sandbox flags are not overridden.");
+  const directory = await mkdtemp(join(tmpdir(), "reb-requests-ui-"));
+  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", "requests-ui-qa");
+  await mkdir(output, {recursive: true});
+  let trafficApiMode = "offline";
+  const server = createServer(async (request, response) => {
+    const path = new URL(request.url, "http://127.0.0.1").pathname;
+    if (path === "/api/events" && trafficApiMode === "malformed") {response.writeHead(200, {"Content-Type": "application/json"}); response.end('{"malformed":true}'); return;}
+    if (path.startsWith("/api/")) {response.writeHead(503, {"Content-Type": "application/json"}); response.end('{"error":"Synthetic offline QA fixture"}'); return;}
+    const name = path === "/" ? "index.html" : path.slice(1);
+    if (!/^[a-z_]+\.(?:html|js|css)$/.test(name)) {response.writeHead(404); response.end(); return;}
+    try {
+      response.writeHead(200, {"Content-Type": name.endsWith(".js") ? "text/javascript" : name.endsWith(".css") ? "text/css" : "text/html"});
+      response.end(await readFile(join(root, "apps/research-ui", name)));
+    } catch {response.writeHead(404); response.end();}
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const browser = spawn(executable, ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${directory}`,
+    "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "about:blank"], {stdio: ["ignore", "ignore", "pipe"]});
+  let stderr = "";
+  browser.stderr.on("data", data => {stderr = (stderr + data).slice(-16000);});
+  let socket;
+  try {
+    const address = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {cleanup(); reject(new Error(`Chromium did not start: ${stderr}`));}, 15000);
+      const read = () => {const match = stderr.match(/DevTools listening on (ws:\/\/\S+)/); if (match) {cleanup(); resolve(match[1]);}};
+      const failed = error => {cleanup(); reject(error instanceof Error ? error : new Error(`Chromium exited before CDP: ${stderr}`));};
+      function cleanup() {clearTimeout(timer); browser.stderr.off("data", read); browser.off("exit", failed); browser.off("error", failed);}
+      browser.stderr.on("data", read); browser.once("exit", failed); browser.once("error", failed); read();
+    });
+    socket = new WebSocket(address);
+    await new Promise((resolve, reject) => {socket.addEventListener("open", resolve, {once: true}); socket.addEventListener("error", reject, {once: true});});
+    let commandId = 0;
+    const commands = new Map();
+    const runtimeErrors = [];
+    socket.addEventListener("message", event => {
+      const message = JSON.parse(event.data);
+      if (message.method === "Runtime.exceptionThrown") runtimeErrors.push(message.params.exceptionDetails.exception?.description || message.params.exceptionDetails.text);
+      const pending = commands.get(message.id);
+      if (!pending) return;
+      commands.delete(message.id); clearTimeout(pending.timer);
+      if (message.error) pending.reject(new Error(JSON.stringify(message.error))); else pending.resolve(message.result);
+    });
+    let session;
+    const command = (method, params = {}, attach = true) => new Promise((resolve, reject) => {
+      const id = ++commandId;
+      const timer = setTimeout(() => {commands.delete(id); reject(new Error(`CDP timed out: ${method}`));}, 10000);
+      commands.set(id, {resolve, reject, timer});
+      socket.send(JSON.stringify({id, method, params, ...(attach && session ? {sessionId: session} : {})}));
+    });
+    const target = await command("Target.createTarget", {url: "about:blank"}, false);
+    session = (await command("Target.attachToTarget", {targetId: target.targetId, flatten: true}, false)).sessionId;
+    await command("Page.enable"); await command("Runtime.enable");
+    const evaluate = async expression => {
+      const result = await command("Runtime.evaluate", {expression, awaitPromise: true, returnByValue: true});
+      if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
+      return result.result.value;
+    };
+    const viewport = async (width, height) => {
+      await command("Emulation.setDeviceMetricsOverride", {width, height, deviceScaleFactor: 1, mobile: false});
+      await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+    };
+    const click = async selector => {
+      const rect = await evaluate(`(() => { const node = document.querySelector(${JSON.stringify(selector)}); if (!node) throw new Error('Missing control'); node.scrollIntoView({block:'nearest', inline:'nearest'}); const r = node.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; })()`);
+      await command("Input.dispatchMouseEvent", {type: "mousePressed", ...rect, button: "left", clickCount: 1});
+      await command("Input.dispatchMouseEvent", {type: "mouseReleased", ...rect, button: "left", clickCount: 1});
+    };
+    const key = async (value, code = value) => {
+      await command("Input.dispatchKeyEvent", {type: "keyDown", key: value, code});
+      await command("Input.dispatchKeyEvent", {type: "keyUp", key: value, code});
+    };
+    const columnsAligned = () => evaluate(`(() => {
+      const heads = [...document.querySelector('.request-head').children];
+      const cells = [...document.querySelector('.request-row').children];
+      return heads.every((head, index) => {
+        if (!head.getClientRects().length) return !cells[index].getClientRects().length;
+        const a = head.getBoundingClientRect(), b = cells[index].getBoundingClientRect();
+        return Math.abs(a.left-b.left) <= 1 && Math.abs(a.right-b.right) <= 1;
+      });
+    })()`);
+    const screenshot = async name => {
+      await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+      const result = await command("Page.captureScreenshot", {format: "png"});
+      await writeFile(join(output, `${name}.png`), Buffer.from(result.data, "base64"));
+    };
+    await viewport(1440, 900);
+    await command("Page.navigate", {url: `http://127.0.0.1:${server.address().port}/`});
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (await evaluate("typeof renderRequests === 'function' && typeof state !== 'undefined'")) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert(await evaluate("typeof renderRequests === 'function'"), "Application did not initialize");
+    await evaluate(`window.fixtureRequests = Array.from({length:520}, (_,i) => ({id:'qa-'+i,path:'https://fixture.invalid/api/item-'+i+'?view=compact',method:i%3?'GET':'POST',status:i%11===0?'pending':200,time:i%11===0?'pending':i/2,type:'xhr',origin:'demo',tabId:'qa-tab',hostOnly:false,operation:'synthetic_qa',events:[],exchange:{request:{state:'available',mime:'application/json',text:'{"id":"qa","value":"first"}',headers:[['content-type','application/json']]},response:{state:i%11===0?'loading':'available',mime:'application/json',text:i%11===0?'':'{"result":"first"}',headers:[['content-type','application/json'],['x-fixture','one']]}}})); state.requests=fixtureRequests; state.sessionMode='demo'; renderRequests(); document.querySelector('#network-notice').textContent='Synthetic browser QA fixture · no live capture';`);
+    assert.equal(await evaluate("document.querySelectorAll('.request-row').length"), 500);
+    assert(await columnsAligned(), "Request headers and row columns must align with the scrollbar gutter");
+    await click('[data-request-id="qa-22"]');
+    assert.equal(await evaluate("state.selectedRequestId"), "qa-22");
+    await click('#inspector-tab-response');
+    assert.match(await evaluate("document.querySelector('#exchange-inspector').textContent"), /Loading response/);
+    await evaluate(`window.selectedNode=document.querySelector('[data-request-id="qa-22"]'); selectedNode.focus(); window.previousTop=elements.requestRows.scrollTop; fixtureRequests[22]={...fixtureRequests[22],status:200,time:14,exchange:{...fixtureRequests[22].exchange,response:{state:'available',mime:'application/json',text:'{"result":"first"}',headers:[['x-fixture','one']]}}}; state.requests=[...fixtureRequests, {...fixtureRequests[0],id:'qa-arrival'}]; renderRequests(); renderInspector();`);
+    assert(await evaluate("document.querySelector('[data-request-id=\"qa-22\"]') === selectedNode && document.activeElement === selectedNode && elements.requestRows.scrollTop === previousTop"));
+    await evaluate("state.requests[22].exchange.response.text='{\"result\":\"other\"}'; renderInspector()");
+    assert.match(await evaluate("document.querySelector('#exchange-inspector').textContent"), /other/);
+    await click('#exchange-inspector .exchange-options summary');
+    await click('#exchange-inspector .exchange-options-menu .exchange-button');
+    await key('Escape');
+    assert(await evaluate("document.querySelector('#exchange-inspector .exchange-controls').hidden && state.trafficDetailOpen"));
+    await click('#inspector-tab-headers');
+    await evaluate("state.requests[22].exchange.response.headers=[['x-fixture','two']]; renderInspector()");
+    assert.match(await evaluate("document.querySelector('#exchange-inspector').textContent"), /two/);
+    await screenshot("requests-wide-headers");
+    trafficApiMode = "malformed";
+    await evaluate("(async()=>{while(state.refreshing) await new Promise(resolve=>setTimeout(resolve,20)); await refresh();})()");
+    assert.equal(await evaluate("state.eventFailureKind"), "malformed");
+    assert.equal(await evaluate("state.selectedRequestId"), "qa-22");
+    trafficApiMode = "offline";
+    await evaluate("(async()=>{while(state.refreshing) await new Promise(resolve=>setTimeout(resolve,20)); await refresh();})()");
+    assert.equal(await evaluate("state.selectedRequestId"), "qa-22");
+    await evaluate("Object.assign(state.requests[22], {status:'failed', failed:true, time:27}); state.requests[22].exchange.response={state:'error',reason:'Synthetic network failure',headers:[]}; renderRequests(); renderInspector()");
+    assert.match(await evaluate("document.querySelector('[data-request-id=\"qa-22\"]').textContent"), /failed/);
+    await click('#inspector-tab-response');
+    assert.match(await evaluate("document.querySelector('#exchange-inspector').textContent"), /Synthetic network failure/);
+    await screenshot("requests-failed-response");
+    await click('[data-request-sort="name"]');
+    await evaluate("elements.requestFilter.value='no-match'; elements.requestFilter.dispatchEvent(new Event('input',{bubbles:true}))");
+    assert.equal(await evaluate("state.selectedRequestId"), "qa-22");
+    assert.match(await evaluate("elements.requestRows.textContent"), /No requests match/);
+    await evaluate("elements.requestFilter.value=''; elements.requestFilter.dispatchEvent(new Event('input',{bubbles:true}))");
+    await click('#request-order');
+    await click('[data-request-id="qa-22"]');
+    await key('ArrowDown');
+    assert.equal(await evaluate("state.selectedRequestId"), "qa-23");
+    await key('Escape');
+    assert.equal(await evaluate("state.trafficDetailOpen"), false);
+    await evaluate("renderRequests(); renderInspector()");
+    assert.equal(await evaluate("document.querySelector('.detail-pane').hidden"), true);
+    await click('[data-request-id="qa-22"]');
+    await evaluate("state.requests=state.requests.filter(request=>request.id!=='qa-22'); renderRequests(); renderInspector()");
+    assert.equal(await evaluate("state.selectedRequestId"), null);
+    assert.match(await evaluate("document.querySelector('#exchange-inspector').textContent"), /left the retained capture window/);
+    await click('#request-detail-close');
+    await click('#request-window-next');
+    assert((await evaluate("state.trafficWindowStart")) > 0);
+    assert((await evaluate("document.querySelectorAll('.request-row').length")) <= 500);
+    await click('#request-window-prev');
+    await click('[data-request-id="qa-23"]');
+    await click('#inspector-tab-preview');
+    await evaluate("state.requests.find(r=>r.id==='qa-23').exchange.response={state:'available',mime:'application/json',text:'{malformed',headers:[]}; renderInspector()");
+    assert.match(await evaluate("document.querySelector('#exchange-inspector').textContent"), /Invalid JSON/);
+    await evaluate("state.requests.find(r=>r.id==='qa-23').exchange.response={state:'available',mime:'text/html',text:'<h1>Safe preview</h1><script>window.parent.compromised=true</script><img src=\"https://forbidden.invalid/image\">',headers:[]}; renderInspector()");
+    assert.equal(await evaluate("document.querySelector('.exchange-html-preview').getAttribute('sandbox')"), "");
+    assert.equal(await evaluate("window.compromised === true"), false);
+    await viewport(600, 800); await screenshot("requests-narrow-preview");
+    await viewport(360, 740);
+    assert(await columnsAligned(), "Narrow request columns must remain aligned");
+    assert(await evaluate("document.documentElement.scrollWidth <= innerWidth"), "Page has horizontal overflow at 360 px");
+    await click('#inspector-tab-payload');
+    await key('ArrowRight');
+    assert.equal(await evaluate("state.inspectorTab"), "preview");
+    await screenshot("requests-phone-preview");
+    await command("Emulation.setEmulatedMedia", {features: [{name: "prefers-reduced-motion", value: "reduce"}]});
+    await evaluate("document.querySelector('.request-row').classList.add('is-new')");
+    assert.equal(await evaluate("getComputedStyle(document.querySelector('.request-row')).animationName"), "none");
+    await evaluate("showScreen('vm')"); await click('#screen-vm [data-screen="traffic"]');
+    assert.equal(await evaluate("document.querySelector('#screen-traffic').hidden"), false);
+    await evaluate("state.requests=[{...fixtureRequests[0],id:'new-capture',tabId:'new-tab'}]; renderRequests(); renderInspector()");
+    assert.equal(await evaluate("state.selectedRequestId"), null);
+    assert.equal(await evaluate("document.querySelectorAll('.request-row').length"), 1);
+    await evaluate("state.requests=[]; renderRequests(); renderInspector()");
+    assert.match(await evaluate("elements.requestRows.textContent"), /No developer evidence/);
+    await screenshot("requests-empty");
+    assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during rendered QA");
+    await writeFile(join(output, "validation.json"), JSON.stringify({status: "passed", path: "browser development UI", source: "synthetic fixture", viewports: [[1440,900],[600,800],[360,740]], checks: ["500-row bound and paging", "pending to response to failed", "equal-length updates", "stable focus and scroll", "sort/filter selection", "dismissal and Escape", "eviction", "arrow-key rows and tabs", "malformed JSON", "sandboxed HTML", "reduced motion", "Back to traffic", "new capture", "empty/malformed/offline"]}, null, 2));
+    console.log(`PASS real Chromium Requests interactions; screenshots: ${output}`);
+  } finally {
+    socket?.close();
+    if (browser.exitCode === null && browser.signalCode === null) {
+      browser.kill();
+      await new Promise(resolve => {const timer = setTimeout(resolve, 2000); browser.once('exit', () => {clearTimeout(timer); resolve();});});
+    }
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    await rm(directory, {recursive: true, force: true, maxRetries: 3, retryDelay: 100});
+  }
+}
+if (trafficBrowser) {await checkTrafficBrowser(); process.exit(0);}
+
 if (fieldsOnly) process.exit(0);
 const temporary = await mkdtemp(join(tmpdir(), "origin-trace-debugger-"));
 const resources = [];

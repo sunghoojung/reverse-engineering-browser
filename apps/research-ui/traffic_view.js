@@ -89,6 +89,94 @@ function trafficTimeLabel(time) {
   return `${(time / 1000).toFixed(2)} s`;
 }
 
+// The broker retains 5,000 events. A separately paged ledger never mounts more
+// than 500 rows; filters and sorting still inspect the whole retained window.
+const TRAFFIC_ROW_LIMIT = 500;
+const TRAFFIC_RETAINED_LIMIT = 5000;
+function trafficTimeValue(request) {
+  if (typeof request.time === 'number' && Number.isFinite(request.time)) return request.time;
+  const milliseconds = /^(\d+(?:\.\d+)?) ms$/.exec(String(request.time));
+  return milliseconds && Number.isFinite(Number(milliseconds[1])) ? Number(milliseconds[1]) : null;
+}
+function trafficSortedRequests(requests, key = 'capture', direction = 1) {
+  if (key === 'capture') return requests;
+  const value = request => key === 'name' ? trafficTargetParts(request).name
+    : key === 'time' ? trafficTimeValue(request)
+      : key === 'status' ? /^\d+$/.test(String(request.status)) ? Number(request.status) : null
+        : key === 'type' ? trafficTypeLabel(request.type) : request.method;
+  // Precompute URL/type keys once; stable ties retain evidence order.
+  return requests.map((request, index) => ({request, index, value: value(request)})).sort((a, b) => {
+    if (a.value === null || b.value === null) return a.value === b.value ? a.index - b.index : a.value === null ? 1 : -1;
+    const comparison = typeof a.value === 'number' ? a.value - b.value : String(a.value).localeCompare(String(b.value));
+    return comparison * direction || a.index - b.index;
+  }).map(entry => entry.request);
+}
+
+function trafficWindow(requests, start, anchor = null) {
+  const found = anchor === null ? -1 : requests.findIndex(request => request.id === anchor);
+  const offset = Math.max(0, Math.min(found < 0 ? start : found, Math.max(0, requests.length - TRAFFIC_ROW_LIMIT)));
+  return {start: offset, rows: requests.slice(offset, offset + TRAFFIC_ROW_LIMIT)};
+}
+
+function renderTrafficRows(container, requests, {selectedId, newIds, matches, onSelect, onKey}) {
+  requests = requests.slice(0, TRAFFIC_ROW_LIMIT);
+  const previousRows = new Map([...container.querySelectorAll('.request-row')].map(row => [row.dataset.requestId, row]));
+  const focused = document.activeElement;
+  const focusedId = container.contains(focused) ? focused.dataset.requestId : null;
+  const scrollTop = container.scrollTop;
+  const anchor = [...previousRows.values()].find(row => row.offsetTop + row.offsetHeight > scrollTop);
+  const anchorOffset = anchor ? anchor.offsetTop - scrollTop : 0;
+  const selectedVisible = requests.some(request => request.id === selectedId);
+  const rows = requests.map((request, index) => {
+    const match = matches?.get(request.id);
+    let row = previousRows.get(String(request.id));
+    if (!row) {
+      row = trafficNode('button', 'request-row'); row.type = 'button';
+      row.setAttribute('role', 'option'); row.dataset.requestId = request.id;
+      row.addEventListener('click', () => onSelect(row.dataset.requestId));
+      row.addEventListener('keydown', onKey);
+      row.addEventListener('animationend', () => row.classList.remove('is-new'));
+      row.addEventListener('animationcancel', () => row.classList.remove('is-new'));
+      if (newIds.has(request.id) && (typeof matchMedia !== 'function' || !matchMedia('(prefers-reduced-motion: reduce)').matches)) row.classList.add('is-new');
+    }
+    const key = JSON.stringify([request.path, request.method, request.status, request.time,
+      request.type, request.origin, request.hostOnly, request.failed, request.targetKind, request.operation, match?.label]);
+    // Reuse the row itself on lifecycle changes, preserving focus and its single
+    // arrival animation. Unchanged rows do not rebuild captured text children.
+    if (row.dataset.renderKey !== key) {
+      row.dataset.renderKey = key;
+      row.dataset.origin = request.origin;
+      row.dataset.targetKind = request.targetKind ?? 'unknown';
+      row.dataset.pending = String(request.status === 'pending' && !request.failed);
+      const target = trafficTargetParts(request);
+      const name = trafficNode('span', 'request-name');
+      name.title = `${trafficOriginLabel(request)} · ${request.method} ${request.path} · network · ${request.operation ?? 'sample'} · request ${request.id}${request.hostOnly ? ' · URL path and query not captured' : ''}`;
+      name.append(trafficNode('span', 'request-resource', target.name),
+        trafficNode('span', 'request-host', `${target.host}${match ? ' · ' + match.label : ''}`));
+      const numericStatus = Number(request.status);
+      const status = trafficNode('span', request.failed || numericStatus >= 400 ? 'status-error'
+        : numericStatus >= 200 ? 'status-ok' : 'status-neutral', request.failed ? '(failed)' : request.status === 'pending' ? '(pending)' : String(request.status));
+      status.title = request.failed ? 'Request failed. Inspect the retained response state for details.'
+        : request.status === 'pending' ? 'No terminal lifecycle event has been captured.' : `HTTP status ${request.status}`;
+      row.replaceChildren(name, status, trafficNode('span', 'request-type', trafficTypeLabel(request.type)),
+        trafficNode('span', 'request-method', request.method), trafficNode('span', 'request-time', trafficTimeLabel(request.time)));
+      row.setAttribute('aria-label', `${trafficOriginLabel(request)} ${request.hostOnly ? 'host-only metadata' : 'request'}: ${request.method} ${request.path}, ${status.textContent}, ${trafficTimeLabel(request.time)}, ${request.operation ?? 'network'}, request ${request.id}${match ? ', match in ' + match.label : ''}`);
+    }
+    row.setAttribute('aria-selected', String(request.id === selectedId));
+    row.tabIndex = request.id === selectedId || !selectedVisible && index === 0 ? 0 : -1;
+    return row;
+  });
+  rows.forEach((row, index) => {
+    const current = container.children[index];
+    if (current !== row) container.insertBefore(row, current ?? null);
+  });
+  while (container.children.length > rows.length) container.lastElementChild.remove();
+  const restored = anchor && rows.find(row => row.dataset.requestId === anchor.dataset.requestId);
+  container.scrollTop = restored ? restored.offsetTop - anchorOffset : scrollTop;
+  if (focusedId && document.activeElement !== focused) (rows.find(row => row.dataset.requestId === focusedId) ?? rows[0] ?? container).focus({preventScroll: true});
+  container.tabIndex = rows.length ? -1 : 0;
+}
+
 const sampleExchanges = {
   '78': {
     request: {state: 'empty', headers: [['accept', 'application/json']]},
@@ -237,7 +325,7 @@ function trafficOriginLabel(request) {
         : request?.origin === 'live' ? 'Live metadata' : 'Local evidence';
 }
 
-function createTrafficPane(side, record, request, onDecode, onTrace, searchMatch = null) {
+function createTrafficPane(side, record, request, onDecode, onTrace, searchMatch = null, view = null) {
   const pane = trafficNode('section', 'exchange-pane');
   pane.dataset.origin = request?.origin ?? 'none';
   pane.setAttribute('aria-label', `${side} content`);
@@ -247,10 +335,14 @@ function createTrafficPane(side, record, request, onDecode, onTrace, searchMatch
   controls.hidden = true;
   const tabs = trafficNode('div', 'exchange-tabs');
   tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', `${side} view`);
-  const model = trafficBodyModel(record, side);
+  const bodyModel = value => view === 'headers' ? {message: 'Headers'} : trafficBodyModel(value, side);
+  let model = bodyModel(record);
   const htmlResponse = side === 'Response' && record?.mime?.split(';')[0].trim().toLowerCase() === 'text/html';
-  const mode = {value: searchMatch?.side === side ? searchMatch.mode : 'formatted'};
-  const modes = [['headers', 'Header'], ...(side === 'Request' ? [['query', 'Query']] : []), ['formatted', 'Body'], ['raw', 'Raw body'], ...(htmlResponse ? [['preview', 'Preview']] : [])];
+  const mode = {value: searchMatch?.side === side ? searchMatch.mode : view === 'headers' ? 'headers' : view === 'response' ? 'raw' : view === 'preview' && htmlResponse ? 'preview' : 'formatted'};
+  const modes = view === 'headers' ? [['headers', 'Headers']]
+    : view === 'preview' ? [[htmlResponse ? 'preview' : 'formatted', 'Preview']]
+      : view === 'response' ? [['raw', 'Raw'], ['formatted', 'Formatted']]
+        : [['query', 'Query'], ['formatted', 'Body'], ['raw', 'Raw']];
   const tabButtons = modes.map(([value, label]) => {
     const button = trafficNode('button', 'exchange-tab', label); button.type = 'button';
     button.setAttribute('role', 'tab'); button.setAttribute('aria-selected', String(value === mode.value));
@@ -275,7 +367,7 @@ function createTrafficPane(side, record, request, onDecode, onTrace, searchMatch
   find.addEventListener('click', () => { controls.hidden = !controls.hidden; options.open = false; if (!controls.hidden) search.focus(); });
   const tree = trafficNode('button', 'exchange-button', 'JSON tree'); tree.type = 'button';
   tree.setAttribute('aria-pressed', 'false');
-  let treeMode = false;
+  let treeMode = view === 'preview' && model.treeSafe;
   tree.addEventListener('click', () => { treeMode = !treeMode; tree.setAttribute('aria-pressed', String(treeMode)); renderedMode = undefined; options.open = false; mode.value = 'formatted'; render(); });
   const search = trafficNode('input', 'exchange-search');
   search.type = 'search'; search.placeholder = 'Find in body'; search.setAttribute('aria-label', `Find in ${side.toLowerCase()}`);
@@ -285,6 +377,10 @@ function createTrafficPane(side, record, request, onDecode, onTrace, searchMatch
   const copy = trafficNode('button', 'exchange-button', 'Copy body'); copy.type = 'button';
   const closeSearch = trafficNode('button', 'exchange-button', 'Done'); closeSearch.type = 'button';
   closeSearch.addEventListener('click', () => { search.value = ''; controls.hidden = true; render(); optionsTitle.focus(); });
+  search.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault(); event.stopPropagation(); closeSearch.click();
+  });
   controls.append(search, closeSearch);
   menu.append(find, tree, wrap, copy); options.append(optionsTitle, menu); header.append(options);
   const meta = trafficNode('div', 'exchange-meta'); meta.setAttribute('role', 'status');
@@ -300,6 +396,7 @@ function createTrafficPane(side, record, request, onDecode, onTrace, searchMatch
     catch { button.textContent = 'Copy unavailable'; }
     setTimeout(() => { button.textContent = original; }, 1600);
   }
+  tree.setAttribute('aria-pressed', String(treeMode));
   tree.disabled = !model.treeSafe;
   tree.title = model.treeSafe ? 'Explore JSON values' : 'Body preserves original literal forms; tree is unavailable.';
   copy.textContent = model.binary ? 'Copy hex' : model.truncated ? 'Copy preview' : 'Copy body';
@@ -330,13 +427,21 @@ function createTrafficPane(side, record, request, onDecode, onTrace, searchMatch
     trace.addEventListener('click', () => onTrace({...descriptor, value, label: path, request}));
     selection.replaceChildren(pathLabel, valueCopy, decode, ...(side === 'Request' ? [trace] : []), close, full);
   }
-  function render() {
+  function render(preservePosition = false) {
     const query = search.value.toLowerCase();
     if (renderedMode === mode.value && renderedSearch === query) return;
     renderedMode = mode.value; renderedSearch = query;
     selection.hidden = true;
+    const scrollTop = content.scrollTop;
+    const contentFocused = content.contains(document.activeElement);
     content.replaceChildren();
     content.scrollTop = 0;
+    // Finish restoration after this synchronous render, including early returns.
+    if (preservePosition) queueMicrotask(() => {
+      if (!pane.isConnected) return;
+      content.scrollTop = scrollTop;
+      if (contentFocused) content.focus({preventScroll: true});
+    });
     tabButtons.forEach((button, index) => {
       const selected = modes[index][0] === mode.value;
       button.setAttribute('aria-selected', String(selected)); button.tabIndex = selected ? 0 : -1;
@@ -440,36 +545,82 @@ function createTrafficPane(side, record, request, onDecode, onTrace, searchMatch
       if (matches > 2000) content.append(trafficNode('p', 'exchange-limit', 'Showing the first 2,000 matching lines. Copy body includes the retained preview.'));
     }
   }
-  search.addEventListener('input', render);
+  search.addEventListener('input', () => render());
   pane.append(header, controls, content, selection, meta);
+  let signature = trafficPaneSignature(record, request, view);
+  pane.updateRecord = (nextRecord, nextRequest) => {
+    const next = trafficPaneSignature(nextRecord, nextRequest, view);
+    if (next === signature) return;
+    signature = next; record = nextRecord; request = nextRequest;
+    model = bodyModel(record);
+    tree.disabled = !model.treeSafe;
+    if (treeMode && !model.treeSafe) treeMode = false;
+    tree.setAttribute('aria-pressed', String(treeMode));
+    copy.disabled = model.text === undefined;
+    copy.textContent = model.binary ? 'Copy hex' : model.truncated ? 'Copy preview' : 'Copy body';
+    renderedMode = undefined;
+    render(true);
+  };
   render();
   return pane;
 }
 
-function renderTrafficExchange(container, request, onDecode, onTrace, find = null) {
-  const key = `${request?.origin}:${request?.id}:${request?.method}:${request?.status}:` +
-    `${request?.exchange?.request?.state}:${request?.exchange?.request?.text?.length ?? request?.exchange?.request?.bytes?.length ?? 0}:` +
-    `${request?.exchange?.response?.state}:${request?.exchange?.response?.mime}:${request?.exchange?.response?.truncated}:` +
-    `${request?.exchange?.response?.text?.length ?? request?.exchange?.response?.bytes?.length ?? 0}:` + JSON.stringify(find);
-  if (container.dataset.selection === key) return;
-  container.dataset.selection = key;
-  if (!request) {
-    container.dataset.side = 'none';
-    container.replaceChildren(trafficNode('div', 'exchange-no-selection', 'Select a request to inspect its request and response.'));
-    return;
-  }
+// Full retained values, including headers and equal-length text replacements,
+// participate in invalidation. Only the selected request owns these bounded keys.
+// Network projection reuses immutable decoded bytes for unchanged bodies.
+// Weak identities avoid retaining a second expanded copy of every inspected body.
+const trafficByteSignatures = new WeakMap();
+let trafficByteIdentity = 0;
+function trafficPaneSignature(record, request, view = null) {
+  if (view === 'headers') return JSON.stringify([request?.origin, request?.id, record?.headers]);
+  if (record?.bytes && !trafficByteSignatures.has(record.bytes)) trafficByteSignatures.set(record.bytes, ++trafficByteIdentity);
+  return JSON.stringify([request?.id, request?.origin, request?.path, request?.hostOnly,
+    request?.urlTruncated, record?.state, record?.reason, record?.mime, record?.truncated,
+    record?.headers, record?.text, record?.bytes ? trafficByteSignatures.get(record.bytes) : null]);
+}
+
+function renderTrafficDetails(container, request, tab, onDecode, onTrace, find = null, notice = '') {
+  const findTab = find?.mode === 'headers' ? 'headers' : find?.side === 'Request' ? 'payload' : 'response';
+  if (findTab !== tab) find = null;
   const exchange = trafficExchange(request);
-  const switcher = trafficNode('div', 'exchange-mobile-switch');
-  switcher.setAttribute('role', 'group'); switcher.setAttribute('aria-label', 'Visible content pane');
-  container.dataset.side = find?.side?.toLowerCase() ?? 'request';
-  for (const side of ['Request', 'Response']) {
-    const button = trafficNode('button', 'exchange-button', side); button.type = 'button';
-    button.setAttribute('aria-pressed', String(side.toLowerCase() === container.dataset.side));
-    button.addEventListener('click', () => {
-      container.dataset.side = side.toLowerCase();
-      switcher.querySelectorAll('button').forEach(node => node.setAttribute('aria-pressed', String(node === button)));
-    });
-    switcher.append(button);
+  const html = exchange.response?.mime?.split(';')[0].trim().toLowerCase() === 'text/html';
+  const key = JSON.stringify([request?.origin, request?.id, tab, tab === 'preview' && html, find, notice]);
+  if (container.dataset.selection !== key) {
+    container.dataset.selection = key;
+    container.replaceChildren();
+    if (!request) {
+      container.append(trafficNode('div', 'exchange-no-selection', notice || 'Select a request to inspect captured details.'));
+      return;
+    }
+    if (tab === 'headers') {
+      const general = trafficNode('section', 'traffic-general');
+      general.append(trafficNode('h2', '', 'General'));
+      for (const label of ['Request URL', 'Request Method', 'Status', 'Source', 'Request ID', 'Browser tab', 'Capture limits']) {
+        const row = trafficNode('div', 'traffic-general-row');
+        row.append(trafficNode('span', '', label), trafficNode('span', 'traffic-general-value'));
+        general.append(row);
+      }
+      container.append(general);
+      for (const side of ['Response', 'Request']) {
+        const pane = createTrafficPane(side, exchange[side.toLowerCase()], request, onDecode, onTrace, find, 'headers');
+        pane.dataset.side = side.toLowerCase(); container.append(pane);
+      }
+    } else {
+      const side = tab === 'payload' ? 'Request' : 'Response';
+      const pane = createTrafficPane(side, exchange[side.toLowerCase()], request, onDecode, onTrace, find, tab);
+      pane.dataset.side = side.toLowerCase(); container.append(pane);
+    }
   }
-  container.replaceChildren(switcher, createTrafficPane('Request', exchange.request, request, onDecode, onTrace, find), createTrafficPane('Response', exchange.response, request, onDecode, onTrace, find));
+  if (!request) return;
+  container.dataset.view = tab;
+  container.querySelectorAll('.exchange-pane').forEach(pane => pane.updateRecord(exchange[pane.dataset.side], request));
+  if (tab === 'headers') {
+    const values = [request.hostOnly ? `${request.path} (host only; path and query not captured)` : request.path,
+      request.method, request.failed ? 'Failed' : request.status, trafficOriginLabel(request), request.id,
+      request.tabId && request.tabId !== '0' ? request.tabId : 'Unattributed',
+      'Retained evidence only. Missing headers and bodies are not fetched.'];
+    container.querySelectorAll('.traffic-general-value').forEach((node, index) => {
+      if (node.textContent !== String(values[index])) node.textContent = String(values[index]);
+    });
+  }
 }

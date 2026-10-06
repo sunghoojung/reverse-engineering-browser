@@ -197,21 +197,39 @@ Expand **Advanced** for Backtraces, Memory, Experiments, Analyst, and Tools.
 Navigation into an advanced tool reveals its group automatically on desktop. On
 narrow windows navigation moves above the workspace and closes after selection.
 
-Traffic keeps a full-width request table above the inspector, including on wide
-windows. Each row shows the URL path and query over its host; host-only native
-metadata is labeled without implying that a path was captured. Status, type,
-method, and elapsed time remain visible where width permits. The selected
-request exposes its complete URL and a Copy URL action. New requests follow the
-bottom of the list while the researcher is there; scrolling up preserves the
-reading position and offers a new-request jump button. Use **All types** beside
-search to filter by resource type. Escape closes an open navigation or filter
-disclosure and restores focus. Request and response content retain their own
-tabs and scroll areas.
+Traffic uses a compact network ledger with visible resource-type filters and
+sortable Name, Status, Type, Method, and Time columns. **Capture order** restores
+the evidence order. The selected request opens Headers, Payload, Preview,
+Response, Initiator, and Timing beside the ledger above 1100 px, or below it in
+narrow windows. REB's Signals and Evidence tools remain separate tabs. Missing
+headers, bodies, initiators, and timing phases stay explicitly unavailable.
+No cache, recording, throttling, or invented waterfall controls are implied.
+The layout follows familiar [network inspection conventions](https://developer.chrome.com/docs/devtools/network/reference)
+while keeping Origin Trace's own controls and Rosé Pine Moon palette.
+
+The ledger mounts at most 500 fixed-height rows. Previous/Next page through the
+retained window without changing the evidence: the native API retains up to
+5,000 events; the existing CDP window retains up to 1,000 requests. Filtering
+and sorting cover the whole retained window. Rows and capture-tab controls are
+reused across refreshes. New arrivals briefly accent the row edge once; pending
+requests use a steady label. Reduced-motion disables animation and transitions.
+Refresh preserves the reading anchor and keyboard focus and never follows the
+bottom automatically. **N new requests** explicitly jumps to the newest capture
+window. Selection survives filters and sorting; its absence from the filter is
+labeled. An actually evicted selection reports that it left the retained window
+instead of silently selecting another request.
+
+Arrow keys select adjacent request rows; inspector tabs use Left/Right and
+Home/End. Escape dismisses Find or viewer options first, or closes the inspector and
+returns focus to the ledger. The close button has the same behavior. A dismissed
+inspector stays closed across refreshes; selecting a request reopens it. Full
+URLs remain available in Headers and Copy URL, and host-only metadata never
+implies a captured path or query.
 
 Choose **Include headers and bodies** beside Traffic search to find a literal,
 case-insensitive value in retained request or response text. Each result names
-its first matching location; selecting a content match opens that side's Header
-or Raw body view with Find filled in. URL, method, and status remain searchable.
+its first matching location; selecting a content match opens Headers, Payload, or Response
+with Find filled in. URL, method, and status remain searchable.
 Tab, domain, and resource filters scope the search before content is inspected.
 Search never enables capture or fetches missing bodies. Binary and uncaptured
 bodies are excluded, and retained prefixes and redacted headers limit coverage.
@@ -301,13 +319,33 @@ See the [Origin Trace reference](../../docs/product/origin-trace-reference.md)
 for workspace behavior, limits, command-line options, and evidence guarantees.
 Versioned wire and storage contracts belong in [`protocol/`](../../protocol/).
 
+### Rendered Requests regression check
+
+The existing debugger checker includes offline DOM/state regressions in
+`make javascript-check`. Those checks do not claim browser interaction or pixels.
+For a real browser pass, use an installed Chrome/Chromium with its normal sandbox:
+
+```sh
+REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium)" \
+  node tools/check-origin-trace-debugger.mjs --traffic-ui-browser
+```
+
+The `requests-ui` CI job runs this mode on the existing Ubuntu runner. It serves
+only synthetic fixtures on loopback, exercises pointer and keyboard workflows,
+checks 500-row paging, lifecycle changes, selection/focus/scroll retention,
+content invalidation, empty/malformed/offline states, dismissal, narrow layouts,
+and reduced motion. Genuine rendered PNGs and a success-only `validation.json`
+are written under `build/requests-ui-qa` and uploaded as a short-lived CI artifact.
+A browser startup or sandbox error is a failed/unavailable check, never a pass;
+do not disable the sandbox to run it. Native macOS interaction remains a separate
+product-path requirement.
+
 ### Interface styling
 
-The shared shell uses neutral charcoal surfaces, thin pane dividers, and
-blue selection accents in both themes. Traffic places a full-width
-request table above the inspector, with independently scrolling panes. Compact
-resource filters share the search row on wide windows and wrap below it on
-narrow windows. Selected-field actions sit beside the evidence on wide windows
+The shared shell keeps the existing Rosé Pine Moon tokens, thin pane dividers,
+and semantic selection accents; Appearance retains the existing light theme.
+Traffic uses independently scrolling ledger and inspector panes. Compact
+resource filters stay visible below search and wrap within narrow windows. Selected-field actions sit beside the evidence on wide windows
 and below it on narrow windows. Session
 counts come from loaded requests, and sample evidence stays visibly labeled.
 Keep labels at least 10 px and reserve stronger color for selection, connection
@@ -462,17 +500,17 @@ hidden until they contain useful state. Headers and query parameters use compact
 key-value rows with per-row enable and remove controls; query rows preserve
 duplicate names and update the request URL.
 
-Traffic opens directly to inline Request and Response tabs: independently scrolling bodies on wide
-windows, and a Request/Response switch below 900 px. Body shows syntax-colored, line-numbered JSON; Raw body preserves captured text.
-Live traffic is grouped by captured browser tab, with an All tabs scope and a
-domain selector inside the active scope. Protocol v3 events carry the stable
-top-level browser tab identifier; older evidence remains available under the
-Unattributed scope. The UI retains the newest 5,000 events per refresh while
-the complete append-only evidence remains on disk.
-The pane menu offers JSON tree, Find, Wrap, and Copy. Text, JavaScript, XML, and
-HTML remain inert text, and binary records use hex. Headers and query parameters
-have separate views. Search filters visible fields or lines; selecting a leaf
-reveals its complete retained value with Copy and Decode actions. Evidence opens the existing Payload, Signals, Initiator, and Timing tools.
+Traffic's Headers tab groups General, Response Headers, and Request Headers.
+Payload keeps Query, Body, and Raw request views; Preview shows a safe JSON tree,
+formatted retained text, or the existing isolated HTML preview. Response offers
+Raw and Formatted text. Find, Wrap, Copy, field selection, Decode, and Trace value
+continue to operate on bounded retained content. Equal-length body edits and
+header-only refreshes invalidate the selected viewer without replacing its
+controls or losing its scroll position. Captured values always remain inert.
+Live traffic remains grouped by captured browser tab with an All tabs scope and
+a domain selector. Protocol v3 carries the stable top-level tab identifier;
+older evidence remains Unattributed. Evidence retains the original payload and
+trace actions; Initiator and Timing display only recorded observations.
 
 The viewer distinguishes uncaptured, redacted, loading, failed, explicitly
 empty, and truncated bodies. Its local preview is bounded to 128 KiB, 1,000 JSON
@@ -485,7 +523,7 @@ it with matching native events when their host, method, and monotonic timing
 agree. CDP body retrieval can still report unavailable content for streaming,
 evicted, cached, or protocol-internal responses rather than inventing bytes.
 
-Captured `text/html` responses also expose **Preview** beside **Raw body**.
+Captured `text/html` responses use the inspector's **Preview** tab.
 Preview reconstructs a bounded, presentation-only HTML tree inside an opaque
 sandboxed frame. It blocks scripts, navigation, submission, network resources,
 and external stylesheets; supported inline presentation styles survive.
@@ -543,13 +581,13 @@ itself an HTTP server.
 
 ## Pane sizes
 
-Drag the shared borders in Traffic, Request/Response, Repeater, Sources navigator,
+Drag the shared borders in Traffic, Repeater, Sources navigator,
 Memory criteria/results/details, and Tools Decoder to resize adjacent panes.
 The divider shows an accent on hover or keyboard focus. Tab to a divider and use
 the arrow keys along its axis; Shift changes the step from 10 to 50 pixels.
 Home or double-click restores that split's default. Escape cancels an active
-drag. Sizes persist as proportions in the local `origin-trace.layout.v1`
-preference, independently of evidence and backend state.
+drag. Traffic saves wide column and narrow row splits separately. Sizes persist as
+proportions in the local `origin-trace.layout.v1` preference, independently of evidence and backend state.
 
 Minimum pane sizes keep controls and empty states usable. The Sources toolbar
 wraps within the editor; its narrow debugger overlay starts below those controls. Saved widths are suspended when the

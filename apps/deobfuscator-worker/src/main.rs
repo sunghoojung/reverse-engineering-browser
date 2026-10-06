@@ -368,4 +368,41 @@ mod framing_tests {
         assert_eq!(responses[0]["ok"], false);
         assert_eq!(responses[1]["derived_source"], "(3)");
     }
+
+    #[test]
+    fn rejected_function_lookup_preserves_next_record() {
+        let mut input = Vec::new();
+        for request in [
+            serde_json::json!({"source": "const broken = ;", "function_at_byte": u32::MAX}),
+            serde_json::json!({"source": format!("{}0;", "!".repeat(10_000)), "function_at_byte": u32::MAX}),
+            serde_json::json!({"source": "const f = () => '雪';", "function_at_byte": 16}),
+            serde_json::json!({"source": "1+2"}),
+        ] {
+            serde_json::to_writer(&mut input, &request).unwrap();
+            input.push(b'\n');
+        }
+        let mut output = Vec::new();
+        serve(&mut Cursor::new(input), &mut output).unwrap();
+        let responses: Vec<serde_json::Value> = output
+            .split(|b| *b == b'\n')
+            .filter(|s| !s.is_empty())
+            .map(|s| serde_json::from_slice(s).unwrap())
+            .collect();
+        assert_eq!(responses.len(), 4);
+        for (response, error) in responses[..2].iter().zip(["malformed", "depth"]) {
+            assert_eq!(response["ok"], false);
+            assert_eq!(response["parsed"], false);
+            assert!(
+                response["syntax_errors"][0]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(error)
+            );
+        }
+        assert_eq!(responses[2]["ok"], true);
+        assert_eq!(responses[2]["function_location"]["kind"], "arrow_function");
+        assert_eq!(responses[2]["function_location"]["body_start"], 16);
+        assert_eq!(responses[2]["derived_source"], "");
+        assert_eq!(responses[3]["derived_source"], "(3)");
+    }
 }

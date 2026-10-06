@@ -69,6 +69,7 @@
         "profile_id": {"const": "anti-bot-vm-detection-v1"},
         "runtime_evidence_version": {"const": 2, "description": "Identity-aware retained runtime relevance; independent of structural VM scoring."},
         "runtime_rule_weights": {"type": "object", "additionalProperties": false, "required": ["antibot.runtime-canvas-webgl", "antibot.runtime-navigator-device", "antibot.runtime-web-audio"], "properties": {"antibot.runtime-canvas-webgl": {"type": "integer", "minimum": 0, "maximum": 100}, "antibot.runtime-navigator-device": {"type": "integer", "minimum": 0, "maximum": 100}, "antibot.runtime-web-audio": {"type": "integer", "minimum": 0, "maximum": 100}}},
+        "javascript_scoring_version": {"type": "integer", "const": 2, "description": "Version 2 scores same-length comment/literal-masked JavaScript regions. Absent in earlier v1 documents."},
         "candidate_threshold": {"type": "integer", "minimum": 0},
         "likely_vm_threshold": {"type": "integer", "minimum": 0},
         "likely_vm_required_families": {"type": "integer", "minimum": 1},

@@ -1019,7 +1019,7 @@ fn vm_runtime_audio_is_bounded_relevance_not_vm_structure_or_value_capture() {
                 .any(|e| e["from"] == "event:1:10:1" && e["state"] == "correlated")
         );
         assert!(!document.to_string().contains("must-not-copy"));
-        assert_eq!(document["producer"]["version"], "1.1.0");
+        assert_eq!(document["producer"]["version"], "1.1.1");
         assert_eq!(
             document["profile"]["runtime_rule_weights"]["antibot.runtime-web-audio"],
             25
@@ -1315,6 +1315,291 @@ async fn vm_http_refreshes_event_only_changes_and_agrees_with_cli() {
     std::fs::remove_file(server.root.path().join("events.jsonl")).unwrap();
     let missing: Value = server.get("/api/analysis/vm").await.json().await.unwrap();
     assert_eq!(missing, baseline);
+}
+
+fn put_vm_lexical_sources(server: &Server, sources: &[String]) -> Vec<Value> {
+    let artifacts = sources
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            let hash = hex::encode(Sha256::digest(source.as_bytes()));
+            let path = format!("blobs/{hash}.bin");
+            server.file(&format!("artifacts/{path}"), source.as_bytes());
+            json!({"protocol_version":1,"artifact_id":(index+1).to_string(),"session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"javascript","url":"https://example.test/lexical.js","mime_type":"text/javascript","byte_size":source.len(),"sha256":hash,"sensitive":false,"content_path":path})
+        })
+        .collect::<Vec<_>>();
+    let manifest = artifacts
+        .iter()
+        .map(|artifact| format!("{artifact}\n"))
+        .collect::<String>();
+    server.file("artifacts/manifest.jsonl", manifest.as_bytes());
+    server.file("events.jsonl", b"");
+    artifacts
+}
+
+#[tokio::test]
+async fn vm_lexical_scoring_ignores_comments_strings_and_raw_templates() {
+    let server = Server::start().await;
+    let ghost = "while (x) { switch (code[pc++]) { case 1: stack.push(1); return; } }";
+    let mut sources = Vec::new();
+    for inert in [
+        format!("/* {ghost} */"),
+        format!("// {ghost}\n"),
+        format!("const text = '{ghost}';"),
+        format!("const text = \"{ghost}\";"),
+        format!("const text = `{ghost}`;"),
+    ] {
+        sources.push(inert.clone());
+        sources.push(format!("function harmless() {{ {inert}\n }}"));
+    }
+    put_vm_lexical_sources(&server, &sources);
+    let document: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server.get("/api/analysis/vm").await,
+            "get",
+            "/api/analysis/vm",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(document["results"].as_array().unwrap().len(), sources.len());
+    for (result, source) in document["results"].as_array().unwrap().iter().zip(&sources) {
+        assert_eq!(result["status"], "complete", "{source}");
+        assert_eq!(result["tier"], "none", "{source}");
+        assert_eq!(result["vm_score"], 0, "{source}");
+        assert_eq!(result["observations"], json!([]), "{source}");
+        assert_eq!(result["evidence_families"], json!([]), "{source}");
+    }
+}
+
+#[tokio::test]
+async fn vm_lexical_scoring_preserves_positive_evidence_and_utf8_coordinates() {
+    let server = Server::start().await;
+    let ghost = "🧪 한글 switch (code[pc++]) { case 1: stack.push(1); return; }";
+    let noise = [
+        String::new(),
+        format!("/* {ghost} */"),
+        format!("// {ghost}\n"),
+        format!("const text = '{ghost}';"),
+        format!("const text = \"{ghost}\";"),
+        format!("const text = `{ghost}`;"),
+    ];
+    let sources = noise
+        .iter()
+        .map(|inert| format!("const π = 1; /* 前置 */\nfunction run(code, pc, stack, table) {{\n{inert}\nwhile (pc < code.length) {{ const opcode = code[pc++]; table[opcode](stack); stack.push(1); }}\n}}"))
+        .collect::<Vec<_>>();
+    put_vm_lexical_sources(&server, &sources);
+    let document: Value = server.get("/api/analysis/vm").await.json().await.unwrap();
+    let results = document["results"].as_array().unwrap();
+    assert_eq!(results.len(), sources.len());
+    let baseline = &results[0];
+    assert_eq!(baseline["tier"], "likely-vm");
+    assert_eq!(baseline["vm_score"], 75);
+    assert_eq!(
+        baseline["evidence_families"],
+        json!(["bytecode", "dispatch", "instruction-pointer", "state"])
+    );
+    for ((result, source), inert) in results.iter().zip(&sources).zip(&noise) {
+        assert_eq!(result["tier"], baseline["tier"]);
+        assert_eq!(result["vm_score"], baseline["vm_score"]);
+        assert_eq!(result["evidence_families"], baseline["evidence_families"]);
+        assert_eq!(result["coverage"]["observed_bytes"], source.len());
+        let observations = result["observations"].as_array().unwrap();
+        let original = baseline["observations"].as_array().unwrap();
+        assert_eq!(observations.len(), original.len());
+        for (observation, expected) in observations.iter().zip(original) {
+            let start = observation["coordinate"]["byte_offset"].as_u64().unwrap() as usize;
+            let size = observation["coordinate"]["byte_size"].as_u64().unwrap() as usize;
+            let old_start = expected["coordinate"]["byte_offset"].as_u64().unwrap() as usize;
+            assert_eq!(start, old_start + inert.len());
+            assert_eq!(
+                source.get(start..start + size).unwrap(),
+                sources[0].get(old_start..old_start + size).unwrap()
+            );
+            let mut normalized = observation.clone();
+            normalized["coordinate"] = expected["coordinate"].clone();
+            normalized["function_region"] = expected["function_region"].clone();
+            assert_eq!(&normalized, expected, "{source}");
+            let region = &observation["function_region"];
+            let region_start = region["byte_offset"].as_u64().unwrap() as usize;
+            let region_size = region["byte_size"].as_u64().unwrap() as usize;
+            assert_eq!(region_start, source.find("{\n").unwrap() + 1);
+            assert_eq!(region_start + region_size, source.len() - 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn vm_lexical_scoring_retains_dispatch_families_and_original_artifacts() {
+    let server = Server::start().await;
+    let prefix = "const π = '🧪'; /* 字节 */\nconst code = Uint8Array.of(0, 255, 0x80, 127);\n";
+    let sources = [
+        "function run() { let pc = 0, stack = []; while (pc < code.length) { switch (code[pc++]) { case 0: stack.push(1); return stack; } } }",
+        "function run() { let pc = 0, stack = []; const handlers = [load, halt]; while (pc < code.length) { const opcode = code[pc++]; handlers[opcode](stack); stack.push(1); if (!stack.length) return; } }",
+        "const run = () => { let pc = 0, registers = []; const handlers = {load, halt}; for (;;) { const opcode = code[pc++]; handlers[opcode](registers); registers[0] = 1; if (!registers.length) break; } };",
+        "function run() { let pc = 0, stack = []; while (pc < code.length) { switch (code[pc++]) { case 'load': stack.push(1); return stack; } } }",
+    ]
+    .iter()
+    .map(|source| format!("{prefix}{source}"))
+    .collect::<Vec<_>>();
+    let artifacts = put_vm_lexical_sources(&server, &sources);
+    let manifest_path = server.root.path().join("artifacts/manifest.jsonl");
+    let manifest = std::fs::read(&manifest_path).unwrap();
+    let response = server.get("/api/analysis/vm").await;
+    let etag = response.headers()["etag"].clone();
+    let document: Value = serde_json::from_slice(
+        &assert_contract_response(response, "get", "/api/analysis/vm", 200).await,
+    )
+    .unwrap();
+    let schema: Value =
+        serde_json::from_str(include_str!("../../../protocol/vm-analysis-v1.schema.json")).unwrap();
+    assert_eq!(document["results"].as_array().unwrap().len(), sources.len());
+    jsonschema::validator_for(&schema)
+        .unwrap()
+        .validate(&document)
+        .unwrap();
+    assert_eq!(document["producer"]["version"], "1.1.1");
+    assert_eq!(document["profile"]["javascript_scoring_version"], 2);
+    assert_eq!(document["profile"]["runtime_evidence_version"], 2);
+    let profile = origin_trace_backend::vm::canonical(&document["profile"]).unwrap();
+    assert_eq!(
+        document["profile_digest"],
+        hex::encode(Sha256::digest(&profile))
+    );
+    let mut prior_profile = document["profile"].clone();
+    prior_profile
+        .as_object_mut()
+        .unwrap()
+        .remove("javascript_scoring_version");
+    assert_ne!(
+        document["profile_digest"],
+        hex::encode(Sha256::digest(
+            origin_trace_backend::vm::canonical(&prior_profile).unwrap()
+        ))
+    );
+    // Unchanged evidence must remain deterministic, including the public ETag.
+    assert_contract_response(
+        server
+            .client
+            .get(format!("{}/api/analysis/vm", server.url))
+            .header("If-None-Match", etag)
+            .send()
+            .await
+            .unwrap(),
+        "get",
+        "/api/analysis/vm",
+        304,
+    )
+    .await;
+    let output = server.root.path().join("cli.json");
+    let cli = Command::new(env!("CARGO_BIN_EXE_origin-trace-vm"))
+        .arg("--artifacts")
+        .arg(server.root.path().join("artifacts"))
+        .arg("--events")
+        .arg(server.root.path().join("events.jsonl"))
+        .arg("--output")
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        cli.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    let cli_document: Value = serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
+    assert_eq!(document, cli_document);
+    assert_eq!(std::fs::read(manifest_path).unwrap(), manifest);
+    assert_eq!(
+        std::fs::read(server.root.path().join("events.jsonl")).unwrap(),
+        b""
+    );
+    for ((result, artifact), source) in document["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(&artifacts)
+        .zip(&sources)
+    {
+        assert_eq!(result["status"], "complete");
+        assert_eq!(result["tier"], "likely-vm");
+        assert_eq!(result["vm_score"], 95);
+        assert_eq!(
+            result["evidence_families"],
+            json!([
+                "bytecode",
+                "dispatch",
+                "exits",
+                "handlers",
+                "instruction-pointer",
+                "state"
+            ])
+        );
+        assert_eq!(result["artifact_sha256"], artifact["sha256"]);
+        let snapshot = &result["bytecode_snapshot"];
+        assert_eq!(snapshot["snapshot_hex"], "00ff807f");
+        assert_eq!(snapshot["original_byte_count"], 4);
+        assert_eq!(
+            snapshot["sha256"],
+            hex::encode(Sha256::digest([0, 255, 128, 127]))
+        );
+        assert_eq!(
+            snapshot["producer"]["byte_offset"],
+            source.find("Uint8Array.of").unwrap()
+        );
+        assert_eq!(snapshot["truncated"], false);
+        let stored = server
+            .root
+            .path()
+            .join("artifacts")
+            .join(artifact["content_path"].as_str().unwrap());
+        assert_eq!(std::fs::read(stored).unwrap(), source.as_bytes());
+        assert_eq!(
+            server
+                .get(&format!(
+                    "/api/artifacts/{}/content",
+                    artifact["artifact_id"].as_str().unwrap()
+                ))
+                .await
+                .bytes()
+                .await
+                .unwrap()
+                .as_ref(),
+            source.as_bytes()
+        );
+    }
+}
+
+#[tokio::test]
+async fn vm_lexical_scoring_preserves_region_failures_and_limits() {
+    let server = Server::start().await;
+    let sources = vec![
+        "function broken() { while (code[pc++]) { stack.push(1); }".into(),
+        "function harmless() {}\n".repeat(4098),
+        "function loop() { while (true) {} } function dispatch() { switch (code[pc++]) { case 1: stack.push(1); return; } }".into(),
+    ];
+    put_vm_lexical_sources(&server, &sources);
+    let document: Value = server.get("/api/analysis/vm").await.json().await.unwrap();
+    let results = document["results"].as_array().unwrap();
+    assert_eq!(results.len(), sources.len());
+    assert_eq!(results[0]["status"], "failed");
+    assert_eq!(results[0]["error"]["code"], "malformed-artifact");
+    assert_eq!(results[1]["status"], "partial");
+    assert_eq!(results[1]["tier"], "none");
+    assert_eq!(results[1]["coverage"]["complete"], false);
+    assert_eq!(
+        results[1]["coverage"]["omissions"][0]["reason"],
+        "javascript-function-region-limit"
+    );
+    assert_eq!(results[2]["tier"], "candidate");
+    assert_eq!(results[2]["vm_score"], 75);
+    assert!(
+        !results[2]["observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["rule_id"] == "js.dispatch-loop")
+    );
 }
 
 #[tokio::test]

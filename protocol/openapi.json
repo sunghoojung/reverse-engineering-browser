@@ -2872,6 +2872,11 @@
               "profile_id": {
                 "const": "anti-bot-vm-detection-v1"
               },
+              "javascript_scoring_version": {
+                "type": "integer",
+                "const": 2,
+                "description": "Version 2 scores same-length comment/literal-masked JavaScript regions. Absent in earlier v1 documents."
+              },
               "candidate_threshold": {
                 "type": "integer",
                 "minimum": 0

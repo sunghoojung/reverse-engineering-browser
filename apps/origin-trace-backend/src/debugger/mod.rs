@@ -14,7 +14,7 @@ mod workers;
 use crate::{
     config::Options,
     durable,
-    error::{Error, Result},
+    error::{Code, Error, Result},
     validation,
 };
 use connection::{Connection, Event};
@@ -349,12 +349,9 @@ impl Debugger {
             .await
     }
     async fn command_for(&self, method: &str, params: Value, deadline: Duration) -> Result<Value> {
-        let connection = self
-            .connection
-            .lock()
-            .await
-            .clone()
-            .ok_or_else(|| Error::conflict("Debugger target is unavailable"))?;
+        let connection = self.connection.lock().await.clone().ok_or_else(|| {
+            Error::conflict("Debugger target is unavailable").with_code(Code::TargetUnavailable)
+        })?;
         connection.command(method, params, deadline).await
     }
     async fn browser_command(&self, method: &str, params: Value) -> Result<Value> {
@@ -372,7 +369,9 @@ impl Debugger {
             .as_array()
             .and_then(|a| a.iter().find(|s| s["script_id"] == id))
             .cloned()
-            .ok_or_else(|| Error::conflict("Script is unavailable"))?;
+            .ok_or_else(|| {
+                Error::conflict("Script is unavailable").with_code(Code::TargetUnavailable)
+            })?;
         if script["length"].as_u64().unwrap_or(0) > 2097152 {
             return Err(Error::conflict(
                 "Live script exceeds the 2 MiB viewer limit",
@@ -383,7 +382,9 @@ impl Debugger {
             .and_then(Value::as_str)
             .map(str::to_owned)
             .or_else(|| self.snapshot()["target"]["id"].as_str().map(str::to_owned))
-            .ok_or_else(|| Error::conflict("Debugger target is unavailable"))?;
+            .ok_or_else(|| {
+                Error::conflict("Debugger target is unavailable").with_code(Code::TargetUnavailable)
+            })?;
         let session = self.hook_session(&target).await?;
         let result = session
             .command(
@@ -531,7 +532,8 @@ impl Debugger {
                     && self.snapshot()["settings"][key].as_array().unwrap().len()
                         >= if xhr { 100 } else { 256 }
                 {
-                    return Err(Error::conflict("Debugger breakpoint limit reached"));
+                    return Err(Error::conflict("Debugger breakpoint limit reached")
+                        .with_code(Code::ResourceLimit));
                 }
                 let method = match action {
                     "set_xhr_breakpoint" => "DOMDebugger.setXHRBreakpoint",
@@ -557,7 +559,8 @@ impl Debugger {
             }
             "add_watch" => {
                 if self.snapshot()["watches"].as_array().unwrap().len() >= 100 {
-                    return Err(Error::conflict("Watch expression limit reached"));
+                    return Err(Error::conflict("Watch expression limit reached")
+                        .with_code(Code::ResourceLimit));
                 }
                 self.update(|s| {let id=self.watch_id.fetch_add(1,Ordering::Relaxed);s["watches"].as_array_mut().unwrap().push(json!({"id":id.to_string(),"expression":request["expression"],"result":null,"error":null}));});
             }
@@ -579,7 +582,8 @@ impl Debugger {
                     .iter()
                     .any(|t| t["id"] == id)
                 {
-                    return Err(Error::conflict("Debugger target is unavailable"));
+                    return Err(Error::conflict("Debugger target is unavailable")
+                        .with_code(Code::TargetUnavailable));
                 }
                 self.clear_object_search().await;
                 self.heap

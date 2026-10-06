@@ -66,3 +66,45 @@ bounded inert decoding. The native app bundles the same helper; see
 [WASM Inspection v1](../../protocol/wasm-inspection-v1.md) for limits and
 coverage semantics. HTTP tests verify offsets, imported function numbering,
 CLI parity, malformed and oversized input, partial coverage, and corruption.
+
+API failures preserve their HTTP status and human `error` text and add stable
+`code` and bounded `details` fields. The shared envelope and enum live in
+`src/error.rs` and the OpenAPI `Error`, `ErrorCode`, and `ErrorDetails` schemas.
+Codes are selected at known failure branches, never by matching error prose.
+Legacy paths without a precise reason use `unspecified` or their existing
+constructor's coarse `invalid_request`, `state_conflict`, or `protocol_error`.
+The initial precise coverage is workspace generation conflicts, unavailable
+selected debugger targets and helpers, debugger/worker resource limits,
+worker cancellation/deadlines, POST body deadlines, and uncertain debugger or
+native-console exchanges. No ambiguous-target classification is inferred from
+an ordinary missing-target result, and target selection behavior is unchanged.
+
+A `timeout` with `details.phase=request_body` happens before action dispatch.
+An interrupted queued/partial write or a command whose reply is lost, malformed, or late has
+`command_outcome_unknown`; it may already have had effects. No code is a retry
+instruction or a rollback/no-op guarantee. Worker cancellation and deadlines
+also do not undo work already performed. Existing effect/prerequisite metadata
+still governs which action may be taken.
+
+Analyst, JWT Decoder and native Console application failures keep HTTP 200 and
+their existing `ok`, `outcome`, `status`, `runtime.status` and text fields, and
+add the same reason fields. Clients must inspect the application result as well
+as HTTP status. `reb-api call` continues to print successful HTTP JSON and keep
+its existing transport-based exit status; non-2xx errors retain their stderr
+format. Offline `reb-api spec` and `describe` include the reason contracts.
+Details contain only fixed enum values and validated generation numbers, never
+inputs, URLs, credentials, capture content, diagnostics or stack traces.
+
+For machine-readable non-2xx HTTP errors, use `reb-api call ... --json-errors`.
+This opt-in mode emits one JSON object on stderr with `http_status`, allowlisted
+`code`/`details`, a human `error` limited to 512 UTF-8 bytes, and an explicit
+`error_truncated` boolean. Legacy errors fall back to `unspecified`; malformed
+or non-JSON bodies get a fixed diagnostic rather than a raw body dump. Unknown
+reason details are discarded. This flag cannot be combined with `--show-headers`.
+Default stderr, success stdout (including HTTP 200 application failures), and
+exit codes are unchanged: 0 for successful HTTP transport, 1 for non-2xx HTTP,
+2 for CLI/connection/read failures. Response ingestion remains capped at 64 MiB.
+For non-2xx responses whose body cannot be read within the existing timeout/size
+limit, JSON mode emits a fixed safe diagnostic with the observed HTTP status and
+keeps exit 2. Preflight and connection failures before HTTP headers keep ordinary
+CLI diagnostics and exit 2; no HTTP status is invented. Commands are never retried.

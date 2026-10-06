@@ -1,6 +1,6 @@
 use crate::{
     config::Options,
-    error::{Error, Result},
+    error::{Cause, Code, Error, Reason, Result},
     validation, worker,
 };
 use serde_json::{Value, json};
@@ -37,7 +37,10 @@ impl OwnedProcess {
             .kill_on_drop(true)
             .process_group(0)
             .spawn()
-            .map_err(|_| Error::new(503, "Native console process could not start"))?;
+            .map_err(|_| {
+                Error::new(503, "Native console process could not start")
+                    .with_code(Code::DependencyUnavailable)
+            })?;
         let group = i32::try_from(
             child
                 .id()
@@ -86,9 +89,9 @@ impl Session {
         // poisoned. Never retry an expression or reuse an ambiguous pipe.
         self.poisoned = true;
         let id = self.next_request;
-        self.next_request = id
-            .checked_add(1)
-            .ok_or_else(|| Error::conflict("Native request IDs exhausted"))?;
+        self.next_request = id.checked_add(1).ok_or_else(|| {
+            Error::conflict("Native request IDs exhausted").with_code(Code::ResourceLimit)
+        })?;
         let mut header = [0u8; 32];
         header[0..4].copy_from_slice(&MAGIC.to_le_bytes());
         header[4..6].copy_from_slice(&2u16.to_le_bytes());
@@ -109,8 +112,15 @@ impl Session {
             let mut value = parsed.value(&payload, &self.id)?;
             if parsed.kind == 11 { value["request_id"] = json!(id.to_string()); }
             Ok(value)
-        }).await.map_err(|_| Error::new(408, "Native console timed out; execution may have occurred. Restart the session"))?
-          .map_err(|e: Error| Error::new(e.status, if e.status == 500 { "Native browser or console disconnected; rebuild Brave with native console support".to_owned() } else { e.message }))?;
+        }).await.map_err(|_| Error::new(408, "Native console timed out; execution may have occurred. Restart the session").with_reason(Reason::uncertain(Cause::Timeout)))?
+          .map_err(|mut e: Error| {
+              if e.status == 500 { e.message = "Native browser or console disconnected; rebuild Brave with native console support".to_owned(); }
+              if e.reason.code != Code::CommandOutcomeUnknown {
+                  let cause = if e.reason.code == Code::ProtocolError { Cause::InvalidReply } else { Cause::TransportFailure };
+                  e = e.with_reason(Reason::uncertain(cause));
+              }
+              e
+          })?;
         self.poisoned = false;
         Ok(result)
     }
@@ -170,7 +180,12 @@ impl ResponseHeader {
         if parsed.status == 6 || (parsed.status == 5 && parsed.bytes == 0) {
             return Err(Error::conflict(
                 "Native session retired; restart it. Execution may have occurred",
-            ));
+            )
+            .with_reason(Reason::uncertain(if parsed.status == 5 {
+                Cause::Timeout
+            } else {
+                Cause::Disconnected
+            })));
         }
         Ok(parsed)
     }
@@ -214,9 +229,15 @@ impl ResponseHeader {
             if !runtime.is_object() || self.status != 0 {
                 return Err(Error::protocol("Invalid runtime envelope"));
             }
-            return Ok(
-                json!({"contract_version":2,"session_id":session,"state":"ready","runtime":runtime}),
+            let failed = matches!(
+                runtime["status"].as_str(),
+                Some("error" | "exception" | "rejected")
             );
+            let mut result = json!({"contract_version":2,"session_id":session,"state":"ready","runtime":runtime});
+            if failed {
+                Reason::new(Code::ApplicationFailed).annotate(&mut result);
+            }
+            return Ok(result);
         }
         let types = [
             "undefined",
@@ -241,10 +262,21 @@ impl ResponseHeader {
         ];
         let text = std::str::from_utf8(payload)
             .map_err(|_| Error::protocol("Native result is not UTF-8"))?;
-        Ok(
-            json!({"contract_version":2,"session_id":session,"state":"ready","status":statuses[self.status as usize],
-            "type":types[self.kind as usize],"text":text,"truncated":self.truncated}),
-        )
+        let mut result = json!({"contract_version":2,"session_id":session,"state":"ready","status":statuses[self.status as usize],
+            "type":types[self.kind as usize],"text":text,"truncated":self.truncated});
+        let reason = match self.status {
+            1 => Some(Reason::new(Code::InvalidRequest)),
+            2 => Some(Reason::new(Code::TargetUnavailable)),
+            3 => Some(Reason::new(Code::StateConflict)),
+            4 => Some(Reason::new(Code::ApplicationFailed)),
+            5 => Some(Reason::uncertain(Cause::Timeout)),
+            6 => Some(Reason::uncertain(Cause::Disconnected)),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            reason.annotate(&mut result);
+        }
+        Ok(result)
     }
 }
 
@@ -305,7 +337,7 @@ impl NativeConsole {
                 return Err(Error::new(
                     503,
                     "Native console requires its bundled helper and a rebuilt custom Brave executable",
-                ));
+                ).with_code(Code::DependencyUnavailable));
             }
             let address = validation::text(&request["url"], "Console URL", 4096, false, false)?;
             let url =
@@ -515,4 +547,83 @@ fn validate_command(command: &Value) -> Result<()> {
         validation::text(&command["prefix"], "Completion prefix", 128, true, false)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wire_status_reasons_preserve_native_application_text() {
+        for (status, code) in [
+            (1, "invalid_request"),
+            (2, "target_unavailable"),
+            (3, "state_conflict"),
+            (4, "application_failed"),
+            (5, "command_outcome_unknown"),
+        ] {
+            let header = ResponseHeader {
+                status,
+                kind: 0,
+                truncated: false,
+                count: 0,
+                bytes: 0,
+            };
+            let result = header.value(b"synthetic private value", "1").unwrap();
+            assert_eq!(result["text"], "synthetic private value");
+            assert_eq!(result["code"], code);
+            assert!(!result["details"].to_string().contains("private"));
+            if status == 5 {
+                assert_eq!(
+                    result["details"],
+                    json!({"phase":"command_exchange","cause":"timeout"})
+                );
+            }
+        }
+        let header = ResponseHeader {
+            status: 0,
+            kind: 0,
+            truncated: false,
+            count: 0,
+            bytes: 0,
+        };
+        let result = header.value(b"success", "1").unwrap();
+        assert!(result.get("code").is_none());
+        assert!(result.get("details").is_none());
+    }
+    #[test]
+    fn runtime_failure_details_do_not_copy_runtime_content() {
+        let header = ResponseHeader {
+            status: 0,
+            kind: 11,
+            truncated: false,
+            count: 0,
+            bytes: 0,
+        };
+        let payload = br#"{"status":"exception","text":"synthetic private text","stack":[]}"#;
+        let result = header.value(payload, "1").unwrap();
+        assert_eq!(
+            result["runtime"],
+            serde_json::from_slice::<Value>(payload).unwrap()
+        );
+        assert_eq!(result["code"], "application_failed");
+        assert_eq!(result["details"], json!({}));
+    }
+    #[test]
+    fn retired_session_does_not_claim_the_command_had_no_effect() {
+        for (status, cause) in [(5u16, "timeout"), (6, "disconnected")] {
+            let mut bytes = [0; 32];
+            bytes[..4].copy_from_slice(&MAGIC.to_le_bytes());
+            bytes[4..6].copy_from_slice(&2u16.to_le_bytes());
+            bytes[6..8].copy_from_slice(&status.to_le_bytes());
+            bytes[8..16].copy_from_slice(&1u64.to_le_bytes());
+            let error = ResponseHeader::parse(&bytes, 1, 2).err().unwrap();
+            assert_eq!(error.status, 409);
+            assert_eq!(error.reason.code, Code::CommandOutcomeUnknown);
+            assert_eq!(
+                serde_json::to_value(error).unwrap()["details"],
+                json!({"phase":"command_exchange","cause":cause})
+            );
+        }
+    }
 }

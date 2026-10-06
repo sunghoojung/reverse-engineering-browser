@@ -2764,11 +2764,21 @@
         "properties": {
           "error": {
             "type": "string"
+          },
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "details": {
+            "$ref": "#/components/schemas/ErrorDetails"
           }
         },
         "required": [
-          "error"
-        ]
+          "error",
+          "code",
+          "details"
+        ],
+        "additionalProperties": false,
+        "description": "Additive machine-readable reasons preserve the existing HTTP status and human error text. Reasons are assigned from known failure branches, never by parsing prose. Unspecified covers legacy failures without a precise classification. Neither HTTP status nor a code authorizes automatic retry; command_outcome_unknown means execution may have occurred."
       },
       "SafeInteger": {
         "type": "integer",
@@ -5063,6 +5073,12 @@
               },
               "duration_us": {
                 "type": "integer"
+              },
+              "code": {
+                "$ref": "#/components/schemas/ErrorCode"
+              },
+              "details": {
+                "$ref": "#/components/schemas/ErrorDetails"
               }
             },
             "required": [
@@ -5071,7 +5087,28 @@
               "token",
               "error",
               "duration_us"
-            ]
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "ok": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "code",
+                    "details"
+                  ]
+                }
+              }
+            ],
+            "description": " Failed application results retain their existing HTTP 200 transport and human text and add code/details. Success results are unchanged."
           },
           {
             "type": "object",
@@ -5106,6 +5143,12 @@
               },
               "duration_us": {
                 "type": "integer"
+              },
+              "code": {
+                "$ref": "#/components/schemas/ErrorCode"
+              },
+              "details": {
+                "$ref": "#/components/schemas/ErrorDetails"
               }
             },
             "required": [
@@ -5119,7 +5162,28 @@
               "signature_bytes",
               "error",
               "duration_us"
-            ]
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "ok": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "code",
+                    "details"
+                  ]
+                }
+              }
+            ],
+            "description": " Failed application results retain their existing HTTP 200 transport and human text and add code/details. Success results are unchanged."
           }
         ],
         "description": "JWT failures can be returned as HTTP 200 with ok=false; inspect the result, not only HTTP status."
@@ -6084,6 +6148,12 @@
           },
           "error": {
             "type": "string"
+          },
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "details": {
+            "$ref": "#/components/schemas/ErrorDetails"
           }
         },
         "required": [
@@ -6100,7 +6170,28 @@
           "logs_truncated",
           "duration_ms",
           "error"
-        ]
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": false
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "required": [
+                "code",
+                "details"
+              ]
+            }
+          }
+        ],
+        "description": " Failed application results retain their existing HTTP 200 transport and human text and add code/details. Success results are unchanged."
       },
       "AnalystResult": {
         "anyOf": [
@@ -12192,6 +12283,12 @@
           },
           "truncated": {
             "type": "boolean"
+          },
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "details": {
+            "$ref": "#/components/schemas/ErrorDetails"
           }
         },
         "required": [
@@ -12202,7 +12299,30 @@
           "type",
           "text",
           "truncated"
-        ]
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "not": {
+                    "const": "ok"
+                  }
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "required": [
+                "code",
+                "details"
+              ]
+            }
+          }
+        ],
+        "description": " Failed application results retain their existing HTTP 200 transport and human text and add code/details. Success results are unchanged."
       },
       "NativeConsoleAction": {
         "oneOf": [
@@ -12984,6 +13104,12 @@
             "required": [
               "status"
             ]
+          },
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "details": {
+            "$ref": "#/components/schemas/ErrorDetails"
           }
         },
         "required": [
@@ -12992,7 +13118,39 @@
           "request_id",
           "state",
           "runtime"
-        ]
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "runtime": {
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "error",
+                        "exception",
+                        "rejected"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
+                }
+              },
+              "required": [
+                "runtime"
+              ]
+            },
+            "then": {
+              "required": [
+                "code",
+                "details"
+              ]
+            }
+          }
+        ],
+        "description": " Failed application results retain their existing HTTP 200 transport and human text and add code/details. Success results are unchanged."
       },
       "RebExecutionMetadata": {
         "type": "object",
@@ -13205,6 +13363,55 @@
             }
           }
         ]
+      },
+      "ErrorCode": {
+        "type": "string",
+        "enum": [
+          "unspecified",
+          "invalid_request",
+          "state_conflict",
+          "protocol_error",
+          "stale_generation",
+          "target_unavailable",
+          "dependency_unavailable",
+          "resource_limit",
+          "timeout",
+          "cancelled",
+          "command_outcome_unknown",
+          "application_failed"
+        ],
+        "description": "Stable bounded application reason. invalid_request/state_conflict/protocol_error are coarse classifications; precise reasons are only supplied by migrated source paths. application_failed does not imply rollback or no side effects. A command-exchange timeout or lost/malformed reply uses command_outcome_unknown, not a confirmed-no-op claim. This can include interrupted queued or partial writes and does not prove a send completed."
+      },
+      "ErrorDetails": {
+        "type": "object",
+        "additionalProperties": false,
+        "maxProperties": 4,
+        "properties": {
+          "phase": {
+            "type": "string",
+            "enum": [
+              "request_body",
+              "worker",
+              "command_exchange"
+            ]
+          },
+          "cause": {
+            "type": "string",
+            "enum": [
+              "timeout",
+              "disconnected",
+              "transport_failure",
+              "invalid_reply"
+            ]
+          },
+          "expected_generation": {
+            "$ref": "#/components/schemas/SafeInteger"
+          },
+          "current_generation": {
+            "$ref": "#/components/schemas/SafeInteger"
+          }
+        },
+        "description": "Allowlisted bounded metadata only. Empty when no detail is known. No arbitrary strings, target URLs or IDs, submitted inputs, credentials, raw captures, diagnostics, or stacks. request_body timeout is before action dispatch; command_exchange uncertainty covers interrupted queued/partial writes and missing or malformed replies; it cannot establish whether an action happened. Worker termination does not undo prior effects."
       }
     }
   },

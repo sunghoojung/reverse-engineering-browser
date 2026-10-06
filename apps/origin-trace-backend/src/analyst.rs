@@ -1,6 +1,6 @@
 use crate::{
     config::Options,
-    error::{Error, Result},
+    error::{Code, Error, Phase, Reason, Result},
     validation, worker, workspace,
 };
 use serde_json::{Value, json};
@@ -104,6 +104,7 @@ impl Analyst {
                 503,
                 "Local analyst execution requires the native runner or Node.js 22 or newer",
             )
+            .with_code(Code::DependencyUnavailable)
         })?;
         let (sender, mut receiver) = watch::channel(false);
         {
@@ -172,13 +173,13 @@ impl Analyst {
         )
         .await;
         match result {
-            Err(e) if e.status == 499 => Ok(failure(
+            Err(e) if e.reason.code == Code::Cancelled => Ok(failure(
                 &request,
                 "cancelled",
                 "Analyst script cancelled",
                 started.elapsed().as_millis() as u64,
             )),
-            Err(e) if e.status == 408 => Ok(failure(
+            Err(e) if e.reason.code == Code::Timeout => Ok(failure(
                 &request,
                 "timed_out",
                 "Analyst script exceeded the 2 second execution limit",
@@ -186,7 +187,7 @@ impl Analyst {
             )),
             Err(e) => Err(e),
             Ok(output) => {
-                let result: Value = serde_json::from_slice(&output.bytes).map_err(|_| {
+                let mut result: Value = serde_json::from_slice(&output.bytes).map_err(|_| {
                     Error::protocol(if output.stderr.is_empty() {
                         "Analyst runner returned malformed output".into()
                     } else {
@@ -194,6 +195,7 @@ impl Analyst {
                     })
                 })?;
                 validate_result(&result, &request)?;
+                annotate_failure(&mut result);
                 Ok(result)
             }
         }
@@ -308,7 +310,11 @@ fn normalize(value: &Value, workspace: &Value) -> Result<Value> {
     if workspace["generation"] != generation {
         return Err(Error::conflict(
             "Analyst workspace changed; refresh before running the saved script",
-        ));
+        )
+        .with_reason(Reason::stale(
+            generation,
+            workspace["generation"].as_u64().unwrap(),
+        )));
     }
     if !workspace["files"].as_array().is_some_and(|a| {
         a.iter().any(|f| {
@@ -412,5 +418,16 @@ fn validate_result(value: &Value, request: &Value) -> Result<()> {
     Ok(())
 }
 fn failure(request: &Value, outcome: &str, message: &str, duration: u64) -> Value {
-    json!({"protocol_version":1,"run_id":request["run_id"],"script_id":request["script_id"],"library_generation":request["library_generation"],"ok":false,"outcome":outcome,"result_type":"error","result_text":"","result_truncated":false,"logs":[],"logs_truncated":false,"duration_ms":duration.min(7000),"error":validation::truncate(message,512)})
+    let mut result = json!({"protocol_version":1,"run_id":request["run_id"],"script_id":request["script_id"],"library_generation":request["library_generation"],"ok":false,"outcome":outcome,"result_type":"error","result_text":"","result_truncated":false,"logs":[],"logs_truncated":false,"duration_ms":duration.min(7000),"error":validation::truncate(message,512)});
+    annotate_failure(&mut result);
+    result
+}
+fn annotate_failure(value: &mut Value) {
+    let code = match value["outcome"].as_str() {
+        Some("cancelled") => Code::Cancelled,
+        Some("timed_out") => Code::Timeout,
+        Some("failed") => Code::ApplicationFailed,
+        _ => return,
+    };
+    Reason::at(code, Phase::Worker).annotate(value);
 }

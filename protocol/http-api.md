@@ -90,6 +90,32 @@ five-second manifest or thirty-second verification deadline expires.
 This is not HTTP Range/206 pagination. Events and artifacts expose a bounded
 recent tail, not a cursor or stable exhaustive export.
 
+## Error reasons and uncertain outcomes
+
+JSON error responses retain their existing HTTP status and human `error` text,
+and add `code` and bounded `details`. `ErrorCode` and `ErrorDetails` in the
+OpenAPI document own these fields. Precise reasons are assigned only where the
+source establishes the failure; legacy cases may use `unspecified` or a coarse
+reason. A request-body timeout is before action dispatch. Interrupted command
+writes or missing/malformed replies can have `command_outcome_unknown`; this
+never proves no effect or authorizes a retry. Dynamic failure reasons do not
+replace the [advisory effects and common guards](#execution-metadata).
+
+Analyst, JWT Decoder and native Console application failures can remain HTTP
+200. Inspect their existing `ok`, `outcome`, `status` or `runtime.status` fields
+as well as their added reason. Success results are unchanged.
+
+For structured CLI errors, `reb-api call ... --json-errors` prints a bounded
+JSON object on stderr with the observed `http_status`, allowlisted `code` and
+`details`, a human `error` capped at 512 UTF-8 bytes, and `error_truncated`.
+Default stderr and successful stdout remain unchanged. Completed non-2xx
+responses exit 1; body-read/size failures after non-2xx headers produce a fixed
+safe JSON diagnostic and keep exit 2. Preflight/connection failures before
+headers retain ordinary CLI diagnostics and exit 2, with no invented status.
+The flag conflicts with `--show-headers`; neither headers nor arbitrary body
+fields are included. HTTP 200 application failures still use stdout and exit 0.
+Response reads remain capped at 64 MiB; commands are never automatically retried.
+
 ## Authentication and locality
 
 There is **no bearer token, API key, login, or OAuth scheme** on this HTTP API.

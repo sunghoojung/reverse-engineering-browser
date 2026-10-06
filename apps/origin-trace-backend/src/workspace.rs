@@ -1,6 +1,6 @@
 use crate::{
     durable,
-    error::{Error, Result},
+    error::{Code, Error, Reason, Result},
     validation::{self, MAX_SAFE_INTEGER},
 };
 use serde_json::{Value, json};
@@ -125,6 +125,10 @@ impl Store {
             return Err(Error::conflict(format!(
                 "{} changed in another window; refresh before saving",
                 kind.root()
+            ))
+            .with_reason(Reason::stale(
+                generation,
+                current["generation"].as_u64().unwrap(),
             )));
         }
         let folders = array(&request["folders"], 32, "Workspace folders")?
@@ -158,7 +162,7 @@ impl Store {
         }
         let candidate = normalize(
             kind,
-            &json!({"contract_version":1,"document_kind":kind.document(),"generation":generation.checked_add(1).ok_or_else(||Error::bad("Workspace generation exhausted"))?,"updated_at_ms":now,"folders":folders,items:values,"limits":kind.limits()}),
+            &json!({"contract_version":1,"document_kind":kind.document(),"generation":generation.checked_add(1).ok_or_else(||Error::bad("Workspace generation exhausted").with_code(Code::ResourceLimit))?,"updated_at_ms":now,"folders":folders,items:values,"limits":kind.limits()}),
         )?;
         if candidate["folders"] == current["folders"] && candidate[items] == current[items] {
             return Ok(current);
@@ -166,7 +170,9 @@ impl Store {
         let mut bytes = serde_json::to_vec(&candidate)?;
         bytes.push(b'\n');
         if bytes.len() > kind.maximum() {
-            return Err(Error::bad("Workspace store exceeds its byte limit"));
+            return Err(
+                Error::bad("Workspace store exceeds its byte limit").with_code(Code::ResourceLimit)
+            );
         }
         durable::write_private(&self.path, &bytes)?;
         Ok(candidate)

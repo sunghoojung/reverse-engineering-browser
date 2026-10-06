@@ -42,6 +42,9 @@ enum Action {
         output: Option<String>,
         #[arg(long)]
         show_headers: bool,
+        /// Print a bounded JSON envelope to stderr for non-2xx HTTP responses.
+        #[arg(long, conflicts_with = "show_headers")]
+        json_errors: bool,
         #[arg(long, default_value_t = 30.0)]
         timeout: f64,
     },
@@ -270,6 +273,7 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
         body_file,
         output,
         show_headers,
+        json_errors,
         timeout,
         ..
     } = options.command
@@ -389,21 +393,54 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
         return Ok(0);
     }
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(chunk) => chunk,
+            Err(_) if json_errors && !status.is_success() => {
+                eprintln!(
+                    "{}",
+                    bounded_http_error(
+                        &spec,
+                        status.as_u16(),
+                        br#"{"error":"API error response could not be read"}"#
+                    )
+                );
+                return Ok(2);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
         if bytes.len().saturating_add(chunk.len()) > 64 * 1024 * 1024 {
+            if json_errors && !status.is_success() {
+                eprintln!(
+                    "{}",
+                    bounded_http_error(
+                        &spec,
+                        status.as_u16(),
+                        br#"{"error":"API response exceeds 64 MiB"}"#
+                    )
+                );
+                return Ok(2);
+            }
             return Err("API response exceeds 64 MiB".into());
         }
         bytes.extend_from_slice(&chunk);
     }
     if !status.is_success() {
-        eprintln!(
-            "HTTP {}: {}",
-            status.as_u16(),
-            String::from_utf8_lossy(&bytes)
-                .chars()
-                .take(500)
-                .collect::<String>()
-        );
+        if json_errors {
+            eprintln!("{}", bounded_http_error(&spec, status.as_u16(), &bytes));
+        } else {
+            eprintln!(
+                "HTTP {}: {}",
+                status.as_u16(),
+                String::from_utf8_lossy(&bytes)
+                    .chars()
+                    .take(500)
+                    .collect::<String>()
+            );
+        }
         return Ok(1);
     }
     if let Some(path) = output {
@@ -421,6 +458,35 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
         println!("{}", serde_json::to_string_pretty(&value)?);
     }
     Ok(0)
+}
+// This mode projects known fields only. A legacy or non-JSON response must
+// never turn into a raw body/header dump or a prose-derived reason.
+fn bounded_http_error(spec: &Value, status: u16, bytes: &[u8]) -> Value {
+    let value = serde_json::from_slice::<Value>(bytes).unwrap_or(Value::Null);
+    let message = value["error"]
+        .as_str()
+        .unwrap_or("API returned an unrecognized error response");
+    let mut end = message.len().min(512);
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut result = json!({"http_status":status,"code":"unspecified","details":{},
+        "error":&message[..end],"error_truncated":end < message.len()});
+    if value["error"].is_string()
+        && spec["components"]["schemas"]["ErrorCode"]["enum"]
+            .as_array()
+            .is_some_and(|codes| codes.contains(&value["code"]))
+    {
+        result["code"] = value["code"].clone();
+        let schema =
+            json!({"$ref":"#/components/schemas/ErrorDetails","components":spec["components"]});
+        if jsonschema::validator_for(&schema)
+            .is_ok_and(|validator| validator.is_valid(&value["details"]))
+        {
+            result["details"] = value["details"].clone();
+        }
+    }
+    result
 }
 #[tokio::main]
 async fn main() {
@@ -446,6 +512,91 @@ mod tests {
                 "Unresolved reference in description: {reference}"
             );
         }
+    }
+
+    #[test]
+    fn json_errors_are_bounded_structured_and_do_not_classify_legacy_prose() {
+        let spec = specification().unwrap();
+        let long = "timeout cancelled secret 雪".repeat(200);
+        let value = bounded_http_error(
+            &spec,
+            409,
+            &serde_json::to_vec(&json!({"error":long,"stack":"do not copy"})).unwrap(),
+        );
+        assert_eq!(value["http_status"], 409);
+        assert_eq!(value["code"], "unspecified");
+        assert_eq!(value["details"], json!({}));
+        assert_eq!(value["error_truncated"], true);
+        let message = value["error"].as_str().unwrap();
+        assert!(message.len() <= 512 && long.starts_with(message));
+        assert_eq!(value.as_object().unwrap().len(), 5);
+        for bytes in [
+            &b"<html>private raw body</html>"[..],
+            b"{",
+            b"null",
+            b"[]",
+            b"{\"error\":{\"secret\":\"private\"}}",
+        ] {
+            let value = bounded_http_error(&spec, 502, bytes);
+            assert_eq!(value["code"], "unspecified");
+            assert_eq!(
+                value["error"],
+                "API returned an unrecognized error response"
+            );
+            assert_eq!(value["error_truncated"], false);
+            assert!(!value.to_string().contains("private"));
+        }
+        let typed = json!({"error":"The command timed out","code":"command_outcome_unknown","details":{"phase":"command_exchange","cause":"timeout"},"headers":{"authorization":"private"}});
+        let value = bounded_http_error(&spec, 409, &serde_json::to_vec(&typed).unwrap());
+        assert_eq!(value["code"], typed["code"]);
+        assert_eq!(value["details"], typed["details"]);
+        assert_eq!(value["error_truncated"], false);
+        for details in [
+            json!({"raw":"private"}),
+            json!({"phase":"invented"}),
+            json!({"expected_generation":u64::MAX}),
+        ] {
+            let value = bounded_http_error(
+                &spec,
+                409,
+                &serde_json::to_vec(
+                    &json!({"error":"failure","code":"state_conflict","details":details}),
+                )
+                .unwrap(),
+            );
+            assert_eq!(value["code"], "state_conflict");
+            assert_eq!(value["details"], json!({}));
+        }
+    }
+    #[test]
+    fn json_error_mode_is_opt_in_and_does_not_dump_headers() {
+        let args = [
+            "reb-api",
+            "call",
+            "get_health",
+            "--base-url",
+            "http://127.0.0.1:7319",
+        ];
+        assert!(matches!(
+            Options::try_parse_from(args).unwrap().command,
+            Action::Call {
+                json_errors: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            Options::try_parse_from(args.into_iter().chain(["--json-errors"]))
+                .unwrap()
+                .command,
+            Action::Call {
+                json_errors: true,
+                ..
+            }
+        ));
+        assert!(
+            Options::try_parse_from(args.into_iter().chain(["--json-errors", "--show-headers"]))
+                .is_err()
+        );
     }
 
     #[test]

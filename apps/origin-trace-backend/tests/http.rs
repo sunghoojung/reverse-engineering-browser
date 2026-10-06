@@ -19,6 +19,9 @@ impl Drop for Server {
 }
 impl Server {
     async fn start() -> Self {
+        Self::start_with_args(&[]).await
+    }
+    async fn start_with_args(args: &[String]) -> Self {
         let root = tempfile::tempdir().unwrap();
         let endpoint = root.path().join("endpoint");
         let mut child = Command::new(env!("CARGO_BIN_EXE_origin-trace-backend"));
@@ -39,7 +42,7 @@ impl Server {
             .arg(root.path().join("analyst.json"))
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
-        let mut child = child.spawn().unwrap();
+        let mut child = child.args(args).spawn().unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         let url = loop {
             if let Ok(url) = std::fs::read_to_string(&endpoint) {
@@ -272,7 +275,12 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
         "Artifact manifest read exceeded its deadline",
         "Artifact verification exceeded its deadline",
     ] {
-        assert_schema(&spec, deadline_schema, &json!({"error":message}), message);
+        assert_schema(
+            &spec,
+            deadline_schema,
+            &json!({"error":message,"code":"unspecified","details":{}}),
+            message,
+        );
     }
 }
 #[test]
@@ -818,6 +826,9 @@ async fn openapi_request_body_deadline_is_a_documented_json_error() {
     assert!(response.starts_with("HTTP/1.1 408 "), "{response}");
     let (_, body) = response.split_once("\r\n\r\n").unwrap();
     let value: Value = serde_json::from_str(body).unwrap();
+    assert_eq!(value["error"], "The request body deadline was exceeded");
+    assert_eq!(value["code"], "timeout");
+    assert_eq!(value["details"], json!({"phase":"request_body"}));
     let spec = specification();
     // Every POST goes through the same bounded body reader.
     for (route, item) in spec["paths"].as_object().unwrap() {
@@ -830,6 +841,26 @@ async fn openapi_request_body_deadline_is_a_documented_json_error() {
             assert_schema(&spec, schema, &value, route);
         }
     }
+}
+#[tokio::test]
+async fn incomplete_request_body_keeps_coarse_reason_and_legacy_text() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let server = Server::start().await;
+    let address = server.url.strip_prefix("http://").unwrap();
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream.write_all(format!("POST /api/debugger/actions HTTP/1.1\r\nHost: {address}\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{{").as_bytes()).await.unwrap();
+    stream.shutdown().await.unwrap();
+    let mut raw = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut raw))
+        .await
+        .unwrap()
+        .unwrap();
+    let response = String::from_utf8(raw).unwrap();
+    assert!(response.starts_with("HTTP/1.1 400 "), "{response}");
+    let value: Value = serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(value["error"], "The request body exceeds its size limit");
+    assert_eq!(value["code"], "invalid_request");
+    assert_eq!(value["details"], json!({}));
 }
 fn metadata_event(sequence: u64) -> Value {
     json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),"monotonic_time_ns":(sequence*1000).to_string(),"navigation_id":"1","frame_id":"1","artifact_id":"0","request_id":sequence.to_string(),"process_id":100,"thread_id":101,"tab_id":1,"category":"network","type":"request_started","payload_encoding":"hex","payload":hex::encode("GET fixture.local"),"payload_size":17,"parent_event_id":"0","browser_context_id_high":"1","browser_context_id_low":"2","initiator_request_id":0,"initiator_process_id":0,"status_code":0,"error_code":0,"resource_type":13,"flags":0,"payload_truncated":false,"encoded_data_length":"0","decoded_body_length":"0"})
@@ -1107,12 +1138,23 @@ async fn durable_workspace_conflict_and_private_permissions() {
             .status(),
         200
     );
+    let conflict = server.action("/api/api-collection/actions", body).await;
+    assert_eq!(conflict.status(), 409);
+    let conflict: Value = conflict.json().await.unwrap();
     assert_eq!(
-        server
-            .action("/api/api-collection/actions", body)
-            .await
-            .status(),
-        409
+        conflict["error"],
+        "API Collection changed in another window; refresh before saving"
+    );
+    assert_eq!(conflict["code"], "stale_generation");
+    assert_eq!(
+        conflict["details"],
+        json!({"expected_generation":0,"current_generation":1})
+    );
+    assert_schema(
+        &specification(),
+        &json!({"$ref":"#/components/schemas/Error"}),
+        &conflict,
+        "stale generation",
     );
     let persisted: Value =
         serde_json::from_slice(&std::fs::read(server.root.path().join("collection.json")).unwrap())
@@ -2136,4 +2178,393 @@ async fn wasm_inspection_preserves_offsets_identity_limits_and_original_bytes() 
     corrupt[0] = 1;
     server.file(&format!("artifacts/blobs/{hash}.bin"), &corrupt);
     assert_eq!(server.get("/api/wasm?artifact_id=1").await.status(), 500);
+}
+
+#[tokio::test]
+async fn error_reasons_preserve_http_text_targets_limits_and_cli_contracts() {
+    let missing = tempfile::tempdir().unwrap();
+    let server = Server::start_with_args(&[
+        "--decoder".into(),
+        missing.path().join("missing-helper").display().to_string(),
+    ])
+    .await;
+    for (route, body, status, code, text) in [
+        (
+            "/api/debugger/actions",
+            json!({"action":"select_target","target_id":"synthetic_private_target"}),
+            409,
+            "target_unavailable",
+            "Debugger target is unavailable",
+        ),
+        (
+            "/api/decoder/actions",
+            json!({"action":"jwt_inspect","protocol_version":1,"token":"synthetic_private_token"}),
+            503,
+            "dependency_unavailable",
+            "The native decoder executable is unavailable",
+        ),
+        (
+            "/api/native-console/actions",
+            json!({"action":"targets","session_id":"1"}),
+            409,
+            "state_conflict",
+            "Start a native console session first",
+        ),
+    ] {
+        let response = server.action(route, body).await;
+        let bytes = assert_contract_response(response, "post", route, status).await;
+        let result: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["code"], code);
+        assert_eq!(result["error"], text);
+        assert_eq!(result["details"], json!({}));
+        assert!(!result.to_string().contains("synthetic_private"));
+        assert!(result.get("retryable").is_none());
+    }
+    let state: Value = server.get("/api/debugger").await.json().await.unwrap();
+    assert!(state["target"].is_null());
+    for _ in 0..100 {
+        assert_eq!(
+            server
+                .action(
+                    "/api/debugger/actions",
+                    json!({"action":"add_watch","expression":"synthetic_private_expression"})
+                )
+                .await
+                .status(),
+            200
+        );
+    }
+    let response = server
+        .action(
+            "/api/debugger/actions",
+            json!({"action":"add_watch","expression":"synthetic_private_expression"}),
+        )
+        .await;
+    assert_eq!(response.status(), 409);
+    let result: Value = response.json().await.unwrap();
+    assert_eq!(result["error"], "Watch expression limit reached");
+    assert_eq!(result["code"], "resource_limit");
+    assert_eq!(result["details"], json!({}));
+
+    let body = server.root.path().join("request.json");
+    std::fs::write(
+        &body,
+        br#"{"action":"select_target","target_id":"synthetic_private_target"}"#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "debugger_action",
+            "--base-url",
+            &server.url,
+            "--body-file",
+        ])
+        .arg(&body)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let value: Value =
+        serde_json::from_str(stderr.trim().strip_prefix("HTTP 409: ").unwrap()).unwrap();
+    assert_eq!(value["error"], "Debugger target is unavailable");
+    assert_eq!(value["code"], "target_unavailable");
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "debugger_action",
+            "--base-url",
+            &server.url,
+            "--json-errors",
+            "--body-file",
+        ])
+        .arg(&body)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let value: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(
+        value,
+        json!({"http_status":409,"code":"target_unavailable","details":{},"error":"Debugger target is unavailable","error_truncated":false})
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["describe", "debugger_action", "--action", "select_target"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let description: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let spec = specification();
+    assert_eq!(
+        description["x-reb-execution-policy"],
+        spec["x-reb-execution-policy"]
+    );
+    assert_eq!(
+        description["x-reb-execution"],
+        spec["paths"]["/api/debugger/actions"]["post"]["x-reb-execution"]
+    );
+    let selected = spec["components"]["schemas"]["DebuggerAction"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|variant| variant["properties"]["action"]["const"] == "select_target")
+        .unwrap();
+    assert_eq!(
+        description["x-reb-selected-action-execution"],
+        selected["x-reb-execution"]
+    );
+    assert_eq!(
+        description["components"]["schemas"]["RebExecutionMetadata"],
+        spec["components"]["schemas"]["RebExecutionMetadata"]
+    );
+    for component in ["Error", "ErrorCode", "ErrorDetails", "SafeInteger"] {
+        assert_eq!(
+            description["components"]["schemas"][component],
+            specification()["components"]["schemas"][component]
+        );
+    }
+    let spec = specification();
+    let validator = jsonschema::validator_for(
+        &json!({"$ref":"#/components/schemas/Error", "components":spec["components"]}),
+    )
+    .unwrap();
+    for patch in [
+        json!({"credentials":"synthetic_private_token"}),
+        json!({"phase":"invented"}),
+        json!({"cause":"raw captured diagnostic"}),
+    ] {
+        assert!(
+            validator
+                .validate(&json!({"error":"failure","code":"unspecified","details":patch}))
+                .is_err()
+        );
+    }
+    assert!(
+        validator
+            .validate(&json!({"error":"failure","code":"invented","details":{}}))
+            .is_err()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn http_200_application_failures_have_reasons_and_keep_cli_transport_exit_status() {
+    use std::os::unix::fs::PermissionsExt;
+    let helper_root = tempfile::tempdir().unwrap();
+    let helper = helper_root.path().join("analyst-fixture");
+    let failure = json!({"protocol_version":1,"run_id":1,"script_id":1,"library_generation":1,
+        "ok":false,"outcome":"failed","result_type":"error","result_text":"","result_truncated":false,
+        "logs":[],"logs_truncated":false,"duration_ms":1,"error":"Synthetic application failure"});
+    std::fs::write(
+        &helper,
+        format!("#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s\\n' '{failure}'\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let decoder = helper_root.path().join("decoder-fixture");
+    let rejected_token = json!({"protocol_version":1,"ok":false,"algorithm":"","signature_status":"invalid","header_json":"","payload_json":"","token_bytes":12,"signature_bytes":0,"error":"Synthetic token failure"});
+    std::fs::write(
+        &decoder,
+        format!("#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s\\n' '{rejected_token}'\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&decoder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let server = Server::start_with_args(&[
+        "--analyst-runner".into(),
+        helper.display().to_string(),
+        "--decoder".into(),
+        decoder.display().to_string(),
+    ])
+    .await;
+    let response = server
+        .action(
+            "/api/decoder/actions",
+            json!({"action":"jwt_inspect","protocol_version":1,"token":"private_fixture_token"}),
+        )
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/decoder/actions", 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["code"], "application_failed");
+    assert_eq!(result["details"], json!({}));
+    assert!(!result.to_string().contains("private_fixture_token"));
+    for (key, value) in rejected_token.as_object().unwrap() {
+        assert_eq!(&result[key], value);
+    }
+
+    let saved = server.action("/api/local-analyst/actions", json!({"action":"replace_local_analyst_workspace","expected_generation":0,
+        "folders":[{"id":1,"name":"Analyst Workspace","parent_id":null}],"files":[{"id":1,"folder_id":1,"name":"Fixture","kind":"analyst-script","language":"javascript","content":"return 1;"}]})).await;
+    assert_eq!(saved.status(), 200, "{}", saved.text().await.unwrap());
+    let request = json!({"action":"run_local_analyst_script","protocol_version":1,"run_id":1,"script_id":1,"library_generation":1,"source":"return 1;",
+        "variables":{},"evidence":{"events":[],"artifacts":[],"trace_edges":[],"signal_profiles":[],"vm_analysis":null,"selected_artifact":null,"summary":{}},"confirmed":true,"confirmed_sensitive":false});
+    let response = server
+        .action("/api/local-analyst/actions", request.clone())
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/local-analyst/actions", 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["code"], "application_failed");
+    assert_eq!(result["details"], json!({"phase":"worker"}));
+    for (key, value) in failure.as_object().unwrap() {
+        assert_eq!(&result[key], value);
+    }
+
+    let body = server.root.path().join("request.json");
+    std::fs::write(&body, request.to_string()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "analyst_action",
+            "--json-errors",
+            "--base-url",
+            &server.url,
+            "--body-file",
+        ])
+        .arg(&body)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["outcome"], "failed");
+    assert_eq!(result["code"], "application_failed");
+
+    // The synthetic helper consumes input but neither evaluates source nor replies.
+    std::fs::write(
+        &helper,
+        "#!/bin/sh\n/bin/cat >/dev/null\nexec /bin/sleep 60\n",
+    )
+    .unwrap();
+    let response = server
+        .action("/api/local-analyst/actions", request.clone())
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/local-analyst/actions", 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["outcome"], "timed_out");
+    assert_eq!(result["code"], "timeout");
+    assert_eq!(result["details"], json!({"phase":"worker"}));
+
+    let client = server.client.clone();
+    let url = format!("{}/api/local-analyst/actions", server.url);
+    let pending =
+        tokio::spawn(async move { client.post(url).json(&request).send().await.unwrap() });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let state: Value = server
+            .get("/api/local-analyst/runner")
+            .await
+            .json()
+            .await
+            .unwrap();
+        if state["active_run_id"] == 1 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "Fixture run never became active");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        server
+            .action(
+                "/api/local-analyst/actions",
+                json!({"action":"cancel_local_analyst_script","run_id":1})
+            )
+            .await
+            .status(),
+        200
+    );
+    let response = pending.await.unwrap();
+    let bytes = assert_contract_response(response, "post", "/api/local-analyst/actions", 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["outcome"], "cancelled");
+    assert_eq!(result["code"], "cancelled");
+    assert_eq!(result["details"], json!({"phase":"worker"}));
+}
+
+#[tokio::test]
+async fn cli_json_errors_handle_legacy_foreign_and_incomplete_http_responses() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    async fn call(body: Vec<u8>, extra_length: usize, structured: bool) -> std::process::Output {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                request.push(stream.read_u8().await.unwrap());
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+                assert!(request.len() < 8192);
+            }
+            stream.write_all(format!("HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nX-Secret: private_header\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()+extra_length).as_bytes()).await.unwrap();
+            // An oversized response can be closed by the bounded CLI reader.
+            let _ = stream.write_all(&body).await;
+        });
+        let output = tokio::task::spawn_blocking(move || {
+            let mut cli = Command::new(env!("CARGO_BIN_EXE_reb-api"));
+            cli.args(["call", "get_health", "--base-url", &url]);
+            if structured {
+                cli.arg("--json-errors");
+            }
+            cli.output().unwrap()
+        })
+        .await
+        .unwrap();
+        server.await.unwrap();
+        output
+    }
+    let legacy = serde_json::to_vec(&json!({"error":"雪".repeat(300)})).unwrap();
+    let output = call(legacy.clone(), 0, false).await;
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        format!(
+            "HTTP 409: {}\n",
+            String::from_utf8_lossy(&legacy)
+                .chars()
+                .take(500)
+                .collect::<String>()
+        )
+    );
+    let output = call(legacy, 0, true).await;
+    assert_eq!(output.status.code(), Some(1));
+    let value: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(value["error"].as_str().unwrap().len(), 510);
+    assert_eq!(value["error_truncated"], true);
+    assert_eq!(value["code"], "unspecified");
+    assert_eq!(value["http_status"], 409);
+
+    for body in [b"<html>private_body</html>".to_vec(),b"{private_body".to_vec(),
+        serde_json::to_vec(&json!({"error":{},"code":"foreign","details":{"raw":"private_body"}})).unwrap(),
+        serde_json::to_vec(&json!({"error":"Known message","code":"state_conflict","details":{"raw":"private_body"}})).unwrap()] {
+        let output = call(body,0,true).await;
+        assert_eq!(output.status.code(),Some(1));
+        assert!(output.stdout.is_empty());
+        let value: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(value["http_status"],409);
+        assert_eq!(value["details"],json!({}));
+        assert!(!value.to_string().contains("private"));
+        assert_eq!(value.as_object().unwrap().len(),5);
+    }
+    for (body, extra_length, message) in [
+        (
+            b"{private_body".to_vec(),
+            100,
+            "API error response could not be read",
+        ),
+        (
+            vec![b'x'; 64 * 1024 * 1024 + 1],
+            0,
+            "API response exceeds 64 MiB",
+        ),
+    ] {
+        let output = call(body, extra_length, true).await;
+        assert_eq!(output.status.code(), Some(2));
+        let value: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(
+            value,
+            json!({"http_status":409,"code":"unspecified","details":{},"error":message,"error_truncated":false})
+        );
+    }
 }

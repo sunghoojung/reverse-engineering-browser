@@ -5,7 +5,7 @@ use crate::{
     decoder::Decoder,
     deobfuscation::Deobfuscator,
     durable,
-    error::{Error, Result},
+    error::{Code, Error, Phase, Reason, Result},
     evidence,
     native_console::NativeConsole,
     origin_trace, validation, vm, wasm,
@@ -646,7 +646,10 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                 .ok_or_else(|| Error::bad("The request body size is invalid"))?;
             let bytes = tokio::time::timeout(Duration::from_secs(5), to_bytes(body, maximum))
                 .await
-                .map_err(|_| Error::new(408, "The request body deadline was exceeded"))?
+                .map_err(|_| {
+                    Error::new(408, "The request body deadline was exceeded")
+                        .with_reason(Reason::at(Code::Timeout, Phase::RequestBody))
+                })?
                 .map_err(|_| Error::bad("The request body exceeds its size limit"))?;
             if bytes.len() != length {
                 return Err(Error::bad("The request body length is invalid"));

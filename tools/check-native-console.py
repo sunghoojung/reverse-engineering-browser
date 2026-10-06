@@ -422,12 +422,21 @@ def check_backend(binary, backend):
             call({**base, "source": "a\0b"}, 400)
             call({**base, "target_id": "01", "source": "1"}, 400)
             call({**base, "target_id": "18446744073709551616", "source": "1"}, 400)
-            assert call({**base, "source": "throw 'fixture'"})["status"] == "exception"
-            assert call({**base, "source": "while (true) {}"})["status"] == "timeout"
+            failure = call({**base, "source": "throw 'fixture'"})
+            assert failure["status"] == "exception" and failure["code"] == "application_failed"
+            assert failure["details"] == {}
+            failure = call({**base, "source": "while (true) {}"})
+            assert failure["status"] == "timeout" and failure["code"] == "command_outcome_unknown"
+            assert failure["details"] == {"phase": "command_exchange", "cause": "timeout"}
             assert call({**base, "source": "window.fixture + 1"})["text"] == "42"
             runtime = {"action": "runtime", "session_id": session, "target_id": target}
             def command(operation, **fields):
-                return call({**runtime, "command": {"operation": operation, **fields}})["runtime"]
+                result = call({**runtime, "command": {"operation": operation, **fields}})
+                if result["runtime"]["status"] in {"error", "exception", "rejected"}:
+                    assert result["code"] == "application_failed" and result["details"] == {}
+                else:
+                    assert "code" not in result and "details" not in result
+                return result["runtime"]
             assert command("evaluate", source="window.fixture + 1")["value"]["text"] == "42"
             assert command("evaluate", source='console.log("hello")')["value"]["type"] == "undefined"
             assert command("poll")["messages"][0]["text"] == "hello"
@@ -458,7 +467,9 @@ def check_backend(binary, backend):
             assert command("await", handle=waiting["handle"])["status"] == "error"
             command("clear")
             call({"action": "targets", "session_id": session})
-            assert call({**base, "source": "1"})["status"] == "stale_target"
+            failure = call({**base, "source": "1"})
+            assert failure["status"] == "stale_target" and failure["code"] == "target_unavailable"
+            assert failure["details"] == {}
             # Locate only our authenticated synthetic child; verify both the
             # browser process and private session directory disappear on Stop.
             def owned_directories():
@@ -478,8 +489,10 @@ def check_backend(binary, backend):
             assert all(not p.exists() for p in owned), "Disposable console profile survived Stop"
             assert call()["state"] == "idle"
             value = call({"action": "start", "url": "http://127.0.0.1/fixture"})
-            call({"action": "evaluate", "session_id": value["session_id"], "target_id": value["targets"][0]["id"],
-                  "source": "__malformed_native_reply__"}, 500)
+            failure = call({"action": "evaluate", "session_id": value["session_id"], "target_id": value["targets"][0]["id"],
+                            "source": "__malformed_native_reply__"}, 500)
+            assert failure["code"] == "command_outcome_unknown"
+            assert failure["details"] == {"phase": "command_exchange", "cause": "transport_failure"}
             assert call()["state"] == "idle", "Malformed native response did not retire the session"
             assert not owned_directories(), "Failed console session leaked its profile"
             print("PASS public HTTP -> Rust session -> actual C++ bridge -> synthetic browser; locality, UTF-8 limits, identity guards, timeout recovery, malformed peer retirement and profile disposal")

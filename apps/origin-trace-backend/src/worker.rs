@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use crate::error::{Code, Error, Phase, Reason, Result};
 use std::{
     path::Path,
     process::Stdio,
@@ -37,7 +37,9 @@ async fn bounded_read(reader: impl AsyncRead + Unpin, maximum: usize) -> Result<
         .read_to_end(&mut bytes)
         .await?;
     if bytes.len() > maximum {
-        return Err(Error::protocol("Worker output exceeded its byte limit"));
+        return Err(
+            Error::protocol("Worker output exceeded its byte limit").with_code(Code::ResourceLimit)
+        );
     }
     Ok(bytes)
 }
@@ -64,9 +66,10 @@ pub async fn run_cancel(
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
-    let mut child = command
-        .spawn()
-        .map_err(|e| Error::new(503, format!("Worker could not start: {e}")))?;
+    let mut child = command.spawn().map_err(|e| {
+        Error::new(503, format!("Worker could not start: {e}"))
+            .with_code(Code::DependencyUnavailable)
+    })?;
     let _group = ProcessGroup(
         child
             .id()
@@ -86,7 +89,7 @@ pub async fn run_cancel(
         .ok_or_else(|| Error::new(503, "Worker diagnostics are unavailable"))?;
     let result = tokio::select! {
         biased;
-        _=async {if let Some(receiver)=cancel.as_mut() {if !*receiver.borrow() {let _=receiver.changed().await;}} else {std::future::pending::<()>().await}}=> {let _=child.kill().await;let _=child.wait().await;return Err(Error::new(499,"Worker cancelled"));},
+        _=async {if let Some(receiver)=cancel.as_mut() {if !*receiver.borrow() {let _=receiver.changed().await;}} else {std::future::pending::<()>().await}}=> {let _=child.kill().await;let _=child.wait().await;return Err(Error::new(499,"Worker cancelled").with_reason(Reason::at(Code::Cancelled, Phase::Worker)));},
         result=tokio::time::timeout(deadline, async {
         tokio::try_join!(async { stdin.write_all(input).await?; drop(stdin); Ok::<_,Error>(()) }, bounded_read(stdout,output_limit),bounded_read(stderr,64*1024),async { child.wait().await.map_err(Error::from) })
     })=>result,
@@ -111,7 +114,8 @@ pub async fn run_cancel(
         Err(_) => {
             let _ = child.kill().await;
             let _ = child.wait().await;
-            Err(Error::new(408, "Worker execution deadline exceeded"))
+            Err(Error::new(408, "Worker execution deadline exceeded")
+                .with_reason(Reason::at(Code::Timeout, Phase::Worker)))
         }
     }
 }
@@ -166,7 +170,9 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
         sender.send(true).unwrap();
-        assert_eq!(task.await.unwrap().err().unwrap().status, 499);
+        let error = task.await.unwrap().err().unwrap();
+        assert_eq!(error.status, 499);
+        assert_eq!(error.reason.code, Code::Cancelled);
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             if unsafe { libc::kill(pid, 0) } != 0 {
@@ -183,23 +189,19 @@ mod tests {
     async fn timeout_and_output_limits_terminate_workers() {
         let mut slow = Command::new("/bin/sh");
         slow.args(["-c", "sleep 60"]);
-        assert_eq!(
-            run(&mut slow, b"", 1024, Duration::from_millis(100))
-                .await
-                .err()
-                .unwrap()
-                .status,
-            408
-        );
+        let error = run(&mut slow, b"", 1024, Duration::from_millis(100))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.status, 408);
+        assert_eq!(error.reason.code, Code::Timeout);
         let mut noisy = Command::new("/bin/sh");
         noisy.args(["-c", "while true; do printf 0123456789; done"]);
-        assert_eq!(
-            run(&mut noisy, b"", 16, Duration::from_secs(2))
-                .await
-                .err()
-                .unwrap()
-                .status,
-            422
-        );
+        let error = run(&mut noisy, b"", 16, Duration::from_secs(2))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.status, 422);
+        assert_eq!(error.reason.code, Code::ResourceLimit);
     }
 }

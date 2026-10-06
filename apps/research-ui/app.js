@@ -4689,6 +4689,16 @@
       const analystExactKeys = (value, keys) => isPlainObject(value) &&
         Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 
+      // Accept legacy results and only the bounded failure annotation this API emits.
+      function resultHasOptionalReason(value, keys, code, phase = null) {
+        const annotated = isPlainObject(value) && (Object.hasOwn(value, 'code') || Object.hasOwn(value, 'details'));
+        if (!annotated) return analystExactKeys(value, keys);
+        return value.ok === false && value.code === code &&
+          analystExactKeys(value, [...keys, 'code', 'details']) &&
+          analystExactKeys(value.details, phase === null ? [] : ['phase']) &&
+          (phase === null || value.details.phase === phase);
+      }
+
       function isLocalAnalystWorkspace(workspace) {
         const expectedLimits = emptyLocalAnalystWorkspace().limits;
         if (!analystExactKeys(workspace, ['contract_version', 'document_kind', 'generation', 'updated_at_ms',
@@ -4764,9 +4774,10 @@
       }
 
       function isLocalAnalystResult(result, run) {
-        if (!analystExactKeys(result, ['protocol_version', 'run_id', 'script_id', 'library_generation', 'ok',
+        const code = result?.outcome === 'cancelled' ? 'cancelled' : result?.outcome === 'timed_out' ? 'timeout' : 'application_failed';
+        if (!resultHasOptionalReason(result, ['protocol_version', 'run_id', 'script_id', 'library_generation', 'ok',
           'outcome', 'result_type', 'result_text', 'result_truncated', 'logs', 'logs_truncated',
-          'duration_ms', 'error']) || result.protocol_version !== 1 || result.run_id !== run.run_id ||
+          'duration_ms', 'error'], code, 'worker') || result.protocol_version !== 1 || result.run_id !== run.run_id ||
           result.script_id !== run.script_id || result.library_generation !== run.library_generation ||
           typeof result.ok !== 'boolean' || !['completed', 'failed', 'cancelled', 'timed_out'].includes(result.outcome) ||
           result.ok !== (result.outcome === 'completed') || !isBoundedText(result.result_type, 64) ||
@@ -5337,8 +5348,8 @@
       }
 
       function isJwtInspection(value) {
-        return decoderHasExactKeys(value, ['protocol_version', 'ok', 'algorithm', 'signature_status', 'header_json',
-          'payload_json', 'token_bytes', 'signature_bytes', 'error', 'duration_us']) && value.protocol_version === 1 &&
+        return resultHasOptionalReason(value, ['protocol_version', 'ok', 'algorithm', 'signature_status', 'header_json',
+          'payload_json', 'token_bytes', 'signature_bytes', 'error', 'duration_us'], 'application_failed') && value.protocol_version === 1 &&
           typeof value.ok === 'boolean' && typeof value.algorithm === 'string' && value.algorithm.length <= 128 &&
           ['not_checked', 'verified', 'invalid', 'unsigned', 'unsupported'].includes(value.signature_status) &&
           typeof value.header_json === 'string' && utf8ByteLength(value.header_json) <= 65536 &&
@@ -5349,7 +5360,7 @@
       }
 
       function isJwtCreation(value) {
-        return decoderHasExactKeys(value, ['protocol_version', 'ok', 'token', 'error', 'duration_us']) &&
+        return resultHasOptionalReason(value, ['protocol_version', 'ok', 'token', 'error', 'duration_us'], 'application_failed') &&
           value.protocol_version === 1 && typeof value.ok === 'boolean' && typeof value.token === 'string' &&
           utf8ByteLength(value.token) <= 65536 &&
           (value.error === null || (typeof value.error === 'string' && utf8ByteLength(value.error) <= 4096)) &&

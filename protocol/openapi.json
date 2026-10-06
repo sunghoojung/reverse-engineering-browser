@@ -3,7 +3,7 @@
   "info": {
     "title": "Origin Trace local HTTP API",
     "version": "1.0.0",
-    "description": "Source-backed description of the Origin Trace Rust backend HTTP interface. Not a new server or a promise of full native-app parity. No credential authentication is implemented. Every /api/ GET and every POST requires Host to name localhost, 127.0.0.1 or ::1 with the exact listening port; cross-site Sec-Fetch-Site is rejected. If Origin is present it must be HTTP, local, same port, without credentials/query/fragment. Nonbrowser CLI clients can omit Origin. Use local access only. Schemas explicitly marked partial retain source-specific gaps; x-max-utf8-bytes is documentary, not a standard JSON Schema validator keyword."
+    "description": "Source-backed description of the Origin Trace Rust backend HTTP interface. Not a new server or a promise of full native-app parity. No credential authentication is implemented. Every /api/ request and every POST requires Host to name localhost, 127.0.0.1 or ::1 with the exact listening port; cross-site Sec-Fetch-Site is rejected. If Origin is present it must be HTTP, local, same port, without credentials/query/fragment. Nonbrowser CLI clients can omit Origin. Use local access only. Schemas explicitly marked partial retain source-specific gaps; x-max-utf8-bytes is documentary, not a standard JSON Schema validator keyword."
   },
   "servers": [
     {
@@ -143,7 +143,7 @@
             }
           },
           "500": {
-            "description": "Store/read/validation/internal failure; some invalid query values also map here.",
+            "description": "Store, read, validation, or internal failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -226,7 +226,7 @@
             }
           },
           "500": {
-            "description": "Store/read/validation/internal failure; some invalid query values also map here.",
+            "description": "Store, read, validation, or internal failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -458,6 +458,16 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "The live debugger returned malformed source or protocol data.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "x-source": "apps/origin-trace-backend/src/app.rs",
@@ -580,6 +590,16 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Local artifact, evidence-store, or worker I/O failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "x-source": "apps/origin-trace-backend/src/app.rs",
@@ -686,7 +706,7 @@
             }
           },
           "500": {
-            "description": "Store/read/validation/internal failure; some invalid query values also map here.",
+            "description": "Store, read, validation, or internal failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -818,7 +838,7 @@
             }
           },
           "500": {
-            "description": "Store/read/validation/internal failure; some invalid query values also map here.",
+            "description": "Store, read, validation, or internal failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -939,7 +959,7 @@
             }
           },
           "500": {
-            "description": "Store/read/validation/internal failure; some invalid query values also map here.",
+            "description": "Store, read, validation, or internal failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -963,6 +983,16 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid or duplicate limit query parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "x-source": "apps/origin-trace-backend/src/app.rs",
@@ -971,7 +1001,7 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "description": "Clamped to 1..5000. Noninteger input currently returns 500, not 400.",
+            "description": "Clamped to 1..5000. Noninteger, out-of-range signed integer, blank, or duplicate values return 400.",
             "schema": {
               "type": "integer",
               "default": 500
@@ -1032,7 +1062,7 @@
             }
           },
           "500": {
-            "description": "Store/read/validation/internal failure; some invalid query values also map here.",
+            "description": "Store, read, validation, or internal failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1056,6 +1086,16 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid or duplicate limit query parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "x-source": "apps/origin-trace-backend/src/app.rs",
@@ -1064,7 +1104,7 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "description": "Clamped to 1..5000. Noninteger input currently returns 500, not 400.",
+            "description": "Clamped to 1..5000. Noninteger, out-of-range signed integer, blank, or duplicate values return 400.",
             "schema": {
               "type": "integer",
               "default": 500
@@ -1125,7 +1165,7 @@
             }
           },
           "500": {
-            "description": "Store/read/validation/internal failure; some invalid query values also map here.",
+            "description": "Store, read, validation, or internal failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1149,6 +1189,16 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid or duplicate request identifier.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "x-source": "apps/origin-trace-backend/src/app.rs",
@@ -1157,7 +1207,7 @@
             "name": "request_id",
             "in": "query",
             "required": false,
-            "description": "Optional correlation filter; invalid value currently returns 500.",
+            "description": "Optional correlation filter. Requires a canonical unsigned 64-bit decimal value; invalid, blank, or duplicate values return 400.",
             "schema": {
               "$ref": "#/components/schemas/Uint64String"
             }
@@ -1202,37 +1252,45 @@
               },
               "X-Artifact-Total-Bytes": {
                 "schema": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]*)$"
                 },
                 "description": "Total artifact byte size."
               },
               "X-Artifact-Offset": {
                 "schema": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]*)$"
                 },
                 "description": "Actual chunk start offset."
               },
               "X-Artifact-Truncated": {
                 "schema": {
-                  "type": "string"
+                  "type": "string",
+                  "enum": [
+                    "true",
+                    "false"
+                  ]
                 },
-                "description": "1 if bytes remain after this chunk, otherwise 0."
+                "description": "true if bytes remain after this chunk, otherwise false."
               },
               "Content-Disposition": {
                 "schema": {
                   "type": "string"
                 },
-                "description": "attachment; filename=\"artifact.bin\""
+                "description": "attachment; filename=\"artifact-{artifact_id}.bin\""
               },
               "Content-Security-Policy": {
                 "schema": {
-                  "type": "string"
+                  "type": "string",
+                  "const": "sandbox"
                 },
                 "description": "sandbox"
               },
               "X-Content-Type-Options": {
                 "schema": {
-                  "type": "string"
+                  "type": "string",
+                  "const": "nosniff"
                 },
                 "description": "nosniff"
               }
@@ -1259,7 +1317,7 @@
             }
           },
           "500": {
-            "description": "Store/read/validation/internal failure; some invalid query values also map here.",
+            "description": "Store, read, validation, or internal failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1267,6 +1325,27 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid or duplicate offset/limit, or offset beyond the artifact byte size.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Artifact manifest lookup exceeded its five-second deadline, or full artifact verification exceeded its thirty-second deadline.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "x-source": "apps/origin-trace-backend/src/evidence.rs"
           }
         },
         "x-source": "apps/origin-trace-backend/src/app.rs",
@@ -1284,17 +1363,18 @@
             "name": "offset",
             "in": "query",
             "required": false,
-            "description": "Clamped to >=0; offset beyond total size returns 500.",
+            "description": "Canonical unsigned decimal byte offset. Negative, malformed, duplicate, or beyond-end offsets return 400.",
             "schema": {
               "type": "integer",
-              "default": 0
+              "default": 0,
+              "minimum": 0
             }
           },
           {
             "name": "limit",
             "in": "query",
             "required": false,
-            "description": "Clamped to 1..2097152 bytes.",
+            "description": "Clamped to 1..2097152 bytes. Noninteger, out-of-range signed integer, blank, or duplicate values return 400.",
             "schema": {
               "type": "integer",
               "default": 2097152
@@ -1361,7 +1441,17 @@
             }
           },
           "500": {
-            "description": "Store/read/validation/internal failure; some invalid query values also map here.",
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The bounded request-body read deadline expired; capture stop may also time out on the capture operation.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1434,7 +1524,7 @@
             }
           },
           "408": {
-            "description": "Bounded worker timed out or busy.",
+            "description": "The bounded request-body read deadline expired, or the native decoder was busy or timed out.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1455,6 +1545,16 @@
           },
           "503": {
             "description": "Required worker unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Local worker I/O or contract validator failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1503,12 +1603,6 @@
                   "const": "no-store",
                   "type": "string"
                 }
-              },
-              "ETag": {
-                "schema": {
-                  "type": "string"
-                },
-                "description": "Present on workspace replacement responses only."
               }
             }
           },
@@ -1543,7 +1637,17 @@
             }
           },
           "500": {
-            "description": "Store/read/validation/internal failure; some invalid query values also map here.",
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The bounded request-body read deadline expired.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1592,12 +1696,6 @@
                   "const": "no-store",
                   "type": "string"
                 }
-              },
-              "ETag": {
-                "schema": {
-                  "type": "string"
-                },
-                "description": "Present on workspace replacement responses only."
               }
             }
           },
@@ -1642,7 +1740,27 @@
             }
           },
           "500": {
-            "description": "Store/read/validation/internal failure; some invalid query values also map here.",
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The bounded request-body read deadline expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The local analyst runner is unavailable or could not start.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1671,7 +1789,7 @@
       "post": {
         "operationId": "debugger_action",
         "summary": "debugger action",
-        "description": "Explicit action allowlist; requires the configured live debugger. State-specific locks and confirmation gates apply. Invalid action fields usually return 409, not 400. Do not retry mutation or evaluation automatically after an uncertain transport failure.",
+        "description": "Explicit action allowlist; live controls require the configured debugger; some local state actions work without a browser. State-specific locks and confirmation gates apply. Schema-invalid action fields return 400; unavailable state, ownership conflicts, and some action-specific semantic checks return 409. Do not retry mutation or evaluation automatically after an uncertain transport failure.",
         "tags": [
           "debugger"
         ],
@@ -1726,6 +1844,36 @@
           },
           "422": {
             "description": "Worker/protocol response or input processing failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The bounded request-body or local worker deadline expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A required local debugger transport or worker is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Local I/O or contract validator failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1929,7 +2077,7 @@
             }
           },
           "408": {
-            "description": "Transport deadline expired; execution may have occurred.",
+            "description": "The request-body read or native transport deadline expired; native execution may have occurred after a transport timeout.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3545,7 +3693,7 @@
       "Event": {
         "type": "object",
         "additionalProperties": true,
-        "description": "Stored JSON object returned without field validation by parse_event. Native producer fields are documented in protocol/README.md; arbitrary object keys remain permitted at this HTTP boundary."
+        "description": "Native event record validated before HTTP delivery for protocol version, canonical identifiers, process ID, and bounded hexadecimal payload consistency. Additional native record fields remain extensible; see protocol/README.md. This schema does not yet describe every native event field."
       },
       "Events": {
         "type": "object",
@@ -3758,7 +3906,6 @@
           "engine": {
             "type": "string",
             "enum": [
-              "python-lexical",
               "rust-oxc"
             ]
           },
@@ -3787,7 +3934,7 @@
           "source_truncated",
           "analysis"
         ],
-        "description": "Analysis/representation internals vary by lexical fallback or Rust worker. See protocol/deobfuscation-v1.md. These nested models intentionally remain extensible."
+        "description": "Static Rust/Oxc analysis with optional derived representation. See protocol/deobfuscation-v1.md. Nested analysis and representation models intentionally remain extensible."
       },
       "DecoderState": {
         "type": "object",
@@ -4427,7 +4574,7 @@
           "requests"
         ],
         "additionalProperties": false,
-        "description": "Full replacement, not patch. IDs are positive; root folder id=1/name=API Collection/parent_id=null must remain. Parent references, uniqueness, depth <=4, header restrictions and cumulative UTF-8 budgets are enforced by api_collection.py. Stale expected_generation returns 409. This stores templates; it does not execute requests."
+        "description": "Full replacement, not patch. IDs are positive; root folder id=1/name=API Collection/parent_id=null must remain. Parent references, uniqueness, depth <=4, header restrictions and cumulative UTF-8 budgets are enforced by src/workspace.rs. Stale expected_generation returns 409. This stores templates; it does not execute requests."
       },
       "AnalystFolder": {
         "type": "object",
@@ -4766,7 +4913,10 @@
                 "const": true,
                 "type": "boolean"
               },
-              "confirmed_sensitive": {}
+              "confirmed_sensitive": {
+                "type": "boolean",
+                "description": "Must be true when selected_artifact.sensitive is true."
+              }
             },
             "required": [
               "action",
@@ -4800,7 +4950,7 @@
             "additionalProperties": false
           }
         ],
-        "description": "Run IDs and script IDs must be positive. Run requires the current saved JavaScript script, matching source and workspace generation. selected_artifact.sensitive=true requires confirmed_sensitive=true. Cancellation is a separate concurrent request. Replacement enforces root id=1/name=Analyst Workspace, tree and cumulative size limits in local_analyst.py."
+        "description": "Run IDs and script IDs must be positive. Run requires the current saved JavaScript script, matching source and workspace generation. selected_artifact.sensitive=true requires confirmed_sensitive=true. Cancellation is a separate concurrent request. Replacement enforces root id=1/name=Analyst Workspace, tree and cumulative size limits in src/workspace.rs."
       },
       "AnalystRunResult": {
         "type": "object",
@@ -5285,7 +5435,7 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerExperimentResult"
           },
           {
             "type": "object",
@@ -5449,7 +5599,8 @@
               "method_filter": {
                 "type": "string",
                 "default": "",
-                "description": "Strip/uppercase; empty matches every method, otherwise normalized HTTP method <=32 bytes."
+                "description": "Strip/uppercase; empty matches every method, otherwise normalized HTTP method <=32 bytes.",
+                "x-max-utf8-bytes": 32
               },
               "rewrite_url": {},
               "rewrite_method": {},
@@ -5491,12 +5642,14 @@
                     "rewrite_url": {
                       "type": "string",
                       "default": "",
-                      "description": "Trimmed optional credential-free HTTP(S) URL, no fragment. Source imposes no explicit byte ceiling here."
+                      "description": "Trimmed optional credential-free HTTP(S) URL without a fragment. Both raw and normalized URL are bounded to 8192 UTF-8 bytes.",
+                      "x-max-utf8-bytes": 8192
                     },
                     "rewrite_method": {
                       "type": "string",
                       "default": "",
-                      "description": "Trimmed/uppercased optional method; normalized method <=32 bytes."
+                      "description": "Trimmed/uppercased optional method; normalized method <=32 bytes.",
+                      "x-max-utf8-bytes": 32
                     },
                     "rewrite_headers": {
                       "$ref": "#/components/schemas/InterceptionHeaders"
@@ -5780,7 +5933,7 @@
             "x-source": [
               "apps/origin-trace-backend/src/debugger/mod.rs",
               "apps/origin-trace-backend/src/debugger/mod.rs",
-              "apps/origin-trace-backend/src/debugger/heap.rs"
+              "apps/origin-trace-backend/src/debugger/objects.rs"
             ],
             "description": "Only current retained Object Lab results are mutable. set value is finite JSON, max depth 8, total entries 256, string/key UTF-8 bytes 4096, integer magnitude <=2^53-1, canonical encoded bytes <=16384. delete forbids value.",
             "x-schema-completeness": "partial",
@@ -6254,7 +6407,7 @@
             "x-source": [
               "apps/origin-trace-backend/src/debugger/mod.rs",
               "apps/origin-trace-backend/src/debugger/mod.rs",
-              "apps/origin-trace-backend/src/debugger/heap.rs"
+              "apps/origin-trace-backend/src/debugger/objects.rs"
             ],
             "description": "At least one nonempty property_query, value_query or class_query, or a nonblank shape JSON object/array is required. Object Lab additionally requires a navigated isolated target.",
             "x-schema-completeness": "partial",
@@ -6358,7 +6511,7 @@
             "x-source": [
               "apps/origin-trace-backend/src/debugger/mod.rs",
               "apps/origin-trace-backend/src/debugger/mod.rs",
-              "apps/origin-trace-backend/src/debugger/heap.rs"
+              "apps/origin-trace-backend/src/debugger/objects.rs"
             ],
             "description": "At least one nonempty property_query, value_query or class_query, or a nonblank shape JSON object/array is required. Object Lab additionally requires a navigated isolated target.",
             "x-schema-completeness": "partial",
@@ -6566,7 +6719,7 @@
               "apps/origin-trace-backend/src/debugger/mod.rs",
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
-            "description": "url is required but may be empty; nonempty url or nonempty script_id is required. Empty script_id is accepted only with nonempty url. kind defaults to conditional if condition is truthy, otherwise line. expression falls back to condition or empty string and must be text; non-line kind requires nonempty expression. Logpoint wrapping must also fit 4096 UTF-8 bytes.",
+            "description": "url is required but may be empty; nonempty url or nonempty script_id is required. Empty script_id is accepted only with nonempty url. kind defaults to conditional if condition is a nonempty string, otherwise line. expression falls back to condition or empty string and must be text; non-line kind requires nonempty expression. Logpoint wrapping must also fit 4096 UTF-8 bytes.",
             "x-schema-completeness": "partial",
             "x-unmodeled-constraints": [
               "Legacy kind/condition/expression fallback and logpoint-wrapped byte ceiling remain runtime validation."
@@ -6803,7 +6956,7 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerTraceResult"
           },
           {
             "type": "object",
@@ -7053,7 +7206,7 @@
             "$ref": "#/components/schemas/DebuggerTraceResult"
           },
           "stop_memory_origin_trace": {
-            "$ref": "#/components/schemas/DebuggerAcknowledgementResult"
+            "$ref": "#/components/schemas/DebuggerTraceResult"
           },
           "clear_memory_origin_trace": {
             "$ref": "#/components/schemas/DebuggerAcknowledgementResult"
@@ -7134,7 +7287,7 @@
             "$ref": "#/components/schemas/DebuggerExperimentActionScopeObjectExperimentRuntimeHooksAutomationRecipesRepeaterResult"
           },
           "clear_request_interception_result": {
-            "$ref": "#/components/schemas/DebuggerAcknowledgementResult"
+            "$ref": "#/components/schemas/DebuggerExperimentResult"
           },
           "configure_repeater_variables": {
             "$ref": "#/components/schemas/DebuggerRepeaterResult"
@@ -9643,6 +9796,5 @@
       }
     }
   },
-  "x-source-revision": "8188884",
   "x-schema-scope": "Existing HTTP operations; debugger nested request/result models are intentionally partial."
 }

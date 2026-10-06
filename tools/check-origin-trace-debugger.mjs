@@ -81,6 +81,361 @@ for (const patch of [{sha256: "b".repeat(64)}, {artifact_id: "2"}, {byte_size: 3
   assert.equal(ui.isWasmInspection({...wasmReport, ...patch}, wasmSource), false);
 }
 console.log("PASS WASM inspection identity, coordinate and resource bounds");
+// Count the expensive operations deterministically instead of setting timing
+// thresholds that depend on the host. These fixtures never contact a browser.
+let networkUrlCalls = 0;
+let networkBodyDecodes = 0;
+const networkModels = runInNewContext(
+  (await readFile(join(root, "apps/research-ui/evidence_models.js"), "utf8")) +
+  (await readFile(join(root, "apps/research-ui/traffic_view.js"), "utf8")) +
+  ";({requestsFromDebuggerNetwork,isDebuggerNetwork,trafficSearchRequests})",
+  {TextEncoder, TextDecoder, Uint8Array,
+    URL: class extends URL {constructor(...args) {networkUrlCalls += 1; super(...args);}},
+    atob(value) {networkBodyDecodes += 1; return atob(value);}},
+);
+const emptyNetworkBody = () => ({state: "empty", mime: "", text: "", base64: "", truncated: false, reason: ""});
+const networkRecord = (id, patch = {}) => ({
+  id, protocol_request_id: id, target_id: "target", target_title: "Fixture",
+  url: "http://fixture.invalid/path", url_truncated: false, method: "GET", method_truncated: false,
+  resource_type: "Fetch", document_url: "http://fixture.invalid/", started_monotonic_ms: 100,
+  wall_time_ms: 100, state: "complete", status: 200, status_text: "OK", protocol: "HTTP/1.1",
+  mime_type: "text/plain", duration_ms: 1, encoded_data_length: 0,
+  from_disk_cache: false, from_service_worker: false, error_text: "",
+  request: {headers: [], body: emptyNetworkBody()}, response: {headers: [], body: emptyNetworkBody()}, ...patch,
+});
+const networkSnapshot = requests => ({capture_enabled: true, target_id: "target", requests, dropped: 0,
+  limits: {requests: 1000, body_bytes: 128 * 1024, headers: 128, header_bytes: 64 * 1024}});
+const nativeRequest = (id, time, path = "fixture.invalid", method = "GET") => ({
+  id, path, method, firstTimestamp: BigInt(time) * 1_000_000n, event: {id}, events: [{id}],
+});
+// The reference intentionally uses the old stable-sort selection, including
+// native order for equal distances and the inclusive ten-second cutoff.
+function referenceNativeIds(records, native) {
+  const claimed = new Set();
+  return records.map(record => {
+    const host = new URL(record.url).host;
+    const match = native.filter(candidate => {
+      let domain;
+      try {domain = new URL(candidate.path).host;} catch {domain = candidate.path.replace(/^\/\//, "").split("/")[0];}
+      return !claimed.has(candidate.id) && candidate.method === record.method && domain === host;
+    }).sort((left, right) => Math.abs(Number(left.firstTimestamp) / 1e6 - record.started_monotonic_ms) -
+      Math.abs(Number(right.firstTimestamp) / 1e6 - record.started_monotonic_ms))[0];
+    if (!match || Math.abs(Number(match.firstTimestamp) / 1e6 - record.started_monotonic_ms) > 10_000) return null;
+    claimed.add(match.id);
+    return match.id;
+  });
+}
+const correlationNative = [nativeRequest("tie-first", 110), nativeRequest("tie-second", 90),
+  nativeRequest("post", 100, "fixture.invalid", "POST"), nativeRequest("other-host", 100, "other.invalid")];
+const correlationRecords = [networkRecord("first"), networkRecord("second"), networkRecord("third"),
+  networkRecord("post", {method: "POST"}), networkRecord("other", {url: "http://other.invalid/redirect"})];
+const nativeIds = (records, native) => Array.from(networkModels.requestsFromDebuggerNetwork(networkSnapshot(records), native), request => request.event?.id ?? null);
+assert.deepEqual(nativeIds(correlationRecords, correlationNative), ["tie-first", "tie-second", null, "post", "other-host"]);
+assert.deepEqual(nativeIds([networkRecord("limit", {started_monotonic_ms: 10_100}), networkRecord("past", {started_monotonic_ms: 10_100.001})],
+  [nativeRequest("one", 100), nativeRequest("two", 100)]), ["one", null]);
+const variedNative = Array.from({length: 250}, (_, i) => nativeRequest(`native-${i}`, i * 7,
+  `${i % 2 ? "http://" : ""}host-${i % 9}.invalid`, i % 3 ? "GET" : "POST"));
+const variedRecords = Array.from({length: 125}, (_, i) => networkRecord(`cdp-${i}`, {
+  url: `http://host-${i % 11}.invalid/path`, method: i % 4 ? "GET" : "POST", started_monotonic_ms: i * 13,
+}));
+assert.deepEqual(nativeIds(variedRecords, variedNative), referenceNativeIds(variedRecords, variedNative));
+const beforeNative = structuredClone(variedNative);
+const beforeRecords = structuredClone(variedRecords);
+nativeIds(variedRecords, variedNative);
+assert.deepEqual(variedNative, beforeNative);
+assert.deepEqual(variedRecords, beforeRecords);
+const unmatchedNative = Array.from({length: 1000}, (_, i) => nativeRequest(`native-${i}`, i, `http://native-${i % 50}.invalid`));
+const unmatchedRecords = Array.from({length: 500}, (_, i) => networkRecord(`cdp-${i}`, {url: `http://other-${i % 50}.invalid/path`}));
+networkUrlCalls = 0;
+assert(nativeIds(unmatchedRecords, unmatchedNative).every(id => id === null));
+assert.equal(networkUrlCalls, 1500);
+
+const binaryBody = text => ({...emptyNetworkBody(), state: "available", mime: "text/plain",
+  base64: Buffer.from(text).toString("base64")});
+const binaryNetwork = networkSnapshot([networkRecord("binary", {
+  request: {headers: [["authorization", "<redacted>"]], body: binaryBody("request text")},
+  response: {headers: [["content-type", "text/plain"]], body: binaryBody("response marker")},
+})]);
+assert.equal(networkModels.isDebuggerNetwork(binaryNetwork), true);
+const binaryOriginal = structuredClone(binaryNetwork);
+const bodyCache = new Map();
+networkBodyDecodes = 0;
+let projected = networkModels.requestsFromDebuggerNetwork(binaryNetwork, [], bodyCache);
+assert.equal(networkBodyDecodes, 2);
+const firstRequestBytes = projected[0].exchange.request.bytes;
+const firstResponseBytes = projected[0].exchange.response.bytes;
+const repeatedNetwork = structuredClone(binaryNetwork);
+repeatedNetwork.requests[0].response.headers.push(["x-new-header", "latest"]);
+repeatedNetwork.requests[0].response.body.truncated = true;
+projected = networkModels.requestsFromDebuggerNetwork(repeatedNetwork, [nativeRequest("arrived", 100)], bodyCache);
+assert.equal(networkBodyDecodes, 2);
+assert.equal(projected[0].exchange.request.bytes, firstRequestBytes);
+assert.equal(projected[0].exchange.response.bytes, firstResponseBytes);
+assert.equal(projected[0].exchange.response.truncated, true);
+assert.equal(projected[0].exchange.response.headers.at(-1)[1], "latest");
+assert.equal(projected[0].event.id, "arrived");
+assert.equal(networkModels.trafficSearchRequests(projected, "marker", true).matches.get("binary").side, "Response");
+assert.equal(networkModels.trafficSearchRequests(projected, "marker", false).matches.size, 0);
+repeatedNetwork.requests[0].response.body = binaryBody("changed response");
+projected = networkModels.requestsFromDebuggerNetwork(repeatedNetwork, [], bodyCache);
+assert.equal(networkBodyDecodes, 3);
+assert.equal(projected[0].exchange.request.bytes, firstRequestBytes);
+assert.notEqual(projected[0].exchange.response.bytes, firstResponseBytes);
+repeatedNetwork.requests[0].response.body = {...emptyNetworkBody(), state: "loading"};
+projected = networkModels.requestsFromDebuggerNetwork(repeatedNetwork, [], bodyCache);
+assert.equal(projected[0].exchange.response.bytes, undefined);
+assert.equal(projected[0].exchange.response.state, "loading");
+assert.equal(bodyCache.get("binary").response.bytes, undefined);
+assert.deepEqual(binaryNetwork, binaryOriginal);
+for (let i = 0; i < 100; i += 1) {
+  const window = networkSnapshot([networkRecord(`window-${i}`, {response: {headers: [], body: binaryBody("bounded")}})]);
+  networkModels.requestsFromDebuggerNetwork(window, [], bodyCache);
+  assert.deepEqual([...bodyCache.keys()], [`window-${i}`]);
+}
+networkModels.requestsFromDebuggerNetwork(networkSnapshot([]), [], bodyCache);
+assert.equal(bodyCache.size, 0);
+networkModels.requestsFromDebuggerNetwork(binaryNetwork, [], bodyCache);
+assert.equal(networkModels.requestsFromDebuggerNetwork({...binaryNetwork, capture_enabled: false}, [], bodyCache).length, 0);
+assert.equal(bodyCache.size, 0);
+console.log("PASS indexed Traffic correlation, stable ties, body reuse, current-window eviction, capture-off and content search");
+
+// Run the actual source load/refresh lifecycle with rendering and transport
+// stubbed. This verifies retention and races, not browser interaction or pixels.
+const appSource = await readFile(join(root, "apps/research-ui/app.js"), "utf8");
+function appSection(start, end) {
+  const offset = appSource.indexOf(start);
+  const boundary = appSource.indexOf(end, offset);
+  assert(offset >= 0 && boundary > offset, `Missing fixture boundary: ${start}`);
+  return appSource.slice(offset, boundary);
+}
+const sourceState = {liveScriptContent: new Map(), staleScriptIds: new Set(), openScriptIds: [], openArtifactIds: [],
+  debuggerRefreshing: false, debuggerEtag: null, debuggerSession: null, selectedScriptId: null,
+  editingBreakpointId: null, selectedRequestId: null, requests: []};
+const sourceSnapshot = scripts => ({target: {id: "target"}, scripts, breakpoints: [], state: "running"});
+let sourceReply;
+let catalogReply;
+let catalogFailure = false;
+let sourceLoads = 0;
+let sourceRenders = 0;
+let sourceVisible = false;
+let sourceHeadersStalled = false;
+let sourceTimerId = 0;
+const sourceTimers = new Map();
+const activeSourceRequests = new Set();
+const sourceSandbox = {state: sourceState, location: {protocol: "http:"},
+  AbortController,
+  setTimeout(callback, delay) {const id = ++sourceTimerId; sourceTimers.set(id, {callback, delay}); return id;},
+  clearTimeout(id) {sourceTimers.delete(id);},
+  document: {hidden: false, querySelector: selector => ({hidden: selector !== "#screen-sources" || !sourceVisible})},
+  isPlainObject: value => value !== null && typeof value === "object" && !Array.isArray(value),
+  isDebuggerResponse: value => value.valid !== false,
+  selectedSource: () => sourceState.debuggerSession.scripts.find(script => script.script_id === sourceState.selectedScriptId),
+  sourceDisplayName: script => script.script_id,
+  fetch: async (url, options) => {
+    if (url.startsWith("/api/debugger/source")) {
+      sourceLoads += 1;
+      const id = sourceLoads;
+      const reply = sourceReply;
+      const signal = options.signal;
+      assert(signal instanceof AbortSignal, "Source transport must receive the cancellation signal");
+      activeSourceRequests.add(id);
+      const abortable = value => new Promise((resolve, reject) => {
+        const settle = (handler, value) => {
+          activeSourceRequests.delete(id);
+          signal.removeEventListener("abort", aborted);
+          handler(value);
+        };
+        const aborted = () => settle(reject, new DOMException("Synthetic transport aborted", "AbortError"));
+        if (signal.aborted) {aborted(); return;}
+        signal.addEventListener("abort", aborted, {once: true});
+        Promise.resolve(value).then(value => settle(resolve, value), error => settle(reject, error));
+      });
+      return sourceHeadersStalled ? abortable(new Promise(() => {})) : {ok: true, json: () => abortable(reply)};
+    }
+    if (catalogFailure) throw new Error("Synthetic refresh disconnected");
+    return {status: 200, ok: true, headers: {get: () => null}, json: async () => catalogReply};
+  }};
+for (const name of ["renderSources", "rebuildTrafficRequests", "applyMemoryOriginTrace", "renderLiveBrowserTabCount",
+  "renderDebugger", "renderShellStatus", "renderNetworkNotice", "renderMemory", "renderFieldProvenance", "scheduleDebuggerRefresh",
+  "renderSourceTree", "renderSourceTabs", "updateSourceDecorations"]) {
+  sourceSandbox[name] = () => {};
+}
+sourceSandbox.renderSources = () => {sourceRenders += 1;};
+const sourceLifecycle = runInNewContext(
+  appSection("      function liveScriptIdentity(", "      function liveSources(") +
+  appSection("      function markLiveSourceStale(", "      function selectedSource(") +
+  appSection("      async function loadScriptContent(", "      async function toggleLineBreakpoint(") +
+  appSection("      function debuggerScriptCatalogSignature(", "      function scheduleDebuggerRefresh(") +
+  appSection("      async function refreshDebugger(", "      async function refreshArtifacts(") +
+  ";({loadScriptContent,refreshDebugger,markLiveSourceStale})", sourceSandbox,
+);
+const fixtureScript = (id, patch = {}) => ({script_id: id, target_id: "target", hash: id, kind: "javascript", ...patch});
+const fixtureSource = (script, source = "retained source") => ({protocol_version: 1, script_id: script.script_id, source, truncated: false});
+async function updateCatalog(snapshot) {
+  catalogReply = snapshot;
+  await sourceLifecycle.refreshDebugger();
+}
+for (let i = 0; i < 100; i += 1) {
+  const script = fixtureScript(`navigation-${i}`);
+  await updateCatalog(sourceSnapshot([script]));
+  sourceReply = fixtureSource(script, `/* ${i} */` + "x".repeat(256 * 1024));
+  await sourceLifecycle.loadScriptContent(script);
+  assert.equal(sourceState.liveScriptContent.size, 1);
+  await updateCatalog(sourceSnapshot([]));
+  assert.equal(sourceState.liveScriptContent.size, 0);
+}
+const retainedScript = fixtureScript("retained");
+await updateCatalog(sourceSnapshot([retainedScript]));
+sourceReply = fixtureSource(retainedScript);
+await sourceLifecycle.loadScriptContent(retainedScript);
+const retainedEntry = sourceState.liveScriptContent.get("retained");
+await updateCatalog({...sourceSnapshot([]), valid: false});
+assert.equal(sourceState.liveScriptContent.get("retained"), retainedEntry);
+assert.equal(sourceState.debuggerRefreshFailed, true);
+await updateCatalog(sourceSnapshot([retainedScript]));
+assert.equal(sourceState.liveScriptContent.get("retained"), retainedEntry);
+catalogFailure = true;
+await updateCatalog(sourceSnapshot([]));
+assert.equal(sourceState.liveScriptContent.get("retained"), retainedEntry);
+catalogFailure = false;
+await updateCatalog(sourceSnapshot([{...retainedScript, hash: "new-hash"}]));
+assert.equal(sourceState.liveScriptContent.size, 0);
+
+let finishOldSource;
+const delayedScript = fixtureScript("delayed");
+await updateCatalog(sourceSnapshot([delayedScript]));
+sourceReply = new Promise(resolve => {finishOldSource = resolve;});
+const delayedLoad = sourceLifecycle.loadScriptContent(delayedScript);
+await Promise.resolve();
+await updateCatalog(sourceSnapshot([]));
+assert.equal(sourceState.liveScriptContent.size, 0);
+await updateCatalog(sourceSnapshot([delayedScript]));
+sourceReply = fixtureSource(delayedScript, "newer load");
+await sourceLifecycle.loadScriptContent(delayedScript);
+finishOldSource(fixtureSource(delayedScript, "obsolete load"));
+await delayedLoad;
+assert.equal(sourceState.liveScriptContent.get("delayed").content, "newer load");
+await updateCatalog(sourceSnapshot([{...delayedScript, target_id: "other-target"}]));
+assert.equal(sourceState.liveScriptContent.size, 0);
+const priorLoads = sourceLoads;
+await sourceLifecycle.loadScriptContent(delayedScript);
+assert.equal(sourceLoads, priorLoads);
+const failedScript = fixtureScript("failed-source");
+await updateCatalog(sourceSnapshot([failedScript]));
+sourceReply = Promise.reject(new Error("Synthetic source failure"));
+await sourceLifecycle.loadScriptContent(failedScript);
+assert.match(sourceState.liveScriptContent.get(failedScript.script_id).loadError, /Synthetic source failure/);
+assert.equal(sourceState.liveScriptContent.get(failedScript.script_id).loading, false);
+sourceReply = fixtureSource(failedScript, "recovered source");
+await sourceLifecycle.loadScriptContent(failedScript);
+assert.equal(sourceState.liveScriptContent.get(failedScript.script_id).content, "recovered source");
+let failDetachedSource;
+const failedPendingScript = fixtureScript("failed-pending");
+await updateCatalog(sourceSnapshot([failedPendingScript]));
+sourceReply = new Promise((resolve, reject) => {failDetachedSource = reject;});
+const pendingFailure = sourceLifecycle.loadScriptContent(failedPendingScript);
+await Promise.resolve();
+await updateCatalog(sourceSnapshot([]));
+await updateCatalog(sourceSnapshot([failedPendingScript]));
+sourceReply = fixtureSource(failedPendingScript, "newer successful source");
+await sourceLifecycle.loadScriptContent(failedPendingScript);
+failDetachedSource(new Error("Obsolete load failed"));
+await pendingFailure;
+assert.equal(sourceState.liveScriptContent.get(failedPendingScript.script_id).content, "newer successful source");
+sourceState.staleScriptIds.add(failedPendingScript.script_id);
+const loadsBeforeStale = sourceLoads;
+await sourceLifecycle.loadScriptContent(failedPendingScript);
+assert.equal(sourceLoads, loadsBeforeStale);
+// Selected/open IDs can survive navigation while their source identity changes.
+// The editor must replace its old bytes without requiring another click.
+sourceVisible = true;
+const selectedScript = fixtureScript("selected");
+await updateCatalog(sourceSnapshot([selectedScript]));
+sourceState.selectedScriptId = selectedScript.script_id;
+sourceState.openScriptIds = [selectedScript.script_id];
+sourceState.sourceCollection = "page";
+sourceReply = fixtureSource(selectedScript, "old selected source");
+await sourceLifecycle.loadScriptContent(selectedScript);
+for (const changedScript of [{...selectedScript, hash: "changed-hash"}, {...selectedScript, target_id: "changed-target"}]) {
+  const priorRenders = sourceRenders;
+  const priorLoads = sourceLoads;
+  sourceReply = fixtureSource(changedScript, `new source ${changedScript.hash}:${changedScript.target_id}`);
+  await updateCatalog(sourceSnapshot([changedScript]));
+  await new Promise(resolve => setImmediate(resolve));
+  assert(sourceRenders > priorRenders);
+  assert.equal(sourceLoads, priorLoads + 1);
+  assert.equal(sourceState.selectedScriptId, "selected");
+  assert.equal(sourceState.openScriptIds[0], "selected");
+  assert.equal(sourceState.liveScriptContent.get("selected").content, sourceReply.source);
+}
+sourceVisible = false;
+sourceState.selectedScriptId = null;
+sourceState.openScriptIds = [];
+const stalledScript = fixtureScript("stalled");
+const noticeBeforeCancellation = sourceState.sourceNotice;
+for (let i = 0; i < 25; i += 1) {
+  await updateCatalog(sourceSnapshot([stalledScript]));
+  sourceHeadersStalled = Boolean(i % 2);
+  sourceReply = new Promise(() => {});
+  const pendingLoad = sourceLifecycle.loadScriptContent(stalledScript);
+  await Promise.resolve();
+  const pending = sourceState.liveScriptContent.get(stalledScript.script_id);
+  assert.equal(activeSourceRequests.size, 1);
+  await updateCatalog(sourceSnapshot([]));
+  await pendingLoad;
+  assert.equal(pending.controller.signal.aborted, true);
+  assert.equal(activeSourceRequests.size, 0);
+  assert.equal(sourceTimers.size, 0);
+  assert.equal(sourceState.liveScriptContent.size, 0);
+  assert.equal(sourceState.sourceNotice, noticeBeforeCancellation);
+}
+for (const headersStalled of [false, true]) {
+  const script = fixtureScript(`timeout-${headersStalled}`);
+  await updateCatalog(sourceSnapshot([script]));
+  sourceHeadersStalled = headersStalled;
+  sourceReply = new Promise(() => {});
+  const timedOutLoad = sourceLifecycle.loadScriptContent(script);
+  await Promise.resolve();
+  assert.equal(sourceTimers.size, 1);
+  const deadline = [...sourceTimers.values()][0];
+  assert.equal(deadline.delay, 15000);
+  deadline.callback();
+  await timedOutLoad;
+  assert.match(sourceState.liveScriptContent.get(script.script_id).loadError, /timed out after 15 seconds/);
+  assert.equal(activeSourceRequests.size, 0);
+  assert.equal(sourceTimers.size, 0);
+  sourceHeadersStalled = false;
+  sourceReply = fixtureSource(script, "source after timeout retry");
+  await sourceLifecycle.loadScriptContent(script);
+  assert.equal(sourceState.liveScriptContent.get(script.script_id).content, sourceReply.source);
+  assert.equal(sourceTimers.size, 0);
+}
+const replacedPending = fixtureScript("replace-pending");
+await updateCatalog(sourceSnapshot([replacedPending]));
+sourceReply = new Promise(() => {});
+const replacedLoad = sourceLifecycle.loadScriptContent(replacedPending);
+await Promise.resolve();
+const replacedController = sourceState.liveScriptContent.get(replacedPending.script_id).controller;
+const replacingScript = {...replacedPending, hash: "replacement"};
+sourceState.debuggerSession = sourceSnapshot([replacingScript]);
+sourceReply = fixtureSource(replacingScript, "replacement source");
+await sourceLifecycle.loadScriptContent(replacingScript);
+await replacedLoad;
+assert.equal(replacedController.signal.aborted, true);
+assert.equal(sourceState.liveScriptContent.get(replacingScript.script_id).content, "replacement source");
+assert.equal(activeSourceRequests.size, 0);
+assert.equal(sourceTimers.size, 0);
+const stalePending = fixtureScript("mark-stale-pending");
+await updateCatalog(sourceSnapshot([stalePending]));
+sourceReply = new Promise(() => {});
+const markedLoad = sourceLifecycle.loadScriptContent(stalePending);
+await Promise.resolve();
+sourceLifecycle.markLiveSourceStale(stalePending.script_id);
+await markedLoad;
+assert.equal(sourceState.liveScriptContent.size, 0);
+assert.equal(activeSourceRequests.size, 0);
+assert.equal(sourceTimers.size, 0);
+console.log("PASS live source eviction, validated refresh retention, identity changes, abort/timeout cleanup and load races");
 // The decoded-field handoff must never silently rebind a chain to edited input
 // or another request, or turn a binary/preview result into a source-text match.
 const fieldHandoff = runInNewContext(

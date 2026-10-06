@@ -192,10 +192,14 @@ std::string EventToJson(const EventRecord& event) {
   output.append("\",\"payload_size\":");
   AppendInteger(output, event.header.payload_size);
   output.append(",\"payload_encoding\":\"hex\",\"payload\":\"");
-  for (const std::byte value : payload) {
-    const auto byte_value = static_cast<unsigned int>(std::to_integer<unsigned char>(value));
-    output.push_back(kHex[(byte_value >> 4U) & 0x0fU]);
-    output.push_back(kHex[byte_value & 0x0fU]);
+  // InlinePayload bounds the extra space even for a malformed advertised size.
+  const std::size_t payload_start = output.size();
+  output.resize(payload_start + payload.size() * 2);
+  for (std::size_t index = 0; index < payload.size(); ++index) {
+    const auto byte_value =
+        static_cast<unsigned int>(std::to_integer<unsigned char>(payload[index]));
+    output[payload_start + index * 2] = kHex[(byte_value >> 4U) & 0x0fU];
+    output[payload_start + index * 2 + 1] = kHex[byte_value & 0x0fU];
   }
   output.append("\"}");
   return output;

@@ -270,6 +270,16 @@ validation and projections; `source_syntax.js` owns source display algorithms.
 Live refresh and DOM updates belong in `app.js`.
 The native scheme handler and packaging script explicitly list shipped assets.
 
+Traffic correlates native requests within method/host buckets, preserving native
+order for equal-time matches. Decoded binary bodies are reused only while their
+request remains in the current network window and its encoded bytes are unchanged;
+headers and capture states always come from the latest validated snapshot. Live
+source text is retained only for the current validated script catalog and matching
+target/hash identity. A failed refresh preserves the last valid cache, and a
+detached pending load is cancelled and cannot restore obsolete source text.
+Source fetches have a 15-second deadline, including body reads; a timed-out load
+can be retried by selecting the source again.
+
 Debugger support modules must not import the session coordinator or the HTTP
 server. Pure request validation does not require a browser connection. The
 coordinator owns session locks, authorization, cancellation, and feature

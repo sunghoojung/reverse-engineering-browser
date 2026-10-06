@@ -1617,7 +1617,7 @@
         return [...requests.values()];
       }
 
-      function networkBodyFromDebugger(body, headers) {
+      function networkBodyFromDebugger(body, headers, previous = null) {
         const record = {
           state: body.state,
           mime: body.mime,
@@ -1627,15 +1627,22 @@
           reason: body.reason
         };
         if (body.base64) {
-          const decoded = atob(body.base64);
-          record.bytes = Uint8Array.from(decoded, character => character.charCodeAt(0));
+          if (previous?.base64 === body.base64) {
+            record.bytes = previous.bytes;
+          } else {
+            const decoded = atob(body.base64);
+            record.bytes = Uint8Array.from(decoded, character => character.charCodeAt(0));
+          }
           delete record.text;
         }
         return record;
       }
 
-      function requestsFromDebuggerNetwork(network, nativeRequests = []) {
-        if (!network?.capture_enabled) return [];
+      function requestsFromDebuggerNetwork(network, nativeRequests = [], bodyCache = null) {
+        if (!network?.capture_enabled) {
+          bodyCache?.clear();
+          return [];
+        }
         const domain = request => {
           try { return new URL(String(request.path ?? '')).host; }
           catch { return String(request.path ?? '').replace(/^\/\//, '').split('/')[0]; }
@@ -1645,20 +1652,48 @@
           ['Media', 'media'], ['Font', 'font'], ['XHR', 'xhr'], ['Fetch', 'xhr'],
           ['WebSocket', 'socket'], ['Manifest', 'other'], ['Other', 'other']
         ]);
+        // Preserve native order within each bucket so equal-distance ties keep
+        // the same greedy assignment as the stable distance sort.
+        const nativeByMethod = new Map();
+        for (const request of nativeRequests) {
+          const hosts = nativeByMethod.get(request.method) ?? new Map();
+          const host = domain(request);
+          const candidates = hosts.get(host) ?? [];
+          candidates.push({request, timestamp: Number(request.firstTimestamp) / 1e6});
+          hosts.set(host, candidates);
+          nativeByMethod.set(request.method, hosts);
+        }
         const claimedNative = new Set();
-        return network.requests.map(record => {
+        const retainedBodies = bodyCache ? new Map() : null;
+        const requests = network.requests.map(record => {
           let host = '';
           try { host = new URL(record.url).host; } catch {}
-          const native = nativeRequests
-            .filter(candidate => !claimedNative.has(candidate.id) && candidate.method === record.method &&
-              domain(candidate) === host)
-            .sort((left, right) => Math.abs(Number(left.firstTimestamp) / 1e6 - record.started_monotonic_ms) -
-              Math.abs(Number(right.firstTimestamp) / 1e6 - record.started_monotonic_ms))[0];
-          if (native && Math.abs(Number(native.firstTimestamp) / 1e6 - record.started_monotonic_ms) <= 10_000) {
+          let native = null;
+          let distance = Infinity;
+          for (const candidate of nativeByMethod.get(record.method)?.get(host) ?? []) {
+            if (claimedNative.has(candidate.request.id)) continue;
+            const candidateDistance = Math.abs(candidate.timestamp - record.started_monotonic_ms);
+            if (candidateDistance < distance) {
+              native = candidate.request;
+              distance = candidateDistance;
+            }
+          }
+          if (native && distance <= 10_000) {
             claimedNative.add(native.id);
           }
           const correlated = claimedNative.has(native?.id) ? native : null;
           const terminal = record.state !== 'pending';
+          const previousBodies = bodyCache?.get(record.id);
+          const exchange = {
+            request: networkBodyFromDebugger(record.request.body, record.request.headers, previousBodies?.request),
+            response: networkBodyFromDebugger(record.response.body, record.response.headers, previousBodies?.response)
+          };
+          if (retainedBodies && (record.request.body.base64 || record.response.body.base64)) {
+            retainedBodies.set(record.id, {
+              request: {base64: record.request.body.base64, bytes: exchange.request.bytes},
+              response: {base64: record.response.body.base64, bytes: exchange.response.bytes}
+            });
+          }
           return {
             id: record.id,
             path: record.url,
@@ -1686,12 +1721,16 @@
             protocolRequestId: record.protocol_request_id,
             initiator: record.initiator,
             urlTruncated: record.url_truncated,
-            exchange: {
-              request: networkBodyFromDebugger(record.request.body, record.request.headers),
-              response: networkBodyFromDebugger(record.response.body, record.response.headers)
-            }
+            exchange
           };
         });
+        // The decoded-byte cache owns only the current validated network window.
+        // Metadata and headers are always projected from the newest snapshot.
+        if (bodyCache) {
+          bodyCache.clear();
+          retainedBodies.forEach((value, key) => bodyCache.set(key, value));
+        }
+        return requests;
       }
 
       function decodeVmFinding(event) {

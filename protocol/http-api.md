@@ -27,7 +27,9 @@ endpoint file, so it will not silently target an installed app session:
 
 ```sh
 apps/origin-trace-backend/target/debug/reb-api list
+apps/origin-trace-backend/target/debug/reb-api spec > origin-trace-openapi.json
 apps/origin-trace-backend/target/debug/reb-api describe debugger_action
+apps/origin-trace-backend/target/debug/reb-api describe debugger_action --action add_automation_recipe
 apps/origin-trace-backend/target/debug/reb-api call get_events \
   --endpoint-file /tmp/reb-api-endpoint --param limit=50 --show-headers
 printf '%s' '{"action":"pause"}' | apps/origin-trace-backend/target/debug/reb-api call debugger_action \
@@ -36,6 +38,14 @@ apps/origin-trace-backend/target/debug/reb-api call get_artifact_content \
   --endpoint-file /tmp/reb-api-endpoint --param artifact_id=1 \
   --param offset=0 --param limit=2097152 --output artifact-chunk.bin --show-headers
 ```
+
+`spec` prints the complete embedded OpenAPI document for validators and client
+generators without contacting a server. `describe` is an operation-detail
+document rather than a complete OpenAPI document. It includes the referenced
+component schemas, so every local `$ref`
+resolves within its JSON output. `--action NAME` narrows a multiplexed request
+to that action and its mapped success response when an action-result mapping
+exists. The operation's body-size limit and other extensions remain visible.
 
 `call` accepts repeated `--param NAME=VALUE` for the operation's documented
 path, query and header parameters, including `If-None-Match`. POST bodies come
@@ -46,8 +56,8 @@ Successful JSON is printed to stdout without a wrapper. A 304 produces no
 stdout body; `--show-headers` prints status, ETag and other response headers to
 stderr. HTTP errors exit nonzero and show the server's error text. Binary
 content requires `--output PATH` (or explicit `--output -` for stdout), and a
-file path is never overwritten. The importable `api_client.py` uses the same
-operation IDs. It does not provide additional permissions on its own.
+file path is never overwritten. The CLI does not provide additional permissions
+on its own.
 
 ```sh
 REB_API=$(cat /tmp/reb-api-endpoint)
@@ -70,14 +80,16 @@ Debugger long polling accepts `wait_ms=0..25000`; it waits only when the supplie
 ETag matches the current generation. Set client timeouts above the chosen wait.
 Artifact content uses `offset` and `limit` query arguments and always returns
 200 on success, including partial chunks. Advance using actual byte count and
-`X-Artifact-Total-Bytes`; `X-Artifact-Truncated` indicates remaining data.
+`X-Artifact-Total-Bytes`; `X-Artifact-Truncated` is the string `true` when bytes
+remain and `false` at the end. An offset equal to the total returns an empty
+chunk; a negative, malformed, or beyond-end offset returns 400.
 This is not HTTP Range/206 pagination. Events and artifacts expose a bounded
 recent tail, not a cursor or stable exhaustive export.
 
 ## Authentication and locality
 
 There is **no bearer token, API key, login, or OAuth scheme** on this HTTP API.
-`security: []` is deliberate, not missing configuration. Every `/api/` GET and
+`security: []` is deliberate, not missing configuration. Every `/api/` request and
 every POST checks the exact listening port in `Host` and permits only
 `127.0.0.1`, `localhost`, or `::1`. `Sec-Fetch-Site: cross-site` is rejected.
 If supplied, `Origin` must be HTTP with a local hostname and matching port,
@@ -95,8 +107,8 @@ scheme behavior is not guaranteed to match the Rust backend in every detail.
 
 ## Contract coverage and known gaps
 
-All current HTTP API routes, documented query parameters, body-size ceilings,
-conditional responses and caught error statuses are represented. Trace,
+The specification describes current HTTP API routes, query parameters,
+body-size ceilings, conditional responses and known application errors. Trace,
 request-signal and VM schemas are embedded from their versioned protocol files
 so the OpenAPI document is portable. Update embedded schemas whenever their
 versioned source changes.
@@ -111,6 +123,8 @@ The action routes are multiplexed, not invented REST resources:
 - Collection and Analyst replacement use optimistic `expected_generation` and
   full documents. Stale generations return 409. Tree integrity, uniqueness,
   forbidden headers and aggregate UTF-8 limits remain runtime validations.
+  Replacement responses do not include an ETag; read the workspace to obtain
+  its current conditional-GET validator.
 - Analyst execution requires the current saved JavaScript script and explicit
   confirmation; sensitive selected artifact data needs additional confirmation.
 - Debugger enumerates all 59 current actions with source-backed request fields,
@@ -127,22 +141,22 @@ The action routes are multiplexed, not invented REST resources:
 Known behavior worth preserving in clients:
 
 - Invalid events/artifacts `limit`, VM `request_id`, or artifact offset/limit
-  parsing currently returns 500, not 400. Several numeric limits clamp values.
-- Malformed decoder JSON envelopes or invalid Content-Length can escape its
-  exception handler and close the connection without a structured response.
-  Deobfuscation also has uncaught filesystem/manifest errors. No synthetic
-  status is promised for these gaps.
-- Unknown GET paths fall back to static-file handling, often an HTML 404;
-  unknown POST paths return a JSON 404. Unsupported methods use the inherited
-  HTTP handler behavior, not an API-wide JSON error envelope. HEAD is not a
-  documented equivalent of API GET.
+  parsing returns 400. Valid signed `limit` values clamp to the operation's
+  bounds; offsets and identifiers must be canonical unsigned decimals.
+- At the application handler, malformed JSON, non-object bodies, invalid body
+  lengths and unsupported chunked bodies return JSON 400 errors. A body read
+  exceeding five seconds returns 408. Transport-level HTTP framing failures
+  may be rejected before the application handler and have no JSON guarantee.
+- Unknown API paths return JSON 404; unsupported methods return JSON 405.
+  Every application response includes `Cache-Control: no-store` and
+  `X-Content-Type-Options: nosniff`. HEAD is not an equivalent of API GET.
 - Current debugger dispatch rejects every action except disarm while Runtime
   Hooks is active, **including request-value comparison**. This conflicts with
   the UI enabling Compare while armed. CLI clients must disarm first until the
   dispatcher is corrected; this change documents rather than alters behavior.
 - GET VM analysis may write its local analysis cache. No rate-limit, pagination
   cursor, idempotency key, cancellation API for every operation, or remote auth
-  exists. Unknown exceptions have no guaranteed JSON contract.
+  exists. A connection failure or process crash has no guaranteed JSON body.
 - Some size constraints are UTF-8 bytes, not characters. `x-max-utf8-bytes`
   describes those checks without misusing JSON Schema `maxLength`.
 
@@ -157,9 +171,13 @@ retry mutations after a timeout or dropped connection.
 
 ## Maintain and validate
 
-Run `make lint`, `make check`, and `make e2e` as the repository handoff
-gate. Run `apps/origin-trace-backend/target/debug/reb-api list` to confirm the client
-loads the contract. Validate the document with an OpenAPI 3.1-capable tool.
+Run `make lint`, `make check`, `make e2e`, `make sanitize`, and `git diff --check`
+as the repository handoff gate. The HTTP tests validate actual response bodies,
+statuses, declared headers, conditional responses and artifact chunks against
+the embedded specification, including invalid-input cases. These local tests
+do not establish live browser or native-app coverage. Run
+`apps/origin-trace-backend/target/debug/reb-api list` to confirm the client loads
+the contract. Validate the document with an OpenAPI 3.1-capable tool.
 When changing the server, update the spec in the same change. Never update a
 schema to claim an endpoint or authorization mechanism that is not implemented.
 
@@ -170,7 +188,7 @@ additional fields depend on the requested action; responses are not full snapsho
 Nested state models remain extensible where noted. `x-action-results` in the spec
 is the machine-readable action-to-schema map.
 
-- `pause`, `resume`, `step_over`, `step_into`, `step_out`, `restart_frame`, `remove_breakpoint`, `set_breakpoints_active`, `set_pause_on_exceptions`, `add_watch`, `remove_watch`, `evaluate_watches`, `set_xhr_breakpoint`, `remove_xhr_breakpoint`, `set_event_breakpoint`, `remove_event_breakpoint`, `select_target`, `stop_memory_origin_trace`, `clear_memory_origin_trace`, `clear_request_interception_result`, `clear_heap_diff_baseline`, `clear_console`: no additional fields.
+- `pause`, `resume`, `step_over`, `step_into`, `step_out`, `restart_frame`, `remove_breakpoint`, `set_breakpoints_active`, `set_pause_on_exceptions`, `add_watch`, `remove_watch`, `evaluate_watches`, `set_xhr_breakpoint`, `remove_xhr_breakpoint`, `set_event_breakpoint`, `remove_event_breakpoint`, `select_target`, `clear_memory_origin_trace`, `clear_heap_diff_baseline`, `clear_console`: no additional fields.
 
 - `set_breakpoint`, `update_breakpoint`: `breakpoint`.
 
@@ -178,7 +196,7 @@ is the machine-readable action-to-schema map.
 
 - `search_heap_snapshot`: `snapshot`.
 
-- `start_memory_origin_trace`: `trace`.
+- `start_memory_origin_trace`, `stop_memory_origin_trace`: `trace`.
 
 - `set_action_scope`, `close_experiment_page`: `action_scope`.
 
@@ -196,7 +214,7 @@ is the machine-readable action-to-schema map.
 
 - `run_automation_recipe`: `automation_recipes`, `run`, `runs`.
 
-- `configure_request_interception`, `run_request_interception`: `experiment`.
+- `configure_request_interception`, `run_request_interception`, `clear_request_interception_result`: `experiment`.
 
 - `configure_repeater_variables`, `run_repeater_request`, `cancel_repeater_request`, `compare_repeater_history`, `clear_repeater_history`: `repeater`.
 

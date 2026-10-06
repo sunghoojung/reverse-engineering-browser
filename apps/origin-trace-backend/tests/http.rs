@@ -87,6 +87,411 @@ impl Server {
         std::fs::write(p, bytes).unwrap();
     }
 }
+fn specification() -> Value {
+    serde_json::from_str(include_str!("../../../protocol/openapi.json")).unwrap()
+}
+fn assert_schema(spec: &Value, schema: &Value, value: &Value, label: &str) {
+    let document = json!({
+        "$schema":"https://json-schema.org/draft/2020-12/schema",
+        "$ref":"#/checked",
+        "checked":schema,
+        "components":spec["components"]
+    });
+    let validator = jsonschema::validator_for(&document).unwrap();
+    if let Err(error) = validator.validate(value) {
+        panic!("{label}: {error}");
+    }
+}
+async fn assert_contract_response(
+    response: reqwest::Response,
+    method: &str,
+    route: &str,
+    expected_status: u16,
+) -> Vec<u8> {
+    assert_eq!(
+        response.status().as_u16(),
+        expected_status,
+        "{method} {route}"
+    );
+    let spec = specification();
+    let operation = &spec["paths"][route][method];
+    assert!(
+        operation["operationId"].is_string(),
+        "Unknown operation: {method} {route}"
+    );
+    let contract = &operation["responses"][expected_status.to_string()];
+    assert!(
+        contract.is_object(),
+        "Undocumented status: {method} {route} {expected_status}"
+    );
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    for (name, header) in contract["headers"].as_object().into_iter().flatten() {
+        let value = response.headers().get(name).unwrap_or_else(|| {
+            panic!("Missing declared header: {method} {route} {expected_status} {name}")
+        });
+        assert_schema(
+            &spec,
+            &header["schema"],
+            &json!(value.to_str().unwrap()),
+            name,
+        );
+    }
+    let content_type = response.headers().get("content-type").map(|value| {
+        value
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .trim()
+            .to_owned()
+    });
+    let bytes = response.bytes().await.unwrap().to_vec();
+    if expected_status == 304 {
+        assert!(bytes.is_empty());
+        assert!(contract.get("content").is_none());
+    } else {
+        let content_type = content_type.expect("Response Content-Type");
+        let schema = &contract["content"][&content_type]["schema"];
+        assert!(
+            !schema.is_null(),
+            "Undocumented content type: {method} {route} {content_type}"
+        );
+        if content_type == "application/json" {
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_schema(
+                &spec,
+                schema,
+                &value,
+                &format!("{method} {route} {expected_status}"),
+            );
+        } else {
+            assert_eq!(content_type, "application/octet-stream");
+            assert_eq!(schema["type"], "string");
+            assert_eq!(schema["format"], "binary");
+        }
+    }
+    bytes
+}
+#[test]
+fn openapi_references_and_debugger_action_result_maps_are_consistent() {
+    use std::collections::BTreeSet;
+    fn references(spec: &Value, value: &Value) {
+        match value {
+            Value::Object(object) => {
+                if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+                    assert!(
+                        reference.starts_with("#/"),
+                        "Nonlocal reference: {reference}"
+                    );
+                    assert!(
+                        spec.pointer(&reference[1..]).is_some(),
+                        "Unresolved reference: {reference}"
+                    );
+                }
+                for value in object.values() {
+                    references(spec, value);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    references(spec, value);
+                }
+            }
+            _ => (),
+        }
+    }
+    let spec = specification();
+    assert_eq!(spec["openapi"], "3.1.0");
+    assert_eq!(spec["security"], json!([]));
+    references(&spec, &spec);
+    let mut ids = BTreeSet::new();
+    for item in spec["paths"].as_object().unwrap().values() {
+        for operation in item.as_object().unwrap().values() {
+            let id = operation["operationId"].as_str().unwrap();
+            assert!(ids.insert(id), "Duplicate operation ID: {id}");
+        }
+    }
+    assert_eq!(ids.len(), 22, "Review route coverage when the API changes");
+    let schemas = &spec["components"]["schemas"];
+    let actions = schemas["DebuggerAction"]["oneOf"].as_array().unwrap();
+    let results = &schemas["DebuggerResult"];
+    let mappings = results["x-action-results"].as_object().unwrap();
+    let mut names = BTreeSet::new();
+    for action in actions {
+        let name = action["properties"]["action"]["const"].as_str().unwrap();
+        assert!(names.insert(name), "Duplicate action: {name}");
+        let reference = action["x-result-schema"].as_str().unwrap();
+        assert!(
+            spec.pointer(&reference[1..]).is_some(),
+            "Unresolved action result: {name}"
+        );
+        assert_eq!(
+            mappings[name]["$ref"], reference,
+            "Mismatched result: {name}"
+        );
+        assert!(
+            results["oneOf"]
+                .as_array()
+                .unwrap()
+                .contains(&mappings[name])
+        );
+    }
+    assert_eq!(
+        names.len(),
+        59,
+        "Review debugger action coverage when the dispatcher changes"
+    );
+    assert_eq!(names, mappings.keys().map(String::as_str).collect());
+    let empty: Value = serde_json::from_str(include_str!("../assets/debugger-empty.json")).unwrap();
+    // These two actions return state, unlike the generic acknowledgement.
+    // The clear action is also exercised through live HTTP below; stopping an
+    // active memory trace still needs the separate browser end-to-end gate.
+    for (action, field, state) in [
+        (
+            "clear_request_interception_result",
+            "experiment",
+            "request_interception",
+        ),
+        ("stop_memory_origin_trace", "trace", "memory_origin_trace"),
+    ] {
+        assert_schema(
+            &spec,
+            &mappings[action],
+            &json!({"ok":true,field:empty[state],"generation":0}),
+            action,
+        );
+    }
+}
+#[tokio::test]
+async fn openapi_responses_match_live_local_http_and_conditional_reads() {
+    let server = Server::start().await;
+    for route in [
+        "/api/health",
+        "/api/decoder",
+        "/api/api-collection",
+        "/api/local-analyst",
+        "/api/local-analyst/runner",
+        "/api/debugger",
+        "/api/native-console",
+        "/api/events",
+        "/api/artifacts",
+        "/api/analysis/vm",
+    ] {
+        let response = server.get(route).await;
+        let etag = response.headers().get("etag").cloned();
+        assert_contract_response(response, "get", route, 200).await;
+        if let Some(etag) = etag {
+            let response = server
+                .client
+                .get(format!("{}{route}", server.url))
+                .header("if-none-match", etag)
+                .send()
+                .await
+                .unwrap();
+            assert_contract_response(response, "get", route, 304).await;
+        }
+    }
+    for (path, route, status) in [
+        ("/api/events?limit=oops", "/api/events", 400),
+        ("/api/events?limit=1&limit=2", "/api/events", 400),
+        ("/api/artifacts?limit=", "/api/artifacts", 400),
+        (
+            "/api/artifacts?limit=9223372036854775808",
+            "/api/artifacts",
+            400,
+        ),
+        ("/api/analysis/vm?request_id=oops", "/api/analysis/vm", 400),
+        ("/api/analysis/vm?request_id=01", "/api/analysis/vm", 400),
+        ("/api/debugger?wait_ms=25001", "/api/debugger", 400),
+        ("/api/debugger/source", "/api/debugger/source", 400),
+        (
+            "/api/debugger/source?script_id=missing",
+            "/api/debugger/source",
+            409,
+        ),
+        ("/api/deobfuscation", "/api/deobfuscation", 400),
+        ("/api/origin-trace", "/api/origin-trace", 400),
+        (
+            "/api/request-signal-profile",
+            "/api/request-signal-profile",
+            400,
+        ),
+        ("/api/wasm?artifact_id=missing", "/api/wasm", 400),
+    ] {
+        assert_contract_response(server.get(path).await, "get", route, status).await;
+    }
+    // A valid signed limit still clamps; malformed input must not become a 500.
+    for route in ["/api/events", "/api/artifacts"] {
+        assert_contract_response(
+            server.get(&format!("{route}?limit=-1")).await,
+            "get",
+            route,
+            200,
+        )
+        .await;
+    }
+    let denied = server
+        .client
+        .get(format!("{}/api/health", server.url))
+        .header("Origin", "https://example.test")
+        .send()
+        .await
+        .unwrap();
+    assert_contract_response(denied, "get", "/api/health", 403).await;
+    for path in ["/api/api-collection", "/api/local-analyst"] {
+        let original: Value = server.get(path).await.json().await.unwrap();
+        let (action, field) = if path.ends_with("api-collection") {
+            ("replace_api_collection", "requests")
+        } else {
+            ("replace_local_analyst_workspace", "files")
+        };
+        let mut folders = original["folders"].as_array().unwrap().clone();
+        let mut folder = json!({"id":2,"name":"Contract fixture","parent_id":1});
+        if field == "requests" {
+            folder["variables"] = json!([]);
+        }
+        folders.push(folder);
+        let request = json!({"action":action,"expected_generation":original["generation"],
+            "folders":folders,field:original[field]});
+        let route = format!("{path}/actions");
+        let response = server.action(&route, request.clone()).await;
+        assert!(
+            response.headers().get("etag").is_none(),
+            "Replacement has no ETag contract"
+        );
+        assert_contract_response(response, "post", &route, 200).await;
+        assert_contract_response(server.action(&route, request).await, "post", &route, 409).await;
+    }
+    for request in [
+        json!({"action":"add_watch","expression":"1"}),
+        json!({"action":"clear_request_interception_result"}),
+    ] {
+        let action = request["action"].as_str().unwrap().to_owned();
+        let bytes = assert_contract_response(
+            server.action("/api/debugger/actions", request).await,
+            "post",
+            "/api/debugger/actions",
+            200,
+        )
+        .await;
+        let spec = specification();
+        let mapping = &spec["components"]["schemas"]["DebuggerResult"]["x-action-results"][&action];
+        assert_schema(
+            &spec,
+            mapping,
+            &serde_json::from_slice::<Value>(&bytes).unwrap(),
+            &action,
+        );
+    }
+}
+#[tokio::test]
+async fn openapi_action_envelopes_and_stored_failures_are_json_errors() {
+    let server = Server::start().await;
+    let spec = specification();
+    for (route, operations) in spec["paths"].as_object().unwrap() {
+        if operations.get("post").is_none() {
+            continue;
+        }
+        for body in ["[]", "{"] {
+            let response = server
+                .client
+                .post(format!("{}{route}", server.url))
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_contract_response(response, "post", route, 400).await;
+        }
+    }
+    let mut analyst = json!({"action":"run_local_analyst_script","protocol_version":1,
+        "run_id":1,"script_id":1,"library_generation":0,"source":"return 1;",
+        "variables":{},"evidence":{"events":[],"artifacts":[],"trace_edges":[],
+            "signal_profiles":[],"vm_analysis":null,"selected_artifact":null,"summary":{}},
+        "confirmed":true,"confirmed_sensitive":false});
+    assert_schema(
+        &spec,
+        &json!({"$ref":"#/components/schemas/AnalystAction"}),
+        &analyst,
+        "Boolean sensitive-capture confirmation",
+    );
+    let analyst_schema = json!({"$ref":"#/components/schemas/AnalystAction",
+        "components":spec["components"]});
+    let analyst_validator = jsonschema::validator_for(&analyst_schema).unwrap();
+    for invalid in [Value::Null, json!("false"), json!(0), json!({})] {
+        analyst["confirmed_sensitive"] = invalid;
+        assert!(analyst_validator.validate(&analyst).is_err());
+        assert_contract_response(
+            server
+                .action("/api/local-analyst/actions", analyst.clone())
+                .await,
+            "post",
+            "/api/local-analyst/actions",
+            400,
+        )
+        .await;
+    }
+    for (file, route) in [
+        ("events.jsonl", "/api/events"),
+        ("artifacts/manifest.jsonl", "/api/artifacts"),
+        ("collection.json", "/api/api-collection"),
+        ("analyst.json", "/api/local-analyst"),
+    ] {
+        server.file(file, b"not-json\n");
+        assert_contract_response(server.get(route).await, "get", route, 500).await;
+    }
+    for (method, path, status) in [
+        (reqwest::Method::GET, "/api/missing", 404),
+        (reqwest::Method::PUT, "/api/health", 405),
+    ] {
+        let response = server
+            .client
+            .request(method, format!("{}{path}", server.url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), status);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert_schema(
+            &spec,
+            &json!({"$ref":"#/components/schemas/Error"}),
+            &response.json::<Value>().await.unwrap(),
+            path,
+        );
+    }
+}
+#[tokio::test]
+async fn openapi_request_body_deadline_is_a_documented_json_error() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let server = Server::start().await;
+    let address = server.url.strip_prefix("http://").unwrap();
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream.write_all(format!("POST /api/capture/actions HTTP/1.1\r\nHost: {address}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{").as_bytes()).await.unwrap();
+    let mut raw = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut raw))
+        .await
+        .unwrap()
+        .unwrap();
+    let response = String::from_utf8(raw).unwrap();
+    assert!(response.starts_with("HTTP/1.1 408 "), "{response}");
+    let (_, body) = response.split_once("\r\n\r\n").unwrap();
+    let value: Value = serde_json::from_str(body).unwrap();
+    let spec = specification();
+    // Every POST goes through the same bounded body reader.
+    for (route, item) in spec["paths"].as_object().unwrap() {
+        if let Some(operation) = item.get("post") {
+            let schema = &operation["responses"]["408"]["content"]["application/json"]["schema"];
+            assert!(
+                schema.is_object(),
+                "Missing body deadline response: {route}"
+            );
+            assert_schema(&spec, schema, &value, route);
+        }
+    }
+}
 #[tokio::test]
 async fn locality_static_allowlist_and_malformed_actions() {
     let server = Server::start().await;
@@ -249,17 +654,53 @@ async fn verified_range_from_large_artifact_and_corruption_rejection() {
         .await;
     assert_eq!(response.status(), 200);
     assert_eq!(response.headers()["x-artifact-truncated"], "true");
-    assert_eq!(response.bytes().await.unwrap().as_ref(), &bytes[..16]);
+    assert_eq!(
+        response.headers()["content-disposition"],
+        "attachment; filename=\"artifact-1.bin\""
+    );
+    assert_eq!(
+        assert_contract_response(response, "get", "/api/artifacts/{artifact_id}/content", 200)
+            .await,
+        &bytes[..16]
+    );
+    let response = server
+        .get(&format!("/api/artifacts/1/content?offset={}", bytes.len()))
+        .await;
+    assert_eq!(response.headers()["x-artifact-truncated"], "false");
+    assert!(
+        assert_contract_response(response, "get", "/api/artifacts/{artifact_id}/content", 200)
+            .await
+            .is_empty()
+    );
+    for query in [
+        "offset=-1",
+        "offset=oops",
+        "offset=20971521",
+        "offset=1&offset=2",
+        "limit=oops",
+    ] {
+        assert_contract_response(
+            server
+                .get(&format!("/api/artifacts/1/content?{query}"))
+                .await,
+            "get",
+            "/api/artifacts/{artifact_id}/content",
+            400,
+        )
+        .await;
+    }
     let mut corrupt = bytes;
     corrupt[0] = b'y';
     server.file(&format!("artifacts/blobs/{hash}.bin"), &corrupt);
-    assert_eq!(
+    assert_contract_response(
         server
             .get("/api/artifacts/1/content?offset=16777216&limit=16")
-            .await
-            .status(),
-        500
-    );
+            .await,
+        "get",
+        "/api/artifacts/{artifact_id}/content",
+        500,
+    )
+    .await;
 }
 #[test]
 fn vm_reports_malformed_input_and_preserves_valid_evidence() {

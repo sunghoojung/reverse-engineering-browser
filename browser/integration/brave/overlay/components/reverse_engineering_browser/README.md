@@ -62,6 +62,21 @@ and the browser session checks them again before socket delivery. The
 browser-side session starts only after its Unix-socket client authenticates to
 the local event broker. It uses another bounded queue and a dedicated writer
 thread, so network and renderer capture paths never wait for the socket.
+Both event queues reuse 1,024 slots (393,536 bytes per queue); that capacity is
+an in-flight bound, not a lifetime limit on captured events. A full queue drops
+without blocking and preserves visible, saturating drop accounting. Coalesced
+wake-ups use an acquire/release exchange on every announcement and clear: a
+producer racing with the consumer's empty check either becomes visible to that
+check or owns a new wake-up. A load-only already-pending shortcut can strand an
+event without a notification, even when the queue has free space.
+
+`make demo && build/reb-event-demo` exercises capacity, weighted drops,
+saturation, slot reuse, and the concurrent notification handoff using the same
+native queue as the renderer. `build/reb-event-demo --queue-iterations 5000000`
+extends the handoff stress run and bounded batch throughput measurement. These
+synthetic checks do not launch a browser, enable capture, or prove performance
+inside a built Brave application.
+
 Payload capture is limited to a bounded metadata prefix. Network request
 prefixes contain only the method and destination host. URL paths, queries,
 fragments, bodies, credentials, authorization headers, and cookies are not

@@ -3,6 +3,7 @@ native-build-test:
 
 check: all native-probe-compile native-build-test workspace-check deob-benchmark
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
+	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 
 native-probe-compile: $(NATIVE_PROBE_QUEUE_OBJECT)
 

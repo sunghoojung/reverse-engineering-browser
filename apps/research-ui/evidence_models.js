@@ -127,24 +127,6 @@
         return Uint8Array.from(pairs, byte => Number.parseInt(byte, 16));
       }
 
-      function summarizeEventValue(event) {
-        const vmFinding = decodeVmFinding(event);
-        if (vmFinding) return `${vmFinding.kind} · ${vmFinding.label} · ${vmFinding.confidence}`;
-        const values = [];
-        const payload = decodePayload(event);
-        if (payload) values.push(payload);
-        if (event.protocol_version >= 2) {
-          if (event.status_code !== 0) values.push(`status ${event.status_code}`);
-          if (event.error_code !== 0) values.push(`error ${event.error_code}`);
-          if (event.encoded_data_length !== '0') values.push(`${event.encoded_data_length} encoded bytes`);
-          if (event.decoded_body_length !== '0') values.push(`${event.decoded_body_length} decoded bytes`);
-          if (event.flags & 1) values.push('payload truncated');
-          if (event.flags & 2) values.push('from cache');
-          if (event.flags & 4) values.push('from service worker');
-        }
-        return values.join(' · ') || 'no inline payload';
-      }
-
       function formatMilliseconds(nanoseconds, prefix = '') {
         const negative = nanoseconds < 0n;
         const absolute = negative ? -nanoseconds : nanoseconds;

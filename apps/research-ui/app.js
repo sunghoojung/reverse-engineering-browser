@@ -1532,11 +1532,6 @@
         if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
       }
 
-      function traceIsAvailable() {
-        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
-        return Boolean(requestTraceRoot(request) || state.selectedField);
-      }
-
       function renderFields() {
         document.querySelectorAll('.field-tab').forEach(tab => {
           const selected = tab.dataset.fieldTab === state.fieldTab;

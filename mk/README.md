@@ -37,7 +37,8 @@ invalidate native objects. `make sanitize` uses its own clean build directory.
 runs two independent executables in a
 temporary directory, checks that a repeat build does no work, and verifies that
 an artifact header change invalidates its consumer without rebuilding the event
-demo. `make check` includes this regression check.
+demo. `make check` includes this regression check, the deobfuscation semantic
+benchmark, and the backend and deobfuscator worker's Rust test suites.
 
 `origin-trace-backend` builds the Rust HTTP service, VM analyzer, and API CLI.
 `ui` starts that service after deterministic evidence generation. `backend-e2e`

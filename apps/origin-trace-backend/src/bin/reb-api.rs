@@ -149,7 +149,17 @@ fn include_components(spec: &Value, detail: &mut Value) -> Result<(), String> {
 }
 fn describe(spec: &Value, operation: &Operation, action: Option<&str>) -> Result<Value, String> {
     let (method, path, definition) = operation;
+    let policy = spec
+        .get("x-reb-execution-policy")
+        .filter(|policy| {
+            policy["version"] == 1
+                && policy["advisory"] == true
+                && policy["automatic_retry"] == "never"
+                && policy["idempotence"] == "unproven"
+        })
+        .ok_or("Missing or unsupported execution policy")?;
     let mut detail = definition.clone();
+    detail["x-reb-execution-policy"] = policy.clone();
     detail["method"] = json!(method);
     detail["path"] = json!(path);
     for key in ["summary", "description", "requestBody", "responses"] {
@@ -182,6 +192,15 @@ fn describe(spec: &Value, operation: &Operation, action: Option<&str>) -> Result
                 definition["operationId"]
             )
         })?;
+        // Keep the operation's common guards, locality and body limits intact.
+        // Missing action metadata must not inherit an apparently safe default.
+        let execution = resolve(spec, variant)?
+            .get("x-reb-execution")
+            .filter(|value| value["kind"] == "action")
+            .ok_or_else(|| {
+                format!("Missing or unsupported execution metadata for action: {action}")
+            })?;
+        detail["x-reb-selected-action-execution"] = execution.clone();
         let mut selected = schema.clone();
         selected["oneOf"] = json!([variant]);
         detail["requestBody"]["content"]["application/json"]["schema"] = selected;
@@ -439,6 +458,16 @@ mod tests {
             assert_eq!(detail["requestBody"], operation.2["requestBody"]);
             assert_eq!(detail["responses"], operation.2["responses"]);
             assert_eq!(detail["x-max-body-bytes"], operation.2["x-max-body-bytes"]);
+            assert_eq!(detail["x-reb-execution"], operation.2["x-reb-execution"]);
+            assert_eq!(
+                detail["x-reb-execution-policy"],
+                spec["x-reb-execution-policy"]
+            );
+            assert!(
+                detail["components"]["schemas"]
+                    .get("RebExecutionMetadata")
+                    .is_some()
+            );
         }
         let health = describe(&spec, &operations(&spec).unwrap()["get_health"], None).unwrap();
         assert!(health["components"]["schemas"].get("Health").is_some());
@@ -471,6 +500,15 @@ mod tests {
                 assert_eq!(
                     resolve(&selected, &variants[0]).unwrap()["properties"]["action"]["const"],
                     name
+                );
+                assert_eq!(selected["x-reb-execution"], detail["x-reb-execution"]);
+                assert_eq!(
+                    selected["x-reb-selected-action-execution"],
+                    resolve(&selected, &variants[0]).unwrap()["x-reb-execution"]
+                );
+                assert_eq!(
+                    selected["x-reb-execution-policy"]["automatic_retry"],
+                    "never"
                 );
             }
         }
@@ -529,6 +567,41 @@ mod tests {
                 .unwrap_err()
                 .contains("Missing response schema")
         );
+    }
+
+    #[test]
+    fn missing_or_unsupported_action_metadata_never_inherits_a_default() {
+        for replacement in [Value::Null, json!({"kind": "operation"})] {
+            let mut spec = specification().unwrap();
+            let action = spec["components"]["schemas"]["DebuggerAction"]["oneOf"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|v| v["properties"]["action"]["const"] == "pause")
+                .unwrap();
+            action["x-reb-execution"] = replacement;
+            assert!(
+                describe(
+                    &spec,
+                    &operations(&spec).unwrap()["debugger_action"],
+                    Some("pause")
+                )
+                .unwrap_err()
+                .contains("execution metadata")
+            );
+        }
+        for policy in [
+            Value::Null,
+            json!({"version":2,"advisory":true,"automatic_retry":"never","idempotence":"unproven"}),
+        ] {
+            let mut spec = specification().unwrap();
+            spec["x-reb-execution-policy"] = policy;
+            assert!(
+                describe(&spec, &operations(&spec).unwrap()["get_health"], None)
+                    .unwrap_err()
+                    .contains("execution policy")
+            );
+        }
     }
 
     #[test]

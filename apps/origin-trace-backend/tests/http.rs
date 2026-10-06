@@ -275,6 +275,334 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
         assert_schema(&spec, deadline_schema, &json!({"error":message}), message);
     }
 }
+#[test]
+fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaults() {
+    use std::collections::BTreeSet;
+    let spec = specification();
+    assert_eq!(
+        spec["x-reb-execution-policy"],
+        json!({
+            "version":1,"advisory":true,"automatic_retry":"never","idempotence":"unproven"
+        })
+    );
+    let schema = &spec["components"]["schemas"]["RebExecutionMetadata"];
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let check = |entry: &Value, label: &str| {
+        assert_schema(&spec, schema, entry, label);
+        let mut prerequisites = BTreeSet::new();
+        for prerequisite in entry["prerequisites"].as_array().unwrap() {
+            assert!(
+                prerequisites.insert(prerequisite["id"].as_str().unwrap()),
+                "Duplicate prerequisite: {label}"
+            );
+        }
+        for source in entry["sources"].as_array().unwrap() {
+            let path = source["path"].as_str().unwrap();
+            assert!(path.starts_with("apps/origin-trace-backend/src/"));
+            let contents = std::fs::read_to_string(root.join(path)).unwrap();
+            let symbol = source["symbol"]
+                .as_str()
+                .unwrap()
+                .rsplit("::")
+                .next()
+                .unwrap();
+            assert!(
+                contents.contains(&format!("fn {symbol}(")),
+                "Missing source symbol: {path}::{symbol}"
+            );
+        }
+    };
+    let mut operation_count = 0;
+    for item in spec["paths"].as_object().unwrap().values() {
+        for operation in item.as_object().unwrap().values() {
+            let label = operation["operationId"].as_str().unwrap();
+            check(&operation["x-reb-execution"], label);
+            assert_eq!(
+                operation["x-reb-execution-schema"]["$ref"],
+                "#/components/schemas/RebExecutionMetadata"
+            );
+            assert!(
+                operation["x-reb-execution"]["prerequisites"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p["id"] == "local-request")
+            );
+            operation_count += 1;
+        }
+    }
+    assert_eq!(operation_count, 22);
+    let schemas = &spec["components"]["schemas"];
+    let mut action_count = 0;
+    for name in [
+        "CaptureAction",
+        "DecoderAction",
+        "CollectionAction",
+        "AnalystAction",
+        "DebuggerAction",
+        "NativeConsoleAction",
+    ] {
+        let variants = schemas[name]["oneOf"]
+            .as_array()
+            .cloned()
+            .unwrap_or_else(|| vec![schemas[name].clone()]);
+        let mut names = BTreeSet::new();
+        for variant in variants {
+            let action = variant["properties"]["action"]["const"].as_str().unwrap();
+            assert!(
+                names.insert(action.to_owned()),
+                "Duplicate action: {name}/{action}"
+            );
+            let entry = &variant["x-reb-execution"];
+            check(entry, action);
+            assert_eq!(entry["kind"], "action");
+            let fields = entry["confirmations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|confirmation| {
+                    let field = confirmation["field"].as_str().unwrap();
+                    assert!(
+                        variant["properties"].get(field).is_some(),
+                        "Unknown confirmation: {action}/{field}"
+                    );
+                    jsonschema::validator_for(&confirmation["when"]).unwrap();
+                    field
+                })
+                .collect::<BTreeSet<_>>();
+            let expected = variant["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .filter(|field| field.contains("confirm"))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(fields, expected, "Confirmation coverage: {action}");
+            action_count += 1;
+        }
+    }
+    assert_eq!(action_count, 74);
+    // Source checks intentionally follow the dispatch syntax. If it changes,
+    // audit the new handler before updating this narrow test helper.
+    fn arms<'a>(source: &'a str, start: &str, end: &str, indent: usize) -> BTreeSet<&'a str> {
+        let body = source
+            .split_once(start)
+            .unwrap()
+            .1
+            .split_once(end)
+            .unwrap()
+            .0;
+        let prefix = " ".repeat(indent);
+        body.lines()
+            .filter_map(|line| line.strip_prefix(&prefix))
+            .filter(|line| line.starts_with('"') || line.starts_with("| \""))
+            .flat_map(|line| {
+                line.split("=>")
+                    .next()
+                    .unwrap()
+                    .split('"')
+                    .skip(1)
+                    .step_by(2)
+            })
+            .collect()
+    }
+    let action_names = |name: &str| {
+        schemas[name]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|variant| variant["properties"]["action"]["const"].as_str().unwrap())
+            .collect::<BTreeSet<_>>()
+    };
+    for (name, source, start, end, indent) in [
+        (
+            "DebuggerAction",
+            include_str!("../src/debugger/mod.rs"),
+            "        match action {",
+            "    async fn breakpoint",
+            12,
+        ),
+        (
+            "DecoderAction",
+            include_str!("../src/decoder.rs"),
+            "        match action {",
+            "        if !worker::executable",
+            12,
+        ),
+        (
+            "AnalystAction",
+            include_str!("../src/app.rs"),
+            "\"/api/local-analyst/actions\" => match",
+            "\"/api/debugger/actions\"",
+            16,
+        ),
+    ] {
+        assert_eq!(
+            action_names(name),
+            arms(source, start, end, indent),
+            "Dispatch coverage: {name}"
+        );
+    }
+    assert_eq!(action_names("DebuggerAction").len(), 59);
+    for (name, source, pattern) in [
+        (
+            "NativeConsoleAction",
+            include_str!("../src/native_console.rs"),
+            r#"action\s*(?:==|!=)\s*"([a-z_]+)""#,
+        ),
+        (
+            "CaptureAction",
+            include_str!("../src/app.rs"),
+            r#""action":"([a-z_]+)""#,
+        ),
+    ] {
+        let pattern = regex::Regex::new(pattern).unwrap();
+        let names = pattern
+            .captures_iter(source)
+            .map(|capture| capture.get(1).unwrap().as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(action_names(name), names, "Dispatch coverage: {name}");
+    }
+    let workspace = include_str!("../src/workspace.rs")
+        .split_once("let expected_action = match kind {")
+        .unwrap()
+        .1
+        .split_once("        };")
+        .unwrap()
+        .0;
+    assert_eq!(
+        workspace
+            .lines()
+            .filter_map(|line| line.split('"').nth(1))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            schemas["CollectionAction"]["properties"]["action"]["const"]
+                .as_str()
+                .unwrap(),
+            "replace_local_analyst_workspace"
+        ])
+    );
+}
+
+#[test]
+fn execution_metadata_keeps_destructive_conditional_and_unproven_effects_visible() {
+    let spec = specification();
+    let action = |schema: &str, name: &str| {
+        spec["components"]["schemas"][schema]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["properties"]["action"]["const"] == name)
+            .unwrap()["x-reb-execution"]
+            .clone()
+    };
+    let effect = |entry: &Value, name: &str| {
+        entry["effects"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|v| v == name)
+            || entry["state_dependent_effects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|condition| {
+                    condition["effects"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|v| v == name)
+                })
+    };
+    assert!(effect(&action("CaptureAction", "clear"), "data-discard"));
+    assert_eq!(
+        action("CaptureAction", "clear")["confirmations"][0]["field"],
+        "confirm"
+    );
+    let vm = &spec["paths"]["/api/analysis/vm"]["get"]["x-reb-execution"];
+    assert!(effect(vm, "filesystem-write"));
+    assert!(!vm["state_dependent_effects"].as_array().unwrap().is_empty());
+    let native_state = &spec["paths"]["/api/native-console"]["get"]["x-reb-execution"];
+    for kind in ["process-stop", "filesystem-write", "data-discard"] {
+        assert!(effect(native_state, kind));
+    }
+    for name in ["cancel_automation_recipe", "disarm_automation_recipes"] {
+        assert!(effect(&action("DebuggerAction", name), "network-access"));
+    }
+    for kind in ["analysis", "process-launch", "process-stop"] {
+        assert!(effect(
+            &action("DebuggerAction", "configure_runtime_field_test"),
+            kind
+        ));
+    }
+    for name in [
+        "search_heap_snapshot",
+        "capture_heap_diff_baseline",
+        "compare_heap_diff",
+        "clear_heap_diff_baseline",
+    ] {
+        assert!(effect(&action("DebuggerAction", name), "filesystem-write"));
+    }
+    for name in [
+        "add_watch",
+        "evaluate_watches",
+        "search_live_objects",
+        "run_repeater_request",
+    ] {
+        assert!(effect(&action("DebuggerAction", name), "code-execution"));
+    }
+    for entry in [
+        action("DebuggerAction", "run_repeater_request"),
+        action("NativeConsoleAction", "evaluate"),
+    ] {
+        assert!(entry["confirmations"].as_array().unwrap().is_empty());
+    }
+    assert!(
+        !action("NativeConsoleAction", "runtime")["uncertainties"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    for name in [
+        "/api/events",
+        "/api/artifacts",
+        "/api/api-collection",
+        "/api/local-analyst",
+    ] {
+        assert!(!effect(
+            &spec["paths"][name]["get"]["x-reb-execution"],
+            "browser-control"
+        ));
+    }
+    let confirmation = action("DecoderAction", "jwt_create")["confirmations"][0].clone();
+    let predicate = jsonschema::validator_for(&confirmation["when"]).unwrap();
+    assert!(predicate.is_valid(&json!({"algorithm":"none"})));
+    assert!(!predicate.is_valid(&json!({"algorithm":"HS256"})));
+    assert!(!predicate.is_valid(&json!({})));
+    let confirmation =
+        action("DebuggerAction", "configure_runtime_field_test")["confirmations"][0].clone();
+    let predicate = jsonschema::validator_for(&confirmation["when"]).unwrap();
+    assert!(predicate.is_valid(&json!({"enabled":true})));
+    assert!(!predicate.is_valid(&json!({"enabled":false})));
+    let run = action("AnalystAction", "run_local_analyst_script");
+    let sensitive = run["confirmations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["field"] == "confirmed_sensitive")
+        .unwrap();
+    let predicate = jsonschema::validator_for(&sensitive["when"]).unwrap();
+    assert!(predicate.is_valid(&json!({"evidence":{"selected_artifact":{"sensitive":true}}})));
+    assert!(!predicate.is_valid(&json!({"evidence":{"selected_artifact":null}})));
+    // Empty records or invented-safe effects are not valid metadata.
+    let schema =
+        jsonschema::validator_for(&spec["components"]["schemas"]["RebExecutionMetadata"]).unwrap();
+    assert!(!schema.is_valid(&json!({})));
+    let mut altered = action("CaptureAction", "clear");
+    altered["effects"] = json!(["read-only"]);
+    assert!(!schema.is_valid(&altered));
+}
+
 #[tokio::test]
 async fn openapi_responses_match_live_local_http_and_conditional_reads() {
     let server = Server::start().await;

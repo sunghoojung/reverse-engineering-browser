@@ -48,6 +48,10 @@ The API CLI embeds the versioned OpenAPI document and requires an explicit
 loopback URL or endpoint file. The VM analyzer reads bounded input prefixes,
 reports omissions, and writes private analysis documents. Its executable is
 `origin-trace-vm --artifacts DIR --events FILE`.
+Offline `reb-api describe OPERATION --action ACTION` also exposes source-backed
+advisory effects and prerequisites while retaining the operation's common
+guards. See the [execution metadata contract](../../protocol/http-api.md#execution-metadata).
+These annotations do not authorize execution or automatic retries.
 
 Request Field Trace uses `src/provenance.rs` for bounded in-process projection of
 request call sites and same-target primitive string matches. Hashes are captured

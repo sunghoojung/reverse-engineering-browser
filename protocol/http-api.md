@@ -46,6 +46,8 @@ component schemas, so every local `$ref`
 resolves within its JSON output. `--action NAME` narrows a multiplexed request
 to that action and its mapped success response when an action-result mapping
 exists. The operation's body-size limit and other extensions remain visible.
+Action descriptions also expose `x-reb-selected-action-execution` alongside the
+unchanged operation-level `x-reb-execution` common guards. Read both together.
 
 `call` accepts repeated `--param NAME=VALUE` for the operation's documented
 path, query and header parameters, including `If-None-Match`. POST bodies come
@@ -170,6 +172,109 @@ Accept whole request objects from files/stdin so quoting and nested JSON remain
 predictable. Keep transport errors separate from structured `{error}` responses
 and successful HTTP responses containing an application failure. Do not blindly
 retry mutations after a timeout or dropped connection.
+
+## Execution metadata
+
+All 22 operations and all 74 top-level request action variants, including the 59
+debugger actions, carry version 1 `x-reb-execution` metadata. It is a source-owned,
+static advisory catalog. It does not grant permission, verify target ownership,
+report current availability, replace server validation, or prove that an action
+has no additional effects. In particular, no confirmation field means only that
+the current handler has no such field. Native evaluation and Repeater still
+require appropriate researcher authorization under [SAFETY.md](../SAFETY.md).
+
+One root `x-reb-execution-policy` owns the common `version: 1`, `advisory: true`,
+`automatic_retry: never`, and `idempotence: unproven` rules. The CLI copies this
+policy into every description and fails if it is missing or unsupported.
+The `x-reb-execution-schema` reference on each operation points to the embedded
+`RebExecutionMetadata` JSON Schema. The CLI includes this schema in offline
+descriptions. Individual execution entries have these fields:
+
+- `kind` is `operation`, `action`, or `action-dependent`. An action-dependent
+  operation has `effects: null`; clients must resolve the exact request action.
+  Missing entries, unknown actions, unsupported versions, and explicit
+  `uncertainties` must never turn into a read-only or safe default.
+- `effects` lists possible direct effects, not effects guaranteed to occur on
+  every successful request. `state_dependent_effects` lists additional effect
+  sets with human-readable `when` conditions. Both lists matter. Their absence
+  is not a proof of harmlessness or a comprehensive browser/OS sandbox claim.
+- `uncertainties` identifies areas needing further inspection. The native
+  `runtime` action, for example, has a second `command.operation` discriminator;
+  those nested commands are not individually effect-audited in this version.
+- `prerequisites` contains stable descriptive `id` values and human-readable
+  `condition` text. They describe relevant availability/ownership checks, not
+  an executable capability evaluator or every request-validation constraint.
+  The request schema and referenced handlers remain authoritative. Common
+  operation and action-specific prerequisites apply together.
+- `confirmations` lists exact request `field` names, `value: true`, and a
+  JSON Schema 2020-12 `when` predicate over the entire request. `{}` means
+  unconditional. For example, unsigned JWT creation needs
+  `allow_unsigned_confirmed=true` when `algorithm` is `none`; selected-field
+  capture needs `confirmed=true` when `enabled` is true. Analyst execution also
+  needs `confirmed_sensitive=true` when the selected artifact is sensitive.
+  Ordinary requiredness and boolean types remain in the request schema.
+- `notes` supplies the effect scope and caveats. `sources` gives repository
+  `path` and Rust `symbol` pointers for auditing, without fragile line numbers.
+
+The common policy deliberately confers no retry permission. It is conservative
+client guidance, not a claim that every operation is non-idempotent. A timeout,
+failed cancellation, or dropped connection can leave effects in flight; do not
+infer rollback or a no-op.
+
+The effect vocabulary is deliberately separate from HTTP method and success:
+
+- `analysis`: interprets or transforms supplied/captured data
+- `local-state-write`: changes retained backend/session state, including caches,
+  counters, watches, definitions, or result records; excludes incidental locks
+  and temporary response allocations
+- `filesystem-write`: creates, replaces, truncates, or removes local files or
+  directories, including analysis caches and temporary snapshots/profiles
+- `browser-control`: sends browser/debugger commands or changes its attachment,
+  execution, instrumentation, or native bridge state; a source-fetch command
+  can have this label even without page mutation
+- `disposable-target-mutation`: changes an owned experiment/native-console
+  target, context, page, or its instrumentation; the label is not proof that
+  arbitrary downstream page code stays within any authorization boundary
+- `code-execution`: evaluates expressions, executes supplied scripts or helper
+  JavaScript, or enables subsequent target execution; static parsing/decoding
+  alone is `analysis`
+- `network-access`: possible target/external HTTP(S) requests or requests caused
+  by page code, navigation, reload, or replay; ordinary local API, CDP, socket,
+  and helper transport is excluded, so this is not a network-isolation claim
+- `process-launch` / `process-stop`: starts or terminates owned helpers,
+  transports, browser processes, or capture services
+- `data-discard`: removes or replaces retained data, definitions, results,
+  browser state, or files; it does not mean every removal is permanent
+- `sensitive-capture`: explicitly changes selected-value capture that may
+  process sensitive request content; the label is not a complete privacy review
+
+Effects include work explicitly enabled by an action, such as automatic recipes
+or saved watches evaluated on later pauses. Independently running capture and
+unrelated background refresh are not attributed to an evidence GET. Browser
+internals, target code, partial failures, and raced state can introduce effects
+that static metadata cannot establish. Check the uncertainty and condition text.
+
+Important distinctions captured by the catalog:
+
+- VM GET can write its analysis cache. Native-console GET can retire an expired
+  or poisoned session, stop processes, and delete its temporary profile.
+- Heap searches/comparisons capture fresh temporary files and run a helper.
+  Live-object search and watch evaluation execute JavaScript. Adding a watch
+  enables its automatic evaluation on a later pause.
+- Configuring interception immediately arms browser rules. Automation
+  cancel/disarm can reload a page, causing more code and requests to run.
+- Capture clear truncates stored records after capture stops, while leaving
+  artifact files. Workspace replacements and clear-history actions discard
+  data even when they do not touch the live target.
+- Debugger action narrowing preserves the common dispatcher guards. Runtime
+  Hooks currently blocks every action except disarm while active, including
+  field comparison. A cancellation lock exemption does not bypass other owners.
+
+`describe --action` fails explicitly if the chosen action lacks supported
+metadata. It retains the operation extension and adds the selected entry under
+`x-reb-selected-action-execution`; it does not overwrite locality, body limits,
+or common prerequisites. `call` and backend dispatch do not consult this catalog
+for authorization or retry, and this change adds no runtime capabilities.
 
 ## Maintain and validate
 

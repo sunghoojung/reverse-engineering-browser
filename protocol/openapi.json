@@ -56,7 +56,30 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs"
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads local state or stored evidence. No browser mutation is requested by this handler; health/events/artifacts can probe local service sockets. Evidence tails and current state are not stable snapshots.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/decoder": {
@@ -97,7 +120,30 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs"
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads local state or stored evidence. No browser mutation is requested by this handler; health/events/artifacts can probe local service sockets. Evidence tails and current state are not stable snapshots.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/api-collection": {
@@ -180,7 +226,30 @@
               "type": "string"
             }
           }
-        ]
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads local state or stored evidence. No browser mutation is requested by this handler; health/events/artifacts can probe local service sockets. Evidence tails and current state are not stable snapshots.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/local-analyst": {
@@ -263,7 +332,30 @@
               "type": "string"
             }
           }
-        ]
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads local state or stored evidence. No browser mutation is requested by this handler; health/events/artifacts can probe local service sockets. Evidence tails and current state are not stable snapshots.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/local-analyst/runner": {
@@ -304,7 +396,30 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/app.rs"
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads local state or stored evidence. No browser mutation is requested by this handler; health/events/artifacts can probe local service sockets. Evidence tails and current state are not stable snapshots.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/debugger": {
@@ -399,7 +514,30 @@
               "type": "string"
             }
           }
-        ]
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads local state or stored evidence. No browser mutation is requested by this handler; health/events/artifacts can probe local service sockets. Evidence tails and current state are not stable snapshots.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/debugger/source": {
@@ -481,7 +619,36 @@
               "type": "string"
             }
           }
-        ]
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "browser-control"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "live-script",
+              "condition": "script_id must identify a live script within the 2 MiB limit and an available page/worker session."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Requests source through an existing page/worker debugger session; it does not evaluate that source.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+              "symbol": "Debugger::source"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/deobfuscation": {
@@ -650,7 +817,50 @@
               "default": "0"
             }
           }
-        ]
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis",
+            "process-launch"
+          ],
+          "state_dependent_effects": [
+            {
+              "effects": [
+                "browser-control"
+              ],
+              "when": "With script_id, source is fetched from its existing live debugger session."
+            },
+            {
+              "effects": [
+                "process-stop"
+              ],
+              "when": "The analysis worker process group is cleaned up on completion or failure."
+            }
+          ],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "deobfuscator-ready",
+              "condition": "The analysis helper must be executable and idle. Exactly one bounded live script or captured JavaScript artifact is required."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Runs the bounded Rust JavaScript analysis helper; source is parsed/transformed rather than evaluated.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/deobfuscation.rs",
+              "symbol": "Deobfuscator::analyze"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/origin-trace": {
@@ -772,7 +982,32 @@
               "type": "string"
             }
           }
-        ]
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Builds a bounded in-process projection from stored events, edges, and artifact metadata.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/request-signal-profile": {
@@ -913,7 +1148,30 @@
               "type": "string"
             }
           }
-        ]
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads local state or stored evidence. No browser mutation is requested by this handler; health/events/artifacts can probe local service sockets. Evidence tails and current state are not stable snapshots.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/events": {
@@ -1016,7 +1274,30 @@
               "type": "string"
             }
           }
-        ]
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads local state or stored evidence. No browser mutation is requested by this handler; health/events/artifacts can probe local service sockets. Evidence tails and current state are not stable snapshots.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/artifacts": {
@@ -1119,7 +1400,30 @@
               "type": "string"
             }
           }
-        ]
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads local state or stored evidence. No browser mutation is requested by this handler; health/events/artifacts can probe local service sockets. Evidence tails and current state are not stable snapshots.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/analysis/vm": {
@@ -1221,7 +1525,48 @@
               "type": "string"
             }
           }
-        ]
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [
+            {
+              "effects": [
+                "local-state-write",
+                "filesystem-write"
+              ],
+              "when": "When the in-memory cache is absent or either artifact-manifest or event-store identity/signature changes, App::get calls vm::store, writes artifacts/analysis/vm-analysis-v1.json, and caches the result. Unix signatures include file identity and change time; non-Unix platforms recompute every request."
+            }
+          ],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Builds or returns local VM analysis; this GET is not guaranteed read-only.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/vm.rs",
+              "symbol": "store"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "analysis_input_signature"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/artifacts/{artifact_id}/content": {
@@ -1380,7 +1725,30 @@
               "default": 2097152
             }
           }
-        ]
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads local state or stored evidence. No browser mutation is requested by this handler; health/events/artifacts can probe local service sockets. Evidence tails and current state are not stable snapshots.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/capture/actions": {
@@ -1473,7 +1841,34 @@
             }
           }
         },
-        "x-max-body-bytes": 256
+        "x-max-body-bytes": 256,
+        "x-reb-execution": {
+          "kind": "action-dependent",
+          "effects": null,
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Resolve the exact request action and combine its prerequisites with these common operation guards. No action inherits a default effect classification.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::post"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/decoder/actions": {
@@ -1576,7 +1971,34 @@
             }
           }
         },
-        "x-max-body-bytes": 1572864
+        "x-max-body-bytes": 1572864,
+        "x-reb-execution": {
+          "kind": "action-dependent",
+          "effects": null,
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Resolve the exact request action and combine its prerequisites with these common operation guards. No action inherits a default effect classification.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::post"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/api-collection/actions": {
@@ -1669,7 +2091,41 @@
             }
           }
         },
-        "x-max-body-bytes": 2162688
+        "x-max-body-bytes": 2162688,
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "filesystem-write",
+            "data-discard"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            },
+            {
+              "id": "current-workspace-generation",
+              "condition": "expected_generation must equal the current stored generation; the full replacement must pass workspace validation."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Replaces the full durable workspace document; omitted entries are removed and generation advances.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/workspace.rs",
+              "symbol": "Store::replace"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/local-analyst/actions": {
@@ -1782,7 +2238,34 @@
             }
           }
         },
-        "x-max-body-bytes": 1114112
+        "x-max-body-bytes": 1114112,
+        "x-reb-execution": {
+          "kind": "action-dependent",
+          "effects": null,
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Resolve the exact request action and combine its prerequisites with these common operation guards. No action inherits a default effect classification.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::post"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/debugger/actions": {
@@ -1895,7 +2378,58 @@
             }
           }
         },
-        "x-max-body-bytes": 131072
+        "x-max-body-bytes": 131072,
+        "x-reb-execution": {
+          "kind": "action-dependent",
+          "effects": null,
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            },
+            {
+              "id": "debugger-memory-owner",
+              "condition": "While Memory Origin Trace is armed/capturing/stepping/stopping, only stop_memory_origin_trace passes this guard."
+            },
+            {
+              "id": "debugger-exclusive-owner",
+              "condition": "No interception request may be running and Object Lab must not be navigating/searching/mutating. Active Repeater permits only cancel_repeater_request. Runtime Hooks arming/armed/handling/stopping permits only disarm_runtime_hooks, including blocking compare_runtime_field_test."
+            },
+            {
+              "id": "debugger-automation-owner",
+              "condition": "Active or arming/running/stopping Automation permits only cancel_automation_recipe or disarm_automation_recipes. When auto_armed, only the recipe actions, navigate_object_experiment, and dispose_request_interception_experiment pass the automatic-owner guard."
+            },
+            {
+              "id": "debugger-action-lock",
+              "condition": "The action lock must be idle except for stop_memory_origin_trace, disarm_runtime_hooks, cancel_repeater_request, cancel_automation_recipe, and disarm_automation_recipes. Exemption from this lock does not bypass other ownership guards."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Resolve the exact request action and combine its prerequisites with these common operation guards. No action inherits a default effect classification.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::post"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+              "symbol": "Debugger::action"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+              "symbol": "check_action_owner"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/wasm": {
@@ -1979,6 +2513,35 @@
               }
             }
           }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "stored-wasm-artifact",
+              "condition": "artifact_id must identify a captured WebAssembly artifact that passes content verification and size limits."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Verifies captured artifact bytes and performs bounded inert WebAssembly decoding without executing the module.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/wasm.rs",
+              "symbol": "load"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
         }
       }
     },
@@ -2011,7 +2574,42 @@
             }
           }
         },
-        "x-source": "apps/origin-trace-backend/src/native_console.rs"
+        "x-source": "apps/origin-trace-backend/src/native_console.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [
+            {
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "filesystem-write",
+                "process-stop",
+                "data-discard"
+              ],
+              "when": "An expired, poisoned, disconnected, or failed native session can be retired, killing its owned processes and deleting its temporary profile."
+            }
+          ],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reports native session state, and may retire an invalid session even though this is GET.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/native_console.rs",
+              "symbol": "NativeConsole::state"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/native-console/actions": {
@@ -2128,7 +2726,34 @@
           }
         },
         "x-max-body-bytes": 65536,
-        "x-source": "apps/origin-trace-backend/src/native_console.rs"
+        "x-source": "apps/origin-trace-backend/src/native_console.rs",
+        "x-reb-execution": {
+          "kind": "action-dependent",
+          "effects": null,
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Resolve the exact request action and combine its prerequisites with these common operation guards. No action inherits a default effect classification.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::post"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     }
   },
@@ -4110,7 +4735,37 @@
               "operation",
               "input_base64"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis",
+                "process-launch"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "process-stop"
+                  ],
+                  "when": "Worker completion, timeout, or a dropped request cleans up the owned process group (worker::run_cancel)."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "decoder-available",
+                  "condition": "The decoder must be executable and its serialized worker must become available within two seconds."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Runs the bounded native decoder/JWT helper on caller-supplied input; JWT application failure can still be HTTP 200.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/decoder.rs",
+                  "symbol": "Decoder::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -4133,7 +4788,37 @@
               "protocol_version",
               "token"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis",
+                "process-launch"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "process-stop"
+                  ],
+                  "when": "Worker completion, timeout, or a dropped request cleans up the owned process group (worker::run_cancel)."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "decoder-available",
+                  "condition": "The decoder must be executable and its serialized worker must become available within two seconds."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Runs the bounded native decoder/JWT helper on caller-supplied input; JWT application failure can still be HTTP 200.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/decoder.rs",
+                  "symbol": "Decoder::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -4162,7 +4847,37 @@
               "token",
               "secret"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis",
+                "process-launch"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "process-stop"
+                  ],
+                  "when": "Worker completion, timeout, or a dropped request cleans up the owned process group (worker::run_cancel)."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "decoder-available",
+                  "condition": "The decoder must be executable and its serialized worker must become available within two seconds."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Runs the bounded native decoder/JWT helper on caller-supplied input; JWT application failure can still be HTTP 200.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/decoder.rs",
+                  "symbol": "Decoder::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -4218,7 +4933,53 @@
               "allow_unsigned_confirmed"
             ],
             "additionalProperties": false,
-            "description": "algorithm=none requires allow_unsigned_confirmed=true and an empty secret; signed algorithms require a nonempty secret. payload_json is JSON text, not an object."
+            "description": "algorithm=none requires allow_unsigned_confirmed=true and an empty secret; signed algorithms require a nonempty secret. payload_json is JSON text, not an object.",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis",
+                "process-launch"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "process-stop"
+                  ],
+                  "when": "Worker completion, timeout, or a dropped request cleans up the owned process group (worker::run_cancel)."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "decoder-available",
+                  "condition": "The decoder must be executable and its serialized worker must become available within two seconds."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "allow_unsigned_confirmed",
+                  "value": true,
+                  "when": {
+                    "type": "object",
+                    "required": [
+                      "algorithm"
+                    ],
+                    "properties": {
+                      "algorithm": {
+                        "const": "none"
+                      }
+                    }
+                  }
+                }
+              ],
+              "notes": "Runs the bounded native decoder/JWT helper on caller-supplied input; JWT application failure can still be HTTP 200.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/decoder.rs",
+                  "symbol": "Decoder::action"
+                }
+              ]
+            }
           }
         ]
       },
@@ -4376,7 +5137,30 @@
             "required": [
               "action"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "process-stop"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "capture-controls",
+                  "condition": "A positive configured broker_pid and socket path are required, including for clear."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Signals a connected broker to stop native capture and marks capture stopped; it can time out after the signal was sent.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/app.rs",
+                  "symbol": "App::post"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -4394,7 +5178,40 @@
               "action",
               "confirm"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "filesystem-write",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "capture-controls",
+                  "condition": "A positive configured broker_pid and socket path are required, including for clear."
+                },
+                {
+                  "id": "capture-stopped",
+                  "condition": "The broker socket must be disconnected before clearing."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirm",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "Truncates the events, trace-edge, and request-signal stores that exist. Artifact files are not deleted.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/app.rs",
+                  "symbol": "App::post"
+                }
+              ]
+            }
           }
         ]
       },
@@ -4670,7 +5487,30 @@
           "requests"
         ],
         "additionalProperties": false,
-        "description": "Full replacement, not patch. IDs are positive; root folder id=1/name=API Collection/parent_id=null must remain. Parent references, uniqueness, depth <=4, header restrictions and cumulative UTF-8 budgets are enforced by src/workspace.rs. Stale expected_generation returns 409. This stores templates; it does not execute requests."
+        "description": "Full replacement, not patch. IDs are positive; root folder id=1/name=API Collection/parent_id=null must remain. Parent references, uniqueness, depth <=4, header restrictions and cumulative UTF-8 budgets are enforced by src/workspace.rs. Stale expected_generation returns 409. This stores templates; it does not execute requests.",
+        "x-reb-execution": {
+          "kind": "action",
+          "effects": [
+            "filesystem-write",
+            "data-discard"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "current-workspace-generation",
+              "condition": "expected_generation must equal the current stored generation; the full replacement must pass workspace validation."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Replaces the full durable workspace document; omitted entries are removed and generation advances.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/workspace.rs",
+              "symbol": "Store::replace"
+            }
+          ]
+        }
       },
       "AnalystFolder": {
         "type": "object",
@@ -4904,7 +5744,30 @@
               "folders",
               "files"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "filesystem-write",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "current-workspace-generation",
+                  "condition": "expected_generation must equal the current stored generation; the full replacement must pass workspace validation."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Replaces the full durable workspace document; omitted entries are removed and generation advances.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/workspace.rs",
+                  "symbol": "Store::replace"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5026,7 +5889,84 @@
               "confirmed",
               "confirmed_sensitive"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis",
+                "local-state-write",
+                "process-launch",
+                "code-execution"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "process-stop"
+                  ],
+                  "when": "Completion, timeout, cancellation, or a dropped request cleans up the owned helper process group."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "analyst-runner-ready",
+                  "condition": "The native runner or Node.js 22+ must be available and no other analyst run may be active."
+                },
+                {
+                  "id": "saved-analyst-script",
+                  "condition": "library_generation, script_id, and source must match the current saved JavaScript analyst script."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirmed",
+                  "value": true,
+                  "when": {}
+                },
+                {
+                  "field": "confirmed_sensitive",
+                  "value": true,
+                  "when": {
+                    "type": "object",
+                    "required": [
+                      "evidence"
+                    ],
+                    "properties": {
+                      "evidence": {
+                        "type": "object",
+                        "required": [
+                          "selected_artifact"
+                        ],
+                        "properties": {
+                          "selected_artifact": {
+                            "type": "object",
+                            "required": [
+                              "sensitive"
+                            ],
+                            "properties": {
+                              "sensitive": {
+                                "const": true
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "notes": "Executes an explicitly selected saved script in the bounded disposable analyst helper using caller-supplied frozen evidence. The helper is separate from the browser.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/analyst.rs",
+                  "symbol": "Analyst::run"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/analyst.rs",
+                  "symbol": "normalize"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5043,7 +5983,34 @@
               "action",
               "run_id"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "process-stop"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "matching-active-analyst-run",
+                  "condition": "run_id must match the active analyst run."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Signals cancellation of the matching run; its worker process group is terminated by the run handler.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/analyst.rs",
+                  "symbol": "Analyst::cancel"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/worker.rs",
+                  "symbol": "run_cancel"
+                }
+              ]
+            }
           }
         ],
         "description": "Run IDs and script IDs must be positive. Run requires the current saved JavaScript script, matching source and workspace generation. selected_artifact.sensitive=true requires confirmed_sensitive=true. Cancellation is a separate concurrent request. Replacement enforces root id=1/name=Analyst Workspace, tree and cumulative size limits in src/workspace.rs."
@@ -5212,7 +6179,29 @@
               "apps/origin-trace-backend/src/debugger/automation.rs"
             ],
             "description": "Adds one recipe. Label is trimmed, source retained verbatim; both need non-whitespace text. Library limits: 16 recipes, 65536 source bytes.",
-            "x-result-schema": "#/components/schemas/DebuggerRecipeAutomationRecipesResult"
+            "x-result-schema": "#/components/schemas/DebuggerRecipeAutomationRecipesResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "automation-editable",
+                  "condition": "Automatic recipes must be disarmed and no recipe run may be active (automation_editable)."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Stores a recipe definition without executing its source.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/automation.rs",
+                  "symbol": "Debugger::edit_recipe"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5305,7 +6294,43 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Original live JavaScript location with zero-based line/UTF-16 column. At least one phase must be enabled. function mode requires function_expression, entry_enabled=true and return_enabled=false, no return logic/override; source mode requires empty function_expression. json override requires return_value; expression override requires nonempty return_expression. Any override requires return_enabled. Nested JSON value has bounded validation. Returns ok,runtime_hooks,generation. Worker target is derived from script_id, not supplied separately.",
-            "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult"
+            "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis",
+                "local-state-write"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "browser-control",
+                    "process-launch",
+                    "process-stop"
+                  ],
+                  "when": "Source mode fetches script source and launches the deobfuscation helper to locate the enclosing function; function mode skips this helper."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "hooks-editable",
+                  "condition": "Runtime Hooks requires its attached disposable page and must not be arming, armed, handling, or stopping (hooks_editable)."
+                },
+                {
+                  "id": "live-hook-source",
+                  "condition": "A bounded live JavaScript source/location and available hook session are required; at most eight definitions."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Stores a Runtime Hook definition for the owned page or worker. Function mode does not evaluate the supplied function expression until arming.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/hooks.rs",
+                  "symbol": "Debugger::add_hook"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5328,7 +6353,38 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "analysis",
+                    "local-state-write",
+                    "browser-control",
+                    "code-execution"
+                  ],
+                  "when": "On a subsequent debugger pause, saved watches are evaluated automatically with throwOnSideEffect=true and results are retained (Debugger::enrich / Debugger::watches)."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [],
+              "confirmations": [],
+              "notes": "Stores a watch expression. It is not evaluated immediately, but subsequent pauses automatically evaluate saved watches.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::action"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::watches"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5355,7 +6411,60 @@
               "apps/origin-trace-backend/src/debugger/automation.rs"
             ],
             "description": "Requires at least one enabled non-manual recipe and an attached isolated target/scope.",
-            "x-result-schema": "#/components/schemas/DebuggerAutomationRecipesResult"
+            "x-result-schema": "#/components/schemas/DebuggerAutomationRecipesResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "code-execution",
+                "network-access"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "data-discard"
+                  ],
+                  "when": "Bounded run history can evict old records."
+                }
+              ],
+              "uncertainties": [
+                "Effects of caller-supplied page-context JavaScript are payload dependent."
+              ],
+              "prerequisites": [
+                {
+                  "id": "automation-editable",
+                  "condition": "Automatic recipes must be disarmed and no recipe run may be active (automation_editable)."
+                },
+                {
+                  "id": "attached-disposable-page",
+                  "condition": "The named tool must own the attached disposable Experiment page, in running or paused state, with no paused interception requests (isolated_target)."
+                },
+                {
+                  "id": "automation-scope-ready",
+                  "condition": "action_scope must be ready with at least one matched connected owned page."
+                },
+                {
+                  "id": "automatic-recipes-enabled",
+                  "condition": "Between one and eight enabled non-manual recipes are required; automatic/session run limits remain enforced."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirmed",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "Installs automatic page-context execution; created recipes can run immediately and before/after-load recipes execute on future matching events.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/automation.rs",
+                  "symbol": "Debugger::arm_recipes"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5378,7 +6487,52 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Requires an attached isolated page, at least one definition and active breakpoints. Returns ok,runtime_hooks,generation.",
-            "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult"
+            "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "code-execution"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "network-access",
+                    "data-discard"
+                  ],
+                  "when": "Caller-supplied entry/return logic and replacement expressions can alter target execution and requests; bounded capture can evict old records."
+                }
+              ],
+              "uncertainties": [
+                "Effects of caller-supplied hook code are not determined by static metadata."
+              ],
+              "prerequisites": [
+                {
+                  "id": "hooks-editable",
+                  "condition": "Runtime Hooks requires its attached disposable page and must not be arming, armed, handling, or stopping (hooks_editable)."
+                },
+                {
+                  "id": "hooks-ready",
+                  "condition": "At least one definition and active debugger breakpoints are required; selected hook sessions and breakable points must remain available."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirmed",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "Installs browser breakpoints/network observation and enables selected hook logic and return overrides in the disposable page/workers.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/hooks.rs",
+                  "symbol": "Debugger::arm_hooks"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5395,7 +6549,44 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerAutomationRecipesResult"
+            "x-result-schema": "#/components/schemas/DebuggerAutomationRecipesResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "data-discard"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "network-access",
+                    "code-execution"
+                  ],
+                  "when": "If a run is active, cleanup terminates execution and reloads its page, which can fetch resources and execute page code."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "automation-active",
+                  "condition": "Cancel requires an active run or armed automatic recipes; disarm requires armed/running work or installed scripts."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Stops automatic or active recipe execution; disarm removes injected scripts/bindings and erases variables. Cancellation is not rollback.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/automation.rs",
+                  "symbol": "Debugger::disarm_recipes"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/automation.rs",
+                  "symbol": "Debugger::cancel_recipe"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5412,7 +6603,39 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerRepeaterResult"
+            "x-result-schema": "#/components/schemas/DebuggerRepeaterResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "code-execution"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "network-access"
+                  ],
+                  "when": "An already-sent request may still reach or complete at the remote server."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "repeater-active",
+                  "condition": "An active execution_id must exist and its debugger connection must be available."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Evaluates AbortController cancellation in the selected page. Failure may leave the request running; cancellation does not undo remote effects.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/repeater.rs",
+                  "symbol": "Debugger::cancel_repeater"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5429,7 +6652,47 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerBaselineResult"
+            "x-result-schema": "#/components/schemas/DebuggerBaselineResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "filesystem-write",
+                "browser-control",
+                "data-discard"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "process-stop"
+                  ],
+                  "when": "A failed heap capture closes its debugger transport."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                },
+                {
+                  "id": "heap-idle",
+                  "condition": "The heap operation lock and snapshot collector must be idle; the selected target must remain the same during capture."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Captures and retains a temporary heap snapshot, replacing and removing any previous baseline.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/heap.rs",
+                  "symbol": "Debugger::heap_action"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/heap.rs",
+                  "symbol": "Debugger::capture_heap"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5446,7 +6709,30 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerAutomationRecipesResult"
+            "x-result-schema": "#/components/schemas/DebuggerAutomationRecipesResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "automation-editable",
+                  "condition": "Automatic recipes must be disarmed and no recipe run may be active (automation_editable)."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Erases retained recipe runs, counters, and failure output; recipe definitions remain.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/automation.rs",
+                  "symbol": "Debugger::clear_recipe_runs"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5463,7 +6749,25 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [],
+              "confirmations": [],
+              "notes": "Erases the corresponding retained debugger result records; capture files are unaffected.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5480,7 +6784,37 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "data-discard"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "filesystem-write"
+                  ],
+                  "when": "Dropping the retained baseline deletes its temporary snapshot file."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "heap-idle",
+                  "condition": "The heap operation lock must be available."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Drops the retained heap baseline and its metadata.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/heap.rs",
+                  "symbol": "Debugger::heap_action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5497,7 +6831,25 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [],
+              "confirmations": [],
+              "notes": "Erases the corresponding retained debugger result records; capture files are unaffected.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5514,7 +6866,30 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerRepeaterResult"
+            "x-result-schema": "#/components/schemas/DebuggerRepeaterResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "repeater-idle",
+                  "condition": "No active Repeater execution may remain."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Erases Repeater history, comparisons, and byte/eviction counters.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/repeater.rs",
+                  "symbol": "Debugger::clear_repeater"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5531,7 +6906,25 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerExperimentResult"
+            "x-result-schema": "#/components/schemas/DebuggerExperimentResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [],
+              "confirmations": [],
+              "notes": "Erases the retained interception result.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5548,7 +6941,30 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult"
+            "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "hooks-editable",
+                  "condition": "Runtime Hooks requires its attached disposable page and must not be arming, armed, handling, or stopping (hooks_editable)."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Erases hit/request records, selected-field observations, comparison, and counters.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/hooks.rs",
+                  "symbol": "Debugger::clear_hook_hits"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5572,7 +6988,40 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
-            "x-result-schema": "#/components/schemas/DebuggerActionScopeResult"
+            "x-result-schema": "#/components/schemas/DebuggerActionScopeResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "data-discard",
+                "process-launch",
+                "process-stop"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [
+                "Page teardown behavior depends on the browser and page code."
+              ],
+              "prerequisites": [
+                {
+                  "id": "scope-idle",
+                  "condition": "An Experiment context must exist, with no pending or running intercepted requests, automatic recipes, active recipe run, or Repeater execution (require_scope_idle)."
+                },
+                {
+                  "id": "additional-owned-page",
+                  "condition": "target_id must name an owned additional page, never the primary page."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Closes an additional owned page and refreshes connections; page state and retained context-specific data can be discarded. Refresh uses transient local transports.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/experiment.rs",
+                  "symbol": "Debugger::experiment_page"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5589,7 +7038,57 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerDiffResult"
+            "x-result-schema": "#/components/schemas/DebuggerDiffResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis",
+                "local-state-write",
+                "filesystem-write",
+                "browser-control",
+                "process-launch",
+                "data-discard"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "process-stop"
+                  ],
+                  "when": "A failed heap capture closes its debugger transport; helper cleanup terminates owned processes."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                },
+                {
+                  "id": "heap-idle",
+                  "condition": "The heap operation lock and snapshot collector must be idle; the selected target must remain the same during capture."
+                },
+                {
+                  "id": "heap-helper",
+                  "condition": "The native heap snapshot analyzer must be executable; compare_heap_diff additionally needs a retained baseline for the same target."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Captures a fresh heap snapshot into a temporary file, runs the native analyzer, and deletes the temporary snapshot when released. Analysis is not an evidence-only read.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/heap.rs",
+                  "symbol": "Debugger::heap_action"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/heap.rs",
+                  "symbol": "Debugger::capture_heap"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/heap.rs",
+                  "symbol": "Debugger::heap_worker"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5617,7 +7116,30 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "IDs must differ and both identify retained successful responses.",
-            "x-result-schema": "#/components/schemas/DebuggerRepeaterResult"
+            "x-result-schema": "#/components/schemas/DebuggerRepeaterResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis",
+                "local-state-write"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "comparable-repeater-responses",
+                  "condition": "Distinct baseline_id/current_id must identify retained entries whose response.ok is true."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Compares two successful retained responses and stores the comparison.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/repeater.rs",
+                  "symbol": "Debugger::compare_repeater"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5645,7 +7167,34 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "IDs must differ and refer to retained available observations with equal URL, method and target. Current action dispatcher rejects this while hooks are armed (409), even though UI enables comparison. Disarm first. Returns ok,runtime_hooks,generation; comparison is intervention-associated or inconclusive, never causal proof.",
-            "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult"
+            "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis",
+                "local-state-write"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "hooks-editable",
+                  "condition": "Runtime Hooks requires its attached disposable page and must not be arming, armed, handling, or stopping (hooks_editable)."
+                },
+                {
+                  "id": "comparable-field-observations",
+                  "condition": "Two distinct available observations must share URL, method, and target."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Compares retained observations and stores the comparison. The common dispatcher currently rejects this action while Runtime Hooks is armed.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/fields.rs",
+                  "symbol": "Debugger::compare_field"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5667,7 +7216,30 @@
               "apps/origin-trace-backend/src/debugger/requests.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
-            "x-result-schema": "#/components/schemas/DebuggerRepeaterResult"
+            "x-result-schema": "#/components/schemas/DebuggerRepeaterResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "repeater-ready",
+                  "condition": "An Experiment context must exist and its primary page must be selected with debugger state running or paused (repeater_ready)."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Replaces session-scoped Repeater variables.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/repeater.rs",
+                  "symbol": "Debugger::repeater_variables"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5789,7 +7361,39 @@
                 }
               }
             ],
-            "x-result-schema": "#/components/schemas/DebuggerExperimentResult"
+            "x-result-schema": "#/components/schemas/DebuggerExperimentResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "data-discard"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "network-access"
+                  ],
+                  "when": "Subsequent matched requests can be continued, blocked, rewritten, or fulfilled according to the armed rule."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "attached-disposable-page",
+                  "condition": "The named tool must own the attached disposable Experiment page, in running or paused state, with no paused interception requests (isolated_target)."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Immediately enables bounded Fetch rules on matched pages and clears the previous result; this is not merely storing a draft.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/experiment.rs",
+                  "symbol": "Debugger::configure_interception"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5867,7 +7471,71 @@
                 }
               }
             ],
-            "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult"
+            "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "data-discard",
+                "disposable-target-mutation"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "sensitive-capture"
+                  ],
+                  "when": "When enabled, matching selected request values are processed into bounded observations/hashes; this is a capture-policy change."
+                },
+                {
+                  "effects": [
+                    "analysis",
+                    "process-launch",
+                    "process-stop"
+                  ],
+                  "when": "For a matching enabled JSON-field capture with an available request body at most 131072 bytes, extract_field_value runs the bounded deobfuscator helper and cleans up its process group. Helper failure records unavailable rather than proving a value absent."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "hooks-editable",
+                  "condition": "Runtime Hooks requires its attached disposable page and must not be arming, armed, handling, or stopping (hooks_editable)."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirmed",
+                  "value": true,
+                  "when": {
+                    "type": "object",
+                    "required": [
+                      "enabled"
+                    ],
+                    "properties": {
+                      "enabled": {
+                        "const": true
+                      }
+                    }
+                  }
+                }
+              ],
+              "notes": "Replaces selected-field capture configuration, rotates its key/revision, clears prior observations, and changes Network-domain capture state.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/fields.rs",
+                  "symbol": "Debugger::configure_field"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/fields.rs",
+                  "symbol": "Debugger::extract_field_value"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/fields.rs",
+                  "symbol": "Debugger::hook_network"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5889,7 +7557,47 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Adds a page to an existing isolated Experiment context. Other URLs must pass credential-free HTTP(S) validation. Returns ok,target_id,action_scope,generation, not a full snapshot.",
-            "x-result-schema": "#/components/schemas/DebuggerTargetIdActionScopeResult"
+            "x-result-schema": "#/components/schemas/DebuggerTargetIdActionScopeResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "process-launch",
+                "process-stop"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "network-access",
+                    "code-execution"
+                  ],
+                  "when": "An HTTP(S) URL navigates and executes page code; about:blank is the default."
+                }
+              ],
+              "uncertainties": [
+                "Browser-internal process and storage work depends on the browser implementation."
+              ],
+              "prerequisites": [
+                {
+                  "id": "scope-idle",
+                  "condition": "An Experiment context must exist, with no pending or running intercepted requests, automatic recipes, active recipe run, or Repeater execution (require_scope_idle)."
+                },
+                {
+                  "id": "page-capacity",
+                  "condition": "Fewer than eight disposable pages may exist."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Creates an additional owned disposable page and refreshes its connections. Transient browser-command transports are closed after use.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/experiment.rs",
+                  "symbol": "Debugger::experiment_page"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5906,7 +7614,43 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerExperimentActionScopeObjectExperimentRuntimeHooksAutomationRecipesRepeaterResult"
+            "x-result-schema": "#/components/schemas/DebuggerExperimentActionScopeObjectExperimentRuntimeHooksAutomationRecipesRepeaterResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "process-launch",
+                "process-stop"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "process-stop",
+                    "data-discard"
+                  ],
+                  "when": "Creation failure may dispose partially created context/pages and stop owned transports."
+                }
+              ],
+              "uncertainties": [
+                "Browser-internal process and storage work depends on the browser implementation."
+              ],
+              "prerequisites": [
+                {
+                  "id": "experiment-absent",
+                  "condition": "No disposable Experiment context may exist; debugger state must be running or paused."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Creates an owned browser context and about:blank page, launches local CDP transports, and selects the experiment. Transient browser-command transports are closed after use.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/experiment.rs",
+                  "symbol": "Debugger::create_experiment"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5923,7 +7667,40 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerAutomationRecipesResult"
+            "x-result-schema": "#/components/schemas/DebuggerAutomationRecipesResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "data-discard"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "network-access",
+                    "code-execution"
+                  ],
+                  "when": "If a run is active, cleanup terminates execution and reloads its page, which can fetch resources and execute page code."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "automation-active",
+                  "condition": "Cancel requires an active run or armed automatic recipes; disarm requires armed/running work or installed scripts."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Stops automatic or active recipe execution; disarm removes injected scripts/bindings and erases variables. Cancellation is not rollback.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/automation.rs",
+                  "symbol": "Debugger::disarm_recipes"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5940,7 +7717,35 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult"
+            "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "data-discard",
+                "disposable-target-mutation"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "code-execution",
+                    "network-access"
+                  ],
+                  "when": "Existing target execution and any already-running hook work may finish before disarm completes."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [],
+              "confirmations": [],
+              "notes": "Removes installed hook breakpoints and active point ownership; definitions and captured results remain.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/hooks.rs",
+                  "symbol": "Debugger::disarm_hooks"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5957,7 +7762,44 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerExperimentActionScopeObjectExperimentRuntimeHooksAutomationRecipesRepeaterResult"
+            "x-result-schema": "#/components/schemas/DebuggerExperimentActionScopeObjectExperimentRuntimeHooksAutomationRecipesRepeaterResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "process-launch",
+                "process-stop",
+                "data-discard"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "network-access",
+                    "code-execution"
+                  ],
+                  "when": "Cleanup of active automatic recipes can reload their page before disposal."
+                }
+              ],
+              "uncertainties": [
+                "Browser storage cleanup and effects already in flight are browser/state dependent; disposal is not rollback."
+              ],
+              "prerequisites": [
+                {
+                  "id": "experiment-present",
+                  "condition": "An owned disposable Experiment context must exist; common dispatcher ownership guards still apply before cleanup."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Disposes the browser context, closes its pages/worker transports, and erases session variables, object references, hook captures, and Repeater history. Recipe definitions remain.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/experiment.rs",
+                  "symbol": "Debugger::dispose_experiment"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -5980,7 +7822,38 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis",
+                "local-state-write",
+                "browser-control",
+                "code-execution"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [
+                "Side-effect rejection depends on the browser evaluator; this metadata does not prove arbitrary expressions harmless."
+              ],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                },
+                {
+                  "id": "current-call-frame",
+                  "condition": "call_frame_id must be in the current paused call_frames."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Evaluates saved expressions using Debugger.evaluateOnCallFrame with throwOnSideEffect=true and saves results. This remains code execution, not a general read-only guarantee.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::watches"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6062,7 +7935,52 @@
                 }
               }
             ],
-            "x-result-schema": "#/components/schemas/DebuggerObjectExperimentResult"
+            "x-result-schema": "#/components/schemas/DebuggerObjectExperimentResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "code-execution",
+                "data-discard"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "network-access"
+                  ],
+                  "when": "The helper runs in the page realm. Replaced Object/Reflect intrinsics or Proxy traps can execute target code and cause downstream requests; avoiding property getters does not prove these operations effect-free."
+                }
+              ],
+              "uncertainties": [
+                "The helper rejects unsafe descriptors but target-side behavior is not a general proof of no additional side effects."
+              ],
+              "prerequisites": [
+                {
+                  "id": "attached-disposable-page",
+                  "condition": "The named tool must own the attached disposable Experiment page, in running or paused state, with no paused interception requests (isolated_target)."
+                },
+                {
+                  "id": "current-object-result",
+                  "condition": "search_id/result_id must identify a retained result for the current session, navigation, and target; the 256-attempt limit must not be exhausted."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirmed",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "Runs a property set/delete helper against a retained disposable-page object and records a bounded audit; existing values or properties may be replaced or deleted.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/objects.rs",
+                  "symbol": "Debugger::mutate_object"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6086,7 +8004,36 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Navigate the attached disposable page to a credential-free HTTP(S) URL. Returns ok,object_experiment,generation. Does not navigate the ordinary browsing target.",
-            "x-result-schema": "#/components/schemas/DebuggerObjectExperimentResult"
+            "x-result-schema": "#/components/schemas/DebuggerObjectExperimentResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "code-execution",
+                "network-access",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [
+                "Page code and navigation determine additional browser storage, process, and request effects."
+              ],
+              "prerequisites": [
+                {
+                  "id": "attached-disposable-page",
+                  "condition": "The named tool must own the attached disposable Experiment page, in running or paused state, with no paused interception requests (isolated_target)."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Releases previous search references, navigates the disposable page, and polls readiness with an evaluated expression. Navigation can trigger armed automation.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/objects.rs",
+                  "symbol": "Debugger::navigate_object"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6103,7 +8050,40 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "analysis",
+                    "local-state-write",
+                    "browser-control",
+                    "code-execution"
+                  ],
+                  "when": "On a subsequent debugger pause, saved watches are evaluated automatically with throwOnSideEffect=true and results are retained (Debugger::enrich / Debugger::watches)."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Pauses target execution; it is not an evidence-only read.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6126,7 +8106,34 @@
               "apps/origin-trace-backend/src/debugger/automation.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
-            "x-result-schema": "#/components/schemas/DebuggerAutomationRecipesResult"
+            "x-result-schema": "#/components/schemas/DebuggerAutomationRecipesResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "automation-editable",
+                  "condition": "Automatic recipes must be disarmed and no recipe run may be active (automation_editable)."
+                },
+                {
+                  "id": "known-recipe",
+                  "condition": "recipe_id must identify an existing recipe."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Replaces or removes a retained recipe definition without executing its source.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/automation.rs",
+                  "symbol": "Debugger::edit_recipe"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6149,7 +8156,31 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Removes a browser breakpoint and its retained definition.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6172,7 +8203,31 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Removes a browser pause rule and its retained setting.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6195,7 +8250,34 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "",
-            "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult"
+            "x-result-schema": "#/components/schemas/DebuggerRuntimeHooksResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "hooks-editable",
+                  "condition": "Runtime Hooks requires its attached disposable page and must not be arming, armed, handling, or stopping (hooks_editable)."
+                },
+                {
+                  "id": "known-hook",
+                  "condition": "hook_id must identify a retained definition."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Removes one retained hook definition.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/hooks.rs",
+                  "symbol": "Debugger::remove_hook"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6218,7 +8300,25 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [],
+              "confirmations": [],
+              "notes": "Discards a retained watch expression and result.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6241,7 +8341,31 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Removes a browser pause rule and its retained setting.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6264,7 +8388,38 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "code-execution",
+                    "network-access"
+                  ],
+                  "when": "Resuming, stepping, restarting, or detaching may let target code run and issue requests; effects depend on page code and existing instrumentation."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Changes debugger execution position or resumes target execution.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6281,7 +8436,38 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "code-execution",
+                    "network-access"
+                  ],
+                  "when": "Resuming, stepping, restarting, or detaching may let target code run and issue requests; effects depend on page code and existing instrumentation."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Changes debugger execution position or resumes target execution.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6312,7 +8498,60 @@
               "apps/origin-trace-backend/src/debugger/automation.rs"
             ],
             "description": "Explicitly execute the selected recipe in the isolated target/scope. Automatic recipes must be disarmed.",
-            "x-result-schema": "#/components/schemas/DebuggerRunRunsAutomationRecipesResult"
+            "x-result-schema": "#/components/schemas/DebuggerRunRunsAutomationRecipesResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "code-execution",
+                "network-access"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "data-discard"
+                  ],
+                  "when": "Bounded run history can evict old records."
+                }
+              ],
+              "uncertainties": [
+                "Effects of caller-supplied page-context JavaScript are payload dependent."
+              ],
+              "prerequisites": [
+                {
+                  "id": "automation-editable",
+                  "condition": "Automatic recipes must be disarmed and no recipe run may be active (automation_editable)."
+                },
+                {
+                  "id": "attached-disposable-page",
+                  "condition": "The named tool must own the attached disposable Experiment page, in running or paused state, with no paused interception requests (isolated_target)."
+                },
+                {
+                  "id": "automation-scope-ready",
+                  "condition": "action_scope must be ready with at least one matched connected owned page."
+                },
+                {
+                  "id": "known-recipe",
+                  "condition": "recipe_id must identify a saved recipe; session run limits must allow execution."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirmed",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "Evaluates the selected recipe source serially on matched disposable pages and stores results/logs.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/automation.rs",
+                  "symbol": "Debugger::run_recipe"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6368,7 +8607,44 @@
               "apps/origin-trace-backend/src/debugger/requests.rs"
             ],
             "description": "Resolves {{variables}} in the isolated session. Resolved URL/method/headers/body are validated again; GET/HEAD cannot have a nonempty body. Returns initial execution state, not necessarily completed response.",
-            "x-result-schema": "#/components/schemas/DebuggerRepeaterResult"
+            "x-result-schema": "#/components/schemas/DebuggerRepeaterResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "code-execution",
+                "network-access"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "data-discard"
+                  ],
+                  "when": "Bounded history may evict previous request/response records."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "repeater-ready",
+                  "condition": "An Experiment context must exist and its primary page must be selected with debugger state running or paused (repeater_ready)."
+                },
+                {
+                  "id": "repeater-idle",
+                  "condition": "No active Repeater execution; the request template and variables must resolve within runtime limits."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Installs an AbortController registry and evaluates the credential-free request runner in the disposable page. The remote request can change server state; a timeout does not prove it was unsent.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/repeater.rs",
+                  "symbol": "Debugger::run_repeater"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6410,7 +8686,38 @@
               "apps/origin-trace-backend/src/debugger/requests.rs"
             ],
             "description": "GET/HEAD after normalization cannot have a nonempty body. If scoped targets exist, target_id must identify one in active scope; absent/null selects the first. Outside scoped mode target_id is ignored.",
-            "x-result-schema": "#/components/schemas/DebuggerExperimentResult"
+            "x-result-schema": "#/components/schemas/DebuggerExperimentResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "code-execution",
+                "network-access",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "attached-disposable-page",
+                  "condition": "The named tool must own the attached disposable Experiment page, in running or paused state, with no paused interception requests (isolated_target)."
+                },
+                {
+                  "id": "matched-connected-page",
+                  "condition": "The selected or first matched target must belong to the configured scope and have a live connection."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Evaluates the request runner in a matched disposable page, sends a credential-free request, and replaces the retained result. A remote server may still change state.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/experiment.rs",
+                  "symbol": "Debugger::run_interception"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6448,7 +8755,57 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Query is stripped before use; captures a bounded heap snapshot and searches it.",
-            "x-result-schema": "#/components/schemas/DebuggerSnapshotResult"
+            "x-result-schema": "#/components/schemas/DebuggerSnapshotResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis",
+                "local-state-write",
+                "filesystem-write",
+                "browser-control",
+                "process-launch",
+                "data-discard"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "process-stop"
+                  ],
+                  "when": "A failed heap capture closes its debugger transport; helper cleanup terminates owned processes."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                },
+                {
+                  "id": "heap-idle",
+                  "condition": "The heap operation lock and snapshot collector must be idle; the selected target must remain the same during capture."
+                },
+                {
+                  "id": "heap-helper",
+                  "condition": "The native heap snapshot analyzer must be executable; compare_heap_diff additionally needs a retained baseline for the same target."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Captures a fresh heap snapshot into a temporary file, runs the native analyzer, and deletes the temporary snapshot when released. Analysis is not an evidence-only read.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/heap.rs",
+                  "symbol": "Debugger::heap_action"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/heap.rs",
+                  "symbol": "Debugger::capture_heap"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/heap.rs",
+                  "symbol": "Debugger::heap_worker"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6552,7 +8909,41 @@
                   }
                 }
               }
-            ]
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis",
+                "local-state-write",
+                "browser-control",
+                "code-execution"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "network-access"
+                  ],
+                  "when": "The helper runs in the page realm. Replaced Object/Reflect intrinsics or Proxy traps can execute target code and cause downstream requests; avoiding property getters does not prove these operations effect-free."
+                }
+              ],
+              "uncertainties": [
+                "Target-side built-ins or proxies may have effects; there is no blanket read-only guarantee."
+              ],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Runs Runtime.evaluate/queryObjects/callFunctionOn helpers and releases remote handles; the helper avoids property getters but executes in the selected live target.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/objects.rs",
+                  "symbol": "Debugger::search_objects"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6656,7 +9047,46 @@
                   }
                 }
               }
-            ]
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis",
+                "local-state-write",
+                "browser-control",
+                "code-execution",
+                "data-discard"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "network-access"
+                  ],
+                  "when": "The helper runs in the page realm. Replaced Object/Reflect intrinsics or Proxy traps can execute target code and cause downstream requests; avoiding property getters does not prove these operations effect-free."
+                }
+              ],
+              "uncertainties": [
+                "Target-side built-ins or proxies may have effects; there is no blanket read-only guarantee."
+              ],
+              "prerequisites": [
+                {
+                  "id": "attached-disposable-page",
+                  "condition": "The named tool must own the attached disposable Experiment page, in running or paused state, with no paused interception requests (isolated_target)."
+                },
+                {
+                  "id": "object-page-navigated",
+                  "condition": "Object Lab must have a nonzero navigation_id and loaded HTTP(S) URL."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Executes the object-search helper, releases previous references, and retains selected remote objects and search results.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/objects.rs",
+                  "symbol": "Debugger::search_objects"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6679,7 +9109,47 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "data-discard"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "filesystem-write"
+                  ],
+                  "when": "Dropping a retained heap baseline removes its temporary snapshot file."
+                },
+                {
+                  "effects": [
+                    "process-stop",
+                    "process-launch",
+                    "code-execution",
+                    "network-access"
+                  ],
+                  "when": "The old transport is stopped; background refresh may launch a new transport, restore breakpoints, and let target code continue."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "known-target",
+                  "condition": "target_id must be present in the current targets list."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Releases retained Object Lab objects, drops the heap baseline, closes the old transport, and selects a preferred target for background reattachment.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6750,7 +9220,44 @@
                 }
               }
             ],
-            "x-result-schema": "#/components/schemas/DebuggerActionScopeResult"
+            "x-result-schema": "#/components/schemas/DebuggerActionScopeResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "process-launch",
+                "process-stop"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "network-access"
+                  ],
+                  "when": "Active interception rules apply to future requests on the newly selected scope."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "scope-idle",
+                  "condition": "An Experiment context must exist, with no pending or running intercepted requests, automatic recipes, active recipe run, or Repeater execution (require_scope_idle)."
+                },
+                {
+                  "id": "owned-scope-target",
+                  "condition": "Target mode requires an owned disposable page in action_scope.targets."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Changes matched owned pages and reconfigures Fetch interception; refresh may open local transports. A partial failure may require disposal. Transient browser-command transports are closed after use.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/experiment.rs",
+                  "symbol": "Debugger::set_scope"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6840,7 +9347,38 @@
                   }
                 }
               }
-            ]
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "code-execution",
+                    "network-access"
+                  ],
+                  "when": "Conditional and logpoint expressions execute in the target when the breakpoint is hit. Expressions are caller-supplied; no general side-effect guarantee."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Installs or replaces a breakpoint; update can partially install before removal fails.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::breakpoint"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6861,7 +9399,38 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "code-execution",
+                    "network-access"
+                  ],
+                  "when": "Enabling existing conditional breakpoints or changing pause behavior can affect subsequent target execution."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Changes browser debugger configuration and retained settings.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6884,7 +9453,38 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "code-execution",
+                    "network-access"
+                  ],
+                  "when": "Enabling existing conditional breakpoints or changing pause behavior can affect subsequent target execution."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Changes browser debugger configuration and retained settings.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6910,7 +9510,38 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "code-execution",
+                    "network-access"
+                  ],
+                  "when": "Enabling existing conditional breakpoints or changing pause behavior can affect subsequent target execution."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Changes browser debugger configuration and retained settings.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6934,7 +9565,38 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Session and state prerequisites are enforced by the action dispatcher.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "code-execution",
+                    "network-access"
+                  ],
+                  "when": "Enabling existing conditional breakpoints or changing pause behavior can affect subsequent target execution."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Changes browser debugger configuration and retained settings.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -6984,7 +9646,43 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "Requires a running target; trace controls debugger until stopped or completed.",
-            "x-result-schema": "#/components/schemas/DebuggerTraceResult"
+            "x-result-schema": "#/components/schemas/DebuggerTraceResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "analysis",
+                    "filesystem-write",
+                    "process-launch",
+                    "process-stop",
+                    "data-discard",
+                    "code-execution",
+                    "network-access"
+                  ],
+                  "when": "When the trace is triggered it captures temporary heap files, runs the analyzer, steps/resumes target code, and cleans up snapshots and owned helpers."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "running-target-idle-heap",
+                  "condition": "Debugger state must be running, the heap operation lock idle, and query nonempty."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Arms a click breakpoint and a bounded background trace; subsequent pauses capture and analyze heap snapshots and step target execution.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/heap.rs",
+                  "symbol": "Debugger::start_memory"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -7001,7 +9699,38 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "code-execution",
+                    "network-access"
+                  ],
+                  "when": "Resuming, stepping, restarting, or detaching may let target code run and issue requests; effects depend on page code and existing instrumentation."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Changes debugger execution position or resumes target execution.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -7018,7 +9747,38 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "code-execution",
+                    "network-access"
+                  ],
+                  "when": "Resuming, stepping, restarting, or detaching may let target code run and issue requests; effects depend on page code and existing instrumentation."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Changes debugger execution position or resumes target execution.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -7035,7 +9795,38 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult"
+            "x-result-schema": "#/components/schemas/DebuggerAcknowledgementResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "code-execution",
+                    "network-access"
+                  ],
+                  "when": "Resuming, stepping, restarting, or detaching may let target code run and issue requests; effects depend on page code and existing instrumentation."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Changes debugger execution position or resumes target execution.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -7052,7 +9843,38 @@
               "apps/origin-trace-backend/src/debugger/mod.rs"
             ],
             "description": "No action-specific request fields. Session/state prerequisites still apply.",
-            "x-result-schema": "#/components/schemas/DebuggerTraceResult"
+            "x-result-schema": "#/components/schemas/DebuggerTraceResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "code-execution",
+                    "network-access"
+                  ],
+                  "when": "Resuming, stepping, restarting, or detaching may let target code run and issue requests; effects depend on page code and existing instrumentation."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "memory-trace-active",
+                  "condition": "Memory Origin Trace must be armed, capturing, stepping, or stopping."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Stops or requests termination of the active Memory Origin Trace and cleans up its click breakpoint.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/heap.rs",
+                  "symbol": "Debugger::stop_memory"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -7103,7 +9925,34 @@
               "apps/origin-trace-backend/src/debugger/automation.rs"
             ],
             "description": "Replaces the selected recipe definition; library must be editable.",
-            "x-result-schema": "#/components/schemas/DebuggerRecipeAutomationRecipesResult"
+            "x-result-schema": "#/components/schemas/DebuggerRecipeAutomationRecipesResult",
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "automation-editable",
+                  "condition": "Automatic recipes must be disarmed and no recipe run may be active (automation_editable)."
+                },
+                {
+                  "id": "known-recipe",
+                  "condition": "recipe_id must identify an existing recipe."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Replaces or removes a retained recipe definition without executing its source.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/automation.rs",
+                  "symbol": "Debugger::edit_recipe"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -7174,7 +10023,38 @@
                   }
                 }
               }
-            ]
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "code-execution",
+                    "network-access"
+                  ],
+                  "when": "Conditional and logpoint expressions execute in the target when the breakpoint is hit. Expressions are caller-supplied; no general side-effect guarantee."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-connection",
+                  "condition": "The selected debugger connection must be available; CDP enforces command-specific execution state."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Installs or replaces a breakpoint; update can partially install before removal fails.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/debugger/mod.rs",
+                  "symbol": "Debugger::breakpoint"
+                }
+              ]
+            }
           }
         ],
         "description": "All 59 action envelopes have source-backed request fields, types and requiredness, including conditional fields. Variants marked partial identify remaining complex runtime constraints explicitly. Session availability, record identity, mutation confirmation and state locks still apply. Extra properties remain allowed where dispatch ignores them."
@@ -9343,7 +12223,55 @@
             "required": [
               "action",
               "url"
-            ]
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "filesystem-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "process-launch",
+                "code-execution",
+                "network-access"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "local-state-write",
+                    "browser-control",
+                    "disposable-target-mutation",
+                    "filesystem-write",
+                    "process-stop",
+                    "data-discard"
+                  ],
+                  "when": "An expired, poisoned, disconnected, or failed native session can be retired, killing its owned processes and deleting its temporary profile."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "native-action-idle",
+                  "condition": "No other native console action may hold the session lock."
+                },
+                {
+                  "id": "native-start-ready",
+                  "condition": "No session may already exist; the helper and configured custom Brave must be executable."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Launches a bridge and custom Brave in a new temporary profile at the requested HTTP(S) URL, then lists documents.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "NativeConsole::action"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "NativeConsole::launch"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -9369,7 +12297,38 @@
             "required": [
               "action",
               "session_id"
-            ]
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "filesystem-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "process-stop",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "native-action-idle",
+                  "condition": "No other native console action may hold the session lock."
+                },
+                {
+                  "id": "matching-native-stop",
+                  "condition": "If a session exists, session_id must match it; null is accepted only when no active session exists."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Stops the owned bridge/browser process groups and removes the temporary profile. An idle session may be stopped without creating one.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "NativeConsole::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -9388,7 +12347,46 @@
             "required": [
               "action",
               "session_id"
-            ]
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "local-state-write",
+                    "browser-control",
+                    "disposable-target-mutation",
+                    "filesystem-write",
+                    "process-stop",
+                    "data-discard"
+                  ],
+                  "when": "An expired, poisoned, disconnected, or failed native session can be retired, killing its owned processes and deleting its temporary profile."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "native-action-idle",
+                  "condition": "No other native console action may hold the session lock."
+                },
+                {
+                  "id": "current-native-session",
+                  "condition": "session_id must match an active unexpired native session; otherwise the action fails and may retire that session."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Lists native documents through the existing bridge and advances exchange state. A listing can retire a failed session.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "NativeConsole::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -9420,7 +12418,55 @@
               "session_id",
               "target_id",
               "source"
-            ]
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "disposable-target-mutation",
+                "code-execution",
+                "network-access"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "local-state-write",
+                    "browser-control",
+                    "disposable-target-mutation",
+                    "filesystem-write",
+                    "process-stop",
+                    "data-discard"
+                  ],
+                  "when": "An expired, poisoned, disconnected, or failed native session can be retired, killing its owned processes and deleting its temporary profile."
+                }
+              ],
+              "uncertainties": [
+                "Expression effects, including browser storage changes and navigation, depend on the supplied code. Execution may have occurred after a timeout or disconnect."
+              ],
+              "prerequisites": [
+                {
+                  "id": "native-action-idle",
+                  "condition": "No other native console action may hold the session lock."
+                },
+                {
+                  "id": "current-native-session",
+                  "condition": "session_id must match an active unexpired native session; otherwise the action fails and may retire that session."
+                },
+                {
+                  "id": "native-document",
+                  "condition": "target_id must identify the selected current document; the native bridge validates it."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Evaluates arbitrary supplied JavaScript in the explicitly selected native document. The request has no confirmation boolean; that is not permission to execute.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "NativeConsole::action"
+                }
+              ]
+            }
           },
           {
             "type": "object",
@@ -9446,7 +12492,65 @@
               "session_id",
               "target_id",
               "command"
-            ]
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "local-state-write",
+                    "browser-control",
+                    "disposable-target-mutation",
+                    "filesystem-write",
+                    "process-stop",
+                    "data-discard"
+                  ],
+                  "when": "An expired, poisoned, disconnected, or failed native session can be retired, killing its owned processes and deleting its temporary profile."
+                },
+                {
+                  "effects": [
+                    "disposable-target-mutation",
+                    "code-execution",
+                    "network-access",
+                    "data-discard"
+                  ],
+                  "when": "command.operation selects evaluation, retained handle/state changes, monitoring, cancellation, or clearing; evaluate accepts arbitrary source."
+                }
+              ],
+              "uncertainties": [
+                "Nested runtime commands are not individually effect-audited here. Treat their additional effects as unknown and inspect the native runtime contract before use."
+              ],
+              "prerequisites": [
+                {
+                  "id": "native-action-idle",
+                  "condition": "No other native console action may hold the session lock."
+                },
+                {
+                  "id": "current-native-session",
+                  "condition": "session_id must match an active unexpired native session; otherwise the action fails and may retire that session."
+                },
+                {
+                  "id": "native-document",
+                  "condition": "target_id and any value handle must remain valid in the selected native document."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Dispatches a nested native runtime command. inspect/complete and other names must not be used to infer that the whole action is read-only.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "NativeConsole::action"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "validate_command"
+                }
+              ]
+            }
           }
         ]
       },
@@ -9889,8 +12993,226 @@
           "state",
           "runtime"
         ]
+      },
+      "RebExecutionMetadata": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "effects",
+          "state_dependent_effects",
+          "uncertainties",
+          "prerequisites",
+          "confirmations",
+          "notes",
+          "sources"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "operation",
+              "action",
+              "action-dependent"
+            ]
+          },
+          "effects": {
+            "oneOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "analysis",
+                    "local-state-write",
+                    "filesystem-write",
+                    "browser-control",
+                    "disposable-target-mutation",
+                    "code-execution",
+                    "network-access",
+                    "process-launch",
+                    "process-stop",
+                    "data-discard",
+                    "sensitive-capture"
+                  ]
+                },
+                "uniqueItems": true
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state_dependent_effects": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "effects",
+                "when"
+              ],
+              "properties": {
+                "effects": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "analysis",
+                      "local-state-write",
+                      "filesystem-write",
+                      "browser-control",
+                      "disposable-target-mutation",
+                      "code-execution",
+                      "network-access",
+                      "process-launch",
+                      "process-stop",
+                      "data-discard",
+                      "sensitive-capture"
+                    ]
+                  },
+                  "uniqueItems": true,
+                  "minItems": 1
+                },
+                "when": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "uncertainties": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "prerequisites": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "condition"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9-]*$"
+                },
+                "condition": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "confirmations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "field",
+                "value",
+                "when"
+              ],
+              "properties": {
+                "field": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]*$"
+                },
+                "value": {
+                  "const": true
+                },
+                "when": {
+                  "type": "object",
+                  "description": "JSON Schema 2020-12 predicate over the whole request. Empty object means unconditional. This only describes a server confirmation field."
+                }
+              }
+            }
+          },
+          "notes": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sources": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "symbol"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "symbol": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        "description": "Effect/prerequisite metadata governed by the root x-reb-execution-policy; see protocol/http-api.md#execution-metadata. Never an authorization grant, dynamic capability check, exhaustive side-effect proof, or retry instruction. Effects cover handler work and explicitly enabled continuations, excluding ordinary local HTTP/CDP/IPC traffic. Missing metadata is unknown, not safe.",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "action-dependent"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "effects": {
+                  "type": "null"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "effects": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "analysis",
+                      "local-state-write",
+                      "filesystem-write",
+                      "browser-control",
+                      "disposable-target-mutation",
+                      "code-execution",
+                      "network-access",
+                      "process-launch",
+                      "process-stop",
+                      "data-discard",
+                      "sensitive-capture"
+                    ]
+                  },
+                  "uniqueItems": true
+                }
+              }
+            }
+          }
+        ]
       }
     }
   },
-  "x-schema-scope": "Existing HTTP operations; debugger nested request/result models are intentionally partial."
+  "x-schema-scope": "Existing HTTP operations; debugger nested request/result models are intentionally partial.",
+  "x-reb-execution-policy": {
+    "version": 1,
+    "advisory": true,
+    "automatic_retry": "never",
+    "idempotence": "unproven"
+  }
 }

@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { runInNewContext } from "node:vm";
 import {
   readFile,
+  open,
   rm,
   mkdtemp,
   mkdir,
@@ -732,6 +733,147 @@ fieldHandoff.setCatalog([{...source, hash: "new-hash"}]); release(); await searc
 assert.equal(selection.candidates.length, 0);
 assert(selection.gaps.includes("Sources changed. Retry."));
 console.log("PASS decoded field identity, chain prefix, UTF-8, source identity, cancellation, and bounds");
+// Chrome's port file is the readiness contract used by ChromeDriver/Telemetry;
+// stderr is diagnostic only (Linux launchers may proxy it through helpers).
+function trafficDevtoolsAddress(text) {
+  if (typeof text !== "string" || text.length > 4096) return null;
+  const match = /^([1-9][0-9]{0,4})\r?\n(\/devtools\/browser\/[a-zA-Z0-9-]{1,128})\r?\n?$/.exec(text);
+  if (!match || Number(match[1]) > 65535) return null;
+  return `ws://127.0.0.1:${match[1]}${match[2]}`;
+}
+
+function trafficBrowserProcess(executable, args) {
+  const grouped = process.platform !== "win32";
+  const started = performance.now();
+  const diagnostics = {executable, args, pid: null, phase: "spawn", elapsed_ms: 0,
+    exit_code: null, signal: null, spawn_error: null, port_file: "not checked", stdout: "", stderr: "", cleanup: null};
+  const browser = spawn(executable, args, {detached: grouped, stdio: ["ignore", "pipe", "pipe"]});
+  diagnostics.pid = browser.pid ?? null;
+  browser.stdout.on("data", data => {diagnostics.stdout = (diagnostics.stdout + data).slice(-16384);});
+  browser.stderr.on("data", data => {diagnostics.stderr = (diagnostics.stderr + data).slice(-16384);});
+  browser.on("error", error => {diagnostics.spawn_error = `${error.code ?? "error"}: ${error.message}`.slice(0, 2048);});
+  browser.on("exit", (code, signal) => {diagnostics.exit_code = code; diagnostics.signal = signal;});
+  const elapsed = () => {diagnostics.elapsed_ms = Math.round(performance.now() - started);};
+  const failed = () => diagnostics.spawn_error || browser.exitCode !== null || browser.signalCode !== null;
+  const failure = reason => {elapsed(); return new Error(`${reason}; ${JSON.stringify(diagnostics)}`);};
+  async function ready(profile, timeoutMs = 30000) {
+    diagnostics.phase = "DevToolsActivePort";
+    const deadline = performance.now() + timeoutMs;
+    while (performance.now() < deadline) {
+      if (failed()) throw failure("Chromium exited or failed before DevTools readiness");
+      let handle;
+      try {
+        handle = await open(join(profile, "DevToolsActivePort"), "r");
+        const buffer = Buffer.alloc(4097);
+        const {bytesRead} = await handle.read(buffer, 0, buffer.length, 0);
+        const address = bytesRead <= 4096 ? trafficDevtoolsAddress(buffer.toString("utf8", 0, bytesRead)) : null;
+        diagnostics.port_file = address ? "valid" : `incomplete or malformed (${bytesRead} bytes read)`;
+        if (address && !failed()) {elapsed(); return address;}
+      } catch (error) {
+        diagnostics.port_file = String(error.code ?? error.message).slice(0, 256);
+        if (error.code !== "ENOENT") throw failure("Cannot read Chromium readiness file");
+      } finally {await handle?.close();}
+      await new Promise(resolve => setTimeout(resolve, Math.max(1, Math.min(50, deadline - performance.now()))));
+    }
+    throw failure(`Chromium DevTools readiness timed out after ${timeoutMs} ms`);
+  }
+  async function stop(graceMs = 2000) {
+    const cleanup = {signals: [], exited: false, error: null};
+    diagnostics.cleanup = cleanup;
+    if (!browser.pid) {cleanup.exited = true; elapsed(); return;}
+    // This group is created solely for our own browser and launcher helpers.
+    // It cannot include the caller or another user's browser.
+    const alive = () => {
+      if (!grouped) return browser.exitCode === null && browser.signalCode === null;
+      try {process.kill(-browser.pid, 0); return true;} catch (error) {if (error.code === "ESRCH") return false; throw error;}
+    };
+    const signal = name => {
+      try {if (grouped) process.kill(-browser.pid, name); else browser.kill(name); cleanup.signals.push(name);}
+      catch (error) {if (error.code !== "ESRCH") throw error;}
+    };
+    try {
+      for (const name of ["SIGTERM", "SIGKILL"]) {
+        if (!alive()) break;
+        signal(name);
+        const deadline = performance.now() + graceMs;
+        while (alive() && performance.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      cleanup.exited = !alive();
+      if (!cleanup.exited) throw new Error("Owned browser process group did not exit after bounded cleanup");
+    } catch (error) {cleanup.error = String(error.message).slice(0, 2048); throw error;}
+    finally {elapsed(); browser.stdout.destroy(); browser.stderr.destroy();}
+  }
+  return {browser, diagnostics, ready, stop};
+}
+
+async function trafficBrowserSocket(address, timeoutMs = 10000, Socket = WebSocket) {
+  const socket = new Socket(address);
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {cleanup(); reject(new Error(`Chromium CDP socket timed out after ${timeoutMs} ms`));}, timeoutMs);
+      const opened = () => {cleanup(); resolve();};
+      const failed = event => {cleanup(); reject(new Error(`Chromium CDP socket ${event.type} before opening`));};
+      function cleanup() {clearTimeout(timer); socket.removeEventListener("open", opened); socket.removeEventListener("error", failed); socket.removeEventListener("close", failed);}
+      socket.addEventListener("open", opened, {once: true});
+      socket.addEventListener("error", failed, {once: true});
+      socket.addEventListener("close", failed, {once: true});
+    });
+    return socket;
+  } catch (error) {socket.close(); throw error;}
+}
+
+// Real child-process fixtures cover the silent-launch path without launching a
+// browser or claiming rendered QA. They run in the existing focused gate.
+for (const invalid of ["", "0\n/devtools/browser/abc", "65536\n/devtools/browser/abc", "9222\nhttps://foreign.invalid/", "9222\n/devtools/page/abc", "9222\n/devtools/browser/abc?remote=x", "x".repeat(4097)]) assert.equal(trafficDevtoolsAddress(invalid), null);
+assert.equal(trafficDevtoolsAddress("9222\n/devtools/browser/abc-def\n"), "ws://127.0.0.1:9222/devtools/browser/abc-def");
+const startupFixture = await mkdtemp(join(tmpdir(), "reb-browser-startup-fixture-"));
+try {
+  const launchFixture = code => trafficBrowserProcess(process.execPath, ["-e", code, startupFixture]);
+  let fixture = launchFixture(`const fs=require('node:fs');const p=require('node:path').join(process.argv[1],'DevToolsActivePort');fs.writeFileSync(p,'9222\\n');setTimeout(()=>fs.writeFileSync(p,'9222\\n/devtools/browser/silent-fixture'),50);setInterval(()=>{},1000);`);
+  try {
+    assert.equal(await fixture.ready(startupFixture, 3000), "ws://127.0.0.1:9222/devtools/browser/silent-fixture");
+    assert.equal(fixture.diagnostics.stderr, "");
+    assert.equal(fixture.diagnostics.port_file, "valid");
+  } finally {await fixture.stop();}
+  assert.equal(fixture.diagnostics.cleanup.exited, true);
+  await rm(join(startupFixture, "DevToolsActivePort"));
+  fixture = launchFixture("process.stderr.write('synthetic startup denial\\n');process.exitCode=23;");
+  try {await assert.rejects(fixture.ready(startupFixture, 3000), /Chromium exited or failed/);}
+  finally {await fixture.stop();}
+  assert.equal(fixture.diagnostics.exit_code, 23);
+  assert.match(fixture.diagnostics.stderr, /synthetic startup denial/);
+  fixture = trafficBrowserProcess(join(startupFixture, "missing-browser"), []);
+  try {await assert.rejects(fixture.ready(startupFixture, 3000), /ENOENT/);}
+  finally {await fixture.stop();}
+  fixture = launchFixture("process.on('SIGTERM',()=>{});process.stdout.write('ready');setInterval(()=>{},1000);");
+  try {
+    // Wait for the fixture's signal handler before testing escalation.
+    const deadline = performance.now() + 3000;
+    while (!fixture.diagnostics.stdout && performance.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(fixture.diagnostics.stdout, "ready");
+    await assert.rejects(fixture.ready(startupFixture, 100), /timed out/);
+  } finally {await fixture.stop(100);}
+  assert.deepEqual(fixture.diagnostics.cleanup.signals, ["SIGTERM", "SIGKILL"]);
+  assert.equal(fixture.diagnostics.cleanup.exited, true);
+  await writeFile(join(startupFixture, "DevToolsActivePort"), "9222\nhttps://foreign.invalid/");
+  fixture = launchFixture("process.stdout.write('x'.repeat(20000));process.stderr.write('y'.repeat(20000));setInterval(()=>{},1000);");
+  try {await assert.rejects(fixture.ready(startupFixture, 200), /incomplete or malformed/);}
+  finally {await fixture.stop();}
+  assert(fixture.diagnostics.stdout.length <= 16384 && fixture.diagnostics.stderr.length <= 16384);
+} finally {await rm(startupFixture, {recursive: true, force: true});}
+class TrafficSocketFixture extends EventTarget {
+  static event = null;
+  static latest;
+  constructor() {super(); TrafficSocketFixture.latest = this; if (TrafficSocketFixture.event) queueMicrotask(() => this.dispatchEvent(new Event(TrafficSocketFixture.event)));}
+  close() {this.closed = true;}
+}
+for (const event of ["open", "error", "close", null]) {
+  TrafficSocketFixture.event = event;
+  if (event === "open") assert(await trafficBrowserSocket("ws://127.0.0.1", 30, TrafficSocketFixture));
+  else {await assert.rejects(trafficBrowserSocket("ws://127.0.0.1", 30, TrafficSocketFixture), /Chromium CDP socket/); assert.equal(TrafficSocketFixture.latest.closed, true);}
+}
+console.log("PASS Chromium silent port-file startup, partial/malformed ports, launch errors, early exit, timeouts, bounded diagnostics/cleanup and socket handshake fixtures (not browser QA)");
+
 // Real, synthetic UI QA using the runner's installed Chromium and Node's CDP
 // WebSocket. No package install, network capture, sandbox override, or backend
 // exposure is needed. Do not substitute these screenshots for native macOS QA.
@@ -753,24 +895,26 @@ async function checkTrafficBrowser() {
       response.end(await readFile(join(root, "apps/research-ui", name)));
     } catch {response.writeHead(404); response.end();}
   });
-  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  const browser = spawn(executable, ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${directory}`,
-    "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "about:blank"], {stdio: ["ignore", "ignore", "pipe"]});
-  let stderr = "";
-  browser.stderr.on("data", data => {stderr = (stderr + data).slice(-16000);});
-  let socket;
+  const args = ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${directory}`,
+    "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "about:blank"];
+  let lifecycle, socket, validation, failure;
+  let diagnostics = {executable, args, phase: "fixture server"};
+  const commands = new Map();
+  await rm(join(output, "validation.json"), {force: true});
   try {
-    const address = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {cleanup(); reject(new Error(`Chromium did not start: ${stderr}`));}, 15000);
-      const read = () => {const match = stderr.match(/DevTools listening on (ws:\/\/\S+)/); if (match) {cleanup(); resolve(match[1]);}};
-      const failed = error => {cleanup(); reject(error instanceof Error ? error : new Error(`Chromium exited before CDP: ${stderr}`));};
-      function cleanup() {clearTimeout(timer); browser.stderr.off("data", read); browser.off("exit", failed); browser.off("error", failed);}
-      browser.stderr.on("data", read); browser.once("exit", failed); browser.once("error", failed); read();
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {cleanup(); reject(new Error("Loopback fixture server timed out"));}, 5000);
+      const failed = error => {cleanup(); reject(error);};
+      function cleanup() {clearTimeout(timer); server.off("error", failed);}
+      server.once("error", failed);
+      server.listen(0, "127.0.0.1", () => {cleanup(); resolve();});
     });
-    socket = new WebSocket(address);
-    await new Promise((resolve, reject) => {socket.addEventListener("open", resolve, {once: true}); socket.addEventListener("error", reject, {once: true});});
+    lifecycle = trafficBrowserProcess(executable, args);
+    diagnostics = lifecycle.diagnostics;
+    const address = await lifecycle.ready(directory);
+    diagnostics.phase = "CDP socket";
+    socket = await trafficBrowserSocket(address);
     let commandId = 0;
-    const commands = new Map();
     const runtimeErrors = [];
     socket.addEventListener("message", event => {
       const message = JSON.parse(event.data);
@@ -780,13 +924,22 @@ async function checkTrafficBrowser() {
       commands.delete(message.id); clearTimeout(pending.timer);
       if (message.error) pending.reject(new Error(JSON.stringify(message.error))); else pending.resolve(message.result);
     });
+    const rejectCommands = reason => {
+      for (const pending of commands.values()) {clearTimeout(pending.timer); pending.reject(new Error(reason));}
+      commands.clear();
+    };
+    socket.addEventListener("close", () => rejectCommands("Chromium CDP socket closed"));
+    socket.addEventListener("error", () => rejectCommands("Chromium CDP socket error"));
     let session;
     const command = (method, params = {}, attach = true) => new Promise((resolve, reject) => {
       const id = ++commandId;
+      diagnostics.last_command = method;
       const timer = setTimeout(() => {commands.delete(id); reject(new Error(`CDP timed out: ${method}`));}, 10000);
       commands.set(id, {resolve, reject, timer});
       socket.send(JSON.stringify({id, method, params, ...(attach && session ? {sessionId: session} : {})}));
     });
+    diagnostics.version = await command("Browser.getVersion", {}, false);
+    diagnostics.phase = "page setup";
     const target = await command("Target.createTarget", {url: "about:blank"}, false);
     session = (await command("Target.attachToTarget", {targetId: target.targetId, flatten: true}, false)).sessionId;
     await command("Page.enable"); await command("Runtime.enable");
@@ -829,6 +982,7 @@ async function checkTrafficBrowser() {
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     assert(await evaluate("typeof renderRequests === 'function'"), "Application did not initialize");
+    diagnostics.phase = "interactive validation";
     await evaluate(`window.fixtureRequests = Array.from({length:520}, (_,i) => ({id:'qa-'+i,path:'https://fixture.invalid/api/item-'+i+'?view=compact',method:i%3?'GET':'POST',status:i%11===0?'pending':200,time:i%11===0?'pending':i/2,type:'xhr',origin:'demo',tabId:'qa-tab',hostOnly:false,operation:'synthetic_qa',events:[],exchange:{request:{state:'available',mime:'application/json',text:'{"id":"qa","value":"first"}',headers:[['content-type','application/json']]},response:{state:i%11===0?'loading':'available',mime:'application/json',text:i%11===0?'':'{"result":"first"}',headers:[['content-type','application/json'],['x-fixture','one']]}}})); state.requests=fixtureRequests; state.sessionMode='demo'; renderRequests(); document.querySelector('#network-notice').textContent='Synthetic browser QA fixture · no live capture';`);
     assert.equal(await evaluate("document.querySelectorAll('.request-row').length"), 500);
     assert(await columnsAligned(), "Request headers and row columns must align with the scrollbar gutter");
@@ -909,18 +1063,29 @@ async function checkTrafficBrowser() {
     assert.match(await evaluate("elements.requestRows.textContent"), /No developer evidence/);
     await screenshot("requests-empty");
     assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during rendered QA");
-    await writeFile(join(output, "validation.json"), JSON.stringify({status: "passed", path: "browser development UI", source: "synthetic fixture", viewports: [[1440,900],[600,800],[360,740]], checks: ["500-row bound and paging", "pending to response to failed", "equal-length updates", "stable focus and scroll", "sort/filter selection", "dismissal and Escape", "eviction", "arrow-key rows and tabs", "malformed JSON", "sandboxed HTML", "reduced motion", "Back to traffic", "new capture", "empty/malformed/offline"]}, null, 2));
-    console.log(`PASS real Chromium Requests interactions; screenshots: ${output}`);
+    validation = {status: "passed", path: "browser development UI", source: "synthetic fixture", viewports: [[1440,900],[600,800],[360,740]], checks: ["500-row bound and paging", "pending to response to failed", "equal-length updates", "stable focus and scroll", "sort/filter selection", "dismissal and Escape", "eviction", "arrow-key rows and tabs", "malformed JSON", "sandboxed HTML", "reduced motion", "Back to traffic", "new capture", "empty/malformed/offline"]};
+    diagnostics.phase = "validated";
+  } catch (error) {
+    failure = error;
+    diagnostics.failure = String(error.stack ?? error).slice(0, 65536);
   } finally {
     socket?.close();
-    if (browser.exitCode === null && browser.signalCode === null) {
-      browser.kill();
-      await new Promise(resolve => {const timer = setTimeout(resolve, 2000); browser.once('exit', () => {clearTimeout(timer); resolve();});});
-    }
+    for (const pending of commands.values()) {clearTimeout(pending.timer); pending.reject(new Error("Browser QA cleanup"));}
+    commands.clear();
+    try {await lifecycle?.stop();}
+    catch (error) {failure ??= error; diagnostics.cleanup_error = String(error.message).slice(0, 2048);}
     server.closeAllConnections();
-    await new Promise(resolve => server.close(resolve));
-    await rm(directory, {recursive: true, force: true, maxRetries: 3, retryDelay: 100});
+    if (server.listening) await new Promise(resolve => server.close(resolve));
+    // Keep a profile only when its owned process could not be stopped.
+    if (!lifecycle || lifecycle.diagnostics.cleanup?.exited) {
+      try {await rm(directory, {recursive: true, force: true, maxRetries: 3, retryDelay: 100});}
+      catch (error) {failure ??= error; diagnostics.profile_cleanup_error = String(error.message).slice(0, 2048);}
+    }
+    await writeFile(join(output, "browser-startup.json"), JSON.stringify(diagnostics, null, 2));
   }
+  if (failure) throw failure;
+  await writeFile(join(output, "validation.json"), JSON.stringify(validation, null, 2));
+  console.log(`PASS real Chromium Requests interactions; screenshots: ${output}`);
 }
 if (trafficBrowser) {await checkTrafficBrowser(); process.exit(0);}
 

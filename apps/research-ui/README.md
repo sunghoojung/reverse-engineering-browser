@@ -336,6 +336,15 @@ checks 500-row paging, lifecycle changes, selection/focus/scroll retention,
 content invalidation, empty/malformed/offline states, dismissal, narrow layouts,
 and reduced motion. Genuine rendered PNGs and a success-only `validation.json`
 are written under `build/requests-ui-qa` and uploaded as a short-lived CI artifact.
+Readiness uses Chrome's `DevToolsActivePort` file with a 30-second deadline,
+not a stderr banner. The socket handshake has a separate 10-second deadline.
+`browser-startup.json` is written even when startup or interaction fails; it
+contains bounded process output, the readiness stage, browser version when
+available, exit status and cleanup results. The checker terminates only its own
+isolated browser process group, including launcher helpers, with bounded
+SIGTERM/SIGKILL waits. No successful validation manifest is written until both
+interaction and cleanup complete. Startup process/socket fixtures also run in
+`make javascript-check`; they do not claim rendered browser coverage.
 A browser startup or sandbox error is a failed/unavailable check, never a pass;
 do not disable the sandbox to run it. Native macOS interaction remains a separate
 product-path requirement.

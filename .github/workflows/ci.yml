@@ -63,6 +63,8 @@ jobs:
           REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
           export REB_UI_CHROMIUM
           test -n "$REB_UI_CHROMIUM"
+          printf 'Browser executable: %s\n' "$REB_UI_CHROMIUM"
+          node --version
           node tools/check-origin-trace-debugger.mjs --traffic-ui-browser
 
       - name: Upload rendered Requests QA

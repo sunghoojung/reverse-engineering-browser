@@ -373,10 +373,13 @@ impl App {
                 if request.is_some() {
                     q.number("request_id", None, 64, false)?;
                 }
-                let signature =
-                    evidence::resource_etag(&self.options.artifacts.join("manifest.jsonl"), "");
+                let signature = format!(
+                    "{}:{}",
+                    analysis_input_signature(&self.options.artifacts.join("manifest.jsonl")),
+                    analysis_input_signature(&self.options.store),
+                );
                 let mut cache = self.analysis.lock().await;
-                if cache.as_ref().is_none_or(|(s, _)| *s != signature) {
+                if !cfg!(unix) || cache.as_ref().is_none_or(|(s, _)| *s != signature) {
                     let root = self.options.artifacts.clone();
                     let store = self.options.store.clone();
                     let value = self.blocking(move || vm::store(&root, &store)).await?;
@@ -717,6 +720,21 @@ impl Query {
                 .map_err(|_| Error::bad("Limit is invalid"))
         })
     }
+}
+fn analysis_input_signature(path: &Path) -> String {
+    // Evidence can be restored or atomically replaced with the same length and
+    // mtime. Unix file identity and change time prevent reusing that old result.
+    // Other platforms recompute analysis rather than relying on a weaker key.
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        path.symlink_metadata()
+            .map(|m| format!("{}:{}:{}:{}", m.dev(), m.ino(), m.ctime(), m.ctime_nsec()))
+            .unwrap_or_else(|error| format!("{:?}", error.kind()))
+    };
+    #[cfg(not(unix))]
+    let identity = String::new();
+    evidence::resource_etag(path, &identity)
 }
 fn matches_etag(headers: &HeaderMap, etag: Option<&str>) -> bool {
     etag.is_some_and(|tag| headers.get("if-none-match").and_then(|v| v.to_str().ok()) == Some(tag))

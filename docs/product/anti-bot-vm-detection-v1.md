@@ -9,6 +9,54 @@ later opcode reconstruction, and later exact value tracing.
 Authorization and capture boundaries for research sessions are defined in
 [`SAFETY.md`](../../SAFETY.md).
 
+## Retained runtime evidence implementation
+
+The local analyzer currently links retained Canvas/WebGL, Navigator/device, and
+Web Audio operations to artifact findings. Web Audio uses only existing
+`web_audio` / `api_call` metadata; there is no new capture or static audio keyword
+rule. Each runtime family contributes at most 25 relevance points per artifact,
+independent of the structural VM score and tier. Ordinary audio use is not proof
+of fingerprinting, anti-bot behavior, a vendor, or a virtual machine.
+
+Runtime observations name their exact `(session_id, process_id,
+sequence_number)` event, rather than a fabricated source-byte coordinate. Graph
+IDs include all three fields. The legacy `event_sequence` field remains for
+existing consumers. Explicit matching nonzero artifact IDs support `observed`
+attribution. Otherwise a matching session, navigation metadata, and nonzero
+frame support only `correlated` evidence. A later explicitly attributed event is
+preferred to an earlier correlated representative without increasing the score.
+
+Zero frame IDs never establish shared context. When both frame IDs are zero,
+only an explicit nonzero artifact match can identify a browser signal; otherwise
+coverage reports `runtime-frame-attribution-unavailable`. Native operation
+probes currently do not provide script artifact IDs, runtime stacks, or navigation
+identity. Their audio observations therefore usually support frame correlation,
+not observed script attribution. A matching zero navigation ID only means both
+records lack navigation identity. Worker and detached-frame activity can remain
+unattributed. Neither signal nor request edges establish causal ordering or
+exact value flow.
+
+Missing, zero, noncanonical, or out-of-range event identity fields and missing or
+unsupported envelope versions (other than 2 or 3) produce an input omission. Identical duplicate events are coalesced; conflicting records
+with the same identity are both excluded and reported. Native transport `gap`
+markers deliberately repeat the preceding event identity, so they are handled
+separately and never invalidate retained signals. A `capture-gap` omission counts
+markers only, not lost events; overlapping queue/sequence losses are not summed.
+The 1,024-edge graph
+bound includes the artifact-to-finding edge. Scoring representatives are retained
+first; excluded graph records produce an explicit `runtime-graph-edge-limit`
+omission and partial coverage. Request roots also keep composite event identity,
+while `related_request_ids` remains a legacy ID-only summary.
+
+Producer `1.1.0` and runtime evidence profile version `2` bind the new relevance
+weights and identity semantics. The HTTP analysis cache tracks changes to both
+the artifact manifest and event store, including event-only appends, replacement,
+and clearing. On Unix it includes file identity and change time, so same-size
+replacement or rewriting with a restored modification time cannot reuse stale
+analysis. Other platforms recompute before deciding whether to return 304. The same bounded analyzer powers the HTTP API and offline CLI.
+This increment does not implement the broader stack, semantic VM, or exact value
+tracing promises below.
+
 ## Release promise
 
 Given an authorized Deep Analysis capture, Origin Trace automatically scans

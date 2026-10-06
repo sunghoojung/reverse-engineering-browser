@@ -866,7 +866,7 @@
 
       function rebuildTrafficRequests() {
         const cdpRequests = requestsFromDebuggerNetwork(
-          state.debuggerSession?.network, state.nativeRequests
+          state.debuggerSession?.network, state.nativeRequests, state.debuggerNetworkBodyCache
         );
         if (state.sessionMode === 'live') {
           state.requests = state.debuggerSession?.network?.capture_enabled
@@ -5970,6 +5970,17 @@
         return JSON.stringify([script.target_id ?? state.debuggerSession?.target?.id ?? '', script.hash]);
       }
 
+      function pruneLiveScriptContent() {
+        const identities = new Map((state.debuggerSession?.scripts ?? [])
+          .map(script => [script.script_id, liveScriptIdentity(script)]));
+        for (const [scriptId, cached] of state.liveScriptContent) {
+          if (identities.get(scriptId) !== cached.identity || state.staleScriptIds.has(scriptId)) {
+            cached.controller?.abort();
+            state.liveScriptContent.delete(scriptId);
+          }
+        }
+      }
+
       function liveSources() {
         const staleScriptIds = state.staleScriptIds ?? new Set();
         return (state.debuggerSession?.scripts ?? []).filter(script => !staleScriptIds.has(script.script_id)).map(script => {
@@ -6038,6 +6049,7 @@
         if (!scriptId) return;
         state.staleScriptIds ??= new Set();
         state.staleScriptIds.add(scriptId);
+        state.liveScriptContent.get(scriptId)?.controller?.abort();
         state.liveScriptContent.delete(scriptId);
         state.openScriptIds = state.openScriptIds.filter(id => id !== scriptId);
         if (state.selectedScriptId === scriptId) {
@@ -6835,15 +6847,24 @@
 
       async function loadScriptContent(source) {
         const identity = liveScriptIdentity(source);
+        const attached = () => !state.staleScriptIds.has(source.script_id) &&
+          (state.debuggerSession?.scripts ?? []).some(script =>
+            script.script_id === source.script_id && liveScriptIdentity(script) === identity);
+        if (!attached()) return;
         const existing = state.liveScriptContent.get(source.script_id);
         if (existing?.identity === identity && (existing.content !== undefined || existing.loading)) return;
-        const pending = { identity, loading: true, loadError: null };
+        existing?.controller?.abort();
+        const controller = new AbortController();
+        const pending = { identity, loading: true, loadError: null, controller };
         state.liveScriptContent.set(source.script_id, pending);
-        const stillCurrent = () => state.liveScriptContent.get(source.script_id) === pending &&
-          (state.debuggerSession?.scripts ?? []).some(script => script.script_id === source.script_id && liveScriptIdentity(script) === identity);
-        renderSources();
+        // Longer than the backend's CDP deadline, but bound stalled HTTP/body reads too.
+        const timeout = setTimeout(() => controller.abort(), 15000);
+        const stillCurrent = () => state.liveScriptContent.get(source.script_id) === pending && attached();
         try {
-          const response = await fetch(`/api/debugger/source?script_id=${encodeURIComponent(source.script_id)}`, { cache: 'no-store' });
+          renderSources();
+          const response = await fetch(`/api/debugger/source?script_id=${encodeURIComponent(source.script_id)}`, {
+            cache: 'no-store', signal: controller.signal
+          });
           const body = await response.json();
           if (!stillCurrent()) return;
           const responseError = body?.error || `Debugger returned ${response.status}`;
@@ -6864,9 +6885,15 @@
             sourceTextLength: body.source.length, contentTruncated: body.truncated });
         } catch (error) {
           if (!stillCurrent()) return;
-          state.liveScriptContent.set(source.script_id, { identity, loading: false, loadError: `Live source is unavailable: ${error.message}` });
+          const message = error.name === 'AbortError'
+            ? 'Loading timed out after 15 seconds. Select the source to retry.' : error.message;
+          state.liveScriptContent.set(source.script_id, { identity, loading: false, loadError: `Live source is unavailable: ${message}` });
           state.sourceNoticeKind = 'warning';
           state.sourceNotice = `Live source ${sourceDisplayName(source)} could not be loaded. The last debugger catalog remains visible.`;
+        } finally {
+          clearTimeout(timeout);
+          // A detached or superseded response must not leave a loading entry behind.
+          if (state.liveScriptContent.get(source.script_id) === pending) state.liveScriptContent.delete(source.script_id);
         }
         renderSources();
       }
@@ -8071,6 +8098,8 @@
           const body = await response.json();
           if (!isDebuggerResponse(body)) throw new TypeError('Malformed debugger response');
           const previousSession = state.debuggerSession;
+          const previousSelectedScript = previousSession?.scripts.find(script => script.script_id === state.selectedScriptId);
+          const previousSelectedIdentity = previousSelectedScript ? liveScriptIdentity(previousSelectedScript) : null;
           const previousState = state.debuggerSession?.state;
           const previousFrame = state.debuggerSession?.paused?.call_frames?.[0]?.id;
           const previousCatalog = debuggerScriptCatalogSignature(previousSession);
@@ -8097,6 +8126,7 @@
               if (!current || (previous && current.hash !== previous.hash)) state.staleScriptIds.delete(scriptId);
             });
           }
+          pruneLiveScriptContent();
           state.openScriptIds = state.openScriptIds.filter(id =>
             body.scripts.some(script => script.script_id === id) && !state.staleScriptIds.has(id));
           if (state.editingBreakpointId !== null && !body.breakpoints.some(breakpoint => breakpoint.id === state.editingBreakpointId)) {
@@ -8139,10 +8169,16 @@
           if (!document.querySelector('#screen-api-collection').hidden) renderApiCollection();
           const sourcesVisible = !document.querySelector('#screen-sources').hidden;
           if (sourcesVisible && !sourceRendered) {
+            const currentSelectedScript = body.scripts.find(script => script.script_id === state.selectedScriptId);
+            const selectedIdentityChanged = previousSelectedIdentity !== null && currentSelectedScript &&
+              previousSelectedIdentity !== liveScriptIdentity(currentSelectedScript);
             const catalogChanged = previousCatalog !== debuggerScriptCatalogSignature(body);
             const openScriptsChanged = previousOpenScripts !== state.openScriptIds.join('\u0000');
             const pendingLine = state.pendingSourceLine ? `${state.pendingSourceLine.scriptId}:${state.pendingSourceLine.line}` : '';
-            if (openScriptsChanged || (state.selectedScriptId === null && previousSession?.scripts?.length > 0 && body.scripts.length === 0)) {
+            if (selectedIdentityChanged) {
+              renderSources();
+              loadScriptContent(selectedSource());
+            } else if (openScriptsChanged || (state.selectedScriptId === null && previousSession?.scripts?.length > 0 && body.scripts.length === 0)) {
               renderSources();
             } else {
               if (catalogChanged && state.sourceCollection === 'page') renderSourceTree();

@@ -26,8 +26,12 @@ jobs:
 
       - name: Install lightweight linters
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes shellcheck
+          # Hosted images include ShellCheck; avoid an unnecessary apt mirror dependency.
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes shellcheck
+          fi
+          shellcheck --version
           python3 -m venv /tmp/reb-ci-tools
           /tmp/reb-ci-tools/bin/pip install --disable-pip-version-check \
             clang-format==18.1.8 ruff==0.12.8

@@ -30,11 +30,12 @@ use std::{
 };
 use tokio::sync::{Mutex, Semaphore};
 
-const UI_ASSETS: [&str; 13] = [
+const UI_ASSETS: [&str; 14] = [
     "index.html",
     "app.css",
     "app_state.js",
     "evidence_models.js",
+    "evidence_package.js",
     "source_syntax.js",
     "source_facts.js",
     "traffic_view.js",

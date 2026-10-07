@@ -682,3 +682,87 @@ Function indexes include imports. **Find** searches the active view; failures
 provide **Retry inspection**. Partial coverage and display limits are explicit.
 The native shell ships `WasmService.swift` and `OriginTraceWasmInspector`, using
 the same Rust provider as HTTP. See [WASM Inspection v1](../../protocol/wasm-inspection-v1.md).
+
+## Evidence coverage and metadata packages
+
+Open **Evidence → Coverage & metadata packages** in the Requests inspector, or
+**Metadata packages** from Backtraces. Choose individual native event identities
+(session, process and sequence) or artifact identities (session and artifact).
+The selected-request view uses only that request's attached native records;
+CDP request IDs and synthetic gap rows are not export identities. The other
+views expose the current retained windows, at most 5,000 events or 500 artifacts,
+with 50 candidates per page. They are not an exhaustive store inventory.
+
+Nothing is selected automatically. Selection spans pages and views, with limits
+of 1,024 events and 64 artifacts. **Selected identities** keeps the exact keys
+inspectable if their rows leave the window. **Clear selection** removes all keys;
+changing the selected request also clears the selection and any prior result.
+Refresh does not silently choose a replacement. A missing selected identity
+fails export rather than substituting a neighboring record.
+
+**Export selected metadata** explicitly calls the local guarded exporter and
+then validates the returned original bytes. It never stops a writer, changes
+capture settings, creates a guard for a legacy store, or retries automatically.
+An active writer, changed source, unsupported store, failed integrity check or
+bounded-scan limit has a visible error. Supported stores must be quiescent under
+the existing cooperative leases; see the [package contract](../../protocol/evidence-package-v1.md).
+
+Alternatively, choose a metadata JSON file up to 4 MiB and click **Validate
+original bytes**. Duplicate members, invalid UTF-8, BOMs and whitespace reach the
+Rust validator unchanged. The UI parses only an accepted document for display.
+Validation neither imports evidence nor runs code, fetches references or uploads
+data outside the local service. The 15-second UI deadline includes body and file
+reads. Response reads retain one buffer (at most 4 MiB for a package, 64 KiB
+for a validation result) and reject more than 65,536 transport chunks. Reads yield
+every 256 chunks so cancellation/deadline tasks run; cancellation does not wait
+for an underlying producer's cleanup. Cancel, Escape, a changed selection/request or leaving Evidence retires
+the pending result. An already started bounded server operation may finish.
+
+A valid package is internally consistent, untrusted metadata, not authenticated
+evidence. A supplied file's provenance and export-time verification remain
+unverified claims. The view separates selected metadata, retained-source scan,
+unknown/partial capture, reference resolution and scoped loss observations.
+Queue-drop counts and sequence holes are not added into a unique loss total.
+Historical builds, capture settings, authorization, observer regime and epochs
+remain unknown. API markers do not prove return, throw, WASM trap, reentry or
+Promise settlement. Event-time context does not identify the current live page.
+Records, references, gaps and issues are paged; captured strings remain text.
+
+No save or clipboard action is automatic. In the browser development UI,
+**Download validated package** requests a download of the exact validated bytes;
+check the browser's download UI for completion. The native WKWebView has no
+reviewed download adapter, so Download is disabled with a visible explanation.
+**Copy validated metadata** is an explicit JSON-text clipboard action and reports
+clipboard denial without claiming a save. In `reb://` stored-evidence native
+mode, export and validation are unavailable; the live native workspace uses the
+bundled Rust HTTP backend.
+
+The browser-free contract and DOM-fixture tests run under `make lint` via
+`node tools/check-origin-trace-debugger.mjs --field-provenance-only`. These tests
+cover byte preservation, identity, bounds, interruption, focus ownership and
+explicit saving; they do not establish rendered, native clipboard or macOS
+packaging acceptance. Interactive QA must additionally inspect keyboard use,
+50-row paging, independent panel scrolling and controls at desktop and narrow
+widths, plus Cancel/Escape, Back/reopen, file replacement and late responses.
+
+For rendered Evidence QA with an installed browser, run:
+
+```sh
+REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium)" \
+  node tools/check-origin-trace-debugger.mjs --evidence-ui-browser
+```
+
+The existing browser CI job runs Requests, Sources and Evidence separately and
+uploads `build/evidence-ui-qa/`. Evidence includes genuine pointer/keyboard
+selection, real file input, explicit download byte comparison, failures,
+interruption, scrolling and narrow layouts. Its synthetic service tests the UI;
+the real native-writer/guarded-export/validator integration is a separate check.
+A validation receipt is written only after interactions and cleanup succeed.
+
+All native HTTP entry paths, including an explicit loopback `--ui-url` without a
+query, normalize to one `native=1` marker. Unrelated encoded/repeated query
+parameters are preserved. Stored native loads also carry the marker; ordinary
+browser URLs without it remain browser mode. `make app-build` exercises the
+actual compiled Swift normalization helper before signing, without starting an
+application window. This helper check does not establish native clipboard or
+rendered WebKit behavior.

@@ -4,6 +4,64 @@ import Darwin
 import Foundation
 import WebKit
 
+// Every HTTP entry into this WKWebView must retain its native capability marker.
+// Preserve unrelated query bytes: URLQueryItem reserialization can change +/%2B
+// semantics in the browser's URLSearchParams consumer.
+private func nativeUIURL(_ rawURL: String) -> URL? {
+  guard let url = URL(string: rawURL),
+    var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+    components.scheme == "http",
+    Set(["127.0.0.1", "localhost", "::1", "[::1]"]).contains(components.host ?? ""),
+    components.port != nil,
+    components.user == nil,
+    components.password == nil,
+    components.fragment == nil
+  else {
+    return nil
+  }
+  let query = components.percentEncodedQuery ?? ""
+  let retained = query.isEmpty ? [] : query.components(separatedBy: "&").filter { item in
+    let name = item.components(separatedBy: "=").first ?? ""
+    return name.removingPercentEncoding != "native"
+  }
+  components.percentEncodedQuery = (retained + ["native=1"]).joined(separator: "&")
+  return components.url
+}
+
+// Exercised by the actual compiled app before signing, without creating NSApp.
+private func checkNativeUIURLs() {
+  let cases: [(String, String)] = [
+    ("http://127.0.0.1:7319/", "native=1"),
+    ("http://localhost:7319/workspace?", "native=1"),
+    ("http://[::1]:7319/", "native=1"),
+    ("http://127.0.0.1:7319/?native", "native=1"),
+    ("http://127.0.0.1:7319/?native=0&native=2", "native=1"),
+    ("http://127.0.0.1:7319/?%6Eative=0&na%74ive=2", "native=1"),
+    ("http://127.0.0.1:7319/?x=a%2Bb&x=c%26d&canvas_images=1&native=0&native=2",
+      "x=a%2Bb&x=c%26d&canvas_images=1&native=1"),
+    ("http://127.0.0.1:7319/?x=&flag&x=a+b&&native=0",
+      "x=&flag&x=a+b&&native=1"),
+    ("http://127.0.0.1:7319/?Native=0&native%3D=value&native=1",
+      "Native=0&native%3D=value&native=1")
+  ]
+  for (input, query) in cases {
+    guard let url = nativeUIURL(input),
+      let actual = URLComponents(url: url, resolvingAgainstBaseURL: false),
+      let original = URLComponents(string: input)
+    else { preconditionFailure("Native UI URL fixture was rejected") }
+    precondition(actual.percentEncodedQuery == query, "Native UI query changed unrelated parameters")
+    precondition(actual.path == original.path && actual.host == original.host && actual.port == original.port)
+    precondition(nativeUIURL(url.absoluteString) == url, "Native UI normalization is not idempotent")
+  }
+  for rejected in ["https://127.0.0.1:7319/", "http://example.test:7319/",
+    "http://127.0.0.1/", "http://user@127.0.0.1:7319/",
+    "http://127.0.0.1:7319/#fragment", "file:///tmp/ui.html"]
+  {
+    precondition(nativeUIURL(rejected) == nil, "Native UI trust checks changed")
+  }
+  print("PASS native UI URL validation, query preservation and capability marker")
+}
+
 private struct LocalHTTPError: Error {
   let status: Int
   let message: String
@@ -90,7 +148,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent("app.css")),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/pane_layout.js", "/app.js", "/app_state.js", "/evidence_models.js", "/source_syntax.js", "/source_facts.js", "/traffic_view.js", "/request_value_test.js", "/field_provenance.js", "/native_console_completion.js", "/native_console.js":
+      case "/pane_layout.js", "/app.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/source_syntax.js", "/source_facts.js", "/traffic_view.js", "/request_value_test.js", "/field_provenance.js", "/native_console_completion.js", "/native_console.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -99,6 +157,11 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         response = (try healthResponse(), "application/json; charset=utf-8", 200, [:])
       case "/api/native-console":
         response = (Data("{\"contract_version\":2,\"available\":false,\"state\":\"idle\",\"session_id\":null,\"message\":\"Open a live workspace to use the native console\"}".utf8), "application/json; charset=utf-8", 200, [:])
+      case "/api/evidence/packages/export", "/api/evidence/packages/validate":
+        response = (try JSONSerialization.data(withJSONObject: [
+          "error": "Metadata packages are unavailable in stored-evidence native mode. Open a live workspace or the browser development UI.",
+          "code": "dependency_unavailable", "details": [:]
+        ]), "application/json; charset=utf-8", 503, [:])
       case "/api/source-facts":
         // The stored-evidence scheme has no reviewed source-facts adapter.
         // Live workspaces use the bundled Rust HTTP backend instead.
@@ -2849,7 +2912,15 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       useSystemKeychain: useSystemKeychain,
       ready: { [weak self] liveURL in
         guard let self, let webView = self.webView else { return }
-        webView.load(URLRequest(url: liveURL))
+        guard let nativeURL = nativeUIURL(liveURL.absoluteString) else {
+          self.presentLiveSessionError(
+            "Origin Trace received an invalid loopback UI URL.",
+            captureMode: captureMode,
+            useSystemKeychain: useSystemKeychain
+          )
+          return
+        }
+        webView.load(URLRequest(url: nativeURL))
         self.presentOriginTraceWindow()
       },
       failed: { [weak self] message in
@@ -3086,19 +3157,10 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
 
   private func configuredUIURL() -> URL? {
     let arguments = CommandLine.arguments
-    guard let urlFlag = arguments.firstIndex(of: "--ui-url"), urlFlag + 1 < arguments.count,
-      let url = URL(string: arguments[urlFlag + 1]),
-      let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-      components.scheme == "http",
-      Set(["127.0.0.1", "localhost", "::1"]).contains(components.host ?? ""),
-      components.port != nil,
-      components.user == nil,
-      components.password == nil,
-      components.fragment == nil
-    else {
+    guard let urlFlag = arguments.firstIndex(of: "--ui-url"), urlFlag + 1 < arguments.count else {
       return nil
     }
-    return url
+    return nativeUIURL(arguments[urlFlag + 1])
   }
 
   private func configureApplicationMenu() {
@@ -3432,6 +3494,10 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
 @main
 private enum OriginTraceMain {
   static func main() {
+    if CommandLine.arguments.contains("--check-native-ui-url") {
+      checkNativeUIURLs()
+      return
+    }
     let application = NSApplication.shared
     let delegate = OriginTraceApp()
     application.delegate = delegate

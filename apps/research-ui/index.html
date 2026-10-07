@@ -423,15 +423,20 @@
             <div class="evidence-content">
               <section id="evidence-package-panel" class="evidence-package-panel" aria-label="Metadata package workflow">
                 <h2>Metadata packages</h2>
-                <p class="package-note">Choose exact native event or artifact identities. Exports contain metadata only: no payloads, URLs, headers, cookies, bodies or artifact bytes. Writers are never stopped automatically.</p>
-                <div class="package-toolbar"><label>Retained view <select data-package-scope aria-label="Package selection view"><option value="request">Selected request native events</option><option value="retained">Retained native event window</option><option value="artifacts">Retained artifact catalog</option></select></label></div>
-                <p data-package-context class="package-note"></p>
-                <div data-package-candidates class="package-candidates" tabindex="-1" aria-label="Exact identities to include"></div>
-                <div class="package-toolbar"><button data-package-previous class="secondary-button" type="button">Previous</button><span data-package-page></span><button data-package-next class="secondary-button" type="button">Next</button></div>
+                <p class="package-note">Metadata only; capture completeness is unknown. Export never stops writers.</p>
+                <div class="package-window" data-package-window>
+                  <div class="package-toolbar package-window-toolbar">
+                    <label>View <select data-package-scope aria-label="Package selection view"><option value="request">Selected request</option><option value="retained">Retained events</option><option value="artifacts">Retained artifacts</option></select></label>
+                    <div data-package-pager class="package-pager" role="group" aria-label="Candidate pages"><button data-package-previous class="secondary-button" type="button">Previous</button><span data-package-page></span><button data-package-next class="secondary-button" type="button">Next</button></div>
+                  </div>
+                  <p data-package-context class="package-note"></p>
+                  <div data-package-candidates class="package-candidates" tabindex="-1" aria-label="Exact identities to include"></div>
+                </div>
                 <p data-package-selection class="package-note"></p>
                 <div data-package-selected></div>
                 <div class="package-toolbar"><button data-package-export class="primary-button" type="button" disabled>Export selected metadata</button><button data-package-clear class="secondary-button" type="button">Clear selection</button></div>
-                <details class="package-disclosure"><summary>Validate a supplied package</summary><p class="package-note">Choose a JSON metadata package up to 4 MiB. Original bytes go to this local validator, with duplicate keys preserved for rejection. Validation does not import evidence or run code.</p><div class="package-toolbar"><label>Package file <input data-package-file type="file" accept=".json,application/json" /></label><button data-package-validate class="secondary-button" type="button" disabled>Validate original bytes</button></div></details>
+                <details data-package-policy class="package-disclosure"><summary>Limits &amp; privacy</summary><p class="package-note">Select up to 1,024 event keys and 64 artifact keys. These retained windows contain at most 5,000 events or 500 artifacts; they are not full store inventories. Selected identities persist across pages and eviction. Refresh never selects new records. Export checks current retained-store presence under updated stopped-store guards. Historical build, capture settings, observer regime and epochs remain unknown. Payloads, URLs, headers, cookies, bodies and artifact bytes are never exported.</p></details>
+                <details data-package-upload class="package-disclosure"><summary>Validate a supplied package</summary><p class="package-note">Choose metadata JSON up to 4 MiB. Original bytes stay with this local validator; duplicate keys are preserved for rejection. Validation imports no evidence and runs no code.</p><div class="package-toolbar"><label>Package file <input data-package-file type="file" accept=".json,application/json" /></label><button data-package-validate class="secondary-button" type="button" disabled>Validate original bytes</button></div></details>
                 <p data-package-notice class="package-notice" role="status" aria-live="polite"></p>
                 <div class="package-toolbar"><button data-package-cancel class="secondary-button" type="button" hidden>Cancel</button><button data-package-download class="secondary-button" type="button" aria-describedby="package-save-note" disabled>Download validated package</button><button data-package-copy class="secondary-button" type="button" disabled>Copy validated metadata</button></div>
                 <p id="package-save-note" data-package-save-note class="package-note"></p>

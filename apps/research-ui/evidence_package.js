@@ -282,7 +282,7 @@ function createEvidencePackagePanel({getContext, protocol = location.protocol}) 
   const renderStatus = model => {
     const unavailable = evidencePackageUnavailable(protocol);
     const cancelOwnedFocus = document.activeElement === cancelButton;
-    notice.textContent = unavailable || model.message || 'Select exact identities, then export metadata. Validation sends the original bytes only to this local service.';
+    notice.textContent = unavailable || model.message || 'Select identities to export, or choose a file to validate locally.';
     notice.dataset.kind = model.status; cancelButton.hidden = model.status !== 'loading';
     exportButton.disabled = Boolean(unavailable) || model.status === 'loading' || (!selected.events.size && !selected.artifacts.size);
     validateButton.disabled = Boolean(unavailable) || model.status === 'loading' || !file.files?.length;
@@ -296,7 +296,7 @@ function createEvidencePackagePanel({getContext, protocol = location.protocol}) 
   };
   const controller = createEvidencePackageController({getSelection, protocol, onChange: renderStatus});
   const renderSelection = () => {
-    selectionSummary.textContent = `${selected.events.size} / 1,024 event keys · ${selected.artifacts.size} / 64 artifact keys selected across all pages. Refresh never selects new records.`;
+    selectionSummary.textContent = `${selected.events.size} / 1,024 events · ${selected.artifacts.size} / 64 artifacts selected`;
     exportButton.disabled = Boolean(evidencePackageUnavailable(protocol)) || controller.model.status === 'loading' || (!selected.events.size && !selected.artifacts.size);
     // Keep every selected identity inspectable even when its original row leaves
     // the retained window or another candidate page/view is visible.
@@ -351,7 +351,7 @@ function createEvidencePackagePanel({getContext, protocol = location.protocol}) 
     }
     const newSignature = JSON.stringify([scope.value, [...next.values()].map(row => [row.id, row.label])]);
     if (signature !== newSignature) { signature = newSignature; rows = [...next.values()]; renderCandidates(); }
-    host.querySelector('[data-package-context]').textContent = `Current view: ${scope.selectedOptions[0].textContent}. This bounded window is not an exhaustive store inventory. ${context.eventsLimited ? 'The event window is limited to its latest 5,000 records. ' : ''}Historical build, capture configuration and observer coverage remain unknown. Selected identities persist if rows leave this window; export checks their current retained-store presence.`;
+    host.querySelector('[data-package-context]').textContent = `${rows.length} selectable keys in this view. ${context.eventsLimited && scope.value !== 'artifacts' ? 'Latest 5,000-event window; older records may be absent.' : 'Retained window may be incomplete.'}`;
   };
   scope.addEventListener('change', () => { page = 0; signature = null; sync(); });
   host.querySelector('[data-package-previous]').addEventListener('click', () => { page -= 1; renderCandidates(); });

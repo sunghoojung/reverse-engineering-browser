@@ -1587,7 +1587,6 @@ for(const status of ['invalid','unsupported'])assert.equal(JSON.parse((await evi
 console.log('PASS Evidence browser fixture raw bytes, valid/invalid/unsupported and guarded-export errors (not rendered QA)');
 
 async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture,setFile,verifyDownload}) {
-  const prefix='#evidence-package-panel';
   const status=()=>evaluate('evidencePackagePanel.controller.model.status');
   const until=async(expression,message)=>{const deadline=Date.now()+5000;while(Date.now()<deadline){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,25));}assert.fail(message);};
   const ready=()=>until("evidencePackagePanel.controller.model.status==='ready'",'Validated metadata did not become ready');
@@ -1596,7 +1595,7 @@ async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,scre
     for(let attempt=0;attempt<4;attempt++){
       const delta=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});if(!n)throw new Error('Missing Evidence control');const p=n.closest('.evidence-content');if(!p)return 0;const r=n.getBoundingClientRect(),b=p.getBoundingClientRect();return r.top<b.top+8?r.top-b.top-8:r.bottom>b.bottom-8?r.bottom-b.bottom+8:0;})()`);
       if(Math.abs(delta)<=1)return;
-      await wheel('.evidence-content',delta);
+      await wheel('.evidence-content',delta,true);
     }
   };
   const packageClick=async selector=>{await reveal(selector);await click(selector);};
@@ -1610,6 +1609,7 @@ async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,scre
   await evaluate(`window.evidenceFixtureEvents=${JSON.stringify(fixture.events)};state.events=evidenceFixtureEvents;state.artifacts=${JSON.stringify(fixture.artifacts)};state.sessionMode='demo';state.requests=[{id:'package-request',path:'https://fixture.invalid/package',method:'GET',status:200,time:1,type:'xhr',origin:'demo',tabId:'qa-tab',operation:'synthetic_qa',events:evidenceFixtureEvents,exchange:{request:{state:'empty',headers:[]},response:{state:'empty',headers:[]}}}];renderRequests();`);
   await click('[data-request-id="package-request"]');await click('#request-evidence-toggle');await click('#request-package-entry [data-screen="evidence"]');
   assert.equal(await evaluate("document.querySelector('#screen-evidence').hidden"),false);
+  assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),false,'Evidence entry must dismiss the navigation popup');
   assert.equal(await evaluate("document.querySelectorAll('[data-package-candidates] input').length"),4);
   for(let index=1;index<=4;index++)await packageClick(`[data-package-candidates] label:nth-child(${index}) input`);
   await scope('artifacts');for(let index=1;index<=2;index++)await packageClick(`[data-package-candidates] label:nth-child(${index}) input`);
@@ -1626,7 +1626,7 @@ async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,scre
   fixture.mode='unavailable';await packageClick('[data-package-export]');await until("evidencePackagePanel.controller.model.status==='error'",'Unavailable guarded store was not shown');
   assert.match(await evaluate("document.querySelector('[data-package-notice]').textContent"),/legacy stores are unsupported/);
   fixture.mode='valid';await packageClick('[data-package-export]');await ready();
-  await packageClick(`${prefix} > details > summary`);await setFile('golden');
+  await packageClick('[data-package-upload] > summary');await setFile('golden');
   fixture.mode='unsupported';await packageClick('[data-package-validate]');await until("evidencePackagePanel.controller.model.status==='unsupported'",'Unsupported version/profile state was hidden');
   await reveal('[data-package-notice]');await screenshot('evidence-unsupported');
   fixture.mode='valid';await setFile('duplicate');await packageClick('[data-package-validate]');await until("evidencePackagePanel.controller.model.status==='invalid'",'Duplicate input was not shown invalid');
@@ -1664,15 +1664,20 @@ async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,scre
   await packageClick('[data-package-selected] summary');assert.match(await evaluate("document.querySelector('[data-package-selected]').textContent"),/event 100.*event 151/);
   await reveal('[data-package-selected]');await screenshot('evidence-selected-pages');
   for(const [width,height] of [[760,560],[360,740]]){
-    await viewport(width,height);await geometry(`${width}x${height}`);
+    await viewport(width,height);await reveal('[data-package-window]');await geometry(`${width}x${height}`);
+    const windowGeometry=await evaluate(`(()=>{const box=selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,height:r.height};};return {outer:box('.evidence-content'),pager:box('[data-package-pager]'),list:box('[data-package-candidates]')};})()`);
+    assert(windowGeometry.pager.top>=windowGeometry.outer.top&&windowGeometry.pager.bottom<=windowGeometry.outer.bottom&&windowGeometry.pager.height>=24,`${width}x${height}: candidate paging must stay visible with the list`);
+    assert(windowGeometry.pager.bottom<=windowGeometry.list.top&&windowGeometry.list.bottom<=windowGeometry.outer.bottom&&windowGeometry.list.top>=windowGeometry.outer.top,`${width}x${height}: pager and candidate list must fit together without overlap`);
+    assert(windowGeometry.list.height>=100,`${width}x${height}: candidate list must retain a usable height`);
     await packageClick('[data-package-previous]');await packageClick('[data-package-next]');
     await reveal('[data-package-candidates]');await screenshot(`evidence-${width}-selection`);
-    const before=await geometry('before narrow scroll');await wheel('.evidence-content',150);const after=await geometry('after narrow scroll');
+    const before=await geometry('before narrow scroll');await wheel('.evidence-content',150,true);const after=await geometry('after narrow scroll');
     assert(after.scrollTop!==before.scrollTop,'Narrow Evidence content must scroll independently');
     await reveal('[data-package-validate]');await packageClick('[data-package-validate]');await ready();await reveal('[data-package-report] h3');await screenshot(`evidence-${width}-coverage`);
   }
   await click('#screen-evidence .back-button');await click('#advanced-navigation > summary');await click('.nav-button[data-screen="backtrace"]');await click('#screen-backtrace .package-navigation');
   assert.equal(await evaluate("document.querySelector('#screen-evidence').hidden"),false,'Narrow Backtraces must expose the package entry');
+  assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),false,'Backtraces entry must dismiss the navigation popup');
   await geometry('narrow Backtraces return');await screenshot('evidence-narrow-reopened');
   return {status:'passed',path:'browser development Evidence UI',source:'synthetic closed metadata fixture; authoritative native-writer HTTP checks are separate',viewports:[[1440,900],[760,560],[360,740]],checks:['Requests and narrow Backtraces pointer entry','exact scoped selection','explicit guarded export and retry','explicit browser download exact bytes; no automatic save','real file input exact-byte validation','invalid and unsupported states','writer refusal and unavailable store','Cancel and Escape focus','stale selection and Back/reopen','50-row paging','keyed refresh focus','Space/Tab keyboard selection','independent candidate/panel scrolling','narrow geometry and screenshots']};
 }
@@ -1760,11 +1765,17 @@ async function checkTrafficBrowser() {
       await command("Emulation.setDeviceMetricsOverride", {width, height, deviceScaleFactor: 1, mobile: false});
       await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     };
-    const wheel = async (selector, deltaY) => {
+    const wheel = async (selector, deltaY, edge = false) => {
       const point = await evaluate(`(() => {
         const node = document.querySelector(${JSON.stringify(selector)}), r = node.getBoundingClientRect();
-        const x = r.x+r.width/2, y = r.y+r.height/2, hit = document.elementFromPoint(x,y);
+        // A scrollable child can consume a wheel aimed at its parent's center.
+        // Evidence deliberately keeps a visible padding gutter beside its list.
+        const x = ${edge} ? r.x+node.clientLeft+node.clientWidth-4 : r.x+r.width/2;
+        const y = r.y+r.height/2, hit = document.elementFromPoint(x,y);
         if (r.width <= 0 || r.height <= 0 || x < 0 || x >= innerWidth || y < 0 || y >= innerHeight || !hit || !node.contains(hit)) throw new Error('Scroll target is clipped or offscreen: '+${JSON.stringify(selector)});
+        if (${edge}) for(let child=hit;child&&child!==node;child=child.parentElement) {
+          if (['auto','scroll','overlay'].includes(getComputedStyle(child).overflowY) && child.scrollHeight>child.clientHeight+1) throw new Error('Outer wheel target is owned by a nested scroller: '+${JSON.stringify(selector)});
+        }
         return {x,y,scrollTop:node.scrollTop};
       })()`);
       await command("Input.dispatchMouseEvent", {type: "mouseWheel", x:point.x, y:point.y, deltaX: 0, deltaY});

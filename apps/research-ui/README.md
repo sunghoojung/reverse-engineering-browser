@@ -691,7 +691,9 @@ Open **Evidence → Coverage & metadata packages** in the Requests inspector, or
 The selected-request view uses only that request's attached native records;
 CDP request IDs and synthetic gap rows are not export identities. The other
 views expose the current retained windows, at most 5,000 events or 500 artifacts,
-with 50 candidates per page. They are not an exhaustive store inventory.
+with 50 candidates per page. They are not an exhaustive store inventory. The
+pager stays above the viewport-bounded list. **Limits & privacy** holds the
+longer coverage and disclosure explanation without crowding the selection view.
 
 Nothing is selected automatically. Selection spans pages and views, with limits
 of 1,024 events and 64 artifacts. **Selected identities** keeps the exact keys

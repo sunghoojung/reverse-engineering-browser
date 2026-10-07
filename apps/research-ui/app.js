@@ -8329,6 +8329,7 @@
             }
           } else button.removeAttribute('aria-current');
         });
+        if (screenName === 'evidence') document.querySelector('#advanced-navigation').open = false;
         if (screenName === 'signals') renderFingerprintActivity();
         if (screenName === 'traffic') renderRuntimeHookTraffic();
         if (screenName === 'backtrace') renderBacktrace();

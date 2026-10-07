@@ -19,8 +19,11 @@ Shared/service workers remain unsupported. See the
 The separate dormant [metadata queue and projection](../../../protocol/native-worker-observation-v1.md)
 models dedicated-worker lifecycle, compile identity and exact tagged direct-message
 pairs without retaining message bodies. Patch 0011 adds disabled pinned Blink
-observation points and carries a separate tag through direct in-process messages. It has no browser-authoritative controller,
-production transport, broker/UI adapter or activation yet.
+observation points and carries a separate tag through direct in-process messages.
+The dormant [authority and acknowledged transfer state machines](../../../protocol/native-worker-transfer-v1.md)
+now define the document/partition lease and bounded batch contract. Service
+observers, Mojo adapters, production controller, broker/UI adapter and activation
+remain unimplemented.
 
 ## Native console
 

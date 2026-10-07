@@ -15,21 +15,14 @@
 #include <span>
 #include <type_traits>
 
+#include "native_worker_types.h"
+
 namespace reb {
 
 inline constexpr std::size_t kNativeWorkerSourceMaxBytes = 2U * 1024U * 1024U;
 inline constexpr std::size_t kNativeWorkerSourceMaxUrlBytes = 8192;
 inline constexpr std::size_t kNativeWorkerSourceCapacity = 4;
 
-struct NativeWorkerToken final {
-  std::uint64_t high = 0;
-  std::uint64_t low = 0;
-  [[nodiscard]] bool valid() const noexcept { return high != 0 || low != 0; }
-  bool operator==(const NativeWorkerToken&) const = default;
-};
-
-enum class NativeWorkerKind : std::uint16_t { kDedicated = 1, kShared = 2, kService = 3 };
-enum class NativeWorkerSourceKind : std::uint16_t { kClassic = 1, kModule = 2 };
 enum class NativeWorkerUrlStatus : std::uint32_t {
   kAbsent = 0,
   // Redacted metadata within the supported syntax subset, not URL validity or
@@ -39,23 +32,6 @@ enum class NativeWorkerUrlStatus : std::uint32_t {
   kInvalidOmitted = 3,
   kUnsupportedAuthorityOmitted = 4,
 };
-enum class NativeWorkerCaptureStatus {
-  kAccepted,
-  kDisabled,
-  kBusy,
-  kExpired,
-  kWrongWorker,
-  kUnsupportedWorker,
-  kStaleGeneration,
-  kInvalid,
-  kTooLarge,
-  kFull,
-  kEmpty,
-  kOutputTooSmall,
-  kAllocationFailed,
-  kSourceUnavailable,
-};
-
 // Browser-supplied, exact-worker authority is required before any source copy.
 // Category masks or renderer-supplied URLs cannot substitute for this policy.
 struct NativeWorkerSourcePolicy final {
@@ -109,12 +85,6 @@ struct NativeWorkerText final {
   std::span<const char16_t> utf16;
   // A hook must report a gap rather than synchronously unpark/read a source.
   bool unavailable = false;
-};
-
-struct NativeWorkerCaptureTicket final {
-  std::uint64_t session_id = 0;
-  std::uint64_t generation = 0;
-  NativeWorkerToken worker;
 };
 
 struct NativeWorkerSourceStats final {

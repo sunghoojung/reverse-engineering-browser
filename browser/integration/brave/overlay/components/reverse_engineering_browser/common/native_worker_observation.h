@@ -6,7 +6,14 @@
 #ifndef BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_WORKER_OBSERVATION_H_
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_WORKER_OBSERVATION_H_
 
-#include "native_worker_source.h"
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <mutex>
+#include <span>
+#include <type_traits>
+
+#include "native_worker_types.h"
 
 namespace reb {
 
@@ -40,6 +47,7 @@ struct NativeWorkerObservationPolicy final {
   NativeWorkerToken worker;
   NativeWorkerToken creator;
   NativeWorkerCreatorKind creator_kind = NativeWorkerCreatorKind::kDocument;
+  bool operator==(const NativeWorkerObservationPolicy&) const = default;
 };
 
 // Carried by the actual in-process message, never reconstructed from trace_id.
@@ -90,12 +98,19 @@ struct NativeWorkerObservation final {
   std::int32_t script_id = 0;
   NativeWorkerCreatorKind creator_kind = NativeWorkerCreatorKind::kDocument;
   std::array<std::byte, 18> reserved{};
+  bool operator==(const NativeWorkerObservation&) const = default;
 };
 static_assert(sizeof(NativeWorkerObservation) == 160);
 static_assert(std::is_trivially_copyable_v<NativeWorkerObservation>);
 static_assert(std::is_standard_layout_v<NativeWorkerObservation>);
 static_assert(offsetof(NativeWorkerObservation, worker) == 80);
 static_assert(offsetof(NativeWorkerObservation, native_trace_id) == 112);
+
+// Structural/identity validation shared by the browser publication gate and local
+// projection. Does not authenticate a renderer or authorize a browser document.
+[[nodiscard]] bool IsValidNativeWorkerObservation(const NativeWorkerObservation& record,
+                                                  const NativeWorkerObservationPolicy& authority,
+                                                  std::uint64_t now_ns) noexcept;
 
 struct NativeWorkerObservationStats final {
   std::uint64_t attempted = 0;
@@ -105,6 +120,7 @@ struct NativeWorkerObservationStats final {
   std::uint64_t stale = 0;
   std::uint64_t contended = 0;
   std::size_t queued = 0;
+  bool operator==(const NativeWorkerObservationStats&) const = default;
 };
 
 // Configure/Disable/Stats are serialized control-path operations. Begin,

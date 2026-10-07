@@ -2,7 +2,7 @@
 function initializePaneLayout() {
   const storageKey = 'origin-trace.layout.v1';
   const configurations = [
-    { id: 'native-console', parent: '#workspace', panes: ['.main', '#native-console-panel'], axis: 'y', minimum: [180, 190], label: 'workspace and console' },
+    { id: 'native-console', parent: '#workspace', panes: ['.main', '#native-console-panel'], axis: 'y', minimum: [180, 240], label: 'workspace and console' },
     { id: 'traffic', parent: '.traffic-grid', panes: ['.request-pane', '.detail-pane'], axis: 'y', minimum: [220, 220], label: 'Traffic list and inspector' },
     { id: 'traffic-columns', parent: '.traffic-grid', panes: ['.request-pane', '.detail-pane'], axis: 'x', minimum: [380, 360], label: 'Traffic list and inspector' },
     { id: 'repeater', parent: '.repeater-split', panes: ['.repeater-request-pane', '.repeater-response-pane'], axis: 'x', minimum: [320, 260], label: 'Repeater request and response' },
@@ -24,8 +24,36 @@ function initializePaneLayout() {
   const persist = () => {
     try { localStorage.setItem(storageKey, JSON.stringify(saved)); } catch { /* Keep the current layout. */ }
   };
-  let scheduled = false, dragging = null;
-  const schedule = () => {
+  // Track actual scroll owners, not every descendant of all eight panes. Read
+  // their current offsets at refresh time so selection-driven moves still win.
+  const scrollOwners = new Set();
+  const rememberScroll = node => {
+    if (!node?.isConnected || typeof node.scrollTop !== 'number') return;
+    scrollOwners.delete(node);
+    if (node.scrollTop || node.scrollLeft) scrollOwners.add(node);
+    if (scrollOwners.size > 64) scrollOwners.delete(scrollOwners.values().next().value);
+  };
+  const preserveScroll = update => {
+    const positions = [];
+    for (const node of scrollOwners) {
+      if (!node.isConnected) { scrollOwners.delete(node); continue; }
+      positions.push([node, node.scrollLeft, node.scrollTop]);
+    }
+    update();
+    let moved = false;
+    for (const [node, left, top] of positions) {
+      if (!node.isConnected) { scrollOwners.delete(node); continue; }
+      // The browser clamps to the final extent after a genuine resize. Only
+      // the temporary default-track expansion must not erase reading position.
+      if (node.scrollLeft !== left) { node.scrollLeft = left; moved = true; }
+      if (node.scrollTop !== top) { node.scrollTop = top; moved = true; }
+    }
+    return moved;
+  };
+  let scheduled = false, dragging = null, layoutRequired = false;
+  const schedule = (positionOnly = false) => {
+    // A real resize/visibility change wins if it coalesces with scrolling.
+    layoutRequired ||= positionOnly !== true;
     if (scheduled) return;
     scheduled = true;
     let frame, timeout;
@@ -33,7 +61,10 @@ function initializePaneLayout() {
       cancelAnimationFrame(frame);
       clearTimeout(timeout);
       scheduled = false;
-      layouts.forEach(layout => layout.refresh());
+      const positionOnly = !layoutRequired; layoutRequired = false;
+      const update = () => layouts.forEach(layout => layout.refresh(positionOnly));
+      if (positionOnly) update();
+      else if (preserveScroll(update)) layouts.forEach(layout => layout.refresh(true));
     };
     frame = requestAnimationFrame(refresh);
     // WebKit can suspend animation frames for an inactive native window while
@@ -97,10 +128,13 @@ function initializePaneLayout() {
       const tracks = [`${size}px`, 'minmax(0, 1fr)', ...geometry.tracks.slice(2)];
       parent.style.setProperty(property, tracks.join(' '));
     };
-    const refresh = () => {
-      // Remove our tracks before testing the responsive layout's geometry.
-      restore(); geometry = measure();
-      if (geometry && (saved[configuration.id] !== undefined ||
+    const refreshGeometry = (positionOnly = false) => {
+      // Scrolling changes clipping, not the split. Temporarily restoring the
+      // default tracks can expand a nested scrollport and clamp its position.
+      // Responsive/structural changes still measure from their CSS defaults.
+      if (!positionOnly) restore();
+      geometry = measure();
+      if (!positionOnly && geometry && (saved[configuration.id] !== undefined ||
           geometry.size < geometry.minimum[0] || geometry.size > geometry.total - geometry.minimum[1])) {
         apply(saved[configuration.id] ?? geometry.size / geometry.total); geometry = measure();
       }
@@ -130,6 +164,10 @@ function initializePaneLayout() {
         height: `${horizontal ? geometry.end - geometry.start : 8}px`
       });
     };
+    const refresh = (positionOnly = false) => {
+      if (positionOnly) { refreshGeometry(true); return; }
+      if (preserveScroll(() => refreshGeometry())) refreshGeometry(true);
+    };
     const setSize = size => {
       if (!geometry) return;
       saved[configuration.id] = Math.max(geometry.minimum[0], Math.min(geometry.total - geometry.minimum[1], size)) / geometry.total;
@@ -150,7 +188,7 @@ function initializePaneLayout() {
         refresh();
       }
     };
-    const layout = { refresh, finish };
+    const layout = { refresh: refreshGeometry, finish };
     handle.addEventListener('pointerdown', event => {
       if (!geometry || event.button !== 0 || dragging) return;
       event.preventDefault(); handle.focus(); handle.setPointerCapture(event.pointerId);
@@ -185,7 +223,7 @@ function initializePaneLayout() {
   observer.observe(document.querySelector('#exchange-inspector'), { childList: true });
   observer.observe(document.querySelector('#native-console-panel'), { attributes: true, attributeFilter: ['hidden'] });
   window.addEventListener('resize', schedule);
-  document.addEventListener('scroll', schedule, true);
+  document.addEventListener('scroll', event => { rememberScroll(event.target); schedule(true); }, true);
   window.addEventListener('blur', () => dragging?.layout.finish(false));
   schedule();
 }

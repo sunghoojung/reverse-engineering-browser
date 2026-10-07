@@ -23,7 +23,11 @@ calls or computed keys are evaluated. Getters, proxies and unsupported host
 properties stop native traversal. Static hints describe APIs and do not prove
 runtime availability. Completion is debounced and stale replies are discarded.
 
-Objects expand lazily, 16 properties per page. Getters/setters remain labeled.
+Objects expand lazily, 16 properties per page. Previous/Next replace the rendered
+page; loading and explicit retry preserve the last successful page. A lower
+terminal offset with an empty page is valid when the live object has shrunk;
+First properties and explicit Reload remain available. A refreshed
+or changed document selection invalidates older value actions. Getters/setters remain labeled.
 Proxies and host interceptors are opaque; DOM Elements have explicit native
 previews. Function source uses V8's intrinsic FunctionProtoToString, bypassing
 page overrides. Source locations link to corresponding URLs in the current
@@ -48,7 +52,9 @@ not compile inline event handlers or read a `handleEvent` getter. Explicit event
 monitoring observes click/input/keydown/submit for at most 60 seconds.
 
 Command/Ctrl+F filters console text; levels and timestamps are optional. Clearing
-output releases values but preserves command history. Forget command history
+output releases values but preserves command history. A separate transcript
+generation discards delayed pre-Clear message replies without invalidating the
+execution context or newer explicit commands. Forget command history
 removes it. Snippets load into the prompt without automatic execution. Disconnect
 kills the owned process groups and removes their profile. Closing the dock keeps
 the session alive.
@@ -90,7 +96,7 @@ and page temporary variables require explicit researcher actions.
 | Completion | 8 path components, 24 suggestions, 1024 lexical names, 4096 names per prototype, 8 prototypes |
 | Renderer messages | 32 / 32 KiB; visible saturating drop count |
 | Browser activity | 64 events; visible saturating drop count |
-| UI transcript / history | Each 128 entries / 256 KiB; transcript eviction is visible |
+| UI transcript / history | Each 128 entries / 256 KiB; transcript also caps 8192 DOM elements; eviction is visible |
 | Snippets / activity view | 16 / 64 KiB snippets; 128 metadata records |
 | Event monitors | 8 Elements, four event types each, 60 seconds |
 | Synchronous watchdog / dispatch / reply | 200 ms / 500 ms / 2 seconds |

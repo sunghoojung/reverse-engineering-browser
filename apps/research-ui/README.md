@@ -19,17 +19,34 @@ disposable browser, then select a document before entering commands.
 Workspace tabs sit across the top, with Console beside Sources. Commands are
 syntax colored while typing and in the transcript; primitive results use colors
 for their value types. Coloring uses inert text spans and a bounded tokenizer.
-The toolbar contains a clear action, document selector, and small connection menu.
-Connection, refresh and disconnect actions live inside that menu. Commands, page messages and
-results appear in that order as consecutive console lines, with the plain `>` prompt directly
-after the output in the same scroll area. Result metadata is available through
-the ellipsis on hover or keyboard focus; expanded details expose type, status,
-session and document IDs, and preview truncation. Truncation, actionable errors
-and output eviction stay visible. There is no Run button or inline help strip;
-Enter runs, and the prompt's accessible description explains multiline input.
+Console keeps a persistent command composer below its independently scrolling
+transcript. Its header identifies the selected document and connection state;
+Find, Clear and Session settings remain available without leaving the dock.
+Each submitted command has a numbered running/completed/error state. A transport
+failure marks its outcome unavailable, preserves the next draft and delivered
+output, and never automatically retries the command. Use Session settings to
+refresh documents explicitly, or disconnect and start a fresh disposable session.
+The Run button and Enter both submit; the composer also shows its UTF-8 byte count.
 An empty prompt has no placeholder text. Fully typed built-in names do not open
 automatic suggestions, so Enter runs them unchanged; Ctrl+Space can still request
 their completions explicitly.
+
+New output follows only when already reading the bottom. Otherwise **Latest
+output** shows new entries and returns to the end explicitly. Filtering shows
+visible/retained counts and a no-match state. Output is bounded to 128 entries,
+256 KiB of text and 8,192 DOM elements; eviction counts stay visible without
+replacing connection errors. Clear removes output and releases retained values
+while preserving command history. Object expansion loads one native property
+page at a time; Previous/Next replace that page rather than growing the DOM.
+Loading, expired-handle errors and explicit retry remain local to the object;
+a failed page request keeps the previous page readable. If the live object shrinks
+below the requested page, First properties and explicit Reload remain usable;
+paging does not claim a frozen snapshot. Delayed page messages requested before
+Clear cannot repopulate the transcript, while newer explicit commands keep their
+execution identity. Malformed message batches preserve prior output and visibly
+require document refresh. Refreshing or changing
+documents invalidates actions on older values. **Value actions** keeps explicit
+copy, store, release and other native utilities separate from passive inspection.
 Toggle the dock with Console or Command/Ctrl+J while keeping the current workspace visible.
 Drag its top divider or use the focused divider's arrow keys to resize; Home resets
 the saved height. Enter runs, Shift+Enter adds a line, and Command/Ctrl+Enter also

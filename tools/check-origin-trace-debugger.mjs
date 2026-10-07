@@ -1,3 +1,4 @@
+import {checkConsoleDOM, createConsoleFixture, checkConsoleInteractions} from './check-console-workspace.mjs';
 import { spawn } from "node:child_process";
 import { runInNewContext } from "node:vm";
 import {
@@ -14,11 +15,13 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
+const consoleBrowser = process.argv[2] === "--console-ui-browser";
 const trafficBrowser = process.argv[2] === "--traffic-ui-browser";
 const sourceFactsBrowser = process.argv[2] === "--source-facts-ui-browser";
 const evidenceBrowser = process.argv[2] === "--evidence-ui-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
-const root = process.argv[fieldsOnly || trafficBrowser || sourceFactsBrowser || evidenceBrowser ? 3 : 2] || new URL("..", import.meta.url).pathname;
+const root = process.argv[fieldsOnly || trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser ? 3 : 2] || new URL("..", import.meta.url).pathname;
+await checkConsoleDOM(root);
 // Facts are UI projections over the already validated Rust contract. These
 // fixtures exercise identity and stale/cancelled request ownership, not JS execution.
 const sourceFactsUI = runInNewContext(
@@ -1685,11 +1688,12 @@ async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,scre
 async function checkTrafficBrowser() {
   const executable = process.env.REB_UI_CHROMIUM;
   assert(executable, "Set REB_UI_CHROMIUM to the installed Chrome/Chromium executable. Sandbox flags are not overridden.");
-  const directory = await mkdtemp(join(tmpdir(), evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
-  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
+  const directory = await mkdtemp(join(tmpdir(), consoleBrowser ? "reb-console-ui-" : evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
+  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", consoleBrowser ? "console-ui-qa" : evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
   await mkdir(output, {recursive: true});
   let trafficApiMode = "offline";
   const factsFixture = sourceFactsBrowser ? await sourceFactsBrowserFixture() : null;
+  const consoleFixture = consoleBrowser ? createConsoleFixture() : null;
   const evidenceFixture = evidenceBrowser ? evidenceBrowserFixture() : null;
   if(evidenceFixture){
     await writeFile(join(directory,'golden.json'),packageGoldenBytes);
@@ -1698,6 +1702,7 @@ async function checkTrafficBrowser() {
   const server = createServer(async (request, response) => {
     const path = new URL(request.url, "http://127.0.0.1").pathname;
     if (factsFixture && await factsFixture.handle(request, response)) return;
+    if (consoleFixture && await consoleFixture.handle(request, response)) return;
     if (evidenceFixture && await evidenceFixture.handle(request, response)) return;
     if (path === "/api/events" && trafficApiMode === "malformed") {response.writeHead(200, {"Content-Type": "application/json"}); response.end('{"malformed":true}'); return;}
     if (path.startsWith("/api/")) {response.writeHead(503, {"Content-Type": "application/json"}); response.end('{"error":"Synthetic offline QA fixture"}'); return;}
@@ -1766,27 +1771,39 @@ async function checkTrafficBrowser() {
       await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     };
     const wheel = async (selector, deltaY, edge = false) => {
+      const mode = edge === 'scrollbar' ? 'scrollbar' : edge ? 'edge' : 'center';
       const point = await evaluate(`(() => {
         const node = document.querySelector(${JSON.stringify(selector)}), r = node.getBoundingClientRect();
-        // A scrollable child can consume a wheel aimed at its parent's center.
-        // Evidence deliberately keeps a visible padding gutter beside its list.
-        const x = ${edge} ? r.x+node.clientLeft+node.clientWidth-4 : r.x+r.width/2;
+        const mode = ${JSON.stringify(mode)}, gutter = r.width-node.clientWidth-2*node.clientLeft;
+        // An outer scroll owner's native scrollbar avoids nested list and form
+        // controls. Evidence retains its original visible-padding edge mode.
+        const x = mode==='scrollbar' && gutter>=6 ? r.x+node.clientLeft+node.clientWidth+gutter/2
+          : mode!=='center' ? r.x+node.clientLeft+node.clientWidth-4 : r.x+r.width/2;
         const y = r.y+r.height/2, hit = document.elementFromPoint(x,y);
         if (r.width <= 0 || r.height <= 0 || x < 0 || x >= innerWidth || y < 0 || y >= innerHeight || !hit || !node.contains(hit)) throw new Error('Scroll target is clipped or offscreen: '+${JSON.stringify(selector)});
-        if (${edge}) for(let child=hit;child&&child!==node;child=child.parentElement) {
-          if (['auto','scroll','overlay'].includes(getComputedStyle(child).overflowY) && child.scrollHeight>child.clientHeight+1) throw new Error('Outer wheel target is owned by a nested scroller: '+${JSON.stringify(selector)});
+        const nested=[];
+        for(let child=hit;child&&child!==node;child=child.parentElement) {
+          if (['auto','scroll','overlay'].includes(getComputedStyle(child).overflowY) && child.scrollHeight>child.clientHeight+1) nested.push({id:child.id,tag:child.tagName,scrollTop:child.scrollTop,clientHeight:child.clientHeight,scrollHeight:child.scrollHeight});
         }
-        return {x,y,scrollTop:node.scrollTop};
+        if(mode!=='center' && nested.length) throw new Error('Outer wheel target is owned by a nested scroller: '+${JSON.stringify(selector)}+' '+JSON.stringify(nested));
+        return {x,y,mode,gutter,scrollTop:node.scrollTop,clientHeight:node.clientHeight,scrollHeight:node.scrollHeight,hit:{id:hit.id,tag:hit.tagName},nested};
       })()`);
+      const receipt={selector,deltaY,point};
+      diagnostics.wheel_events=[...(diagnostics.wheel_events??[]).slice(-63),receipt];
+      // Move the actual pointer after viewport/scroll-owner changes before
+      // dispatching a genuine wheel event; never assign a DOM scroll offset.
+      await command("Input.dispatchMouseEvent", {type:"mouseMoved",x:point.x,y:point.y});
       await command("Input.dispatchMouseEvent", {type: "mouseWheel", x:point.x, y:point.y, deltaX: 0, deltaY});
-      await evaluate(`new Promise(resolve => {
-        const node=document.querySelector(${JSON.stringify(selector)}), start=performance.now();
+      receipt.result=await evaluate(`new Promise(resolve => {
+        const node=document.querySelector(${JSON.stringify(selector)}), start=performance.now(), trace=[];
         let previous=${point.scrollTop}, moved=false, stable=0;
         function frame(){const current=node.scrollTop; moved ||= current!==${point.scrollTop};
           stable=current===previous?stable+1:0; previous=current;
-          if(moved&&stable>=3 || performance.now()-start>1500) resolve(); else requestAnimationFrame(frame);}
+          if(trace.length<128)trace.push({elapsed:Math.round(performance.now()-start),scrollTop:current,clientHeight:node.clientHeight,scrollHeight:node.scrollHeight});
+          if(moved&&stable>=3 || performance.now()-start>1500) resolve({scrollTop:current,clientHeight:node.clientHeight,scrollHeight:node.scrollHeight,trace}); else requestAnimationFrame(frame);}
         requestAnimationFrame(frame);
       })`);
+      return receipt;
     };
     const click = async selector => {
       // Reveal a request only by scrolling its bounded ledger. Never scroll a
@@ -1891,7 +1908,7 @@ async function checkTrafficBrowser() {
     };
     captureFailure = async () => {
       const result = await command("Page.captureScreenshot", {format: "png"});
-      await writeFile(join(output, evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
+      await writeFile(join(output, consoleBrowser ? "console-failure.png" : evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
     };
     await viewport(1440, 900);
     await command("Page.navigate", {url: `http://127.0.0.1:${server.address().port}/`});
@@ -1901,7 +1918,10 @@ async function checkTrafficBrowser() {
     }
     assert(await evaluate("typeof renderRequests === 'function'"), "Application did not initialize");
     diagnostics.phase = "interactive validation";
-    if (evidenceBrowser) {
+    if (consoleBrowser) {
+      validation = await checkConsoleInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:consoleFixture,type:text=>command("Input.insertText",{text}),recordGeometry:value=>{diagnostics.console_upper_panes=[...(diagnostics.console_upper_panes??[]).slice(-31),value];}});
+      assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Console QA");
+    } else if (evidenceBrowser) {
       const setFile=async name=>{
         const doc=await command('DOM.getDocument');
         const input=await command('DOM.querySelector',{nodeId:doc.root.nodeId,selector:'[data-package-file]'});
@@ -2030,7 +2050,12 @@ async function checkTrafficBrowser() {
     commands.clear();
     try {await lifecycle?.stop();}
     catch (error) {failure ??= error; diagnostics.cleanup_error = String(error.message).slice(0, 2048);}
-    factsFixture?.release();
+    factsFixture?.release(); consoleFixture?.release();
+    if (consoleFixture) {
+      diagnostics.fixture_errors = consoleFixture.errors;
+      try {await writeFile(join(output, 'console-fixture-receipts.json'), JSON.stringify({schema:'reb-console-ui-qa-v1',receipts:consoleFixture.receipts,errors:consoleFixture.errors}, null, 2));}
+      catch (error) {failure ??= error; diagnostics.fixture_receipt_error = String(error.message).slice(0, 2048);}
+    }
     evidenceFixture?.release();
     server.closeAllConnections();
     if (server.listening) await new Promise(resolve => server.close(resolve));
@@ -2043,9 +2068,9 @@ async function checkTrafficBrowser() {
   }
   if (failure) throw failure;
   await writeFile(join(output, "validation.json"), JSON.stringify(validation, null, 2));
-  console.log(`PASS real Chromium ${evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
+  console.log(`PASS real Chromium ${consoleBrowser ? 'Console' : evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
 }
-if (trafficBrowser || sourceFactsBrowser || evidenceBrowser) {await checkTrafficBrowser(); process.exit(0);}
+if (trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser) {await checkTrafficBrowser(); process.exit(0);}
 
 if (fieldsOnly) process.exit(0);
 const temporary = await mkdtemp(join(tmpdir(), "origin-trace-debugger-"));

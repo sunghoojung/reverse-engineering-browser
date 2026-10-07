@@ -114,6 +114,30 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+  console-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Exercise Console in installed Chrome
+        if: ${{ !cancelled() }}
+        run: |
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          node tools/check-origin-trace-debugger.mjs --console-ui-browser
+
+      - name: Upload rendered Console QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: console-ui-${{ github.run_id }}
+          path: build/console-ui-qa
+          if-no-files-found: ignore
+          retention-days: 3
+
   test:
     timeout-minutes: 15
     strategy:

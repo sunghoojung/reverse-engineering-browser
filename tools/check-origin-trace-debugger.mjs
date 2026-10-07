@@ -3270,7 +3270,53 @@ console.log('PASS Memory real render functions: 200 unchanged refreshes retain r
 }
 console.log('PASS Memory browser fixture validated debugger state, ETag200/304 and zero implicit actions (not rendered QA)');
 
-async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeText,screenshot,fixture}) {
+// Model the production divider placement, including ordinary and overlay
+// scrollbars. This reproduces a real competing resize strip at a flush row
+// edge; it is not a rendered-browser or native hit-testing substitute.
+async function checkMemoryRowGutters() {
+  const layoutSource=await readFile(join(root,'apps/research-ui/pane_layout.js'),'utf8');
+  const css=await readFile(join(root,'apps/research-ui/app.css'),'utf8');
+  const padding=Number(css.match(/#memory-results\s*\{\s*padding-inline:\s*(\d+)px;\s*\}/)?.[1]??0);
+  const receipts=[];
+  for(const width of [1440,760,360])for(const scrollbar of [16,0])for(const resized of [false,true]){
+    const outerLeft=width>650?1:0,total=width-outerLeft*2,criteria=width>950?(resized?420:292):245;
+    const outputWidth=total-criteria,listWidth=width>950?(resized?330:outputWidth*.38):width>650?outputWidth:total;
+    const box=(left,top,w,h)=>({left,right:left+w,top,bottom:top+h,width:w,height:h});
+    const node=(rect=null)=>({id:'',hidden:false,dataset:{},style:{removeProperty(){},setProperty(){}},parentElement:null,attributes:{},classList:{add(){},remove(){}},listeners:{},
+      setAttribute(k,v){this.attributes[k]=v;},addEventListener(k,v){this.listeners[k]=v;},getClientRects(){return rect?[rect]:[];},getBoundingClientRect(){return rect??box(0,0,0,0);},querySelector(){return node();}});
+    const body=node(box(0,0,width,900));body.children=[];body.append=n=>body.children.push(n);
+    const grid=node(box(outerLeft,237,total,638)),search=node(box(outerLeft,237,criteria,638)),output=node(box(outerLeft+criteria,237,outputWidth,638));
+    grid.parentElement=body;search.parentElement=output.parentElement=grid;grid.querySelector=s=>s==='.memory-search-pane'?search:output;
+    const listLeft=width>650?outerLeft+criteria:0;
+    const results=node(box(listLeft,295,width>650?outputWidth:total,580)),list=node(box(listLeft,295,listWidth,580)),detail=node(box(listLeft+listWidth,295,outputWidth-listWidth,580));
+    results.parentElement=output;list.parentElement=detail.parentElement=results;results.querySelector=s=>s==='.memory-results-list'?list:detail;
+    const parents=new Map([['.memory-grid',grid],['.memory-results-pane',results]]),queue=new Map();let serial=0;
+    const enqueue=fn=>{queue.set(++serial,fn);return serial;},cancel=id=>queue.delete(id);
+    const context={document:{body,querySelector:s=>{if(!parents.has(s))parents.set(s,node());return parents.get(s);},createElement:()=>node(),addEventListener(){}},window:{addEventListener(){}},innerWidth:width,innerHeight:900,
+      localStorage:{getItem:()=>null,setItem(){}},isPlainObject:v=>!!v&&typeof v==='object',requestAnimationFrame:enqueue,cancelAnimationFrame:cancel,setTimeout:enqueue,clearTimeout:cancel,
+      ResizeObserver:class{observe(){}},MutationObserver:class{observe(){}},getComputedStyle:n=>({display:n===grid?(width>650?'grid':'block'):n===results?'grid':'block',overflowX:'visible',overflowY:'visible',
+        getPropertyValue:()=>n===grid?`${criteria}px ${outputWidth}px`:n===results&&width>950?`${listWidth}px ${outputWidth-listWidth}px`:`${listWidth}px`})};
+    runInNewContext(layoutSource+';initializePaneLayout();',context);
+    while(queue.size){const [id,fn]=queue.entries().next().value;queue.delete(id);fn();}
+    const dividers=body.children.filter(n=>!n.hidden&&['pane-divider-memory','pane-divider-memory-detail'].includes(n.id)).map(n=>({id:n.id,...box(parseFloat(n.style.left),parseFloat(n.style.top),parseFloat(n.style.width),parseFloat(n.style.height))}));
+    assert.equal(dividers.length,width>950?2:width>650?1:0);assert(dividers.every(d=>d.width===8));
+    const target=gutter=>box(listLeft+gutter,331,listWidth-scrollbar-1-gutter*2,54);
+    const points=r=>[[r.left+r.width/2,r.top+r.height/2],[r.left+3,r.top+3],[r.right-3,r.bottom-3]];
+    const hits=r=>points(r).map(([x,y])=>({x,y,hit:dividers.find(d=>x>=d.left&&x<d.right&&y>=d.top&&y<d.bottom)?.id??'memory-result-row'}));
+    const baseline=hits(target(0));
+    if(width>650)assert(baseline.some(p=>p.hit==='pane-divider-memory'),'Flush baseline must reproduce the intercepted three-pixel row corner');
+    const row=target(padding),after=hits(row);
+    assert(after.every(p=>p.hit==='memory-result-row'),'Memory content corners must remain owned by the row');
+    assert(dividers.every(d=>Math.min(row.right,d.right)<=Math.max(row.left,d.left)||Math.min(row.bottom,d.bottom)<=Math.max(row.top,d.top)),'The entire row target must be outside the resize hit strips');
+    receipts.push({width,scrollbar,resized,baseline,after,row,dividers});
+  }
+  assert.equal(receipts.length,12);
+  console.log('PASS Memory flush-row resize interception counterexample and separated row targets across 12 viewport/scrollbar/split geometries (production pane layout; not rendered QA)');
+  return receipts;
+}
+await checkMemoryRowGutters();
+
+async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeText,screenshot,fixture,recordMemoryCheck=()=>{}}) {
   const ready=async()=>{for(let n=0;n<150;n++){if(await evaluate('!state.memorySearchPending && !state.debuggerActionPending'))return;await new Promise(resolve=>setTimeout(resolve,20));}throw Error('Memory action did not settle');};
   const wheelReceipts=[];
   const closed=async label=>{
@@ -3280,14 +3326,22 @@ async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeTe
   const unobscured=async(selector,label)=>{
     const result=await evaluate(`(()=>{
       const n=document.querySelector(${JSON.stringify(selector)});if(!n)return {missing:true};
-      const r=n.getBoundingClientRect();let top=0,bottom=innerHeight,left=0,right=innerWidth;
-      for(let p=n.parentElement;p;p=p.parentElement){const b=p.getBoundingClientRect(),s=getComputedStyle(p);if(s.overflowY!=='visible'){top=Math.max(top,b.top+p.clientTop);bottom=Math.min(bottom,b.top+p.clientTop+p.clientHeight);}if(s.overflowX!=='visible'){left=Math.max(left,b.left+p.clientLeft);right=Math.min(right,b.left+p.clientLeft+p.clientWidth);}}
-      const points=[[r.left+r.width/2,r.top+r.height/2],[r.left+3,r.top+3],[r.right-3,r.bottom-3]];
-      return {visible:r.width>0&&r.height>0&&r.left>=left-1&&r.right<=right+1&&r.top>=top-1&&r.bottom<=bottom+1,
-        covered:points.filter(([x,y])=>{const hit=document.elementFromPoint(x,y);return !hit||!n.contains(hit);}).length};
+      const rect=node=>{const r=node.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};};
+      const identify=node=>node?{id:node.id,tag:node.tagName,classes:node.className,role:node.getAttribute('role')}:null;
+      const r=rect(n),owners=[];let top=0,bottom=innerHeight,left=0,right=innerWidth;
+      for(let p=n.parentElement;p;p=p.parentElement){const b=p.getBoundingClientRect(),s=getComputedStyle(p);if(s.overflowY!=='visible'){top=Math.max(top,b.top+p.clientTop);bottom=Math.min(bottom,b.top+p.clientTop+p.clientHeight);}if(s.overflowX!=='visible'){left=Math.max(left,b.left+p.clientLeft);right=Math.min(right,b.left+p.clientLeft+p.clientWidth);}if(owners.length<8&&['auto','scroll','overlay','hidden','clip'].some(value=>s.overflowX===value||s.overflowY===value))owners.push({node:identify(p),rect:rect(p),overflowX:s.overflowX,overflowY:s.overflowY,scrollTop:p.scrollTop,clientHeight:p.clientHeight,scrollHeight:p.scrollHeight});}
+      const points=[[r.left+r.width/2,r.top+r.height/2],[r.left+3,r.top+3],[r.right-3,r.bottom-3]].map(([x,y])=>{const hit=document.elementFromPoint(x,y);return {x,y,owned:!!hit&&n.contains(hit),hit:identify(hit)};});
+      const dividers=[...document.querySelectorAll('#pane-divider-memory, #pane-divider-memory-detail')].filter(node=>!node.hidden&&node.getClientRects().length).map(node=>({node:identify(node),rect:rect(node),controls:node.getAttribute('aria-controls'),orientation:node.getAttribute('aria-orientation')}));
+      const resizeOverlaps=n.matches('.memory-result-row')?dividers.filter(d=>Math.min(r.right,d.rect.right)>Math.max(r.left,d.rect.left)&&Math.min(r.bottom,d.rect.bottom)>Math.max(r.top,d.rect.top)).map(d=>d.node.id):[];
+      return {node:identify(n),rect:r,clip:{top,bottom,left,right},owners,points,dividers,resizeOverlaps,
+        visible:r.width>0&&r.height>0&&r.left>=left-1&&r.right<=right+1&&r.top>=top-1&&r.bottom<=bottom+1,
+        covered:points.filter(point=>!point.owned).length};
     })()`);
-    assert.equal(result.visible,true,`${label}: ${selector} must fit its visible pane`);
-    assert.equal(result.covered,0,`${label}: ${selector} must be unobscured at center and corners`);
+    recordMemoryCheck({selector,label,...result});
+    const receipt=JSON.stringify(result);
+    assert.equal(result.visible,true,`${label}: ${selector} must fit its visible pane: ${receipt}`);
+    assert.deepEqual(result.resizeOverlaps,[],`${label}: result hit target must not overlap a resize handle: ${receipt}`);
+    assert.equal(result.covered,0,`${label}: ${selector} must be unobscured at center and corners: ${receipt}`);
   };
   // Only dispatch native wheels through the existing settled, hit-tested helper.
   // Resolve nested owner clipping before scrolling it; never assign scrollTop,
@@ -3688,7 +3742,7 @@ async function checkTrafficBrowser() {
       validation = await checkInvestigationInteractions({evaluate,viewport,click,key,wheel,screenshot,dialog,typeText,fixture:factsFixture});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during investigation QA");
     } else if (memoryBrowser) {
-      validation = await checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeText,screenshot,fixture:memoryFixture});
+      validation = await checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeText,screenshot,fixture:memoryFixture,recordMemoryCheck:value=>{diagnostics.memory_control_checks=[...(diagnostics.memory_control_checks??[]).slice(-63),value];}});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Memory QA");
     } else if (collectionBrowser) {
       validation = await checkCollectionInteractions({evaluate,viewport,click,key,wheel,type:text=>command("Input.insertText",{text}),screenshot,fixture:collectionFixture});

@@ -37,6 +37,7 @@ export async function checkFloat32Model(root) {
     let fail=false;const c=ui.createFloat32Controller({fetcher:()=>fail?fetcher():response()});await c.run(request);const retained=c.snapshot().report;fail=true;await c.run(request);assert.equal(c.snapshot().status,'error');assert.equal(c.snapshot().report,retained);assert.equal(c.snapshot().stale,true);
   }
   await checkFloat32RevealModel();
+  await checkFloat32ResponsiveOwnerModel(root);
   await checkFloat32HostLifecycle(root,fixture);
   await checkFloat32NativeBridge(root);
   console.log('PASS Float32 exact identity, closed report shapes, finite/nonfinite display, stale/latest/cancel/deadline and bounded transport models (not rendered QA)');
@@ -93,11 +94,26 @@ export function createFloat32Revealer({evaluate,wheel,record=()=>{}}) {
         for(let p=node.parentElement;p;p=p.parentElement){
           const s=getComputedStyle(p),b=p.getBoundingClientRect();
           if(!['auto','scroll'].includes(s.overflowY)||p.scrollHeight<=p.clientHeight+1)continue;
-          const top=Math.max(0,b.top)+8,bottom=Math.min(innerHeight,b.bottom)-8;
+          const panel=document.querySelector('#tools-panel-float32'),shell=document.querySelector('#screen-tools > .tools-shell');
+          let owner=p===panel?'#tools-panel-float32':null,stickyBottom=b.top;
+          // The existing <=760px layout makes this exact shell the scroll owner.
+          // Its sticky tab row clips panel controls even when inside the shell.
+          if(p===shell&&innerWidth<=760&&s.display==='block'&&panel.contains(node)) {
+            owner='#screen-tools > .tools-shell';
+            const tabs=document.querySelector('#screen-tools > .tools-shell > .tools-tabs');
+            if(!tabs||getComputedStyle(tabs).position!=='sticky')throw new Error('Missing responsive Float32 sticky tab boundary');
+            stickyBottom=tabs.getBoundingClientRect().bottom;
+          }
+          const top=Math.max(0,b.top,stickyBottom)+8,bottom=Math.min(innerHeight,b.bottom)-8;
           if(r.top>=top&&r.bottom<=bottom)continue;
-          if(p.id!=='tools-panel-float32')throw new Error('Unexpected Float32 scroll owner: '+p.id);
-          return {owner:'#'+p.id,deltaY:r.top<top?r.top-top:r.bottom-bottom,scrollTop:p.scrollTop,
-            control:{top:r.top,bottom:r.bottom},clip:{top,bottom},
+          const geometry={id:p.id,className:p.className,display:s.display,overflowY:s.overflowY,
+            top:b.top,bottom:b.bottom,clientHeight:p.clientHeight,scrollHeight:p.scrollHeight};
+          if(!owner)throw new Error('Unexpected Float32 scroll owner: '+JSON.stringify({selector:${JSON.stringify(selector)},geometry,control:{top:r.top,bottom:r.bottom},clip:{top,bottom},viewport:{width:innerWidth,height:innerHeight}}));
+          return {owner,deltaY:r.top<top?r.top-top:r.bottom-bottom,scrollTop:p.scrollTop,
+            control:{top:r.top,bottom:r.bottom},clip:{top,bottom,stickyBottom},geometry,viewport:{width:innerWidth,height:innerHeight},
+            neighbors:{page:document.scrollingElement?.scrollTop??0,screen:document.querySelector('#screen-tools')?.scrollTop??0,
+              panel:owner==='#tools-panel-float32'?null:panel.scrollTop},
+            textareas:[...p.querySelectorAll('textarea')].map(child=>child.scrollTop),
             samples:[...p.querySelectorAll('.float32-rows')].map(child=>child.scrollTop)};
         }
         return null;
@@ -108,10 +124,15 @@ export function createFloat32Revealer({evaluate,wheel,record=()=>{}}) {
       const deltaY=Math.sign(movement.deltaY)*Math.ceil(Math.abs(movement.deltaY));
       const receipt=await wheel(movement.owner,deltaY,'scrollbar');
       assert.equal(receipt.point.nested.length,0,'Float32 wheel landed in a nested scroller');
-      const after=await evaluate(`(()=>{const p=document.querySelector(${JSON.stringify(movement.owner)});return {scrollTop:p.scrollTop,samples:[...p.querySelectorAll('.float32-rows')].map(child=>child.scrollTop)};})()`);
+      const after=await evaluate(`(()=>{const p=document.querySelector(${JSON.stringify(movement.owner)});return {scrollTop:p.scrollTop,
+        neighbors:{page:document.scrollingElement?.scrollTop??0,screen:document.querySelector('#screen-tools')?.scrollTop??0,
+          panel:${movement.owner==='#tools-panel-float32'?'null':"document.querySelector('#tools-panel-float32').scrollTop"}},
+        textareas:[...p.querySelectorAll('textarea')].map(child=>child.scrollTop),samples:[...p.querySelectorAll('.float32-rows')].map(child=>child.scrollTop)};})()`);
       record({selector,before:movement,deltaY,point:receipt.point,after});
       assert((after.scrollTop-movement.scrollTop)*deltaY>0,'Float32 owning pane did not move: '+JSON.stringify({selector,movement,after,point:receipt.point}));
       assert.deepEqual(after.samples,movement.samples,'Revealing a Float32 control scrolled the nested sample list');
+      assert.deepEqual(after.textareas,movement.textareas,'Revealing a Float32 control scrolled an input textarea');
+      assert.deepEqual(after.neighbors,movement.neighbors,'Revealing a Float32 control scrolled the page or another Tools pane');
     }
     assert.fail('Float32 control could not be reached through its owning scroll pane: '+selector);
   };
@@ -123,7 +144,7 @@ async function checkFloat32RevealModel() {
   const pane={id:'tools-panel-float32',parentElement:null,scrollHeight:1200,clientHeight:686,
     get scrollTop(){return state.scrollTop;},getBoundingClientRect:()=>({top:190,bottom:876}),querySelectorAll:()=>[samples]};
   const control={parentElement:pane,getBoundingClientRect:()=>({top:state.controlTop-(state.scrollTop-100),bottom:state.controlTop+state.controlHeight-(state.scrollTop-100)})};
-  const evaluate=async expression=>JSON.parse(JSON.stringify(runInNewContext(expression,{document:{querySelector:selector=>selector==='#tools-panel-float32'?pane:control},getComputedStyle:()=>({overflowY:'auto'}),innerHeight:900})));
+  const evaluate=async expression=>JSON.parse(JSON.stringify(runInNewContext(expression,{document:{querySelector:selector=>selector==='#tools-panel-float32'?pane:control},getComputedStyle:()=>({overflowY:'auto'}),innerHeight:900,innerWidth:1440})));
   const wheel=async(owner,deltaY,mode)=>{
     assert.equal(owner,'#tools-panel-float32');assert.equal(mode,'scrollbar');assert(Number.isInteger(deltaY));state.wheels++;
     state.scrollTop=Math.min(514,Math.max(0,state.scrollTop+deltaY));
@@ -139,6 +160,43 @@ async function checkFloat32RevealModel() {
   await assert.rejects(createFloat32Revealer({evaluate,wheel:async()=>{state.sampleTop++;state.scrollTop++;return {point:{nested:[]}};}})('#float32-run'),/nested sample list/);
   await assert.rejects(createFloat32Revealer({evaluate,wheel:async()=>({point:{nested:[{id:'wrong-owner'}]}})})('#float32-run'),/landed in a nested/);
   console.log('PASS Float32 reveal owning-pane progress, independent nested-list offsets, fractional edges, upward motion and blocked-wheel controls (geometry model; not rendered QA)');
+}
+
+async function checkFloat32ResponsiveOwnerModel(root) {
+  const css=await readFile(join(root,'apps/research-ui/app.css'),'utf8');
+  assert.match(css,/@media \(max-width: 760px\)[\s\S]+?#screen-tools:not\(\[hidden\]\), \.tools-shell \{ overflow: auto; \}\s*\.tools-shell \{ display: block; \}\s*\.tools-tabs \{ position: sticky; top: 0;/);
+  for(const width of [600,360]) {
+    const state={outer:100,sample:17,textarea:9,page:0,screen:0,panel:0,target:900,width,display:'block',sticky:true,foreign:false};
+    const rows={get scrollTop(){return state.sample;}},textarea={get scrollTop(){return state.textarea;}};
+    const shell={id:'',className:'tools-shell',parentElement:null,clientHeight:584,scrollHeight:2200,
+      get scrollTop(){return state.outer;},getBoundingClientRect:()=>({top:192,bottom:776}),querySelectorAll:selector=>selector==='textarea'?[textarea]:[rows]};
+    const panel={id:'tools-panel-float32',parentElement:shell,clientHeight:1800,scrollHeight:1800,contains:node=>node===control,
+      get scrollTop(){return state.panel;},getBoundingClientRect:()=>({top:228-state.outer,bottom:2028-state.outer})};
+    const control={parentElement:panel,getBoundingClientRect:()=>({top:state.target-(state.outer-100),bottom:state.target+28-(state.outer-100)})};
+    const tabs={getBoundingClientRect:()=>({bottom:228})};
+    const document={scrollingElement:{get scrollTop(){return state.page;}},querySelector:selector=>({
+      '#tools-panel-float32':panel,'#screen-tools > .tools-shell':state.foreign?{}:shell,
+      '#screen-tools > .tools-shell > .tools-tabs':tabs,'#screen-tools':{get scrollTop(){return state.screen;}}
+    }[selector]??control)};
+    const evaluate=async expression=>JSON.parse(JSON.stringify(runInNewContext(expression,{document,innerWidth:state.width,innerHeight:800,
+      getComputedStyle:node=>node===tabs?{position:state.sticky?'sticky':'static'}:{overflowY:'auto',display:state.display}})));
+    const wheel=async(owner,delta,mode)=>{assert.equal(owner,'#screen-tools > .tools-shell');assert.equal(mode,'scrollbar');state.outer=Math.min(1616,Math.max(0,state.outer+delta));return {point:{nested:[],mode}};};
+    const receipts=[],reveal=createFloat32Revealer({evaluate,wheel,record:value=>receipts.push(value)});
+    await reveal('#float32-run');assert.equal(receipts[0].before.clip.top,236);assert.equal(state.sample,17);assert.equal(state.textarea,9);
+    state.target=220;await reveal('[data-float32-input="input"]');assert(state.outer<100,'Sticky tabs must remain above the full revealed control');
+    state.outer=1616;state.target=2400;await assert.rejects(reveal('#float32-run'),/owning pane did not move/,'Narrow saturation must not waive the margin');
+    for(const mutate of [()=>state.foreign=true,()=>state.width=761,()=>state.display='grid']) {
+      state.foreign=false;state.width=width;state.display='block';state.outer=100;state.target=900;mutate();
+      await assert.rejects(reveal('#float32-run'),/Unexpected Float32 scroll owner/);
+    }
+    state.foreign=false;state.width=width;state.display='block';state.sticky=false;
+    await assert.rejects(reveal('#float32-run'),/sticky tab boundary/);state.sticky=true;
+    for(const key of ['sample','textarea','page','screen','panel']) {
+      state.outer=100;state.target=900;
+      await assert.rejects(createFloat32Revealer({evaluate,wheel:async(...args)=>{const receipt=await wheel(...args);state[key]++;return receipt;}})('#float32-run'),/scrolled/);
+    }
+  }
+  console.log('PASS Float32 exact responsive shell, sticky-tab clipping, narrow up/down movement and foreign/wide/nested/page ownership rejection (geometry model; not rendered QA)');
 }
 
 export async function checkFloat32Interactions({evaluate,viewport,click,key,command,wheel,screenshot,fixture}) {
@@ -187,10 +245,24 @@ export async function checkFloat32Interactions({evaluate,viewport,click,key,comm
   await use('#float32-previous');await until("float32Panel.controller.snapshot().status==='ready' && float32Panel.controller.snapshot().report.detail.start===0",'Previous window failed');
   // Keyboard tab selection uses the shared tablist behavior.
   await use('#tools-tab-jwt');await press('ArrowRight');await until("state.toolsTab==='float32'",'Keyboard Float32 tab selection failed');
-  for(const [width,height] of [[600,800],[360,740]]){await viewport(width,height);await use('#float32-run');await until("!float32Panel.controller.snapshot().pending",'Narrow compare remained pending');assert.equal((await snapshot()).status,'ready');await reveal('.float32-receipt');assert(await evaluate('document.documentElement.scrollWidth<=innerWidth'),'Float32 causes horizontal page overflow');await screenshot(`float32-${width}-report`);await use('#float32-next');await until("float32Panel.controller.snapshot().report.detail.start===64 && !float32Panel.controller.snapshot().pending",'Narrow paging failed');}
+  const narrowOwners=[];
+  for(const [width,height] of [[600,800],[360,740]]) {
+    await viewport(width,height);const firstCheck=scrollChecks.length;
+    await compare();
+    // Return above the run controls using a real wheel and strict hit-tested
+    // input click, then descend again without moving its nested textarea.
+    await use('[data-float32-input="input"]');await compare();
+    await reveal('.float32-receipt');
+    assert(await evaluate('document.documentElement.scrollWidth<=innerWidth'),'Float32 causes horizontal page overflow');
+    const checks=scrollChecks.slice(firstCheck);
+    assert(checks.some(check=>check.before.owner==='#screen-tools > .tools-shell'&&check.before.viewport.width===width),'Narrow Float32 must exercise its exact responsive shell owner');
+    narrowOwners.push({width,height,checks});
+    await screenshot(`float32-${width}-report`);await use('#float32-next');
+    await until("float32Panel.controller.snapshot().report.detail.start===64 && !float32Panel.controller.snapshot().pending",'Narrow paging failed');
+  }
   await use('#float32-clear');assert.equal((await snapshot()).report,null);await screenshot('float32-cleared');
   assert(scrollChecks.some(check=>check.selector==='#float32-run'&&check.before.samples.length===1&&check.after.scrollTop>check.before.scrollTop),'Float32 Run reveal must exercise the outer pane with a retained nested sample list');
-  return {status:'passed',path:'browser development UI with actual Rust backend',source:'original synthetic buffers; only held responses/503 are synthetic',viewports:[[1440,900],[600,800],[360,740]],scrollChecks,nestedWheel:{before:nestedBefore,after:nestedAfter},checks:['explicit input and reference','actual backend result identity','exceptional values and signed zero','visible tolerances','stale/retry retention','cancel and late responses','newer result wins','sample pagination','keyboard tabs','narrow scrolling and pointer controls','clear']};
+  return {status:'passed',path:'browser development UI with actual Rust backend',source:'original synthetic buffers; only held responses/503 are synthetic',viewports:[[1440,900],[600,800],[360,740]],scrollChecks,narrowOwners,nestedWheel:{before:nestedBefore,after:nestedAfter},checks:['explicit input and reference','actual backend result identity','exceptional values and signed zero','visible tolerances','stale/retry retention','cancel and late responses','newer result wins','sample pagination','keyboard tabs','narrow scrolling and pointer controls','clear']};
 }
 
 async function checkFloat32HostLifecycle(root, fixture) {

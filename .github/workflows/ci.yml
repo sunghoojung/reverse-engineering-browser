@@ -188,6 +188,22 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: codesign --verify --deep --strict "build/Origin Trace.app"
 
+      - name: Exercise relocated macOS package and live launcher
+        if: matrix.os == 'macos-latest'
+        run: |
+          export ORIGIN_TRACE_TEST_BROWSER="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+          test -x "$ORIGIN_TRACE_TEST_BROWSER"
+          node tools/check-origin-trace-package.mjs
+
+      - name: Upload native package diagnostics
+        if: matrix.os == 'macos-latest' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-package-${{ github.run_id }}
+          path: build/package-qa
+          if-no-files-found: ignore
+          retention-days: 3
+
       - name: Upload macOS application preview
         if: matrix.os == 'macos-latest' && github.event_name == 'pull_request' && success()
         uses: actions/upload-artifact@v7

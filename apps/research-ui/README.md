@@ -207,6 +207,46 @@ frames, and retains captured evidence. Reload the browser tab to resume the
 debugger connection. A connected browser socket alone does not imply that its
 renderer is still running.
 
+## Packaged UI resources
+
+The native stored-evidence scheme and the live HTTP backend share exactly one
+`Contents/Resources/research-ui/` directory. `index.html` resolves CSS and scripts
+relative to that directory; both Analyst adapters pass its `analyst_runner_core.js`
+to the bundled native runner. `analyst_runner_node.js` remains available for the
+backend's supported Node fallback. The runners are not public UI routes.
+`OriginTrace.icns` and `run-live-session.sh` stay at the Resources root.
+
+To package a new UI module, add its filename once to the explicit asset loop in
+[`build-research-app.sh`](../../scripts/build-research-app.sh). If it is served by
+the UI, also add its HTML reference and the existing native scheme and Rust
+`UI_ASSETS` route allowlists. `make javascript-check` compares those lists, checks
+the canonical consumer paths and rejects duplicate root copies. It reports bytes
+removed from the current source assets; this is an uncompressed payload saving,
+not a promised ZIP-size reduction.
+
+After `make check` and `make app-build` on macOS, run:
+
+```sh
+ORIGIN_TRACE_TEST_BROWSER="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  node tools/check-origin-trace-package.mjs
+```
+
+The check relocates the signed bundle outside the repository, verifies its exact
+resource bytes and signature, and runs the real WebKit app in offline, deterministic
+demo, failed-live-start/offline fallback, and live HTTP modes. Each exercises
+bundled CSS/JS, private-route rejection, native capability markers, API contracts,
+Decoder and saved Analyst execution. The existing launcher check runs from an
+unrelated directory with bundled helpers and a disposable headless browser; it
+also checks shutdown and handshake removal. Logs are saved under `build/package-qa/`.
+The macOS CI job runs this check before uploading the app preview.
+
+The failed-start smoke uses a deliberately missing browser and follows the offline
+branch without showing a modal dialog. It does not automate the Retry/Continue
+Offline buttons. Headless Chrome tests live debugger startup and packaged routing,
+not custom Brave probe capture. These checks do not replace interactive native
+keyboard, resize and visual QA. On other platforms, `--contract-only` checks
+source wiring only and does not claim native runtime coverage.
+
 ## Workspace layout
 
 Traffic, Collection, Sources, and Fingerprinting are available in the sidebar.

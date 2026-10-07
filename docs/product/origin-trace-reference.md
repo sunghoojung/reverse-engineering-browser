@@ -157,7 +157,7 @@ The browser-facing DevTools WebSocket runs in `build/reb-debugger-transport`, a
 dependency-free C++20 helper. It validates the loopback endpoint and handshake,
 enforces command and message bounds, handles WebSocket control frames, and
 passes versioned, length-prefixed JSON records over private process pipes.
-Python remains the HTTP and debugger-state adapter, so the public UI routes and
+Rust owns the HTTP and debugger-state adapter, so the public UI routes and
 response contracts do not depend on the native transport protocol.
 
 The Memory workspace uses the same authorized live target for bounded,

@@ -1,4 +1,5 @@
 use crate::{
+    analysis_catalog,
     analyst::Analyst,
     config::Options,
     debugger::Debugger,
@@ -126,6 +127,7 @@ impl App {
             "/api/health" => {
                 json!({"status":"ok","store":self.options.store,"store_exists":self.options.store.exists(),"trace_store":self.options.trace_store,"trace_store_exists":self.options.trace_store.exists(),"signal_store":self.options.signal_store,"signal_store_exists":self.options.signal_store.exists(),"artifact_store":self.options.artifacts,"artifact_store_exists":self.options.artifacts.exists(),"artifact_receiver_configured":self.options.artifact_socket.is_some(),"artifact_receiver_connected":self.receiver_connected().await,"api_collection_store":self.collection.path,"api_collection_store_exists":self.collection.path.exists(),"local_analyst_store":self.workspace.path,"local_analyst_store_exists":self.workspace.path.exists(),"local_analyst_runner_available":self.analyst.state()["available"],"decoder_available":self.decoder.state()["available"],"broker_connected":self.broker_connected().await,"capture_mode":self.options.capture_mode(),"debugger_state":self.debugger.snapshot()["state"]})
             }
+            "/api/analysis/catalog" => analysis_catalog::catalog()?,
             "/api/decoder" => self.decoder.state(),
             "/api/native-console" => self.native_console.state().await,
             "/api/wasm" => {

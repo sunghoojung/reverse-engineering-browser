@@ -52,7 +52,7 @@ Implementation and contracts:
 
 The normal macOS application uses Swift and WKWebView. `make app` packages and
 opens the application, which starts its bundled capture services, analysis
-worker, loopback Python server, and an isolated instrumented Brave profile.
+worker, loopback Rust backend, and an isolated instrumented Brave profile.
 `make live` provides the same orchestration from the repository for development
 and fixture testing. `make ui` serves the browser development interface alone.
 Explicit store or demo arguments retain the native stored-evidence reader path
@@ -60,7 +60,7 @@ without starting another session.
 
 Live debugging is enabled for a normal session. A loopback DevTools WebSocket
 connects Brave to `reb-debugger-transport`, a bounded C++ helper. Versioned
-private process pipes connect that helper to the Python debugger-state and
+private process pipes connect that helper to the Rust debugger-state and
 policy adapter. The UI uses allowlisted local routes for debugger, source,
 memory, and experiment operations. Runtime values and debugger state stay
 ephemeral rather than entering the native evidence store.

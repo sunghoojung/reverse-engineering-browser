@@ -224,7 +224,7 @@
   <text x="871" y="1230" class="sub" text-anchor="middle">Bounded DevTools WebSocket</text>
   <rect x="1115" y="1110" width="72" height="72" fill="#DC2626"/>
   <use href="#icon-shield" x="1115" y="1110" width="72" height="72"/>
-  <text x="1151" y="1210" class="label" text-anchor="middle">Python Adapter</text>
+  <text x="1151" y="1210" class="label" text-anchor="middle">Rust Backend</text>
   <text x="1151" y="1230" class="sub" text-anchor="middle">Debugger state + action policy</text>
   <rect x="1395" y="1110" width="72" height="72" fill="#2563EB"/>
   <use href="#icon-debugger" x="1395" y="1110" width="72" height="72"/>

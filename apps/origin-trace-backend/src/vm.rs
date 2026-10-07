@@ -75,6 +75,53 @@ static ANTI: LazyLock<Vec<(&str, u64, Regex)>> = LazyLock::new(|| {
     ("antibot.request",15,r"(?i)\b(?:fetch|XMLHttpRequest|sendBeacon|WebSocket)\b"),
 ].into_iter().map(|(id,weight,p)|(id,weight,Regex::new(p).expect("Anti-bot rule"))).collect()
 });
+pub(crate) fn current_producer() -> Value {
+    json!({"id":"origin-trace-vm-detector","version":"1.1.1"})
+}
+
+// The catalog and generated documents share this exact profile projection.
+// Keep bibliography revisions outside it so citations never rewrite analysis identity.
+pub(crate) fn current_profile() -> Value {
+    let mut limits = serde_json::Map::new();
+    for (key, value) in CONFIG.as_object().unwrap() {
+        if let Some(name) = key.strip_prefix("MAX_")
+            && name != "JS_FUNCTION_SIGNATURE_CHARACTERS"
+        {
+            limits.insert(format!("max_{}", name.to_ascii_lowercase()), value.clone());
+        }
+    }
+    json!({"profile_id":PROFILE,"javascript_scoring_version":2,"candidate_threshold":20,"likely_vm_threshold":60,"likely_vm_required_families":3,"rule_weights":CONFIG["RULE_WEIGHTS"],"runtime_evidence_version":2,"runtime_rule_weights":runtime_weights(),"limits":limits})
+}
+
+pub(crate) fn current_rule_definitions() -> Vec<Value> {
+    let mut rules = Vec::new();
+    for (id, weight) in CONFIG["RULE_WEIGHTS"].as_object().unwrap() {
+        let detail = JS_RULES.iter().find(|(rule, _, _)| *rule == id)
+            .map(|(_, detail, _)| *detail).unwrap_or_else(|| match id.as_str() {
+                "js.dispatch-loop" => "A loop and switch or indexed call occur in one approximate function region.",
+                "wasm.dispatch-loop" => "Decoded br_table or call_indirect occurs inside a loop.",
+                "wasm.instruction-pointer" => "A decoded variable is both read and written, with arithmetic in the function.",
+                "wasm.linear-memory" => "A decoded instruction accesses linear memory.",
+                "wasm.handler-table" => "An indirect call or module table/element section is present.",
+                "wasm.bytecode-region" => "A data section is a possible bytecode region, not identified guest instructions.",
+                "wasm.bounded-exit" => "A decoded return or trap is present.",
+                _ => unreachable!("Every structural rule needs a catalog definition"),
+            });
+        rules.push(json!({"rule_id":id,"family":CONFIG["RULE_FAMILIES"][id],"weight":weight,
+            "scope":if id.starts_with("js.") {"javascript-structure"} else {"wasm-structure"},"summary":detail}));
+    }
+    for (id, weight, _) in ANTI.iter() {
+        rules.push(json!({"rule_id":id,"family":"relevance","weight":weight,"scope":"javascript-lexical-relevance",
+            "summary":"An unmasked source-text pattern matches this relevance category; comments and literals can match."}));
+    }
+    for (id, weight) in runtime_weights().as_object().unwrap() {
+        rules.push(json!({"rule_id":id,"family":"relevance","weight":weight,"scope":"retained-runtime-relevance",
+            "summary":"A retained browser-surface event is attributed to this artifact or correlated by capture context."}));
+    }
+    rules.sort_by(|a, b| a["rule_id"].as_str().cmp(&b["rule_id"].as_str()));
+    rules
+}
+
 fn observation(id: &str, start: usize, end: usize, detail: &str) -> Value {
     json!({"rule_id":id,"family":CONFIG["RULE_FAMILIES"][id],"weight":CONFIG["RULE_WEIGHTS"][id],"coordinate":{"byte_offset":start,"byte_size":end.saturating_sub(start).max(1)},"detail":detail})
 }
@@ -893,15 +940,7 @@ pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
         omissions.push(json!({"reason":"capture-gap","observed_records":capture_gaps}));
     }
     let events = events.into_iter().flatten().collect::<Vec<_>>();
-    let mut limits = serde_json::Map::new();
-    for (key, value) in CONFIG.as_object().unwrap() {
-        if let Some(name) = key.strip_prefix("MAX_")
-            && name != "JS_FUNCTION_SIGNATURE_CHARACTERS"
-        {
-            limits.insert(format!("max_{}", name.to_ascii_lowercase()), value.clone());
-        }
-    }
-    let profile = json!({"profile_id":PROFILE,"javascript_scoring_version":2,"candidate_threshold":20,"likely_vm_threshold":60,"likely_vm_required_families":3,"rule_weights":CONFIG["RULE_WEIGHTS"],"runtime_evidence_version":2,"runtime_rule_weights":runtime_weights(),"limits":limits});
+    let profile = current_profile();
     let mut results = failures;
     for artifact in &artifacts {
         if !["javascript", "wasm"].contains(&artifact["kind"].as_str().unwrap_or("")) {
@@ -954,7 +993,7 @@ pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
             mixed.push(json!({"finding_id":finding(&format!("{}:{}",js["artifact_sha256"].as_str().unwrap(),wasm["artifact_sha256"].as_str().unwrap()),&rules),"runtime":"mixed","tier":if js["tier"]=="likely-vm" || wasm["tier"]=="likely-vm" {"likely-vm"} else {"candidate"},"artifact_ids":[parent,wasm["artifact_id"]],"vm_score":js["vm_score"].as_u64().unwrap()+wasm["vm_score"].as_u64().unwrap(),"anti_bot_score":js["anti_bot_score"],"evidence_families":js["evidence_families"].as_array().unwrap().iter().chain(wasm["evidence_families"].as_array().unwrap()).map(|v|v.as_str().unwrap()).collect::<BTreeSet<_>>(),"boundary":{"state":"observed","reason":"The WASM artifact manifest names the JavaScript artifact as its creator."}}));
         }
     }
-    let mut document = json!({"contract_version":1,"document_kind":"vm-analysis","producer":{"id":"origin-trace-vm-detector","version":"1.1.1"},"profile_digest":digest(&profile)?,"profile":profile,"inputs":{"artifact_manifest_digest":manifest_digest,"event_store_digest":event_digest},"input_coverage":{"complete":omissions.is_empty(),"omissions":omissions},"summary":{"analyzed_artifacts":results.len(),"candidate_count":results.iter().filter(|r|r["tier"]=="candidate").count(),"likely_vm_count":results.iter().filter(|r|r["tier"]=="likely-vm").count(),"failed_count":results.iter().filter(|r|r["status"]=="failed").count(),"mixed_count":mixed.len()},"results":results,"mixed_findings":mixed});
+    let mut document = json!({"contract_version":1,"document_kind":"vm-analysis","producer":current_producer(),"profile_digest":digest(&profile)?,"profile":profile,"inputs":{"artifact_manifest_digest":manifest_digest,"event_store_digest":event_digest},"input_coverage":{"complete":omissions.is_empty(),"omissions":omissions},"summary":{"analyzed_artifacts":results.len(),"candidate_count":results.iter().filter(|r|r["tier"]=="candidate").count(),"likely_vm_count":results.iter().filter(|r|r["tier"]=="likely-vm").count(),"failed_count":results.iter().filter(|r|r["status"]=="failed").count(),"mixed_count":mixed.len()},"results":results,"mixed_findings":mixed});
     document["document_digest"] = json!(digest(&document)?);
     durable::write_private(
         &root.join("analysis/vm-analysis-v1.json"),

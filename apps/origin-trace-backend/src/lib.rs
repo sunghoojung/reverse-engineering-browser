@@ -1,3 +1,4 @@
+mod analysis_catalog;
 mod analyst;
 mod app;
 mod config;

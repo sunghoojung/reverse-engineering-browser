@@ -40,7 +40,7 @@ to the disposable Experiment BrowserContext are eligible. The worker's CDP
 configured test may ask `Network.getRequestPostData` for the exact matching
 request when the event omits it. No body is fetched for unrelated requests.
 
-The Python debugger bridge queues at most two bounded extraction jobs. The
+The Rust debugger bridge queues at most two bounded extraction jobs. The
 bundled Rust worker parses the JSON and RFC 6901 pointer, returning only a
 selected value up to 4 KiB. The bridge retains a 256-byte preview, SHA-256,
 byte count, request and target IDs, and related hit IDs; it never retains a

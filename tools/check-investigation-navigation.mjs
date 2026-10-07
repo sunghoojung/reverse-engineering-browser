@@ -44,10 +44,32 @@ export async function checkInvestigationCore(root) {
   history.clear();assert.equal(view.count,0);
   assert(!/localStorage|sessionStorage|pushState|replaceState/.test(source),'Evidence navigation never persists history');
   for(const asset of ['apps/origin-trace-backend/src/app.rs','apps/research-ui/macos/OriginTraceApp.swift','scripts/build-research-app.sh','apps/research-ui/index.html']) assert((await readFile(join(root,asset),'utf8')).includes('investigation_navigation.js'),asset);
-  const evidence = runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+';({isBrokerResponse,isOriginTraceResponse})');
+  const evidence = runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+';({isBrokerResponse,isOriginTraceResponse,requestsFromEvents})',{TextDecoder});
   const fixture = investigationFixture({handle:async()=>false,release(){}});
   assert(evidence.isBrokerResponse({count:1,events:[fixture.event]}),'Synthetic investigation event must pass normal broker admission');
   assert(evidence.isOriginTraceResponse(fixture.trace),'Synthetic trace must pass the production trace contract');
+  // Fixture counterexample: session replacement retires a selection, not every
+  // request. Derive each replacement through the real /api/events handler/model.
+  const fixtureRequests=async session=>{
+    fixture.session=session;let body;
+    await fixture.handle({url:'/api/events?limit=5000',method:'GET'},{writeHead(){},end:value=>{body=JSON.parse(value);}});
+    assert(evidence.isBrokerResponse(body));
+    return evidence.requestsFromEvents(body.events,'live');
+  };
+  const originalRequests=await fixtureRequests('11'),oldIdentity=model.investigationRequestIdentity(originalRequests[0]);
+  const replacedRequests=await fixtureRequests('12');
+  assert.equal(replacedRequests.length,1,'A stale selection notice does not mean the retained request window is empty');
+  assert.equal(model.investigationResolve(oldIdentity,replacedRequests,model.investigationRequestIdentity).status,'stale');
+  const retiredSelection={selectedRequestId:originalRequests[0].id,trafficDetailOpen:true,originTraceGeneration:0,signalProfileGeneration:0};
+  const resetSelection=app.slice(app.indexOf('      function resetRequestSelection('),app.indexOf('      function renderRequestCount('));
+  runInNewContext(resetSelection+';resetRequestSelection()',{state:retiredSelection,evidencePackagePanel:{sync(){}}});
+  assert.equal(retiredSelection.selectedRequestId,null);assert.match(retiredSelection.trafficSelectionNotice,/left the retained capture window/);
+  assert.equal(retiredSelection.trafficDetailOpen,true,'Retiring the old identity intentionally leaves its inspector open; later QA must close it through the control');
+  const freshRequests=await fixtureRequests('14'),freshIdentity=model.investigationRequestIdentity(freshRequests[0]);
+  assert.equal(freshRequests.length,1);assert.equal(freshIdentity.session,'14');assert.equal(freshIdentity.request,'91');
+  assert.equal(model.investigationResolve(freshIdentity,freshRequests,model.investigationRequestIdentity).status,'ready');
+  assert.equal(model.investigationResolve(freshIdentity,await fixtureRequests('13'),model.investigationRequestIdentity).status,'stale');
+  console.log('PASS investigation fixture counterexample: stale selection can coexist with a retained replacement; fresh exact request comes from normal event admission (not rendered QA)');
   await checkAdvancedNavigation(root);
   await checkInvestigationReturns(root);
   await checkCollectionNavigation(root, source);
@@ -288,10 +310,30 @@ export async function checkInvestigationInteractions({evaluate,viewport,click,ke
   // Rebuild a real short-label return trail. With Back to Requests + Forward,
   // the old flex layout squeezed the open notice into a 150px right column.
   await viewport(360,740);
+  const requestSetupReceipt=()=>evaluate("(()=>{const box=n=>{const r=n.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height,scrollTop:n.scrollTop,clientHeight:n.clientHeight,scrollHeight:n.scrollHeight};};return {screen:investigationScreen(),selected:state.selectedRequestId,notice:state.trafficSelectionNotice,detailOpen:state.trafficDetailOpen,refreshing:state.refreshing,requests:state.requests.map(r=>({id:r.id,identity:investigationRequestIdentity(r)})),pane:box(document.querySelector('#screen-traffic .request-pane')),list:box(elements.requestRows),rows:[...elements.requestRows.querySelectorAll('.request-row')].map(n=>{const r=n.getBoundingClientRect(),hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return {id:n.dataset.requestId,...box(n),ownsPoint:!!hit&&n.contains(hit),hit:hit?.id||hit?.tagName};})};})()");
+  const requestSetup={before:await requestSetupReceipt()};
+  // The previous refusal intentionally retired the selected session. Refresh a
+  // new retained identity through the fixture route before constructing this trail.
+  await until('!state.refreshing','Prior event refresh did not finish before phone setup');
+  fixture.session='14';await evaluate('refresh()');
+  await until("!state.refreshing&&state.events[0]?.session_id==='14'&&state.requests.length===1&&investigationRequestIdentity(state.requests[0])?.session==='14'",'Fresh phone request was not admitted through the broker fixture');
   if(!await evaluate("document.querySelector('#investigation-navigation details').open"))await click('#investigation-navigation summary');
   await click('#investigation-clear');
   await click('.nav-button[data-screen="traffic"]');await arrived('traffic','Prepare short-label request return');
-  await click('.request-row');
+  requestSetup.retained=await requestSetupReceipt();
+  console.log('Investigation phone request setup before close',JSON.stringify(requestSetup));
+  if(await evaluate('state.trafficDetailOpen'))await click('#request-detail-close');
+  await until('!state.trafficDetailOpen','Obsolete request inspector did not close through its control');
+  requestSetup.closed=await requestSetupReceipt();
+  console.log('Investigation phone request setup after close',JSON.stringify(requestSetup.closed));
+  const phoneRequestSelector=await evaluate("'#request-rows .request-row[data-request-id=\"'+CSS.escape(state.requests[0].id)+'\"]'");
+  await until(`(()=>{const n=document.querySelector(${JSON.stringify(phoneRequestSelector)}),request=state.requests.find(r=>r.id===n?.dataset.requestId);if(!n||investigationRequestIdentity(request)?.session!=='14')return false;const r=n.getBoundingClientRect(),hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return r.width>0&&r.height>0&&r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight&&!!hit&&n.contains(hit);})()`,'Fresh retained phone row did not become visible and hit-testable after closing the obsolete inspector');
+  requestSetup.ready=await requestSetupReceipt();
+  console.log('Investigation phone request setup ready',JSON.stringify(requestSetup.ready));
+  await click(phoneRequestSelector);
+  await until("investigationRequestIdentity(state.requests.find(r=>r.id===state.selectedRequestId))?.session==='14'",'The native row click did not select the fresh exact request');
+  requestSetup.selected=await requestSetupReceipt();
+  console.log('Investigation phone request selected',JSON.stringify(requestSetup.selected));
   await click('.nav-button[data-screen="sources"]');await arrived('sources','Prepare short-label source destination');
   assert.equal(await evaluate("document.querySelector('#investigation-back').textContent"),'Back to Requests');
   assert.equal(await evaluate("document.querySelector('#investigation-forward').textContent"),'Forward');
@@ -324,7 +366,7 @@ export async function checkInvestigationInteractions({evaluate,viewport,click,ke
   assert.deepEqual(await retainedView(),beforePhoneReturn,'Context reading must not navigate, replace drafts or change selected evidence');
   console.log('Investigation phone context geometry',JSON.stringify({normal:phoneContext,long:longContext}));
   assert.equal(fixture.calls.filter(call=>call.method!=='GET').length,0,'Investigation navigation issued an action request');
-  return {status:'passed',path:'existing browser development driver',phoneContext,source:'original synthetic request + immutable UTF-8/BOM artifact + explicit synthetic trace/facts delivery',viewports:[[1440,900],[760,560],[360,740]],checks:['Advanced dismissed at every linked pivot and Back/Forward without hidden menu focus','manual pointer choices, Enter/Tab/Escape and repeated selection at all three widths','refused return preserves an explicitly open chooser','request → trace → exact session artifact → verified original UTF-8 range → Decoder evidence → Back','no derived-analysis request or automatic transform/send/capture/action','real Open original evidence click','native decline/confirm replacement dialogs preserve newer drafts','preserved request/trace/source selection, Decoder draft and trigger focus','keyboard Back/Forward','missing and ambiguous source','foreign-session trace rejection','interrupted trace delivery','Console URL search does not navigate','session-change stale return','bounded narrow controls']};
+  return {status:'passed',path:'existing browser development driver',phoneContext,requestSetup,source:'original synthetic request + immutable UTF-8/BOM artifact + explicit synthetic trace/facts delivery',viewports:[[1440,900],[760,560],[360,740]],checks:['Advanced dismissed at every linked pivot and Back/Forward without hidden menu focus','manual pointer choices, Enter/Tab/Escape and repeated selection at all three widths','refused return preserves an explicitly open chooser','request → trace → exact session artifact → verified original UTF-8 range → Decoder evidence → Back','no derived-analysis request or automatic transform/send/capture/action','real Open original evidence click','native decline/confirm replacement dialogs preserve newer drafts','preserved request/trace/source selection, Decoder draft and trigger focus','keyboard Back/Forward','missing and ambiguous source','foreign-session trace rejection','interrupted trace delivery','Console URL search does not navigate','session-change stale return','bounded narrow controls']};
 }
 
 // These regressions exercise the production navigation and selection functions,

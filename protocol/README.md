@@ -16,6 +16,10 @@ its disposable browser ownership, wire layouts, and limits.
 [Native Worker Source v1](native-worker-source-v1.md) describes the dormant
 dedicated-worker source queue, pinned hooks, and blockers to production activation.
 
+[Native Worker Transfer v1](native-worker-transfer-v1.md) describes the dormant
+browser-owned authority, acknowledged bounded metadata transfer, and unbound Mojo
+contract.
+
 ## Two representations
 
 1. Native hot paths use the fixed 320-byte C++ `EventRecord` in

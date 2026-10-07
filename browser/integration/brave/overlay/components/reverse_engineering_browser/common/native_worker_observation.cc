@@ -264,6 +264,35 @@ NativeWorkerObservationStats NativeWorkerObservationQueue::Stats() noexcept {
   return result;
 }
 
+bool IsValidNativeWorkerObservation(const NativeWorkerObservation& record,
+                                    const NativeWorkerObservationPolicy& authority,
+                                    const std::uint64_t now_ns) noexcept {
+  if (!ValidPolicy(authority) || record.magic != 0x4f574252U || record.version != 1 ||
+      record.record_size != sizeof(record) || record.worker_kind != NativeWorkerKind::kDedicated ||
+      record.session_id != authority.session_id || record.generation != authority.generation ||
+      record.browser_context != authority.browser_context ||
+      record.renderer_instance != authority.renderer_instance ||
+      record.worker != authority.worker || record.creator != authority.creator ||
+      record.creator_kind != authority.creator_kind || record.monotonic_time_ns > now_ns ||
+      record.sequence == 0 || record.monotonic_time_ns >= authority.expires_at_monotonic_ns ||
+      std::any_of(record.reserved.begin(), record.reserved.end(),
+                  [](std::byte byte) { return byte != std::byte{}; }) ||
+      !ValidInput(
+          {record.operation, record.direction, record.native_trace_id, record.script_id,
+           record.source_kind,
+           record.operation == NativeWorkerOperation::kMessageSent || record.send_sequence == 0
+               ? NativeWorkerMessageTag{}
+               : NativeWorkerMessageTag{record.session_id, record.generation,
+                                        record.send_sequence}}) ||
+      (record.operation == NativeWorkerOperation::kMessageSent &&
+       record.send_sequence != record.sequence) ||
+      (IsMessage(record.operation) && record.operation != NativeWorkerOperation::kMessageSent &&
+       record.send_sequence >= record.sequence)) {
+    return false;
+  }
+  return now_ns < authority.expires_at_monotonic_ns;
+}
+
 bool NativeWorkerObservationProjection::Reset(
     const NativeWorkerObservationPolicy& authority) noexcept {
   authority_ = {};
@@ -296,27 +325,7 @@ bool NativeWorkerObservationProjection::Expire(const std::uint64_t now_ns) noexc
 bool NativeWorkerObservationProjection::Apply(const NativeWorkerObservation& record,
                                               const std::uint64_t now_ns) noexcept {
   static_cast<void>(Expire(now_ns));
-  if (!ValidPolicy(authority_) || record.magic != 0x4f574252U || record.version != 1 ||
-      record.record_size != sizeof(record) || record.worker_kind != NativeWorkerKind::kDedicated ||
-      record.session_id != authority_.session_id || record.generation != authority_.generation ||
-      record.browser_context != authority_.browser_context ||
-      record.renderer_instance != authority_.renderer_instance ||
-      record.worker != authority_.worker || record.creator != authority_.creator ||
-      record.creator_kind != authority_.creator_kind || record.monotonic_time_ns > now_ns ||
-      record.sequence == 0 || record.monotonic_time_ns >= authority_.expires_at_monotonic_ns ||
-      std::any_of(record.reserved.begin(), record.reserved.end(),
-                  [](std::byte byte) { return byte != std::byte{}; }) ||
-      !ValidInput(
-          {record.operation, record.direction, record.native_trace_id, record.script_id,
-           record.source_kind,
-           record.operation == NativeWorkerOperation::kMessageSent || record.send_sequence == 0
-               ? NativeWorkerMessageTag{}
-               : NativeWorkerMessageTag{record.session_id, record.generation,
-                                        record.send_sequence}}) ||
-      (record.operation == NativeWorkerOperation::kMessageSent &&
-       record.send_sequence != record.sequence) ||
-      (IsMessage(record.operation) && record.operation != NativeWorkerOperation::kMessageSent &&
-       record.send_sequence >= record.sequence)) {
+  if (!IsValidNativeWorkerObservation(record, authority_, now_ns)) {
     Increment(stats_.rejected);
     return false;
   }

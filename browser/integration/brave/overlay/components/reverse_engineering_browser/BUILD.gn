@@ -9,6 +9,7 @@ mojom("mojom") {
   sources = [
     "common/native_console.mojom",
     "common/native_probe_transport.mojom",
+    "common/native_worker_transport.mojom",
   ]
 
   public_deps = [ "//mojo/public/mojom/base" ]
@@ -25,6 +26,16 @@ source_set("console_protocol") {
   sources = [ "common/native_console_protocol.h" ]
 }
 
+source_set("worker_metadata") {
+  sources = [
+    "common/native_worker_observation.cc",
+    "common/native_worker_observation.h",
+    "common/native_worker_transfer.cc",
+    "common/native_worker_transfer.h",
+    "common/native_worker_types.h",
+  ]
+}
+
 component("renderer_sink") {
   output_name = "reverse_engineering_browser_renderer_sink"
 
@@ -32,8 +43,6 @@ component("renderer_sink") {
 
   sources = [
     "common/native_probe_event.h",
-    "common/native_worker_observation.cc",
-    "common/native_worker_observation.h",
     "common/native_worker_source.cc",
     "common/native_worker_source.h",
     "renderer/native_probe_sink.cc",
@@ -44,6 +53,8 @@ component("renderer_sink") {
     "renderer/native_worker_source_sink.h",
   ]
 
+  # Public sink headers expose the common worker metadata value types.
+  public_deps = [ ":worker_metadata" ]
   deps = [ "//base" ]
 }
 
@@ -92,6 +103,10 @@ source_set("browser") {
     "browser/native_probe_session.h",
     "browser/native_probe_socket_client.cc",
     "browser/native_probe_socket_client.h",
+    "browser/native_worker_authority.cc",
+    "browser/native_worker_authority.h",
+    "browser/native_worker_transfer_gate.cc",
+    "browser/native_worker_transfer_gate.h",
     "common/native_artifact_header.h",
     "common/native_console_io.cc",
     "common/native_console_io.h",
@@ -104,6 +119,7 @@ source_set("browser") {
     ":console_protocol",
     ":mojom",
     ":queue",
+    ":worker_metadata",
     "//base",
     "//content/public/browser",
     "//mojo/public/cpp/base",

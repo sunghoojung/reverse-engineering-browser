@@ -24,8 +24,9 @@ monotonic expiry, full browser-context and renderer-incarnation tokens, exact
 worker and creator tokens, and creator kind. This is a browser-owned authority
 contract, not authentication of an untrusted renderer. A browser controller must
 validate the actual creator relation, storage-partition identity and selected
-document/navigation generation before configuring; these browser checks are
-not implemented by this local component. Do not infer authority from URLs,
+document/navigation generation before configuring. The dormant
+[authority/transfer component](native-worker-transfer-v1.md) models these checks,
+but its browser service observer and Mojo adapters are not installed. Do not infer authority from URLs,
 PIDs, token claims, or nearest timestamps.
 
 An accepted send returns a 24-byte `{session, generation, send_sequence}` tag.
@@ -90,7 +91,8 @@ missing sequences, reported loss, ambiguity, untagged receives and retired entri
    Do not serialize or trust it through Mojo/MessagePort without a new contract.
 2. Observe browser `DedicatedWorkerService` lifecycle/creator ownership, including
    nested workers arriving out of order, process death and lost teardown messages.
-3. Add versioned, generation-bound, acknowledged bounded IPC. Reserve downstream
+3. Connect the dormant [authority/transfer state machines](native-worker-transfer-v1.md)
+   through versioned, generation-bound, acknowledged bounded IPC. Reserve downstream
    bytes/slots before copying or posting; retain credit until browser acknowledgment.
    Bound tasks and work per drain; report disconnect and terminal losses. The
    existing general mapped probe queue is not sufficient for this guarantee.

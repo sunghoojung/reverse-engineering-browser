@@ -11,6 +11,7 @@
 #include <string_view>
 #include <thread>
 
+#include "components/reverse_engineering_browser/browser/native_worker_transfer_gate.h"
 #include "components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "components/reverse_engineering_browser/common/native_worker_observation.h"
 #include "components/reverse_engineering_browser/common/native_worker_source.h"
@@ -920,6 +921,633 @@ bool CheckNativeWorkerObservationConcurrency() {
          taken + stats.dropped == stats.attempted && stats.queued == 0;
 }
 
+bool WorkerCheck(const bool condition, const std::string_view description) {
+  if (!condition) {
+    std::cerr << "Native worker transport: " << description << '\n';
+  }
+  return condition;
+}
+
+struct WorkerTransferFixture final {
+  static constexpr std::uint64_t kNow = 100;
+  reb::NativeWorkerAuthorityScope scope{1,      71,     1,      100'000'000'000ULL,
+                                        {1, 2}, {3, 4}, {5, 6}, {7, 8}};
+  reb::NativeWorkerOwner owner{{9, 10},
+                               {11, 12},
+                               scope.selected_frame,
+                               reb::NativeWorkerCreatorKind::kDocument,
+                               scope.selected_document,
+                               scope.document_generation};
+  reb::NativeWorkerAuthority authority;
+  reb::NativeWorkerObservationQueue queue;
+  reb::NativeWorkerTransferSender sender{queue};
+  reb::NativeWorkerTransferReceiver receiver{authority};
+  reb::NativeWorkerLease lease;
+  reb::NativeWorkerCaptureTicket ticket;
+
+  bool Configure() {
+    return authority.Reset(scope, kNow) &&
+           authority.Created(scope.observer_epoch, owner, kNow) ==
+               reb::NativeWorkerAuthorityStatus::kRecorded &&
+           authority.Issue(owner.worker, {13, 14}, kNow, lease) ==
+               reb::NativeWorkerAuthorityStatus::kAllowed &&
+           sender.Configure(lease, kNow) == reb::NativeWorkerTransferStatus::kConfigured &&
+           receiver.Configure(lease, kNow) &&
+           queue.Begin(reb::NativeWorkerKind::kDedicated, owner.worker, owner.creator,
+                       owner.creator_kind, kNow,
+                       ticket) == reb::NativeWorkerCaptureStatus::kAccepted;
+  }
+  bool Capture(const reb::NativeWorkerObservationInput input = {}) {
+    return queue.Capture(ticket, input, kNow) == reb::NativeWorkerCaptureStatus::kAccepted;
+  }
+};
+static_assert(!std::is_copy_constructible_v<reb::NativeWorkerTransferSender>);
+static_assert(!std::is_move_constructible_v<reb::NativeWorkerTransferSender>);
+static_assert(!std::is_copy_constructible_v<reb::NativeWorkerTransferReceiver>);
+static_assert(!std::is_move_constructible_v<reb::NativeWorkerAuthority>);
+
+bool CheckNativeWorkerAuthority() {
+  using Status = reb::NativeWorkerAuthorityStatus;
+  using Creator = reb::NativeWorkerCreatorKind;
+  WorkerTransferFixture fixture;
+  auto& authority = fixture.authority;
+  auto scope = fixture.scope;
+  const auto root = fixture.owner;
+  reb::NativeWorkerOwner child{{20, 21}, {22, 23}, root.worker, Creator::kDedicatedWorker, {}, 0};
+  reb::NativeWorkerLease lease;
+  if (!WorkerCheck(
+          authority.Resolve(root.worker, 100) == Status::kDisabled && authority.Reset(scope, 100) &&
+              authority.Created(1, child, 100) == Status::kRecorded &&
+              authority.Resolve(child.worker, 100) == Status::kUnresolvedParent &&
+              authority.Issue(child.worker, {30, 31}, 100, lease) == Status::kUnresolvedParent &&
+              lease == reb::NativeWorkerLease{} &&
+              authority.Created(1, root, 100) == Status::kRecorded &&
+              authority.Created(1, root, 100) == Status::kDuplicate &&
+              authority.Resolve(child.worker, 100) == Status::kAllowed &&
+              authority.Issue(child.worker, {30, 31}, 100, lease) == Status::kAllowed &&
+              authority.IsCurrent(lease, 100),
+          "out-of-order browser ancestry and exact duplicate ownership")) {
+    return false;
+  }
+  const auto old_lease = lease;
+  if (!WorkerCheck(authority.Issue(root.worker, {32, 33}, 100, lease) == Status::kAllowed &&
+                       !authority.IsCurrent(old_lease, 100) && authority.IsCurrent(lease, 100),
+                   "new lease revokes prior worker/connection")) {
+    return false;
+  }
+  for (unsigned field = 0; field < 13; ++field) {
+    auto forged = lease;
+    switch (field) {
+      case 0:
+        ++forged.policy.browser_context.high;
+        break;
+      case 1:
+        ++forged.storage_partition.high;
+        break;
+      case 2:
+        ++forged.policy.renderer_instance.high;
+        break;
+      case 3:
+        ++forged.selected_frame.high;
+        break;
+      case 4:
+        ++forged.selected_document.high;
+        break;
+      case 5:
+        ++forged.document_generation;
+        break;
+      case 6:
+        ++forged.observer_epoch;
+        break;
+      case 7:
+        ++forged.connection.high;
+        break;
+      case 8:
+        ++forged.policy.worker.high;
+        break;
+      case 9:
+        ++forged.policy.creator.high;
+        break;
+      case 10:
+        ++forged.policy.session_id;
+        break;
+      case 11:
+        ++forged.policy.generation;
+        break;
+      case 12:
+        ++forged.policy.expires_at_monotonic_ns;
+        break;
+    }
+    if (!WorkerCheck(!authority.IsCurrent(forged, 100), "forged lease rejected")) {
+      return false;
+    }
+  }
+  auto conflict = root;
+  ++conflict.renderer_instance.high;
+  if (!WorkerCheck(authority.Created(1, conflict, 100) == Status::kAmbiguous &&
+                       authority.Resolve(child.worker, 100) == Status::kAmbiguous &&
+                       !authority.IsCurrent(lease, 100),
+                   "conflicting ownership fails closed")) {
+    return false;
+  }
+  ++scope.observer_epoch;
+  if (!authority.Reset(scope, 100)) {
+    return false;
+  }
+  auto wrong_document = root;
+  ++wrong_document.creator_document.high;
+  if (!WorkerCheck(authority.Created(2, wrong_document, 100) == Status::kRecorded &&
+                       authority.Resolve(root.worker, 100) == Status::kWrongDocument &&
+                       authority.Created(1, child, 100) == Status::kStaleEpoch &&
+                       !authority.DocumentDestroyed(1, scope.selected_document, 1) &&
+                       !authority.DocumentDestroyed(2, scope.selected_document, 2),
+                   "document token/generation and observer epoch are mandatory")) {
+    return false;
+  }
+  ++scope.observer_epoch;
+  if (!authority.Reset(scope, 100)) {
+    return false;
+  }
+  auto cycle = root;
+  cycle.creator = child.worker;
+  cycle.creator_kind = Creator::kDedicatedWorker;
+  cycle.creator_document = {};
+  cycle.document_generation = 0;
+  if (!WorkerCheck(authority.Created(3, cycle, 100) == Status::kRecorded &&
+                       authority.Created(3, child, 100) == Status::kRecorded &&
+                       authority.Resolve(child.worker, 100) == Status::kCycle,
+                   "cycles never establish ancestry")) {
+    return false;
+  }
+  ++scope.observer_epoch;
+  if (!authority.Reset(scope, 100)) {
+    return false;
+  }
+  if (!WorkerCheck(authority.Destroyed(4, root.worker) == Status::kRecorded &&
+                       authority.Created(4, root, 100) == Status::kRetired &&
+                       authority.Created(4, child, 100) == Status::kRecorded &&
+                       authority.Resolve(child.worker, 100) == Status::kRetired,
+                   "out-of-order teardown tombstones cannot be reused")) {
+    return false;
+  }
+  ++scope.observer_epoch;
+  if (!authority.Reset(scope, 100)) {
+    return false;
+  }
+  if (!WorkerCheck(authority.RendererDestroyed(5, root.renderer_instance) == Status::kRecorded &&
+                       authority.Created(5, root, 100) == Status::kRetired &&
+                       authority.RendererDestroyed(5, root.renderer_instance) == Status::kDuplicate,
+                   "renderer incarnation tombstones reject late creation")) {
+    return false;
+  }
+  ++scope.observer_epoch;
+  if (!authority.Reset(scope, 100) || authority.Created(6, root, 100) != Status::kRecorded ||
+      authority.Created(6, child, 100) != Status::kRecorded ||
+      authority.Issue(child.worker, {30, 31}, 100, lease) != Status::kAllowed ||
+      authority.RendererDestroyed(6, root.renderer_instance) != Status::kRecorded ||
+      !WorkerCheck(!authority.IsCurrent(lease, 100) &&
+                       authority.Resolve(child.worker, 100) == Status::kRetired,
+                   "parent renderer death revokes descendant lease")) {
+    return false;
+  }
+  ++scope.observer_epoch;
+  if (!authority.Reset(scope, 100)) {
+    return false;
+  }
+  for (std::size_t index = 0; index < reb::kNativeWorkerAuthorityCapacity; ++index) {
+    auto owner = root;
+    owner.worker = {1000 + index, 1};
+    if (authority.Created(7, owner, 100) != Status::kRecorded ||
+        authority.RendererDestroyed(7, {2000 + index, 1}) != Status::kRecorded) {
+      return false;
+    }
+  }
+  if (!WorkerCheck(authority.Created(7, root, 100) == Status::kFull &&
+                       authority.RendererDestroyed(7, root.renderer_instance) == Status::kFull &&
+                       authority.Resolve({1000, 1}, 100) == Status::kDisabled &&
+                       authority.stats().capacity_drops == 2,
+                   "fixed ownership and retirement bounds report loss and fail closed")) {
+    return false;
+  }
+  ++scope.observer_epoch;
+  if (!authority.Reset(scope, 100) || authority.Created(8, root, 100) != Status::kRecorded ||
+      authority.Issue(root.worker, {30, 31}, 100, lease) != Status::kAllowed ||
+      !WorkerCheck(!authority.IsCurrent(lease, scope.expires_at_ns) &&
+                       authority.Resolve(root.worker, scope.expires_at_ns) == Status::kExpired &&
+                       authority.DocumentDestroyed(8, scope.selected_document, 1) &&
+                       authority.Resolve(root.worker, 100) == Status::kDisabled,
+                   "absolute expiry and exact document teardown")) {
+    return false;
+  }
+  std::cout << "Native worker authority: ancestry=passed tombstones=passed cycles=passed "
+               "document_partition_lease=passed stale_epoch=passed bounds=passed\n";
+  return true;
+}
+
+bool CheckNativeWorkerTransfer() {
+  using Status = reb::NativeWorkerTransferStatus;
+  using Capture = reb::NativeWorkerCaptureStatus;
+  WorkerTransferFixture fixture;
+  if (!fixture.Configure()) {
+    return false;
+  }
+  reb::NativeWorkerPull request;
+  constexpr auto kNow = WorkerTransferFixture::kNow;
+  constexpr auto kNext = kNow + reb::kNativeWorkerMinPollIntervalNs;
+  if (!WorkerCheck(
+          fixture.receiver.Request(kNow, request) == Status::kRequestReady &&
+              fixture.receiver.Receive(fixture.sender.Pull(request, kNow), kNow) == Status::kIdle &&
+              fixture.receiver.Request(kNext - 1, request) == Status::kBusy,
+          "empty polling respects bounded request cadence")) {
+    return false;
+  }
+  reb::NativeWorkerMessageTag tag;
+  using Operation = reb::NativeWorkerOperation;
+  using Direction = reb::NativeWorkerDirection;
+  if (fixture.queue.Capture(fixture.ticket, {Operation::kMessageSent, Direction::kToWorker, 0},
+                            kNow, &tag) != Capture::kAccepted ||
+      !fixture.Capture({Operation::kMessageReceived, Direction::kToWorker, 0, 0,
+                        reb::NativeWorkerSourceKind::kClassic, tag}) ||
+      !fixture.Capture({Operation::kScriptCompiled, Direction::kNone, 0, 7,
+                        reb::NativeWorkerSourceKind::kModule}) ||
+      fixture.receiver.Request(kNext, request) != Status::kRequestReady) {
+    return false;
+  }
+  const auto reply = fixture.sender.Pull(request, kNext);
+  if (!WorkerCheck(reply.status == Status::kBatch && reply.batch.count == 3 &&
+                       fixture.sender.stats().acknowledged_records == 0 &&
+                       fixture.receiver.Receive(reply, kNext) == Status::kBatch &&
+                       fixture.receiver.Request(kNext, request) == Status::kBusy,
+                   "drain retains credit until downstream acceptance")) {
+    return false;
+  }
+  const auto* pending = fixture.receiver.PendingForPublication(kNext);
+  reb::NativeWorkerObservationProjection projection;
+  if (!pending || !projection.Reset(fixture.lease.policy)) {
+    return false;
+  }
+  for (std::size_t index = 0; index < pending->count; ++index) {
+    if (!projection.Apply(pending->records[index], kNext)) {
+      return false;
+    }
+  }
+  const reb::NativeWorkerBatchAck ack{pending->epoch, pending->batch_id};
+  auto wrong_ack = ack;
+  ++wrong_ack.batch_id;
+  if (!WorkerCheck(projection.messages().size() == 1 && projection.messages()[0].observed() &&
+                       projection.scripts().size() == 1 &&
+                       !fixture.receiver.AcknowledgePublished(wrong_ack, kNext) &&
+                       fixture.receiver.PendingForPublication(kNext) &&
+                       fixture.receiver.AcknowledgePublished(ack, kNext) &&
+                       !fixture.receiver.PendingForPublication(kNext) &&
+                       !fixture.receiver.AcknowledgePublished(ack, kNext),
+                   "exact carried tag survives transfer; ack is exact and single-use")) {
+    return false;
+  }
+  const auto now = kNext + reb::kNativeWorkerMinPollIntervalNs;
+  if (fixture.receiver.Request(now, request) != Status::kRequestReady ||
+      fixture.receiver.Receive(fixture.sender.Pull(request, now), now) != Status::kIdle ||
+      !WorkerCheck(fixture.sender.stats().acknowledged_records == 3 &&
+                       fixture.sender.stats().acknowledged_batches == 1,
+                   "next pull acknowledges complete batch")) {
+    return false;
+  }
+  fixture.receiver.Revoke();
+  if (!WorkerCheck(!fixture.receiver.Configure(fixture.lease, now),
+                   "revoked receiver cannot reset sequence state in the same lease")) {
+    return false;
+  }
+  std::cout << "Native worker transfer: bounded_poll=passed exact_tag_projection=passed "
+               "downstream_credit=passed acknowledgment=passed lease_replay=passed\n";
+  return true;
+}
+
+bool CheckNativeWorkerTransferPressure() {
+  using Status = reb::NativeWorkerTransferStatus;
+  WorkerTransferFixture fixture;
+  if (!fixture.Configure()) {
+    return false;
+  }
+  for (std::size_t index = 0; index < reb::kNativeWorkerObservationCapacity; ++index) {
+    if (!fixture.Capture()) {
+      return false;
+    }
+  }
+  if (fixture.queue.Capture(fixture.ticket, {}, 100) != reb::NativeWorkerCaptureStatus::kFull) {
+    return false;
+  }
+  fixture.queue.Retire(fixture.ticket);
+  std::uint64_t now = WorkerTransferFixture::kNow;
+  for (std::size_t index = 0; index < 8; ++index) {
+    reb::NativeWorkerPull request;
+    if (fixture.receiver.Request(now, request) != Status::kRequestReady) {
+      return false;
+    }
+    const auto reply = fixture.sender.Pull(request, now);
+    if (fixture.receiver.Receive(reply, now) != Status::kBatch ||
+        !WorkerCheck(
+            reply.batch.count == reb::kNativeWorkerBatchCapacity &&
+                reply.batch.capture_stats.dropped == 1 && reply.batch.worker_retired &&
+                reply.batch.capture_stats.queued == (7 - index) * reb::kNativeWorkerBatchCapacity &&
+                fixture.receiver.AcknowledgePublished({reply.epoch, reply.batch.batch_id}, now),
+            "retired queue drains in fixed batches with terminal drop accounting")) {
+      return false;
+    }
+    now += reb::kNativeWorkerMinPollIntervalNs;
+  }
+  reb::NativeWorkerPull request;
+  if (fixture.receiver.Request(now, request) != Status::kRequestReady ||
+      fixture.receiver.Receive(fixture.sender.Pull(request, now), now) != Status::kIdle ||
+      fixture.sender.stats().acknowledged_records != reb::kNativeWorkerObservationCapacity ||
+      fixture.sender.stats().batches != 8 || fixture.queue.Stats().retired != 0) {
+    return false;
+  }
+  std::cout << "Native worker transfer pressure: batches=8 records=128 overflow=reported "
+               "retired_drain=passed terminal_loss=passed\n";
+  return true;
+}
+
+bool CheckNativeWorkerTransferRejection() {
+  using Status = reb::NativeWorkerTransferStatus;
+  constexpr auto kNow = WorkerTransferFixture::kNow;
+  for (unsigned field = 0; field < 16; ++field) {
+    WorkerTransferFixture fixture;
+    reb::NativeWorkerPull request;
+    if (!fixture.Configure() || !fixture.Capture() || !fixture.Capture() ||
+        fixture.receiver.Request(kNow, request) != Status::kRequestReady) {
+      return false;
+    }
+    auto reply = fixture.sender.Pull(request, kNow);
+    switch (field) {
+      case 0:
+        ++reply.batch.version;
+        break;
+      case 1:
+        ++reply.batch.reserved;
+        break;
+      case 2:
+        reply.batch.count = 17;
+        break;
+      case 3:
+        ++reply.batch.epoch.connection.high;
+        break;
+      case 4:
+        reply.batch.batch_id = 0;
+        break;
+      case 5:
+        reply.batch.acknowledgment_deadline_ns = kNow;
+        break;
+      case 6:
+        ++reply.batch.acknowledgment_deadline_ns;
+        break;
+      case 7:
+        reply.batch.capture_stats.queued = 129;
+        break;
+      case 8:
+        ++reply.batch.records[0].worker.high;
+        break;
+      case 9:
+        reply.batch.records[0].reserved[0] = std::byte{1};
+        break;
+      case 10:
+        reply.batch.records[0].monotonic_time_ns = kNow - 1;
+        break;
+      case 11:
+        reply.batch.records[0].monotonic_time_ns = kNow + 1;
+        break;
+      case 12:
+        reply.batch.records[1].sequence = reply.batch.records[0].sequence;
+        break;
+      case 13:
+        reply.batch.records[2] = reply.batch.records[0];
+        break;
+      case 14:
+        reply.status = Status::kIdle;
+        break;
+      case 15:
+        reply.status = static_cast<Status>(65535);
+        break;
+    }
+    if (!WorkerCheck(fixture.receiver.Receive(reply, kNow) == Status::kInvalid &&
+                         !fixture.receiver.PendingForPublication(kNow),
+                     "malformed or forged batch rejected before publication")) {
+      std::cerr << "Mutation field: " << field << '\n';
+      return false;
+    }
+  }
+  WorkerTransferFixture fixture;
+  reb::NativeWorkerPull request;
+  if (!fixture.Configure() || !fixture.Capture() ||
+      fixture.receiver.Request(kNow, request) != Status::kRequestReady) {
+    return false;
+  }
+  const auto reply = fixture.sender.Pull(request, kNow);
+  auto stale = reply;
+  ++stale.epoch.connection.high;
+  if (fixture.receiver.Receive(stale, kNow) != Status::kStaleEpoch ||
+      fixture.receiver.Receive(reply, kNow) != Status::kBatch ||
+      fixture.receiver.Receive(reply, kNow) != Status::kStaleEpoch) {
+    return false;
+  }
+  ++request.request_id;
+  const auto retry = fixture.sender.Pull(request, kNow);
+  if (!WorkerCheck(retry.status == Status::kAwaitingAcknowledgment && retry.batch == reply.batch &&
+                       fixture.sender.stats().staged_records == 1,
+                   "unacknowledged retry cannot drain or mutate staged batch")) {
+    return false;
+  }
+  ++request.request_id;
+  request.acknowledged = {reply.epoch, reply.batch.batch_id + 1};
+  if (fixture.sender.Pull(request, kNow).status != Status::kInvalidAcknowledgment ||
+      fixture.sender.stats().acknowledged_records != 0) {
+    return false;
+  }
+  std::cout << "Native worker transfer rejection: mutations=16 stale_connection=passed "
+               "duplicate_reply=passed immutable_retry=passed invalid_ack=passed\n";
+  return true;
+}
+
+bool CheckNativeWorkerTransferRetirement() {
+  using Status = reb::NativeWorkerTransferStatus;
+  constexpr auto kNow = WorkerTransferFixture::kNow;
+  for (unsigned mode = 0; mode < 5; ++mode) {
+    WorkerTransferFixture fixture;
+    reb::NativeWorkerPull request;
+    if (!fixture.Configure() || !fixture.Capture() ||
+        fixture.receiver.Request(kNow, request) != Status::kRequestReady) {
+      return false;
+    }
+    const auto reply = fixture.sender.Pull(request, kNow);
+    if (fixture.receiver.Receive(reply, kNow) != Status::kBatch) {
+      return false;
+    }
+    std::uint64_t now = kNow;
+    switch (mode) {
+      case 0:
+        if (!fixture.authority.DocumentDestroyed(1, fixture.scope.selected_document, 1))
+          return false;
+        break;
+      case 1:
+        if (fixture.authority.Destroyed(1, fixture.owner.worker) !=
+            reb::NativeWorkerAuthorityStatus::kRecorded)
+          return false;
+        break;
+      case 2:
+        if (fixture.authority.RendererDestroyed(1, fixture.owner.renderer_instance) !=
+            reb::NativeWorkerAuthorityStatus::kRecorded)
+          return false;
+        break;
+      case 3:
+        now = fixture.scope.expires_at_ns;
+        break;
+      case 4:
+        now = reply.batch.acknowledgment_deadline_ns;
+        break;
+    }
+    if (!WorkerCheck(
+            !fixture.receiver.PendingForPublication(now) &&
+                !fixture.receiver.AcknowledgePublished({reply.epoch, reply.batch.batch_id}, now) &&
+                fixture.receiver.retired_records() == 1,
+            "publication rechecks document, worker, renderer, expiry and ack deadline")) {
+      return false;
+    }
+  }
+  WorkerTransferFixture timed;
+  reb::NativeWorkerPull request;
+  if (!timed.Configure()) {
+    return false;
+  }
+  for (std::size_t index = 0; index < 17; ++index) {
+    if (!timed.Capture())
+      return false;
+  }
+  if (timed.receiver.Request(kNow, request) != Status::kRequestReady)
+    return false;
+  const auto reply = timed.sender.Pull(request, kNow);
+  const auto deadline = reply.batch.acknowledgment_deadline_ns;
+  if (!WorkerCheck(timed.sender.Tick(deadline).status == Status::kTimedOut &&
+                       timed.sender.stats().retired_inflight_records == 16 &&
+                       timed.sender.stats().timeouts == 1 && timed.queue.Stats().retired == 1 &&
+                       !timed.queue.IsEnabled() &&
+                       timed.receiver.Request(deadline, request) == Status::kTimedOut &&
+                       timed.receiver.abandoned_requests() == 1,
+                   "idle timeout reports queued, inflight and unanswered losses separately")) {
+    return false;
+  }
+  WorkerTransferFixture disconnected;
+  if (!disconnected.Configure() || !disconnected.Capture() ||
+      disconnected.receiver.Request(kNow, request) != Status::kRequestReady)
+    return false;
+  const auto staged = disconnected.sender.Pull(request, kNow);
+  const auto closed = disconnected.sender.Revoke(staged.epoch, Status::kDisconnected);
+  if (!WorkerCheck(closed.status == Status::kDisconnected &&
+                       closed.transfer_stats.retired_inflight_records == 1 &&
+                       !disconnected.queue.IsEnabled(),
+                   "disconnect retires sender credit"))
+    return false;
+  std::cout << "Native worker transfer retirement: document=passed worker=passed renderer=passed "
+               "expiry=passed timeout=passed disconnect=passed losses=reported\n";
+  return true;
+}
+
+bool CheckNativeWorkerTransferControls() {
+  using Status = reb::NativeWorkerTransferStatus;
+  constexpr auto kNow = WorkerTransferFixture::kNow;
+  WorkerTransferFixture fixture;
+  reb::NativeWorkerPull request;
+  if (!WorkerCheck(fixture.sender.Tick(kNow).status == Status::kDisabled &&
+                       fixture.sender.Pull(request, kNow).status == Status::kDisabled &&
+                       fixture.receiver.Request(kNow, request) == Status::kDisabled &&
+                       !fixture.receiver.Configure({}, kNow),
+                   "unconfigured endpoints stay disabled")) {
+    return false;
+  }
+  if (!fixture.Configure())
+    return false;
+  // Loss with no accepted event still gets a status-only batch and final ack.
+  const reb::NativeWorkerObservationInput invalid{reb::NativeWorkerOperation::kScriptCompiled,
+                                                  reb::NativeWorkerDirection::kNone, 0, -1};
+  if (fixture.queue.Capture(fixture.ticket, invalid, kNow) !=
+          reb::NativeWorkerCaptureStatus::kInvalid ||
+      fixture.receiver.Request(kNow, request) != Status::kRequestReady)
+    return false;
+  const auto loss = fixture.sender.Pull(request, kNow);
+  if (!WorkerCheck(
+          loss.status == Status::kBatch && loss.batch.count == 0 &&
+              loss.batch.capture_stats.dropped == 1 && loss.batch.capture_stats.pending_gap == 1 &&
+              fixture.receiver.Receive(loss, kNow) == Status::kBatch &&
+              fixture.receiver.AcknowledgePublished({loss.epoch, loss.batch.batch_id}, kNow),
+          "stats-only batch exposes loss without a later event"))
+    return false;
+  const auto next = kNow + reb::kNativeWorkerMinPollIntervalNs;
+  fixture.queue.Retire(fixture.ticket);
+  if (fixture.receiver.Request(next, request) != Status::kRequestReady)
+    return false;
+  const auto terminal = fixture.sender.Pull(request, next);
+  if (!WorkerCheck(terminal.status == Status::kBatch && terminal.batch.count == 0 &&
+                       terminal.batch.worker_retired &&
+                       fixture.receiver.Receive(terminal, next) == Status::kBatch &&
+                       fixture.receiver.AcknowledgePublished(
+                           {terminal.epoch, terminal.batch.batch_id}, next),
+                   "idle retirement sends terminal status exactly once"))
+    return false;
+  const auto later = next + reb::kNativeWorkerMinPollIntervalNs;
+  if (fixture.receiver.Request(later, request) != Status::kRequestReady ||
+      fixture.receiver.Receive(fixture.sender.Pull(request, later), later) != Status::kIdle)
+    return false;
+  const auto old_epoch = reb::WorkerTransferEpoch(fixture.lease);
+  if (fixture.sender.Revoke(old_epoch, Status::kRevoked).status != Status::kRevoked)
+    return false;
+  fixture.receiver.Revoke();
+  reb::NativeWorkerLease replacement;
+  if (fixture.authority.Issue(fixture.owner.worker, {90, 91}, later, replacement) !=
+          reb::NativeWorkerAuthorityStatus::kAllowed ||
+      fixture.sender.Configure(replacement, later) != Status::kConfigured ||
+      !fixture.receiver.Configure(replacement, later))
+    return false;
+  if (!WorkerCheck(
+          fixture.sender.Revoke(old_epoch, Status::kRevoked).status == Status::kStaleEpoch &&
+              fixture.queue.IsEnabled() &&
+              fixture.receiver.Receive(loss, later) == Status::kStaleEpoch,
+          "late old-connection controls cannot retire new capture"))
+    return false;
+  std::cout << "Native worker controls: disabled=passed stats_only=passed empty_retirement=passed "
+               "reconfiguration=passed stale_revoke=passed\n";
+  return true;
+}
+
+bool CheckNativeWorkerTransferLifetime() {
+  reb::NativeWorkerObservationQueue queue;
+  reb::NativeWorkerAuthority authority;
+  const reb::NativeWorkerAuthorityScope scope{1,      71,     1,      100'000'000'000ULL,
+                                              {1, 2}, {3, 4}, {5, 6}, {7, 8}};
+  const reb::NativeWorkerOwner owner{{9, 10},
+                                     {11, 12},
+                                     scope.selected_frame,
+                                     reb::NativeWorkerCreatorKind::kDocument,
+                                     scope.selected_document,
+                                     scope.document_generation};
+  reb::NativeWorkerLease lease;
+  if (!authority.Reset(scope, 100) ||
+      authority.Created(scope.observer_epoch, owner, 100) !=
+          reb::NativeWorkerAuthorityStatus::kRecorded ||
+      authority.Issue(owner.worker, {13, 14}, 100, lease) !=
+          reb::NativeWorkerAuthorityStatus::kAllowed) {
+    return false;
+  }
+  {
+    reb::NativeWorkerTransferSender sender(queue);
+    if (sender.Configure(lease, 100) != reb::NativeWorkerTransferStatus::kConfigured) {
+      return false;
+    }
+  }
+  if (queue.IsEnabled()) {
+    std::cerr << "Worker sender destruction left capture enabled\n";
+    return false;
+  }
+  return true;
+}
+
 bool ParseIterations(const int argc, char* argv[], std::uint64_t& iterations) {
   if (argc == 1) {
     return true;
@@ -941,11 +1569,14 @@ int main(const int argc, char* argv[]) {
     return 2;
   }
   if (!RunEventDemo() || !CheckEventJson() || !CheckNativeQueueLimits() ||
-      !CheckNativeWorkerObservations() || !CheckNativeWorkerMessageTags() ||
-      !CheckNativeWorkerObservationConcurrency() || !CheckNativeWorkerSources() ||
-      !CheckNativeWorkerSourceUrls() || !CheckNativeWorkerSourceConcurrency() ||
-      !CheckNativeQueueProducers() || !MeasureNativeQueueReuse(iterations) ||
-      !CheckNativeQueueNotifications(iterations)) {
+      !CheckNativeWorkerTransferLifetime() || !CheckNativeWorkerAuthority() ||
+      !CheckNativeWorkerTransfer() || !CheckNativeWorkerTransferPressure() ||
+      !CheckNativeWorkerTransferRejection() || !CheckNativeWorkerTransferRetirement() ||
+      !CheckNativeWorkerTransferControls() || !CheckNativeWorkerObservations() ||
+      !CheckNativeWorkerMessageTags() || !CheckNativeWorkerObservationConcurrency() ||
+      !CheckNativeWorkerSources() || !CheckNativeWorkerSourceUrls() ||
+      !CheckNativeWorkerSourceConcurrency() || !CheckNativeQueueProducers() ||
+      !MeasureNativeQueueReuse(iterations) || !CheckNativeQueueNotifications(iterations)) {
     std::cerr << "Native event queue validation failed\n";
     return 1;
   }

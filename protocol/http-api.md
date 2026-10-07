@@ -227,7 +227,7 @@ retry mutations after a timeout or dropped connection.
 
 ## Execution metadata
 
-All 23 operations and all 74 top-level request action variants, including the 59
+All 24 operations and all 74 top-level request action variants, including the 59
 debugger actions, carry version 1 `x-reb-execution` metadata. It is a source-owned,
 static advisory catalog. It does not grant permission, verify target ownership,
 report current availability, replace server validation, or prove that an action
@@ -380,3 +380,14 @@ is the machine-readable action-to-schema map.
 - `capture_heap_diff_baseline`: `baseline`.
 
 - `compare_heap_diff`: `diff`.
+
+## Inert evidence package validation
+
+`POST /api/evidence/packages/validate` (`validate_evidence_package`) accepts a
+bounded supplied package directly. It returns `valid`, `invalid`, or
+`unsupported` validation data with `origin: untrusted_input` and
+`authenticity: not_established`; HTTP 200 alone does not imply validity.
+Duplicate JSON keys are rejected before HTTP or CLI materialization. See
+[Evidence Package v1](evidence-package-v1.md) for the closed metadata schema,
+canonical serialization/digest, limits, safe issues, and provenance boundaries.
+No source store or artifact content is accessed, and no export is implied.

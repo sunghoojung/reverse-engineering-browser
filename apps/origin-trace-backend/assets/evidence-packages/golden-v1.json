@@ -1,0 +1,321 @@
+{
+  "format": "reb-evidence-package",
+  "protocol_version": 1,
+  "serialization_profile": "reb-json-semantic-v1",
+  "redaction_profile": "reb-metadata-only-v1",
+  "semantics_profile": "reb-api-marker-v1",
+  "selection": {
+    "events": [
+      {
+        "session_id": "7",
+        "process_id": 42,
+        "sequence_number": "1"
+      },
+      {
+        "session_id": "7",
+        "process_id": 42,
+        "sequence_number": "3"
+      },
+      {
+        "session_id": "7",
+        "process_id": 43,
+        "sequence_number": "1"
+      },
+      {
+        "session_id": "8",
+        "process_id": 42,
+        "sequence_number": "1"
+      }
+    ],
+    "artifacts": [
+      {
+        "session_id": "7",
+        "artifact_id": "9"
+      },
+      {
+        "session_id": "8",
+        "artifact_id": "9"
+      }
+    ]
+  },
+  "provenance": {
+    "origin": "configured_local_stores",
+    "consistency": "cooperative_stopped_store_v1",
+    "producer_build": null,
+    "browser_build": null,
+    "capture_configuration": null,
+    "capture_authorization": "not_attested",
+    "origin_scope": "unknown"
+  },
+  "coverage": {
+    "selection": "complete",
+    "events": {
+      "selection_state": "complete",
+      "selected_count": 4,
+      "source_scan": "complete",
+      "capture_state": "unknown",
+      "limitations": [
+        "capture_configuration_unknown",
+        "metadata_only",
+        "origin_scope_unknown",
+        "producer_build_unknown"
+      ]
+    },
+    "artifacts": {
+      "selection_state": "complete",
+      "selected_count": 2,
+      "source_scan": "complete",
+      "capture_state": "unknown",
+      "limitations": [
+        "capture_configuration_unknown",
+        "creator_identity_incomplete",
+        "metadata_only",
+        "origin_scope_unknown",
+        "producer_build_unknown"
+      ]
+    },
+    "excluded_sections": [
+      "analysis_documents",
+      "artifact_bytes",
+      "debugger_network",
+      "hook_values",
+      "signal_profiles",
+      "trace_edges"
+    ]
+  },
+  "records": {
+    "events": [
+      {
+        "key": {
+          "session_id": "7",
+          "process_id": 42,
+          "sequence_number": "1"
+        },
+        "protocol_version": 3,
+        "monotonic_time_ns": "10",
+        "navigation_id": "1",
+        "frame_id": "1",
+        "thread_id": 1,
+        "tab_id": 0,
+        "artifact_id": "9",
+        "parent_event_id": "0",
+        "request_id": "0",
+        "browser_context_id_high": null,
+        "browser_context_id_low": null,
+        "initiator_request_id": null,
+        "initiator_process_id": null,
+        "category": "web_audio",
+        "type": "api_call",
+        "status_code": null,
+        "error_code": null,
+        "resource_type": null,
+        "flags": 0,
+        "encoded_data_length": null,
+        "decoded_body_length": null,
+        "payload_size": 17,
+        "payload_truncated": false,
+        "operation": "AudioNode.connect",
+        "observation": "marker_observed",
+        "outcome": "not_recorded",
+        "placement": "unknown"
+      },
+      {
+        "key": {
+          "session_id": "7",
+          "process_id": 42,
+          "sequence_number": "3"
+        },
+        "protocol_version": 3,
+        "monotonic_time_ns": "30",
+        "navigation_id": "1",
+        "frame_id": "1",
+        "thread_id": 1,
+        "tab_id": 0,
+        "artifact_id": "0",
+        "parent_event_id": "1",
+        "request_id": "0",
+        "browser_context_id_high": null,
+        "browser_context_id_low": null,
+        "initiator_request_id": null,
+        "initiator_process_id": null,
+        "category": "web_audio",
+        "type": "api_call",
+        "status_code": null,
+        "error_code": null,
+        "resource_type": null,
+        "flags": 0,
+        "encoded_data_length": null,
+        "decoded_body_length": null,
+        "payload_size": 17,
+        "payload_truncated": false,
+        "operation": "AudioNode.connect",
+        "observation": "marker_observed",
+        "outcome": "not_recorded",
+        "placement": "unknown"
+      },
+      {
+        "key": {
+          "session_id": "7",
+          "process_id": 43,
+          "sequence_number": "1"
+        },
+        "protocol_version": 3,
+        "monotonic_time_ns": "10",
+        "navigation_id": "1",
+        "frame_id": "1",
+        "thread_id": 1,
+        "tab_id": 0,
+        "artifact_id": "0",
+        "parent_event_id": "0",
+        "request_id": "0",
+        "browser_context_id_high": null,
+        "browser_context_id_low": null,
+        "initiator_request_id": null,
+        "initiator_process_id": null,
+        "category": "web_audio",
+        "type": "api_call",
+        "status_code": null,
+        "error_code": null,
+        "resource_type": null,
+        "flags": 0,
+        "encoded_data_length": null,
+        "decoded_body_length": null,
+        "payload_size": 17,
+        "payload_truncated": false,
+        "operation": "AudioNode.connect",
+        "observation": "marker_observed",
+        "outcome": "not_recorded",
+        "placement": "unknown"
+      },
+      {
+        "key": {
+          "session_id": "8",
+          "process_id": 42,
+          "sequence_number": "1"
+        },
+        "protocol_version": 3,
+        "monotonic_time_ns": "10",
+        "navigation_id": "1",
+        "frame_id": "1",
+        "thread_id": 1,
+        "tab_id": 0,
+        "artifact_id": "0",
+        "parent_event_id": "0",
+        "request_id": "0",
+        "browser_context_id_high": null,
+        "browser_context_id_low": null,
+        "initiator_request_id": null,
+        "initiator_process_id": null,
+        "category": "web_audio",
+        "type": "api_call",
+        "status_code": null,
+        "error_code": null,
+        "resource_type": null,
+        "flags": 0,
+        "encoded_data_length": null,
+        "decoded_body_length": null,
+        "payload_size": 17,
+        "payload_truncated": false,
+        "operation": "AudioNode.connect",
+        "observation": "marker_observed",
+        "outcome": "not_recorded",
+        "placement": "unknown"
+      }
+    ],
+    "artifacts": [
+      {
+        "key": {
+          "session_id": "7",
+          "artifact_id": "9"
+        },
+        "protocol_version": 1,
+        "navigation_id": "1",
+        "frame_id": "1",
+        "parent_artifact_id": "0",
+        "creator_event_id": "1",
+        "execution_context_id": null,
+        "capture_origin": "unknown",
+        "kind": "javascript",
+        "byte_size": "0",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "sensitive": false,
+        "verification": "sha256_verified_at_export",
+        "content": "omitted"
+      },
+      {
+        "key": {
+          "session_id": "8",
+          "artifact_id": "9"
+        },
+        "protocol_version": 1,
+        "navigation_id": "1",
+        "frame_id": "1",
+        "parent_artifact_id": "0",
+        "creator_event_id": "0",
+        "execution_context_id": null,
+        "capture_origin": "unknown",
+        "kind": "wasm",
+        "byte_size": "0",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "sensitive": false,
+        "verification": "sha256_verified_at_export",
+        "content": "omitted"
+      }
+    ]
+  },
+  "relationships": [
+    {
+      "from_kind": "artifact",
+      "from_key": {
+        "session_id": "7",
+        "artifact_id": "9"
+      },
+      "relation": "artifact_creator",
+      "to_kind": "event",
+      "to_key": null,
+      "resolution": "insufficient_identity"
+    },
+    {
+      "from_kind": "event",
+      "from_key": {
+        "session_id": "7",
+        "process_id": 42,
+        "sequence_number": "1"
+      },
+      "relation": "event_artifact",
+      "to_kind": "artifact",
+      "to_key": {
+        "session_id": "7",
+        "artifact_id": "9"
+      },
+      "resolution": "included"
+    },
+    {
+      "from_kind": "event",
+      "from_key": {
+        "session_id": "7",
+        "process_id": 42,
+        "sequence_number": "3"
+      },
+      "relation": "parent_event",
+      "to_kind": "event",
+      "to_key": {
+        "session_id": "7",
+        "process_id": 42,
+        "sequence_number": "1"
+      },
+      "resolution": "included"
+    }
+  ],
+  "gaps": [
+    {
+      "kind": "creator_identity_incomplete",
+      "artifact_key": {
+        "session_id": "7",
+        "artifact_id": "9"
+      },
+      "creator_event_id": "1"
+    }
+  ],
+  "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+}

@@ -175,6 +175,8 @@ profile across the existing request-ID bridge.
 API for CLI clients. See [HTTP API usage and gaps](http-api.md) for endpoint
 discovery, local request checks, and schema coverage.
 Socket and native custom-scheme transports remain separate contracts.
+[Evidence Package v1](evidence-package-v1.md) defines the metadata-only package
+identity and inert supplied-document validator; it is not a stored-source export.
 
 ## Request field provenance
 

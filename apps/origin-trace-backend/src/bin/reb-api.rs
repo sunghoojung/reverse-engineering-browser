@@ -373,11 +373,16 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
         if raw.len() as u64 > limit {
             return Err("Request body exceeds its byte limit".into());
         }
-        let body: Value = serde_json::from_slice(&raw)?;
-        if !body.is_object() {
-            return Err("Request body must be a JSON object".into());
+        if definition["operationId"] == "validate_evidence_package" {
+            origin_trace_backend::evidence_package::parse_bytes(&raw)?;
+            request = request.header("content-type", "application/json").body(raw);
+        } else {
+            let body: Value = serde_json::from_slice(&raw)?;
+            if !body.is_object() {
+                return Err("Request body must be a JSON object".into());
+            }
+            request = request.json(&body);
         }
-        request = request.json(&body);
     } else if body_file.is_some() {
         return Err("Operation does not accept a body".into());
     }
@@ -630,6 +635,50 @@ mod tests {
         );
         assert!(health.get("actions").is_none());
         assert!(health["requestBody"].is_null());
+    }
+
+    #[test]
+    fn evidence_package_discovery_is_self_contained_and_inert() {
+        let spec = specification().unwrap();
+        let ops = operations(&spec).unwrap();
+        let operation = &ops["validate_evidence_package"];
+        assert_eq!(operation.0, "POST");
+        assert_eq!(operation.1, "/api/evidence/packages/validate");
+        let detail = describe(&spec, operation, None).unwrap();
+        assert_self_contained(&detail);
+        assert_eq!(detail["x-max-body-bytes"], 4 * 1024 * 1024);
+        assert_eq!(detail["x-reb-execution"]["effects"], json!(["analysis"]));
+        assert_eq!(detail["x-reb-execution-policy"]["automatic_retry"], "never");
+        assert!(detail.get("actions").is_none());
+        assert_eq!(
+            detail["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/EvidencePackage"
+        );
+        assert_eq!(
+            detail["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/EvidencePackageValidationResult"
+        );
+        for name in [
+            "EvidencePackage",
+            "EvidencePackageValidationResult",
+            "EvidencePackageEventMetadata",
+            "EvidencePackageArtifactMetadata",
+            "EvidencePackageRelationship",
+            "EvidencePackageGap",
+            "Error",
+            "RebExecutionMetadata",
+        ] {
+            assert!(
+                detail["components"]["schemas"].get(name).is_some(),
+                "{name}"
+            );
+        }
+        assert!(
+            detail["components"]["schemas"]
+                .get("DebuggerAction")
+                .is_none()
+        );
+        assert!(describe(&spec, operation, Some("validate")).is_err());
     }
 
     #[test]

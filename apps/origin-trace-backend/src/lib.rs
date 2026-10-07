@@ -9,6 +9,7 @@ mod durable;
 mod endpoint;
 mod error;
 mod evidence;
+pub mod evidence_package;
 mod native_console;
 mod origin_trace;
 mod provenance;

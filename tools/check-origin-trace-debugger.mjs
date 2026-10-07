@@ -1,3 +1,5 @@
+import {checkTrafficComparisonController,checkCapturedComparisonInteractions} from './check-traffic-comparison-ui.mjs';
+import {checkTrafficComparisonModel} from './check-traffic-comparison.mjs';
 import {canvasBrowserFixture,checkCanvasFixture,checkCanvasInteractions} from './check-canvas-ui.mjs';
 import {checkConsoleDOM, createConsoleFixture, checkConsoleInteractions} from './check-console-workspace.mjs';
 import {checkFloat32Model,float32BrowserFixture,checkFloat32Fixture,checkFloat32Interactions} from './check-float32-ui.mjs';
@@ -34,6 +36,8 @@ const evidenceBrowser = process.argv[2] === "--evidence-ui-browser";
 const comparisonBrowser = process.argv[2] === "--evidence-comparison-ui-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
 const root = process.argv[fieldsOnly || canvasBrowser || sourcesHistoryBrowser || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
+await checkTrafficComparisonModel(root);
+await checkTrafficComparisonController(root);
 await checkConsoleDOM(root);
 await checkCollectionController(root);
 await checkInvestigationCore(root);
@@ -753,6 +757,8 @@ assert.equal(bodyCache.size, 0);
 networkModels.requestsFromDebuggerNetwork(binaryNetwork, [], bodyCache);
 assert.equal(networkModels.requestsFromDebuggerNetwork({...binaryNetwork, capture_enabled: false}, [], bodyCache).length, 0);
 assert.equal(bodyCache.size, 0);
+const truncatedMethodNetwork=networkSnapshot([networkRecord('method-truncated',{method_truncated:true})]);
+assert.equal(networkModels.requestsFromDebuggerNetwork(truncatedMethodNetwork)[0].methodTruncated,true);
 console.log("PASS indexed Traffic correlation, stable ties, body reuse, current-window eviction, capture-off and content search");
 
 // A minimal DOM verifies the real reconciliation code and bounded state, not
@@ -1312,14 +1318,14 @@ const summaryState = {selectedRequestId: "current", requests: [uiRequest("curren
 const summaryElements = {};
 for (const name of ["selectedMethod", "selectedStatus", "selectedUrl", "requestCopyUrl", "requestCollectionPivot", "requestInspector", "requestSearchScope", "requestFilter"]) summaryElements[name] = new TrafficFixtureNode();
 summaryElements.requestSearchScope.value = "url";
-const summaryNodes = new Map(["#exchange-inspector", ".traffic-grid", ".detail-pane", "#request-evidence-toggle", "#request-package-entry"].map(key => [key, new TrafficFixtureNode()]));
+const summaryNodes = new Map(["#exchange-inspector", "#traffic-comparison", ".traffic-grid", ".detail-pane", "#request-evidence-toggle", "#request-package-entry"].map(key => [key, new TrafficFixtureNode()]));
 let renderedSummaryRequest;
 const summaryInspector = runInNewContext(
   appSection("      function updateSelectionSummary(", "      function selectRequest(") +
   appSection("      function renderInspector()", "      function renderEvidence()") + ";renderInspector", {
     state: summaryState, elements: summaryElements, evidencePackagePanel: {sync() {}},
     document: {querySelectorAll: () => [], querySelector: selector => summaryNodes.get(selector)},
-    renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;}, openFieldProvenance() {},
+    renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;}, renderTrafficComparison() {}, openFieldProvenance() {},
   });
 for (const [status, failed] of [["pending", false], [200, false], ["failed", true]]) {
   summaryState.requests = [{...summaryState.requests[0], status, failed}];
@@ -3502,7 +3508,7 @@ async function sourceFactsBrowserFixture() {
       const source=artifacts.find(value=>value.artifact_id===url.searchParams.get('artifact_id') && value.session_id===url.searchParams.get('session_id'));
       if(!source){json(404,{error:'Synthetic exact source not found'});return true;}
       if(fixture.mode==='pending') await new Promise(resolve=>fixture.pending.push(resolve));
-      if(fixture.mode==='error'){json(503,{error:'Synthetic worker unavailable',code:'dependency_unavailable',details:{}});return true;}
+      if(fixture.mode==='error'){json(503,{error:fixture.errorMessage??'Synthetic worker unavailable',code:'dependency_unavailable',details:{}});return true;}
       const value=fixture.factsReports.has(source.artifact_id)?{...fixture.factsReports.get(source.artifact_id),source}:report(source);
       if(fixture.mode==='malformed') value.source={...source,sha256:'b'.repeat(64)};
       json(200,value);return true;
@@ -3691,7 +3697,12 @@ async function checkFactsReferenceInteractions({evaluate,viewport,click,key,whee
   // Real byte-reader request held while a newer selection cancels its owner.
   fixture.previewMode='pending-body';await sourceClick('[data-facts-action="reveal-declaration"]');
   const deadline=Date.now()+5000;while(!fixture.previewPending.length&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,25));assert(fixture.previewPending.length);
-  await sourceClick('[data-facts-action="all-bindings"]');const before=await evaluate('elements.sourcePosition.textContent');
+  await evaluate(`(()=>{const button=document.querySelector('[data-facts-action="all-bindings"]'),pane=button.closest('.debug-panes');const top=()=>button.getBoundingClientRect().top+pane.scrollTop;const before=top();window.__factsCancelGeometry={before};const observe=event=>{if(event.target!==button)return;window.__factsCancelGeometry.after=top();document.removeEventListener('pointerdown',observe,true);};document.addEventListener('pointerdown',observe,true);})()`);
+  await sourceClick('[data-facts-action="all-bindings"]');
+  const cancelGeometry=await evaluate('window.__factsCancelGeometry');
+  assert(Math.abs(cancelGeometry.after-cancelGeometry.before)<1,`Cancellation moved the pressed control: ${JSON.stringify(cancelGeometry)}`);
+  assert(await evaluate("Boolean(document.querySelector('[data-facts-binding-query]'))"),'The first physical All bindings click must complete after cancelling a reveal');
+  const before=await evaluate('elements.sourcePosition.textContent');
   fixture.previewMode='ready';fixture.releasePreview();await until("sourceFactsPanel.model.status!=='loading-source'",'Selection did not retire byte read');
   assert.equal(await evaluate('elements.sourcePosition.textContent'),before,'Cancelled old declaration stole the source range');
   await sourceClick('#source-facts-report [data-fact-id="0"] [data-facts-action="explore-binding"]');
@@ -3713,6 +3724,13 @@ async function checkFactsReferenceInteractions({evaluate,viewport,click,key,whee
   await sourceClick('#source-facts-report [data-fact-id="4"] [data-facts-action="explore-binding"]');
   assert.match(await evaluate("document.querySelector('#source-facts-report').textContent"),/No admitted operations.*not proof of no runtime use/);
   await screenshot('source-facts-references-narrow-empty');
+  fixture.mode='error';fixture.errorMessage='Synthetic worker unavailable. '+ 'Original bytes are unchanged. Inspect the detailed diagnostic and retry explicitly. '.repeat(20);
+  await sourceClick('[data-facts-action="retry-facts"]');
+  await until("sourceFactsPanel.model.status==='error'",'Long diagnostic was not shown');
+  await sourceClick('.source-facts-status');await press('ArrowDown');
+  await until("document.querySelector('.source-facts-status').scrollTop>0",'Long status must be keyboard-scrollable');
+  assert.equal(await evaluate('document.activeElement.getAttribute("aria-label")'),'Source facts status');
+  await screenshot('source-facts-references-narrow-error-status');fixture.mode='partial';fixture.errorMessage=null;
   await sourceClick('[data-facts-action="all-bindings"]');
   await evaluate(`window.retiredFactsQuery=document.querySelector('[data-facts-binding-query]');window.retiredFactsCategory=document.querySelector('[aria-label="JavaScript fact category"]');window.retiredFactsExplore=document.querySelector('[data-facts-action=explore-binding]')`);
   await sourceClick('[data-facts-action="close"]');await viewport(1440,900);
@@ -6048,8 +6066,9 @@ async function checkTrafficBrowser() {
     await evaluate("state.requests=[]; renderRequests(); renderInspector()");
     assert.match(await evaluate("elements.requestRows.textContent"), /No developer evidence/);
     await screenshot("requests-empty");
+    const capturedComparison = await checkCapturedComparisonInteractions({evaluate,viewport,click,key,wheel,screenshot,emptyDebugger:JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/debugger-empty.json'),'utf8'))});
     assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during rendered QA");
-    validation = {status: "passed", path: "browser development UI", source: "synthetic fixture", viewports: [[1440,900],[600,800],[360,740]], checks: ["500-row bound and paging", "synchronized selected summary", "visible bounded narrow split", "independent ledger and body scrolling", "hit-tested pointer controls", "pending to response to failed", "equal-length updates", "stable focus and scroll", "sort/filter selection", "dismissal and Escape", "eviction", "arrow-key rows and tabs", "malformed JSON", "sandboxed HTML", "reduced motion", "Back to traffic", "new capture", "empty/malformed/offline"]};
+    validation = {capturedComparison,status: "passed", path: "browser development UI", source: "synthetic fixture", viewports: [[1440,900],[600,800],[360,740]], checks: ["500-row bound and paging", "synchronized selected summary", "visible bounded narrow split", "independent ledger and body scrolling", "hit-tested pointer controls", "pending to response to failed", "equal-length updates", "stable focus and scroll", "sort/filter selection", "dismissal and Escape", "eviction", "arrow-key rows and tabs", "malformed JSON", "sandboxed HTML", "reduced motion", "Back to traffic", "new capture", "empty/malformed/offline"]};
     }
     diagnostics.phase = "validated";
     }

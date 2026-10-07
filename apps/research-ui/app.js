@@ -1130,6 +1130,7 @@
         } else {
           state.requests = state.nativeRequests;
         }
+        syncTrafficComparison();
       }
 
       function renderShellStatus() {
@@ -1889,15 +1890,20 @@
         updateSelectionSummary(request);
         document.querySelector('.traffic-grid').dataset.detailOpen = String(state.trafficDetailOpen);
         document.querySelector('.detail-pane').hidden = !state.trafficDetailOpen;
-        exchangeInspector.hidden = !showingExchange;
+        const showingComparison = state.inspectorTab === 'compare';
+        const comparisonPanel = document.querySelector('#traffic-comparison');
+        comparisonPanel.hidden = !showingComparison;
+        renderTrafficComparison(comparisonPanel, request, showingComparison);
+        exchangeInspector.hidden = !showingExchange || showingComparison;
         exchangeInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
         const evidenceToggle = document.querySelector('#request-evidence-toggle');
         evidenceToggle.textContent = state.inspectorTab === 'evidence' ? 'Headers' : 'Evidence';
         evidenceToggle.setAttribute('aria-expanded', String(state.inspectorTab === 'evidence'));
         evidenceToggle.disabled = !request;
         elements.requestCollectionPivot.disabled = !request;
-        elements.requestInspector.hidden = showingExchange;
-        document.querySelector('.detail-pane').classList.toggle('showing-exchange', showingExchange);
+        elements.requestInspector.hidden = showingExchange || showingComparison;
+        document.querySelector('.detail-pane').classList.toggle('showing-exchange', showingExchange || showingComparison);
+        if (showingComparison) return;
         if (showingExchange) {
           renderTrafficDetails(exchangeInspector, request, state.inspectorTab, (value, selection) => {
             const identity = investigationRequestIdentity(request);

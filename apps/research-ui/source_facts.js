@@ -358,7 +358,7 @@ function createSourceFactsPanel({getSource, onNavigate, openSidebar}) {
     actions.append(run, cancel, button('Close', () => { details.open = false; controller.cancel(); toggle.focus(); }));
     content.push(actions);
     const status = node('p', model.error || (busy ? model.status === 'loading' ? 'Analyzing immutable JavaScript…' : 'Verifying original UTF-8 bytes…' : model.notice || (model.report ? 'Analysis response loaded. Original evidence is unchanged.' : 'No facts loaded. Analysis never executes this source.')), 'source-facts-status');
-    status.setAttribute('role', model.error ? 'alert' : 'status'); content.push(status);
+    status.setAttribute('role', model.error ? 'alert' : 'status'); status.tabIndex = 0; status.setAttribute('aria-label', 'Source facts status'); content.push(status);
     const report = model.report;
     if (report) {
       const coverage = report.coverage;
@@ -480,7 +480,7 @@ function createSourceFactsPanel({getSource, onNavigate, openSidebar}) {
     // A verified byte reveal deliberately focuses the editor before this render,
     // so it never matches `focused` and cannot have its focus stolen here.
     if (focused) {
-      const controls = [...container.querySelectorAll('button, input, select')];
+      const controls = [...container.querySelectorAll('button, input, select, .source-facts-status')];
       let replacement = controls.find(control => focusedAction ? control.dataset.factsAction === focusedAction &&
         control.closest('[data-fact-id]')?.dataset.factId === focusedRow : focusedLabel && control.getAttribute('aria-label') === focusedLabel);
       if (!replacement || replacement.disabled || replacement.hidden) replacement = controls.find(control => !control.hidden && ['cancel', 'retry-facts', 'analyze-captured-source'].includes(control.dataset.factsAction));

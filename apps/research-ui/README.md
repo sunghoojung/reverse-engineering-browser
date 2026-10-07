@@ -316,6 +316,36 @@ No cache, recording, throttling, or invented waterfall controls are implied.
 The layout follows familiar [network inspection conventions](https://developer.chrome.com/docs/devtools/network/reference)
 while keeping Origin Trace's own controls and Rosé Pine Moon palette.
 
+Traffic’s **Compare** tab pins one exact retained request as a baseline. Select
+another request to compare method, URL, status, request/response headers, and
+request/response bodies without replaying either request. **Clear baseline**
+releases the reference. Concise baseline and selected-request summaries stay
+visible; their disclosure expands the full exact capture identifiers. Demo/sample
+rows cannot be pinned. Native references use
+session/process/event/request IDs; CDP references use target/protocol-request/start
+identity and are never promoted to native provenance. Loss of the exact retained
+record, duplicate identities, an observed target change or debugger generation
+restart expires the baseline permanently until explicitly selected again.
+
+JSON changes use escaped JSON Pointers, preserve number lexemes (including
+integers above 2^53), ignore object-key order, and compare arrays by index. The
+view separately labels exact retained UTF-8 byte equality and structural equality.
+Duplicate keys (including equivalent escaped names), malformed JSON/UTF-8,
+binary MIME types, incomplete capture and unavailable content remain explicitly
+unsupported or inconclusive. Header names are case-insensitive and duplicate
+values retain their order; redacted values never prove equality. Header capture
+completeness cannot be established by the current capture contract.
+
+Comparison is a local interpretation of current retained snapshots, not a frozen
+capture or an assertion about original wire bytes or causation. It retains no body
+copy in navigation, storage, or the baseline reference. Work is capped at 128 KiB
+per body, 4,096 JSON nodes and 24 levels. Each section shows at most 64 changed
+rows, with a shared 64 Ki-character report budget, bounded value previews, and
+explicit omitted counts. Existing bodies are never rewritten. Unchanged refreshes
+preserve the result DOM, focus and scroll; changed results preserve section disclosures
+and summary focus. At most four 128 KiB byte snapshots detect in-place changes;
+leaving the tab releases the result DOM and these snapshots.
+
 The ledger mounts at most 500 fixed-height rows. Previous/Next page through the
 retained window without changing the evidence: the native API retains up to
 5,000 events; the existing CDP window retains up to 1,000 requests. Filtering
@@ -428,7 +458,7 @@ input and output visible with transformation history available on demand.
 | `field_provenance.js`, `../origin-trace-backend/src/provenance.rs` | Selected request strings, bounded source candidates, replay evidence, source identity checks, and explicit value-flow gaps |
 | `request_value_test.js` | Ephemeral request-value capture controls, observation selection, and comparison rendering |
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
-| `traffic_view.js` | Bounded request/response body views, explicit missing-data states, and labeled sample exchanges |
+| `traffic_view.js`, `traffic_comparison.js` | Bounded request/response views, exact retained comparison ownership, lossless structural JSON comparison, explicit missing-data states, and labeled sample exchanges |
 | `source_syntax.js` | Source names, display formatting, and bounded tokenization without DOM or application state |
 | `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion |
 | `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |

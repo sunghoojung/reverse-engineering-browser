@@ -1703,6 +1703,7 @@
             protocolRequestId: record.protocol_request_id,
             initiator: record.initiator,
             urlTruncated: record.url_truncated,
+            methodTruncated: record.method_truncated,
             exchange
           };
         });

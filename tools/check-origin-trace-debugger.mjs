@@ -1167,7 +1167,8 @@ const ownershipFunctionNames = ['liveScriptIdentity', 'sourceIdentity', 'sourceI
   'sourceDisplayView', 'sourceViewLabel', 'sourceDerivedView', 'loadArtifactContent', 'refreshArtifacts',
   'closeSource', 'loadScriptContent', 'sourceRuntimeLine', 'sourceRuntimeColumn', 'prefillHookFromSource',
   'sourceDisplayName', 'sourceIcon', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent', 'updateSourceDecorations', 'breakpointLinesForSource',
-  'revealRuntimeHookHit', 'sourceArtifactIdentityMatches', 'selectArtifact', 'selectScript', 'sourceFormattedView'];
+  'revealRuntimeHookHit', 'sourceArtifactIdentityMatches', 'selectArtifact', 'selectScript', 'sourceFormattedView', 'textElement', 'deobfuscationRow', 'deobfuscationOwner', 'cancelDeobfuscation', 'retryDeobfuscation', 'retireDeobfuscationReveal',
+  'updateDeobfuscationView', 'setDeobfuscationDisclosure', 'revealDeobfuscationChange', 'deobfuscationButton', 'deobfuscationDisclosure', 'renderDeobfuscationReport'];
 const ownershipModels = await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8');
 const ownershipSyntax = await readFile(join(root, 'apps/research-ui/source_syntax.js'), 'utf8');
 const ownershipProvenance = await readFile(join(root, 'apps/research-ui/field_provenance.js'), 'utf8');
@@ -1188,7 +1189,7 @@ function ownedContext(patch = {}) {
     sourceFormatCache:new Map(), wasmRequests:new Map(), wasmCache:new Map(),
     sourceDeobfuscated:false, sourceFormatted:false, sourceWasm:false, sessionMode:'live', ...patch.state};
   const sandbox = {console, state, TextEncoder, TextDecoder, Uint8Array, crypto, AbortController, setTimeout, clearTimeout,
-    sourceFactsFields:sourceFactsUI.sourceFactsFields, sourceFactsIdentity:sourceFactsUI.sourceFactsIdentity, sourceFactsReadBytes:sourceFactsUI.sourceFactsReadBytes,
+    sourceFactsFields:sourceFactsUI.sourceFactsFields, sourceFactsIdentity:sourceFactsUI.sourceFactsIdentity, sourceFactsUnavailable:sourceFactsUI.sourceFactsUnavailable, sourceFactsReadBytes:sourceFactsUI.sourceFactsReadBytes,
     sourceFactsPanel:{original:()=>undefined,cancel(){}}, investigationBeforeSelection(){}, location:{protocol:'http:'}, document:{querySelector:()=>({hidden:true})},
     renderSources(){}, renderSourceHealth(){}, renderShellStatus(){}, renderFingerprintActivity(){},
     runtimeHooksState:()=>({workers:[], isolated:true, target_id:state.debuggerSession?.target?.id}),
@@ -1433,19 +1434,185 @@ class SourceReviewNode {
   set className(value){this.classes=new Set(value.split(' '));}get className(){return [...this.classes].join(' ');}
   get textContent(){return this._text+this.children.map(node=>node.textContent??'').join('');}set textContent(value){this._text=value;this.children=[];}
   setAttribute(key,value){this.attributes[key]=value;}getAttribute(key){return this.attributes[key];}
-  append(...nodes){for(const node of nodes){node.parent=this;this.children.push(node);}}replaceChildren(...nodes){this._text='';this.children=[];this.append(...nodes);}
+  append(...nodes){for(let node of nodes){if(typeof node==='string')node=this.doc.createTextNode(node);node.parent=this;this.children.push(node);}}replaceChildren(...nodes){this._text='';this.children=[];this.append(...nodes);}
   contains(node){return this===node||this.children.some(child=>child.contains?.(node));}addEventListener(key,callback){(this.listeners[key]??=[]).push(callback);}
   getBoundingClientRect(){return {left:0,right:500};}focus(){this.doc.activeElement=this;}scrollIntoView(){}
-  matches(selector){if(selector==='[aria-selected="true"]')return this.attributes['aria-selected']==='true';if(selector==='.source-line[data-line]')return this.classes.has('source-line')&&this.dataset.line!==undefined;if(selector==='.source-line.current')return this.classes.has('source-line')&&this.classes.has('current');if(selector.startsWith('.'))return this.classes.has(selector.slice(1));return this.tagName===selector;}
+  matches(selector){if(selector==='[data-deob-control]')return this.dataset.deobControl!==undefined;if(selector==='[aria-selected="true"]')return this.attributes['aria-selected']==='true';if(selector==='.source-line[data-line]')return this.classes.has('source-line')&&this.dataset.line!==undefined;if(selector==='.source-line.current')return this.classes.has('source-line')&&this.classes.has('current');if(selector.startsWith('.'))return this.classes.has(selector.slice(1));return this.tagName===selector;}
   querySelectorAll(selector){return this.children.flatMap(node=>[...(node.matches?.(selector)?[node]:[]),...(node.querySelectorAll?.(selector)??[])]);}querySelector(selector){return this.querySelectorAll(selector)[0]??null;}closest(selector){return this.matches(selector)?this:this.parent?.closest(selector);}
 }
 function sourceReviewDOM() {
   const document={activeElement:null,querySelector:()=>({hidden:false})};
   document.createElement=tag=>new SourceReviewNode(tag,document);
   document.createTextNode=text=>{const node=new SourceReviewNode('text',document);node.textContent=text;return node;};
-  const elements=Object.fromEntries(['sourceLanguage','sourceCode','sourceCodeEmpty','sourceCodeWrap','sourceEditorTabs','sourceTree'].map(key=>[key,new SourceReviewNode('div',document)]));
+  const elements=Object.fromEntries(['sourceLanguage','sourceCode','sourceCodeEmpty','sourceCodeWrap','sourceEditorTabs','sourceTree','sourcePosition','deobfuscationReport','deobfuscationIntrinsics'].map(key=>[key,new SourceReviewNode('div',document)]));
   return {document,elements};
 }
+{
+  const original='const a=1; const b=2;',artifact=await ownedArtifact('map-complete',original);
+  const {api}=ownedContext();
+  for(const [text,segments] of [
+    ['const b=2;',[{kind:'verbatim',original_start:11,original_end:21,derived_start:0,derived_end:10}]],
+    ['const a=1;',[{kind:'verbatim',original_start:0,original_end:10,derived_start:0,derived_end:10}]],
+    ['(3)',[{kind:'replacement',original_start:0,original_end:0,derived_start:0,derived_end:3}]],
+  ]) {
+    const payload=ownedPayload(artifact,original);payload.representation.text=text;payload.representation.segments=segments;
+    await assert.rejects(api.validateSourceAnalysis(payload,{...artifact,source_type:'artifact'},false),/source map/);
+  }
+  sourceOwnershipReceipt.push({test:'deob_complete_original_map_no_implicit_deletion_or_zero_width_replacement',status:'passed'});
+}
+// Changed-span inspection uses production admission, controller and DOM code.
+// These fixtures never execute analyzed JavaScript and are not rendered QA.
+function ownedDerivedPayload(source, original, replacements) {
+  const payload=ownedPayload(source,original), segments=[];let cursor=0,derived='';
+  const append=(kind,start,end,text)=>{const begin=Buffer.byteLength(derived);derived+=text;segments.push({kind,original_start:Buffer.byteLength(original.slice(0,start)),original_end:Buffer.byteLength(original.slice(0,end)),derived_start:begin,derived_end:Buffer.byteLength(derived)});};
+  for(const [before,after] of replacements){const start=original.indexOf(before,cursor);assert(start>=cursor);if(start>cursor)append('verbatim',cursor,start,original.slice(cursor,start));append('replacement',start,start+before.length,after);cursor=start+before.length;}
+  if(cursor<original.length)append('verbatim',cursor,original.length,original.slice(cursor));
+  payload.representation={text:derived,offset_unit:'utf-8-byte',segments,truncated:false};
+  payload.analysis.representation={status:'derived',derived_bytes:Buffer.byteLength(derived),segment_count:segments.length,truncated:false,transformations:replacements.map((_,index)=>({id:`fixture-family-${index}`,kind:'rewrite',count:1,detail:'Authored aggregate fixture; no per-change rule.'}))};
+  return payload;
+}
+{
+  const original='\ufeffconst 雪="😀";'+Array.from({length:7},(_,i)=>`const v${i}=1+${i};`).join('');
+  const artifact=await ownedArtifact('inspector',original);artifact.content=original;
+  let payload=ownedDerivedPayload(artifact,original,Array.from({length:7},(_,i)=>[`1+${i}`,`(${i+1})`]));
+  payload.analysis.omissions=['Generic unsupported operations remain unresolved.'];
+  payload.analysis.limits={max_source_bytes:4194304,max_transformations:4096};
+  payload.analysis.classification={label:'minified',confidence:95,evidence:[{id:'fixture-signal',detail:'Heuristic fixture signal'}]};
+  payload.analysis.string_tables=Array.from({length:5},(_,i)=>({kind:`table-${i+1}`,offset:0,entry_count:8,encodings:['literal'],decoded_preview:'<script>inert</script>'}));
+  const {document,elements}=sourceReviewDOM();let api;
+  const ctx=ownedContext({state:{artifacts:[artifact],selectedArtifactId:artifact.artifact_id,sourceDeobfuscated:true},document,elements,
+    formatByteSize:value=>`${value} bytes`,renderSources(){api?.renderDeobfuscationReport(api.selectedSource());},fetch:async()=>Response.json(payload)});api=ctx.api;
+  await api.loadDeobfuscation(api.selectedSource());const source=api.selectedSource(),key=api.deobfuscationKey(source),good=ctx.state.deobfuscationCache.get(key),report=elements.deobfuscationReport;
+  assert.equal(ctx.state.deobfuscationRequests.get(key).status,'ready');
+  assert.equal(good.sourceInspection.changes.length,7);assert.equal(good.sourceInspection.changes[0].original_start,original.indexOf('1+0'));
+  assert.match(report.textContent,/7 changed spans/);assert.match(report.textContent,/7 reported rewrites/);assert(!report.textContent.includes('confidence 95'));
+  assert.match(report.textContent,/Recovered tables \(5\)/);assert(report.textContent.includes('table-4'));assert(!report.textContent.includes('table-5'));
+  assert.equal(report.querySelectorAll('script').length,0);assert(report.textContent.includes('<script>inert</script>'));
+  const control=key=>report.querySelectorAll('[data-deob-control]').find(node=>node.dataset.deobControl===key);
+  const click=async key=>{const node=control(key);assert(node && !node.disabled,key);node.focus();await node.listeners.click[0]();};
+  const originalNode=report.querySelectorAll('pre')[0];originalNode.scrollLeft=77;report.scrollTop=43;originalNode.focus();
+  api.renderDeobfuscationReport(api.selectedSource());assert.equal(report.querySelectorAll('pre')[0],originalNode);assert.equal(originalNode.scrollLeft,77);assert.equal(document.activeElement,originalNode);
+  const tables=report.querySelectorAll('details').find(node=>node.querySelector('summary').textContent.startsWith('Recovered tables'));
+  tables.open=true;await click('tables-next'); // Native toggle delivery may still be queued.
+  assert(report.textContent.includes('table-5'));assert(!report.textContent.includes('table-1'));
+  assert.equal(report.querySelectorAll('details').find(node=>node.querySelector('summary').textContent.startsWith('Recovered tables')).open,true);
+  tables.open=false;tables.listeners.toggle[0]({currentTarget:tables});assert.equal(good.inspectorView.open.tables,true,'Detached queued toggle must not overwrite the current disclosure');
+  await click('transformations-next');assert(report.textContent.includes('fixture-family-6'));assert(!report.textContent.includes('fixture-family-0'));
+  await click('change-next');assert.match(report.textContent,/Change 2 of 7/);assert.equal(document.activeElement.dataset.deobControl,'change-next');assert.equal(report.scrollTop,43);
+  for(let i=0;i<5;i++)await click('change-next');assert.equal(document.activeElement.dataset.deobControl,'change-previous');
+  ctx.state.deobfuscationRequests.set(key,{status:'error',error:'Authored retry failure'});api.renderDeobfuscationReport(api.selectedSource());
+  assert.match(report.textContent,/Authored retry failure/);assert.match(report.textContent,/Last successful report remains below/);assert.equal(report.querySelectorAll('pre').length,2);
+  assert.equal(api.sourceDisplayView(api.selectedSource()).content,good.representation.text);
+  const corruptions=[
+    value=>{value.representation.segments.shift();value.representation.text=value.representation.text.slice(good.sourceInspection.changes[0].derived_start);},
+    value=>{const last=value.representation.segments.pop();value.representation.text=value.representation.text.slice(0,last.derived_start);},
+    value=>{value.representation.segments[1].original_end=value.representation.segments[1].original_start;},
+    value=>{value.analysis.representation.transformations[0].count++;},
+    value=>{value.representation.transformations=[{id:'claimed',count:9999,detail:'Untrusted claim'}];},
+    value=>{value.analysis.limits={max_source_bytes:'unbounded'};},
+    value=>{value.engine='unknown-engine';},
+    value=>{value.representation.segments[0].original_end=1;},
+  ];
+  for(const corrupt of corruptions){payload=structuredClone(good);corrupt(payload);await api.loadDeobfuscation(api.selectedSource(),{retry:true});assert.equal(ctx.state.deobfuscationRequests.get(key).status,'error');assert.equal(ctx.state.deobfuscationCache.get(key),good);}
+  // A stale control must not affect a fresh owner with different assumption mode.
+  const stale=control('retry');ctx.state.deobfuscationAssumeIntrinsics=true;const before=ctx.state.deobfuscationRequests.size;await stale.listeners.click[0]();assert.equal(ctx.state.deobfuscationRequests.size,before);
+  api.releaseSourcePreview(source);ctx.state.selectedArtifactId=null;api.renderDeobfuscationReport(null);assert.equal(report.deobfuscationRender,null);assert.equal(report.querySelectorAll('pre').length,0);
+  sourceOwnershipReceipt.push({test:'deob_changed_spans_unicode_paging_inert_reports_focus_retry_and_admission',status:'passed',changes:7,tables:5,corruptions:corruptions.length});
+}
+{
+  const original='const result=1+2;',artifact=await ownedArtifact('deob-cancel',original);artifact.content=original;
+  const gate=ownedDeferred();let calls=0;
+  const {api,state}=ownedContext({state:{artifacts:[artifact],selectedArtifactId:artifact.artifact_id},fetch:async()=>{calls++;await gate.promise;return Response.json(ownedDerivedPayload(artifact,original,[['1+2','(3)']]));}});
+  const source=api.selectedSource(),key=api.deobfuscationKey(source),pending=api.loadDeobfuscation(source),request=state.deobfuscationRequests.get(key);
+  api.cancelDeobfuscation(source,request);assert.equal(request.status,'cancelled');await api.loadDeobfuscation(source);assert.equal(calls,1);
+  const newer=api.loadDeobfuscation(source,{retry:true}),newRequest=state.deobfuscationRequests.get(key);api.cancelDeobfuscation(source,request);assert.equal(newRequest.status,'loading');api.cancelDeobfuscation(source,newRequest);
+  gate.resolve();await Promise.all([pending,newer]);assert.equal(state.deobfuscationCache.size,0);assert.equal(request.status,'cancelled');
+  const second=ownedDeferred();const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(original));let hashing=false;
+  const hashCtx=ownedContext({state:{artifacts:[artifact],selectedArtifactId:artifact.artifact_id},crypto:{subtle:{digest(){hashing=true;return second.promise;}}},fetch:async()=>Response.json(ownedDerivedPayload(artifact,original,[['1+2','(3)']]))});
+  const hashPending=hashCtx.api.loadDeobfuscation(hashCtx.api.selectedSource());for(let i=0;i<20&&!hashing;i++)await new Promise(resolve=>setTimeout(resolve,1));assert(hashing);
+  hashCtx.api.cancelDeobfuscation(hashCtx.api.selectedSource());second.resolve(hash);await hashPending;assert.equal(hashCtx.state.deobfuscationCache.size,0);
+  sourceOwnershipReceipt.push({test:'deob_explicit_cancel_late_body_and_digest_no_implicit_retry',status:'passed'});
+}
+{
+  const original='const result="'+('x'.repeat(2047))+'😀'+('y'.repeat(64))+'";',artifact=await ownedArtifact('101',original);artifact.content=original;
+  const before=original.slice(13,-1),payload=ownedDerivedPayload(artifact,original,[[before,'("short")']]);
+  const {document,elements}=sourceReviewDOM();const navigated=[];
+  const context=ownedContext({state:{artifacts:[artifact],selectedArtifactId:artifact.artifact_id},document,elements,formatByteSize:String,
+    sourceFactsPanel:{original:()=>undefined,cancel(){},model:{status:'ready',error:''},navigate:async range=>navigated.push(range)},fetch:async()=>Response.json(payload)});
+  await context.api.loadDeobfuscation(context.api.selectedSource());context.api.renderDeobfuscationReport(context.api.selectedSource());
+  const report=elements.deobfuscationReport,pre=report.querySelectorAll('pre')[0];assert(pre.textContent.length<=2048);assert(!/[\uD800-\uDBFF]$/.test(pre.textContent));assert.match(report.textContent,/Snippet shows/);
+  const good=context.api.selectedSource().deobfuscation;await context.api.revealDeobfuscationChange(context.api.selectedSource(),good.inspectorView);
+  assert.equal(navigated.length,1);assert.equal(navigated[0].start,payload.representation.segments[1].original_start);assert.equal(navigated[0].end,payload.representation.segments[1].original_end);
+  sourceOwnershipReceipt.push({test:'deob_bounded_snippet_and_verified_original_range_handoff',status:'passed'});
+}
+
+{
+  for (const action of ['option','replacement','selection','eviction']) {
+    const original='const result=1+2;',artifact=await ownedArtifact('102',original);artifact.content=original;
+    const payload=ownedDerivedPayload(artifact,original,[['1+2','(3)']]),gate=ownedDeferred();let navigations=0;
+    const {document,elements}=sourceReviewDOM();
+    const ctx=ownedContext({state:{artifacts:[artifact],selectedArtifactId:artifact.artifact_id},document,elements,formatByteSize:String,fetch:async()=>Response.json(payload)});
+    await ctx.api.loadDeobfuscation(ctx.api.selectedSource());const source=ctx.api.selectedSource(),good=source.deobfuscation,view=good.inspectorView,key=ctx.api.deobfuscationKey(source);
+    const facts=sourceFactsUI.createSourceFactsController({getSource:ctx.api.selectedSource,protocol:'http:',onChange(){},onNavigate(){navigations++;},cryptoApi:crypto,
+      fetcher:async()=>{await gate.promise;return new Response(original,{headers:{'X-Artifact-Total-Bytes':String(Buffer.byteLength(original)),'X-Artifact-Offset':'0','X-Artifact-Truncated':'false'}});}});
+    ctx.sandbox.sourceFactsPanel=facts;
+    const pending=ctx.api.revealDeobfuscationChange({...source,deobfuscationAssumption:false},view);assert(view.revealing);
+    if(action==='option')ctx.state.deobfuscationAssumeIntrinsics=true;
+    if(action==='replacement')ctx.state.deobfuscationCache.set(key,{...good,inspectorView:{change:0,pages:{},open:{},notice:''}});
+    if(action==='selection')ctx.api.updateDeobfuscationView(source,view,'changes',1);
+    if(action==='eviction')ctx.api.releaseSourcePreview(source);
+    gate.resolve();await pending;assert.equal(navigations,0,action);assert.equal(view.revealing,false,action);assert.notEqual(facts.model.status,'loading-source',action);
+  }
+  sourceOwnershipReceipt.push({test:'deob_reveal_guard_before_real_facts_navigation_option_report_selection_eviction',status:'passed'});
+}
+{
+  const original='const result=1+2;',artifact=await ownedArtifact('103',original);artifact.content=original;
+  const payload=ownedDerivedPayload(artifact,original,[['1+2','(3)']]),oldGate=ownedDeferred(),factsGate=ownedDeferred();let factsSignal;
+  const dom=sourceReviewDOM();
+  const ctx=ownedContext({...dom,formatByteSize:String,state:{artifacts:[artifact],selectedArtifactId:artifact.artifact_id},fetch:async()=>Response.json(payload)});
+  await ctx.api.loadDeobfuscation(ctx.api.selectedSource());const source=ctx.api.selectedSource(),view=source.deobfuscation.inspectorView;
+  const facts=sourceFactsUI.createSourceFactsController({getSource:ctx.api.selectedSource,protocol:'http:',onChange(){},onNavigate(){throw Error('Retired reveal navigated');},cryptoApi:crypto,
+    fetcher:async(url,options)=>{if(url.startsWith('/api/source-facts')){factsSignal=options.signal;await factsGate.promise;return Response.json({});}await oldGate.promise;return new Response(original);}});
+  ctx.sandbox.sourceFactsPanel=facts;const old=ctx.api.revealDeobfuscationChange(source,view);facts.cancel();const unrelated=facts.load();assert(factsSignal&&!factsSignal.aborted);
+  ctx.api.retireDeobfuscationReveal(view);assert.equal(factsSignal.aborted,false,'Retiring an old reveal must not cancel newer unrelated Facts work');
+  facts.cancel();oldGate.resolve();factsGate.resolve();await Promise.all([old,unrelated]);
+  sourceOwnershipReceipt.push({test:'deob_owned_reveal_cancellation_preserves_unrelated_facts',status:'passed'});
+}
+
+{
+  for(const original of ['const value=1+2;','const 雪="😀";\nconst value=1+2;','\n'.repeat(20000)+'const value=1+2;']) {
+    const script={script_id:'deob-live',target_id:'owned-page',hash:'opaque-token',language:'JavaScript',length:original.length,source_type:'script',kind:'javascript',start_line:4,start_column:2};
+    const payload=ownedDerivedPayload(script,original,[['1+2','(3)']]);payload.analysis.source.sha256=await ownershipHash(original);
+    const {document,elements}=sourceReviewDOM();elements.sourceSidebar=document.createElement('aside');elements.sourcePosition.textContent='Existing source position';
+    const line=original.split('\n').length-1,row=document.createElement('span');row.className='source-line';row.dataset.line=String(5+line);elements.sourceCode.append(row);
+    const ctx=ownedContext({state:{debuggerSession:{target:{id:'owned-page'},scripts:[script]},selectedScriptId:script.script_id,sourceDeobfuscated:true,sourceSidebarOpen:true},document,elements,formatByteSize:String,
+      getComputedStyle:()=>({position:'absolute'}),renderSourceSidebar(){elements.sourceSidebar.hidden=!ctx.state.sourceSidebarOpen;},
+      sourceFactsPanel:{original:()=>undefined,cancel(){},navigate(){throw Error('Live text must not use captured Facts');}},
+      fetch:async url=>url.startsWith('/api/debugger/source')?Response.json({protocol_version:1,script_id:script.script_id,source:original,truncated:false}):Response.json(payload)});
+    runInNewContext(sourceProductionFunction('revealOriginalLine'),ctx.sandbox);
+    await ctx.api.loadScriptContent(script);await ctx.api.loadDeobfuscation(ctx.api.selectedSource());const good=ctx.api.selectedSource().deobfuscation;
+    await ctx.api.revealDeobfuscationChange(ctx.api.selectedSource(),good.inspectorView);
+    if(line>=20000){assert.match(good.inspectorView.notice,/20,000/);assert.equal(ctx.state.sourceDeobfuscated,true);assert.equal(elements.sourcePosition.textContent,'Existing source position');}
+    else {assert.equal(document.activeElement,row);assert.equal(elements.sourceSidebar.hidden,true);assert.match(elements.sourcePosition.textContent,new RegExp(`Line ${5+line}, Column ${13+(line===0?2:0)}`));}
+    ctx.state.debuggerSession.scripts=[{...script,target_id:'replacement-page'}];const before=document.activeElement;await ctx.api.revealDeobfuscationChange(script,good.inspectorView);assert.equal(document.activeElement,before);
+  }
+  const legacyOriginal='const x=1+2;',artifact=await ownedArtifact('deob-legacy',legacyOriginal);artifact.content=legacyOriginal;
+  const legacy=ownedDerivedPayload(artifact,legacyOriginal,[['1+2','(3)']]);legacy.engine='python-lexical';legacy.representation.offset_unit='unicode-code-point';
+  const {document,elements}=sourceReviewDOM();const legacyContext=ownedContext({state:{artifacts:[artifact],selectedArtifactId:artifact.artifact_id},document,elements,formatByteSize:String,fetch:async()=>Response.json(legacy)});
+  await legacyContext.api.loadDeobfuscation(legacyContext.api.selectedSource());legacyContext.api.renderDeobfuscationReport(legacyContext.api.selectedSource());
+  assert.match(elements.deobfuscationReport.textContent,/Legacy code-point map/);assert.equal(elements.deobfuscationReport.querySelectorAll('pre').length,0);
+  assert.equal(legacyContext.api.selectedSource().deobfuscation.sourceInspection.byteRanges,false);
+  const nativeArtifact=await ownedArtifact('104',legacyOriginal);nativeArtifact.content=legacyOriginal;const nativePayload=ownedDerivedPayload(nativeArtifact,legacyOriginal,[['1+2','(3)']]);
+  const nativeDOM=sourceReviewDOM(),native=ownedContext({state:{artifacts:[nativeArtifact],selectedArtifactId:'104'},...nativeDOM,location:{protocol:'reb:'},formatByteSize:String,fetch:async()=>Response.json(nativePayload)});
+  await native.api.loadDeobfuscation(native.api.selectedSource());native.api.renderDeobfuscationReport(native.api.selectedSource());
+  assert.match(nativeDOM.elements.deobfuscationReport.textContent,/Unavailable in stored-evidence native mode/);assert.equal(nativeDOM.elements.deobfuscationReport.querySelectorAll('[data-deob-control]').find(node=>node.dataset.deobControl==='reveal').disabled,true);
+  const empty=ownedPayload(nativeArtifact,legacyOriginal);empty.analysis.representation={transformations:[]};
+  const emptyDOM=sourceReviewDOM(),emptyCtx=ownedContext({state:{artifacts:[nativeArtifact],selectedArtifactId:'104'},...emptyDOM,formatByteSize:String,fetch:async()=>Response.json(empty)});
+  await emptyCtx.api.loadDeobfuscation(emptyCtx.api.selectedSource());emptyCtx.api.renderDeobfuscationReport(emptyCtx.api.selectedSource());assert.match(emptyDOM.elements.deobfuscationReport.textContent,/0 reported rewrites/);
+
+  sourceOwnershipReceipt.push({test:'deob_owned_live_range_target_refusal_and_qualified_legacy_map',status:'passed'});
+}
+
 {
   const text='const a = 1;', script={script_id:'mapped',target_id:'page-1',hash:'opaque-mapped-version',language:'JavaScript',length:text.length,source_type:'script',kind:'javascript',start_line:0,start_column:0,content:text};
   for(const mode of ['pretty','derived']) {
@@ -1874,7 +2041,13 @@ async function sourceFactsBrowserFixture() {
       const source=live?{...live.source,source_type:'script'}:artifacts.find(value=>value.artifact_id===url.searchParams.get('artifact_id'));
       if(!source){json(404,{error:'Synthetic source unavailable'});return true;}
       const text=live?live.text:documents.get(source.artifact_id).toString('utf8');
-      const payload=ownedPayload(source,text);payload.analysis.source.sha256=await ownershipHash(text);
+      if(fixture.deobMode==='error'){json(503,{error:'Authored analyzer retry failure'});return true;}
+      const payload=fixture.changedSource&&source.artifact_id===fixture.changedSource?ownedDerivedPayload(source,text,Array.from({length:7},(_,i)=>[`1+${i}`,`(${i+1})`])):ownedPayload(source,text);
+      if(fixture.changedSource&&source.artifact_id===fixture.changedSource){
+        payload.analysis.omissions=['Unsupported runtime behavior remains unresolved.'];
+        payload.analysis.string_tables=Array.from({length:5},(_,i)=>({kind:`table-${i+1}`,offset:0,entry_count:8,encodings:['literal'],decoded_preview:'<script>inert fixture</script>'}));
+      }
+      payload.analysis.source.sha256=await ownershipHash(text);
       payload.analysis.source.lines=text.split('\n').length;
       payload.analysis.assumptions=url.searchParams.get('assume_intrinsics')==='1'?['standard-intrinsics']:[];
       if(fixture.deobMode==='wrong-id')payload.artifact_id='999';
@@ -2256,7 +2429,49 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
     const failures=await evaluate('(()=>{const observer=globalThis.__sourceOwnershipQA;if(!observer)return null;const failures=observer.failures();observer.restore();return failures;})()');
     assert(failures&&failures.count===0&&failures.pending===0,`Observed Sources loader errors or unfinished work: ${JSON.stringify(failures)}`);
   }
-  return {status:'passed',ownership_receipts:ownershipReceipts,path:'browser development Sources UI',source:'synthetic captured artifacts and validated debugger replies; no analyzed JavaScript executed',viewports:[[1440,900],[760,560],[360,740]],checks:['live pretty/derived mapped gutters survive background refresh and navigate by real click','editor scroll and keyboard focus retained at wide/narrow widths','mixed-tab Home/End and selected focus','close pending live body and analyzer responses','same script ID/opaque token on replacement target rejects old body','no debugger mutation from mapped links','pending preview body plus catalog refresh','no automatic Deob on source entry','mismatched analyzer and preview hash refusal','explicit analysis and preview retry','unchanged editor scroll and Find occurrence','keyboard file tabs and Delete cleanup','real hit-tested Facts controls','offline HTTP artifact availability','100-row paging','keyboard categories and disclosure','UTF-8/BOM original-byte navigation','profile-complete/partial/truncated/unknown/unavailable/error states','identity rejection and prior-report retention','Cancel and explicit retry','stale selection','Close/Escape/reopen focus','narrow overlay dismissal','workspace return']};
+  // Real controls for the exact-span inspector over inert authored replies.
+  const changedText='\ufeffconst 雪="😀";'+Array.from({length:7},(_,i)=>`const v${i}=1+${i};`).join('\n');
+  fixture.changedSource='11';await fixture.addSource('11',changedText);await evaluate('refreshArtifacts()');
+  await click('[data-source-collection="captured"]');await click('[data-artifact-id="11"]');
+  await until("selectedSource()?.content?.includes('const v6')",'Changed-span fixture did not load');
+  if(!await evaluate('state.sourceDeobfuscated'))await click('#source-deob');
+  await until("selectedSource()?.deobfuscation?.sourceInspection?.changes.length===7",'Validated changed spans did not arrive');
+  if(await evaluate("document.querySelector('#source-sidebar').hidden"))await click('#source-sidebar-toggle');
+  if(!await evaluate("document.querySelector('#deobfuscation-details').open"))await sourceClick('#deobfuscation-details > summary');
+  await sourceClick('[data-deob-control="change-next"]');await press('Enter');
+  assert.match(await evaluate("elements.deobfuscationReport.textContent"),/Change 3 of 7/);
+  assert.equal(await evaluate('document.activeElement.dataset.deobControl'),'change-next');
+  await sourceClick('[data-deob-control="disclosure-tables"]');await sourceClick('[data-deob-control="tables-next"]');
+  assert(await evaluate("elements.deobfuscationReport.textContent.includes('table-5')"),'Generic omissions hid recovered tables');
+  await sourceClick('[data-deob-control="disclosure-transformations"]');await sourceClick('[data-deob-control="transformations-next"]');
+  assert(await evaluate("elements.deobfuscationReport.textContent.includes('fixture-family-6')"),'Transformation summaries were silently truncated');
+  await sourceClick('[data-deob-control="change-previous"]');await screenshot('deobfuscation-inspector-wide');
+  fixture.deobMode='error';await sourceClick('[data-deob-control="reanalyze"]');
+  await until("elements.deobfuscationReport.textContent.includes('Authored analyzer retry failure')",'Retry error did not remain visible');
+  assert.equal(await evaluate("elements.deobfuscationReport.querySelectorAll('pre').length"),2,'Retry failure hid the previous snippets');
+  await evaluate(`(()=>{const original={analysis:loadDeobfuscation};const observer=(${sourceOwnershipOperationObserver.toString()})(original,sourceIdentity);globalThis.__sourceOwnershipQA={...observer,restore(){loadDeobfuscation=original.analysis;delete globalThis.__sourceOwnershipQA;}};loadDeobfuscation=observer.wrappers.analysis;})()`);
+  try {
+    fixture.deobMode='pending';await sourceClick('[data-deob-control="retry"]');
+    const deobDeadline=Date.now()+5000;while(!fixture.deobPending.length&&Date.now()<deobDeadline)await new Promise(resolve=>setTimeout(resolve,25));assert(fixture.deobPending.length);
+    const cancelledOperation=await heldOperation('analysis');
+    await sourceClick('[data-deob-control="cancel"]');fixture.deobMode='ready';
+    const cancelledSettlement=await releaseAndSettle(cancelledOperation,fixture.release);
+    assert.equal(await evaluate("state.deobfuscationRequests.get(deobfuscationKey(selectedSource()))?.status"),'cancelled');
+    receipt('deobfuscation-cancelled-late-reply',{...cancelledSettlement,reportRetained:await evaluate("elements.deobfuscationReport.querySelectorAll('pre').length===2")});
+  } finally {
+    const failures=await evaluate('(()=>{const observer=globalThis.__sourceOwnershipQA;const failures=observer.failures();observer.restore();return failures;})()');
+    assert.equal(failures.count,0);assert.equal(failures.pending,0);
+  }
+  await viewport(360,740);await screenshot('deobfuscation-inspector-narrow-cancelled');
+  assert(await evaluate('document.documentElement.scrollWidth<=innerWidth'),'Inspector overflows the narrow viewport');
+  await sourceClick('[data-deob-control="reveal"]');
+  await until("!state.sourceDeobfuscated&&!state.sourceFormatted&&document.activeElement.classList.contains('source-line')",'Original range did not navigate with keyboard focus');
+  assert.match(await evaluate('elements.sourcePosition.textContent'),/Original UTF-8 bytes/);
+  assert.equal(fixture.documents.get('11').toString('utf8'),changedText,'Inspector modified original fixture bytes');
+  assert.equal(fixture.rejectedWrites.length,0,'Inspector executed a debugger mutation');
+  await screenshot('deobfuscation-inspector-narrow-original');await viewport(1440,900);
+  receipt('deobfuscation-inspector-controls',{changedSpans:7,recoveredTables:5,viewports:[1440,360],retryPreservesReport:true,cancelRetiresRequest:true,originalBytesPreserved:true});
+  return {status:'passed',ownership_receipts:ownershipReceipts,path:'browser development Sources UI',source:'synthetic captured artifacts and validated debugger replies; no analyzed JavaScript executed',viewports:[[1440,900],[760,560],[360,740]],checks:['exact changed-span snippets, keyboard navigation, paging, retry preservation, cancel terminal receipt and original reveal at wide/360px widths','live pretty/derived mapped gutters survive background refresh and navigate by real click','editor scroll and keyboard focus retained at wide/narrow widths','mixed-tab Home/End and selected focus','close pending live body and analyzer responses','same script ID/opaque token on replacement target rejects old body','no debugger mutation from mapped links','pending preview body plus catalog refresh','no automatic Deob on source entry','mismatched analyzer and preview hash refusal','explicit analysis and preview retry','unchanged editor scroll and Find occurrence','keyboard file tabs and Delete cleanup','real hit-tested Facts controls','offline HTTP artifact availability','100-row paging','keyboard categories and disclosure','UTF-8/BOM original-byte navigation','profile-complete/partial/truncated/unknown/unavailable/error states','identity rejection and prior-report retention','Cancel and explicit retry','stale selection','Close/Escape/reopen focus','narrow overlay dismissal','workspace return']};
 }
 
 // Contract-valid synthetic investigation records, shared by the production-model

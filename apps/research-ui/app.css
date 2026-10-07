@@ -2280,6 +2280,21 @@
       .deobfuscation-row { display: grid; grid-template-columns: minmax(120px, .35fr) minmax(0, 1fr); gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line-soft); color: var(--muted); font-size: 11px; }
       .deobfuscation-row strong { color: var(--faint); font: 650 10px var(--mono); text-transform: uppercase; }
       .deobfuscation-row span { overflow-wrap: anywhere; }
+      #deobfuscation-report { min-width: 0; }
+      #deobfuscation-report .deobfuscation-row { grid-template-columns: minmax(0, .36fr) minmax(0, 1fr); gap: 8px; }
+      #deobfuscation-report .deobfuscation-row strong { overflow-wrap: anywhere; }
+      .deobfuscation-title { display: block; padding: 10px 0 6px; color: var(--text); font-size: 12px; }
+      .deobfuscation-note, .deobfuscation-notice { margin: 8px 0; overflow-wrap: anywhere; color: var(--muted); font-size: 11px; line-height: 1.6; }
+      .deobfuscation-notice { padding: 8px; border-left: 2px solid var(--amber); background: var(--panel-2); }
+      .deobfuscation-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 10px 0; }
+      .deobfuscation-controls .secondary-button, #deobfuscation-report > .secondary-button { max-width: 100%; white-space: normal; }
+      .deobfuscation-change-position { flex: 1 1 90px; color: var(--accent); font: 10px var(--mono); text-align: center; }
+      .deobfuscation-snippet { min-width: 0; margin: 10px 0; }
+      .deobfuscation-snippet > strong { display: block; overflow-wrap: anywhere; color: var(--faint); font: 10px/1.5 var(--mono); }
+      .deobfuscation-snippet pre { max-width: 100%; max-height: 160px; margin: 5px 0; padding: 9px; overflow: auto; border: 1px solid var(--line); border-radius: 4px; background: var(--chrome); color: var(--text); font: 11px/1.65 var(--mono); white-space: pre; }
+      .deobfuscation-disclosure { min-width: 0; margin-top: 12px; border-top: 1px solid var(--line-soft); }
+      .deobfuscation-disclosure > summary { padding: 9px 0; overflow-wrap: anywhere; color: var(--text); font-size: 11px; cursor: pointer; }
+      #deobfuscation-report [data-deob-control]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
       .vm-metric span { display: block; color: var(--faint); font: 10px var(--mono); text-transform: uppercase; }
       .vm-metric strong { display: block; margin-top: 6px; font: 500 18px var(--mono); }
       .vm-detail-card { border: 1px solid var(--line); background: var(--panel-2); }

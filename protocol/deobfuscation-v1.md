@@ -26,6 +26,16 @@ adding offsets. The UI uses UTF-16 to match JavaScript and debugger columns.
 text to a zero-width original position. Rust `replacement` segments anchor a
 folded value to the whole original expression, and a position within one maps
 to that expression's start. Transformations never change retained artifact bytes.
+Sources admits only known Rust/Oxc and legacy Python engines, ordered maps and
+complete contiguous derived coverage. Replacement original spans must be
+nonempty; synthetic spans must be zero-width. Rust maps must additionally cover
+the complete original contiguously and use UTF-8 bytes, and supplied aggregate
+transformation counts must sum to the number of mapped replacements (at most
+4,096). Original and derived byte sizes, scalar boundaries, and verbatim slices
+are checked before a changed span is exposed. Legacy code-point maps may omit
+original formatting whitespace and are ineligible for exact-byte change
+inspection. Missing optional summaries remain
+unknown. Aggregate rule families do not identify individual replacement rules.
 
 Sources are capped at 4 MiB. Worker analysis has a five-second adapter deadline, at most
 4,096 rewrites, and 64 diagnostics. `truncated` means a derivation or rewrite

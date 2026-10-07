@@ -15,13 +15,16 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
+import {checkCollectionController, collectionBrowserFixture, checkCollectionInteractions} from "./check-origin-trace-collection.mjs";
+const collectionBrowser = process.argv[2] === "--collection-ui-browser";
 const consoleBrowser = process.argv[2] === "--console-ui-browser";
 const trafficBrowser = process.argv[2] === "--traffic-ui-browser";
 const sourceFactsBrowser = process.argv[2] === "--source-facts-ui-browser";
 const evidenceBrowser = process.argv[2] === "--evidence-ui-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
-const root = process.argv[fieldsOnly || trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser ? 3 : 2] || new URL("..", import.meta.url).pathname;
+const root = process.argv[fieldsOnly || trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser || collectionBrowser ? 3 : 2] || new URL("..", import.meta.url).pathname;
 await checkConsoleDOM(root);
+await checkCollectionController(root);
 // Facts are UI projections over the already validated Rust contract. These
 // fixtures exercise identity and stale/cancelled request ownership, not JS execution.
 const sourceFactsUI = runInNewContext(
@@ -1688,10 +1691,11 @@ async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,scre
 async function checkTrafficBrowser() {
   const executable = process.env.REB_UI_CHROMIUM;
   assert(executable, "Set REB_UI_CHROMIUM to the installed Chrome/Chromium executable. Sandbox flags are not overridden.");
-  const directory = await mkdtemp(join(tmpdir(), consoleBrowser ? "reb-console-ui-" : evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
-  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", consoleBrowser ? "console-ui-qa" : evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
+  const directory = await mkdtemp(join(tmpdir(), collectionBrowser ? "reb-collection-ui-" : consoleBrowser ? "reb-console-ui-" : evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
+  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", collectionBrowser ? "collection-ui-qa" : consoleBrowser ? "console-ui-qa" : evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
   await mkdir(output, {recursive: true});
   let trafficApiMode = "offline";
+  const collectionFixture = collectionBrowser ? collectionBrowserFixture() : null;
   const factsFixture = sourceFactsBrowser ? await sourceFactsBrowserFixture() : null;
   const consoleFixture = consoleBrowser ? createConsoleFixture() : null;
   const evidenceFixture = evidenceBrowser ? evidenceBrowserFixture() : null;
@@ -1701,6 +1705,7 @@ async function checkTrafficBrowser() {
   }
   const server = createServer(async (request, response) => {
     const path = new URL(request.url, "http://127.0.0.1").pathname;
+    if (collectionFixture && await collectionFixture.handle(request, response)) return;
     if (factsFixture && await factsFixture.handle(request, response)) return;
     if (consoleFixture && await consoleFixture.handle(request, response)) return;
     if (evidenceFixture && await evidenceFixture.handle(request, response)) return;
@@ -1908,7 +1913,7 @@ async function checkTrafficBrowser() {
     };
     captureFailure = async () => {
       const result = await command("Page.captureScreenshot", {format: "png"});
-      await writeFile(join(output, consoleBrowser ? "console-failure.png" : evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
+      await writeFile(join(output, collectionBrowser ? "collection-failure.png" : consoleBrowser ? "console-failure.png" : evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
     };
     await viewport(1440, 900);
     await command("Page.navigate", {url: `http://127.0.0.1:${server.address().port}/`});
@@ -1918,7 +1923,10 @@ async function checkTrafficBrowser() {
     }
     assert(await evaluate("typeof renderRequests === 'function'"), "Application did not initialize");
     diagnostics.phase = "interactive validation";
-    if (consoleBrowser) {
+    if (collectionBrowser) {
+      validation = await checkCollectionInteractions({evaluate,viewport,click,key,wheel,type:text=>command("Input.insertText",{text}),screenshot,fixture:collectionFixture});
+      assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Collection QA");
+    } else if (consoleBrowser) {
       validation = await checkConsoleInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:consoleFixture,type:text=>command("Input.insertText",{text}),recordGeometry:value=>{diagnostics.console_upper_panes=[...(diagnostics.console_upper_panes??[]).slice(-31),value];}});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Console QA");
     } else if (evidenceBrowser) {
@@ -2051,6 +2059,7 @@ async function checkTrafficBrowser() {
     try {await lifecycle?.stop();}
     catch (error) {failure ??= error; diagnostics.cleanup_error = String(error.message).slice(0, 2048);}
     factsFixture?.release(); consoleFixture?.release();
+    collectionFixture?.release();
     if (consoleFixture) {
       diagnostics.fixture_errors = consoleFixture.errors;
       try {await writeFile(join(output, 'console-fixture-receipts.json'), JSON.stringify({schema:'reb-console-ui-qa-v1',receipts:consoleFixture.receipts,errors:consoleFixture.errors}, null, 2));}
@@ -2068,9 +2077,9 @@ async function checkTrafficBrowser() {
   }
   if (failure) throw failure;
   await writeFile(join(output, "validation.json"), JSON.stringify(validation, null, 2));
-  console.log(`PASS real Chromium ${consoleBrowser ? 'Console' : evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
+  console.log(`PASS real Chromium ${collectionBrowser ? 'Collection' : consoleBrowser ? 'Console' : evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
 }
-if (trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser) {await checkTrafficBrowser(); process.exit(0);}
+if (trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser || collectionBrowser) {await checkTrafficBrowser(); process.exit(0);}
 
 if (fieldsOnly) process.exit(0);
 const temporary = await mkdtemp(join(tmpdir(), "origin-trace-debugger-"));

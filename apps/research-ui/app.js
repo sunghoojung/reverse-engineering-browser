@@ -4091,6 +4091,17 @@
         return values.reduce((maximum, value) => Math.max(maximum, value.id), 0) + 1;
       }
 
+      function collectionNextRequestId() {
+        // Do not recycle a deleted recipe ID while its ephemeral runs still exist.
+        const repeater = repeaterState();
+        return Math.max(collectionNextId(state.apiCollection.requests),
+          (state.collectionPendingSubmission?.requestId ?? 0) + 1,
+          ...(state.collectionSubmittedOwners ?? []).filter(owner => owner.targetId === requestInterception()?.target_id &&
+            owner.experimentId === requestInterception()?.experiment_id).map(owner => owner.requestId + 1),
+          ...[...(repeater?.history ?? []), repeater?.active_execution].map(entry =>
+            Number.isSafeInteger(entry?.collection_request_id) ? entry.collection_request_id + 1 : 1));
+      }
+
       function collectionVariablesFromText(value, label) {
         const source = value.trim();
         if (!source) return [];
@@ -4134,6 +4145,10 @@
       function collectionRequestDraft() {
         const request = collectionRequest();
         if (!request) throw new TypeError('Select a saved request first.');
+        if (state.apiCollectionNeedsReload || state.collectionRequestDraftId !== request.id ||
+            state.collectionRequestDraftCreatedAt !== request.created_at_ms) {
+          throw new TypeError('The request draft owner changed. Discard these edits and retry load before saving.');
+        }
         const timeout = Number(elements.collectionRequestTimeout.value);
         if (!Number.isInteger(timeout) || timeout < 100 || timeout > 30000) {
           throw new TypeError('Timeout must be between 100 and 30000 ms.');
@@ -4174,50 +4189,76 @@
       }
 
       async function refreshApiCollection(force = false) {
-        if (state.apiCollectionRefreshing || location.protocol === 'file:') return false;
+        if (state.apiCollectionRefreshing || state.apiCollectionSaving || location.protocol === 'file:') return false;
         state.apiCollectionRefreshing = true;
+        const version = state.apiCollectionVersion;
+        const controller = new AbortController();
+        const deadline = setTimeout(() => controller.abort(), 15000);
         if (!state.apiCollectionLoaded) setCollectionNotice('loading', 'Loading your local collection…');
         try {
           const headers = !force && state.apiCollectionEtag ? {'If-None-Match': state.apiCollectionEtag} : {};
-          const response = await fetch('/api/api-collection', {cache: 'no-store', headers});
+          const response = await fetch('/api/api-collection', {cache: 'no-store', headers, signal: controller.signal});
+          if (version !== state.apiCollectionVersion) return false;
           if (response.status === 304) return true;
-          if (!response.ok) throw new Error(`API Collection store returned ${response.status}`);
+          if (!response.ok) throw new Error(`Collection store returned ${response.status}`);
           const body = await response.json();
-          if (!isApiCollection(body)) throw new TypeError('Malformed API Collection response');
+          if (version !== state.apiCollectionVersion) return false;
+          if (!isApiCollection(body)) throw new TypeError('Malformed Collection response');
+          if (body.generation < state.apiCollection.generation) return false;
+          const missingRequest = state.collectionDraftDirty && !body.requests.some(item => item.id === state.collectionRequestDraftId &&
+            item.created_at_ms === state.collectionRequestDraftCreatedAt);
+          const missingFolder = state.collectionFolderDirty && !body.folders.some(item => item.id === state.collectionFolderDraftId);
+          if (missingRequest || missingFolder) {
+            state.apiCollectionEtag = null;
+            state.apiCollectionNeedsReload = true;
+            setCollectionNotice('conflict', 'The edited item was removed or replaced in another window. Your edits remain here. Discard them, then retry load to see the current collection.');
+            return false;
+          }
           state.apiCollection = body;
+          state.apiCollectionNeedsReload = false;
           state.apiCollectionLoaded = true;
           state.apiCollectionEtag = response.headers.get('ETag');
           if (!collectionFolder(state.collectionSelectedFolderId)) state.collectionSelectedFolderId = 1;
           if (!collectionRequest()) state.collectionSelectedRequestId = null;
+          else state.collectionSelectedFolderId = collectionRequest().folder_id;
           setCollectionNotice(body.requests.length ? 'ready' : 'empty', body.requests.length
-            ? `${body.requests.length} saved ${body.requests.length === 1 ? 'request' : 'requests'} loaded from the permission-restricted local store.`
-            : 'Start by creating a saved request or importing one from Traffic.');
-          renderApiCollection();
+            ? `${body.requests.length} saved ${body.requests.length === 1 ? 'request' : 'requests'} · local collection loaded.`
+            : 'Create a saved request, or import a method and query-free URL from Requests.');
           return true;
         } catch (error) {
-          setCollectionNotice('error', `API Collection unavailable: ${error.message}. The last valid collection remains visible.`);
-          renderApiCollection();
+          if (version !== state.apiCollectionVersion) return false;
+          state.apiCollectionEtag = null;
+          setCollectionNotice('error', `Collection load failed: ${controller.signal.aborted ? 'timed out' : error.message}. The last valid collection and your edits remain visible.`);
           return false;
         } finally {
+          clearTimeout(deadline);
           state.apiCollectionRefreshing = false;
+          renderApiCollection();
         }
       }
 
       async function replaceApiCollection(folders, requests, successMessage) {
         if (state.apiCollectionSaving) return false;
+        if (state.apiCollectionNeedsReload) {
+          setCollectionNotice('conflict', 'Discard the stale edits and retry load before changing this collection.'); return false;
+        }
         state.apiCollectionSaving = true;
-        setCollectionNotice('saving', 'Saving one atomic API Collection generation…');
+        state.apiCollectionVersion += 1;
+        const controller = new AbortController();
+        const deadline = setTimeout(() => controller.abort(), 15000);
+        setCollectionNotice('saving', 'Saving collection changes locally…');
         renderApiCollection();
         try {
           const response = await fetch('/api/api-collection/actions', {
             method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(collectionReplacement(folders, requests))
+            body: JSON.stringify(collectionReplacement(folders, requests)), signal: controller.signal
           });
           const body = await response.json();
           if (response.status === 409) {
             state.apiCollectionEtag = null;
-            await refreshApiCollection(true);
-            setCollectionNotice('conflict', body.error || 'The collection changed in another window. The current generation was reloaded.');
+            state.apiCollectionSaving = false;
+            const refreshed = await refreshApiCollection(true);
+            if (refreshed || state.apiCollectionStatus === 'saving') setCollectionNotice('conflict', `${body.error || 'The collection changed in another window.'} Your edits are retained; retry load and review them before saving again.`);
             return false;
           }
           if (!response.ok) throw new Error(body.error || `API Collection store returned ${response.status}`);
@@ -4228,16 +4269,18 @@
           setCollectionNotice('ready', successMessage);
           return true;
         } catch (error) {
-          setCollectionNotice('error', `API Collection was not changed: ${error.message}`);
+          state.apiCollectionEtag = null;
+          setCollectionNotice('error', `Save could not be confirmed: ${controller.signal.aborted ? 'timed out' : error.message}. Your edits are retained. Retry load before saving again.`);
           return false;
         } finally {
+          clearTimeout(deadline);
           state.apiCollectionSaving = false;
           renderApiCollection();
         }
       }
 
       function collectionFolderOptions(selectedId, excludedIds = new Set()) {
-        return state.apiCollection.folders
+        const options = state.apiCollection.folders
           .filter(folder => !excludedIds.has(folder.id))
           .sort((left, right) => collectionFolderLineage(left.id).map(item => item.name).join('/').localeCompare(
             collectionFolderLineage(right.id).map(item => item.name).join('/')
@@ -4248,31 +4291,54 @@
             option.selected = folder.id === selectedId;
             return option;
           });
+        if (selectedId && !options.some(option => option.value === String(selectedId))) {
+          const unavailable = document.createElement('option'); unavailable.value = String(selectedId);
+          unavailable.textContent = `Unavailable folder #${selectedId}`; unavailable.selected = true; unavailable.disabled = true;
+          options.push(unavailable);
+        }
+        return options;
+      }
+
+      function collectionMayLeaveDraft() {
+        if (state.apiCollectionSaving) return false;
+        if (!state.apiCollectionLoaded) { setCollectionNotice('error', 'Load the local collection before changing it.'); return false; }
+        if (state.apiCollectionNeedsReload) { setCollectionNotice('conflict', 'Discard stale edits and retry load before changing the selected item.'); return false; }
+        if (state.collectionDraftDirty || state.collectionFolderDirty) {
+          setCollectionNotice('conflict', 'Unsaved edits remain with the selected item. Save or discard them before switching, creating, duplicating or deleting.');
+          return false;
+        }
+        return true;
       }
 
       function selectCollectionFolder(folderId, focus = false) {
-        if (!collectionFolder(folderId)) return;
+        if (!collectionFolder(folderId)) return false;
+        if (folderId === state.collectionSelectedFolderId && state.collectionSelectedRequestId === null) return true;
+        if (!collectionMayLeaveDraft()) return false;
         state.collectionSelectedFolderId = folderId;
         state.collectionSelectedRequestId = null;
         state.collectionFolderDraftId = null;
-        state.collectionFolderDirty = false;
         state.collectionDeleteFolderId = null;
+        state.collectionSelectionVersion += 1;
         renderApiCollection();
         if (focus) elements.collectionTree.querySelector(`[data-folder-id="${folderId}"]`)?.focus({preventScroll: true});
+        return true;
       }
 
       function selectCollectionRequest(requestId, focus = false) {
         const request = collectionRequest(requestId);
-        if (!request) return;
+        if (!request) return false;
+        if (requestId === state.collectionSelectedRequestId) return true;
+        if (!collectionMayLeaveDraft()) return false;
         state.collectionSelectedRequestId = requestId;
         state.collectionSelectedFolderId = request.folder_id;
-        state.collectionExpandedFolderIds.add(request.folder_id);
+        collectionFolderLineage(request.folder_id).forEach(folder => state.collectionExpandedFolderIds.add(folder.id));
         state.collectionRequestDraftId = null;
-        state.collectionDraftDirty = false;
         state.collectionDeleteRequestId = null;
         state.collectionSelectedHistoryId = null;
+        state.collectionSelectionVersion += 1;
         renderApiCollection();
         if (focus) elements.collectionTree.querySelector(`[data-request-id="${requestId}"]`)?.focus({preventScroll: true});
+        return true;
       }
 
       function moveCollectionTreeSelection(event) {
@@ -4282,26 +4348,50 @@
         const index = rows.indexOf(row);
         if (index < 0) return;
         event.preventDefault();
-        if (row.dataset.folderId && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
+        if (['ArrowLeft', 'ArrowRight'].includes(event.key)) {
           const folderId = Number(row.dataset.folderId);
-          const expanded = state.collectionExpandedFolderIds.has(folderId);
+          if (!folderId) {
+            if (event.key === 'ArrowLeft') selectCollectionFolder(collectionRequest(Number(row.dataset.requestId))?.folder_id, true);
+            return;
+          }
+          const expanded = folderId === 1 || state.collectionExpandedFolderIds.has(folderId);
           if (event.key === 'ArrowRight' && !expanded) state.collectionExpandedFolderIds.add(folderId);
           else if (event.key === 'ArrowLeft' && expanded && folderId !== 1) state.collectionExpandedFolderIds.delete(folderId);
           else if (event.key === 'ArrowLeft') {
-            const parentId = collectionFolder(folderId)?.parent_id;
-            if (parentId !== null && parentId !== undefined) selectCollectionFolder(parentId, true);
-            return;
-          } else return;
-          renderApiCollection();
+            selectCollectionFolder(collectionFolder(folderId)?.parent_id, true); return;
+          } else if (rows[index + 1]) { rows[index + 1].focus(); return; }
+          renderCollectionTree();
           elements.collectionTree.querySelector(`[data-folder-id="${folderId}"]`)?.focus();
           return;
         }
         const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
           : Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
-        rows[next].click(); rows[next].focus();
+        const target = rows[next];
+        if (target.dataset.requestId) selectCollectionRequest(Number(target.dataset.requestId), true);
+        else selectCollectionFolder(Number(target.dataset.folderId), true);
+      }
+
+      function selectCollectionContent(tab, response = false, focus = false) {
+        const allowed = response ? ['body', 'headers'] : ['headers', 'body', 'variables'];
+        if (!allowed.includes(tab)) return;
+        state[response ? 'collectionResponseTab' : 'collectionRequestTab'] = tab;
+        const attribute = response ? 'collection-response-tab' : 'collection-tab';
+        document.querySelectorAll(`[data-${attribute}]`).forEach(button => {
+          const selected = button.getAttribute(`data-${attribute}`) === tab;
+          button.setAttribute('aria-selected', String(selected)); button.tabIndex = selected ? 0 : -1;
+          if (!response) document.getElementById(button.getAttribute('aria-controls')).hidden = !selected;
+          if (selected && focus) button.focus({preventScroll: true});
+        });
+        if (response) {
+          elements.collectionResponse.setAttribute('aria-labelledby', `collection-response-tab-${tab}`);
+          elements.collectionResponse.dataset.renderKey = '';
+          renderCollectionExecution();
+        }
       }
 
       function renderCollectionTree() {
+        const focused = elements.collectionTree.contains(document.activeElement) ? document.activeElement?.dataset : null;
+        const scrollTop = elements.collectionTree.scrollTop;
         const rows = [];
         const appendFolder = (folder, level) => {
           const children = state.apiCollection.folders.filter(candidate => candidate.parent_id === folder.id)
@@ -4311,6 +4401,8 @@
           const hasChildren = children.length > 0 || requests.length > 0;
           const expanded = folder.id === 1 || state.collectionExpandedFolderIds.has(folder.id);
           const row = document.createElement('button'); row.type = 'button'; row.className = 'collection-tree-row';
+          row.disabled = state.apiCollectionSaving;
+          row.title = collectionFolderLineage(folder.id).map(item => item.name).join(' / ');
           row.dataset.folderId = String(folder.id); row.style.setProperty('--collection-depth', String(level - 1));
           row.setAttribute('role', 'treeitem'); row.setAttribute('aria-level', String(level));
           row.setAttribute('aria-selected', String(!state.collectionSelectedRequestId && state.collectionSelectedFolderId === folder.id));
@@ -4319,8 +4411,8 @@
           row.append(textElement('span', 'collection-tree-glyph', hasChildren ? expanded ? '▾' : '▸' : '·'),
             textElement('span', 'collection-tree-name', folder.name),
             textElement('span', 'collection-tree-meta', `${requests.length}`));
-          row.addEventListener('click', () => selectCollectionFolder(folder.id));
-          row.addEventListener('dblclick', () => { if (hasChildren && folder.id !== 1) {
+          row.addEventListener('click', () => selectCollectionFolder(folder.id, true));
+          row.addEventListener('dblclick', () => { if (!state.apiCollectionSaving && hasChildren && folder.id !== 1) {
             if (expanded) state.collectionExpandedFolderIds.delete(folder.id); else state.collectionExpandedFolderIds.add(folder.id);
             renderApiCollection();
           }});
@@ -4330,6 +4422,8 @@
           children.forEach(child => appendFolder(child, level + 1));
           requests.forEach(request => {
             const requestRow = document.createElement('button'); requestRow.type = 'button'; requestRow.className = 'collection-tree-row';
+            requestRow.disabled = state.apiCollectionSaving;
+            requestRow.title = `${request.name} · ${request.method} ${request.url}`;
             requestRow.dataset.requestId = String(request.id); requestRow.style.setProperty('--collection-depth', String(level));
             requestRow.setAttribute('role', 'treeitem'); requestRow.setAttribute('aria-level', String(level + 1));
             requestRow.setAttribute('aria-selected', String(state.collectionSelectedRequestId === request.id));
@@ -4337,30 +4431,37 @@
             requestRow.append(textElement('span', 'collection-tree-glyph', '↗'),
               textElement('span', 'collection-tree-name', request.name),
               textElement('span', 'collection-tree-meta', request.method));
-            requestRow.addEventListener('click', () => selectCollectionRequest(request.id));
+            requestRow.addEventListener('click', () => selectCollectionRequest(request.id, true));
             requestRow.addEventListener('keydown', moveCollectionTreeSelection);
             rows.push(requestRow);
           });
         };
         appendFolder(collectionFolder(1), 1);
         elements.collectionTree.replaceChildren(...rows);
+        elements.collectionTree.scrollTop = scrollTop;
+        if (focused?.requestId) elements.collectionTree.querySelector(`[data-request-id="${focused.requestId}"]`)?.focus({preventScroll: true});
+        else if (focused?.folderId) elements.collectionTree.querySelector(`[data-folder-id="${focused.folderId}"]`)?.focus({preventScroll: true});
       }
 
       function renderCollectionFolderForm() {
-        const folder = collectionFolder(state.collectionSelectedFolderId) ?? collectionFolder(1);
-        if (state.collectionFolderDraftId !== folder.id || !state.collectionFolderDirty) {
+        const folder = collectionFolder(state.collectionFolderDirty ? state.collectionFolderDraftId : state.collectionSelectedFolderId) ?? collectionFolder(1);
+        const keepDraft = state.collectionFolderDraftId === folder.id && state.collectionFolderDirty;
+        const parentId = keepDraft ? Number(elements.collectionFolderParent.value) : folder.parent_id ?? 1;
+        if (!keepDraft) {
           state.collectionFolderDraftId = folder.id;
           elements.collectionFolderName.value = folder.name;
           elements.collectionFolderVariables.value = collectionVariablesText(folder.variables);
         }
         const excluded = collectionDescendantIds(folder.id); excluded.add(folder.id);
-        elements.collectionFolderParent.replaceChildren(...collectionFolderOptions(folder.parent_id ?? 1, excluded));
-        elements.collectionFolderParent.value = String(folder.parent_id ?? 1);
+        elements.collectionFolderParent.replaceChildren(...collectionFolderOptions(parentId, excluded));
+        elements.collectionFolderParent.value = String(parentId);
         const root = folder.id === 1;
         elements.collectionFolderName.disabled = root || state.apiCollectionSaving;
         elements.collectionFolderParent.disabled = root || state.apiCollectionSaving;
         elements.collectionFolderVariables.disabled = state.apiCollectionSaving;
-        elements.collectionSaveFolder.disabled = state.apiCollectionSaving;
+        elements.collectionSaveFolder.disabled = state.apiCollectionSaving || state.apiCollectionNeedsReload;
+        elements.collectionDiscardFolder.disabled = state.apiCollectionSaving || !state.collectionFolderDirty;
+        elements.collectionFolderDraftStatus.textContent = state.collectionFolderDirty ? `· ${folder.name} · Unsaved` : '';
         elements.collectionDeleteFolder.disabled = root || state.apiCollectionSaving;
         elements.collectionDeleteFolder.textContent = state.collectionDeleteFolderId === folder.id ? 'Confirm delete' : 'Delete folder';
       }
@@ -4401,10 +4502,17 @@
         elements.collectionEditorEmpty.hidden = Boolean(request);
         elements.collectionRequestForm.hidden = !request;
         elements.collectionRequestBadge.dataset.kind = request ? '' : 'offline';
-        elements.collectionRequestBadge.textContent = request ? request.method : 'No request';
+        elements.collectionRequestBadge.textContent = request ? `#${request.id}` : 'No request';
+        elements.collectionEditorTitle.textContent = request?.name ?? 'Request';
+        elements.collectionDraftStatus.textContent = !request ? 'Select a saved request to edit.' : state.collectionDraftDirty
+          ? 'Unsaved edits · Save or discard before switching.' : `${collectionFolderLineage(request.folder_id).map(folder => folder.name).join(' / ')} · Saved`;
         if (!request) return;
-        if (state.collectionRequestDraftId !== request.id || !state.collectionDraftDirty) {
+        const keepDraft = state.collectionRequestDraftId === request.id &&
+          state.collectionRequestDraftCreatedAt === request.created_at_ms && state.collectionDraftDirty;
+        const folderId = keepDraft ? Number(elements.collectionRequestFolder.value) : request.folder_id;
+        if (!keepDraft) {
           state.collectionRequestDraftId = request.id;
+          state.collectionRequestDraftCreatedAt = request.created_at_ms;
           elements.collectionRequestName.value = request.name;
           elements.collectionRequestFolder.value = String(request.folder_id);
           elements.collectionRequestUrl.value = request.url;
@@ -4415,30 +4523,90 @@
           elements.collectionRequestBody.value = request.body;
           elements.collectionRequestVariables.value = collectionVariablesText(request.variables);
         }
-        elements.collectionRequestFolder.replaceChildren(...collectionFolderOptions(request.folder_id));
-        elements.collectionRequestFolder.value = String(request.folder_id);
+        elements.collectionRequestFolder.replaceChildren(...collectionFolderOptions(folderId));
+        elements.collectionRequestFolder.value = String(folderId);
         elements.collectionRequestForm.querySelectorAll('input, textarea, select').forEach(field => {
           field.disabled = state.apiCollectionSaving;
         });
-        elements.collectionSaveRequest.disabled = state.apiCollectionSaving;
+        elements.collectionSaveRequest.disabled = state.apiCollectionSaving || state.apiCollectionNeedsReload;
+        elements.collectionDiscardRequest.disabled = state.apiCollectionSaving || !state.collectionDraftDirty;
         elements.collectionDuplicateRequest.disabled = state.apiCollectionSaving || state.apiCollection.requests.length >= 128;
         elements.collectionDeleteRequest.disabled = state.apiCollectionSaving;
-        elements.collectionDeleteRequest.textContent = state.collectionDeleteRequestId === request.id ? 'Confirm delete' : 'Delete';
+        elements.collectionDeleteRequest.textContent = state.collectionDeleteRequestId === request.id ? 'Confirm delete' : 'Delete request';
         renderCollectionVariableStatus();
       }
 
+      function collectionRunKey(executionId) {
+        return JSON.stringify([requestInterception()?.target_id, requestInterception()?.experiment_id, executionId]);
+      }
+
+      function rememberCollectionRunOwner(key, owner) {
+        const owners = state.collectionRunOwners ??= new Map();
+        owners.set(key, {requestId: owner.requestId, createdAt: owner.createdAt});
+        while (owners.size > 25) owners.delete(owners.keys().next().value);
+        return owners.get(key);
+      }
+
+      function collectionObservedRunOwner(entry, active = false) {
+        const executionId = active ? entry?.execution_id : entry?.id;
+        if (!entry || !Number.isSafeInteger(executionId)) return null;
+        const key = collectionRunKey(executionId);
+        const known = state.collectionRunOwners?.get(key);
+        if (known) return known;
+        // Polling can observe a run before its POST acknowledgement, or after
+        // that acknowledgement is lost. Dispatch ownership must already exist.
+        const candidates = (state.collectionSubmittedOwners ?? []).filter(owner =>
+          owner.targetId === requestInterception()?.target_id && owner.experimentId === requestInterception()?.experiment_id &&
+          owner.requestId === entry.collection_request_id && owner.executionId === undefined && executionId > owner.afterExecutionId);
+        if (!candidates.length) return null;
+        const owner = candidates[0];
+        if (candidates.some(candidate => candidate.createdAt !== owner.createdAt)) return {ambiguous: true};
+        owner.executionId = executionId;
+        return rememberCollectionRunOwner(key, owner);
+      }
+
+      function collectionRunBelongsToRequest(entry, active = false) {
+        const owner = collectionObservedRunOwner(entry, active);
+        const request = collectionRequest();
+        if (!request || !entry || entry.collection_request_id !== request.id || !Number.isSafeInteger(entry.started_at_ms) || entry.started_at_ms < request.created_at_ms) return false;
+        return !owner || !owner.ambiguous && owner.requestId === request.id && owner.createdAt === request.created_at_ms;
+      }
+
       function collectionHistoryEntries() {
-        const requestId = state.collectionSelectedRequestId;
-        return (repeaterState()?.history ?? []).filter(entry => entry.collection_request_id === requestId);
+        return (repeaterState()?.history ?? []).filter(entry => collectionRunBelongsToRequest(entry));
+      }
+
+      function collectionPendingRunForSelection() {
+        const pending = state.collectionPendingRunSelection;
+        if (!pending) return null;
+        const request = collectionRequest();
+        if (pending.selection !== state.collectionSelectionVersion || pending.historySelection !== state.collectionHistorySelectionVersion ||
+            pending.requestId !== request?.id || pending.createdAt !== request?.created_at_ms ||
+            pending.key !== collectionRunKey(pending.executionId) || !requestInterception()?.isolated) {
+          state.collectionPendingRunSelection = null;
+          return null;
+        }
+        return pending;
       }
 
       function renderCollectionResponse(entry) {
+        const repeater = repeaterState();
+        const running = ['running', 'cancelling'].includes(repeater?.state) &&
+          collectionRunBelongsToRequest(repeater?.active_execution, true);
+        const pending = collectionPendingRunForSelection();
+        const pendingLabel = running ? ' · another run in progress' : pending ? ` · waiting for run ${pending.executionId}` : '';
+        const key = JSON.stringify([requestInterception()?.experiment_id, state.collectionSelectedRequestId,
+          entry?.id, state.collectionResponseTab, entry ? 'complete' : pending?.executionId ?? (running ? repeater.state : 'idle')]);
+        if (entry) elements.collectionResponseMeta.textContent = `Run ${entry.id} · ${entry.resolved_request.method} ${entry.resolved_request.url}${pendingLabel}`;
+        if (elements.collectionResponse.dataset.renderKey === key) return;
+        elements.collectionResponse.dataset.renderKey = key;
         if (!entry) {
           elements.collectionResponse.className = 'repeater-response experiment-empty';
-          elements.collectionResponse.textContent = 'Run the selected request to inspect its bounded response.';
-          elements.collectionResponseMeta.textContent = 'Select a completed execution.';
+          elements.collectionResponse.textContent = pending ? `Waiting for acknowledged run ${pending.executionId} to appear in history…` : running ? 'Waiting for this request’s response…'
+            : collectionRequest() ? 'Run this saved request to inspect its bounded response.' : 'Select a saved request to inspect its runs.';
+          elements.collectionResponseMeta.textContent = pending ? `Run ${pending.executionId} acknowledged; response pending.` : running ? 'An explicit run is in progress.' : 'No completed run for this request.';
           elements.collectionResponseBadge.dataset.kind = 'offline';
-          elements.collectionResponseBadge.textContent = 'No response';
+          elements.collectionResponseBadge.textContent = pending ? running && repeater.state === 'cancelling' ? 'Cancelling' : 'Awaiting response' : running ? repeater.state === 'cancelling' ? 'Cancelling' : 'Running' : 'No response';
           return;
         }
         const response = entry.response;
@@ -4446,17 +4614,23 @@
         summary.append(experimentFact('Status', response.ok ? `${response.status} ${response.status_text}`.trim() : entry.state.replaceAll('_', ' ')),
           experimentFact('Duration', `${response.duration_ms} ms`),
           experimentFact('Body', `${utf8ByteLength(response.body)} bytes${response.body_truncated ? ' · truncated' : ''}`));
-        const headers = document.createElement('div'); headers.className = 'repeater-response-headers';
-        if (response.headers.length) headers.append(...response.headers.map(header => {
-          const row = document.createElement('div'); row.className = 'repeater-response-header';
-          row.append(textElement('span', '', header.name), textElement('span', '', header.value)); return row;
-        }));
-        else headers.append(textElement('div', 'experiment-empty', 'No response headers.'));
-        const body = document.createElement('pre'); body.className = 'experiment-result-body';
-        body.textContent = response.ok ? response.body || '(empty response body)' : response.error;
+        let content;
+        if (state.collectionResponseTab === 'headers') {
+          content = document.createElement('div'); content.className = 'repeater-response-headers';
+          if (response.headers.length) content.append(...response.headers.map(header => {
+            const row = document.createElement('div'); row.className = 'repeater-response-header';
+            row.append(textElement('span', '', header.name), textElement('span', '', header.value)); return row;
+          }));
+          else content.append(textElement('div', 'experiment-empty', 'No response headers were retained.'));
+          if (response.headers_truncated) content.append(textElement('p', 'collection-help', 'Response headers were truncated; only the retained subset is shown.'));
+        } else {
+          content = document.createElement('pre'); content.className = 'experiment-result-body';
+          content.textContent = response.ok ? response.body || '(empty response body)' : response.error;
+        }
         elements.collectionResponse.className = 'repeater-response';
-        elements.collectionResponse.replaceChildren(summary, headers, body);
-        elements.collectionResponseMeta.textContent = `run ${entry.id} · ${entry.resolved_request.method} ${entry.resolved_request.url}`;
+        elements.collectionResponse.replaceChildren(summary, content);
+        elements.collectionResponse.scrollTop = 0;
+        elements.collectionResponseMeta.textContent = `Run ${entry.id} · ${entry.resolved_request.method} ${entry.resolved_request.url}${pendingLabel}`;
         elements.collectionResponseBadge.dataset.kind = response.ok ? '' : 'error';
         elements.collectionResponseBadge.textContent = response.ok ? 'Complete' : entry.state.replaceAll('_', ' ');
       }
@@ -4464,6 +4638,12 @@
       function renderCollectionExecution() {
         const experiment = requestInterception();
         const repeater = repeaterState();
+        const history = collectionHistoryEntries();
+        const pendingSelection = collectionPendingRunForSelection();
+        if (pendingSelection && history.some(entry => entry.id === pendingSelection.executionId)) {
+          state.collectionSelectedHistoryId = pendingSelection.executionId;
+          state.collectionPendingRunSelection = null;
+        }
         const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
         const active = ['running', 'cancelling'].includes(repeater?.state);
         const contextReady = attached && experiment?.isolated && experiment.target_id === state.debuggerSession?.target?.id &&
@@ -4471,42 +4651,65 @@
         elements.collectionContextBadge.dataset.kind = repeater?.state === 'error' ? 'error' : contextReady ? '' : 'offline';
         elements.collectionContextBadge.textContent = active ? repeater.state === 'cancelling' ? 'Cancelling' : 'Running'
           : contextReady ? 'Isolated' : experiment?.state === 'creating' ? 'Creating' : 'Not created';
-        elements.collectionContextMessage.textContent = contextReady
-          ? 'Disposable page attached with no baseline cookies or storage.'
-          : attached ? repeater?.message ?? 'Create the shared isolated Request Lab context.'
-            : 'Attach an authorized browser target before creating a context.';
+        elements.collectionContextMessage.textContent = active
+          ? `Request #${repeater.active_execution?.collection_request_id ?? 'external'} is ${repeater.state}. Cancellation does not undo an already sent request.`
+          : contextReady ? 'Disposable page attached. Baseline cookies and storage are excluded.'
+            : attached ? repeater?.message ?? 'Create the shared isolated Request Lab context.'
+              : 'Attach an authorized browser target before creating a context.';
         elements.collectionCreateContext.disabled = !attached || Boolean(experiment?.isolated) ||
           state.experimentPending || state.debuggerActionPending;
-        elements.collectionRun.disabled = !collectionRequest() || !contextReady || active || state.experimentPending || state.apiCollectionSaving;
+        elements.collectionRun.disabled = !collectionRequest() || !contextReady || active || state.experimentPending ||
+          state.apiCollectionSaving || state.apiCollectionNeedsReload || state.collectionRunPending || Boolean(collectionPendingRunForSelection()) || state.debuggerActionPending || state.collectionFolderDirty;
+        elements.collectionRun.textContent = state.collectionRunPending ? 'Submitting…' : state.collectionDraftDirty ? 'Save & Run' : 'Run saved request';
+        elements.collectionRunHelp.textContent = collectionPendingRunForSelection() ? 'The acknowledged run is awaiting its response. Selecting another run only changes the displayed result.'
+          : state.collectionFolderDirty ? 'Save or discard folder variables before running.'
+          : !attached ? 'A browser target and isolated context are required to run.'
+            : !contextReady ? active ? 'Wait for the active run, or cancel it in Isolated context.' : 'Create an isolated context to run this request.'
+              : state.collectionDraftDirty ? 'Save & Run saves these edits locally, then sends that saved request once.'
+                : 'Run sends the saved method, URL, headers and body once. Selecting a request never sends it.';
         elements.collectionCancel.disabled = !active || state.debuggerActionPending || repeater?.state === 'cancelling';
-        const history = collectionHistoryEntries();
         if (!history.some(entry => entry.id === state.collectionSelectedHistoryId)) {
           state.collectionSelectedHistoryId = history.at(-1)?.id ?? null;
         }
         elements.collectionHistoryBadge.textContent = `${history.length} ${history.length === 1 ? 'run' : 'runs'}`;
         elements.collectionHistoryBadge.dataset.kind = history.length ? '' : 'offline';
-        if (!history.length) elements.collectionHistory.replaceChildren(
-          emptyListboxOption('experiment-empty', collectionRequest() ? 'No executions for this request.' : 'Select a saved request.')
-        );
-        else elements.collectionHistory.replaceChildren(...[...history].reverse().map(entry => {
-          const row = document.createElement('button'); row.type = 'button'; row.className = 'collection-history-row';
-          row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(entry.id === state.collectionSelectedHistoryId));
-          row.tabIndex = entry.id === state.collectionSelectedHistoryId ? 0 : -1;
-          row.append(textElement('span', '', `${entry.resolved_request.method} ${entry.resolved_request.url}`),
-            textElement('strong', '', entry.response.ok ? String(entry.response.status) : entry.state.replaceAll('_', ' ')),
-            textElement('small', '', `run ${entry.id} · ${entry.response.duration_ms} ms · ${new Date(entry.completed_at_ms).toLocaleTimeString()}`));
-          row.addEventListener('click', () => { state.collectionSelectedHistoryId = entry.id; renderCollectionExecution(); });
-          row.addEventListener('keydown', event => {
-            if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
-            event.preventDefault();
-            const rows = [...elements.collectionHistory.querySelectorAll('.collection-history-row')];
-            const index = rows.indexOf(row);
-            const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
-              : Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
-            rows[next].click(); rows[next].focus();
-          });
-          return row;
-        }));
+        const historyKey = JSON.stringify([experiment?.experiment_id, state.collectionSelectedRequestId,
+          state.collectionSelectedHistoryId, history.map(entry => entry.id)]);
+        if (elements.collectionHistory.dataset.renderKey !== historyKey) {
+          const focusedId = elements.collectionHistory.contains(document.activeElement) ? document.activeElement?.dataset.runId : null;
+          const scrollTop = elements.collectionHistory.scrollTop;
+          elements.collectionHistory.dataset.renderKey = historyKey;
+          if (!history.length) elements.collectionHistory.replaceChildren(
+            emptyListboxOption('experiment-empty', collectionRequest() ? 'No executions for this request.' : 'Select a saved request.')
+          );
+          else elements.collectionHistory.replaceChildren(...[...history].reverse().map(entry => {
+            const row = document.createElement('button'); row.type = 'button'; row.className = 'collection-history-row';
+            row.dataset.runId = String(entry.id);
+            row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(entry.id === state.collectionSelectedHistoryId));
+            row.tabIndex = entry.id === state.collectionSelectedHistoryId ? 0 : -1;
+            row.append(textElement('span', '', `${entry.resolved_request.method} ${entry.resolved_request.url}`),
+              textElement('strong', '', entry.response.ok ? String(entry.response.status) : entry.state.replaceAll('_', ' ')),
+              textElement('small', '', `Run ${entry.id} · ${entry.response.duration_ms} ms · ${new Date(entry.completed_at_ms).toLocaleTimeString()}`));
+            row.addEventListener('click', () => {
+              state.collectionHistorySelectionVersion += 1;
+              state.collectionPendingRunSelection = null;
+              state.collectionSelectedHistoryId = entry.id; renderCollectionExecution();
+              elements.collectionHistory.querySelector(`[data-run-id="${entry.id}"]`)?.focus({preventScroll: true});
+            });
+            row.addEventListener('keydown', event => {
+              if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+              event.preventDefault();
+              const rows = [...elements.collectionHistory.querySelectorAll('.collection-history-row')];
+              const index = rows.indexOf(row);
+              const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
+                : Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
+              rows[next].click();
+            });
+            return row;
+          }));
+          elements.collectionHistory.scrollTop = scrollTop;
+          if (focusedId) elements.collectionHistory.querySelector(`[data-run-id="${focusedId}"]`)?.focus({preventScroll: true});
+        }
         renderCollectionResponse(history.find(entry => entry.id === state.collectionSelectedHistoryId) ?? null);
       }
 
@@ -4522,11 +4725,13 @@
         }
         elements.collectionGeneration.textContent = `Generation ${state.apiCollection.generation}`;
         elements.collectionCount.textContent = `${state.apiCollection.requests.length} / 128`;
-        elements.collectionNewFolder.disabled = state.apiCollectionSaving || state.apiCollection.folders.length >= 32 ||
+        elements.collectionNewFolder.disabled = !state.apiCollectionLoaded || state.apiCollectionNeedsReload || state.apiCollectionSaving || state.apiCollection.folders.length >= 32 ||
           collectionFolderDepth(state.collectionSelectedFolderId) >= 4;
-        elements.collectionNewRequest.disabled = state.apiCollectionSaving || state.apiCollection.requests.length >= 128;
+        elements.collectionNewRequest.disabled = !state.apiCollectionLoaded || state.apiCollectionNeedsReload || state.apiCollectionSaving || state.apiCollection.requests.length >= 128;
         elements.collectionNotice.dataset.kind = state.apiCollectionStatus;
         elements.collectionNotice.textContent = state.apiCollectionMessage;
+        elements.collectionRetry.hidden = !['error', 'conflict'].includes(state.apiCollectionStatus);
+        elements.collectionRetry.disabled = state.apiCollectionRefreshing || state.apiCollectionSaving;
         renderCollectionTree();
         renderCollectionFolderForm();
         renderCollectionRequestForm();
@@ -4534,12 +4739,13 @@
       }
 
       async function createCollectionFolder() {
+        if (!collectionMayLeaveDraft()) return;
         const name = elements.collectionNewFolderName.value.trim();
         if (!name) { setCollectionNotice('error', 'Enter a folder name.'); return; }
         const parentId = state.collectionSelectedFolderId;
         const folder = {id: collectionNextId(state.apiCollection.folders), name, parent_id: parentId, variables: []};
         if (await replaceApiCollection([...state.apiCollection.folders, folder], state.apiCollection.requests, `Folder “${name}” created.`)) {
-          state.collectionSelectedFolderId = folder.id;
+          selectCollectionFolder(folder.id);
           state.collectionExpandedFolderIds.add(parentId);
           elements.collectionNewFolderForm.hidden = true;
           elements.collectionNewFolderName.value = '';
@@ -4548,7 +4754,7 @@
       }
 
       async function saveCollectionFolder() {
-        const folder = collectionFolder(state.collectionSelectedFolderId);
+        const folder = collectionFolder(state.collectionFolderDraftId);
         if (!folder) return;
         try {
           const replacement = {
@@ -4570,6 +4776,10 @@
         try {
           const request = collectionRequest();
           const draft = collectionRequestDraft();
+          if (state.collectionFolderDirty && draft.folder_id !== state.collectionFolderDraftId) {
+            setCollectionNotice('conflict', 'Save or discard the current folder edits before moving this request.');
+            return false;
+          }
           const requests = state.apiCollection.requests.map(candidate => candidate.id === request.id ? draft : candidate);
           if (await replaceApiCollection(state.apiCollection.folders, requests, `Request “${draft.name}” saved.`)) {
             state.collectionSelectedFolderId = draft.folder_id;
@@ -4584,6 +4794,7 @@
       }
 
       async function createCollectionRequest(template = null) {
+        if (!collectionMayLeaveDraft()) return null;
         const folderId = state.collectionSelectedFolderId;
         const base = template?.name || 'New request';
         const siblingNames = new Set(state.apiCollection.requests.filter(request => request.folder_id === folderId)
@@ -4591,24 +4802,28 @@
         let name = base;
         for (let suffix = 2; siblingNames.has(name.toLocaleLowerCase()); suffix += 1) name = `${base} ${suffix}`;
         const request = {
-          id: collectionNextId(state.apiCollection.requests), folder_id: folderId, name,
+          id: collectionNextRequestId(), folder_id: folderId, name,
           url: template?.url || 'https://example.test/', method: template?.method || 'GET', headers: [], body: '',
           timeout_ms: 15000, variables: []
         };
         if (await replaceApiCollection(state.apiCollection.folders, [...state.apiCollection.requests, request], `Request “${name}” created.`)) {
+          state.collectionSelectionVersion += 1;
           state.collectionSelectedRequestId = request.id;
           state.collectionExpandedFolderIds.add(folderId);
           state.collectionRequestDraftId = null;
           state.collectionDraftDirty = false;
           renderApiCollection();
           requestAnimationFrame(() => elements.collectionRequestName.focus({preventScroll: true}));
+          return request.id;
         }
+        return null;
       }
 
       async function duplicateCollectionRequest() {
+        if (!collectionMayLeaveDraft()) return;
         const source = collectionRequest();
         if (!source) return;
-        const id = collectionNextId(state.apiCollection.requests);
+        const id = collectionNextRequestId();
         const siblingNames = new Set(state.apiCollection.requests.filter(request => request.folder_id === source.folder_id)
           .map(request => request.name.toLocaleLowerCase()));
         let name = `${source.name} copy`;
@@ -4616,12 +4831,14 @@
         const duplicate = {...source, id, name};
         delete duplicate.created_at_ms; delete duplicate.updated_at_ms;
         if (await replaceApiCollection(state.apiCollection.folders, [...state.apiCollection.requests, duplicate], `Request “${name}” duplicated.`)) {
+          state.collectionSelectionVersion += 1;
           state.collectionSelectedRequestId = id; state.collectionRequestDraftId = null; state.collectionDraftDirty = false;
           renderApiCollection();
         }
       }
 
       async function deleteCollectionRequest() {
+        if (!collectionMayLeaveDraft()) return;
         const request = collectionRequest();
         if (!request) return;
         if (state.collectionDeleteRequestId !== request.id) {
@@ -4630,6 +4847,7 @@
         }
         if (await replaceApiCollection(state.apiCollection.folders,
           state.apiCollection.requests.filter(candidate => candidate.id !== request.id), `Request “${request.name}” deleted.`)) {
+          state.collectionSelectionVersion += 1;
           state.collectionSelectedRequestId = null; state.collectionDeleteRequestId = null;
           state.collectionRequestDraftId = null; state.collectionDraftDirty = false;
           renderApiCollection();
@@ -4637,6 +4855,7 @@
       }
 
       async function deleteCollectionFolder() {
+        if (!collectionMayLeaveDraft()) return;
         const folder = collectionFolder(state.collectionSelectedFolderId);
         if (!folder || folder.id === 1) return;
         const hasContents = state.apiCollection.folders.some(candidate => candidate.parent_id === folder.id) ||
@@ -4655,26 +4874,73 @@
 
       async function runCollectionRequest() {
         const request = collectionRequest();
-        if (!request) return;
-        if (state.collectionDraftDirty && !(await saveCollectionRequest())) return;
+        if (!request || state.collectionRunPending || collectionPendingRunForSelection() || state.apiCollectionSaving || state.apiCollectionNeedsReload || state.experimentPending || state.debuggerActionPending) return;
+        if (state.collectionFolderDirty) {
+          setCollectionNotice('conflict', 'Save or discard folder variables before running a request.'); return;
+        }
+        const selection = state.collectionSelectionVersion;
+        const historySelection = state.collectionHistorySelectionVersion;
+        const targetId = state.debuggerSession?.target?.id;
+        const experimentId = requestInterception()?.experiment_id;
+        const ready = () => ['running', 'paused'].includes(state.debuggerSession?.state) && targetId === state.debuggerSession?.target?.id &&
+          experimentId === requestInterception()?.experiment_id && requestInterception()?.target_id === targetId && requestInterception()?.isolated &&
+          ['ready', 'error'].includes(requestInterception()?.state) && ['ready', 'error'].includes(repeaterState()?.state);
+        if (!ready()) { setCollectionNotice('error', 'Create an isolated context before running.'); return; }
+        state.collectionRunPending = true;
+        state.collectionPendingSubmission = {requestId: request.id, createdAt: request.created_at_ms, targetId, experimentId};
+        renderCollectionExecution();
+        let savedEdits = false;
         try {
+          if (state.collectionDraftDirty) {
+            // The button explicitly says Save & Run. Selection and plain saves never send.
+            if (!(await saveCollectionRequest())) return;
+            savedEdits = true;
+          }
           const saved = collectionRequest(request.id);
           const variables = {};
           collectionFolderLineage(saved.folder_id).forEach(folder => folder.variables.forEach(variable => {
             variables[variable.name] = variable.value;
           }));
           saved.variables.forEach(variable => { variables[variable.name] = variable.value; });
-          if (!await runExperimentAction({action: 'configure_repeater_variables', variables})) return;
-          const previousId = repeaterState()?.history.at(-1)?.id ?? 0;
-          const response = await runExperimentAction({
-            action: 'run_repeater_request', url: saved.url, method: saved.method,
+          const payload = {action: 'run_repeater_request', url: saved.url, method: saved.method,
             headers: repeaterHeaderObject(saved.headers), body: saved.body, timeout_ms: saved.timeout_ms,
-            collection_request_id: saved.id
-          });
-          const executionId = response?.repeater?.active_execution?.execution_id ?? response?.repeater?.history.at(-1)?.id;
-          if (Number.isSafeInteger(executionId) && executionId > previousId) state.collectionSelectedHistoryId = executionId;
+            collection_request_id: saved.id};
+          if (!ready()) throw new Error('The isolated context changed before the request could run.');
+          if (!await runExperimentAction({action: 'configure_repeater_variables', variables})) {
+            throw new Error(state.experimentError || 'Request variables could not be configured.');
+          }
+          if (!ready()) throw new Error('The isolated context changed before the request could run.');
+          if (state.apiCollectionNeedsReload || collectionRequest(saved.id)?.created_at_ms !== saved.created_at_ms) {
+            throw new Error('The saved request was removed or replaced before sending. No request was sent.');
+          }
+          const previousId = repeaterState()?.history.at(-1)?.id ?? 0;
+          const submittedOwners = state.collectionSubmittedOwners ??= [];
+          const submission = {...state.collectionPendingSubmission, afterExecutionId: previousId};
+          submittedOwners.push(submission);
+          if (submittedOwners.length > 25) submittedOwners.shift();
+          const response = await runExperimentAction(payload);
+          if (!response) throw new Error(state.experimentError || 'The run could not be confirmed. It was not automatically retried.');
+          const acknowledgement = response.repeater?.active_execution?.collection_request_id === saved.id
+            ? response.repeater.active_execution : response.repeater?.history.findLast(entry => entry.collection_request_id === saved.id && entry.id > previousId);
+          const executionId = acknowledgement?.execution_id ?? acknowledgement?.id;
+          if (!Number.isSafeInteger(executionId) || executionId <= previousId) {
+            throw new Error('The run acknowledgement did not identify this request. Its outcome is unknown and it was not retried.');
+          }
+          const key = JSON.stringify([targetId, experimentId, executionId]);
+          submission.executionId = executionId;
+          rememberCollectionRunOwner(key, {requestId: saved.id, createdAt: saved.created_at_ms});
+          if (selection === state.collectionSelectionVersion && historySelection === state.collectionHistorySelectionVersion &&
+              state.collectionSelectedRequestId === saved.id && collectionRequest()?.created_at_ms === saved.created_at_ms) {
+            state.collectionPendingRunSelection = {key, executionId, requestId: saved.id, createdAt: saved.created_at_ms, selection, historySelection};
+          }
+          setCollectionNotice('ready', `${savedEdits ? 'Edits saved. ' : ''}Run submitted for “${saved.name}”. Responses remain tied to that submitted request.`);
+        } catch (error) {
+          setCollectionNotice('error', `${savedEdits ? 'Edits saved. ' : ''}${error.message}`);
+        } finally {
+          state.collectionPendingSubmission = null;
+          state.collectionRunPending = false;
           renderApiCollection();
-        } catch (error) { setCollectionNotice('error', error.message); renderApiCollection(); }
+        }
       }
 
       const analystExactKeys = (value, keys) => isPlainObject(value) &&
@@ -9175,7 +9441,35 @@
         const index = history.findIndex(entry => entry.id === state.repeaterSelectedHistoryId);
         if (index >= 0 && index < history.length - 1) loadRepeaterHistoryEntry(history[index + 1]);
       });
+      elements.collectionRetry.addEventListener('click', () => refreshApiCollection(true));
+      elements.collectionDiscardRequest.addEventListener('click', () => {
+        if (state.apiCollectionSaving) return;
+        state.collectionDraftDirty = false; state.collectionRequestDraftId = null;
+        setCollectionNotice(state.apiCollectionNeedsReload ? 'conflict' : 'ready', state.apiCollectionNeedsReload
+          ? 'Request edits discarded. Retry load to inspect the current collection.' : 'Request edits discarded. The saved request is unchanged.'); renderApiCollection();
+      });
+      elements.collectionDiscardFolder.addEventListener('click', () => {
+        if (state.apiCollectionSaving) return;
+        state.collectionFolderDirty = false; state.collectionFolderDraftId = null;
+        setCollectionNotice(state.apiCollectionNeedsReload ? 'conflict' : 'ready', state.apiCollectionNeedsReload
+          ? 'Folder edits discarded. Retry load to inspect the current collection.' : 'Folder edits discarded. Saved variables are unchanged.'); renderApiCollection();
+      });
+      for (const response of [false, true]) {
+        const attribute = response ? 'collection-response-tab' : 'collection-tab';
+        const tabs = [...document.querySelectorAll(`[data-${attribute}]`)];
+        tabs.forEach((tab, index) => {
+          tab.addEventListener('click', () => selectCollectionContent(tab.getAttribute(`data-${attribute}`), response));
+          tab.addEventListener('keydown', event => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+              : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+            selectCollectionContent(tabs[next].getAttribute(`data-${attribute}`), response, true);
+          });
+        });
+      }
       elements.collectionNewFolder.addEventListener('click', () => {
+        if (!collectionMayLeaveDraft()) return;
         elements.collectionNewFolderForm.hidden = false;
         elements.collectionNewFolderName.value = '';
         requestAnimationFrame(() => elements.collectionNewFolderName.focus());
@@ -9183,6 +9477,7 @@
       elements.collectionCancelFolder.addEventListener('click', () => {
         elements.collectionNewFolderForm.hidden = true;
         elements.collectionNewFolderName.value = '';
+        elements.collectionNewFolder.focus();
       });
       elements.collectionConfirmFolder.addEventListener('click', createCollectionFolder);
       elements.collectionNewFolderName.addEventListener('keydown', event => {
@@ -9199,6 +9494,9 @@
       elements.collectionFolderForm.querySelectorAll('input, textarea, select').forEach(field => field.addEventListener('input', () => {
         state.collectionFolderDirty = true;
         state.collectionDeleteFolderId = null;
+        elements.collectionFolderDraftStatus.textContent = '· Unsaved';
+        elements.collectionDiscardFolder.disabled = false;
+        renderCollectionExecution();
       }));
       elements.collectionDeleteFolder.addEventListener('click', deleteCollectionFolder);
       elements.collectionRequestForm.addEventListener('submit', event => {
@@ -9207,17 +9505,26 @@
       elements.collectionRequestForm.querySelectorAll('input, textarea, select').forEach(field => field.addEventListener('input', () => {
         state.collectionDraftDirty = true;
         state.collectionDeleteRequestId = null;
+        elements.collectionDraftStatus.textContent = 'Unsaved edits · Save or discard before switching.';
+        elements.collectionDiscardRequest.disabled = false;
         renderCollectionVariableStatus();
+        renderCollectionExecution();
       }));
       elements.collectionDuplicateRequest.addEventListener('click', duplicateCollectionRequest);
       elements.collectionDeleteRequest.addEventListener('click', deleteCollectionRequest);
       elements.collectionCreateContext.addEventListener('click', async () => {
-        await runExperimentAction({action: 'create_request_interception_experiment'});
+        if (state.experimentPending || elements.collectionCreateContext.disabled) return;
+        elements.collectionCreateContext.disabled = true;
+        const result = await runExperimentAction({action: 'create_request_interception_experiment'});
+        if (!result) setCollectionNotice('error', state.experimentError || 'Isolated context could not be created.');
         renderApiCollection();
       });
       elements.collectionRun.addEventListener('click', runCollectionRequest);
       elements.collectionCancel.addEventListener('click', async () => {
-        await runExperimentAction({action: 'cancel_repeater_request'});
+        if (elements.collectionCancel.disabled) return;
+        elements.collectionCancel.disabled = true;
+        const result = await runExperimentAction({action: 'cancel_repeater_request'});
+        if (!result) setCollectionNotice('error', state.experimentError || 'Cancellation could not be confirmed.');
         renderApiCollection();
       });
       analystElements.newFolder.addEventListener('click', createAnalystFolder);

@@ -81,6 +81,13 @@ function trafficTypeLabel(type) {
   return Object.hasOwn(TRAFFIC_TYPE_LABELS, type) ? TRAFFIC_TYPE_LABELS[type] : 'Other';
 }
 
+// Keep table labels compact; filters and tooltips retain the full type names.
+const TRAFFIC_TABLE_TYPE_LABELS = Object.freeze({xhr: 'XHR/Fetch', doc: 'Doc', css: 'CSS', js: 'JS',
+  font: 'Font', img: 'Img', media: 'Media', socket: 'WS', wasm: 'Wasm'});
+function trafficTableTypeLabel(type) {
+  return Object.hasOwn(TRAFFIC_TABLE_TYPE_LABELS, type) ? TRAFFIC_TABLE_TYPE_LABELS[type] : 'Other';
+}
+
 function trafficTimeLabel(time) {
   if (typeof time !== 'number' || !Number.isFinite(time)) return time === 'pending' ? '—' : String(time ?? '—');
   if (time < 1) return `${time.toFixed(2)} ms`;
@@ -155,10 +162,12 @@ function renderTrafficRows(container, requests, {selectedId, newIds, matches, on
         trafficNode('span', 'request-host', `${target.host}${match ? ' · ' + match.label : ''}`));
       const numericStatus = Number(request.status);
       const status = trafficNode('span', request.failed || numericStatus >= 400 ? 'status-error'
-        : numericStatus >= 200 ? 'status-ok' : 'status-neutral', request.failed ? '(failed)' : request.status === 'pending' ? '(pending)' : String(request.status));
+        : numericStatus >= 200 ? 'status-ok' : 'status-neutral', request.failed ? '(failed)' : request.status === 'pending' ? 'Pending' : String(request.status));
       status.title = request.failed ? 'Request failed. Inspect the retained response state for details.'
         : request.status === 'pending' ? 'No terminal lifecycle event has been captured.' : `HTTP status ${request.status}`;
-      row.replaceChildren(name, status, trafficNode('span', 'request-type', trafficTypeLabel(request.type)),
+      const type = trafficNode('span', 'request-type', trafficTableTypeLabel(request.type));
+      type.title = trafficTypeLabel(request.type);
+      row.replaceChildren(name, status, type,
         trafficNode('span', 'request-method', request.method), trafficNode('span', 'request-time', trafficTimeLabel(request.time)));
       row.setAttribute('aria-label', `${trafficOriginLabel(request)} ${request.hostOnly ? 'host-only metadata' : 'request'}: ${request.method} ${request.path}, ${status.textContent}, ${trafficTimeLabel(request.time)}, ${request.operation ?? 'network'}, request ${request.id}${match ? ', match in ' + match.label : ''}`);
     }

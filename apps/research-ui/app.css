@@ -2756,6 +2756,7 @@
       .request-resource { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 11px; }
       .request-host { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 10px var(--sans); }
       .request-type, .request-method, .request-time { color: var(--muted); }
+      .request-type { font-family: var(--sans); }
       .request-time { text-align: right; font-variant-numeric: tabular-nums; }
       .request-rows { position: relative; overflow-anchor: none; scrollbar-gutter: stable; }
       .request-row[data-pending="true"] .status-neutral { color: var(--amber); }
@@ -2790,7 +2791,7 @@
       .traffic-general-row > :first-child { color: var(--muted); font-family: var(--sans); }
       .traffic-general-value { overflow-wrap: anywhere; }
       @media (max-width: 1100px) {
-        #screen-traffic .traffic-grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(min-content, 45%) minmax(240px, 1fr); overflow-y: auto; }
+        #screen-traffic .traffic-grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 50%) minmax(0, 1fr); overflow: hidden; }
         .request-pane { border-right: 0; border-bottom: 1px solid var(--line); }
       }
       @media (max-width: 600px) {
@@ -2802,8 +2803,9 @@
         .request-host { display: none; }
         .network-tools .filter-box { flex-basis: 130px; }
         .request-search-scope { order: 0; width: auto; }
-        .request-scope { grid-template-columns: minmax(0, 1fr); }
+        .request-scope { grid-template-columns: minmax(0, 1fr) auto; }
         .request-domain-filter { justify-content: flex-start; }
+        .request-domain-filter select { max-width: 110px; }
         .selection-url { flex-basis: calc(100% - 180px); }
       }
       @media (prefers-reduced-motion: reduce) {
@@ -2997,9 +2999,6 @@
 .hook-hit-link:hover, .hook-hit-link:focus-visible { background: var(--accent-soft); }
 #screen-traffic:not([hidden]) { display: grid; grid-template-rows: auto minmax(0, 1fr); }
 #screen-traffic .traffic-grid { grid-row: 2; height: auto; min-height: 0; }
-@media (max-height: 650px) and (max-width: 1100px) {
-  #screen-traffic .traffic-grid[data-detail-open="true"] { grid-template-rows: minmax(min-content, 240px) minmax(320px, 1fr); overflow-y: auto; }
-}
 .runtime-hook-traffic { position: relative; display: flex; flex-wrap: wrap; gap: 5px 10px; align-items: center; max-height: 145px; padding: 9px 72px 9px 12px; overflow: auto; border-bottom: 1px solid var(--line); background: var(--accent-soft); }
 .runtime-hook-traffic[hidden] { display: none; }
 .runtime-hook-traffic-heading, .runtime-hook-traffic-title { flex: 1 0 100%; min-width: 0; overflow-wrap: anywhere; }

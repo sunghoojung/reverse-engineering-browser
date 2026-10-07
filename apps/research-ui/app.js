@@ -1590,6 +1590,7 @@
         const exchangeInspector = document.querySelector('#exchange-inspector');
         const showingExchange = ['headers', 'payload', 'preview', 'response'].includes(state.inspectorTab) || state.selectedRequestId === null;
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        updateSelectionSummary(request);
         document.querySelector('.traffic-grid').dataset.detailOpen = String(state.trafficDetailOpen);
         document.querySelector('.detail-pane').hidden = !state.trafficDetailOpen;
         exchangeInspector.hidden = !showingExchange;

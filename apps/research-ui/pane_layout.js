@@ -69,10 +69,11 @@ function initializePaneLayout() {
       const total = horizontal ? a.width + b.width : a.height + b.height;
       const minimum = [...configuration.minimum];
       if (configuration.id === 'traffic') {
+        if (total > parent.getBoundingClientRect().height + 2) return null;
         const controls = [...panes[0].children].filter(child => !child.matches('.request-table'))
           .reduce((height, child) => height + child.getBoundingClientRect().height, 0);
         const emptyHeight = panes[0].querySelector('.request-empty')?.getBoundingClientRect().height ?? 0;
-        minimum[0] = Math.max(minimum[0], Math.ceil(controls + panes[0].querySelector('.request-head').getBoundingClientRect().height + Math.max(28, emptyHeight) + panes[0].querySelector('.request-window').getBoundingClientRect().height + 2));
+        minimum[0] = Math.max(minimum[0], Math.ceil(controls + panes[0].querySelector('.request-head').getBoundingClientRect().height + Math.max(56, emptyHeight) + panes[0].querySelector('.request-window').getBoundingClientRect().height + 2));
         if (panes[1].querySelector('.exchange-html-preview')) minimum[1] = 320;
       }
       if (total < minimum[0] + minimum[1]) return null;

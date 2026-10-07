@@ -201,7 +201,9 @@ Traffic uses a compact network ledger with visible resource-type filters and
 sortable Name, Status, Type, Method, and Time columns. **Capture order** restores
 the evidence order. The selected request opens Headers, Payload, Preview,
 Response, Initiator, and Timing beside the ledger above 1100 px, or below it in
-narrow windows. REB's Signals and Evidence tools remain separate tabs. Missing
+narrow windows. Both panes stay within the available workspace height; the
+request ledger and inspector body scroll independently. Captured-tab and domain
+filters share a compact row at narrow widths. REB's Signals and Evidence tools remain separate tabs. Missing
 headers, bodies, initiators, and timing phases stay explicitly unavailable.
 No cache, recording, throttling, or invented waterfall controls are implied.
 The layout follows familiar [network inspection conventions](https://developer.chrome.com/docs/devtools/network/reference)
@@ -332,9 +334,12 @@ REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium)" \
 
 The `requests-ui` CI job runs this mode on the existing Ubuntu runner. It serves
 only synthetic fixtures on loopback, exercises pointer and keyboard workflows,
-checks 500-row paging, lifecycle changes, selection/focus/scroll retention,
+checks 500-row paging, synchronized selected-summary lifecycle changes, selection/focus/scroll retention,
 content invalidation, empty/malformed/offline states, dismissal, narrow layouts,
-and reduced motion. Genuine rendered PNGs and a success-only `validation.json`
+and reduced motion. Narrow checks require two visible ledger rows, visible
+inspector tabs, at least 80 px of preview height, independent wheel scrolling,
+and hit-tested pointer targets without scrolling an offscreen workspace into view.
+Genuine rendered PNGs and a success-only `validation.json`
 are written under `build/requests-ui-qa` and uploaded as a short-lived CI artifact.
 Readiness uses Chrome's `DevToolsActivePort` file with a 30-second deadline,
 not a stderr banner. The socket handshake has a separate 10-second deadline.

@@ -238,7 +238,7 @@ const trafficDocument = {activeElement: null, createElement: tag => new TrafficF
   const node = new TrafficFixtureNode("text"); node.textContent = text; return node;
 }};
 const trafficSource = await readFile(join(root, "apps/research-ui/traffic_view.js"), "utf8");
-const trafficUI = runInNewContext(trafficSource + ";({trafficSortedRequests,trafficWindow,renderTrafficRows,renderTrafficDetails,trafficPaneSignature,TRAFFIC_ROW_LIMIT})", {
+const trafficUI = runInNewContext(trafficSource + ";({trafficSortedRequests,trafficWindow,renderTrafficRows,renderTrafficDetails,trafficPaneSignature,trafficTableTypeLabel,TRAFFIC_ROW_LIMIT})", {
   document: trafficDocument, URL, TextEncoder, TextDecoder, Uint8Array, queueMicrotask,
   navigator: {clipboard: {writeText: async () => {}}}, setTimeout: () => 0,
   createSourceTokenizer: () => ({}), sourceSyntaxTokens: text => [{type: "plain", text}],
@@ -248,6 +248,7 @@ const uiRequest = (id, patch = {}) => ({id, path: `https://fixture.invalid/${id}
   exchange: {request: {state: "empty", headers: []}, response: {state: "loading", headers: []}}, ...patch});
 const retainedTraffic = Array.from({length: 5000}, (_, index) => uiRequest(String(index), {time: index % 20}));
 assert.equal(trafficUI.TRAFFIC_ROW_LIMIT, 500);
+for (const type of ["constructor", "__proto__", null]) assert.equal(trafficUI.trafficTableTypeLabel(type), "Other");
 assert.equal(trafficUI.trafficWindow(retainedTraffic, 0).rows.length, 500);
 assert.equal(trafficUI.trafficWindow(retainedTraffic, 5000).start, 4500);
 assert.equal(trafficUI.trafficWindow(retainedTraffic.slice(30), 300, "300").start, 270);
@@ -261,6 +262,9 @@ assert.deepEqual(Array.from(trafficUI.trafficSortedRequests([uiRequest("native",
 const ledger = new TrafficFixtureNode();
 const rowOptions = {selectedId: "3", newIds: new Set(["3"]), onSelect() {}, onKey() {}};
 trafficUI.renderTrafficRows(ledger, retainedTraffic.slice(0, 500), rowOptions);
+assert.equal(ledger.children[0].children[1].textContent, "Pending");
+assert.equal(ledger.children[0].children[2].textContent, "XHR/Fetch");
+assert.equal(ledger.children[0].children[2].title, "Fetch/XHR");
 const selectedRow = ledger.children[3];
 selectedRow.focus(); ledger.scrollTop = 84;
 assert(selectedRow.classList.contains("is-new"));
@@ -365,6 +369,39 @@ for (const [validate, legacy] of [
   assert(validate({...legacy, ok: true, error: ""}));
 }
 console.log("PASS legacy and annotated Analyst/JWT failures, unchanged successes and bounded reason rejection");
+
+// Every inspector render must refresh the strip from the same current request;
+// lifecycle callers must not be able to leave a stale pending/status badge.
+const summaryState = {selectedRequestId: "current", requests: [uiRequest("current")], inspectorTab: "headers",
+  trafficDetailOpen: true, trafficSelectionNotice: null};
+const summaryElements = {};
+for (const name of ["selectedMethod", "selectedStatus", "selectedUrl", "requestCopyUrl", "requestCollectionPivot", "requestInspector", "requestSearchScope", "requestFilter"]) summaryElements[name] = new TrafficFixtureNode();
+summaryElements.requestSearchScope.value = "url";
+const summaryNodes = new Map(["#exchange-inspector", ".traffic-grid", ".detail-pane", "#request-evidence-toggle"].map(key => [key, new TrafficFixtureNode()]));
+let renderedSummaryRequest;
+const summaryInspector = runInNewContext(
+  appSection("      function updateSelectionSummary(", "      function selectRequest(") +
+  appSection("      function renderInspector()", "      function renderEvidence()") + ";renderInspector", {
+    state: summaryState, elements: summaryElements,
+    document: {querySelectorAll: () => [], querySelector: selector => summaryNodes.get(selector)},
+    renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;}, openFieldProvenance() {},
+  });
+for (const [status, failed] of [["pending", false], [200, false], ["failed", true]]) {
+  summaryState.requests = [{...summaryState.requests[0], status, failed}];
+  summaryInspector();
+  assert.equal(summaryElements.selectedStatus.textContent, String(status));
+  assert.equal(summaryElements.selectedStatus.classList.contains("status-error"), failed);
+  assert.equal(renderedSummaryRequest, summaryState.requests[0]);
+}
+summaryState.requests = [{...summaryState.requests[0], method: "POST", path: "https://fixture.invalid/new-path"}];
+summaryInspector();
+assert.equal(summaryElements.selectedMethod.textContent, "POST");
+assert.equal(summaryElements.selectedUrl.textContent, "https://fixture.invalid/new-path");
+summaryState.requests = []; summaryState.selectedRequestId = null;
+summaryInspector();
+assert.equal(summaryElements.selectedStatus.textContent, "-");
+assert.equal(summaryElements.requestCopyUrl.disabled, true);
+console.log("PASS selected strip and inspector share current pending/response/failed/empty request metadata");
 
 const pivotProfile = {signals: [{category: "canvas", event_count: "1", confidence: "observed", relation: "parent_chain"}]};
 const pivotState = {requests: [uiRequest("selected")], selectedRequestId: "selected", signalProfile: pivotProfile,
@@ -952,8 +989,40 @@ async function checkTrafficBrowser() {
       await command("Emulation.setDeviceMetricsOverride", {width, height, deviceScaleFactor: 1, mobile: false});
       await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     };
+    const wheel = async (selector, deltaY) => {
+      const point = await evaluate(`(() => {
+        const node = document.querySelector(${JSON.stringify(selector)}), r = node.getBoundingClientRect();
+        const x = r.x+r.width/2, y = r.y+r.height/2, hit = document.elementFromPoint(x,y);
+        if (r.width <= 0 || r.height <= 0 || x < 0 || x >= innerWidth || y < 0 || y >= innerHeight || !hit || !node.contains(hit)) throw new Error('Scroll target is clipped or offscreen: '+${JSON.stringify(selector)});
+        return {x,y,scrollTop:node.scrollTop};
+      })()`);
+      await command("Input.dispatchMouseEvent", {type: "mouseWheel", x:point.x, y:point.y, deltaX: 0, deltaY});
+      await evaluate(`new Promise(resolve => {
+        const node=document.querySelector(${JSON.stringify(selector)}), start=performance.now();
+        let previous=${point.scrollTop}, moved=false, stable=0;
+        function frame(){const current=node.scrollTop; moved ||= current!==${point.scrollTop};
+          stable=current===previous?stable+1:0; previous=current;
+          if(moved&&stable>=3 || performance.now()-start>1500) resolve(); else requestAnimationFrame(frame);}
+        requestAnimationFrame(frame);
+      })`);
+    };
     const click = async selector => {
-      const rect = await evaluate(`(() => { const node = document.querySelector(${JSON.stringify(selector)}); if (!node) throw new Error('Missing control'); node.scrollIntoView({block:'nearest', inline:'nearest'}); const r = node.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; })()`);
+      // Reveal a request only by scrolling its bounded ledger. Never scroll a
+      // workspace/ancestor to make an offscreen inspector control appear usable.
+      const delta = await evaluate(`(() => {
+        const node = document.querySelector(${JSON.stringify(selector)});
+        if (!node) throw new Error('Missing control: '+${JSON.stringify(selector)});
+        if (!node.matches('.request-row')) return 0;
+        const r = node.getBoundingClientRect(), box = elements.requestRows.getBoundingClientRect();
+        return r.top < box.top ? r.top-box.top : r.bottom > box.bottom ? r.bottom-box.bottom : 0;
+      })()`);
+      if (delta) await wheel('#request-rows', delta);
+      const rect = await evaluate(`(() => {
+        const node = document.querySelector(${JSON.stringify(selector)}), r = node.getBoundingClientRect();
+        const x = r.x+r.width/2, y = r.y+r.height/2, hit = document.elementFromPoint(x,y);
+        if (r.width <= 0 || r.height <= 0 || r.left < 0 || r.right > innerWidth || r.top < 0 || r.bottom > innerHeight || !hit || !node.contains(hit)) throw new Error('Control is clipped or offscreen: '+${JSON.stringify(selector)});
+        return {x,y};
+      })()`);
       await command("Input.dispatchMouseEvent", {type: "mousePressed", ...rect, button: "left", clickCount: 1});
       await command("Input.dispatchMouseEvent", {type: "mouseReleased", ...rect, button: "left", clickCount: 1});
     };
@@ -988,6 +1057,51 @@ async function checkTrafficBrowser() {
           return cell?.visible && Math.abs(head.left-cell.left) <= 1 && Math.abs(head.right-cell.right) <= 1;
         });
     };
+    const narrowPanes = async label => {
+      const geometry = await evaluate(`(() => {
+        const box = selector => {
+          const node = document.querySelector(selector), r = node.getBoundingClientRect();
+          let left=Math.max(0,r.left), right=Math.min(innerWidth,r.right), top=Math.max(0,r.top), bottom=Math.min(innerHeight,r.bottom);
+          for(let parent=node.parentElement;parent;parent=parent.parentElement){
+            const p=parent.getBoundingClientRect(), style=getComputedStyle(parent);
+            if(style.overflowX!=='visible'){left=Math.max(left,p.left);right=Math.min(right,p.right);}
+            if(style.overflowY!=='visible'){top=Math.max(top,p.top);bottom=Math.min(bottom,p.bottom);}
+          }
+          return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height,
+            visibleWidth:Math.max(0,right-left),visibleHeight:Math.max(0,bottom-top),
+            clientHeight:node.clientHeight,scrollHeight:node.scrollHeight,scrollTop:node.scrollTop};
+        };
+        return {viewport:{width:innerWidth,height:innerHeight},grid:box('.traffic-grid'),ledger:box('#request-rows'),
+          inspector:box('.detail-pane'),tabs:box('.inspector-tabs'),preview:box('.exchange-html-preview')};
+      })()`);
+      diagnostics.narrow_panes = [...(diagnostics.narrow_panes ?? []).slice(-5), {label,...geometry}];
+      assert(geometry.ledger.visibleWidth >= 200 && geometry.ledger.visibleHeight >= 56, `${label}: at least two request rows must remain visible`);
+      assert(geometry.tabs.visibleHeight >= 28, `${label}: inspector tabs must be visible`);
+      assert(geometry.preview.visibleWidth >= 200 && geometry.preview.visibleHeight >= 80, `${label}: rendered preview must be usable alongside the ledger`);
+      assert(geometry.ledger.bottom <= geometry.inspector.top + 1, `${label}: stacked panes must not overlap`);
+      assert(geometry.inspector.bottom <= geometry.grid.bottom + 1 && geometry.inspector.bottom <= geometry.viewport.height, `${label}: inspector must fit the workspace`);
+      assert(geometry.grid.scrollHeight <= geometry.grid.clientHeight + 1 && geometry.grid.scrollTop === 0, `${label}: workspace must not scroll to reach the inspector`);
+      return geometry;
+    };
+    const independentlyScrollPanes = async label => {
+      const before = await narrowPanes(label);
+      const down = before.ledger.scrollTop < before.ledger.scrollHeight-before.ledger.clientHeight-120;
+      await wheel('#request-rows', down ? 112 : -112);
+      const after = await narrowPanes(label+' after ledger scroll');
+      assert.notEqual(after.ledger.scrollTop, before.ledger.scrollTop, `${label}: wheel must scroll the ledger`);
+      assert.equal(after.inspector.top, before.inspector.top, `${label}: ledger scroll must not move the inspector`);
+      await click('#inspector-tab-response');
+      assert.equal(await evaluate("state.inspectorTab"), "response");
+      const bodyBefore = await evaluate("({ledger:elements.requestRows.scrollTop,body:document.querySelector('#exchange-inspector .exchange-content').scrollTop})");
+      await wheel('#exchange-inspector .exchange-content', 112);
+      const bodyAfter = await evaluate("({ledger:elements.requestRows.scrollTop,body:document.querySelector('#exchange-inspector .exchange-content').scrollTop,grid:document.querySelector('.traffic-grid').scrollTop})");
+      assert(bodyAfter.body > bodyBefore.body, `${label}: inspector body must scroll independently`);
+      assert.equal(bodyAfter.ledger, bodyBefore.ledger, `${label}: body scroll must not move the ledger`);
+      assert.equal(bodyAfter.grid, 0);
+      await click('#inspector-tab-preview');
+      assert.equal(await evaluate("state.inspectorTab"), "preview");
+      await narrowPanes(label+' restored preview');
+    };
     const screenshot = async name => {
       await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
       const result = await command("Page.captureScreenshot", {format: "png"});
@@ -1008,12 +1122,15 @@ async function checkTrafficBrowser() {
     await evaluate(`window.fixtureRequests = Array.from({length:520}, (_,i) => ({id:'qa-'+i,path:'https://fixture.invalid/api/item-'+i+'?view=compact',method:i%3?'GET':'POST',status:i%11===0?'pending':200,time:i%11===0?'pending':i/2,type:'xhr',origin:'demo',tabId:'qa-tab',hostOnly:false,operation:'synthetic_qa',events:[],exchange:{request:{state:'available',mime:'application/json',text:'{"id":"qa","value":"first"}',headers:[['content-type','application/json']]},response:{state:i%11===0?'loading':'available',mime:'application/json',text:i%11===0?'':'{"result":"first"}',headers:[['content-type','application/json'],['x-fixture','one']]}}})); state.requests=fixtureRequests; state.sessionMode='demo'; renderRequests(); document.querySelector('#network-notice').textContent='Synthetic browser QA fixture · no live capture';`);
     assert.equal(await evaluate("document.querySelectorAll('.request-row').length"), 500);
     assert(await columnsAligned(), "Request headers and row columns must align with the scrollbar gutter");
+    assert(await evaluate("[document.querySelector('.request-row').children[1],document.querySelector('.request-row .request-type')].every(node=>node.clientWidth>0&&node.scrollWidth<=node.clientWidth)"), "Pending and type labels must fit their compact cells");
     await click('[data-request-id="qa-22"]');
     assert.equal(await evaluate("state.selectedRequestId"), "qa-22");
     await click('#inspector-tab-response');
+    assert.equal(await evaluate("elements.selectedStatus.textContent"), "pending");
     assert.match(await evaluate("document.querySelector('#exchange-inspector').textContent"), /Loading response/);
     await evaluate(`window.selectedNode=document.querySelector('[data-request-id="qa-22"]'); selectedNode.focus(); window.previousTop=elements.requestRows.scrollTop; fixtureRequests[22]={...fixtureRequests[22],status:200,time:14,exchange:{...fixtureRequests[22].exchange,response:{state:'available',mime:'application/json',text:'{"result":"first"}',headers:[['x-fixture','one']]}}}; state.requests=[...fixtureRequests, {...fixtureRequests[0],id:'qa-arrival'}]; renderRequests(); renderInspector();`);
     assert(await evaluate("document.querySelector('[data-request-id=\"qa-22\"]') === selectedNode && document.activeElement === selectedNode && elements.requestRows.scrollTop === previousTop"));
+    assert.equal(await evaluate("elements.selectedStatus.textContent"), "200");
     await evaluate("state.requests[22].exchange.response.text='{\"result\":\"other\"}'; renderInspector()");
     assert.match(await evaluate("document.querySelector('#exchange-inspector').textContent"), /other/);
     await click('#exchange-inspector .exchange-options summary');
@@ -1035,6 +1152,7 @@ async function checkTrafficBrowser() {
     assert.match(await evaluate("document.querySelector('[data-request-id=\"qa-22\"]').textContent"), /failed/);
     await click('#inspector-tab-response');
     assert.match(await evaluate("document.querySelector('#exchange-inspector').textContent"), /Synthetic network failure/);
+    assert.equal(await evaluate("elements.selectedStatus.textContent"), "failed");
     await screenshot("requests-failed-response");
     await click('[data-request-sort="name"]');
     await evaluate("elements.requestFilter.value='no-match'; elements.requestFilter.dispatchEvent(new Event('input',{bubbles:true}))");
@@ -1062,16 +1180,21 @@ async function checkTrafficBrowser() {
     await click('#inspector-tab-preview');
     await evaluate("state.requests.find(r=>r.id==='qa-23').exchange.response={state:'available',mime:'application/json',text:'{malformed',headers:[]}; renderInspector()");
     assert.match(await evaluate("document.querySelector('#exchange-inspector').textContent"), /Invalid JSON/);
-    await evaluate("state.requests.find(r=>r.id==='qa-23').exchange.response={state:'available',mime:'text/html',text:'<h1>Safe preview</h1><script>window.parent.compromised=true</script><img src=\"https://forbidden.invalid/image\">',headers:[]}; renderInspector()");
+    await evaluate("state.requests.find(r=>r.id==='qa-23').exchange.response={state:'available',mime:'text/html',text:'<h1>Safe preview</h1>\\n'+Array.from({length:80},(_,i)=>'<p>Retained preview line '+i+'</p>').join('\\n')+'<script>window.parent.compromised=true</script><img src=\"https://forbidden.invalid/image\">',headers:[]}; renderInspector()");
     assert.equal(await evaluate("document.querySelector('.exchange-html-preview').getAttribute('sandbox')"), "");
     assert.equal(await evaluate("window.compromised === true"), false);
-    await viewport(600, 800); await screenshot("requests-narrow-preview");
+    await viewport(600, 800);
+    await independentlyScrollPanes("600x800");
+    await screenshot("requests-narrow-preview");
     await viewport(360, 740);
+    await independentlyScrollPanes("360x740");
     assert(await columnsAligned(), "Narrow request columns must remain aligned");
     assert(await evaluate("document.documentElement.scrollWidth <= innerWidth"), "Page has horizontal overflow at 360 px");
     await click('#inspector-tab-payload');
+    assert.equal(await evaluate("state.inspectorTab"), "payload");
     await key('ArrowRight');
     assert.equal(await evaluate("state.inspectorTab"), "preview");
+    await narrowPanes("360x740 keyboard preview");
     await screenshot("requests-phone-preview");
     await command("Emulation.setEmulatedMedia", {features: [{name: "prefers-reduced-motion", value: "reduce"}]});
     await evaluate("document.querySelector('.request-row').classList.add('is-new')");
@@ -1085,7 +1208,7 @@ async function checkTrafficBrowser() {
     assert.match(await evaluate("elements.requestRows.textContent"), /No developer evidence/);
     await screenshot("requests-empty");
     assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during rendered QA");
-    validation = {status: "passed", path: "browser development UI", source: "synthetic fixture", viewports: [[1440,900],[600,800],[360,740]], checks: ["500-row bound and paging", "pending to response to failed", "equal-length updates", "stable focus and scroll", "sort/filter selection", "dismissal and Escape", "eviction", "arrow-key rows and tabs", "malformed JSON", "sandboxed HTML", "reduced motion", "Back to traffic", "new capture", "empty/malformed/offline"]};
+    validation = {status: "passed", path: "browser development UI", source: "synthetic fixture", viewports: [[1440,900],[600,800],[360,740]], checks: ["500-row bound and paging", "synchronized selected summary", "visible bounded narrow split", "independent ledger and body scrolling", "hit-tested pointer controls", "pending to response to failed", "equal-length updates", "stable focus and scroll", "sort/filter selection", "dismissal and Escape", "eviction", "arrow-key rows and tabs", "malformed JSON", "sandboxed HTML", "reduced motion", "Back to traffic", "new capture", "empty/malformed/offline"]};
     diagnostics.phase = "validated";
   } catch (error) {
     failure = error;

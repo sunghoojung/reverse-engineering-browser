@@ -2522,10 +2522,17 @@ async function checkTrafficBrowser() {
         const node = document.querySelector(${JSON.stringify(selector)}), r = node.getBoundingClientRect();
         const x = r.x+r.width/2, y = r.y+r.height/2, hit = document.elementFromPoint(x,y);
         if (r.width <= 0 || r.height <= 0 || r.left < 0 || r.right > innerWidth || r.top < 0 || r.bottom > innerHeight || !hit || !node.contains(hit)) throw new Error('Control is clipped or offscreen: '+${JSON.stringify(selector)});
-        return {x,y};
+        return {x,y,left:r.left,right:r.right,top:r.top,bottom:r.bottom,
+          hit:{id:hit.id,tag:hit.tagName},connectionOpen:document.querySelector('#native-console-connection')?.open};
       })()`);
-      await command("Input.dispatchMouseEvent", {type: "mousePressed", ...rect, button: "left", clickCount: 1});
-      await command("Input.dispatchMouseEvent", {type: "mouseReleased", ...rect, button: "left", clickCount: 1});
+      const receipt={selector,before:rect};
+      if(consoleBrowser)diagnostics.pointer_events=[...(diagnostics.pointer_events??[]).slice(-63),receipt];
+      await command("Input.dispatchMouseEvent", {type: "mousePressed", x:rect.x,y:rect.y, button: "left", clickCount: 1});
+      await command("Input.dispatchMouseEvent", {type: "mouseReleased", x:rect.x,y:rect.y, button: "left", clickCount: 1});
+      if(consoleBrowser)receipt.after=await evaluate(`(()=>{
+        const node=document.querySelector(${JSON.stringify(selector)}),r=node?.getBoundingClientRect(),hit=document.elementFromPoint(${rect.x},${rect.y});
+        return {left:r?.left,right:r?.right,top:r?.top,bottom:r?.bottom,ownsPoint:!!node?.contains(hit),hit:{id:hit?.id,tag:hit?.tagName},connectionOpen:document.querySelector('#native-console-connection')?.open};
+      })()`);
     };
     const key = async (value, code = value, native = {}) => {
       await command("Input.dispatchKeyEvent", {type: "keyDown", key: value, code, ...native});

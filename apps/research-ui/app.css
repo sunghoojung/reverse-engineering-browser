@@ -3361,3 +3361,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .investigation-source-search p { flex-basis: 100%; margin: 6px 0; overflow-wrap: anywhere; }
 .investigation-navigation [hidden], .investigation-navigation[hidden] { display: none; }
 .investigation-navigation :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (max-width: 600px) {
+  /* Explanations need a reading row, not the narrow space beside Back/Forward. */
+  .investigation-controls > details[open] { flex-basis: 100%; }
+}

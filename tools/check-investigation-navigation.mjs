@@ -285,8 +285,46 @@ export async function checkInvestigationInteractions({evaluate,viewport,click,ke
     await click('.nav-button[data-screen="sources"]');await arrived('sources',`Primary choice at ${size[0]}`);
     assert.equal(await evaluate('document.activeElement.dataset.screen'),'sources','Primary choice must keep its own focus');
   }
+  // Rebuild a real short-label return trail. With Back to Requests + Forward,
+  // the old flex layout squeezed the open notice into a 150px right column.
+  await viewport(360,740);
+  if(!await evaluate("document.querySelector('#investigation-navigation details').open"))await click('#investigation-navigation summary');
+  await click('#investigation-clear');
+  await click('.nav-button[data-screen="traffic"]');await arrived('traffic','Prepare short-label request return');
+  await click('.request-row');
+  await click('.nav-button[data-screen="sources"]');await arrived('sources','Prepare short-label source destination');
+  assert.equal(await evaluate("document.querySelector('#investigation-back').textContent"),'Back to Requests');
+  assert.equal(await evaluate("document.querySelector('#investigation-forward').textContent"),'Forward');
+  fixture.session='13';await evaluate('refresh()');await until("state.events[0]?.session_id==='13'",'Short-label session replacement did not load');
+  const retainedView=()=>evaluate("({screen:investigationScreen(),request:state.selectedRequestId,artifact:state.selectedArtifactId,decoder:toolsElements.input.value,steps:state.decoderSteps.length,history:document.querySelector('#investigation-history-count').textContent})");
+  const beforePhoneReturn=await retainedView();
+  await click('#investigation-back');
+  await until("document.querySelector('#investigation-navigation details').open&&document.querySelector('#investigation-notice').textContent.includes('Return unavailable:')",'Short-label stale return did not expose its warning');
+  assert.deepEqual(await retainedView(),beforePhoneReturn,'Unavailable phone Back must preserve the workspace, selected evidence, draft and history position');
+  await closed('Short-label unavailable phone return');
+  const phoneContext=await evaluate("(()=>{const box=selector=>{const n=document.querySelector(selector),r=n.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};};const bar=document.querySelector('#investigation-navigation');return {bar:box('#investigation-navigation'),controls:box('.investigation-controls'),details:box('#investigation-navigation details'),back:box('#investigation-back'),forward:box('#investigation-forward'),notice:box('#investigation-notice'),clear:box('#investigation-clear'),text:document.querySelector('#investigation-notice').textContent,overflow:getComputedStyle(bar).overflowY};})()");
+  assert(phoneContext.details.left<=phoneContext.controls.left+1&&phoneContext.details.right>=phoneContext.controls.right-1&&phoneContext.details.top>=Math.max(phoneContext.back.bottom,phoneContext.forward.bottom),'Open phone context must use the full row below short Back/Forward labels');
+  assert.match(phoneContext.text,/Return unavailable:.*Nothing was fetched or recaptured/);
+  for(const item of [phoneContext.back,phoneContext.forward,phoneContext.notice,phoneContext.clear])assert(item.width>0&&item.height>0&&item.left>=phoneContext.bar.left&&item.right<=phoneContext.bar.right&&item.top>=phoneContext.bar.top&&item.bottom<=phoneContext.bar.bottom,'Phone warning and navigation controls must be visible inside their bar');
+  assert(phoneContext.bar.height<=740*.35+1&&phoneContext.overflow==='auto','Phone navigation must remain a bounded independent scroller');
+  await screenshot('investigation-short-label-unavailable-360');
+  // A longer fixture explanation exercises the same production notice renderer,
+  // then actual wheel input proves that only its navigation scroller moves.
+  await evaluate("window.shortLinkContext=document.querySelector('#investigation-notice').textContent;investigationNotice(Array(12).fill(shortLinkContext).join(' '),'unavailable')");
+  const scrollOwners=()=>evaluate("({page:document.scrollingElement.scrollTop,source:elements.sourceCodeWrap.scrollTop,details:document.querySelector('#source-sidebar .debug-panes').scrollTop})");
+  const beforeContextScroll=await scrollOwners();
+  const longContext=await evaluate("(()=>{const n=document.querySelector('#investigation-navigation');return {height:n.getBoundingClientRect().height,client:n.clientHeight,scroll:n.scrollHeight,top:n.scrollTop};})()");
+  assert(longContext.height<=740*.35+1&&longContext.scroll>longContext.client,'Long phone context must overflow only its bounded navigation pane');
+  await wheel('#investigation-navigation',longContext.scroll,true);
+  assert(await evaluate("document.querySelector('#investigation-navigation').scrollTop>0"),'Actual wheel input must scroll the long context');
+  assert.deepEqual(await scrollOwners(),beforeContextScroll,'Navigation scrolling must not move Sources or the page');
+  assert(await evaluate("(()=>{const n=document.querySelector('#investigation-clear').getBoundingClientRect(),b=document.querySelector('#investigation-navigation').getBoundingClientRect();return n.top>=b.top&&n.bottom<=b.bottom;})()"),'History control must remain reachable at the end of long context');
+  await screenshot('investigation-long-context-scroll-360');
+  await evaluate("investigationNotice(shortLinkContext,'unavailable')");
+  assert.deepEqual(await retainedView(),beforePhoneReturn,'Context reading must not navigate, replace drafts or change selected evidence');
+  console.log('Investigation phone context geometry',JSON.stringify({normal:phoneContext,long:longContext}));
   assert.equal(fixture.calls.filter(call=>call.method!=='GET').length,0,'Investigation navigation issued an action request');
-  return {status:'passed',path:'existing browser development driver',source:'original synthetic request + immutable UTF-8/BOM artifact + explicit synthetic trace/facts delivery',viewports:[[1440,900],[760,560],[360,740]],checks:['Advanced dismissed at every linked pivot and Back/Forward without hidden menu focus','manual pointer choices, Enter/Tab/Escape and repeated selection at all three widths','refused return preserves an explicitly open chooser','request → trace → exact session artifact → verified original UTF-8 range → Decoder evidence → Back','no derived-analysis request or automatic transform/send/capture/action','real Open original evidence click','native decline/confirm replacement dialogs preserve newer drafts','preserved request/trace/source selection, Decoder draft and trigger focus','keyboard Back/Forward','missing and ambiguous source','foreign-session trace rejection','interrupted trace delivery','Console URL search does not navigate','session-change stale return','bounded narrow controls']};
+  return {status:'passed',path:'existing browser development driver',phoneContext,source:'original synthetic request + immutable UTF-8/BOM artifact + explicit synthetic trace/facts delivery',viewports:[[1440,900],[760,560],[360,740]],checks:['Advanced dismissed at every linked pivot and Back/Forward without hidden menu focus','manual pointer choices, Enter/Tab/Escape and repeated selection at all three widths','refused return preserves an explicitly open chooser','request → trace → exact session artifact → verified original UTF-8 range → Decoder evidence → Back','no derived-analysis request or automatic transform/send/capture/action','real Open original evidence click','native decline/confirm replacement dialogs preserve newer drafts','preserved request/trace/source selection, Decoder draft and trigger focus','keyboard Back/Forward','missing and ambiguous source','foreign-session trace rejection','interrupted trace delivery','Console URL search does not navigate','session-change stale return','bounded narrow controls']};
 }
 
 // These regressions exercise the production navigation and selection functions,

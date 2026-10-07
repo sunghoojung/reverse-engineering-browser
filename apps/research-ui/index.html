@@ -310,7 +310,7 @@
           <section id="screen-memory" class="screen" aria-label="Memory investigation" hidden>
             <header class="screen-head">
               <div><h1>Memory Explorer</h1><div class="screen-subtitle">Find objects, inspect what retains them, and compare memory over time.</div></div>
-              <div class="screen-head-actions"><span class="memory-readonly">Local analysis</span></div>
+              <div class="screen-head-actions"><span id="memory-target" class="memory-target">Target unavailable</span><span class="memory-readonly">Ephemeral · local</span></div>
             </header>
             <div id="memory-notice" class="memory-notice" data-kind="offline" role="status" aria-live="polite">Run a live session to attach an authorized browser target.</div>
                   <div class="memory-mode-switch" role="group" aria-label="Memory search mode">
@@ -322,6 +322,7 @@
             <div class="memory-grid">
               <aside class="memory-search-pane" aria-label="Memory search criteria">
                 <form id="memory-search-form" class="memory-form" data-mode="live">
+                  <div class="memory-stage"><span>1</span><div><strong>Choose criteria</strong><small id="memory-workflow">Find an object, then inspect its inert preview.</small></div></div>
 
                   <label class="memory-live-only">Property name<input id="memory-property-query" type="text" placeholder="token, config, fingerprint" maxlength="512" autocomplete="off" /></label>
                   <label class="memory-search-only memory-value-field"><span id="memory-value-caption">Value</span><input id="memory-value-query" type="text" placeholder="exact text or pattern" maxlength="512" autocomplete="off" /></label>
@@ -365,12 +366,18 @@
                   <details class="workspace-disclosure"><summary>Search behavior</summary><p id="memory-search-help" class="memory-search-help">Accessors are reported without invoking getters. Results are ephemeral and are never added to the evidence store.</p></details>
                 </form>
               </aside>
-              <div id="memory-results-pane" class="memory-results-pane">
+              <div class="memory-output">
+                <div class="memory-receipt">
+                  <div id="memory-submission" class="memory-submission">No submitted result.</div>
+                  <details class="memory-submitted"><summary>Submitted criteria</summary><pre id="memory-submitted-criteria">No submitted criteria</pre></details>
+                </div>
+                <div id="memory-results-pane" class="memory-results-pane">
                 <div class="memory-results-list">
                   <div class="memory-results-head"><span id="memory-result-label">Matches</span><span id="memory-result-count">0</span></div>
                   <div id="memory-results" role="listbox" aria-label="Live object matches"></div>
                 </div>
                 <div id="memory-detail" class="memory-detail" tabindex="0"><div class="memory-empty">Attach a live page, enter at least one criterion, then start a bounded search.</div></div>
+                </div>
               </div>
             </div>
           </section>

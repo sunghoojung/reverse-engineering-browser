@@ -365,6 +365,45 @@ result statistics are likewise available in expanders beside their controls.
 Advanced workspaces keep the primary task visible and secondary information in
 expandable sections. Backtraces groups correlation identifiers separately from
 relationship facts. Memory places its four modes above the search and results.
+Each Memory mode keeps criteria, explicit action, and inspection separate. The
+result receipt records the submitted target, time, and criteria; diff receipts
+also retain the submitted baseline's native target/time/size metadata. Baselines
+are target-scoped; the native contract does not provide document identity. Draft
+scope changes do not rewrite an existing result. Captures can briefly pause the
+target, and origin tracing explicitly controls debugger stepping until stopped.
+Completed debugger polls are reconciled when actions settle, including after a
+lost acknowledgement; a matching terminal trace poll can retire an unread
+acknowledgement immediately. Memory HTTP waits have explicit headers-and-body
+deadlines: 30 seconds for live search, 90 for baseline capture, 120 for snapshot
+search, 150 for diff, and 15 for trace controls or baseline reset. These include
+margin beyond the existing native command/worker timeouts and do not limit or
+cancel an already-running native trace. Target/context/epoch expiry also retires
+the wait. Only that HTTP read is aborted; completion stays unconfirmed, no
+action is automatically retried, and a retired request cannot release a newer
+action's pending latch. Other debugger callers keep their existing request behavior;
+an older reply cannot overwrite a newer terminal trace or baseline.
+Trace-ID ordering is scoped to the observed native restart epoch.
+Acknowledgements require a valid generation before reporting reset or clear.
+No action is automatically retried. Lost, malformed, or stale replies report an
+unconfirmed outcome: discarding a reply does not stop native work. Target or
+observed execution-context changes expire previews without relabeling them as
+current. Only the current bounded result is retained, with no heap-file history.
+
+Memory result rows keep their identity during unchanged refreshes, preserving
+keyboard selection, focus, detail scroll, and incoming-reference disclosures.
+Snapshot paths and incoming references remain separate; heap diffs show retained
+owners even when no signature groups changed. Partial results qualify absence
+and dominator claims. Origin traces expose the recorded location as text, but do
+not open a live source using only a possibly reused script ID or URL: the trace
+contract lacks the execution-context/source-hash identity needed for that link.
+Request-field pivots only fill criteria and do not run captures; a pending action
+keeps its criteria and receipt when the workspace is reopened.
+
+The `--memory-ui-browser` mode of `tools/check-origin-trace-debugger.mjs` uses
+the existing installed-Chromium driver and synthetic native API fixtures. It
+covers four workflows, race/error/partial states, keyboard/refresh behavior,
+inert text, and wide/narrow geometry. It is separate from native macOS validation.
+
 Experiments separates setup, request, and response, with activity logs collapsed.
 Analyst prioritizes the editor and evidence permissions; folder settings, storage,
 variables, execution limits, and history can be expanded as needed. Tools keeps

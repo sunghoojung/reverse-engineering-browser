@@ -3467,7 +3467,7 @@ async function checkMemoryResponsiveOwners() {
   const narrow=css.slice(css.indexOf('      @media (max-width: 950px) {'));
   assert.match(narrow,/\.memory-results-pane \{ overflow: auto; grid-template-columns: 1fr; grid-template-rows: minmax\(150px, \.7fr\) minmax\(170px, 1fr\); \}/);
   const source=await readFile(join(root,'tools/check-origin-trace-debugger.mjs'),'utf8');
-  const from=source.indexOf('  const wheelReceipts=',source.indexOf('async function checkMemoryInteractions('));
+  const from=source.indexOf('  const wheelReceipts=',source.indexOf('\nasync function checkMemoryInteractions('));
   const to=source.indexOf('  await viewport(1440,900);',from);
   const helpers=source.slice(from,to)+';({reveal,checkReadingScroll,scrollState,wheelReceipts})';
   const results=[];
@@ -3504,6 +3504,96 @@ async function checkMemoryResponsiveOwners() {
 }
 await checkMemoryResponsiveOwners();
 
+// Run the actual screen transition, pane scheduler and entry assertions with
+// rendering deferred. This models event ordering, not Chromium layout or paint.
+async function checkMemoryEntryReadiness() {
+  const driver=await readFile(join(root,'tools/check-origin-trace-debugger.mjs'),'utf8');
+  const start=driver.indexOf('  const wheelReceipts=',driver.indexOf('\nasync function checkMemoryInteractions('));
+  const helpers=driver.slice(start,driver.indexOf('  await viewport(1440,900);',start))+';({enter,geometry})';
+  const layoutSource=await readFile(join(root,'apps/research-ui/pane_layout.js'),'utf8');
+  const appSource=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
+  const showScreen=appSource.slice(appSource.indexOf('      function showScreen('),appSource.indexOf('\n      async function refresh()',appSource.indexOf('      function showScreen(')));
+  const box=(left,top,width,height)=>({x:left,y:top,left,top,right:left+width,bottom:top+height,width,height});
+  for(const ordering of ['before-frame','frame-before-entry','timeout-before-entry']) {
+    const frames=new Map(),timers=new Map(),mutations=[],nodes=new Map(),checks=[];let serial=0,painted=0,focusWrites=0;
+    const node=(selector,rect=null,parent=null)=>{
+      const n={id:selector.startsWith('#')?selector.slice(1):'',tagName:'DIV',className:'',dataset:{},hidden:false,parentElement:parent,style:{setProperty(){},removeProperty(){}},attributes:{},listeners:{},clientTop:0,clientLeft:0,scrollTop:0,scrollLeft:0,
+        classList:{add(){},remove(){},contains:()=>false},getAttribute(k){return this.attributes[k]??null;},setAttribute(k,v){this.attributes[k]=v;},removeAttribute(k){delete this.attributes[k];},addEventListener(k,v){this.listeners[k]=v;},
+        getBoundingClientRect(){return n.className==='pane-divider'?box(parseFloat(n.style.left)||0,parseFloat(n.style.top)||0,parseFloat(n.style.width)||0,parseFloat(n.style.height)||0):rect??box(0,0,0,0);},getClientRects(){for(let p=n;p;p=p.parentElement)if(p.hidden)return [];const r=n.getBoundingClientRect();return r.width&&r.height?[r]:[];},
+        get clientHeight(){return rect?.height??0;},get clientWidth(){return rect?.width??0;},get scrollHeight(){return this.clientHeight;},
+        matches:s=>s===selector,closest:()=>null,contains(other){for(let p=other;p;p=p.parentElement)if(p===n)return true;return false;},querySelector:s=>nodes.get(s)??node(s),focus(){focusWrites++;document.activeElement=n;}};
+      nodes.set(selector,n);return n;
+    };
+    const body=node('body',box(0,0,760,560));body.children=[];body.append=n=>body.children.push(n);
+    const main=node('main',box(0,62,760,474),body),sources=node('#screen-sources',box(0,99,760,437),main),memory=node('#screen-memory',box(0,99,760,437),main);memory.hidden=true;
+    // An admissible Sources split crossing the CI snapshot-button center.
+    // The real receipt identifies the hit owner, but did not record its bounds.
+    const split=175.53125;
+    const navigator=node('.sources-navigator',box(0,99,split,437),sources),editor=node('.sources-editor',box(split,99,760-split,437),sources);
+    sources.querySelector=s=>s==='.sources-navigator'?navigator:s==='.sources-editor'?editor:node('.source-editor-toolbar');
+    const summary=node('#advanced-navigation > summary',box(365,31,76,30),body),navigation=node('#advanced-navigation',null,body);navigation.open=false;navigation.querySelector=()=>summary;
+    const trigger=node('#advanced-navigation .nav-button[data-screen="memory"]',null,navigation);trigger.classList.contains=s=>s==='nav-button';
+    const control=(selector,rect)=>{const n=node(selector,rect,memory);n.tagName=selector.includes('mode=')?'BUTTON':'DIV';return n;};
+    control('#screen-memory h1',box(17,109,388,15));control('#screen-memory .screen-subtitle',box(17,129,388,33));control('#memory-notice',box(0,173,760,34));
+    control('[data-memory-mode="live"]',box(14,215,97.5625,30));const snapshot=control('[data-memory-mode="snapshot"]',box(117.5625,215,115.9375,30));
+    control('[data-memory-mode="diff"]',box(239.5,215,86,30));control('[data-memory-mode="origin"]',box(331.5,215,97,30));
+    const intersects=(r,x,y)=>x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom;
+    const document={body,activeElement:summary,createElement:()=>node(''),addEventListener(){},
+      querySelector:s=>nodes.get(s)??node(s),querySelectorAll:s=>s==='.screen'?[sources,memory]:s==='.nav-button'?[]:s.includes('.pane-divider')?body.children:s.startsWith('#pane-divider-memory')?[]:[],
+      elementFromPoint(x,y){const handle=body.children.find(n=>!n.hidden&&intersects(box(parseFloat(n.style.left),parseFloat(n.style.top),parseFloat(n.style.width),parseFloat(n.style.height)),x,y));if(handle)return handle;return [...nodes.values()].reverse().find(n=>n.getClientRects().length&&intersects(n.getBoundingClientRect(),x,y));}};
+    const enqueue=(queue,fn)=>{queue.set(++serial,fn);return serial;};
+    const context={document,window:{addEventListener(){}},innerWidth:760,innerHeight:560,
+      localStorage:{getItem:()=>null,setItem(){throw Error('Entry must not persist a split');}},isPlainObject:v=>!!v&&typeof v==='object',
+      requestAnimationFrame:fn=>enqueue(frames,fn),cancelAnimationFrame:id=>frames.delete(id),setTimeout:fn=>enqueue(timers,fn),clearTimeout:id=>timers.delete(id),
+      MutationObserver:class{constructor(fn){mutations.push(fn);}observe(){}},ResizeObserver:class{observe(){}},
+      getComputedStyle:n=>({display:n===sources?'grid':'block',visibility:'visible',pointerEvents:'auto',overflowX:'hidden',overflowY:'hidden',getPropertyValue:()=>`${split}px ${760-split}px`})};
+    const flush=queue=>{const pending=[...queue];for(const [id,fn]of pending)if(queue.delete(id))fn();};
+    const frame=()=>{flush(frames);painted++;};
+    runInNewContext(layoutSource+';initializePaneLayout();',context);frame();
+    const divider=body.children.find(n=>n.id==='pane-divider-sources');assert.equal(divider.hidden,false);
+    const state={originTraceStatus:'idle',sourceHooksOpen:false};
+    const transition=runInNewContext(showScreen+';showScreen',{...context,state,investigationBeforeScreen(){},evidenceWorkspace:{setVisible(){}},sourceFactsPanel:{cancel(){}},float32Panel:{cancel(){}},renderMemory(){},renderDebugger(){},renderSources(){},selectedSource:()=>null});
+    const fixture={requests:[]};let readyExpressions=0;
+    const evaluate=async code=>{
+      const result=runInNewContext(code,context);
+      if(result&&typeof result.then==='function'){
+        readyExpressions++;const before=frames.size;
+        assert(before>0,'Readiness must queue a native render observation');
+        for(let n=0;n<4&&frames.size;n++)frame();
+      }
+      const serialized=JSON.stringify(await result);return serialized===undefined?undefined:JSON.parse(serialized);
+    };
+    const click=async selector=>{
+      if(selector==='#advanced-navigation > summary'){navigation.open=true;document.activeElement=trigger;return;}
+      assert.equal(selector,'#advanced-navigation .nav-button[data-screen="memory"]');
+      transition('memory',trigger);mutations[0]([{attributeName:'hidden'}]);
+      if(ordering==='frame-before-entry')frame();else if(ordering==='timeout-before-entry')flush(timers);
+    };
+    const api=runInNewContext(helpers,{evaluate,click,fixture,assert:Object.assign((...args)=>assert(...args),assert,{deepEqual:(a,b,m)=>assert.deepEqual(JSON.parse(JSON.stringify(a)),JSON.parse(JSON.stringify(b)),m)}),recordMemoryCheck:r=>checks.push(r)});
+    if(ordering==='before-frame'){
+      await click('#advanced-navigation > summary');await click('#advanced-navigation .nav-button[data-screen="memory"]');
+      assert.equal(sources.hidden,true);assert.equal(divider.hidden,false,'Hidden source keeps its body-level handle until scheduled layout');
+      await assert.rejects(api.geometry('Pre-paint counterexample'),/must be unobscured at center and corners/);
+      const receipt=checks.at(-1);assert.equal(receipt.selector,'[data-memory-mode="snapshot"]');assert.equal(receipt.covered,1);assert.equal(receipt.points[0].hit.id,divider.id);assert(receipt.points.slice(1).every(p=>p.owned));
+      assert.equal(receipt.allDividers.length,8);const sourceDivider=receipt.allDividers.find(d=>d.node.id===divider.id);
+      assert.equal(sourceDivider.hidden,false);assert.equal(sourceDivider.rendered,true);assert.equal(sourceDivider.pointerEvents,'auto');assert(intersects(sourceDivider.rect,receipt.points[0].x,receipt.points[0].y));
+      transition('sources',trigger);mutations[0]([{attributeName:'hidden'}]);frame();
+    }
+    const before=painted,previousFocus=focusWrites;
+    await api.enter('Painted Memory entry '+ordering);
+    assert.equal(divider.hidden,true);assert.equal(readyExpressions,1);assert(painted>=before+2,'Entry waits across two native frame boundaries');
+    assert.equal(fixture.requests.length,0);assert.equal(focusWrites,previousFocus+1,'Only production chooser dismissal restores focus');
+    assert.equal(snapshot.scrollTop,0);assert(checks.at(-1).covered===0);
+    // Readiness observes completion once; a persistent foreign overlay must
+    // still fail the original strict guard, rather than being waited away.
+    Object.defineProperty(divider,'hidden',{get:()=>false,set(){}});
+    await assert.rejects(api.enter('Persistent foreign divider'),/must be unobscured at center and corners/);
+    assert.equal(checks.at(-1).covered,1);
+  }
+  console.log('PASS Memory pre-paint Sources divider counterexample, native-frame entry readiness, frame/timer ordering and persistent-overlay rejection (production functions; not rendered QA)');
+}
+await checkMemoryEntryReadiness();
+
 async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeText,screenshot,fixture,recordMemoryCheck=()=>{}}) {
   const ready=async()=>{for(let n=0;n<150;n++){if(await evaluate('!state.memorySearchPending && !state.debuggerActionPending'))return;await new Promise(resolve=>setTimeout(resolve,20));}throw Error('Memory action did not settle');};
   const wheelReceipts=[],containmentReceipts=[];
@@ -3533,9 +3623,10 @@ async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeTe
       const r=rect(n),owners=[];let top=0,bottom=innerHeight,left=0,right=innerWidth;
       for(let p=n.parentElement;p;p=p.parentElement){const b=p.getBoundingClientRect(),s=getComputedStyle(p);if(s.overflowY!=='visible'){top=Math.max(top,b.top+p.clientTop);bottom=Math.min(bottom,b.top+p.clientTop+p.clientHeight);}if(s.overflowX!=='visible'){left=Math.max(left,b.left+p.clientLeft);right=Math.min(right,b.left+p.clientLeft+p.clientWidth);}if(owners.length<8&&['auto','scroll','overlay','hidden','clip'].some(value=>s.overflowX===value||s.overflowY===value))owners.push({node:identify(p),rect:rect(p),overflowX:s.overflowX,overflowY:s.overflowY,scrollTop:p.scrollTop,clientHeight:p.clientHeight,scrollHeight:p.scrollHeight});}
       const points=[[r.left+r.width/2,r.top+r.height/2],[r.left+3,r.top+3],[r.right-3,r.bottom-3]].map(([x,y])=>{const hit=document.elementFromPoint(x,y);return {x,y,owned:!!hit&&n.contains(hit),hit:identify(hit)};});
-      const dividers=[...document.querySelectorAll('#pane-divider-memory, #pane-divider-memory-detail')].filter(node=>!node.hidden&&node.getClientRects().length).map(node=>({node:identify(node),rect:rect(node),controls:node.getAttribute('aria-controls'),orientation:node.getAttribute('aria-orientation')}));
+      const allDividers=[...document.querySelectorAll('.pane-divider')].map(node=>{const style=getComputedStyle(node);return {node:identify(node),rect:rect(node),hidden:node.hidden,rendered:!!node.getClientRects().length,display:style.display,visibility:style.visibility,pointerEvents:style.pointerEvents,controls:node.getAttribute('aria-controls'),orientation:node.getAttribute('aria-orientation')};});
+      const dividers=allDividers.filter(d=>!d.hidden&&d.rendered&&['pane-divider-memory','pane-divider-memory-detail'].includes(d.node.id));
       const resizeOverlaps=n.matches('.memory-result-row')?dividers.filter(d=>Math.min(r.right,d.rect.right)>Math.max(r.left,d.rect.left)&&Math.min(r.bottom,d.rect.bottom)>Math.max(r.top,d.rect.top)).map(d=>d.node.id):[];
-      return {node:identify(n),rect:r,clip:{top,bottom,left,right},owners,points,dividers,resizeOverlaps,
+      return {node:identify(n),rect:r,clip:{top,bottom,left,right},owners,points,dividers,allDividers,resizeOverlaps,
         visible:r.width>0&&r.height>0&&r.left>=left-1&&r.right<=right+1&&r.top>=top-1&&r.bottom<=bottom+1,
         covered:points.filter(point=>!point.owned).length};
     })()`);
@@ -3600,6 +3691,10 @@ async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeTe
     assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),true,label+': real pointer opens Advanced');
     await click('#advanced-navigation .nav-button[data-screen="memory"]');
     assert.equal(await evaluate("document.querySelector('#screen-memory').hidden"),false,label+': Memory workspace opens');
+    // showScreen changes visibility before the shared pane scheduler retires
+    // Sources' body-level resize handle. Observe the painted entry boundary
+    // before strict geometry, just as Console does; never retry a failed hit.
+    await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
     await closed(label);await geometry(label);
     assert.equal(await evaluate("document.activeElement===document.querySelector('#advanced-navigation > summary')"),true,label+': focus returns to summary');
     assert.equal(fixture.requests.length,posts,label+': navigation must not submit an action');

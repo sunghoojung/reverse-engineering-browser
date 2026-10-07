@@ -60,17 +60,20 @@ const nativeConsoleCatalog = (() => {
   return groups;
 })();
 
-function nativeConsoleSuggestions(source, caret, explicit = false) {
+// Share lexical safety and replacement coordinates, while each caller retains
+// its own rules for admitting catalog hints or native identifier chains.
+function nativeConsoleCompletionContext(source, caret) {
   if (source.length > 8192 || caret < 0 || caret > source.length) return null;
   // The sentinel makes an unfinished string, regex or comment consume the
   // caret. Reuse the source lexer rather than mistaking dots inside data for JS.
-  const lexed = sourcePrettyTokens(source.slice(0, caret) + '\u0001', 'javascript');
+  const beforeCaret = source.slice(0, caret);
+  const lexed = sourcePrettyTokens(beforeCaret + '\u0001', 'javascript');
   const last = lexed.at(-1);
   if (!last || last.kind !== 'operator' || last.text !== '\u0001') return null;
   let previous = null;
   for (const token of lexed) {
     if (['whitespace', 'comment', 'line-comment'].includes(token.kind)) continue;
-    if (token.text === '/' && sourcePrettyMayStartRegex(previous) && sourcePrettyRegexEnd(source.slice(0, caret), token.start) === token.start + 1) return null;
+    if (token.text === '/' && sourcePrettyMayStartRegex(previous) && sourcePrettyRegexEnd(beforeCaret, token.start) === token.start + 1) return null;
     previous = token;
   }
   const tokens = lexed.slice(0, -1).filter(token => !['whitespace', 'comment', 'line-comment'].includes(token.kind));
@@ -78,6 +81,17 @@ function nativeConsoleSuggestions(source, caret, explicit = false) {
   const word = tokens[index]?.kind === 'word' && tokens[index].end === caret ? tokens[index--] : null;
   const start = word?.start ?? caret;
   const prefix = word?.text ?? '';
+  // Replace the entire identifier when completing in its middle. All offsets
+  // are UTF-16, matching the textarea, source lexer and native selection API.
+  let end = caret;
+  while (end < source.length && /[\w$]/.test(source[end])) ++end;
+  return {tokens, index, start, end, prefix};
+}
+
+function nativeConsoleSuggestions(source, caret, explicit = false) {
+  const context = nativeConsoleCompletionContext(source, caret);
+  if (!context) return null;
+  const {tokens, index, start, end, prefix} = context;
   const member = ['.', '?.'].includes(tokens[index]?.text);
   if (!member && !prefix && !explicit) return null;
   if (member && tokens[index].end !== start && source.slice(tokens[index].end, start).trim()) return null;
@@ -120,10 +134,6 @@ function nativeConsoleSuggestions(source, caret, explicit = false) {
   };
   const group = member ? nativeConsoleCatalog.get(resolve(index - 1)?.type) : nativeConsoleCatalog.get('global');
   if (!group) return null;
-  // Replace the entire identifier when completing in its middle. All offsets
-  // are UTF-16, matching the textarea, source lexer and native selection API.
-  let end = caret;
-  while (end < source.length && /[\w$]/.test(source[end])) ++end;
   // A fully typed API name is ready to run. Do not replace it with a longer
   // prefix match when Enter submits; explicit completion still includes it.
   if (!explicit && caret === end && group.has(prefix)) return null;
@@ -135,19 +145,10 @@ function nativeConsoleSuggestions(source, caret, explicit = false) {
 // Only identifier chains cross the native completion boundary. Calls,
 // computed keys, strings and comments are excluded rather than evaluated.
 function nativeConsoleCompletionQuery(source, caret, explicit = false) {
-  if (source.length > 8192 || caret < 0 || caret > source.length) return null;
-  const lexed = sourcePrettyTokens(source.slice(0, caret) + '\u0001', 'javascript');
-  if (lexed.at(-1)?.text !== '\u0001' || lexed.at(-1)?.kind !== 'operator') return null;
-  let previous = null;
-  for (const token of lexed) {
-    if (['whitespace', 'comment', 'line-comment'].includes(token.kind)) continue;
-    if (token.text === '/' && sourcePrettyMayStartRegex(previous) && sourcePrettyRegexEnd(source.slice(0, caret), token.start) === token.start + 1) return null;
-    previous = token;
-  }
-  const tokens = lexed.slice(0, -1).filter(token => !['whitespace', 'comment', 'line-comment'].includes(token.kind));
-  let index = tokens.length - 1;
-  const word = tokens[index]?.kind === 'word' && tokens[index].end === caret ? tokens[index--] : null;
-  const prefix = word?.text || '', start = word?.start ?? caret;
+  const context = nativeConsoleCompletionContext(source, caret);
+  if (!context) return null;
+  const {tokens, prefix, start, end} = context;
+  let {index} = context;
   const path = [];
   while (['.', '?.'].includes(tokens[index]?.text)) {
     const owner = tokens[index - 1];
@@ -156,7 +157,6 @@ function nativeConsoleCompletionQuery(source, caret, explicit = false) {
   }
   if (path.length > 8 || path.some(component => component.length > 128) || prefix.length > 128 || !path.length && !prefix && !explicit) return null;
   if (tokens[index] && ['.', '?.', ')', ']'].includes(tokens[index].text)) return null;
-  let end = caret; while (end < source.length && /[\w$]/.test(source[end])) ++end;
   return {path, prefix, start, end, source, caret};
 }
 

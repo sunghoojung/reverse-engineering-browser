@@ -175,6 +175,14 @@ export async function checkSourcesHistoryInteractions({evaluate,viewport,click:n
   try {
     for(const size of [[1440,900],[760,560]]){
       await viewport(...size);
+      // The attached Debugger becomes an intentional overlay at narrow widths.
+      // Dismiss it through its visible control before recording editor input;
+      // keep the shared pointer helper's strict visibility/hit checks intact.
+      if(await evaluate("getComputedStyle(elements.sourceSidebar).position==='absolute'&&!elements.sourceSidebar.hidden")){
+        await click('#source-sidebar-toggle');
+        await until('elements.sourceSidebar.hidden','Narrow Debugger overlay did not close');
+        await frames();
+      }
       for(const kind of ['artifact','live']){
         const route=kind==='live'?'live:history-live':'artifact:100';
         for(const scenario of ['restore','repeat','interaction','forward','failure']){

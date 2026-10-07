@@ -29,7 +29,7 @@ await checkCollectionController(root);
 // fixtures exercise identity and stale/cancelled request ownership, not JS execution.
 const sourceFactsUI = runInNewContext(
   (await readFile(join(root, 'apps/research-ui/source_facts.js'), 'utf8')) +
-  ';({sourceFactsIdentity,sourceFactsUnavailable,isSourceFactsReport,sourceFactsPosition,sourceFactsReadBytes,createSourceFactsController})',
+  ';({sourceFactsFields,sourceFactsIdentity,sourceFactsUnavailable,isSourceFactsReport,sourceFactsPosition,sourceFactsReadBytes,createSourceFactsController})',
   {TextEncoder, TextDecoder, Uint8Array, AbortController, setTimeout, clearTimeout, fetch, crypto},
 );
 const factsBytes = new TextEncoder().encode('\ufeffconst 雪 = "😀";\n雪++;');
@@ -821,8 +821,8 @@ console.log("PASS legacy and annotated Analyst/JWT failures, unchanged successes
 // An unchanged event ETag must not prevent artifact-only updates reaching Evidence.
 const packageRefreshState = {artifactRefreshing:false,artifactEtag:null,artifactCatalogSignature:null,artifacts:[],openArtifactIds:[],selectedArtifactId:null,sessionMode:'live'};
 let packageRefreshBody={artifacts:packageGolden.records.artifacts.map(row=>({...row,...row.key}))}, packageRefreshSyncs=0;
-const packageArtifactRefresh=runInNewContext(appSection('      async function refreshArtifacts()', '      function showScreen(')+';refreshArtifacts',{
-  state:packageRefreshState,location:{protocol:'http:'},fetch:async()=>Response.json(packageRefreshBody),isArtifactResponse:()=>true,
+const packageArtifactRefresh=runInNewContext(appSection('      function liveScriptIdentity(', '      function liveSources(') + appSection('      async function refreshArtifacts()', '      function showScreen(')+';refreshArtifacts',{
+  sourceFactsFields:sourceFactsUI.sourceFactsFields, sourceFactsIdentity:sourceFactsUI.sourceFactsIdentity, state:packageRefreshState,location:{protocol:'http:'},fetch:async()=>Response.json(packageRefreshBody),isArtifactResponse:()=>true,
   renderShellStatus(){},renderSourceHealth(){},renderSources(){},renderFingerprintActivity(){},loadArtifactContent(){},loadWasmInspection(){},
   nativeCanvasCaptureDisplayLimit:10,document:{querySelector:()=>({hidden:true})},evidencePackagePanel:{sync(){packageRefreshSyncs++;}}
 });
@@ -913,6 +913,7 @@ let sourceTimerId = 0;
 const sourceTimers = new Map();
 const activeSourceRequests = new Set();
 const sourceSandbox = {state: sourceState, location: {protocol: "http:"},
+  sourceFactsReadBytes: sourceFactsUI.sourceFactsReadBytes, TextDecoder, TextEncoder,
   AbortController,
   setTimeout(callback, delay) {const id = ++sourceTimerId; sourceTimers.set(id, {callback, delay}); return id;},
   clearTimeout(id) {sourceTimers.delete(id);},
@@ -940,7 +941,12 @@ const sourceSandbox = {state: sourceState, location: {protocol: "http:"},
         signal.addEventListener("abort", aborted, {once: true});
         Promise.resolve(value).then(value => settle(resolve, value), error => settle(reject, error));
       });
-      return sourceHeadersStalled ? abortable(new Promise(() => {})) : {ok: true, json: () => abortable(reply)};
+      return sourceHeadersStalled ? abortable(new Promise(() => {})) : {ok: true, body: {getReader() {
+        let delivered = false;
+        return {async read() {if (delivered) return {done:true}; delivered=true;
+          return {done:false, value:new TextEncoder().encode(JSON.stringify(await abortable(reply)))};},
+          cancel() {activeSourceRequests.delete(id); return Promise.resolve();}, releaseLock() {}};
+      }}};
     }
     if (catalogFailure) throw new Error("Synthetic refresh disconnected");
     return {status: 200, ok: true, headers: {get: () => null}, json: async () => catalogReply};
@@ -1126,6 +1132,398 @@ assert.equal(sourceState.liveScriptContent.size, 0);
 assert.equal(activeSourceRequests.size, 0);
 assert.equal(sourceTimers.size, 0);
 console.log("PASS live source eviction, validated refresh retention, identity changes, abort/timeout cleanup and load races");
+// Adversarial Sources ownership tests run production functions, not a second
+// controller. Transport/DOM fixtures are inert and are not rendered acceptance.
+function sourceProductionFunction(name) {
+  const start = appSource.search(new RegExp(`^      (?:async )?function ${name}\\(`, 'm'));
+  assert(start >= 0, name);
+  const end = /^      }$/m.exec(appSource.slice(start));
+  assert(end, name);
+  return appSource.slice(start, start + end.index + end[0].length);
+}
+const ownershipFunctionNames = ['liveScriptIdentity', 'sourceIdentity', 'sourceIsCurrent', 'sourceReference', 'setSourceCursor', 'sourceCursorFor',
+  'retireSourceAnalysis', 'releaseSourcePreview', 'boundSourcePreviews', 'boundSourceAnalysis',
+  'liveSources', 'capturedSources', 'selectedSource', 'deobfuscationKey', 'sourceOwnedLiveText', 'validateSourceAnalysis', 'loadDeobfuscation',
+  'sourceDisplayView', 'sourceViewLabel', 'sourceDerivedView', 'loadArtifactContent', 'refreshArtifacts',
+  'closeSource', 'loadScriptContent', 'sourceRuntimeLine', 'sourceRuntimeColumn', 'prefillHookFromSource',
+  'sourceDisplayName', 'sourceIcon', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent', 'updateSourceDecorations', 'breakpointLinesForSource',
+  'revealRuntimeHookHit', 'sourceArtifactIdentityMatches', 'selectArtifact', 'selectScript', 'sourceFormattedView'];
+const ownershipModels = await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8');
+const ownershipSyntax = await readFile(join(root, 'apps/research-ui/source_syntax.js'), 'utf8');
+const ownershipProvenance = await readFile(join(root, 'apps/research-ui/field_provenance.js'), 'utf8');
+const ownershipProvenanceSite = ownershipProvenance.slice(ownershipProvenance.indexOf('function revealProvenanceSite('), ownershipProvenance.indexOf('\nfunction provenanceSourceURL('));
+const ownershipHash = async text => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',
+  typeof text === 'string' ? new TextEncoder().encode(text) : text)), byte => byte.toString(16).padStart(2, '0')).join('');
+const ownedArtifact = async (id, text = 'const a = 1;', session = '1') => ({protocol_version:1, artifact_id:id, session_id:session,
+  navigation_id:'1', frame_id:'1', parent_artifact_id:'0', creator_event_id:'0', kind:'javascript',
+  url:`https://fixture.invalid/${id}.js`, mime_type:'text/javascript', byte_size:Buffer.byteLength(text), sha256:await ownershipHash(text), sensitive:false});
+const ownedPayload = (source, text) => ({schema:'deobfuscation-analysis-v1', engine:'rust-oxc', mode:'derived', source_truncated:false,
+  artifact_id:source.source_type === 'script' ? null : source.artifact_id,
+  script_id:source.source_type === 'script' ? source.script_id : null, original_source:text,
+  analysis:{source:{sha256:source.sha256 ?? source.hash,byte_size:Buffer.byteLength(text)},assumptions:[]},
+  representation:{text,offset_unit:'utf-8-byte',segments:text ? [{kind:'verbatim',original_start:0,original_end:Buffer.byteLength(text),derived_start:0,derived_end:Buffer.byteLength(text)}] : []}});
+function ownedContext(patch = {}) {
+  const state = {artifacts:[], openArtifactIds:[], openScriptIds:[], selectedArtifactId:null, selectedScriptId:null,
+    liveScriptContent:new Map(), staleScriptIds:new Set(), deobfuscationRequests:new Map(), deobfuscationCache:new Map(),
+    sourceFormatCache:new Map(), wasmRequests:new Map(), wasmCache:new Map(),
+    sourceDeobfuscated:false, sourceFormatted:false, sourceWasm:false, sessionMode:'live', ...patch.state};
+  const sandbox = {console, state, TextEncoder, TextDecoder, Uint8Array, crypto, AbortController, setTimeout, clearTimeout,
+    sourceFactsFields:sourceFactsUI.sourceFactsFields, sourceFactsIdentity:sourceFactsUI.sourceFactsIdentity, sourceFactsReadBytes:sourceFactsUI.sourceFactsReadBytes,
+    sourceFactsPanel:{original:()=>undefined}, location:{protocol:'http:'}, document:{querySelector:()=>({hidden:true})},
+    renderSources(){}, renderSourceHealth(){}, renderShellStatus(){}, renderFingerprintActivity(){},
+    runtimeHooksState:()=>({workers:[], isolated:true, target_id:state.debuggerSession?.target?.id}),
+    sourceName:source=>source.url, nativeCanvasCaptureDisplayLimit:4, evidencePackagePanel:{sync(){}},
+    ...patch, state};
+  return {state, sandbox, api:runInNewContext(ownershipModels + ownershipSyntax + ownershipProvenanceSite + ownershipFunctionNames.map(sourceProductionFunction).join('\n') +
+    `;({${ownershipFunctionNames.join(',')},revealProvenanceSite})`, sandbox)};
+}
+const sourceOwnershipReceipt = [];
+const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{resolve=done;}); return {promise,resolve};};
+{
+  const artifact=await ownedArtifact('1'), added=await ownedArtifact('2'), held=ownedDeferred(); let reads=0;
+  const {state,api}=ownedContext({state:{artifacts:[artifact],openArtifactIds:['1'],selectedArtifactId:'1'},
+    fetch:async url=>url.startsWith('/api/artifacts?') ? Response.json({count:2,artifacts:[{...artifact,loading:undefined},added]}) : (reads++,held.promise)});
+  const pending=api.loadArtifactContent(artifact); assert(artifact.loading);
+  await api.refreshArtifacts(); assert.equal(state.artifacts[0],artifact,'Refresh must preserve its pending owner');
+  held.resolve(new Response('const a = 1;')); await pending;
+  assert.equal(state.artifacts[0].content,'const a = 1;'); assert.equal(artifact.loading,false); assert.equal(reads,1);
+  sourceOwnershipReceipt.push({test:'pending_refresh_owner',status:'passed',contentReads:reads});
+}
+{
+  const old=await ownedArtifact('1'), newer=await ownedArtifact('1','const newer = 2;','2');
+  const held=ownedDeferred(); let signal, reads=0;
+  const {state,api}=ownedContext({state:{artifacts:[old],openArtifactIds:['1'],selectedArtifactId:'1'}, fetch:async (url,options)=>{
+    if(url.startsWith('/api/artifacts?')) return Response.json({count:1,artifacts:[newer]});
+    reads++; if(reads===1){signal=options.signal;return held.promise;} return new Response('const newer = 2;');
+  }});
+  const pending=api.loadArtifactContent(old); await api.refreshArtifacts(); assert(signal.aborted);
+  held.resolve(new Response('const a = 1;')); await pending;
+  await new Promise(resolve=>setImmediate(resolve));
+  // The newly selected owner may still be in WebCrypto; await only that owner.
+  for(let i=0;i<50 && state.artifacts[0].loading;i++) await new Promise(resolve=>setTimeout(resolve,1));
+  assert.equal(state.artifacts[0].session_id,'2'); assert.equal(state.artifacts[0].content,'const newer = 2;');
+  assert.equal(old.content,undefined); assert.equal(reads,2);
+  sourceOwnershipReceipt.push({test:'session_reuse_retires_late_preview',status:'passed'});
+}
+{
+  const artifact=await ownedArtifact('1'); let reads=0, bytes='const b = 1;';
+  const {state,api}=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'1'},fetch:async()=>{reads++;return new Response(bytes);}});
+  await api.loadArtifactContent(artifact); assert.match(artifact.loadError,/SHA-256/); assert.equal(artifact.content,undefined);
+  await api.loadArtifactContent(artifact); assert.equal(reads,1,'No implicit retry');
+  bytes='const a = 1;'; await api.loadArtifactContent(artifact,{retry:true}); assert.equal(artifact.content,bytes);
+  api.closeSource({...artifact,source_type:'artifact'}); assert.equal(artifact.content,undefined);
+  assert.equal(artifact.sha256,await ownershipHash(bytes)); assert.equal(state.artifacts.length,1);
+  sourceOwnershipReceipt.push({test:'wrong_preview_hash_explicit_retry_preserves_descriptor',status:'passed'});
+}
+{
+  const original='\ufeffconst 雪 = "😀";\r\n雪;'; const artifact=await ownedArtifact('1',original); artifact.content=original;
+  let payload=ownedPayload(artifact,original);
+  const {state,api}=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'1'},fetch:async()=>Response.json(payload)});
+  await api.loadDeobfuscation(api.selectedSource()); const key=api.deobfuscationKey(api.selectedSource());
+  assert.equal(state.deobfuscationRequests.get(key).status,'ready'); const successful=state.deobfuscationCache.get(key);
+  const malformed = [value=>{value.artifact_id='999';}, value=>{value.analysis.source.sha256='b'.repeat(64);},
+    value=>{value.original_source=original.replace('const','throw');}, value=>{value.analysis.source.byte_size++;},
+    value=>{value.mode='analysis';}, value=>{value.source_truncated=true;}, value=>{value.analysis.assumptions=['standard-intrinsics'];},
+    value=>{value.representation.segments[0].original_start=1;}, value=>{value.representation.segments=[];},
+    value=>{value.representation.text='other';}, value=>{value.analysis.omissions={};},
+    value=>{value.analysis.classification={evidence:[null]};},value=>{value.analysis.string_tables=[null];}];
+  for(const corrupt of malformed) {
+    payload=structuredClone(successful);corrupt(payload); await api.loadDeobfuscation(api.selectedSource(),{retry:true});
+    assert.equal(state.deobfuscationRequests.get(key).status,'error'); assert.equal(state.deobfuscationCache.get(key),successful);
+    assert.equal(api.sourceDisplayView(api.selectedSource()).content,original); assert.match(api.sourceViewLabel(api.selectedSource()),/Original evidence preview/);
+  }
+  // Even a forged cache cannot replace the original-mode preview.
+  state.deobfuscationCache.set(key,{...successful,original_source:'forged evidence'});
+  assert.equal(api.sourceDisplayView(api.selectedSource()).content,original);
+  sourceOwnershipReceipt.push({test:'deob_identity_hash_assumptions_map_original_separation',status:'passed',rejections:malformed.length});
+}
+{
+  const text='const worker = 1;'; const script={script_id:'worker:7:1',target_id:'worker-7',target_type:'worker',hash:await ownershipHash(text),language:'JavaScript',length:text.length};
+  const held=ownedDeferred(); let waiting=false, signal;
+  const {state,api}=ownedContext({state:{debuggerSession:{target:{id:'page-1'},scripts:[script]},selectedScriptId:script.script_id,openScriptIds:[script.script_id]},
+    fetch:async(url,options)=>{signal=options.signal;return url.startsWith('/api/debugger/source')
+      ? Response.json({protocol_version:1,script_id:script.script_id,source:text,truncated:false})
+      : waiting ? held.promise : Response.json(ownedPayload(api.liveSources()[0],text));}});
+  await api.loadScriptContent({...script,source_type:'script',kind:'javascript'});
+  await api.loadDeobfuscation(api.liveSources()[0]); assert.equal(api.liveSources()[0].deobfuscation.original_source,text);
+  waiting=true;const pending=api.loadDeobfuscation(api.liveSources()[0],{retry:true});
+  const payload=ownedPayload(api.liveSources()[0],text); api.closeSource(api.liveSources()[0]); assert(signal.aborted);
+  held.resolve(Response.json(payload)); await pending; assert.equal(state.deobfuscationCache.size,0);
+  assert.equal(state.deobfuscationRequests.size,0);
+  sourceOwnershipReceipt.push({test:'worker_target_analysis_and_closed_reply_retirement',status:'passed'});
+}
+{
+  const artifact=await ownedArtifact('1'); const held=ownedDeferred(); const {state,api}=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'1'},fetch:async()=>held.promise});
+  const pending=api.loadDeobfuscation(api.selectedSource());
+  state.artifacts=[{...artifact,session_id:'99'}];
+  held.resolve(Response.json(ownedPayload(artifact,'const a = 1;'))); await pending;
+  assert.equal(state.deobfuscationCache.size,0);
+  sourceOwnershipReceipt.push({test:'late_analysis_new_session_same_id_hash_rejected',status:'passed'});
+}
+{
+  const source={script_id:'7',target_id:'new-page',hash:'b'.repeat(64),source_type:'script',start_line:0,start_column:0,url:'fixture.js'};
+  const elements=Object.fromEntries(['hooksScript','hooksEntryMode','hooksLine','hooksColumn','hooksLabel'].map(key=>[key,{value:''}]));
+  const {state,api}=ownedContext({state:{debuggerSession:{target:{id:'new-page'},scripts:[source]},sourceCursor:{scriptId:'7',line:90,column:31}},elements});
+  const variants=[{scriptId:'7',line:90,column:31}, {identity:api.sourceIdentity({...source,target_id:'old-page'}),representation:'original',line:90,column:31},
+    {identity:api.sourceIdentity({...source,hash:'a'.repeat(64)}),representation:'original',line:90,column:31},
+    {identity:api.sourceIdentity(source),representation:'derived',line:90,column:31}];
+  for(const cursor of variants){state.sourceCursor=cursor;assert(api.prefillHookFromSource(source));assert.equal(elements.hooksLine.value,'1');assert.equal(elements.hooksColumn.value,'1');}
+  state.sourceCursor={identity:api.sourceIdentity(source),representation:'original',line:90,column:31};
+  assert(api.prefillHookFromSource(source));assert.equal(elements.hooksLine.value,'91');
+  sourceOwnershipReceipt.push({test:'cursor_target_hash_representation_binding',status:'passed',rejections:variants.length});
+}
+{
+  const artifacts=await Promise.all(Array.from({length:25},(_,index)=>ownedArtifact(String(index+1))));
+  for(const artifact of artifacts) artifact.content='const a = 1;';
+  const {state,api}=ownedContext({state:{artifacts,openArtifactIds:artifacts.map(value=>value.artifact_id),selectedArtifactId:'25'},fetch:async()=>new Response('const a = 1;')});
+  for(const artifact of artifacts) api.closeSource({...artifact,source_type:'artifact'});
+  assert.equal(state.openArtifactIds.length,0); assert.equal(artifacts.filter(value=>value.content!==undefined).length,0);
+  assert.equal(artifacts.length,25);assert(artifacts.every(value=>value.sha256));
+  const script={script_id:'7',target_id:'page-1',hash:'a'.repeat(64),language:'JavaScript',kind:'javascript',source_type:'script'};
+  const held=ownedDeferred();let signal; const live=ownedContext({state:{debuggerSession:{target:{id:'page-1'},scripts:[script]},openScriptIds:['7'],selectedScriptId:'7'},
+    fetch:async(url,options)=>{signal=options.signal;return held.promise;}});
+  const pending=live.api.loadScriptContent(script); live.api.closeSource(script); assert(signal.aborted);
+  held.resolve(Response.json({protocol_version:1,script_id:'7',source:'closed-source retained',truncated:false})); await pending;
+  assert.equal(live.state.liveScriptContent.size,0);
+  sourceOwnershipReceipt.push({test:'close_25_previews_and_pending_live_read',status:'passed',retainedPreviews:0,retainedDescriptors:25});
+}
+{
+  const text='x'.repeat(2097152), artifacts=await Promise.all(Array.from({length:12},(_,index)=>ownedArtifact(String(index+1),text)));
+  const {state,api}=ownedContext({state:{artifacts,openArtifactIds:artifacts.map(value=>value.artifact_id)},fetch:async()=>new Response(text)});
+  for(const artifact of artifacts){state.selectedArtifactId=artifact.artifact_id;await api.loadArtifactContent(artifact);}
+  const loaded=artifacts.filter(value=>value.content!==undefined), characters=loaded.reduce((sum,value)=>sum+value.content.length,0);
+  assert(loaded.length<=8 && characters<=8*1024*1024); assert.equal(artifacts[0].content,undefined);
+  state.selectedArtifactId='1';await api.loadArtifactContent(artifacts[0]);assert.equal(artifacts[0].content,text);
+  const binary=new Uint8Array(2097152);const wasm={...await ownedArtifact('99'),kind:'wasm',mime_type:'application/wasm',byte_size:binary.length,sha256:await ownershipHash(binary)};
+  const hex=ownedContext({state:{artifacts:[wasm],selectedArtifactId:'99'},fetch:async()=>new Response(binary)});
+  await hex.api.loadArtifactContent(wasm); assert(wasm.content.split('\n').length<=20003);assert(wasm.content.length<2*1024*1024);assert(wasm.contentTruncated);
+  sourceOwnershipReceipt.push({test:'preview_byte_budget_and_bounded_hex',status:'passed',retainedPreviews:loaded.length,retainedUTF16TextBytes:characters*2,hexRows:wasm.content.split('\n').length});
+}
+{
+  const artifact=await ownedArtifact('1');artifact.content='const a = 1;';let reads=0;
+  const {state,api}=ownedContext({state:{artifacts:[artifact]},fetch:async()=>{reads++;return new Response('const a = 1;');}});
+  const identity={type:'captured-artifact',session:artifact.session_id,artifact:'1',sha256:artifact.sha256,bytes:artifact.byte_size};
+  for(const wrong of [{...identity,session:'2'},{...identity,sha256:'b'.repeat(64)},{...identity,bytes:1}]) {
+    assert.equal(api.selectArtifact('1',null,{passive:true,identity:wrong}),false);assert.equal(state.selectedArtifactId,null);
+  }
+  assert.equal(api.selectArtifact('1',null,{passive:true,identity}),true);assert.equal(state.selectedArtifactId,'1');assert.equal(reads,0);
+  state.artifacts.push({...artifact,session_id:'2'});assert.equal(api.selectArtifact('1',null,{identity}),false);
+  assert.equal(api.selectedSource(),null);assert.equal(reads,0);
+  sourceOwnershipReceipt.push({test:'exact_passive_artifact_entry_and_global_ambiguity',status:'passed'});
+}
+{
+  const artifact=await ownedArtifact('1'), held=ownedDeferred(),timers=new Map();let sequence=0,reads=0,signal;
+  const {api}=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'1'},
+    setTimeout(callback,delay){const id=++sequence;timers.set(id,{callback,delay});return id;},clearTimeout(id){timers.delete(id);},
+    fetch:async(url,options)=>{reads++;signal=options.signal;return reads===1?held.promise:new Response('const a = 1;');}});
+  const old=api.loadArtifactContent(artifact);const timer=[...timers.values()][0];assert.equal(timer.delay,10000);timer.callback();
+  assert(signal.aborted);assert.equal(artifact.loading,false);assert.match(artifact.loadError,/timed out/);
+  await api.loadArtifactContent(artifact,{retry:true});assert.equal(artifact.content,'const a = 1;');
+  held.resolve(new Response('old wrong content'));await old;assert.equal(artifact.content,'const a = 1;');assert.equal(timers.size,0);
+  sourceOwnershipReceipt.push({test:'preview_deadline_late_headers_explicit_retry',status:'passed'});
+}
+{
+  const artifact=await ownedArtifact('1');artifact.content='const a = 1;';
+  const digest=ownedDeferred(),timers=new Map();let sequence=0,hashes=0;
+  const realHash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(artifact.content));
+  const {state,api}=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'1'},
+    crypto:{subtle:{digest(){hashes++;return hashes===1?digest.promise:Promise.resolve(realHash);}}},
+    setTimeout(callback,delay){const id=++sequence;timers.set(id,{callback,delay});return id;},clearTimeout(id){timers.delete(id);},
+    fetch:async()=>Response.json(ownedPayload(artifact,'const a = 1;'))});
+  const old=api.loadDeobfuscation(api.selectedSource());for(let i=0;i<50&&!hashes;i++)await new Promise(resolve=>setImmediate(resolve));assert.equal(hashes,1);
+  const key=api.deobfuscationKey(api.selectedSource());[...timers.values()][0].callback();
+  assert.equal(state.deobfuscationRequests.get(key).status,'error');assert.match(state.deobfuscationRequests.get(key).error,/timed out/);
+  await api.loadDeobfuscation(api.selectedSource(),{retry:true});const newer=state.deobfuscationCache.get(key);assert(newer);
+  digest.resolve(realHash);await old;assert.equal(state.deobfuscationCache.get(key),newer);assert.equal(timers.size,0);
+  sourceOwnershipReceipt.push({test:'analysis_deadline_late_crypto_cannot_replace_retry',status:'passed'});
+}
+{
+  const artifact=await ownedArtifact('1'); const {api}=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'1'},
+    fetch:async()=>new Response(new Uint8Array(2097153))});
+  await api.loadArtifactContent(artifact);assert.equal(artifact.content,undefined);assert.match(artifact.loadError,/byte limit/);
+  sourceOwnershipReceipt.push({test:'preview_reader_rejects_oversized_body_before_decode',status:'passed'});
+}
+{
+  const text='const snow = "雪😀";'; const utf8=await ownershipHash(text),utf16=await ownershipHash(Buffer.from(text,'utf16le'));
+  assert.notEqual(utf8,utf16);
+  const script={script_id:'worker:hash:1',target_id:'worker-hash',target_type:'worker',hash:utf16,language:'JavaScript',length:text.length,source_type:'script',kind:'javascript'};
+  const payload=ownedPayload(script,text);payload.analysis.source.sha256=utf8;
+  const {state,api}=ownedContext({state:{debuggerSession:{target:{id:'page'},scripts:[script]},selectedScriptId:script.script_id},
+    fetch:async url=>url.startsWith('/api/deobfuscation')?Response.json(payload):Response.json({protocol_version:1,script_id:script.script_id,source:text,truncated:false})});
+  await api.loadScriptContent(script);assert.equal(state.liveScriptContent.get(script.script_id).content,text);
+  await api.loadDeobfuscation(api.selectedSource());assert.equal(api.selectedSource().deobfuscation.original_source,text);
+  assert.equal(api.selectedSource().hash,utf16);assert.equal(api.selectedSource().deobfuscation.analysis.source.sha256,utf8);
+  sourceOwnershipReceipt.push({test:'opaque_cdp_owner_and_analyzer_utf8_hashes_remain_distinct',status:'passed'});
+}
+{
+  const artifact=await ownedArtifact('1');const source={...artifact,source_type:'artifact',content:'retained preview',deobfuscation:{original_source:'retained analysis'},controller:new AbortController()};
+  const {api}=ownedContext();const reference=api.sourceReference(source);
+  assert.equal(api.sourceIdentity(reference),api.sourceIdentity(source));
+  for(const field of ['content','deobfuscation','controller'])assert.equal(Object.hasOwn(reference,field),false);
+  sourceOwnershipReceipt.push({test:'ui_source_references_do_not_retain_evicted_payloads',status:'passed'});
+}
+{
+  const text='const hook = 1;',script={script_id:'7',target_id:'page-1',hash:await ownershipHash(text),language:'JavaScript',length:text.length,start_line:0,start_column:0,url:'https://fixture.invalid/same.js'};
+  let focused=0;const callbacks=[];
+  const {state,api}=ownedContext({state:{debuggerSession:{target:{id:'page-1'},scripts:[script]}},
+    showScreen(){},openSourceHooks(){},renderRuntimeHooks(){},requestAnimationFrame(callback){callbacks.push(callback);},
+    document:{querySelector:()=>({hidden:false})},elements:{sourcePosition:{},sourceCodeWrap:{focus(){focused++;}}},
+    fetch:async()=>Response.json({protocol_version:1,script_id:'7',source:text,truncated:false})});
+  api.revealRuntimeHookHit({target_id:'page-1',source:script.url,line:90,column:31});
+  assert.equal(state.selectedScriptId,null);assert.match(state.experimentError,/URL match cannot/);assert.equal(state.sourceCursor,undefined);
+  api.revealRuntimeHookHit({target_id:'page-1',script_id:'7',source_hash:script.hash,line:2,column:3});
+  assert.equal(state.selectedScriptId,'7');assert.equal(state.sourceCursor.identity,api.sourceIdentity(api.selectedSource()));
+  state.selectedScriptId=null;callbacks[0]();assert.equal(focused,0);
+  sourceOwnershipReceipt.push({test:'hook_hit_requires_target_script_hash_and_late_focus_owner',status:'passed'});
+}
+// Minimal DOM fixture checks identity-stable remount avoidance and actual tab
+// handlers. Real keyboard, hit-testing and geometry remain the browser gate.
+{
+  let active=null, searches=0, renders=0;let api;
+  class Node {
+    constructor(tag='div'){this.tagName=tag;this.children=[];this.attributes={};this.listeners={};this.dataset={};this.scrollLeft=0;this.scrollTop=0;this.textContent='';this.hidden=false;this.classList={contains:()=>false,add(){},toggle(){}};}
+    setAttribute(key,value){this.attributes[key]=value;}getAttribute(key){return this.attributes[key];}
+    append(...nodes){this.children.push(...nodes);}replaceChildren(...nodes){this.children=nodes;renders++;}
+    contains(node){return this===node || this.children.some(child=>child.contains?.(node));}
+    addEventListener(key,callback){(this.listeners[key]??=[]).push(callback);}getBoundingClientRect(){return{left:0,right:500};}
+    focus(){active=this;}querySelector(selector){return selector==='[aria-selected="true"]'?this.children.find(node=>node.attributes['aria-selected']==='true'):null;}
+  }
+  const artifact=await ownedArtifact('1','a\nb\nc'),second=await ownedArtifact('2','second');artifact.content='a\nb\nc';second.content='second';
+  const elements=Object.fromEntries(['sourceLanguage','sourceCode','sourceCodeEmpty','sourceCodeWrap','sourceEditorTabs','sourceTree'].map(key=>[key,new Node()]));
+  const doc={createElement:tag=>new Node(tag),querySelector:()=>({hidden:false}),get activeElement(){return active;}};
+  const context=ownedContext({state:{artifacts:[artifact,second],openArtifactIds:['1','2'],selectedArtifactId:'1'},elements,document:doc,
+    renderSources(){api?.renderSourceTabs();},updateSourceDecorations(){},appendSourceSyntax(node,tokens){node.textContent=tokens.map(value=>value.text).join('');},
+    applySourceSearch(){searches++;},memoryOriginTraceActive:()=>false,fetch:async()=>new Response('a\nb\nc')});api=context.api;
+  const source=api.selectedSource();api.renderSourceContent(source,{content:source.content,lineMap:null});const row=elements.sourceCode.children[0];
+  elements.sourceCodeWrap.scrollTop=713;elements.sourceCodeWrap.scrollLeft=143;context.state.sourceSearchIndex=3;const oldRenders=renders,oldSearches=searches;
+  api.renderSourceContent(api.selectedSource(),{content:source.content,lineMap:null});assert.equal(elements.sourceCode.children[0],row);
+  assert.equal(elements.sourceCodeWrap.scrollTop,713);assert.equal(elements.sourceCodeWrap.scrollLeft,143);assert.equal(context.state.sourceSearchIndex,3);
+  assert.equal(renders,oldRenders);assert.equal(searches,oldSearches);
+  api.renderSourceTabs();elements.sourceEditorTabs.children[0].focus();
+  const press=key=>active.listeners.keydown[0]({key,preventDefault(){}});
+  press('ArrowRight');assert.equal(context.state.selectedArtifactId,'2');assert.equal(active.getAttribute('aria-selected'),'true');
+  press('Home');assert.equal(context.state.selectedArtifactId,'1');press('End');assert.equal(context.state.selectedArtifactId,'2');
+  press('Delete');assert.equal(context.state.openArtifactIds.length,1);assert.equal(context.state.selectedArtifactId,'1');assert.equal(second.content,undefined);
+  sourceOwnershipReceipt.push({test:'same_view_scroll_find_dom_retained_keyboard_tabs',status:'passed',scrollTop:713,findOccurrence:3});
+}
+// Corrective integration regressions from independent review. These use the
+// actual renderer, decoration updater, cursor receiver and Field trace pivot.
+class SourceReviewNode {
+  constructor(tag='div',doc){this.tagName=tag;this.doc=doc;this.children=[];this.attributes={};this.listeners={};this.dataset={};this.scrollLeft=0;this.scrollTop=0;this.hidden=false;this._text='';this.classes=new Set();this.classList={add:value=>this.classes.add(value),contains:value=>this.classes.has(value),toggle:(value,on)=>on?this.classes.add(value):this.classes.delete(value)};this.style={setProperty(){}};}
+  set className(value){this.classes=new Set(value.split(' '));}get className(){return [...this.classes].join(' ');}
+  get textContent(){return this._text+this.children.map(node=>node.textContent??'').join('');}set textContent(value){this._text=value;this.children=[];}
+  setAttribute(key,value){this.attributes[key]=value;}getAttribute(key){return this.attributes[key];}
+  append(...nodes){for(const node of nodes){node.parent=this;this.children.push(node);}}replaceChildren(...nodes){this._text='';this.children=[];this.append(...nodes);}
+  contains(node){return this===node||this.children.some(child=>child.contains?.(node));}addEventListener(key,callback){(this.listeners[key]??=[]).push(callback);}
+  getBoundingClientRect(){return {left:0,right:500};}focus(){this.doc.activeElement=this;}scrollIntoView(){}
+  matches(selector){if(selector==='[aria-selected="true"]')return this.attributes['aria-selected']==='true';if(selector==='.source-line[data-line]')return this.classes.has('source-line')&&this.dataset.line!==undefined;if(selector==='.source-line.current')return this.classes.has('source-line')&&this.classes.has('current');if(selector.startsWith('.'))return this.classes.has(selector.slice(1));return this.tagName===selector;}
+  querySelectorAll(selector){return this.children.flatMap(node=>[...(node.matches?.(selector)?[node]:[]),...(node.querySelectorAll?.(selector)??[])]);}querySelector(selector){return this.querySelectorAll(selector)[0]??null;}closest(selector){return this.matches(selector)?this:this.parent?.closest(selector);}
+}
+function sourceReviewDOM() {
+  const document={activeElement:null,querySelector:()=>({hidden:false})};
+  document.createElement=tag=>new SourceReviewNode(tag,document);
+  document.createTextNode=text=>{const node=new SourceReviewNode('text',document);node.textContent=text;return node;};
+  const elements=Object.fromEntries(['sourceLanguage','sourceCode','sourceCodeEmpty','sourceCodeWrap','sourceEditorTabs','sourceTree'].map(key=>[key,new SourceReviewNode('div',document)]));
+  return {document,elements};
+}
+{
+  const text='const a = 1;', script={script_id:'mapped',target_id:'page-1',hash:'opaque-mapped-version',language:'JavaScript',length:text.length,source_type:'script',kind:'javascript',start_line:0,start_column:0,content:text};
+  for(const mode of ['pretty','derived']) {
+    const {document,elements}=sourceReviewDOM();let navigation;
+    const {api,state}=ownedContext({state:{debuggerSession:{target:{id:'page-1'},state:'running',scripts:[script]},selectedScriptId:script.script_id,sourceFormatted:mode==='pretty',sourceDeobfuscated:mode==='derived'},document,elements,
+      appendSourceSyntax:(node,tokens)=>{node.textContent=tokens.map(value=>value.text).join('');},applySourceSearch(){},memoryOriginTraceActive:()=>false,
+      revealOriginalLine:(source,line,column)=>{navigation={source,line,column};}});
+    const view={content:text,lineMap:[{originalLine:0,originalColumn:4}],...(mode==='pretty'?{formatted:{}}:{derived:{}})};
+    api.renderSourceContent(script,view);const gutter=elements.sourceCode.children[0].querySelector('.source-gutter');
+    for(let refresh=0;refresh<3;refresh++){api.renderSourceContent(script,view);api.updateSourceDecorations();assert.equal(gutter.disabled,false);assert.equal(gutter.getAttribute('aria-label'),'Show original source at line 1');}
+    gutter.listeners.click[0]({stopPropagation(){}});assert.equal(navigation.line,0);assert.equal(navigation.column,4);
+    // The original-runtime branch still updates genuine breakpoint controls.
+    state.sourceFormatted=false;state.sourceDeobfuscated=false;api.renderSourceContent(script,{content:text,lineMap:null});
+    state.debuggerSession.breakpoints=[{script_id:'mapped',line:0,locations:[{script_id:'mapped',line:0}]}];api.updateSourceDecorations();
+    assert.equal(elements.sourceCode.children[0].querySelector('.source-gutter').getAttribute('aria-label'),'Remove breakpoint on line 1');
+  }
+  sourceOwnershipReceipt.push({test:'review_mapped_live_gutters_survive_real_decoration_refresh',status:'passed',representations:['pretty','derived']});
+}
+{
+  const text='a();\nb();\nc();',script={script_id:'field',target_id:'page-1',hash:'opaque-field-version',language:'JavaScript',length:text.length,start_line:0,start_column:0,url:'https://fixture.invalid/field.js'};
+  const elements=Object.fromEntries(['hooksScript','hooksEntryMode','hooksLine','hooksColumn','hooksLabel','sourcePosition'].map(key=>[key,{value:''}]));
+  const fieldProvenanceSelection={error:null};let screens=0;
+  const {state,api}=ownedContext({state:{debuggerSession:{target:{id:'page-1'},state:'running',scripts:[script]}},elements,fieldProvenanceSelection,
+    showScreen(){screens++;},renderFieldProvenance(){},fetch:async()=>Response.json({protocol_version:1,script_id:'field',source:text,truncated:false})});
+  const site={script_id:'field',target_id:'page-1',source_hash:script.hash,line:2,column:3};
+  api.revealProvenanceSite(site);assert.equal(elements.sourcePosition.textContent,'Line 3, Column 4');assert.equal(api.sourceCursorFor(api.selectedSource()).line,2);
+  assert(api.prefillHookFromSource(api.selectedSource()));assert.equal(elements.hooksLine.value,'3');assert.equal(elements.hooksColumn.value,'4');assert.equal(screens,1);
+  state.debuggerSession.scripts.push({...script,target_id:'other-page'});state.selectedScriptId=null;state.sourceCursor=null;
+  api.revealProvenanceSite(site);assert.match(fieldProvenanceSelection.error,/ambiguous/);assert.equal(state.selectedScriptId,null);assert.equal(state.sourceCursor,null);assert.equal(screens,1);
+  assert.equal((appSource.match(/state\.sourceCursor = \{/g)??[]).length,1,'Cursor values must flow through the single receiving adapter');
+  assert(!/state\.sourceCursor\s*=/.test(ownershipProvenance));
+  sourceOwnershipReceipt.push({test:'review_field_trace_cursor_receiver_and_ambiguous_selection',status:'passed',hookLine:3,hookColumn:4});
+}
+{
+  const {document,elements}=sourceReviewDOM();const first=await ownedArtifact('retry-1'),second=await ownedArtifact('retry-2','second');
+  first.loadError='Synthetic preview error';second.content='second';
+  const {api,state,sandbox}=ownedContext({state:{artifacts:[first,second],selectedArtifactId:first.artifact_id},document,elements,
+    textElement:(tag,kind,text)=>{const node=document.createElement(tag);node.className=kind;node.textContent=text;return node;},
+    appendSourceSyntax:(node,tokens)=>{node.textContent=tokens.map(value=>value.text).join('');},applySourceSearch(){}});
+  const key=api.deobfuscationKey({...first,source_type:'artifact'}),analysis=ownedPayload(first,'const a = 1;');state.deobfuscationCache.set(key,analysis);
+  api.renderSourceContent(api.selectedSource());const retry=elements.sourceCodeEmpty.children[1];assert(retry.listeners.click);
+  api.releaseSourcePreview({...first,source_type:'artifact'});state.selectedArtifactId=second.artifact_id;api.renderSourceContent(api.selectedSource());
+  assert.equal(elements.sourceCodeEmpty.hidden,true);assert.equal(elements.sourceCodeEmpty.children.length,0);assert.equal(state.deobfuscationCache.size,0);
+  // Even an externally retained old handler receives descriptor-only data.
+  state.selectedArtifactId=first.artifact_id;let received;
+  sandbox.sourceIsCurrent=source=>{received=source;return false;};retry.listeners.click[0]();
+  assert(received);for(const key of ['content','deobfuscation','controller'])assert.equal(Object.hasOwn(received,key),false);
+  sourceOwnershipReceipt.push({test:'review_hidden_retry_dom_and_bound_reference_release',status:'passed',hiddenRetryNodes:0});
+}
+{
+  const original='// a\u0000b\r\nconst snow = "雪😀";',normalized=original.replaceAll('\u0000',' ');
+  for(const opaque of [await ownershipHash(normalized),'provider-specific-opaque-version']) {
+    const script={script_id:'opaque',target_id:'worker-opaque',target_type:'worker',hash:opaque,language:'JavaScript',length:original.length,source_type:'script',kind:'javascript',start_line:0,start_column:0};
+    let text=original,analyzerCalls=0,truncated=false;const gate=ownedDeferred();let held=false;
+    const {api,state}=ownedContext({state:{debuggerSession:{target:{id:'page'},scripts:[script]},selectedScriptId:'opaque'},fetch:async url=>{
+      if(url.startsWith('/api/debugger/source'))return Response.json({protocol_version:1,script_id:'opaque',source:original,truncated});
+      analyzerCalls++;const result=ownedPayload(script,text);result.analysis.source.sha256=await ownershipHash(text);return held?gate.promise:Response.json(result);
+    }});
+    await api.loadDeobfuscation(api.selectedSource());assert.equal(analyzerCalls,0,'Unloaded live text cannot be analyzed');
+    await api.loadScriptContent(script);assert.equal(state.liveScriptContent.get('opaque').content,original);
+    await api.loadDeobfuscation(api.selectedSource(),{retry:true});assert.equal(api.selectedSource().deobfuscation.original_source,original);
+    const key=api.deobfuscationKey(api.selectedSource()),good=state.deobfuscationCache.get(key);
+    text=normalized;await api.loadDeobfuscation(api.selectedSource(),{retry:true});assert.equal(state.deobfuscationRequests.get(key).status,'error');assert.equal(state.deobfuscationCache.get(key),good);
+    // A new full preview owner under the same opaque catalog token cannot take
+    // an old pending analyzer result, even when its bytes are identical.
+    text=original;held=true;const pending=api.loadDeobfuscation(api.selectedSource(),{retry:true});await Promise.resolve();
+    const old=state.liveScriptContent.get('opaque');state.liveScriptContent.set('opaque',{...old});
+    const result=ownedPayload(script,original);result.analysis.source.sha256=await ownershipHash(original);gate.resolve(Response.json(result));await pending;
+    assert.equal(state.deobfuscationCache.get(key),good);assert.equal(state.deobfuscationRequests.get(key).status,'error');
+    state.liveScriptContent.set('opaque',{...old,content:normalized,sourceTextLength:normalized.length});assert.equal(api.selectedSource().deobfuscation,null,'A different owned text cannot display an old derived result');
+    state.liveScriptContent.delete('opaque');truncated=true;held=false;await api.loadScriptContent(script);const before=analyzerCalls;
+    await api.loadDeobfuscation(api.selectedSource(),{retry:true});assert.equal(analyzerCalls,before,'A truncated preview cannot authenticate analyzer text');
+  }
+  sourceOwnershipReceipt.push({test:'review_opaque_cdp_token_exact_full_live_text_and_late_owner',status:'passed',nulNormalizationUsedAsProof:false,providerFormats:2});
+}
+
+if (process.env.REB_SOURCE_OWNERSHIP_BACKEND_URL) {
+  const endpoint=new URL(process.env.REB_SOURCE_OWNERSHIP_BACKEND_URL);
+  assert(endpoint.protocol==='http:' && ['127.0.0.1','localhost','[::1]'].includes(endpoint.hostname),'Sources fixture backend must be loopback');
+  const catalog=await (await fetch(new URL('/api/artifacts?limit=500',endpoint))).json();
+  const {state,api}=ownedContext({state:{artifacts:catalog.artifacts},fetch:(url,options)=>fetch(new URL(url,endpoint),options)});
+  const javascript=state.artifacts.filter(source=>source.kind==='javascript');assert(javascript.length);
+  for(const artifact of javascript) {
+    state.selectedArtifactId=artifact.artifact_id;await api.loadArtifactContent(artifact);assert.equal(artifact.loadError,null);
+    const original=artifact.content;
+    for(const intrinsics of [false,true]) {
+      state.deobfuscationAssumeIntrinsics=intrinsics;await api.loadDeobfuscation(api.selectedSource());
+      const request=state.deobfuscationRequests.get(api.deobfuscationKey(api.selectedSource()));assert.equal(request.status,'ready',request.error);
+      assert.equal(api.sourceDisplayView(api.selectedSource()).content,original);assert.equal(artifact.content,original);
+    }
+    const response=await fetch(new URL(`/api/artifacts/${artifact.artifact_id}/content?limit=2097152`,endpoint));
+    assert.equal(await ownershipHash(new Uint8Array(await response.arrayBuffer())),artifact.sha256);
+  }
+  sourceOwnershipReceipt.push({test:'real_rust_worker_http_to_sources_admission',status:'passed',artifacts:javascript.length,intrinsicModes:2});
+}
+console.log('PASS Sources pending refresh owners, analyzer identity/hash/maps, worker targets, cursor scope, explicit retry, close/eviction byte bounds, bounded hex, stable editor and keyboard tab handlers (not rendered QA)');
+if (process.env.REB_SOURCE_OWNERSHIP_RECEIPT) await writeFile(process.env.REB_SOURCE_OWNERSHIP_RECEIPT, JSON.stringify({scope:'Production-function and DOM fixtures; not rendered acceptance',results:sourceOwnershipReceipt},null,2));
+
 // The decoded-field handoff must never silently rebind a chain to edited input
 // or another request, or turn a binary/preview result into a source-text match.
 const fieldHandoff = runInNewContext(
@@ -1390,7 +1788,28 @@ async function sourceFactsBrowserFixture() {
   const artifact = id => ({protocol_version:1,artifact_id:id,session_id:'11',navigation_id:'13',frame_id:'17',parent_artifact_id:'0',creator_event_id:'19',execution_context_id:'23',capture_origin:'dynamic_javascript',kind:'javascript',url:`https://fixture.invalid/facts-${id}.js`,mime_type:'text/javascript',byte_size:bytes.length,sha256:hash,sensitive:false});
   const artifacts = [artifact('7'),artifact('8')];
   const snow = Buffer.byteLength('\ufeffconst ');
-  const fixture = {mode:'partial',pending:[],requests:[],artifacts,bytes,snow};
+  const documents = new Map(artifacts.map(source=>[source.artifact_id,bytes]));
+  const debuggerState=JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/debugger-empty.json'),'utf8'));
+  const liveDocuments=new Map();
+  const fixture = {mode:'partial',pending:[],requests:[],artifacts,bytes,snow,documents,debuggerState,liveDocuments,
+    previewMode:'ready',previewPending:[],deobMode:'ready',deobPending:[],analysisRequests:[],previewRequests:[],
+    liveMode:'ready',livePending:[],liveRequests:[],rejectedWrites:[]};
+  fixture.addLiveSource = (id,text) => {
+    const lines=text.split('\n');
+    const source={script_id:id,url:`https://fixture.invalid/${id}.js`,hash:`opaque-${id}-v1`,source_map_url:'',language:'JavaScript',
+      start_line:0,start_column:0,end_line:lines.length-1,end_column:lines.at(-1).length,execution_context_id:31,
+      length:text.length,has_source_url:false,is_module:false};
+    liveDocuments.set(id,{source,text});
+    debuggerState.state='running';debuggerState.generation++;
+    debuggerState.target??={id:'qa-source-page-one',type:'page',title:'Synthetic Sources owner',url:'https://fixture.invalid/sources'};
+    debuggerState.targets=[debuggerState.target];debuggerState.live_tab_count=1;
+    debuggerState.scripts=[...liveDocuments.values()].map(value=>value.source);
+    return source;
+  };
+  fixture.addSource = async (id,text) => {
+    const content=Buffer.from(text),source={...artifact(id),byte_size:content.length,sha256:await ownershipHash(content)};
+    artifacts.push(source);documents.set(id,content);return source;
+  };
   const report = source => ({schema:'reb-javascript-source-facts-v1',profile:'lexical-effects-v1',offset_unit:'utf-8-byte',source_bytes:bytes.length,source,ok:fixture.mode!=='unavailable',
     scopes:fixture.mode==='unavailable'?[]:[{id:0,parent_id:null,range:{start:0,end:bytes.length},kind:'program'}],
     regions:fixture.mode==='unavailable'?[]:[{id:0,parent_id:null,callable_id:null,range:{start:0,end:bytes.length},kind:'program',entry_order:0}],
@@ -1401,6 +1820,22 @@ async function sourceFactsBrowserFixture() {
   fixture.handle = async (request,response) => {
     const url = new URL(request.url,'http://127.0.0.1');
     const json = (status,value) => {if(!response.destroyed){response.writeHead(status,{'Content-Type':'application/json'});response.end(JSON.stringify(value));}};
+    if(url.pathname==='/api/debugger/actions'){
+      fixture.rejectedWrites.push({method:request.method??'POST',path:url.pathname});
+      json(405,{error:'The Sources fixture never executes debugger mutations'});return true;
+    }
+    if(url.pathname==='/api/debugger'){json(200,debuggerState);return true;}
+    if(url.pathname==='/api/debugger/source'){
+      const live=liveDocuments.get(url.searchParams.get('script_id'));
+      if(!live){json(404,{error:'Synthetic live source unavailable'});return true;}
+      // Capture the old reply before a fixture target changes. It must never
+      // become the new owner's text when the held body is delivered later.
+      const reply=JSON.stringify({protocol_version:1,script_id:live.source.script_id,source:live.text,truncated:false});
+      fixture.liveRequests.push(live.source.script_id);
+      response.writeHead(200,{'Content-Type':'application/json'});
+      if(fixture.liveMode==='pending-body'){response.flushHeaders?.();await new Promise(resolve=>fixture.livePending.push(resolve));}
+      if(!response.destroyed)response.end(reply);return true;
+    }
     if(url.pathname==='/api/events'){json(200,{count:0,events:[],capture_mode:'demo',broker_connected:false,capture_controls_available:false});return true;}
     if(url.pathname==='/api/artifacts'){json(200,{count:artifacts.length,artifacts});return true;}
     if(url.pathname==='/api/source-facts'){
@@ -1413,21 +1848,43 @@ async function sourceFactsBrowserFixture() {
       if(fixture.mode==='malformed') value.source={...source,sha256:'b'.repeat(64)};
       json(200,value);return true;
     }
-    if(/^\/api\/artifacts\/[78]\/content$/.test(url.pathname)){
+    if(url.pathname==='/api/deobfuscation'){
+      fixture.analysisRequests.push(url.search);
+      const live=liveDocuments.get(url.searchParams.get('script_id'));
+      const source=live?{...live.source,source_type:'script'}:artifacts.find(value=>value.artifact_id===url.searchParams.get('artifact_id'));
+      if(!source){json(404,{error:'Synthetic source unavailable'});return true;}
+      const text=live?live.text:documents.get(source.artifact_id).toString('utf8');
+      const payload=ownedPayload(source,text);payload.analysis.source.sha256=await ownershipHash(text);
+      payload.analysis.source.lines=text.split('\n').length;
+      payload.analysis.assumptions=url.searchParams.get('assume_intrinsics')==='1'?['standard-intrinsics']:[];
+      if(fixture.deobMode==='wrong-id')payload.artifact_id='999';
+      if(fixture.deobMode==='wrong-hash')payload.analysis.source.sha256='b'.repeat(64);
+      if(fixture.deobMode==='pending')await new Promise(resolve=>fixture.deobPending.push(resolve));
+      json(200,payload);return true;
+    }
+    if(/^\/api\/artifacts\/[0-9]+\/content$/.test(url.pathname)){
+      const id=url.pathname.split('/')[3], content=documents.get(id);
+      if(!content){json(404,{error:'Synthetic artifact unavailable'});return true;}
+      fixture.previewRequests.push(id);
       const offset=Number(url.searchParams.get('offset')||0),limit=Number(url.searchParams.get('limit')||2097152);
-      const chunk=bytes.subarray(offset,offset+limit);
-      response.writeHead(200,{'Content-Type':'application/octet-stream','X-Artifact-Total-Bytes':String(bytes.length),'X-Artifact-Offset':String(offset),'X-Artifact-Truncated':String(offset+chunk.length<bytes.length)});response.end(chunk);return true;
+      const chunk=Buffer.from(content.subarray(offset,offset+limit)),mode=fixture.previewMode;
+      if(mode==='wrong-bytes' && chunk.length)chunk[0]^=1;
+      response.writeHead(200,{'Content-Type':'application/octet-stream','X-Artifact-Total-Bytes':String(content.length),'X-Artifact-Offset':String(offset),'X-Artifact-Truncated':String(offset+chunk.length<content.length)});
+      if(mode==='pending-body'){response.flushHeaders?.();await new Promise(resolve=>fixture.previewPending.push(resolve));}
+      if(!response.destroyed)response.end(chunk);return true;
     }
     return false;
   };
-  fixture.release = () => {for(const resolve of fixture.pending.splice(0)) resolve();};
+  fixture.releasePreview = () => {for(const resolve of fixture.previewPending.splice(0)) resolve();};
+  fixture.releaseLive = () => {for(const resolve of fixture.livePending.splice(0)) resolve();};
+  fixture.release = () => {for(const resolve of [...fixture.pending.splice(0),...fixture.previewPending.splice(0),...fixture.deobPending.splice(0),...fixture.livePending.splice(0)]) resolve();};
   return fixture;
 }
 
 // Keep fixture routing admissible to the normal refresh path before launching
 // Chrome; a blanket offline events response would prevent artifact discovery.
 const sourcesFixtureControl = await sourceFactsBrowserFixture();
-const sourcesFixtureModels = runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+';({isBrokerResponse,isArtifactResponse})');
+const sourcesFixtureModels = runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+';({isBrokerResponse,isArtifactResponse,isDebuggerResponse})',{TextEncoder});
 async function sourcesFixtureResponse(url) {
   const response={destroyed:false,writeHead(status,headers){this.status=status;this.headers=headers;},end(body){this.body=body;}};
   assert(await sourcesFixtureControl.handle({url},response));return response;
@@ -1441,11 +1898,96 @@ assert.equal(JSON.parse(sourcesFactsControl.body).source.artifact_id,'7');
 assert.equal((await sourcesFixtureResponse('/api/source-facts?session_id=12&artifact_id=7')).status,404);
 const sourcesBytesControl=await sourcesFixtureResponse('/api/artifacts/7/content?offset=0&limit=2097152');
 assert.equal(sourcesBytesControl.headers['X-Artifact-Truncated'],'false');assert.deepEqual(sourcesBytesControl.body,sourcesFixtureControl.bytes);
-console.log('PASS Sources browser fixture event admission, exact artifact identity, response and byte headers (not rendered QA)');
+const emptyDebuggerControl=JSON.parse((await sourcesFixtureResponse('/api/debugger')).body);
+assert(sourcesFixtureModels.isDebuggerResponse(emptyDebuggerControl));
+const liveControl=sourcesFixtureControl.addLiveSource('qa-control','const inert = "雪";');
+assert(sourcesFixtureModels.isDebuggerResponse(JSON.parse((await sourcesFixtureResponse('/api/debugger')).body)));
+assert.equal(JSON.parse((await sourcesFixtureResponse('/api/debugger/source?script_id=qa-control')).body).source,'const inert = "雪";');
+const liveAnalysisControl=JSON.parse((await sourcesFixtureResponse('/api/deobfuscation?script_id=qa-control&mode=derived')).body);
+assert.equal(liveAnalysisControl.script_id,liveControl.script_id);assert.equal(liveAnalysisControl.artifact_id,null);
+assert.equal(liveAnalysisControl.analysis.source.sha256,await ownershipHash(liveAnalysisControl.original_source));
+// Held replies capture their old text, even when the fixture's current text is
+// replaced before release. This checks the adversarial route itself.
+sourcesFixtureControl.liveMode='pending-body';const heldLiveControl=sourcesFixtureResponse('/api/debugger/source?script_id=qa-control');
+await new Promise(resolve=>setImmediate(resolve));assert.equal(sourcesFixtureControl.livePending.length,1);
+sourcesFixtureControl.liveDocuments.get('qa-control').text='const newer = 1;';sourcesFixtureControl.releaseLive();
+assert.equal(JSON.parse((await heldLiveControl).body).source,'const inert = "雪";');
+sourcesFixtureControl.liveMode='ready';
+console.log('PASS Sources browser fixture event/artifact/debugger admission, exact source text, inert analysis replies and held-body ownership routes (not rendered QA)');
 
-async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture}) {
+// Test-only observation of the actual loader promises. Each wrapper calls its
+// loader exactly once with the original receiver/arguments and returns the same
+// promise. Receipts contain identities/status only, never source text or payloads.
+function sourceOwnershipOperationObserver(loaders, identify) {
+  const entries=new Map(),failures=[];let sequence=0,failureCount=0,pendingCount=0;
+  const settle=(entry,status,error)=>{
+    entry.status=status;entry.settled_at=Date.now();pendingCount--;
+    if(status!=='fulfilled'){
+      entry.error_name=String(error?.name??'Error').slice(0,64);entry.error_message=String(error?.message??error).slice(0,256);
+      failureCount++;failures.push({...entry});if(failures.length>64)failures.shift();
+    }
+  };
+  const observe=(promise,entry)=>{promise.then(()=>settle(entry,'fulfilled'),error=>settle(entry,'rejected',error));};
+  const wrappers=Object.fromEntries(Object.entries(loaders).map(([kind,loader])=>[kind,function(...args){
+    const entry={id:++sequence,kind,identity:identify(args[0]),status:'pending',started_at:Date.now(),settled_at:null};
+    entries.set(entry.id,entry);pendingCount++;
+    // This observer is installed only for the three held-operation cases.
+    // Overflow fails receipt lookup rather than changing production execution.
+    while(entries.size>64)entries.delete(entries.keys().next().value);
+    try {const promise=Reflect.apply(loader,this,args);observe(promise,entry);return promise;}
+    catch(error){settle(entry,'threw',error);throw error;}
+  }]));
+  return {wrappers,read:id=>entries.has(id)?{...entries.get(id)}:null,failures:()=>({count:failureCount,pending:pendingCount,entries:failures.map(entry=>({...entry}))}),
+    pending:(kind,identity)=>[...entries.values()].filter(entry=>entry.kind===kind&&entry.identity===identity&&entry.status==='pending').map(entry=>({...entry}))};
+}
+
+async function waitForSourceOwnershipSettlement(read,expected,timeoutMs=5000) {
+  const deadline=Date.now()+timeoutMs;
+  do {
+    const entry=await read(expected.id);
+    assert(entry&&entry.id===expected.id&&entry.kind===expected.kind&&entry.identity===expected.identity,'Held source operation lost its exact receipt');
+    if(entry.status!=='pending'){
+      assert(['fulfilled','rejected','threw'].includes(entry.status)&&Number.isFinite(entry.settled_at),'Invalid source terminal receipt');
+      return entry;
+    }
+    const remaining=deadline-Date.now();
+    if(remaining<=0)break;
+    await new Promise(resolve=>setTimeout(resolve,Math.min(25,remaining)));
+  } while(Date.now()<=deadline);
+  assert.fail(`Held ${expected.kind} source operation ${expected.id} did not settle within ${timeoutMs} ms`);
+}
+
+// A completion later than the old 50 ms sleep must be observed before accepting
+// no-stale-commit assertions. Stalled work must fail closed, not pass on timeout.
+const settlementReceiver={receiver:'unchanged'};
+let releaseObserved,rejectObserved,observedCalls=0,lateObservedCommit=false;
+const delayedObserved=new Promise(resolve=>{releaseObserved=resolve;});
+const rejectedObserved=new Promise((resolve,reject)=>{rejectObserved=reject;});
+const settlementObserver=sourceOwnershipOperationObserver({
+  live:function(source,extra){assert.equal(this,settlementReceiver);assert.equal(source.identity,'exact-owner');assert.equal(extra,'unchanged');observedCalls++;return delayedObserved;},
+  analysis:()=>rejectedObserved,stalled:()=>new Promise(()=>{}),
+},source=>source.identity);
+assert.equal(settlementObserver.wrappers.live.call(settlementReceiver,{identity:'exact-owner'},'unchanged'),delayedObserved);
+assert.equal(observedCalls,1);
+const observedPending=settlementObserver.pending('live','exact-owner');assert.equal(observedPending.length,1);
+setTimeout(()=>{lateObservedCommit=true;releaseObserved();},180);
+const observedTerminal=await waitForSourceOwnershipSettlement(settlementObserver.read,observedPending[0]);
+assert.equal(observedTerminal.status,'fulfilled');assert(lateObservedCommit,'Settlement accepted before the obsolete completion');
+assert.throws(()=>assert.equal(lateObservedCommit,false),'A late stale commit must fail the post-settlement acceptance');
+assert.equal(settlementObserver.wrappers.analysis({identity:'exact-owner'}),rejectedObserved);
+const rejectedPending=settlementObserver.pending('analysis','exact-owner')[0];rejectObserved(new Error('Synthetic cancellation'));
+assert.equal((await waitForSourceOwnershipSettlement(settlementObserver.read,rejectedPending)).status,'rejected');
+assert.equal(settlementObserver.failures().count,1);assert.equal(settlementObserver.failures().entries[0].error_message,'Synthetic cancellation');
+settlementObserver.wrappers.stalled({identity:'exact-owner'});
+await assert.rejects(waitForSourceOwnershipSettlement(settlementObserver.read,settlementObserver.pending('stalled','exact-owner')[0],60),/did not settle/);
+await assert.rejects(waitForSourceOwnershipSettlement(settlementObserver.read,{...observedPending[0],identity:'other-owner'}),/exact receipt/);
+console.log('PASS Sources held-operation terminal receipts: same promise/arguments/receiver, delayed stale-commit refusal, rejection, exact identity and bounded nonsettlement (not rendered QA)');
+
+async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture,recordSourceCheck=()=>{}}) {
+  const ownershipReceipts=[];
+  const receipt=(label,detail)=>{const entry={label,...detail};ownershipReceipts.push(entry);recordSourceCheck(entry);};
   const press = value => {
-    const code = {Enter:13,Escape:27,Home:36,End:35,ArrowDown:40}[value];
+    const code = {Enter:13,Escape:27,Home:36,End:35,ArrowLeft:37,ArrowRight:39,ArrowDown:40,Delete:46}[value];
     return key(value,value,{windowsVirtualKeyCode:code,
       ...(value==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});
   };
@@ -1544,7 +2086,154 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
   await click('[data-screen="sources"]');
   await click('[data-artifact-id="8"]');
   assert.equal(await evaluate("state.selectedArtifactId"),'8');
-  return {status:'passed',path:'browser development Sources UI',source:'synthetic immutable-artifact fixture; no analyzed JavaScript executed',viewports:[[1440,900],[760,560]],checks:['real hit-tested Facts controls','offline HTTP artifact availability','100-row paging','keyboard categories and disclosure','UTF-8/BOM original-byte navigation','profile-complete/partial/truncated/unknown/unavailable/error states','identity rejection and prior-report retention','Cancel and explicit retry','stale selection','Close/Escape/reopen focus','narrow overlay dismissal','workspace return']};
+  // This remains the existing Sources browser mode, with the same hit-tested
+  // pointer, keyboard, scroll and screenshot driver. No analyzed code runs.
+  if(await evaluate("document.querySelector('#source-facts-details').open"))await sourceClick('[data-facts-action="close"]');
+  assert.equal(fixture.analysisRequests.length,0,'Selection and Facts must not start Deob');
+  const longSource=Array.from({length:600},(_,index)=>`const row${index} = ${index};`).join('\n');
+  await fixture.addSource('9',longSource);await evaluate('refreshArtifacts()');
+  fixture.previewMode='pending-body';await click('[data-artifact-id="9"]');
+  const waiting=Date.now()+5000;while(!fixture.previewPending.length && Date.now()<waiting)await new Promise(resolve=>setTimeout(resolve,25));
+  assert(fixture.previewPending.length,'Preview did not reach delayed body fixture');
+  await fixture.addSource('10','const retry = 10;');await evaluate('refreshArtifacts()');
+  assert(await evaluate("selectedSource().loading && document.querySelector('#source-code-empty').textContent.includes('Loading')"));
+  fixture.previewMode='ready';fixture.releasePreview();
+  await until("selectedSource()?.content?.includes('row599') && !selectedSource().loading",'Catalog refresh stranded the selected preview');
+  await wheel('#source-code-wrap',900);
+  await click('#source-search');for(const letter of 'row')await key(letter,`Key${letter.toUpperCase()}`,{text:letter,unmodifiedText:letter});
+  await press('Enter');await press('Enter');
+  const reading=await evaluate("({top:elements.sourceCodeWrap.scrollTop,index:state.sourceSearchIndex,focus:document.activeElement.id})");
+  assert(reading.index>0);await evaluate('renderSources()');
+  assert.deepEqual(await evaluate("({top:elements.sourceCodeWrap.scrollTop,index:state.sourceSearchIndex,focus:document.activeElement.id})"),reading,'Refresh moved the current reading/find position');
+  fixture.deobMode='wrong-id';await click('#source-deob');
+  await until("document.querySelector('#source-view-kind').textContent.includes('analysis failed')",'Mismatched analyzer identity was not visibly refused');
+  assert(await evaluate("document.querySelector('#source-code').textContent.includes('row599')"),'Bad analyzer response changed original preview');
+  if(await evaluate("document.querySelector('#source-sidebar').hidden"))await click('#source-sidebar-toggle');
+  fixture.deobMode='ready';await sourceClick('#deobfuscation-report button');
+  await until("document.querySelector('#source-view-kind').textContent.includes('Derived')",'Explicit analysis retry did not recover');
+  await click('#source-deob');assert(await evaluate("document.querySelector('#source-view-kind').textContent.includes('Original evidence preview')"));
+  await screenshot('source-ownership-wide-recovered');
+  if(!await evaluate("document.querySelector('#source-sidebar').hidden"))await click('#source-sidebar-toggle');
+  await click('#source-editor-tabs [aria-selected="true"]');await press('ArrowLeft');assert.equal(await evaluate('state.selectedArtifactId'),'8');
+  await press('ArrowRight');assert.equal(await evaluate('state.selectedArtifactId'),'9');await press('Delete');
+  assert.equal(await evaluate("state.openArtifactIds.includes('9')"),false);
+  assert.equal(await evaluate("state.artifacts.find(value=>value.artifact_id==='9').content===undefined"),true,'Closing a source retained its preview');
+  assert.equal(fixture.documents.get('9').toString('utf8'),longSource,'Closing a preview changed original fixture bytes');
+  fixture.previewMode='wrong-bytes';await click('[data-artifact-id="10"]');
+  await until("document.querySelector('#source-code-empty').textContent.includes('SHA-256')",'Wrong preview bytes were accepted');
+  await viewport(760,560);await screenshot('source-ownership-narrow-error');
+  fixture.previewMode='ready';await click('#source-code-empty button');
+  await until("document.querySelector('#source-code').textContent.includes('const retry = 10;')",'Visible source retry did not recover');
+  await viewport(360,740);await screenshot('source-ownership-small-recovered');
+  assert(await evaluate('document.documentElement.scrollWidth<=innerWidth'),'Sources narrow recovery overflows the page');
+  await viewport(1440,900);
+  const waitFixture = async (pending,label) => {
+    const deadline=Date.now()+5000;while(!pending.length&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,25));
+    assert(pending.length,label);
+  };
+  // Real browser interaction over validated synthetic debugger replies. The
+  // fixture's JavaScript is rendered as text, never loaded into a target page.
+  await click('#source-search');await key('a','KeyA',{modifiers:2});await key('Backspace','Backspace',{windowsVirtualKeyCode:8});
+  assert.equal(await evaluate('elements.sourceSearch.value'),'');
+  const liveText="const owner = 'one';\n"+Array.from({length:180},(_,index)=>`const liveRow${index}={value:${index}};`).join('\n');
+  fixture.addLiveSource('qa-live-source',liveText);await evaluate('refreshDebugger()');
+  await until("state.debuggerSession?.scripts.some(source=>source.script_id==='qa-live-source')",'Validated live fixture did not reach Page');
+  await click('[data-source-collection="page"]');await click('#source-tree [data-script-id="qa-live-source"]');
+  await until(`selectedSource()?.content===sourceOwnedLiveText(selectedSource()) && selectedSource()?.content?.includes("owner = 'one'")`,'Complete owned live text did not load');
+  const analysisBeforeLive=fixture.analysisRequests.length;
+  for(const [size,index] of [[[1440,900],0],[[760,560],1]]) {
+    await viewport(...size);
+    // Home/End and return focus are exercised on the real mixed file-tab strip.
+    await click('#source-editor-tabs [aria-selected="true"]');await press('End');await press('Home');
+    assert.equal(await evaluate('state.selectedScriptId'),'qa-live-source');
+    assert(await evaluate("document.activeElement.matches('#source-editor-tabs [aria-selected=true]')"),'Keyboard tab switch lost selected-tab focus');
+    for(const [mode,button] of [['pretty','#source-pretty'],['derived','#source-deob']]) {
+      await click(button);await until(mode==='pretty'?'state.sourceFormatted':"Boolean(sourceDerivedView(selectedSource())) && state.sourceDeobfuscated",`${mode}: representation did not become ready`);
+      await click('#source-code-wrap');await wheel('#source-code-wrap',500);
+      const before=await evaluate("({top:elements.sourceCodeWrap.scrollTop,left:elements.sourceCodeWrap.scrollLeft,focus:document.activeElement.id})");
+      assert(before.top>0,`${mode}: live editor did not scroll`);assert.equal(before.focus,'source-code-wrap');
+      const artifactId=String(40+index*2+(mode==='derived'?1:0));await fixture.addSource(artifactId,`const arrival${artifactId} = 1;`);
+      await evaluate('refreshArtifacts()');await until(`state.artifacts.some(source=>source.artifact_id==='${artifactId}')`,'Background catalog did not refresh');
+      const after=await evaluate("({top:elements.sourceCodeWrap.scrollTop,left:elements.sourceCodeWrap.scrollLeft,focus:document.activeElement.id})");
+      receipt(`live-${size[0]}-${mode}-reading`,{viewport:size,before,after});
+      assert.deepEqual(after,before,`${mode}: background refresh moved editor reading/focus`);
+      const mapped=await evaluate(`(()=>{const box=elements.sourceCodeWrap.getBoundingClientRect();const button=[...elements.sourceCode.querySelectorAll('.source-gutter')].find(node=>{const r=node.getBoundingClientRect();return !node.disabled && r.top>=box.top+2 && r.bottom<=box.bottom-2;});if(!button)return null;return {line:button.parentElement.dataset.line,label:button.getAttribute('aria-label')};})()`);
+      receipt(`live-${size[0]}-${mode}-gutter`,{viewport:size,mapped});
+      assert(mapped && /^Show original source at line [0-9]+$/.test(mapped.label),`${mode}: refreshed live gutter lost original-map action`);
+      const originalLine=Number(mapped.label.match(/[0-9]+$/)[0])-1;
+      await screenshot(`source-ownership-${size[0]}-${mode}-mapped`);
+      await click(`#source-code .source-line[data-line="${mapped.line}"] .source-gutter`);
+      assert.equal(await evaluate('state.sourceFormatted || state.sourceDeobfuscated'),false);
+      assert.equal(await evaluate('sourceCursorFor(selectedSource())?.line'),originalLine,`${mode}: mapped gutter navigated to the wrong original location`);
+      assert(await evaluate("document.activeElement.classList.contains('source-line')"),`${mode}: original-map return lost row focus`);
+      assert(await evaluate('document.documentElement.scrollWidth<=innerWidth'),'Live Sources mapping overflowed the viewport');
+    }
+  }
+  assert(fixture.analysisRequests.length>analysisBeforeLive,'Explicit live Deob never reached the inert analyzer route');
+  assert.equal(fixture.rejectedWrites.length,0,'Mapped gutter interaction attempted a debugger mutation');
+  // Observe the complete real client operations, including body reads, hashing
+  // and final ownership checks. This does not invoke loaders or alter UI state.
+  await evaluate(`(()=>{const original={live:loadScriptContent,analysis:loadDeobfuscation};const observer=(${sourceOwnershipOperationObserver.toString()})(original,sourceIdentity);globalThis.__sourceOwnershipQA={...observer,restore(){loadScriptContent=original.live;loadDeobfuscation=original.analysis;delete globalThis.__sourceOwnershipQA;}};loadScriptContent=observer.wrappers.live;loadDeobfuscation=observer.wrappers.analysis;})()`);
+  const heldOperation=async kind=>{
+    const entries=await evaluate(`globalThis.__sourceOwnershipQA.pending(${JSON.stringify(kind)},sourceIdentity(selectedSource()))`);
+    assert.equal(entries.length,1,`Expected exactly one held ${kind} operation for the selected identity`);return entries[0];
+  };
+  const releaseAndSettle=async(operation,release)=>{
+    const before=await evaluate(`globalThis.__sourceOwnershipQA.read(${operation.id})`);
+    assert(before&&before.id===operation.id&&before.kind===operation.kind&&before.identity===operation.identity,'Held operation changed before release');
+    const releaseRequestedAt=Date.now();release();
+    const terminal=await waitForSourceOwnershipSettlement(id=>evaluate(`globalThis.__sourceOwnershipQA.read(${id})`),operation);
+    return {operation:terminal,terminal_before_release:before.status!=='pending',release_requested_at:releaseRequestedAt};
+  };
+  try {
+  // Closing an in-flight live tab must cancel it. Release the server hold,
+  // establish client termination, then assert no stale preview commit. A client
+  // which already aborted is recorded as terminal before release, not delivery.
+  fixture.addLiveSource('qa-pending-source','const pendingOwner = 1;');await evaluate('refreshDebugger()');
+  await until("state.debuggerSession.scripts.some(source=>source.script_id==='qa-pending-source')",'Pending live fixture was not discovered');
+  fixture.liveMode='pending-body';await click('#source-tree [data-script-id="qa-pending-source"]');
+  await waitFixture(fixture.livePending,'Live body did not enter held state');
+  const closedLiveOperation=await heldOperation('live');
+  await click('#source-editor-tabs [aria-selected="true"]');await press('Delete');
+  assert.equal(await evaluate("state.liveScriptContent.has('qa-pending-source') || state.openScriptIds.includes('qa-pending-source')"),false);
+  fixture.liveMode='ready';const closedLiveSettlement=await releaseAndSettle(closedLiveOperation,fixture.releaseLive);
+  const closedLiveRetained=await evaluate("state.liveScriptContent.has('qa-pending-source')");
+  receipt('closed-live-late-body',{...closedLiveSettlement,retained:closedLiveRetained});
+  assert.equal(closedLiveRetained,false,'Closed late live body repopulated the cache');
+  // Reuse the same script ID and opaque token on a replacement target. The
+  // held old text must never replace the fresh target's complete owned text.
+  await click('#source-editor-tabs [aria-selected="true"]');await press('Delete');
+  fixture.liveMode='pending-body';await click('[data-source-collection="page"]');
+  await waitFixture(fixture.livePending,'Old target body did not enter held state');
+  const replacedLiveOperation=await heldOperation('live');
+  fixture.liveMode='ready';fixture.debuggerState.target={...fixture.debuggerState.target,id:'qa-source-page-two',title:'Replacement synthetic source owner'};
+  fixture.debuggerState.targets=[fixture.debuggerState.target];fixture.debuggerState.generation++;
+  fixture.liveDocuments.get('qa-live-source').text=liveText.replace("owner = 'one'","owner = 'two'");
+  await evaluate('refreshDebugger()');
+  await until(`selectedSource()?.target_id==='qa-source-page-two' && selectedSource()?.content?.includes("owner = 'two'") && !selectedSource().loading`,'Replacement target did not obtain its own complete text');
+  const replacedLiveSettlement=await releaseAndSettle(replacedLiveOperation,fixture.releaseLive);
+  const replacementOwned=await evaluate(`selectedSource().content.includes("owner = 'two'") && !selectedSource().content.includes("owner = 'one'")`);
+  receipt('replacement-target-late-body',{...replacedLiveSettlement,newOwnerPreserved:replacementOwned});
+  assert(replacementOwned,'Retired target body replaced the new source');
+  // An explicit Deob on that new owner is held, then its tab is closed. Both
+  // the pending request and every analysis variant for that owner must retire.
+  fixture.deobMode='pending';await click('#source-deob');await waitFixture(fixture.deobPending,'Analyzer response did not enter held state');
+  const closedAnalysisOperation=await heldOperation('analysis');
+  const closedIdentity=await evaluate('sourceIdentity(selectedSource())');
+  await click('#source-editor-tabs [aria-selected="true"]');await press('Delete');
+  fixture.deobMode='ready';const closedAnalysisSettlement=await releaseAndSettle(closedAnalysisOperation,fixture.release);
+  const analysisReleased=await evaluate(`![...state.deobfuscationRequests.keys(),...state.deobfuscationCache.keys()].some(key=>key.startsWith(${JSON.stringify(closedIdentity+'|')}))`);
+  receipt('closed-live-late-analysis',{...closedAnalysisSettlement,released:analysisReleased,debuggerWrites:fixture.rejectedWrites.length});
+  assert(analysisReleased,'Closed live analyzer owner retained a late result');
+  assert.equal(fixture.rejectedWrites.length,0,'Sources QA issued an unexpected debugger action');
+  await screenshot('source-ownership-narrow-closed-owner');await viewport(1440,900);
+  } finally {
+    // Attaching a rejection observer handles its promise, so explicitly fail QA
+    // for every rejected/thrown loader, including calls outside the held case.
+    const failures=await evaluate('(()=>{const observer=globalThis.__sourceOwnershipQA;if(!observer)return null;const failures=observer.failures();observer.restore();return failures;})()');
+    assert(failures&&failures.count===0&&failures.pending===0,`Observed Sources loader errors or unfinished work: ${JSON.stringify(failures)}`);
+  }
+  return {status:'passed',ownership_receipts:ownershipReceipts,path:'browser development Sources UI',source:'synthetic captured artifacts and validated debugger replies; no analyzed JavaScript executed',viewports:[[1440,900],[760,560],[360,740]],checks:['live pretty/derived mapped gutters survive background refresh and navigate by real click','editor scroll and keyboard focus retained at wide/narrow widths','mixed-tab Home/End and selected focus','close pending live body and analyzer responses','same script ID/opaque token on replacement target rejects old body','no debugger mutation from mapped links','pending preview body plus catalog refresh','no automatic Deob on source entry','mismatched analyzer and preview hash refusal','explicit analysis and preview retry','unchanged editor scroll and Find occurrence','keyboard file tabs and Delete cleanup','real hit-tested Facts controls','offline HTTP artifact availability','100-row paging','keyboard categories and disclosure','UTF-8/BOM original-byte navigation','profile-complete/partial/truncated/unknown/unavailable/error states','identity rejection and prior-report retention','Cancel and explicit retry','stale selection','Close/Escape/reopen focus','narrow overlay dismissal','workspace return']};
 }
 
 // The rendered fixture tests presentation and user actions. The separate real
@@ -1949,7 +2638,7 @@ async function checkTrafficBrowser() {
       validation=await checkEvidenceInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:evidenceFixture,setFile,verifyDownload});
       assert.deepEqual(runtimeErrors,[],"Application raised uncaught errors during Evidence QA");
     } else if (sourceFactsBrowser) {
-      validation = await checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:factsFixture});
+      validation = await checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:factsFixture,recordSourceCheck:entry=>{(diagnostics.source_ownership_checks??=[]).push(entry);}});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Sources QA");
     } else {
     await evaluate(`window.fixtureRequests = Array.from({length:520}, (_,i) => ({id:'qa-'+i,path:'https://fixture.invalid/api/item-'+i+'?view=compact',method:i%3?'GET':'POST',status:i%11===0?'pending':200,time:i%11===0?'pending':i/2,type:'xhr',origin:'demo',tabId:'qa-tab',hostOnly:false,operation:'synthetic_qa',events:[],exchange:{request:{state:'available',mime:'application/json',text:'{"id":"qa","value":"first"}',headers:[['content-type','application/json']]},response:{state:i%11===0?'loading':'available',mime:'application/json',text:i%11===0?'':'{"result":"first"}',headers:[['content-type','application/json'],['x-fixture','one']]}}})); state.requests=fixtureRequests; state.sessionMode='demo'; renderRequests(); document.querySelector('#network-notice').textContent='Synthetic browser QA fixture · no live capture';`);

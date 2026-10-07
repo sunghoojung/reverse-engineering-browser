@@ -126,10 +126,8 @@ fn specification() -> Value {
 
 #[tokio::test]
 async fn origin_trace_gap_markers_preserve_addressable_events_over_http() {
-    let fixture: Value = serde_json::from_str(include_str!(
-        "../assets/origin-trace-gap-cases.json"
-    ))
-    .unwrap();
+    let fixture: Value =
+        serde_json::from_str(include_str!("../assets/origin-trace-gap-cases.json")).unwrap();
     let server = Server::start_with_helper_canaries(true).await;
     for case in fixture["cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
@@ -150,7 +148,9 @@ async fn origin_trace_gap_markers_preserve_addressable_events_over_http() {
             .map(|(key, value)| {
                 format!(
                     "{key}={}",
-                    value.as_str().map_or_else(|| value.to_string(), str::to_owned)
+                    value
+                        .as_str()
+                        .map_or_else(|| value.to_string(), str::to_owned)
                 )
             })
             .collect::<Vec<_>>()
@@ -166,7 +166,12 @@ async fn origin_trace_gap_markers_preserve_addressable_events_over_http() {
         assert_eq!(body["status"], case["status"], "{name}");
         let steps = body["steps"].as_array().unwrap();
         assert_eq!(
-            json!(steps.iter().map(|step| &step["event"]["sequence_number"]).collect::<Vec<_>>()),
+            json!(
+                steps
+                    .iter()
+                    .map(|step| &step["event"]["sequence_number"])
+                    .collect::<Vec<_>>()
+            ),
             case["step_sequences"],
             "{name}"
         );
@@ -211,10 +216,8 @@ async fn origin_trace_gap_markers_preserve_addressable_events_over_http() {
 
 #[tokio::test]
 async fn origin_trace_step_limit_keeps_capture_gap_bounded_over_http() {
-    let fixture: Value = serde_json::from_str(include_str!(
-        "../assets/origin-trace-gap-cases.json"
-    ))
-    .unwrap();
+    let fixture: Value =
+        serde_json::from_str(include_str!("../assets/origin-trace-gap-cases.json")).unwrap();
     let server = Server::start().await;
     let mut events = vec![fixture["events"]["gap"].clone()];
     let mut edges = Vec::new();

@@ -234,6 +234,33 @@ export async function checkConsoleInteractions({evaluate,viewport,click,key,whee
     assert(value.scroll.height>=28,'Transcript must retain a readable line');assert(value.scroll.bottom<=value.form.top,'Composer must not overlap transcript');
     assert(value.form.bottom<=value.panel.bottom+1&&value.run.right<=value.width&&value.run.left>=0,'Composer must remain visible');return value;
   };
+  const upperPaneChecks=[];
+  const upperPane=async label=>{
+    const value=await evaluate(`(()=>{
+      const box=node=>{const r=node.getBoundingClientRect();return {top:r.top,bottom:r.bottom,left:r.left,right:r.right,height:r.height};};
+      const pane=document.querySelector('#screen-traffic .request-pane'),tools=pane.querySelector('.network-tools'),notice=pane.querySelector('.network-notice'),searchStatus=pane.querySelector('.request-search-status'),scope=pane.querySelector('.request-scope'),consolePanel=document.querySelector('#native-console-panel');
+      return {label:${JSON.stringify(label)},viewport:{width:innerWidth,height:innerHeight},pane:{...box(pane),scrollTop:pane.scrollTop,clientHeight:pane.clientHeight,scrollHeight:pane.scrollHeight},tools:box(tools),filters:[...tools.querySelectorAll('.type-filter')].map(box),searchMode:document.querySelector('#request-search-scope').value,searchStatus:{...box(searchStatus),hidden:searchStatus.hidden},notice:box(notice),scope:box(scope),head:box(pane.querySelector('.request-head')),console:box(consolePanel),consoleHidden:consolePanel.hidden};
+    })()`);
+    assert(value.filters.every(filter=>filter.top>=value.tools.top-1&&filter.bottom<=value.tools.bottom+1),`${label}: resource filters must fit inside their intrinsic toolbar row`);
+    if(!value.searchStatus.hidden){
+      assert(value.searchStatus.top>=value.tools.bottom-1,`${label}: content-search status must remain below the toolbar`);
+      assert(value.searchStatus.height>0,`${label}: selected content-search status must be visible`);
+    }
+    assert(value.notice.top>=(value.searchStatus.hidden?value.tools.bottom:value.searchStatus.bottom)-1,`${label}: warning must remain below filters and any visible search status`);
+    assert(value.scope.top>=value.notice.bottom-1,`${label}: warning must retain its intrinsic wrapped height`);
+    assert(value.head.top>=value.scope.bottom-1,`${label}: request header must remain below scope controls`);
+    if(!value.consoleHidden)assert(value.pane.bottom<=value.console.top+1,`${label}: upper pane must stay above Console`);
+    upperPaneChecks.push(value);return value;
+  };
+  const scrollUpperPane=async label=>{
+    const before=await upperPane(label);
+    assert(before.pane.scrollHeight>before.pane.clientHeight,`${label}: short upper pane must intentionally scroll`);
+    await wheel('#screen-traffic .request-pane',100);
+    const after=await upperPane(label+' after scroll');
+    assert(after.pane.scrollTop>before.pane.scrollTop,`${label}: upper-pane wheel must reach overflowed content`);
+    assert.equal(after.console.top,before.console.top,`${label}: upper-pane scrolling must not move Console`);
+    await wheel('#screen-traffic .request-pane',-1000);
+  };
   await click('#native-console-toggle');await until("!document.querySelector('#native-console-start').disabled",'Availability never became ready');
   await screenshot('console-connect');await fill('#native-console-url','https://fixture.invalid/console');await click('#native-console-start');
   await until("document.querySelector('#native-console-target').options.length===2",'Document listing missing');await selectDocument();
@@ -241,7 +268,7 @@ export async function checkConsoleInteractions({evaluate,viewport,click,key,whee
   // Real keyboard resizing uses the shared app divider, not injected layout CSS.
   const beforeResize=await geometry();const separatorBefore=await evaluate("Number(document.querySelector('#pane-divider-native-console').getAttribute('aria-valuenow'))");
   await click('#pane-divider-native-console');for(let i=0;i<4;i++)await key('ArrowUp','ArrowUp',{modifiers:8,windowsVirtualKeyCode:38});
-  const afterResize=await geometry();assert(afterResize.panel.height>beforeResize.panel.height,'Keyboard divider must actually enlarge the dock');assert(await evaluate("Number(document.querySelector('#pane-divider-native-console').getAttribute('aria-valuenow'))")<separatorBefore,'Separator value must track the resize');
+  const afterResize=await geometry();await upperPane('enlarged dock');assert(afterResize.panel.height>beforeResize.panel.height,'Keyboard divider must actually enlarge the dock');assert(await evaluate("Number(document.querySelector('#pane-divider-native-console').getAttribute('aria-valuenow'))")<separatorBefore,'Separator value must track the resize');
   await command('fixture.object');assert.equal(fixture.calls.filter(call=>call.command?.operation==='inspect').length,0);
   await reveal('.native-console-object > summary');await until("document.querySelectorAll('.native-console-property').length===16",'Object properties missing');
   await screenshot('console-object-properties');
@@ -279,13 +306,27 @@ export async function checkConsoleInteractions({evaluate,viewport,click,key,whee
   assert.equal(await evaluate("document.querySelector('#native-console-latest').hidden"),true);
   await click('#native-console-search');await type('absent-result');await until("!document.querySelector('#native-console-no-matches').hidden",'No-match state missing');await press('Escape');
   assert.equal(await evaluate("document.activeElement.id"),'native-console-source');
-  for(const [width,height,name]of [[760,560,'console-narrow'],[360,740,'console-phone']]){await viewport(width,height);await geometry();await screenshot(name);await command('fixture.object',true,'pointer');}
+  for(const [width,height,name]of [[760,560,'console-narrow'],[360,740,'console-phone']]){
+    await viewport(width,height);await geometry();await scrollUpperPane(name);await screenshot(name);
+    // Exercise the real selector and the optional fifth grid track. No
+    // synthetic style, hidden-attribute or application-state mutation is used.
+    await reveal('#request-search-scope');await press('Home');await press('ArrowDown');await press('Enter');
+    await until("document.querySelector('#request-search-scope').value==='content'&&!document.querySelector('#request-search-status').hidden",'Content-search selector must reveal its status row');
+    await scrollUpperPane(name+' content search');await screenshot(name+'-content-search');
+    await reveal('#request-search-scope');await press('Home');await press('Enter');
+    await until("document.querySelector('#request-search-scope').value==='url'&&document.querySelector('#request-search-status').hidden",'URL search must restore the four-track pane');
+    await upperPane(name+' restored URL search');await command('fixture.object',true,'pointer');
+  }
   await click('#native-console-clear');await until("document.querySelector('#native-console-output').children.length===0",'Clear failed');await screenshot('console-cleared');
   // History still works after clearing; recalling is not execution.
   await click('#native-console-source');await press('ArrowUp');assert.equal(await evaluate("document.querySelector('#native-console-source').value"),'fixture.object');
   await click('#native-console-close');assert.equal(await evaluate("document.activeElement.id"),'native-console-toggle');await click('#native-console-toggle');
   assert.equal(await evaluate("document.querySelector('#native-console-source').value"),'fixture.object');
   const oldSession=fixture.session;await click('#native-console-connection > summary');await reveal('#native-console-stop');await until("!document.querySelector('#native-console-start').disabled",'Disconnect did not complete');await reveal('#native-console-start');await until("document.querySelector('#native-console-target').options.length===2",'Reconnect did not list documents');await selectDocument();assert.notEqual(fixture.session,oldSession);assert.equal(await evaluate("document.querySelector('#native-console-source').value"),'fixture.object');const reconnected=await command('fixture.object');assert.equal(reconnected.session,fixture.session);assert.notEqual(reconnected.session,commandChecks[0].session_id);await screenshot('console-reconnected');
+  // Restore the full Requests pane after a large saved dock and narrow reflow.
+  await viewport(1440,900);await fill('#native-console-source','draft survives dock resize');await press('Escape');await click('#native-console-close');
+  const fullPane=await upperPane('return to full Requests');assert(fullPane.consoleHidden);assert(fullPane.pane.clientHeight>afterResize.panel.height);assert(fullPane.tools.top>=fullPane.pane.top-1,'Returning to the full pane must restore the toolbar into view');await screenshot('console-closed-full-requests');
+  await click('#native-console-toggle');assert.equal(await evaluate("document.querySelector('#native-console-source').value"),'draft survives dock resize');await geometry();await upperPane('reopened after full Requests');
   assert.deepEqual(fixture.errors,[],'Synthetic fixture raised an unexpected error');
-  return {status:'passed',command_receipts:commandChecks,resize:{before:beforeResize,after:afterResize},path:'browser development Console UI',source:'scripted native replies; no target JavaScript executed',viewports:[[1440,900],[760,560],[360,740]],checks:['hit-tested connection and explicit document selection','keyboard command entry and divider resizing','fixed composer geometry','lazy getter-safe property paging','live shrink/regrowth and keyboard pager focus','inspection retry preserves page','pending editable draft and duplicate-submit rejection','transport failure and explicit recovery','stale document and value rejection','inert exception text','128-entry eviction and anchored arrival scroll','Find/Escape focus','pointer Run at narrow widths','Clear invalidates older quiet polls and preserves newer command/result ownership','malformed quiet poll fails closed without partial output','non-numeric timestamp batch is atomic without coercion','clear preserves history','close/reopen preserves draft','disconnect/reconnect requires fresh document selection and preserves draft']};
+  return {status:'passed',upper_pane_geometry:upperPaneChecks,command_receipts:commandChecks,resize:{before:beforeResize,after:afterResize},path:'browser development Console UI',source:'scripted native replies; no target JavaScript executed',viewports:[[1440,900],[760,560],[360,740]],checks:['hit-tested connection and explicit document selection','keyboard command entry and divider resizing','fixed composer geometry','intrinsic Requests toolbar/search-status/warning rows and independent upper-pane scroll','genuine content-search selector and URL restoration at both narrow widths','narrow reflow and full-pane return preserve geometry/draft','lazy getter-safe property paging','live shrink/regrowth and keyboard pager focus','inspection retry preserves page','pending editable draft and duplicate-submit rejection','transport failure and explicit recovery','stale document and value rejection','inert exception text','128-entry eviction and anchored arrival scroll','Find/Escape focus','pointer Run at narrow widths','Clear invalidates older quiet polls and preserves newer command/result ownership','malformed quiet poll fails closed without partial output','non-numeric timestamp batch is atomic without coercion','clear preserves history','close/reopen preserves draft','disconnect/reconnect requires fresh document selection and preserves draft']};
 }

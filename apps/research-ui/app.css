@@ -3272,3 +3272,8 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 }
 
 .native-console-property-pager button[aria-disabled="true"] { opacity: .5; }
+
+/* A tall Console leaves Traffic scrollable; its wrapped controls must not
+   shrink their grid tracks and paint over the next warning or scope row. */
+.workspace[data-console-open="true"] #screen-traffic .request-pane { grid-template-rows: repeat(3, max-content) minmax(112px, 1fr); }
+.workspace[data-console-open="true"] #screen-traffic .request-pane:has(.request-search-status:not([hidden])) { grid-template-rows: repeat(4, max-content) minmax(112px, 1fr); }

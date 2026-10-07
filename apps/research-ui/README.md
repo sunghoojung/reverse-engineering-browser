@@ -27,7 +27,9 @@ links remain visible and do not switch to similarly named evidence.
 On phones, expanded **Link context** uses a full-width row below Back/Forward;
 long explanations stay in the bounded navigation scroller above the workspace.
 
-A captured request opens its recorded Backtrace. **Open retained source** uses
+A captured request opens its recorded Backtrace using its exact session,
+process and sequence identity. Reused IDs in other sessions cannot supply its
+trace; unsafe numeric identities and ambiguous rows are rejected. **Open retained source** uses
 that step's session and artifact identity. A Facts **Original bytes** link
 verifies complete retained UTF-8 bytes and SHA-256; **Decode range** copies those
 exact bytes, up to 64 KiB, into Decoder. **Open original evidence** retains the

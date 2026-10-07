@@ -180,9 +180,27 @@ async fn origin_trace_gap_markers_preserve_addressable_events_over_http() {
             "{name}"
         );
         if let Some(root) = steps.first() {
-            assert_eq!(root["event"]["session_id"], "7", "{name}");
+            assert_eq!(
+                root["event"]["session_id"],
+                case["step_sessions"]
+                    .as_array()
+                    .map_or("7", |sessions| sessions[0].as_str().unwrap()),
+                "{name}"
+            );
             assert_eq!(root["request_id"], "9007199254740995", "{name}");
             assert_eq!(root["value"], "synthetic request", "{name}");
+        }
+        if let Some(sessions) = case.get("step_sessions") {
+            assert_eq!(
+                json!(
+                    steps
+                        .iter()
+                        .map(|step| &step["event"]["session_id"])
+                        .collect::<Vec<_>>()
+                ),
+                *sessions,
+                "{name}"
+            );
         }
         let gaps = body["gaps"].as_array().unwrap();
         assert_eq!(
@@ -205,6 +223,163 @@ async fn origin_trace_gap_markers_preserve_addressable_events_over_http() {
             );
         }
     }
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn origin_trace_exact_session_selection_over_http() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../assets/origin-trace-gap-cases.json")).unwrap();
+    let server = Server::start_with_helper_canaries(true).await;
+    let mut events = Vec::new();
+    let mut edges = Vec::new();
+    for session in [
+        "9007199254740992",
+        "9007199254740993",
+        "18446744073709551615",
+    ] {
+        for name in ["root", "source"] {
+            let mut event = fixture["events"][name].clone();
+            event["session_id"] = json!(session);
+            events.push(event);
+        }
+        let mut edge = fixture["edges"]["parent"].clone();
+        edge["session_id"] = json!(session);
+        edges.push(edge);
+    }
+    for (path, rows) in [("events.jsonl", events), ("trace.jsonl", edges)] {
+        server.file(
+            path,
+            rows.iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .as_bytes(),
+        );
+    }
+    let root =
+        "request_id=9007199254740995&root_process_id=42&root_sequence_number=9007199254740993";
+    let mut prior_etag = None;
+    for session in [
+        "9007199254740992",
+        "9007199254740993",
+        "18446744073709551615",
+    ] {
+        let path = format!("/api/origin-trace?{root}&session_id={session}");
+        let mut request = server.client.get(format!("{}{path}", server.url));
+        if let Some(etag) = &prior_etag {
+            request = request.header("If-None-Match", etag);
+        }
+        let response = request.send().await.unwrap();
+        let etag = response.headers()["etag"].to_str().unwrap().to_owned();
+        assert_ne!(
+            prior_etag.as_ref(),
+            Some(&etag),
+            "Session selection must change the ETag"
+        );
+        let bytes = assert_contract_response(response, "get", "/api/origin-trace", 200).await;
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["status"], "complete",
+            "Exact session selection must disambiguate reused request/event identifiers"
+        );
+        assert_eq!(body["steps"].as_array().unwrap().len(), 2);
+        assert!(
+            body["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|step| step["event"]["session_id"] == session)
+        );
+        let unchanged = server
+            .client
+            .get(format!("{}{path}", server.url))
+            .header("If-None-Match", &etag)
+            .send()
+            .await
+            .unwrap();
+        assert_contract_response(unchanged, "get", "/api/origin-trace", 304).await;
+        prior_etag = Some(etag);
+
+        let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+            .args([
+                "call",
+                "get_origin_trace",
+                "--base-url",
+                &server.url,
+                "--param",
+                "request_id=9007199254740995",
+                "--param",
+                "root_process_id=42",
+                "--param",
+                "root_sequence_number=9007199254740993",
+                "--param",
+                &format!("session_id={session}"),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            body
+        );
+    }
+    let missing = server
+        .client
+        .get(format!(
+            "{}/api/origin-trace?{root}&session_id=7",
+            server.url
+        ))
+        .header("If-None-Match", prior_etag.unwrap())
+        .send()
+        .await
+        .unwrap();
+    let bytes = assert_contract_response(missing, "get", "/api/origin-trace", 200).await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap()["status"],
+        "empty"
+    );
+    for query in [
+        format!("{root}&session_id=9007199254740992&session_id=9007199254740993"),
+        format!("{root}&session_id=7&session_id=7"),
+        "request_id=9007199254740995&session_id=7&root_process_id=42".into(),
+        "request_id=9007199254740995&session_id=7&root_sequence_number=1".into(),
+    ] {
+        assert_contract_response(
+            server.get(&format!("/api/origin-trace?{query}")).await,
+            "get",
+            "/api/origin-trace",
+            400,
+        )
+        .await;
+    }
+    let description = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["describe", "get_origin_trace"])
+        .output()
+        .unwrap();
+    assert!(description.status.success());
+    let description: Value = serde_json::from_slice(&description.stdout).unwrap();
+    let selector = description["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|parameter| parameter["name"] == "session_id")
+        .unwrap();
+    assert_eq!(selector["required"], false);
+    assert_eq!(
+        selector["schema"]["$ref"],
+        "#/components/schemas/NonzeroUint64String"
+    );
     assert!(
         !server
             .root

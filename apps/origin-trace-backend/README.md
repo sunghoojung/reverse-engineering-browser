@@ -29,6 +29,12 @@ The `origin_trace_gap` HTTP regressions cover native queue markers sharing their
 anchor identity, missing anchors, repeated markers, unrelated streams, malformed
 markers, genuine duplicate events, exact large IDs, and bounded coverage. The
 native Swift builder runs the same synthetic cases during `make app-build`.
+Shared cases also cover reused request/event identifiers across sessions, exact
+large string IDs, omitted selectors, and malformed/missing session selectors.
+`GET /api/origin-trace` and `reb-api call get_origin_trace` accept optional
+`session_id`; concrete UI selections always send it. Unresolved cross-session
+matches are explicitly ambiguous, while an absent exact match remains empty.
+See [exact trace selection](../../protocol/http-api.md#exact-request-trace-selection).
 
 The listener accepts only `127.0.0.1`, `localhost`, or `::1`; every API request
 validates Host, Origin, and fetch-site headers. Static serving allowlists the

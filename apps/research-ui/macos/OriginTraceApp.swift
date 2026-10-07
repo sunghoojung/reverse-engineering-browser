@@ -2324,6 +2324,16 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
 
   private func originTraceResponse(for requestURL: URL) throws -> Data {
     let items = URLComponents(url: requestURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    for name in ["request_id", "session_id", "root_process_id", "root_sequence_number"] {
+      let matches = items.filter { $0.name == name }
+      guard matches.count <= 1, matches.allSatisfy({ $0.value != nil }) else {
+        throw artifactError("Specify \(name) only once with a value")
+      }
+    }
+    let sessionID = items.first(where: { $0.name == "session_id" })?.value
+    if let sessionID, !isCanonicalUInt64(sessionID, nonzero: true) {
+      throw artifactError("Session ID must be a canonical nonzero unsigned 64-bit integer")
+    }
     guard let requestID = items.first(where: { $0.name == "request_id" })?.value,
       requestID.range(of: #"^(?:0|[1-9][0-9]*)$"#, options: .regularExpression) != nil,
       UInt64(requestID) != nil
@@ -2361,6 +2371,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       edges: edges,
       artifacts: recentArtifactEntries(),
       requestID: requestID,
+      sessionID: sessionID,
       rootProcessID: rootProcessID,
       rootSequenceNumber: rootSequence
     )

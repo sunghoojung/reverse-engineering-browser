@@ -2048,15 +2048,17 @@
       }
 
       function originTraceSelection() {
-        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        const candidates = state.requests.filter(candidate => candidate.id === state.selectedRequestId);
+        const request = candidates.length === 1 ? candidates[0] : null;
         const root = requestTraceRoot(request);
         if (!request || !root) return null;
-        const requestID = integerText(root, 'request_id');
+        const requestID = investigationId(root.request_id), sessionID = investigationId(root.session_id);
+        const rootSequenceNumber = investigationId(root.sequence_number), rootProcessID = root.process_id;
+        if (!requestID || !sessionID || sessionID === '0' || !rootSequenceNumber || rootSequenceNumber === '0' ||
+            !Number.isSafeInteger(rootProcessID) || rootProcessID < 0 || rootProcessID > 4294967295) return null;
         return {
-          request,
-          root,
-          requestID,
-          key: `${request.id}:${integerText(root, 'session_id')}:${root.process_id}:${integerText(root, 'sequence_number')}`
+          request, root, requestID, sessionID, rootProcessID, rootSequenceNumber,
+          key: `${request.id}:${sessionID}:${rootProcessID}:${rootSequenceNumber}`
         };
       }
 
@@ -2066,7 +2068,7 @@
         const selection = originTraceSelection();
         if (!selection || location.protocol === 'file:') {
           state.originTraceStatus = 'empty';
-          state.originTraceError = 'A live broker request is required for origin tracing.';
+          state.originTraceError = 'An unambiguous retained request with exact session and event identifiers is required for origin tracing.';
           renderBacktrace();
           return;
         }
@@ -2091,8 +2093,9 @@
             : {};
           const parameters = new URLSearchParams({
             request_id: selection.requestID,
-            root_process_id: String(selection.root.process_id),
-            root_sequence_number: integerText(selection.root, 'sequence_number')
+            session_id: selection.sessionID,
+            root_process_id: String(selection.rootProcessID),
+            root_sequence_number: selection.rootSequenceNumber
           });
           const response = await fetch(`/api/origin-trace?${parameters}`, { cache: 'no-store', headers, signal: controller.signal });
           if (!ownsSelection()) return;

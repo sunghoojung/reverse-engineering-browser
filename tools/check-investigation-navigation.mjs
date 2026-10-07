@@ -461,6 +461,28 @@ async function checkInvestigationReturns(root) {
     const dynamic={dataset:{},id:'',localName:'button'};t.context.dynamic=dynamic;t.context.owner={contains:()=>true,querySelectorAll:()=>[],querySelector:()=>null};
     assert.equal(t.run('investigationSelector(dynamic,owner,true)'),null,'Ordinal focus cannot target a different dynamic record');
   }
+  {
+    const t=setup();t.run(traceReader);const fixture=investigationFixture({handle:async()=>false,release(){}});
+    t.context.isOriginTraceResponse=()=>true;
+    const calls=[];
+    t.context.fetch=async url=>{const query=new URL(url,'http://127.0.0.1').searchParams;calls.push(query);
+      return {ok:true,status:200,headers:{get:()=>null},json:async()=>({...fixture.trace,steps:[{...fixture.trace.steps[0],event:{session_id:query.get('session_id'),process_id:17,sequence_number:'9007199254740993'}}]})};};
+    // These IDs arrive as canonical JSON strings; unsafe JSON numbers cannot be recovered.
+    for(const session of ['9007199254740992','9007199254740993','18446744073709551615']) {
+      t.state.requests=[{id:'same',origin:'live',operation:'request_started',events:[{...fixture.event,session_id:session,sequence_number:'9007199254740993'}]}];t.state.selectedRequestId='same';
+      await t.context.refreshOriginTrace();assert.equal(t.state.originTraceStatus,'ready');
+      assert.equal(calls.at(-1).get('session_id'),session);assert.equal(calls.at(-1).get('root_sequence_number'),'9007199254740993');
+    }
+    for(const field of ['session_id','sequence_number','request_id']) {
+      for(const invalid of [9007199254740992,'01','18446744073709551616',null]) {
+        t.state.requests[0].events=[{...fixture.event,[field]:invalid}];
+        assert.equal(t.run('originTraceSelection()'),null);await t.context.refreshOriginTrace();
+      }
+    }
+    t.state.requests[0].events=[fixture.event];t.state.requests.push({...t.state.requests[0]});
+    assert.equal(t.run('originTraceSelection()'),null);await t.context.refreshOriginTrace();
+    assert.equal(calls.length,3,'Unsafe or ambiguous identities must never be sent');
+  }
   for(const phase of ['fetch','body','304']) {
     const t=setup();t.run(traceReader);const fixture=investigationFixture({handle:async()=>false,release(){}});
     const request={id:'stable-row',origin:'live',operation:'request_started',events:[fixture.event]};t.state.requests=[request];t.state.selectedRequestId=request.id;
@@ -492,7 +514,7 @@ async function checkInvestigationReturns(root) {
     const node=()=>({children:[],setAttribute(){},append(...children){this.children.push(...children);},replaceChildren(...children){this.children=children;}});
     const elements={evidenceRows:node(),evidenceCount:node(),evidenceLinkCount:node()};
     const context=createContext({state,elements,evidencePackagePanel:{sync(){}},evidenceWorkspace:{sync(){}},sampleEvidence:[{value:'must not substitute sample data'}],document:{querySelectorAll:()=>[],querySelector:()=>({hidden:true}),createElement:node},integerText:(event,key)=>String(event[key]),formatMilliseconds:String,renderBacktrace(){}});
-    runInContext(rootFunction+'\n'+section('      function renderEvidence(', '      async function refreshOriginTrace('),context);
+    runInContext(nav.slice(nav.indexOf('const investigationId ='),nav.indexOf('function investigationEventIdentity('))+'\n'+rootFunction+'\n'+section('      function renderEvidence(', '      async function refreshOriginTrace('),context);
     context.renderEvidence();assert.equal(elements.evidenceRows.children.length,0);assert.equal(elements.evidenceLinkCount.textContent,'0','Completed stale trace cannot become an Evidence count');
     state.originTrace=null;context.renderEvidence();assert.equal(elements.evidenceRows.children.length,0,'Live requests never fall back to sample evidence');
   }

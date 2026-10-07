@@ -390,6 +390,10 @@ impl App {
             "/api/origin-trace" => {
                 let request = q.required("request_id")?.to_owned();
                 q.number("request_id", None, 64, false)?;
+                let session = q.one("session_id")?.map(str::to_owned);
+                if session.is_some() {
+                    q.number("session_id", None, 64, true)?;
+                }
                 let process = q.one("root_process_id")?;
                 let sequence = q.one("root_sequence_number")?;
                 if process.is_some() != sequence.is_some() {
@@ -411,7 +415,7 @@ impl App {
                 etag = Some(evidence::resource_etag(
                     &options.store,
                     &format!(
-                        "{}:{}:{request}:{process:?}:{sequence:?}",
+                        "{}:{}:{request}:{session:?}:{process:?}:{sequence:?}",
                         evidence::resource_etag(&options.trace_store, ""),
                         evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), "")
                     ),
@@ -425,6 +429,7 @@ impl App {
                         &evidence::recent(&options.trace_store, 30000, 4096, "origin trace edge")?,
                         &evidence::artifacts(&options.artifacts, 10000)?,
                         &request,
+                        session.as_deref(),
                         process,
                         sequence.as_deref(),
                     )

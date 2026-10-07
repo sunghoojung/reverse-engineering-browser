@@ -302,6 +302,10 @@ narrow windows. Both panes stay within the available workspace height; the
 request ledger and inspector body scroll independently. Captured-tab and domain
 filters share a compact row at narrow widths. REB's Signals and Evidence tools remain separate tabs. Missing
 headers, bodies, initiators, and timing phases stay explicitly unavailable.
+Request signal profiles are owned by the exact selected session, request and root
+event. Late responses cannot replace a newer selection or refresh. Malformed or
+failed refreshes preserve only the last validated profile for that same identity
+and require a full response on retry; changed or ambiguous owners clear it.
 No cache, recording, throttling, or invented waterfall controls are implied.
 The layout follows familiar [network inspection conventions](https://developer.chrome.com/docs/devtools/network/reference)
 while keeping Origin Trace's own controls and Rosé Pine Moon palette.

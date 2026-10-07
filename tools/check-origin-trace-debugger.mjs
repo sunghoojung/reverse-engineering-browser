@@ -1694,6 +1694,149 @@ function trafficDevtoolsAddress(text) {
   return `ws://127.0.0.1:${match[1]}${match[2]}`;
 }
 
+// Browser.downloadProgress is the completion boundary. A final filename can be
+// reserved before bytes are written, without any visible .crdownload sibling.
+// One explicit download is allowed per QA run; late events can never own a retry.
+function trafficBrowserDownloadObserver({timeoutMs=5000,setTimer=setTimeout,clearTimer=clearTimeout}={}) {
+  let active=null,used=false,closed=false;
+  const events=[];
+  const finish=(error,value)=>{
+    if(!active)return;
+    const owner=active;active=null;clearTimer(owner.timer);
+    if(error)owner.reject(error);else owner.resolve(value);
+  };
+  return {
+    arm(frameId,filename) {
+      assert(!closed&&!used,'Browser download observer is closed or already used');
+      assert(typeof frameId==='string'&&frameId.length>0&&frameId.length<=256,'A verified download frame is required');
+      assert(typeof filename==='string'&&filename.length>0&&filename.length<=256,'A bounded expected download filename is required');
+      used=true;
+      const completion=new Promise((resolve,reject)=>{active={frameId,filename,guid:null,resolve,reject,timer:null};});
+      // Events, timeout, or socket failure can precede the caller awaiting it.
+      completion.catch(()=>{});
+      active.timer=setTimer(()=>finish(new Error('Browser download did not complete before its deadline')),timeoutMs);
+      return {completion,cancel:()=>finish(new Error('Browser download observation cancelled'))};
+    },
+    observe(message) {
+      if(!active||!['Browser.downloadWillBegin','Browser.downloadProgress'].includes(message.method))return;
+      const p=message.params??{};
+      if(typeof p.guid!=='string'||!p.guid.length||p.guid.length>128){finish(new Error('Invalid browser download GUID'));return;}
+      const event={method:message.method,guid:p.guid,state:typeof p.state==='string'?p.state.slice(0,32):null,
+        frameId:typeof p.frameId==='string'?p.frameId.slice(0,256):null,filename:typeof p.suggestedFilename==='string'?p.suggestedFilename.slice(0,256):null,
+        receivedBytes:Number.isFinite(p.receivedBytes)?p.receivedBytes:null,totalBytes:Number.isFinite(p.totalBytes)?p.totalBytes:null};
+      events.push(event);if(events.length>32)events.shift();
+      if(message.method==='Browser.downloadWillBegin') {
+        if(p.frameId!==active.frameId||p.suggestedFilename!==active.filename){finish(new Error('Unexpected browser download frame or filename'));return;}
+        if(active.guid!==null){finish(new Error('More than one browser download began'));return;}
+        active.guid=p.guid;return;
+      }
+      // An unrelated or pre-begin progress event cannot complete this download.
+      if(p.guid!==active.guid)return;
+      if(p.state==='canceled'){finish(new Error('Browser download was canceled'));return;}
+      if(!['inProgress','completed'].includes(p.state)){finish(new Error('Invalid browser download state'));return;}
+      if(p.state==='completed')finish(null,{guid:active.guid,frameId:active.frameId,filename:active.filename,state:p.state});
+    },
+    close(reason='Browser QA cleanup') {closed=true;finish(new Error(reason));},
+    receipts:()=>events.map(event=>({...event}))
+  };
+}
+
+async function verifyTrafficBrowserDownload({observer,frameId,directory,expectedBytes,trigger}) {
+  const filename='selected.reb-evidence.json';
+  assert.deepEqual(await readdir(directory),[],'Validation must not automatically save a file');
+  const receipt=observer.arm(frameId,filename);
+  try {
+    const [,completed]=await Promise.all([Promise.resolve().then(trigger),receipt.completion]);
+    // Never poll for matching bytes: completed-but-empty, partial or corrupt
+    // output must fail the same exact-byte assertion as any other bad download.
+    const saved=await readFile(join(directory,filename));
+    assert.deepEqual(new Uint8Array(saved),expectedBytes,'Browser download must preserve exact validated bytes');
+    assert.deepEqual(await readdir(directory),[filename]);
+    return completed;
+  } finally {receipt.cancel();}
+}
+
+// Synthetic CDP events and real temporary files exercise the exact verifier.
+// They are not a rendered-browser or native-download acceptance result.
+const downloadTestRoot=await mkdtemp(join(tmpdir(),'reb-download-check-'));
+try {
+  const bytes=new Uint8Array([123,34,111,107,34,58,116,114,117,101,125]);
+  const filename='selected.reb-evidence.json',frameId='download-frame';
+  const begin=(guid='owned',frame=frameId,name=filename)=>({method:'Browser.downloadWillBegin',params:{guid,frameId:frame,suggestedFilename:name}});
+  const progress=(state,guid='owned')=>({method:'Browser.downloadProgress',params:{guid,state,receivedBytes:bytes.length,totalBytes:bytes.length}});
+  const setup=async label=>{
+    const directory=join(downloadTestRoot,label);await mkdir(directory);
+    const timers=new Map();let nextTimer=0;
+    const observer=trafficBrowserDownloadObserver({setTimer:(callback,delay)=>{assert.equal(delay,5000);timers.set(++nextTimer,callback);return nextTimer;},clearTimer:id=>timers.delete(id)});
+    return {directory,observer,timers,path:join(directory,filename),timeout(){for(const callback of [...timers.values()])callback();}};
+  };
+  {
+    const t=await setup('reserved-final');let entered;
+    const ready=new Promise(resolve=>{entered=resolve;});let settled=false;
+    const pending=verifyTrafficBrowserDownload({...t,frameId,expectedBytes:bytes,trigger:async()=>{
+      t.observer.observe(begin());await writeFile(t.path,new Uint8Array());entered();
+    }});
+    pending.then(()=>{settled=true;},()=>{settled=true;});await ready;await new Promise(resolve=>setImmediate(resolve));
+    const premature=await readFile(t.path);
+    assert.equal((await readdir(t.directory)).every(name=>!name.endsWith('.crdownload')),true,'The old readiness heuristic accepts the reserved final name');
+    assert.equal(premature.length,0);assert.notDeepEqual(new Uint8Array(premature),bytes,'The old read reproduces a false corrupt-download failure');
+    assert.equal(settled,false,'File existence must not finish the actual verifier');
+    t.observer.observe(progress('completed','foreign'));await Promise.resolve();assert.equal(settled,false,'A foreign GUID cannot release file verification');
+    await writeFile(t.path,bytes);t.observer.observe(progress('completed'));
+    assert.equal((await pending).guid,'owned');assert.equal(t.timers.size,0);
+  }
+  {
+    const t=await setup('early-terminal');
+    const completed=await verifyTrafficBrowserDownload({...t,frameId,expectedBytes:bytes,trigger:async()=>{
+      await writeFile(t.path,bytes);t.observer.observe(begin());t.observer.observe(progress('completed'));
+      await Promise.resolve(); // Terminal event arrives before trigger acknowledgement.
+    }});
+    assert.equal(completed.state,'completed');assert.equal(t.timers.size,0);
+  }
+  for(const mode of ['canceled','wrong-guid','wrong-frame','wrong-name','duplicate-begin','timeout','close','trigger-error','corrupt','partial','empty','extra-file','missing-file']) {
+    const t=await setup(mode);
+    const pending=verifyTrafficBrowserDownload({...t,frameId,expectedBytes:bytes,trigger:async()=>{
+      if(mode==='trigger-error')throw new Error('Synthetic click failure');
+      if(mode!=='missing-file')await writeFile(t.path,mode==='empty'?new Uint8Array():mode==='corrupt'?new Uint8Array(bytes.length):mode==='partial'?bytes.slice(0,3):bytes);
+      if(mode==='extra-file')await writeFile(join(t.directory,'unexpected.json'),bytes);
+      t.observer.observe(begin('owned',mode==='wrong-frame'?'foreign-frame':frameId,mode==='wrong-name'?'other.json':filename));
+      if(mode==='duplicate-begin')t.observer.observe(begin('other'));
+      else if(mode==='canceled')t.observer.observe(progress('canceled'));
+      else if(mode==='close')t.observer.close('Synthetic socket closed');
+      else if(mode==='timeout'||mode==='wrong-guid'){
+        if(mode==='wrong-guid')t.observer.observe(progress('completed','foreign'));
+        t.timeout();t.observer.observe(progress('completed')); // Late success cannot undo failure.
+      } else t.observer.observe(progress('completed'));
+    }});
+    await assert.rejects(pending,error=>{
+      const expected=mode==='canceled'?/was canceled/:mode==='timeout'||mode==='wrong-guid'?/deadline/:mode==='close'?/socket closed/:mode==='trigger-error'?/click failure/:mode==='wrong-frame'||mode==='wrong-name'?/frame or filename/:mode==='duplicate-begin'?/More than one/:mode==='missing-file'?/ENOENT/:mode==='extra-file'?/Expected values/:/exact validated bytes/;
+      assert.match(error.message,expected,mode);return true;
+    });
+    assert.equal(t.timers.size,0,mode+': completion observer must release its timer');
+    assert.throws(()=>t.observer.arm(frameId,filename),/closed or already used/,'Late events cannot be assigned to a retried owner');
+    t.observer.close();
+  }
+  {
+    const t=await setup('unsolicited-file');let triggered=false;
+    await writeFile(t.path,bytes);
+    await assert.rejects(verifyTrafficBrowserDownload({...t,frameId,expectedBytes:bytes,trigger:()=>{triggered=true;}}),/must not automatically save/);
+    assert.equal(triggered,false);assert.equal(t.timers.size,0);t.observer.close();
+  }
+  {
+    const t=await setup('before-wait-registration'),receipt=t.observer.arm(frameId,filename);
+    t.observer.observe(begin());t.observer.observe(progress('completed'));
+    assert.equal((await receipt.completion).guid,'owned','A terminal event before awaiting must remain available');
+    assert.equal(t.timers.size,0);t.observer.close();
+  }
+  {
+    const t=await setup('bounded-events'),receipt=t.observer.arm(frameId,filename);
+    t.observer.observe(begin());
+    for(let n=0;n<1000;n++)t.observer.observe(progress('inProgress','other-'+n));
+    assert.equal(t.observer.receipts().length,32);t.timeout();await assert.rejects(receipt.completion,/deadline/);assert.equal(t.timers.size,0);
+  }
+  console.log('PASS exact browser-download completion receipt: reserved-file race, early terminal events, matched GUID, cancellation, timeout/late/foreign events, cleanup/bounds, corrupt/empty/missing/extra output (synthetic CDP and filesystem, not rendered QA)');
+} finally {await rm(downloadTestRoot,{recursive:true,force:true});}
+
 function trafficBrowserProcess(executable, args) {
   const grouped = process.platform !== "win32";
   const started = performance.now();
@@ -3586,6 +3729,7 @@ async function checkTrafficBrowser() {
   let lifecycle, socket, validation, failure, captureFailure;
   let diagnostics = {executable, args, phase: "fixture server"};
   const commands = new Map();
+  const downloads = trafficBrowserDownloadObserver();
   await rm(join(output, "validation.json"), {force: true});
   try {
     if (float32Browser || float32FixtureOnly) {
@@ -3614,6 +3758,7 @@ async function checkTrafficBrowser() {
     const browserDialogs = [];
     socket.addEventListener("message", event => {
       const message = JSON.parse(event.data);
+      downloads.observe(message);
       if (message.method === "Page.javascriptDialogOpening") browserDialogs.push(message.params);
       if (message.method === "Runtime.exceptionThrown") runtimeErrors.push(message.params.exceptionDetails.exception?.description || message.params.exceptionDetails.text);
       const pending = commands.get(message.id);
@@ -3622,6 +3767,7 @@ async function checkTrafficBrowser() {
       if (message.error) pending.reject(new Error(JSON.stringify(message.error))); else pending.resolve(message.result);
     });
     const rejectCommands = reason => {
+      downloads.close(reason);
       for (const pending of commands.values()) {clearTimeout(pending.timer); pending.reject(new Error(reason));}
       commands.clear();
     };
@@ -3836,15 +3982,10 @@ async function checkTrafficBrowser() {
         await command('DOM.setFileInputFiles',{nodeId:input.nodeId,files:[join(directory,name+'.json')]});
       };
       const downloadDirectory=join(directory,'downloads');await mkdir(downloadDirectory);
-      await command('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:downloadDirectory},false);
+      await command('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:downloadDirectory,eventsEnabled:true},false);
+      const frameId=(await command('Page.getFrameTree')).frameTree.frame.id;
       const verifyDownload=async trigger=>{
-        assert.deepEqual(await readdir(downloadDirectory),[],'Validation must not automatically save a file');
-        await trigger();
-        const deadline=Date.now()+5000;let saved;
-        while(Date.now()<deadline){try{saved=await readFile(join(downloadDirectory,'selected.reb-evidence.json'));if((await readdir(downloadDirectory)).every(name=>!name.endsWith('.crdownload')))break;}catch{}await new Promise(resolve=>setTimeout(resolve,25));}
-        assert(saved,'Explicit Download did not produce a completed file');
-        assert.deepEqual(new Uint8Array(saved),packageGoldenBytes,'Browser download must preserve exact validated bytes');
-        assert.deepEqual(await readdir(downloadDirectory),['selected.reb-evidence.json']);
+        diagnostics.download=await verifyTrafficBrowserDownload({observer:downloads,frameId,directory:downloadDirectory,expectedBytes:packageGoldenBytes,trigger});
       };
       validation=await checkEvidenceInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:evidenceFixture,setFile,verifyDownload});
       assert.deepEqual(runtimeErrors,[],"Application raised uncaught errors during Evidence QA");
@@ -3954,6 +4095,8 @@ async function checkTrafficBrowser() {
       catch (screenshotError) {diagnostics.failure_screenshot_error = String(screenshotError.message).slice(0, 2048);}
     }
   } finally {
+    downloads.close();
+    diagnostics.download_events=downloads.receipts();
     socket?.close();
     for (const pending of commands.values()) {clearTimeout(pending.timer); pending.reject(new Error("Browser QA cleanup"));}
     commands.clear();

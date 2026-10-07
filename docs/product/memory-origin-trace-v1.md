@@ -56,7 +56,7 @@ The debugger snapshot exposes `memory_origin_trace` protocol version 1 with:
 - at most 25 retained rows, each with function location, capture size, native
   probe coverage, match state, and one bounded representative match.
 
-The Python bridge and UI both reject malformed identifiers, counts, windows,
+The Rust bridge and UI both reject malformed identifiers, counts, windows,
 state combinations, out-of-order steps, mismatched match objects, oversized
 captures, and invalid coverage claims before replacing the last valid state.
 

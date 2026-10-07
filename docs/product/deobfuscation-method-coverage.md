@@ -58,13 +58,12 @@ programs in Node. The production worker never runs Node or any captured
 JavaScript. `make check` compiles the worker; the full handoff also builds
 the packaged app.
 
-The browser development server uses the same Rust worker when built, preferring
-`target/debug` then `target/release`, or an explicit
-`REB_DEOBFUSCATOR_WORKER` path. Without a worker it retains the separately
-labelled `python-lexical` classifier/formatter. An available worker's error
-never silently falls back. Native builds always bundle Rust. Python heuristic
-classification and table previews remain supplementary evidence, not proof
-that a Rust rewrite is valid.
+The Rust backend uses the same inert Rust worker for browser development and
+native sessions, with an explicit `REB_DEOBFUSCATOR_WORKER` override. A missing
+worker returns unavailable; an error never silently falls back. Native builds
+bundle the worker. Supplementary lexical classification and table previews run
+in the Rust backend and do not prove that a rewrite is valid. Historical
+`python-lexical` response names describe earlier contracts, not a current engine.
 
 ## Proxy calls
 

@@ -302,25 +302,19 @@ digest.
 
 ## REA integration boundary
 
-[REA](https://github.com/morluto/rea) is useful as an offline JavaScript
-analysis provider and an architectural reference. The reviewed upstream commit
-is `07888ec096f69753a1535703fb7b3c3070e786b7`.
+[REA](https://github.com/morluto/rea/tree/472b72a53068a8e2ec78fe239d687023482daaa7)
+is an architectural reference at reviewed revision
+`472b72a53068a8e2ec78fe239d687023482daaa7`. Its source provides evidence identity,
+coverage, and explicit effect contracts. This is source inspection, not a claim
+that upstream tests or all REA capabilities were validated here.
 
-Reusable REA capabilities include inert Babel parsing, source-map inventory,
-lexical scopes and bindings, uniquely resolved local calls, argument and return
-flow, object operations, async relationships, request construction, function
-fingerprints, deterministic graph identifiers, explicit unknowns, and bounded
-coverage.
-
-REA does not currently provide the required WebAssembly semantic analyzer and
-its published package exposes a CLI rather than a stable library export. Origin
-Trace therefore uses a provider boundary and never imports private REA build
-paths. Version 1 may use a pinned CLI adapter for stable public output or adapt
-MIT-licensed algorithms with attribution. VM-specific JavaScript structures
-that REA does not expose remain owned by the Origin Trace JavaScript frontend.
-
-REA is not part of Brave capture, the renderer hot path, or the normalized VM
-contract. MCP remains out of scope.
+The current detector is the Rust implementation in
+[`vm.rs`](../../apps/origin-trace-backend/src/vm.rs), not a REA CLI adapter. It
+uses name-dependent masked lexical JavaScript rules, decoded WASM opcode and
+section clues, and retained runtime relevance. AST/binding-linked VM candidates
+and guest semantics remain later work. The [analysis catalog](./analysis-catalog-v1.md)
+exposes the actual profile, rule IDs, reviewed sources, and limitations. REA is
+not part of Brave capture or the renderer hot path. MCP remains out of scope.
 
 ## Processing pipeline
 

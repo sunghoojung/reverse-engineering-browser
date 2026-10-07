@@ -52,6 +52,9 @@ Offline `reb-api describe OPERATION --action ACTION` also exposes source-backed
 advisory effects and prerequisites while retaining the operation's common
 guards. See the [execution metadata contract](../../protocol/http-api.md#execution-metadata).
 These annotations do not authorize execution or automatic retries.
+`reb-api call get_analysis_catalog --base-url URL` returns the embedded current VM
+profile, rule definitions, and reviewed sources without touching evidence or
+starting analysis. See [Analysis Catalog v1](../../docs/product/analysis-catalog-v1.md).
 
 Request Field Trace uses `src/provenance.rs` for bounded in-process projection of
 request call sites and same-target primitive string matches. Hashes are captured

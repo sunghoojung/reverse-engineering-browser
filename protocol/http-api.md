@@ -116,6 +116,32 @@ The flag conflicts with `--show-headers`; neither headers nor arbitrary body
 fields are included. HTTP 200 application failures still use stdout and exit 0.
 Response reads remain capped at 64 MiB; commands are never automatically retried.
 
+## Analysis definitions and reviewed sources
+
+`GET /api/analysis/catalog` (`reb-api call get_analysis_catalog --base-url URL`)
+returns the embedded current VM profile and digest, every structural/static/runtime
+rule ID and weight, and reviewed source IDs, primary URLs, revisions, applicability,
+limitations, and reuse status. `reb-api describe get_analysis_catalog` works
+offline and includes the complete response schema and advisory execution metadata.
+The closed response has at most 64 rules and 32 source records; a regression gate
+keeps the actual embedded response below 128 KiB. It takes no parameters and needs
+no evidence store, browser, worker, or network source access.
+
+Match a generated document's producer ID/version to `current_producer` and its
+`profile_digest` to `current_profile_digest` before using these definitions.
+Build identity is not recorded, so matching metadata does not prove the same binary. Older v1 profile shapes remain accepted by their existing
+schema, but historical definitions are not included or revalidated. Static relevance
+weights were not included in that historical profile projection; the catalog exposes
+them without changing existing analysis identity. Neither value alone is a full analyzer identity.
+`catalog_digest` is SHA-256 of canonical sorted-key JSON excluding itself, using the
+existing VM canonicalization. It changes with source/definition metadata while the
+analysis profile identity stays unchanged. Neither digest nor score proves source
+authenticity, accuracy, causality, or semantic equivalence.
+
+Sources are inert metadata; this endpoint does not fetch URLs, read evidence, run
+source, or write the VM cache. The [analysis catalog guide](../docs/product/analysis-catalog-v1.md)
+explains evidence levels and compatibility.
+
 ## Authentication and locality
 
 There is **no bearer token, API key, login, or OAuth scheme** on this HTTP API.
@@ -201,7 +227,7 @@ retry mutations after a timeout or dropped connection.
 
 ## Execution metadata
 
-All 22 operations and all 74 top-level request action variants, including the 59
+All 23 operations and all 74 top-level request action variants, including the 59
 debugger actions, carry version 1 `x-reb-execution` metadata. It is a source-owned,
 static advisory catalog. It does not grant permission, verify target ownership,
 report current availability, replace server validation, or prove that an action

@@ -2755,6 +2755,92 @@
           "$ref": "#/components/schemas/RebExecutionMetadata"
         }
       }
+    },
+    "/api/analysis/catalog": {
+      "get": {
+        "operationId": "get_analysis_catalog",
+        "summary": "Get current analysis definitions and source provenance",
+        "description": "Read-only, bounded, embedded VM profile, rules, source revisions, applicability, and reuse status. No evidence access, URL fetching, cache writes, or source execution. Only current producer ID/version and exact profile digest are supported; build identity is not recorded; historical compatibility does not imply current validation.",
+        "tags": [
+          "analysis"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalysisCatalog"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal catalog serialization failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Returns embedded definitions only. No evidence reads, source fetches, local writes, process launches, target actions, or analyzed-program execution.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/analysis_catalog.rs",
+              "symbol": "catalog"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/vm.rs",
+              "symbol": "current_profile"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/vm.rs",
+              "symbol": "current_rule_definitions"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/vm.rs",
+              "symbol": "current_producer"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
     }
   },
   "components": {
@@ -13412,6 +13498,232 @@
           }
         },
         "description": "Allowlisted bounded metadata only. Empty when no detail is known. No arbitrary strings, target URLs or IDs, submitted inputs, credentials, raw captures, diagnostics, or stacks. request_body timeout is before action dispatch; command_exchange uncertainty covers interrupted queued/partial writes and missing or malformed replies; it cannot establish whether an action happened. Worker termination does not undo prior effects."
+      },
+      "AnalysisCatalog": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "contract_version",
+          "catalog_digest",
+          "current_producer",
+          "current_profile_digest",
+          "current_profile",
+          "compatibility",
+          "rules",
+          "sources",
+          "limitations"
+        ],
+        "properties": {
+          "contract_version": {
+            "const": 1
+          },
+          "catalog_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "current_profile_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "current_profile": {
+            "$ref": "#/components/schemas/VmAnalysis/$defs/profile"
+          },
+          "compatibility": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "profile_matching",
+              "historical_definitions",
+              "limitations",
+              "build_identity"
+            ],
+            "properties": {
+              "profile_matching": {
+                "const": "exact-producer-and-profile"
+              },
+              "historical_definitions": {
+                "const": "not-included"
+              },
+              "limitations": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "build_identity": {
+                "const": "not-recorded"
+              }
+            }
+          },
+          "rules": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "rule_id",
+                "family",
+                "weight",
+                "scope",
+                "summary",
+                "source_ids",
+                "limitations"
+              ],
+              "properties": {
+                "rule_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80,
+                  "pattern": "^[a-z][a-z0-9.-]*$"
+                },
+                "family": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "weight": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "scope": {
+                  "enum": [
+                    "javascript-structure",
+                    "wasm-structure",
+                    "javascript-lexical-relevance",
+                    "retained-runtime-relevance"
+                  ]
+                },
+                "summary": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                },
+                "source_ids": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 8,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80,
+                    "pattern": "^[a-z][a-z0-9.-]*$"
+                  }
+                },
+                "limitations": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                }
+              }
+            }
+          },
+          "sources": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "source_id",
+                "title",
+                "primary_url",
+                "reviewed_on",
+                "reviewed_revision",
+                "kind",
+                "summary",
+                "applicability",
+                "limitations",
+                "reuse_status"
+              ],
+              "properties": {
+                "source_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80,
+                  "pattern": "^[a-z][a-z0-9.-]*$"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "primary_url": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "format": "uri",
+                  "pattern": "^https://"
+                },
+                "reviewed_on": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 10,
+                  "format": "date"
+                },
+                "reviewed_revision": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 80
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "kind": {
+                  "enum": [
+                    "primary-implementation",
+                    "primary-documentation",
+                    "author-claim",
+                    "unavailable",
+                    "discovery-catalog"
+                  ]
+                },
+                "summary": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                },
+                "applicability": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                },
+                "limitations": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                },
+                "reuse_status": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                }
+              }
+            }
+          },
+          "limitations": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            }
+          },
+          "current_producer": {
+            "$ref": "#/components/schemas/VmAnalysis/properties/producer"
+          }
+        },
+        "description": "Embedded current VM definitions and reviewed source context only. Match current producer ID/version and exact current_profile_digest; build identity is not recorded; historical profile definitions are not included. Digests identify content, not authenticity or correctness.",
+        "x-source": "apps/origin-trace-backend/src/analysis_catalog.rs"
       }
     }
   },

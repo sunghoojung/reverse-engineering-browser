@@ -19,23 +19,16 @@ The reviewed systems converge on four useful principles:
    separate from interpretation.
 4. Bound every collection and analysis pass, then expose missing coverage.
 
-These principles recur in the
-[Hyper Solutions request-scraper workflow](https://hypersolutions.co/blog/claude-code-plugin-ai-scraping),
-[REA evidence model](https://github.com/morluto/rea),
-[Ghostwire](https://github.com/sofianeelhor/ghostwire),
-[web-re-toolkit](https://github.com/proofofbots/web-re-toolkit/), and
-[auto-re-agent](https://github.com/Dryxio/auto-re-agent). The VM-focused
-[anti-bot analysis](https://emro.cat/blog/how-i-broke-the-anti-bot-behind-nike-kick-and-twitch/),
-[JavaScript VM implementation](https://disasm.dev/blog/writing-a-javascript-vm-in-go/),
-[JSREI projects](https://github.com/JSREI), and
-[SneakerDev research catalog](https://www.sneakerdev.com/blog?ref=d_blog_ch)
-reinforce that browser-surface access, runtime ordering, and outgoing payloads
-must remain connected during later VM or deobfuscation work. The passive
-[anti-bot detector](https://github.com/mmewni/antibot-detect) demonstrates the
-value of explainable, evidence-backed classification. Brave's
-[Web Audio fingerprinting report](https://x.com/brave/status/2091232672659972110?s=46)
-provided the most direct missing user workflow: make audio and other
-fingerprint-surface activity visible from the request being investigated.
+The [analysis catalog](./analysis-catalog-v1.md) records the reviewed revisions
+and limits of REA, Ghostwire, ReAgent, web-re-toolkit, Hyper's plugin, the
+educational Go VM, focused JSREI projects, and fingerprint research. These are
+conceptual references, not proof that REB implements every upstream technique.
+Hyper's hosted analysis is not a locally inspected server implementation;
+antibot-detect's tiers are uncalibrated, and SneakerDev is a discovery catalog.
+The [emro URL](https://emro.cat/blog/how-i-broke-the-anti-bot-behind-nike-kick-and-twitch/)
+now contains a withdrawal notice dated 2026-04-26, so it is historical context
+only and cannot support technical findings. Retained Web Audio calls are useful
+request context; they do not contain samples or establish fingerprinting.
 
 ## Evidence path
 

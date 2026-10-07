@@ -89,6 +89,6 @@ result, never fabricated provenance. Repeated requests can also differ because
 of time, randomness, cache, server state, or changed page state.
 
 The existing Rust worker performs inert, bounded JSON Pointer extraction.
-Python selects bounded query, form, header, and raw-text values from the CDP
+The Rust backend selects bounded query, form, header, and raw-text values from the CDP
 event or an explicitly requested post-data fetch. The UI and bridge retain only
 ephemeral selected-value evidence; native evidence storage is unchanged.

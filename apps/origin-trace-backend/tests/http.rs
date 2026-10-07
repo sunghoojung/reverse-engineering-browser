@@ -216,7 +216,7 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 22, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 23, "Review route coverage when the API changes");
     let schemas = &spec["components"]["schemas"];
     let actions = schemas["DebuggerAction"]["oneOf"].as_array().unwrap();
     let results = &schemas["DebuggerResult"];
@@ -339,7 +339,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 22);
+    assert_eq!(operation_count, 23);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -2567,4 +2567,324 @@ async fn cli_json_errors_handle_legacy_foreign_and_incomplete_http_responses() {
             json!({"http_status":409,"code":"unspecified","details":{},"error":message,"error_truncated":false})
         );
     }
+}
+
+#[tokio::test]
+async fn analysis_catalog_is_bounded_read_only_and_discoverable_offline() {
+    use std::collections::BTreeSet;
+    let server = Server::start().await;
+    server.file("events.jsonl", b"invalid evidence is not read\n");
+    server.file(
+        "artifacts/manifest.jsonl",
+        b"invalid manifest is not read\n",
+    );
+    let bytes = assert_contract_response(
+        server.get("/api/analysis/catalog").await,
+        "get",
+        "/api/analysis/catalog",
+        200,
+    )
+    .await;
+    assert!(bytes.len() < 128 * 1024);
+    let catalog: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(!server.root.path().join("artifacts/analysis").exists());
+    assert_eq!(
+        std::fs::read(server.root.path().join("events.jsonl")).unwrap(),
+        b"invalid evidence is not read\n"
+    );
+    assert_eq!(
+        std::fs::read(server.root.path().join("artifacts/manifest.jsonl")).unwrap(),
+        b"invalid manifest is not read\n"
+    );
+    assert_eq!(
+        server
+            .get("/api/analysis/catalog")
+            .await
+            .bytes()
+            .await
+            .unwrap()
+            .as_ref(),
+        bytes
+    );
+    let mut identity = catalog.clone();
+    let digest = identity
+        .as_object_mut()
+        .unwrap()
+        .remove("catalog_digest")
+        .unwrap();
+    let hash = |value: &Value| {
+        hex::encode(Sha256::digest(
+            origin_trace_backend::vm::canonical(value).unwrap(),
+        ))
+    };
+    assert_eq!(digest, hash(&identity));
+    identity["sources"][0]["summary"] = json!("A later source review.");
+    assert_ne!(digest, hash(&identity));
+    assert_eq!(
+        catalog["current_profile_digest"],
+        hash(&identity["current_profile"])
+    );
+    assert_eq!(
+        catalog["compatibility"]["profile_matching"],
+        "exact-producer-and-profile"
+    );
+    assert_eq!(
+        catalog["compatibility"]["historical_definitions"],
+        "not-included"
+    );
+    let sources = catalog["sources"].as_array().unwrap();
+    let source_ids = sources
+        .iter()
+        .map(|s| s["source_id"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(source_ids.len(), sources.len());
+    for source in sources {
+        let url = url::Url::parse(source["primary_url"].as_str().unwrap()).unwrap();
+        assert_eq!(url.scheme(), "https");
+        assert!(url.has_host() && url.username().is_empty() && url.password().is_none());
+        if let Some(revision) = source["reviewed_revision"].as_str() {
+            assert!(url.path().contains(revision));
+        }
+    }
+    let unavailable = sources
+        .iter()
+        .find(|s| s["source_id"] == "emro-withdrawn")
+        .unwrap();
+    assert_eq!(unavailable["kind"], "unavailable");
+    assert!(unavailable["reviewed_revision"].is_null());
+    assert_eq!(
+        sources
+            .iter()
+            .find(|s| s["source_id"] == "scrapfly-audio")
+            .unwrap()["kind"],
+        "author-claim"
+    );
+    let rules = catalog["rules"].as_array().unwrap();
+    let rule_ids = rules
+        .iter()
+        .map(|r| r["rule_id"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(rules.len(), rule_ids.len());
+    for rule in rules {
+        for source in rule["source_ids"].as_array().unwrap() {
+            let id = source.as_str().unwrap();
+            assert!(source_ids.contains(id), "Unresolved source: {id}");
+            assert_ne!(id, "emro-withdrawn");
+        }
+    }
+    let spec = specification();
+    let schema = &spec["components"]["schemas"]["AnalysisCatalog"];
+    let validator_document =
+        json!({"$ref":"#/checked","checked":schema,"components":spec["components"]});
+    let validator = jsonschema::validator_for(&validator_document).unwrap();
+    for pointer in [
+        "",
+        "/current_producer",
+        "/current_profile",
+        "/compatibility",
+        "/rules/0",
+        "/sources/0",
+    ] {
+        let mut invalid = catalog.clone();
+        invalid.pointer_mut(pointer).unwrap()["unexpected"] = json!(true);
+        assert!(!validator.is_valid(&invalid), "Open object: {pointer}");
+    }
+    for (field, size) in [("rules", 65), ("sources", 33)] {
+        let mut invalid = catalog.clone();
+        invalid[field] = json!(vec![catalog[field][0].clone(); size]);
+        assert!(!validator.is_valid(&invalid), "Unbounded array: {field}");
+    }
+    let operation = &spec["paths"]["/api/analysis/catalog"]["get"];
+    assert_eq!(operation["x-reb-execution"]["effects"], json!([]));
+    assert_eq!(
+        operation["x-reb-execution"]["state_dependent_effects"],
+        json!([])
+    );
+    let cli = |args: &[&str]| {
+        let result = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        result.stdout
+    };
+    let list = cli(&["list"]);
+    assert!(
+        String::from_utf8(list)
+            .unwrap()
+            .contains("get_analysis_catalog")
+    );
+    let description: Value =
+        serde_json::from_slice(&cli(&["describe", "get_analysis_catalog"])).unwrap();
+    assert_eq!(description["responses"], operation["responses"]);
+    assert_eq!(description["x-reb-execution"], operation["x-reb-execution"]);
+    assert!(
+        description["components"]["schemas"]
+            .get("VmAnalysis")
+            .is_some()
+    );
+    assert_schema(
+        &description,
+        &description["components"]["schemas"]["AnalysisCatalog"],
+        &catalog,
+        "Offline CLI catalog schema",
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&cli(&[
+            "call",
+            "get_analysis_catalog",
+            "--base-url",
+            &server.url
+        ]))
+        .unwrap(),
+        catalog
+    );
+    let forbidden = server
+        .client
+        .get(format!("{}/api/analysis/catalog", server.url))
+        .header("Origin", "https://external.test")
+        .send()
+        .await
+        .unwrap();
+    assert_contract_response(forbidden, "get", "/api/analysis/catalog", 403).await;
+}
+
+#[tokio::test]
+async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_identity() {
+    use std::collections::{BTreeMap, BTreeSet};
+    let server = Server::start().await;
+    let root = server.root.path().join("artifacts");
+    let js = vm_artifact(&root, b"function run(code) { let pc=0, stack=[]; while (pc<code.length) { switch(code[pc++]) { case 1: stack.push(1); break; default: return; } } } canvas; navigator; webdriver; crypto; fetch;", "3");
+    // Original inert WASM fixture: one loop, local advance, memory read,
+    // indirect dispatch, exit, and data segment. Never instantiated or run.
+    let mut wasm = b"\0asm\x01\0\0\0".to_vec();
+    let section = |module: &mut Vec<u8>, id: u8, bytes: &[u8]| {
+        assert!(bytes.len() < 128);
+        module.extend([id, bytes.len() as u8]);
+        module.extend(bytes);
+    };
+    section(&mut wasm, 1, &[1, 0x60, 0, 0]);
+    section(&mut wasm, 3, &[1, 0]);
+    section(&mut wasm, 4, &[1, 0x70, 0, 1]);
+    section(&mut wasm, 5, &[1, 0, 1]);
+    let body = [
+        1, 1, 0x7f, 3, 0x40, 0x20, 0, 0x41, 1, 0x6a, 0x21, 0, 0x41, 0, 0x28, 2, 0, 0x1a, 0x41, 0,
+        0x11, 0, 0, 0x0c, 0, 0x0b, 0x0f, 0x0b,
+    ];
+    let mut code = vec![1, body.len() as u8];
+    code.extend(body);
+    section(&mut wasm, 10, &code);
+    section(&mut wasm, 11, &[1, 0, 0x41, 0, 0x0b, 3, 1, 2, 3]);
+    wasmparser::Validator::new().validate_all(&wasm).unwrap();
+    let hash = hex::encode(Sha256::digest(&wasm));
+    let mut module = js.clone();
+    module["artifact_id"] = json!("2");
+    module["kind"] = json!("wasm");
+    module["sha256"] = json!(hash);
+    module["byte_size"] = json!(wasm.len());
+    module["content_path"] = json!(format!("blobs/{hash}.bin"));
+    server.file(&format!("artifacts/blobs/{hash}.bin"), &wasm);
+    server.file("artifacts/manifest.jsonl", &jsonl(&[js, module]));
+    server.file(
+        "events.jsonl",
+        &jsonl(&[
+            vm_event("canvas", 1, 1, "1"),
+            vm_event("navigator", 2, 1, "1"),
+            vm_event("web_audio", 3, 1, "1"),
+        ]),
+    );
+    let catalog: Value = server
+        .get("/api/analysis/catalog")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let document: Value = server.get("/api/analysis/vm").await.json().await.unwrap();
+    assert_vm_document(&document);
+    assert_eq!(document["summary"]["failed_count"], 0);
+    assert_eq!(catalog["current_producer"], document["producer"]);
+    assert_eq!(
+        catalog["current_producer"],
+        json!({"id":"origin-trace-vm-detector","version":"1.1.1"})
+    );
+    assert_eq!(catalog["compatibility"]["build_identity"], "not-recorded");
+    assert_eq!(catalog["current_profile"], document["profile"]);
+    assert_eq!(
+        catalog["current_profile_digest"],
+        document["profile_digest"]
+    );
+    // Exact projection from the pre-catalog implementation: the extraction
+    // must not silently change existing generated profile identities.
+    assert_eq!(
+        document["profile_digest"],
+        "61900fb0d5f5e7b8db28d67086c4e2648aca6a604c1fd2ef509941e95c974824"
+    );
+    let rules = catalog["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["rule_id"].as_str().unwrap(), r))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen = BTreeSet::new();
+    for result in document["results"].as_array().unwrap() {
+        for key in ["observations", "anti_bot_observations"] {
+            for observation in result[key].as_array().unwrap() {
+                let id = observation["rule_id"].as_str().unwrap();
+                let rule = rules
+                    .get(id)
+                    .unwrap_or_else(|| panic!("Unresolved rule: {id}"));
+                assert_eq!(rule["weight"], observation["weight"]);
+                if let Some(family) = observation.get("family") {
+                    assert_eq!(&rule["family"], family);
+                }
+                seen.insert(id);
+            }
+        }
+    }
+    assert_eq!(
+        seen,
+        rules.keys().copied().collect(),
+        "Fixture must exercise every catalogued rule"
+    );
+    for key in ["rule_weights", "runtime_rule_weights"] {
+        for (id, weight) in document["profile"][key].as_object().unwrap() {
+            assert_eq!(&rules[id.as_str()]["weight"], weight);
+        }
+    }
+    let mut historical_profile = document["profile"].clone();
+    historical_profile
+        .as_object_mut()
+        .unwrap()
+        .remove("javascript_scoring_version");
+    let spec = specification();
+    assert_schema(
+        &spec,
+        &spec["components"]["schemas"]["VmAnalysis"]["$defs"]["profile"],
+        &historical_profile,
+        "Historical profile remains accepted",
+    );
+    assert_ne!(
+        catalog["current_profile_digest"],
+        hex::encode(Sha256::digest(
+            origin_trace_backend::vm::canonical(&historical_profile).unwrap()
+        ))
+    );
+    let stored = std::fs::read(root.join("analysis/vm-analysis-v1.json")).unwrap();
+    assert_eq!(
+        server
+            .get("/api/analysis/catalog")
+            .await
+            .json::<Value>()
+            .await
+            .unwrap(),
+        catalog
+    );
+    assert_eq!(
+        std::fs::read(root.join("analysis/vm-analysis-v1.json")).unwrap(),
+        stored
+    );
 }

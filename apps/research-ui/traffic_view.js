@@ -423,7 +423,7 @@ function createTrafficPane(side, record, request, onDecode, onTrace, searchMatch
     const valueCopy = trafficNode('button', 'exchange-button', 'Copy value'); valueCopy.type = 'button';
     valueCopy.addEventListener('click', () => copyText(valueText, valueCopy));
     const decode = trafficNode('button', 'exchange-button', 'Decode'); decode.type = 'button';
-    decode.addEventListener('click', () => onDecode(valueText));
+    decode.addEventListener('click', () => onDecode(valueText, {side, path}));
     const close = trafficNode('button', 'exchange-button', 'Close'); close.type = 'button';
     close.addEventListener('click', () => { selection.hidden = true; row.setAttribute('aria-pressed', 'false'); row.focus(); });
     const full = trafficNode('pre', 'exchange-selected-value', valueText);

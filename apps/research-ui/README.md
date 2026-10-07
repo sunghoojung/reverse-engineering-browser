@@ -10,6 +10,46 @@ Project-wide authorization, capture, and privacy policy is in
 [SAFETY.md](../../SAFETY.md); this guide describes the product's current controls
 and limits.
 
+## Connected investigations
+
+**Advanced** is a manually opened workspace chooser. Completed workspace
+navigation closes it at every width; choosing an item returns keyboard focus
+to its summary. Linked Back/Forward keeps its existing destination-focus
+restoration. A refused link leaves the current workspace and chooser intact.
+
+Cross-workspace navigation uses one in-memory Back/Forward trail (at most 24
+stops). Alt+Left and Alt+Right work outside editors; visible controls remain
+available. Returns validate the exact retained session/event or artifact/hash,
+restore selected request/trace/source or Evidence record and visible pane,
+original range, focus and bounded pane
+scroll positions, and leave owner-managed drafts in place. Expired or ambiguous
+links remain visible and do not switch to similarly named evidence.
+On phones, expanded **Link context** uses a full-width row below Back/Forward;
+long explanations stay in the bounded navigation scroller above the workspace.
+
+A captured request opens its recorded Backtrace. **Open retained source** uses
+that step's session and artifact identity. A Facts **Original bytes** link
+verifies complete retained UTF-8 bytes and SHA-256; **Decode range** copies those
+exact bytes, up to 64 KiB, into Decoder. **Open original evidence** retains the
+source identity and half-open byte range. Request inspector and Field trace
+handoffs distinguish selected string bytes from unavailable raw HTTP offsets.
+Evidence source links use the selected native record’s exact retained artifact
+identity. Back restores both observation-list and record-inspector scroll, the
+visible trigger and current scope/search without selecting package exports.
+Replacing an existing Decoder draft requires confirmation. Input edits mark its
+prior origin stale. Navigation never transforms, sends, captures or executes.
+
+The explicit Collection copy action saves only method and a query-free URL
+after exact request identity and Collection draft checks. A confirmed recipe ID
+is a copied template, never captured evidence; no request is sent.
+
+Console URL links open a bounded, explicitly unverified source search. The
+separate disposable browser is not assigned a captured-artifact identity, and
+Console line offsets are never applied to search candidates. Debugger/native
+host-and-time correlations likewise cannot become exact captured trace links.
+See [Investigation navigation v1](../../docs/product/investigation-navigation-v1.md)
+for the identity boundary, retained limits and integration points.
+
 ## Native console
 
 The **Console** bottom dock starts a separate disposable custom Brave session for
@@ -82,8 +122,8 @@ URLs in the owned disposable browser. Navigation rejects old IDs and clears
 retained handles. Experiment activity opens a separate Traffic view of bounded
 native resource-completion metadata. It contains session/document/resource IDs
 and the last evaluation request ID; observation order does not prove causation.
-Paths, queries, headers and bodies are excluded. Source links look up corresponding
-URLs in the existing evidence workspace and report absent source explicitly.
+Paths, queries, headers and bodies are excluded. Source links search retained captured URLs with an explicit unverified label.
+They do not automatically open a source or claim an exact artifact relationship.
 
 Closing the dock preserves the session; Disconnect removes its browser/profile.
 The Sources Logs drawer remains the debugger log viewer. Console values and
@@ -803,10 +843,60 @@ provide **Retry inspection**. Partial coverage and display limits are explicit.
 The native shell ships `WasmService.swift` and `OriginTraceWasmInspector`, using
 the same Rust provider as HTTP. See [WASM Inspection v1](../../protocol/wasm-inspection-v1.md).
 
-## Evidence coverage and metadata packages
+## Evidence investigation and metadata packages
 
-Open **Evidence → Coverage & metadata packages** in the Requests inspector, or
-**Metadata packages** from Backtraces. Choose individual native event identities
+Open **Evidence → Inspect observations & artifacts** in the Requests inspector,
+or **Evidence** from Backtraces. The initial view leads with the selected request,
+a bounded recorded-observation list and an independently scrolling record inspector.
+It separates native request records, explicit same-process parent links, matching
+nonzero session/process/navigation/frame context and unlinked retained records.
+For debugger requests, the method/host/time association with native records remains
+visibly correlated, including when the native records have exact parent links.
+The compact request summary keeps the method/host/time basis, absent exact producer
+request key, missing-parent count and unknown coverage visible beside the reading panes.
+A context match never establishes causation, value flow or request ownership.
+
+The inspector exposes the operation, original bounded inline payload, recorded
+outcome, monotonic time and exact artifact reference. API/property markers do not
+supply arguments, return values, exceptions or Promise settlement. Observer,
+placement, producer and historical build remain unknown. IDs and original hashes
+are available in **Provenance & exact identifiers**; they do not crowd every row.
+**Coverage & gaps** separates missing parent references, queue markers, sequence
+holes, arrival discontinuities, unavailable request records and the retained-window limit without adding
+them into a loss total or inventing capture completeness. Numeric holes are counted
+from sorted unique session/process IDs, so a later-arriving record can fill one;
+absent numbers alone do not prove capture loss. Long request headings ellipsize
+with their full displayed text in a tooltip. Coverage opens a bounded, keyboard-
+scrollable disclosure above the workspace and never consumes the pane height;
+Escape closes it and restores the summary focus. Records remain in retained
+order within relationship groups, not a cross-process execution timeline.
+
+The view inspects at most 5,000 events and 500 artifact descriptors, renders 50
+observations per page, bounds each parent lookup to 32 links and does not fetch
+missing evidence. Search filters existing observations only. Arrow keys, Home and
+End move through the displayed order. At 760 px and below, **Observations / Selected
+record** switches between full-width panes. Unchanged refreshes preserve inspector
+DOM, disclosures, focus and scroll. Eviction explicitly clears the selected record
+without silently substituting its neighbor. Selecting a new valid record clears
+that selection notice independently of refresh errors. Inspecting a parent
+outside the current filter preserves the search/scope draft and clearly labels
+the visible parent details as outside it. Empty and failed-refresh states stay
+visible; already retained observations remain inspectable after a refresh failure.
+
+**Open captured source** requires a unique session/artifact descriptor, SHA-256,
+original byte size and the approved shared investigation adapter. The adapter opens
+original Sources passively and preserves shared Back history; URL matches never
+substitute. Builds without that adapter show a visible unavailable explanation.
+This tab adds no backend read, capture, analysis or execution. Final composed
+release acceptance must exercise the working adapter with the Sources ownership
+repairs rather than accepting the unavailable standalone state.
+
+**Metadata package** opens the existing selection/export/validation workflow as a
+secondary mode. **Return to observations** retains the observation selection and
+scroll. Highlighting an observation never selects it for export. Leaving package
+mode retires pending package ownership, just as leaving Evidence does.
+
+Choose individual native event identities
 (session, process and sequence) or artifact identities (session and artifact).
 The selected-request view uses only that request's attached native records;
 CDP request IDs and synthetic gap rows are not export identities. The other

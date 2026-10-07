@@ -3346,6 +3346,160 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   #screen-api-collection .screen-head-actions { display: none; }
 }
 
+/* Shared return navigation uses the existing Rosé Pine shell tokens. */
+.main { display: flex; flex-direction: column; }
+.main > .screen { flex: 1 1 0; height: auto; min-height: 0; }
+.investigation-navigation { flex: 0 0 auto; max-height: 35vh; overflow: auto; padding: 4px 8px; border-bottom: 1px solid var(--line); background: var(--chrome); font: 11px/1.5 var(--sans); }
+.investigation-controls { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 5px; }
+.investigation-controls > button { min-height: 28px; white-space: normal; }
+.investigation-controls details { flex: 1 1 150px; min-width: 0; }
+.investigation-controls summary { min-height: 28px; padding: 5px; cursor: pointer; color: var(--muted); }
+#investigation-notice { margin: 5px 0; overflow-wrap: anywhere; color: var(--text); }
+#investigation-history-count { margin-right: 8px; color: var(--faint); }
+.investigation-navigation[data-status="stale"], .investigation-navigation[data-status="unavailable"], .investigation-navigation[data-status="ambiguous"] { border-left: 3px solid var(--amber); }
+.investigation-source-search { display: flex; flex-wrap: wrap; gap: 6px; }
+.investigation-source-search p { flex-basis: 100%; margin: 6px 0; overflow-wrap: anywhere; }
+.investigation-navigation [hidden], .investigation-navigation[hidden] { display: none; }
+.investigation-navigation :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (max-width: 600px) {
+  /* Explanations need a reading row, not the narrow space beside Back/Forward. */
+  .investigation-controls > details[open] { flex-basis: 100%; }
+}
+
+/* Evidence is an observation notebook, with packaging as a separate action mode. */
+.evidence-investigation { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); background: var(--bg); }
+.evidence-investigation[hidden], #evidence-package-mode[hidden] { display: none; }
+.evidence-context { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 310px); gap: 28px; padding: 20px 24px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.evidence-eyebrow { font: 10px/1.5 var(--sans); color: var(--faint); letter-spacing: .08em; text-transform: uppercase; }
+.evidence-context h2 { font: 600 17px/1.5 var(--mono); margin: 7px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.evidence-context p { margin: 0; font: 12px/1.6 var(--sans); color: var(--muted); }
+.evidence-coverage { position: relative; align-self: center; display: grid; gap: 5px; padding-left: 22px; border-left: 1px solid var(--line); font: 11px/1.6 var(--sans); color: var(--muted); }
+.evidence-coverage > strong { color: var(--text); font-size: 13px; font-weight: 500; }
+.evidence-coverage > span { color: var(--amber); }
+.evidence-coverage summary { cursor: pointer; color: var(--muted); }
+.evidence-coverage details p { margin-top: 8px; font-size: 11px; }
+.evidence-coverage-popover { position: absolute; z-index: 12; right: 0; top: calc(100% + 8px); width: min(420px, calc(100vw - 32px)); max-height: min(260px, 40vh); overflow: auto; overscroll-behavior: contain; padding: 10px 14px 14px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); box-shadow: 0 8px 24px var(--shadow); }
+.evidence-coverage details:not([open]) .evidence-coverage-popover { display: none; }
+.evidence-workspace-notice { padding: 9px 20px; color: var(--amber); border-bottom: 1px solid var(--line); font: 11px/1.6 var(--sans); overflow-wrap: anywhere; }
+.evidence-investigation-layout { min-height: 0; min-width: 0; display: grid; grid-template-columns: minmax(290px, 40%) minmax(0, 1fr); }
+.evidence-observations { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; border-right: 1px solid var(--line); background: var(--panel); }
+.evidence-observation-tools { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(125px, auto); gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--line-soft); }
+.evidence-observation-tools label { display: grid; gap: 6px; font: 10px/1.4 var(--sans); color: var(--muted); }
+.evidence-observation-tools input, .evidence-observation-tools select { min-width: 0; width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--text); font: 11px var(--sans); }
+.evidence-list-caption { display: flex; justify-content: space-between; gap: 10px; padding: 10px 16px 4px; color: var(--muted); font: 10px/1.5 var(--sans); }
+.evidence-observation-list { min-height: 0; overflow: auto; padding: 0 8px 12px; overscroll-behavior: contain; }
+.evidence-observation-group h3 { margin: 15px 8px 3px; font: 600 11px/1.5 var(--sans); color: var(--text); }
+.evidence-group-note { margin: 0 8px 9px; color: var(--faint); font: 10px/1.5 var(--sans); }
+.evidence-observation { display: grid; gap: 5px; width: 100%; padding: 11px 12px; margin: 3px 0; border: 1px solid transparent; border-left: 2px solid transparent; border-radius: 4px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.evidence-observation:hover { background: var(--panel-3); }
+.evidence-observation[aria-current="true"] { background: var(--accent-soft); border-color: var(--line); border-left-color: var(--accent); }
+.evidence-observation-meta { display: flex; justify-content: space-between; gap: 12px; color: var(--faint); font: 10px/1.5 var(--sans); }
+.evidence-observation-meta time { flex-shrink: 0; font-family: var(--mono); }
+.evidence-observation strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 500 12px/1.5 var(--mono); }
+.evidence-observation-preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 10px/1.5 var(--sans); color: var(--muted); }
+.evidence-list-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 9px 14px; border-top: 1px solid var(--line); color: var(--faint); font: 9px/1.5 var(--sans); }
+.evidence-list-footer > div { display: flex; gap: 6px; }
+.evidence-list-footer button { padding: 4px 7px; font-size: 10px; }
+.evidence-list-empty, .evidence-detail-empty { padding: 24px 12px 10px; font: 500 14px/1.7 var(--sans); color: var(--muted); }
+.evidence-inspector { min-width: 0; min-height: 0; overflow: auto; padding: 24px clamp(18px, 3vw, 44px) 40px; overscroll-behavior: contain; }
+.evidence-detail-head h2 { margin: 8px 0 12px; font: 500 21px/1.5 var(--mono); overflow-wrap: anywhere; }
+.evidence-relation { display: inline-block; margin: 0; padding: 4px 8px; border-radius: 4px; color: var(--muted); background: var(--panel); font: 10px/1.6 var(--sans); }
+.evidence-relation-request, .evidence-relation-parent { color: var(--cyan); }
+.evidence-relation-context { color: var(--amber); }
+.evidence-detail-section { margin-top: 24px; }
+.evidence-detail-section h3 { margin: 0 0 10px; font: 600 12px/1.5 var(--sans); }
+.evidence-value { padding: 13px 15px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); color: var(--text); font: 12px/1.8 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.evidence-detail-hint { font: 11px/1.7 var(--sans); color: var(--muted); overflow-wrap: anywhere; margin: 10px 0; }
+.evidence-record-facts { display: grid; grid-template-columns: minmax(100px, 135px) minmax(0, 1fr); gap: 9px 15px; margin: 15px 0 0; font: 11px/1.6 var(--sans); }
+.evidence-record-facts dt { color: var(--faint); }
+.evidence-record-facts dd { margin: 0; overflow-wrap: anywhere; }
+.evidence-artifact-card { display: grid; justify-items: start; gap: 8px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); }
+.evidence-artifact-card strong { font: 500 12px/1.6 var(--mono); overflow-wrap: anywhere; max-width: 100%; color: var(--cyan); }
+.evidence-artifact-card p { margin: 0; color: var(--muted); font: 11px/1.5 var(--sans); }
+.evidence-record-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.evidence-provenance { border-top: 1px solid var(--line); margin-top: 24px; padding-top: 15px; font: 11px/1.6 var(--sans); }
+.evidence-provenance summary { cursor: pointer; color: var(--muted); }
+.evidence-investigation :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.evidence-mobile-tabs { display: none; }
+.evidence-package-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); color: var(--muted); font: 11px/1.6 var(--sans); }
+@media (max-width: 1000px) {
+  .evidence-context { padding: 15px 18px; gap: 18px; grid-template-columns: minmax(0, 1fr) 230px; }
+  .evidence-observation-tools { grid-template-columns: 1fr; }
+  .evidence-scope-label { grid-template-columns: auto minmax(0, 1fr); align-items: center; }
+}
+@media (max-width: 760px) {
+  #screen-evidence > .screen-head { flex-wrap: wrap; gap: 10px; padding-block: 10px; }
+  #screen-evidence .screen-head-actions { margin-left: auto; }
+  .evidence-context { grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 12px 16px; }
+  .evidence-context h2 { font-size: 14px; margin: 4px 0; }
+  .evidence-context p { font-size: 11px; }
+  .evidence-coverage { border: 0; padding: 0; display: flex; flex-wrap: wrap; align-items: center; column-gap: 12px; row-gap: 3px; }
+  .evidence-coverage > strong { font-size: 11px; }
+  .evidence-mobile-tabs { display: flex; padding: 0 16px; gap: 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .evidence-mobile-tabs button { border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); padding: 10px 0; font: 11px var(--sans); }
+  .evidence-mobile-tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+  .evidence-investigation-layout { display: block; position: relative; }
+  .evidence-observations, .evidence-inspector { height: 100%; border-right: 0; }
+  .evidence-investigation-layout[data-evidence-pane="observations"] .evidence-inspector, .evidence-investigation-layout[data-evidence-pane="detail"] .evidence-observations { display: none; }
+  .evidence-observation-tools { grid-template-columns: minmax(110px, 1fr) minmax(120px, 155px); padding: 10px 16px; }
+  .evidence-scope-label { grid-template-columns: 1fr; }
+  .evidence-inspector { padding: 18px 20px 30px; }
+  .evidence-detail-head h2 { font-size: 18px; }
+}
+@media (max-width: 420px) {
+  #screen-evidence .screen-subtitle { font-size: 10px; }
+  #screen-evidence .screen-head-actions { width: 100%; justify-content: flex-end; }
+  .evidence-context { padding: 10px 12px; }
+  .evidence-context-main p { line-height: 1.5; }
+  .evidence-record-facts { grid-template-columns: minmax(86px, 110px) minmax(0, 1fr); gap: 7px; }
+  .evidence-inspector { padding-inline: 16px; }
+  .evidence-observation-tools { padding-inline: 12px; }
+}
+
+.evidence-context { grid-row: 1; }
+.evidence-workspace-notice { grid-row: 2; }
+.evidence-mobile-tabs { grid-row: 3; }
+.evidence-investigation-layout { grid-row: 4; }
+
+#screen-evidence .screen-head-actions .secondary-button { display: inline-flex; }
+
+.evidence-context-main { min-width: 0; }
+
+@media (max-width: 760px) {
+  .evidence-observation-tools label > span { display: none; }
+}
+@media (min-width: 601px) and (max-width: 760px) {
+  /* Give the visible coverage warning room beside the compact correlation note. */
+  .evidence-context { grid-template-columns: minmax(0, 1fr) 240px; gap: 18px; }
+  .evidence-coverage { display: grid; padding-left: 14px; border-left: 1px solid var(--line); }
+}
+
+/* On phones, keep the retained count and disclosure together so the warning
+   gets its own full-width line rather than competing with either control. */
+@media (max-width: 600px) {
+  .evidence-coverage { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+  .evidence-coverage > span { grid-column: 1 / -1; grid-row: 2; }
+  .evidence-coverage > details { grid-column: 2; grid-row: 1; }
+}
+
+/* Short narrow windows and phones keep warnings and controls without spending the
+   observation viewport on repeated vertical padding. Control sizes and type
+   stay unchanged; the real-browser guard still requires 120 px of reading space. */
+@media (max-width: 760px) and (max-height: 640px), (max-width: 420px) {
+  #screen-evidence > .screen-head { min-height: 44px; padding-block: 6px; }
+  #screen-evidence .evidence-context { padding-block: 8px; }
+  #screen-evidence .evidence-workspace-notice { padding-block: 5px; }
+  #screen-evidence .evidence-observation-tools { padding-block: 6px; }
+  #screen-evidence .evidence-list-caption { padding-top: 6px; }
+  #screen-evidence .evidence-list-footer { padding-block: 5px; }
+}
+
+@media (max-width: 420px) {
+  #screen-evidence .evidence-list-footer { flex-wrap: nowrap; }
+  #screen-evidence .evidence-list-footer > span { min-width: 0; flex: 1; }
+  #screen-evidence .evidence-list-footer > div { flex: 0 0 auto; }
+}
+
       /* Memory is an explicit capture workflow, with a submitted receipt separate from draft criteria. */
       #screen-memory:not([hidden]) { grid-template-rows: auto auto auto minmax(0, 1fr); }
       #screen-memory > .screen-head { min-height: 52px; height: auto; }

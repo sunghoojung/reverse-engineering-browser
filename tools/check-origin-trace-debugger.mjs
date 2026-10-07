@@ -16,6 +16,8 @@ import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
 import {checkCollectionController, collectionBrowserFixture, checkCollectionInteractions} from "./check-origin-trace-collection.mjs";
+import {checkInvestigationCore, investigationFixture, checkInvestigationInteractions} from "./check-investigation-navigation.mjs";
+const investigationBrowser = process.argv[2] === "--investigation-ui-browser";
 const collectionBrowser = process.argv[2] === "--collection-ui-browser";
 const consoleBrowser = process.argv[2] === "--console-ui-browser";
 const trafficBrowser = process.argv[2] === "--traffic-ui-browser";
@@ -23,9 +25,10 @@ const sourceFactsBrowser = process.argv[2] === "--source-facts-ui-browser";
 const memoryBrowser = process.argv[2] === "--memory-ui-browser";
 const evidenceBrowser = process.argv[2] === "--evidence-ui-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
-const root = process.argv[fieldsOnly || trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser || collectionBrowser || memoryBrowser ? 3 : 2] || new URL("..", import.meta.url).pathname;
+const root = process.argv[fieldsOnly || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser || collectionBrowser || memoryBrowser ? 3 : 2] || new URL("..", import.meta.url).pathname;
 await checkConsoleDOM(root);
 await checkCollectionController(root);
+await checkInvestigationCore(root);
 // Facts are UI projections over the already validated Rust contract. These
 // fixtures exercise identity and stale/cancelled request ownership, not JS execution.
 const sourceFactsUI = runInNewContext(
@@ -825,7 +828,7 @@ let packageRefreshBody={artifacts:packageGolden.records.artifacts.map(row=>({...
 const packageArtifactRefresh=runInNewContext(appSection('      function liveScriptIdentity(', '      function liveSources(') + appSection('      async function refreshArtifacts()', '      function showScreen(')+';refreshArtifacts',{
   sourceFactsFields:sourceFactsUI.sourceFactsFields, sourceFactsIdentity:sourceFactsUI.sourceFactsIdentity, state:packageRefreshState,location:{protocol:'http:'},fetch:async()=>Response.json(packageRefreshBody),isArtifactResponse:()=>true,
   renderShellStatus(){},renderSourceHealth(){},renderSources(){},renderFingerprintActivity(){},loadArtifactContent(){},loadWasmInspection(){},
-  nativeCanvasCaptureDisplayLimit:10,document:{querySelector:()=>({hidden:true})},evidencePackagePanel:{sync(){packageRefreshSyncs++;}}
+  nativeCanvasCaptureDisplayLimit:10,document:{querySelector:()=>({hidden:true})},evidenceWorkspace:{sync(){}},evidencePackagePanel:{sync(){packageRefreshSyncs++;}}
 });
 await packageArtifactRefresh();assert.equal(packageRefreshState.artifacts.length,2);assert.equal(packageRefreshSyncs,1);
 packageRefreshBody={artifacts:[]};await packageArtifactRefresh();assert.equal(packageRefreshState.artifacts.length,0);assert.equal(packageRefreshSyncs,2);
@@ -870,6 +873,23 @@ summaryInspector();
 assert.equal(summaryElements.selectedStatus.textContent, "-");
 assert.equal(summaryElements.requestCopyUrl.disabled, true);
 console.log("PASS selected strip and inspector share current pending/response/failed/empty request metadata");
+
+// Exercise the actual production listeners: selecting a tab is idempotent,
+// whereas the shortcut deliberately toggles Evidence back to Headers.
+const stickyInspectorState={inspectorTab:'evidence',fieldTab:'body',requests:[],selectedRequestId:null};
+const explicitEvidenceTab=new TrafficFixtureNode('button');explicitEvidenceTab.dataset.inspectorTab='evidence';
+const evidenceShortcut=new TrafficFixtureNode('button');
+runInNewContext(appSection("      document.querySelectorAll('.inspector-tab').forEach(button => button.addEventListener('click'", "      enableTabKeyboardNavigation('.inspector-tab');"), {
+  state:stickyInspectorState,document:{querySelectorAll:()=>[explicitEvidenceTab],querySelector:()=>evidenceShortcut},
+  renderInspector(){},renderEvidence(){},refreshRequestSignalProfile(){}
+});
+explicitEvidenceTab.click();assert.equal(stickyInspectorState.inspectorTab,'evidence');
+evidenceShortcut.click();assert.equal(stickyInspectorState.inspectorTab,'headers');
+explicitEvidenceTab.click();assert.equal(stickyInspectorState.inspectorTab,'evidence');
+explicitEvidenceTab.click();assert.equal(stickyInspectorState.inspectorTab,'evidence');
+evidenceShortcut.click();assert.equal(stickyInspectorState.inspectorTab,'headers');
+console.log('PASS explicit Evidence tab selection preserves sticky selection while its shortcut deliberately toggles to Headers');
+
 
 const pivotProfile = {signals: [{category: "canvas", event_count: "1", confidence: "observed", relation: "parent_chain"}]};
 const pivotState = {requests: [uiRequest("selected")], selectedRequestId: "selected", signalProfile: pivotProfile,
@@ -1170,10 +1190,10 @@ function ownedContext(patch = {}) {
     sourceDeobfuscated:false, sourceFormatted:false, sourceWasm:false, sessionMode:'live', ...patch.state};
   const sandbox = {console, state, TextEncoder, TextDecoder, Uint8Array, crypto, AbortController, setTimeout, clearTimeout,
     sourceFactsFields:sourceFactsUI.sourceFactsFields, sourceFactsIdentity:sourceFactsUI.sourceFactsIdentity, sourceFactsReadBytes:sourceFactsUI.sourceFactsReadBytes,
-    sourceFactsPanel:{original:()=>undefined}, location:{protocol:'http:'}, document:{querySelector:()=>({hidden:true})},
+    sourceFactsPanel:{original:()=>undefined,cancel(){}}, investigationBeforeSelection(){}, location:{protocol:'http:'}, document:{querySelector:()=>({hidden:true})},
     renderSources(){}, renderSourceHealth(){}, renderShellStatus(){}, renderFingerprintActivity(){},
     runtimeHooksState:()=>({workers:[], isolated:true, target_id:state.debuggerSession?.target?.id}),
-    sourceName:source=>source.url, nativeCanvasCaptureDisplayLimit:4, evidencePackagePanel:{sync(){}},
+    sourceName:source=>source.url, nativeCanvasCaptureDisplayLimit:4, evidencePackagePanel:{sync(){}}, evidenceWorkspace:{sync(){}},
     ...patch, state};
   return {state, sandbox, api:runInNewContext(ownershipModels + ownershipSyntax + ownershipProvenanceSite + ownershipFunctionNames.map(sourceProductionFunction).join('\n') +
     `;({${ownershipFunctionNames.join(',')},revealProvenanceSite})`, sandbox)};
@@ -2240,15 +2260,242 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
   return {status:'passed',ownership_receipts:ownershipReceipts,path:'browser development Sources UI',source:'synthetic captured artifacts and validated debugger replies; no analyzed JavaScript executed',viewports:[[1440,900],[760,560],[360,740]],checks:['live pretty/derived mapped gutters survive background refresh and navigate by real click','editor scroll and keyboard focus retained at wide/narrow widths','mixed-tab Home/End and selected focus','close pending live body and analyzer responses','same script ID/opaque token on replacement target rejects old body','no debugger mutation from mapped links','pending preview body plus catalog refresh','no automatic Deob on source entry','mismatched analyzer and preview hash refusal','explicit analysis and preview retry','unchanged editor scroll and Find occurrence','keyboard file tabs and Delete cleanup','real hit-tested Facts controls','offline HTTP artifact availability','100-row paging','keyboard categories and disclosure','UTF-8/BOM original-byte navigation','profile-complete/partial/truncated/unknown/unavailable/error states','identity rejection and prior-report retention','Cancel and explicit retry','stale selection','Close/Escape/reopen focus','narrow overlay dismissal','workspace return']};
 }
 
+// Contract-valid synthetic investigation records, shared by the production-model
+// checks and the existing real Chromium driver. No fixture code is executed.
+const observationSourceBytes = Buffer.from('// Synthetic capture fixture.\nfunction collect() { return "metadata"; }\n');
+const observationSourceHash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', observationSourceBytes)), byte => byte.toString(16).padStart(2, '0')).join('');
+function observationEvent(sequence, category, type, text, extra = {}) {
+  const payload = Buffer.from(text);
+  return {protocol_version:3,session_id:'7',sequence_number:String(sequence),monotonic_time_ns:String(1320000000n + BigInt(sequence) * 100000n),
+    navigation_id:'101',frame_id:'301',artifact_id:'0',parent_event_id:'0',request_id:'0',process_id:42,thread_id:44,
+    browser_context_id_high:'0',browser_context_id_low:'0',tab_id:3,initiator_request_id:0,initiator_process_id:0,
+    encoded_data_length:'0',decoded_body_length:'0',status_code:0,error_code:0,resource_type:13,flags:0,
+    category,type,payload_encoding:'hex',payload_size:payload.length,payload:payload.toString('hex'),payload_truncated:false,...extra};
+}
+function observationFixtureContext() {
+  const events = [
+    observationEvent(100,'navigator','property_read','Navigator.hardwareConcurrency'),
+    observationEvent(101,'canvas','api_call','CanvasRenderingContext2D.fillText',{parent_event_id:'99',artifact_id:'9'}),
+    observationEvent(102,'canvas','api_call','HTMLCanvasElement.toDataURL',{parent_event_id:'101',artifact_id:'9'}),
+    observationEvent(103,'network','request_initiated','POST telemetry.fixture.invalid',{parent_event_id:'102',request_id:'9'}),
+    observationEvent(104,'webgl','api_call','WebGLRenderingContext.getParameter',{artifact_id:'12'}),
+    observationEvent(105,'permissions','api_call','Permissions.query'),
+    observationEvent(106,'network','request_completed','telemetry.fixture.invalid',{parent_event_id:'103',request_id:'9',status_code:204}),
+    observationEvent(106,'runtime','gap','2'),
+    observationEvent(1,'webrtc','api_call','RTCPeerConnection.getStats',{process_id:77,navigation_id:'202',frame_id:'404'})
+  ];
+  const artifacts = [{protocol_version:1,session_id:'7',artifact_id:'9',navigation_id:'101',frame_id:'301',parent_artifact_id:'0',creator_event_id:'95',execution_context_id:'23',capture_origin:'network_response',kind:'javascript',url:'https://fixture.invalid/assets/collector.js',mime_type:'text/javascript',byte_size:observationSourceBytes.length,sha256:observationSourceHash,sensitive:false}];
+  return {events,artifacts,request:{id:'evidence-investigation-request',origin:'live',method:'POST',path:'telemetry.fixture.invalid',hostOnly:true,events:events.filter(event=>event.category==='network')},eventsLimited:false};
+}
+const observationCode = (await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8')) + '\n' + packageSource;
+const observationUI = runInNewContext(observationCode + ';({evidenceObservationModel,evidenceRequestKey,evidenceArtifactReference,isBrokerResponse,isArtifactResponse})', {TextDecoder, Uint8Array});
+const observationContext = observationFixtureContext();
+assert(observationUI.isBrokerResponse({count:observationContext.events.length,events:observationContext.events,capture_mode:'demo'}));
+assert(observationUI.isArtifactResponse({count:observationContext.artifacts.length,artifacts:observationContext.artifacts}));
+const observationModel = observationUI.evidenceObservationModel(observationContext);
+assert.deepEqual(Array.from(observationModel.rows.filter(row=>row.group==='parent'),row=>row.key),['7:42:101','7:42:102']);
+assert.deepEqual(Array.from(observationModel.rows.filter(row=>row.group==='request'),row=>row.key),['7:42:103','7:42:106']);
+assert.equal(observationModel.rows.find(row=>row.key==='7:42:100').group,'context');
+assert.equal(observationModel.rows.find(row=>row.key==='7:77:1').group,'unlinked');
+assert.equal(observationModel.missingParents,1); assert.equal(observationModel.queueMarkers,1);
+assert.equal(observationModel.rows.find(row=>row.key==='7:42:102').outcome,'Outcome not recorded');
+assert.equal(observationModel.rows.find(row=>row.key==='7:42:104').artifact.status,'missing');
+assert.equal(observationModel.linkedArtifacts,1);
+const cachedObservationContext=observationFixtureContext();cachedObservationContext.artifacts[0].content='large cached source'.repeat(200000);cachedObservationContext.artifacts[0].deobfuscation={original_source:cachedObservationContext.artifacts[0].content};cachedObservationContext.events[0].unexpected_payload=cachedObservationContext.artifacts[0].content;
+const cachedObservationModel=observationUI.evidenceObservationModel(cachedObservationContext);
+assert(JSON.stringify(cachedObservationModel).length<16000,'Evidence render state must never retain or stringify cached source/analysis text or unknown event fields');
+assert(!Object.hasOwn(cachedObservationModel.rows.find(row=>row.artifact.artifact)?.artifact.artifact,'content'));
+const longURLContext=observationFixtureContext();longURLContext.artifacts[0].url='x'.repeat(1000000);
+assert.equal(observationUI.evidenceObservationModel(longURLContext).rows.find(row=>row.artifact.artifact).artifact.artifact.url.length,2048);
+const observationUnknown=structuredClone(observationContext);observationUnknown.events[0].frame_id='0';
+assert.equal(observationUI.evidenceObservationModel(observationUnknown).rows[0].group,'unlinked');
+const observationForeign=structuredClone(observationContext);observationForeign.events[0].session_id='8';
+assert.equal(observationUI.evidenceObservationModel(observationForeign).rows[0].group,'unlinked');
+const observationCollision=structuredClone(observationContext);observationCollision.events.push({...observationCollision.events[2]});
+assert.equal(observationUI.evidenceObservationModel(observationCollision).rows.find(row=>row.key==='7:42:102').group,'unlinked');
+observationCollision.artifacts.push({...observationCollision.artifacts[0],session_id:'8'});
+assert.equal(observationUI.evidenceObservationModel(observationCollision).rows.find(row=>row.key==='7:42:101').artifact.status,'ambiguous');
+const observationCDP={...observationContext,request:{...observationContext.request,protocolRequestId:'cdp-7',operation:'cdp_complete',tabId:'target',firstTimestamp:1320000000n}};
+assert.equal(observationUI.evidenceObservationModel(observationCDP).correlatedRequest,true);
+assert.notEqual(observationUI.evidenceRequestKey(observationCDP.request),observationUI.evidenceRequestKey({...observationCDP.request,firstTimestamp:1320000001n}));
+const observationReused={...observationContext.request,events:observationContext.request.events.map(event=>({...event,session_id:'8'}))};
+assert.notEqual(observationUI.evidenceRequestKey(observationContext.request),observationUI.evidenceRequestKey(observationReused));
+const observationLarge={...observationContext,request:null,events:Array.from({length:6000},(_,index)=>observationEvent(index+1,'runtime','api_call','Date.now'))};
+const largeObservationModel=observationUI.evidenceObservationModel(observationLarge);
+assert.equal(largeObservationModel.rows.length,5000);assert.equal(largeObservationModel.limited,true);assert.equal(largeObservationModel.rows[0].key,'7:42:1001');
+const observationCycle=structuredClone(observationContext);observationCycle.events[1].parent_event_id='102';
+assert.equal(observationUI.evidenceObservationModel(observationCycle).parentCycle,true);
+const observationBinary=structuredClone(observationContext);observationBinary.events[0].payload='ff';observationBinary.events[0].payload_size=1;
+assert.equal(observationUI.evidenceObservationModel(observationBinary).rows[0].payload.encoding,'hex');
+console.log('PASS Evidence observation model: contract-valid records, scoped parents, nonzero context, CDP qualification, unknown outcomes, exact artifact identity, ambiguity, eviction and bounds');
+
+function observationPanelFixture(narrow = false) {
+  const document={activeElement:null};
+  class ObservationNode extends TrafficFixtureNode {
+    matches(selector) {
+      const match=selector.match(/^(?:(\w+))?\[([\w-]+)(?:="([^"]*)")?\]$/);
+      if(match){const [,tag,name,value]=match; const actual=name.startsWith('data-')?this.dataset[name.slice(5).replace(/-([a-z])/g,(_,letter)=>letter.toUpperCase())]:this.getAttribute(name);return (!tag||this.tagName.toLowerCase()===tag)&&actual!==null&&actual!==undefined&&(value===undefined||actual===value);}
+      return super.matches(selector);
+    }
+    focus(){document.activeElement=this;}
+    scrollIntoView(){}
+    replaceChildren(...nodes){if(this.contains(document.activeElement))document.activeElement=null;super.replaceChildren(...nodes);}
+    emit(type,fields={}){for(const callback of this.listeners.get(type)??[])callback({target:this,currentTarget:this,preventDefault(){},...fields});}
+  }
+  document.createElement=tag=>new ObservationNode(tag);
+  const ids=['evidence-investigation','evidence-rows','evidence-inspector','evidence-search','evidence-scope','evidence-workspace-notice','evidence-package-toggle','evidence-package-mode','evidence-return','evidence-trace','evidence-window-count','evidence-previous','evidence-next','evidence-context-kind','evidence-context-title','evidence-context-note','evidence-count','evidence-coverage-summary','evidence-gap-details','evidence-coverage-details','evidence-coverage-popover'];
+  const nodes=Object.fromEntries(ids.map(id=>[id,new ObservationNode()]));
+  document.querySelector=selector=>nodes[selector.slice(1)]??null;
+  const layout=new ObservationNode();layout.className='evidence-investigation-layout';
+  const tabs=['observations','detail'].map(value=>{const tab=new ObservationNode('button');tab.dataset.evidencePane=value;return tab;});
+  nodes['evidence-coverage-details'].append(new ObservationNode('summary'),nodes['evidence-coverage-popover']);
+  nodes['evidence-investigation'].append(nodes['evidence-coverage-details'],layout,...tabs);layout.append(nodes['evidence-rows'],nodes['evidence-inspector']);
+  let context=observationFixtureContext(),packageVisible=false,packageCancels=0,sourceCalls=0;
+  const create=runInNewContext(observationCode+';createEvidenceWorkspace',{document,TextDecoder,Uint8Array,window:{matchMedia:()=>({matches:narrow})}});
+  const panel=create({getContext:()=>context,packagePanel:{sync(){},setVisible(value){packageVisible=value;if(!value)packageCancels++;}},onTrace(){},onRequest(){},onSource(){sourceCalls++;return true;},canOpenSource:()=>true});
+  panel.setVisible(true);
+  return {panel,nodes,tabs,document,get context(){return context;},set context(value){context=value;},get packageVisible(){return packageVisible;},get packageCancels(){return packageCancels;},get sourceCalls(){return sourceCalls;}};
+}
+const observations=observationPanelFixture();
+const observationRows=()=>observations.nodes['evidence-rows'].querySelectorAll('[data-evidence-key]');
+assert.equal(observationRows().length,7);
+assert.equal(observations.nodes['evidence-coverage-summary'].textContent,'1 missing parent · coverage unknown');
+assert.match(observations.nodes['evidence-gap-details'].textContent,/1 missing or ambiguous parent references/);
+observationRows().find(row=>row.dataset.evidenceKey==='7:42:102').click();
+const stableObservationInspector=observations.nodes['evidence-inspector'].children[0];
+const provenanceSummary=observations.nodes['evidence-inspector'].querySelector('summary');
+observations.nodes['evidence-inspector'].querySelector('details').open=true;provenanceSummary.focus();observations.nodes['evidence-inspector'].scrollTop=127;observations.panel.sync();
+assert.equal(observations.nodes['evidence-inspector'].children[0],stableObservationInspector,'Unchanged refresh must preserve the inspector DOM');
+assert.equal(observations.document.activeElement,provenanceSummary);assert.equal(observations.nodes['evidence-inspector'].scrollTop,127);
+assert.match(observations.nodes['evidence-inspector'].textContent,/Outcome not recorded/);
+assert.doesNotMatch(observationRows()[0].textContent,/session 7|process 42/,'First-view rows must not be dominated by identifiers');
+observations.nodes['evidence-package-toggle'].click();assert.equal(observations.packageVisible,true);
+observations.nodes['evidence-return'].click();assert.equal(observations.packageVisible,false);assert.equal(observations.panel.snapshot().selectedKey,'7:42:102');
+assert.equal(observations.document.activeElement,observations.nodes['evidence-package-toggle']);
+// A stale source button must not reinterpret the selected event's reference.
+const staleSourceButton=observations.nodes['evidence-inspector'].querySelector('[data-evidence-action="source"]');
+observations.context={...observations.context,artifacts:[]};staleSourceButton.click();assert.equal(observations.sourceCalls,0);
+assert.match(observations.nodes['evidence-inspector'].textContent,/absent from the retained catalog/);
+observations.context=observationFixtureContext();observations.panel.sync();
+const retainedRow=observationRows().find(row=>row.dataset.evidenceKey==='7:42:102');retainedRow.focus();observations.nodes['evidence-rows'].scrollTop=89;
+observations.context.events.push(observationEvent(108,'runtime','api_call','Date.now'));observations.panel.sync();
+assert.equal(observations.document.activeElement.dataset.evidenceKey,'7:42:102');assert.equal(observations.nodes['evidence-rows'].scrollTop,89);
+observations.context={...observations.context,events:observations.context.events.filter(event=>event.sequence_number!=='102')};observations.panel.sync();
+assert.equal(observations.panel.snapshot().selectedKey,null);assert.match(observations.nodes['evidence-workspace-notice'].textContent,/left the retained window/);
+observations.panel.sync();assert.equal(observations.panel.snapshot().selectedKey,null,'Eviction must not silently choose a neighboring record');
+observations.context=observationCDP;observations.panel.sync();assert.match(observations.nodes['evidence-context-note'].textContent,/No exact producer request key/);
+assert.match(observations.nodes['evidence-context-note'].textContent,/Matched by method, host and time/);
+observationRows().find(row=>row.dataset.evidenceKey==='7:42:102').click();assert.match(observations.nodes['evidence-inspector'].textContent,/association does not become exact/);
+observations.context=observationLarge;observations.panel.sync();assert.equal(observationRows().length,50);observations.nodes['evidence-next'].click();assert.match(observations.nodes['evidence-window-count'].textContent,/51–100 of 5000/);
+observationRows()[0].emit('keydown',{key:'End'});assert.match(observations.nodes['evidence-window-count'].textContent,/4951–5000 of 5000/);
+assert.equal(observations.document.activeElement.dataset.evidenceKey,'7:42:6000');
+observations.nodes['evidence-search'].value='not-present';observations.nodes['evidence-search'].emit('input');assert.match(observations.nodes['evidence-rows'].textContent,/No retained observations match/);
+observations.context={events:[],artifacts:[],request:null,error:'disconnected'};observations.panel.sync();assert.match(observations.nodes['evidence-workspace-notice'].textContent,/refresh is unavailable/);
+observations.context={events:[],artifacts:[],request:null};observations.panel.sync();assert.doesNotMatch(observations.nodes['evidence-workspace-notice'].textContent,/refresh/);
+console.log('PASS Evidence production reconciliation: stable inspector/focus/scroll, secondary package mode, stale exact-source refusal, eviction, CDP disclosure, 5,000-record paging, keyboard and failed refresh');
+
+// Arrival order is not retained-identity membership and neither proves loss.
+for (const [ids, holes, jumps, late] of [[[1,3,2],'0',1,1],[[1,4,3],'1',1,1],[[3,2,1],'0',0,2],[[1,5],'3',1,0]]) {
+  const value=observationUI.evidenceObservationModel({events:ids.map(id=>observationEvent(id,'runtime','api_call','Date.now')),artifacts:[]});
+  assert.equal(value.sequence.holes,holes);assert.equal(value.sequence.arrivalDiscontinuities,jumps);assert.equal(value.sequence.outOfOrderArrivals,late);
+}
+const scopedHoleEvents=[observationEvent(1,'runtime','api_call','Date.now'),observationEvent(3,'runtime','api_call','Date.now'),observationEvent(2,'runtime','api_call','Date.now',{session_id:'8'}),observationEvent(3,'runtime','gap','5')];
+const scopedHoles=observationUI.evidenceObservationModel({events:scopedHoleEvents,artifacts:[]});
+assert.equal(scopedHoles.sequence.holes,'1');assert.equal(scopedHoles.queueMarkers,1);
+for (const narrow of [false,true]) {
+  const panel=observationPanelFixture(narrow), nodes=panel.nodes;
+  nodes['evidence-search'].value='toDataURL';nodes['evidence-search'].emit('input');
+  const scopeBefore=nodes['evidence-scope'].value;
+  nodes['evidence-rows'].querySelector('[data-evidence-key="7:42:102"]').click();
+  nodes['evidence-inspector'].querySelector('[data-evidence-action="parent"]').click();
+  assert.equal(panel.panel.snapshot().selectedKey,'7:42:101');assert.equal(nodes['evidence-search'].value,'toDataURL');assert.equal(nodes['evidence-scope'].value,scopeBefore);
+  assert.match(nodes['evidence-workspace-notice'].textContent,/selected parent is outside the current filter/);
+  assert.equal(panel.document.activeElement,nodes['evidence-inspector'],'A parent outside the filter focuses its visible inspector; DOM fixture is not rendered proof');
+  if(narrow)assert.equal(panel.panel.snapshot().pane,'detail');
+  nodes['evidence-search'].value='';nodes['evidence-search'].emit('input');assert.equal(nodes['evidence-workspace-notice'].hidden,true,'Outside-filter notice must clear once the selected parent is included again');
+}
+const evictionNotice=observationPanelFixture();
+evictionNotice.nodes['evidence-rows'].querySelector('[data-evidence-key="7:42:102"]').click();
+evictionNotice.context.events=evictionNotice.context.events.filter(event=>event.sequence_number!=='102');evictionNotice.context.error='disconnected';evictionNotice.panel.sync();
+assert.match(evictionNotice.nodes['evidence-workspace-notice'].textContent,/left the retained window/);
+evictionNotice.nodes['evidence-rows'].querySelector('[data-evidence-key="7:42:101"]').click();
+assert.doesNotMatch(evictionNotice.nodes['evidence-workspace-notice'].textContent,/left the retained window/);
+assert.match(evictionNotice.nodes['evidence-workspace-notice'].textContent,/refresh is unavailable/);
+evictionNotice.context.error=null;evictionNotice.panel.sync();assert.equal(evictionNotice.nodes['evidence-workspace-notice'].hidden,true);
+const duplicateSource=observationPanelFixture();
+duplicateSource.nodes['evidence-rows'].querySelector('[data-evidence-key="7:42:102"]').click();
+const duplicateSourceAction=duplicateSource.nodes['evidence-inspector'].querySelector('[data-evidence-action="source"]');
+const exactSnapshot=duplicateSource.panel.snapshot();duplicateSource.context.events.push({...duplicateSource.context.events.find(event=>event.sequence_number==='102')});
+duplicateSourceAction.click();assert.equal(duplicateSource.sourceCalls,0);assert.equal(duplicateSource.panel.canRestore(exactSnapshot),false);
+const coveragePanel=observationPanelFixture();coveragePanel.nodes['evidence-coverage-details'].open=true;
+coveragePanel.nodes['evidence-coverage-details'].emit('keydown',{key:'Escape',stopPropagation(){}});
+assert.equal(coveragePanel.nodes['evidence-coverage-details'].open,false);assert.equal(coveragePanel.document.activeElement,coveragePanel.nodes['evidence-coverage-details'].querySelector('summary'));
+console.log('PASS Evidence review regressions: arrival versus retained holes, scope separation, parent draft preservation, narrow visible-pane focus target, independent selection/error notices and stale duplicate source refusal');
+
+
+
+// Exercise the actual shared boundary against the real Evidence controller.
+// The lightweight DOM checks identity/ownership; CI owns visibility/geometry.
+for (const scenario of ['return','evicted','duplicate','changed-session','interrupted']) {
+  const fixture=observationPanelFixture(true), {nodes,document:owner}=fixture;
+  const request=fixture.context.request;
+  const other={...request,id:'other',events:request.events.map(event=>({...event,session_id:'8'}))};
+  const state={requests:[request,other],events:fixture.context.events,artifacts:fixture.context.artifacts,selectedRequestId:request.id,decoderSteps:[],inspectorTab:'evidence'};
+  for(const [id,node] of Object.entries(nodes))node.id=id;
+  nodes['evidence-rows'].querySelector('[data-evidence-key="7:42:102"]').click();
+  const source=nodes['evidence-inspector'].querySelector('[data-evidence-action="source"]');source.focus();
+  nodes['evidence-rows'].scrollTop=55;nodes['evidence-inspector'].scrollTop=81;
+  const panes=[nodes['evidence-rows'],nodes['evidence-inspector'],nodes['evidence-package-mode']];
+  const evidenceRoot={id:'screen-evidence',scrollTop:0,scrollLeft:0,contains:()=>true,matches:s=>s==='#screen-evidence',querySelectorAll:()=>panes,
+    querySelector:selector=>selector==='#evidence-open-source'?nodes['evidence-inspector'].querySelector('[data-evidence-action="source"]'):nodes[selector.slice(1)]};
+  let screen='evidence',notice='',selections=0;const raf=[];
+  const back={focus(){owner.activeElement=back;}};
+  const document={get activeElement(){return owner.activeElement;},querySelector:selector=>selector==='.screen:not([hidden])'?{id:`screen-${screen}`}:selector==='#screen-evidence'?evidenceRoot:selector==='#investigation-notice'?{textContent:notice}:selector==='#investigation-back'?back:null};
+  const sandbox={state,document,CSS:{escape:s=>s},evidenceWorkspace:fixture.panel,sourceFactsPanel:{},selectedSource:()=>null,integerText:(e,k)=>String(e[k]),requestAnimationFrame:fn=>raf.push(fn),
+    selectRequest:id=>{state.selectedRequestId=id;fixture.context={...fixture.context,request:state.requests.find(item=>item.id===id)};fixture.panel.sync();selections++;},
+    showScreen:name=>{screen=name;fixture.panel.setVisible(name==='evidence');},noticeWriter:value=>{notice=value;}};
+  const code=await readFile(join(root,'apps/research-ui/investigation_navigation.js'),'utf8');
+  const nav=runInNewContext(appSection('      function requestTraceRoot(','      function requestSignalProfileSelection(')+code+';investigationNotice=noticeWriter;({snapshot:investigationSnapshot,restore:restoreInvestigation,retire:retireInvestigationReturn})',sandbox);
+  const saved=nav.snapshot();assert.equal(saved.evidence.selectedKey,'7:42:102');assert.equal(saved.focus,'#evidence-open-source');
+  assert(!JSON.stringify(saved).includes('payload'),'History cannot retain record payloads');
+  screen='sources';state.selectedRequestId='other';fixture.context={...fixture.context,request:other};fixture.panel.sync();fixture.panel.setVisible(false);
+  nodes['evidence-search'].value='newer filter';nodes['evidence-scope'].value='all';
+  if(scenario==='evicted')fixture.context.events=fixture.context.events.filter(event=>event.sequence_number!=='102');
+  if(scenario==='duplicate')fixture.context.events=[...fixture.context.events,{...fixture.context.events.find(event=>event.sequence_number==='102')}];
+  if(scenario==='changed-session')state.requests=[{...request,events:other.events},other];
+  const restored=nav.restore(saved);
+  if(['evicted','duplicate','changed-session'].includes(scenario)) {assert.equal(restored,false);assert.equal(screen,'sources');assert.equal(selections,0,'Failed preflight must not mutate current request');continue;}
+  assert.equal(restored,true);assert.equal(state.selectedRequestId,request.id);assert.equal(fixture.panel.snapshot().pane,'detail');
+  if(scenario==='interrupted'){nav.retire();nodes['evidence-inspector'].scrollTop=777;owner.activeElement=nodes['evidence-search'];}
+  await Promise.resolve();for(const callback of raf.splice(0))callback();
+  assert.equal(nodes['evidence-search'].value,'newer filter');assert.equal(nodes['evidence-scope'].value,'all');
+  if(scenario==='interrupted'){assert.equal(nodes['evidence-inspector'].scrollTop,777);assert.equal(owner.activeElement,nodes['evidence-search']);}
+  else {assert.equal(nodes['evidence-rows'].scrollTop,55);assert.equal(nodes['evidence-inspector'].scrollTop,81);assert.equal(owner.activeElement.id,'evidence-open-source');assert.match(nodes['evidence-workspace-notice'].textContent,/outside the current filter/);}
+}
+console.log('PASS shared Evidence return with original request preflight, selected-key/pane ownership, independent scroll, exact focus, preserved current filters, evicted/duplicate/session refusal and interrupted focus (not rendered QA)');
+
 // The rendered fixture tests presentation and user actions. The separate real
 // native-writer/HTTP probe establishes authoritative export and validation.
 function evidenceBrowserFixture() {
-  const fixture={mode:'valid',requests:[],pending:[],lastValidation:null};
+  const fixture={mode:'valid',requests:[],pending:[],lastValidation:null,observationActive:false,derivedRequests:0};
+  fixture.observation=observationFixtureContext();
   const bytes=packageGoldenBytes;
   fixture.events=packageGolden.records.events.map(row=>({...row,...row.key}));
   fixture.artifacts=packageGolden.records.artifacts.map(row=>({...row,...row.key}));
   fixture.handle=async(request,response)=>{
     const path=new URL(request.url,'http://127.0.0.1').pathname;
+    if(path==='/api/deobfuscation') fixture.derivedRequests++;
+    if(fixture.observationActive){
+      const send=value=>{response.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'});response.end(JSON.stringify(value));};
+      if(fixture.observationFrozen&&['/api/events','/api/artifacts'].includes(path)){response.writeHead(304);response.end();return true;}
+      if(path==='/api/events'){send({count:fixture.observation.events.length,events:fixture.observation.events,capture_mode:'live',broker_connected:true,capture_controls_available:false});return true;}
+      if(path==='/api/artifacts'){send({count:fixture.observation.artifacts.length,artifacts:fixture.observation.artifacts});return true;}
+      if(path==='/api/artifacts/9/content'){
+        const parameters=new URL(request.url,'http://127.0.0.1').searchParams,offset=Number(parameters.get('offset')||0),limit=Number(parameters.get('limit')||2097152);
+        const bytes=observationSourceBytes.subarray(offset,offset+limit);
+        response.writeHead(200,{'Content-Type':'application/octet-stream','X-Artifact-Total-Bytes':String(observationSourceBytes.length),'X-Artifact-Offset':String(offset),'X-Artifact-Truncated':String(offset+bytes.length<observationSourceBytes.length)});response.end(bytes);return true;
+      }
+    }
     if(!['/api/evidence/packages/export','/api/evidence/packages/validate'].includes(path)) return false;
     let body=Buffer.alloc(0);
     for await(const chunk of request) {
@@ -2285,7 +2532,130 @@ for(const [mode,status] of [['writer_busy',409],['unavailable',503]])assert.equa
 for(const status of ['invalid','unsupported'])assert.equal(JSON.parse((await evidenceFixtureResponse('/api/evidence/packages/validate',packageGoldenBytes,status)).body).status,status);
 console.log('PASS Evidence browser fixture raw bytes, valid/invalid/unsupported and guarded-export errors (not rendered QA)');
 
+async function checkEvidenceObservationInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture}) {
+  const readingPanes=[];
+  const until=async(expression,message)=>{const end=Date.now()+5000;while(Date.now()<end){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,25));}assert.fail(message);};
+  const press=(value,code=value)=>key(value,code,{windowsVirtualKeyCode:({Enter:13,Escape:27,Home:36,End:35,ArrowDown:40,ArrowUp:38,Tab:9})[value],...(value==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});
+  const observationReveal=async selector=>{
+    for(let attempt=0;attempt<4;attempt++){
+      const target=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});if(!n)throw new Error('Missing observation control');const p=n.closest('#evidence-rows, #evidence-inspector');if(!p)return null;const r=n.getBoundingClientRect(),b=p.getBoundingClientRect();return {pane:'#'+p.id,delta:r.top<b.top+5?r.top-b.top-5:r.bottom>b.bottom-5?r.bottom-b.bottom+5:0};})()`);
+      if(!target||Math.abs(target.delta)<=1)break;
+      await wheel(target.pane,target.delta);
+    }
+  };
+  const observationClick=async selector=>{await observationReveal(selector);await click(selector);};
+  const geometry=async label=>{
+    const result=await evaluate(`(()=>{const names=['#evidence-investigation','.evidence-investigation-layout','#evidence-rows','#evidence-inspector'];return {width:innerWidth,height:innerHeight,page:document.documentElement.scrollWidth,panes:names.map(name=>{const n=document.querySelector(name),r=n.getBoundingClientRect();return {name,visible:r.width>0&&r.height>0,left:r.left,right:r.right,top:r.top,bottom:r.bottom,client:n.clientHeight,scroll:n.scrollHeight,width:n.clientWidth,scrollWidth:n.scrollWidth};})};})()`);
+    assert(result.page<=result.width+1,`${label}: no page-wide horizontal overflow`);
+    for(const pane of result.panes.filter(value=>value.visible)){assert(pane.left>=-1&&pane.right<=result.width+1&&pane.bottom<=result.height+1,`${label}: ${pane.name} stays in viewport`);assert(pane.scrollWidth<=pane.width+1,`${label}: ${pane.name} does not clip content horizontally`);}
+    const active=result.panes.find(value=>value.name==='#evidence-rows'&&value.visible)??result.panes.find(value=>value.name==='#evidence-inspector'&&value.visible);assert(active?.client>=120,`${label}: selected pane retains reading space (${active?.client ?? 0}px; minimum 120px)`);
+    readingPanes.push({label,width:result.width,height:result.height,readingHeight:active.client});
+  };
+  fixture.observationActive=true;
+  await evaluate('state.eventEtag=null;state.artifactEtag=null;refresh()');
+  await until("state.events.some(event=>event.sequence_number==='102')&&state.artifacts.some(artifact=>artifact.artifact_id==='9')",'Investigation fixture did not load through normal broker/artifact routes');
+  fixture.observationFrozen=true;
+  await click('[data-request-id]');await click('#request-evidence-toggle');await click('#request-package-entry [data-screen="evidence"]');
+  assert.equal(await evaluate("document.querySelector('#evidence-package-mode').hidden"),true,'Evidence must land on observations, not package controls');
+  await observationClick('[data-evidence-key="7:42:102"]');
+  assert.match(await evaluate("document.querySelector('#evidence-inspector').textContent"),/Outcome not recorded/);
+  assert.match(await evaluate("document.querySelector('#evidence-rows').textContent"),/Recorded parent links.*Same captured context/);
+  assert.equal(await evaluate("document.querySelectorAll('[data-package-candidates] input:checked').length"),0,'Observation selection must never select export identities');
+  await geometry('wide investigation');await screenshot('evidence-investigation-wide');
+  const inspectorBefore=await evaluate("document.querySelector('#evidence-inspector').scrollTop");await wheel('#evidence-rows',90);
+  assert.equal(await evaluate("document.querySelector('#evidence-inspector').scrollTop"),inspectorBefore,'Observation scrolling must not move the record inspector');
+  await observationClick('[data-evidence-key="7:42:102"]');await press('ArrowDown');
+  assert.equal(await evaluate('evidenceWorkspace.snapshot().selectedKey'),'7:42:100','Keyboard movement follows the displayed group order');
+  await press('ArrowUp');assert.equal(await evaluate('evidenceWorkspace.snapshot().selectedKey'),'7:42:102');
+  await evaluate("window.observationFocus=document.activeElement;window.observationInspector=document.querySelector('#evidence-inspector').firstElementChild;evidenceWorkspace.sync()");
+  assert.equal(await evaluate('document.activeElement===observationFocus'),true);assert.equal(await evaluate("document.querySelector('#evidence-inspector').firstElementChild===observationInspector"),true);
+  await click('#evidence-package-toggle');await click('#evidence-return');
+  assert.equal(await evaluate('evidenceWorkspace.snapshot().selectedKey'),'7:42:102');
+  const sourceSupported=await evaluate("!document.querySelector('[data-evidence-action=source]').disabled");
+  if(process.env.REB_UI_REQUIRE_EVIDENCE_NAVIGATION==='1')assert(sourceSupported,'Final composed acceptance requires the approved working source adapter');
+  const sourceRoundTrips=[];
+  const sourceRoundTrip=async label=>{
+    if(!sourceSupported)return;
+    // Seed other already-authored drafts without submitting, decoding or running.
+    await evaluate("document.querySelector('#decoder-input').value='retain decoder input';document.querySelector('#native-console-source').value='/* retain console draft */'");
+    await observationReveal('[data-evidence-action="source"]');
+    await evaluate("window.evidenceReturnView={list:document.querySelector('#evidence-rows').scrollTop,detail:document.querySelector('#evidence-inspector').scrollTop,search:document.querySelector('#evidence-search').value,scope:document.querySelector('#evidence-scope').value,pane:evidenceWorkspace.snapshot().pane,decoder:document.querySelector('#decoder-input').value,console:document.querySelector('#native-console-source').value}");
+    await click('[data-evidence-action="source"]');
+    await until("!document.querySelector('#screen-sources').hidden&&selectedSource()?.artifact_id==='9'",'Exact captured source did not open');
+    assert.equal(await evaluate('state.sourceDeobfuscated||state.sourceFormatted'),false);
+    await click('#investigation-back');
+    await until("!document.querySelector('#screen-evidence').hidden&&document.activeElement.id==='evidence-open-source'",'Shared Back did not restore the exact Evidence source trigger');
+    assert.equal(await evaluate('evidenceWorkspace.snapshot().selectedKey'),'7:42:102');
+    const restored=await evaluate("(()=>{const n=document.activeElement,r=n.getBoundingClientRect();return {list:document.querySelector('#evidence-rows').scrollTop===evidenceReturnView.list,detail:document.querySelector('#evidence-inspector').scrollTop===evidenceReturnView.detail,search:document.querySelector('#evidence-search').value===evidenceReturnView.search,scope:document.querySelector('#evidence-scope').value===evidenceReturnView.scope,pane:evidenceWorkspace.snapshot().pane===evidenceReturnView.pane,decoder:document.querySelector('#decoder-input').value===evidenceReturnView.decoder,console:document.querySelector('#native-console-source').value===evidenceReturnView.console,visible:r.width>0&&r.height>0&&r.top>=0&&r.bottom<=innerHeight};})()");
+    assert(Object.values(restored).every(Boolean),`${label}: Source → Back must preserve both pane scrolls, visible exact focus, scope/search and other drafts: ${JSON.stringify(restored)}`);
+    assert.equal(fixture.derivedRequests,0,'Evidence source navigation must not start derived analysis');
+    sourceRoundTrips.push(label);await screenshot(`evidence-investigation-source-back-${label}`);
+  };
+  if(sourceSupported)await sourceRoundTrip('wide');
+  else assert.match(await evaluate("document.querySelector('#evidence-inspector').textContent"),/Safe source navigation is unavailable/);
+  await observationClick('[data-evidence-key="7:42:104"]');assert.match(await evaluate("document.querySelector('#evidence-inspector').textContent"),/absent from the retained catalog/);
+  await screenshot('evidence-investigation-missing-source');
+  await observationClick('[data-evidence-key="7:42:102"]');
+  for(const [width,height] of [[760,560],[360,740]]){
+    await viewport(width,height);assert.equal(await evaluate("getComputedStyle(document.querySelector('#evidence-package-toggle')).display==='none'"),false,'Package entry must remain available on narrow layouts');
+    await click('[data-evidence-pane="observations"][role="tab"]');await geometry(`${width} observations`);await screenshot(`evidence-investigation-${width}-observations`);
+    await observationClick('[data-evidence-key="7:42:102"]');await geometry(`${width} selected record`);await screenshot(`evidence-investigation-${width}-record`);
+    assert.equal(await evaluate("document.activeElement.id"),'evidence-inspector','Narrow record selection must focus the revealed pane');
+    const before=await evaluate("document.querySelector('#evidence-inspector').scrollTop");await wheel('#evidence-inspector',150);assert(await evaluate(`document.querySelector('#evidence-inspector').scrollTop>${before}`),'Narrow inspector scroll is independent');
+    await click('[data-evidence-pane="observations"][role="tab"]');
+    await click('#evidence-search');
+    for(const character of 'toDataURL')await key(character,`Key${character.toUpperCase()}`,{text:character,unmodifiedText:character});
+    await observationClick('[data-evidence-key="7:42:102"]');
+    const scopeDraft=await evaluate("document.querySelector('#evidence-scope').value");
+    await observationClick('[data-evidence-action="parent"]');
+    assert.equal(await evaluate('evidenceWorkspace.snapshot().selectedKey'),'7:42:101');
+    assert.equal(await evaluate("document.querySelector('#evidence-search').value"),'toDataURL');assert.equal(await evaluate("document.querySelector('#evidence-scope').value"),scopeDraft);
+    assert.match(await evaluate("document.querySelector('#evidence-workspace-notice').textContent"),/selected parent is outside the current filter/);
+    assert.equal(await evaluate("(()=>{const n=document.activeElement,r=n.getBoundingClientRect();return n.id==='evidence-inspector'&&r.width>0&&r.height>0&&r.top>=0&&r.bottom<=innerHeight;})()"),true,'Narrow parent traversal must leave focus in a visible inspector');
+    await geometry(`${width} filtered parent`);await screenshot(`evidence-investigation-${width}-parent`);
+    await click('[data-evidence-pane="observations"][role="tab"]');await observationClick('[data-evidence-key="7:42:102"]');
+    await sourceRoundTrip(String(width));
+    await click('[data-evidence-pane="observations"][role="tab"]');
+    await evaluate("document.querySelector('#evidence-search').value='';document.querySelector('#evidence-search').dispatchEvent(new Event('input',{bubbles:true}))");
+    await evaluate("window.evidenceShortRequest=state.requests[0];state.requests[0]={...state.requests[0],protocolRequestId:'long-url-cdp',operation:'cdp_complete',tabId:'long-url-target',hostOnly:false,path:('https://fixture.invalid/'+('segment/'.repeat(300))).slice(0,2048)};renderEvidence()");
+    await geometry(`${width} long correlated request`);
+    // A compact layout must preserve the actual qualifiers and every control,
+    // rather than buying reading space by hiding warnings or reducing coverage.
+    const essentials=await evaluate(`['#evidence-context-note','#evidence-workspace-notice','#evidence-coverage-summary','#evidence-search','#evidence-scope','#evidence-package-toggle','#evidence-previous','#evidence-next'].map(selector=>{const n=document.querySelector(selector),r=n.getBoundingClientRect(),style=getComputedStyle(n);return {selector,visible:r.width>0&&r.height>0&&r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight&&style.visibility!=='hidden',unclipped:n.scrollHeight<=n.clientHeight+1};})`);
+    assert(essentials.every(value=>value.visible&&value.unclipped),`${width}: context qualifications, notices and controls must remain visible and unclipped: ${JSON.stringify(essentials)}`);
+    assert.match(await evaluate("document.querySelector('#evidence-context-note').textContent"),/No exact producer request key/);
+    assert.match(await evaluate("document.querySelector('#evidence-context-note').textContent"),/Matched by method, host and time/);
+    assert.match(await evaluate("document.querySelector('#evidence-coverage-summary').textContent"),/1 missing parent · coverage unknown/);
+    assert.match(await evaluate("document.querySelector('#evidence-workspace-notice').textContent"),/Request context changed/);
+
+    const paneHeight=await evaluate("document.querySelector('.evidence-investigation-layout').clientHeight");
+    await click('#evidence-coverage-details > summary');
+    assert.equal(await evaluate("document.querySelector('.evidence-investigation-layout').clientHeight"),paneHeight,'Expanded coverage must not consume reading-pane height');
+    const coverage=await evaluate("(()=>{const n=document.querySelector('#evidence-coverage-popover'),r=n.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,height:r.height,scroll:n.scrollHeight,client:n.clientHeight};})()");
+    assert(coverage.left>=0&&coverage.right<=width&&coverage.top>=0&&coverage.bottom<=height&&coverage.height<=height*.4+1,`${width}: coverage must be bounded and inside the viewport`);
+    await geometry(`${width} long request with coverage`);await screenshot(`evidence-investigation-${width}-long-coverage`);
+    await click('#evidence-coverage-popover');
+    if(coverage.scroll>coverage.client+1){await wheel('#evidence-coverage-popover',150);assert(await evaluate("document.querySelector('#evidence-coverage-popover').scrollTop>0"));}
+    await press('Escape');assert.equal(await evaluate("document.querySelector('#evidence-coverage-details').open"),false);
+    assert.equal(await evaluate("document.activeElement===document.querySelector('#evidence-coverage-details > summary')"),true);
+    await evaluate("state.requests[0]=evidenceShortRequest;renderEvidence()");
+    await observationClick('[data-evidence-key="7:42:102"]');
+  }
+  await viewport(1440,900);
+  await evaluate("state.requests[0]={...state.requests[0],protocolRequestId:'synthetic-cdp',operation:'cdp_complete',tabId:'synthetic-target'};renderEvidence()");
+  await observationClick('[data-evidence-key="7:42:102"]');assert.match(await evaluate("document.querySelector('#evidence-context-note').textContent"),/No exact producer request key/);await screenshot('evidence-investigation-correlated-request');
+  await evaluate("state.events=state.events.filter(event=>event.sequence_number!=='102');renderEvidence()");
+  assert.equal(await evaluate('evidenceWorkspace.snapshot().selectedKey'),null);assert.match(await evaluate("document.querySelector('#evidence-workspace-notice').textContent"),/left the retained window/);
+  await screenshot('evidence-investigation-evicted');
+  fixture.observationActive=false;
+  await evaluate("state.requests=[];state.events=[];state.artifacts=[];resetRequestSelection();renderEvidence()");await screenshot('evidence-investigation-empty');
+  await click('#screen-evidence .back-button');
+  return {sourcePivot:sourceSupported?'passed with approved shared adapter':'unavailable until approved navigation composition',sourceRoundTrips,readingPanes,checks:['normal contract-valid broker/artifact routes','investigation-first landing','separate native parent/context/unlinked relationships','CDP association qualification','marker outcomes unknown','exact linked artifact and missing-source state','observation selection does not export','stable keyboard/focus/scroll','secondary package mode and return','narrow pane switch and scrolling','filtered parent traversal preserves drafts and visible focus','long correlated URL and bounded keyboard coverage at 760/360','composed Source Back preserves both pane scrolls and other tool drafts','eviction without substitution','empty retained window']};
+}
+
 async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture,setFile,verifyDownload}) {
+  const observations=await checkEvidenceObservationInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture});
+  const packageGeometry=[];
   const status=()=>evaluate('evidencePackagePanel.controller.model.status');
   const until=async(expression,message)=>{const deadline=Date.now()+5000;while(Date.now()<deadline){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,25));}assert.fail(message);};
   const ready=()=>until("evidencePackagePanel.controller.model.status==='ready'",'Validated metadata did not become ready');
@@ -2306,9 +2676,16 @@ async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,scre
     assert(value.pageWidth<=value.width+1&&value.panelScroll<=value.panelWidth+1,`${label}: package text/controls must not cause horizontal overflow`);return value;
   };
   await evaluate(`window.evidenceFixtureEvents=${JSON.stringify(fixture.events)};state.events=evidenceFixtureEvents;state.artifacts=${JSON.stringify(fixture.artifacts)};state.sessionMode='demo';state.requests=[{id:'package-request',path:'https://fixture.invalid/package',method:'GET',status:200,time:1,type:'xhr',origin:'demo',tabId:'qa-tab',operation:'synthetic_qa',events:evidenceFixtureEvents,exchange:{request:{state:'empty',headers:[]},response:{state:'empty',headers:[]}}}];renderRequests();`);
-  await click('[data-request-id="package-request"]');await click('#request-evidence-toggle');await click('#request-package-entry [data-screen="evidence"]');
+  await click('[data-request-id="package-request"]');
+  // Inspector tabs survive Back and request selection. This entry is explicit;
+  // the observation subtest above separately exercises the Evidence toggle.
+  await click('#inspector-tab-evidence');
+  assert.equal(await evaluate("state.inspectorTab"),'evidence');
+  assert.equal(await evaluate("document.querySelector('#request-package-entry').hidden"),false);
+  await click('#request-package-entry [data-screen="evidence"]');
   assert.equal(await evaluate("document.querySelector('#screen-evidence').hidden"),false);
   assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),false,'Evidence entry must dismiss the navigation popup');
+  await click('#evidence-package-toggle');
   assert.equal(await evaluate("document.querySelectorAll('[data-package-candidates] input').length"),4);
   for(let index=1;index<=4;index++)await packageClick(`[data-package-candidates] label:nth-child(${index}) input`);
   await scope('artifacts');for(let index=1;index<=2;index++)await packageClick(`[data-package-candidates] label:nth-child(${index}) input`);
@@ -2364,7 +2741,26 @@ async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,scre
   await reveal('[data-package-selected]');await screenshot('evidence-selected-pages');
   for(const [width,height] of [[760,560],[360,740]]){
     await viewport(width,height);await reveal('[data-package-window]');await geometry(`${width}x${height}`);
+    if(width<=600){
+      const contextState=()=>evaluate("(()=>{const details=document.querySelector('#investigation-navigation details');return {open:details.open,notice:document.querySelector('#investigation-notice').textContent,selection:document.querySelector('[data-package-selection]').textContent,candidates:[...document.querySelectorAll('[data-package-candidates] input')].map(n=>[n.dataset.packageKey,n.checked]),candidateScroll:document.querySelector('[data-package-candidates]').scrollTop};})()");
+      const beforeContext=await contextState();
+      assert(beforeContext.open,'Stale return context remains disclosed during phone package inspection');
+      assert.match(beforeContext.notice,/Return unavailable:.*Nothing was fetched or recaptured/);
+      await click('#investigation-navigation details > summary');
+      assert.equal((await contextState()).open,false);
+      await click('#investigation-navigation details > summary');
+      assert.deepEqual(await contextState(),beforeContext,'Link context toggles must preserve the exact package selection, candidate scroll and complete warning');
+      await reveal('[data-package-window]');
+    }
+    const navigationGeometry=await evaluate(`(()=>{const box=selector=>{const n=document.querySelector(selector),r=n.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,height:r.height};};return {bar:box('#investigation-navigation'),controls:box('.investigation-controls'),details:box('#investigation-navigation details'),back:box('#investigation-back'),forward:box('#investigation-forward'),notice:box('#investigation-notice'),clear:box('#investigation-clear'),overflow:getComputedStyle(document.querySelector('#investigation-navigation')).overflowY};})()`);
+    if(width<=600){
+      assert(navigationGeometry.details.left<=navigationGeometry.controls.left+1&&navigationGeometry.details.right>=navigationGeometry.controls.right-1&&navigationGeometry.details.top>=Math.max(navigationGeometry.back.bottom,navigationGeometry.forward.bottom), 'Open phone Link context occupies a full-width row below Back/Forward');
+      for(const item of [navigationGeometry.notice,navigationGeometry.clear])assert(item.left>=navigationGeometry.bar.left&&item.right<=navigationGeometry.bar.right&&item.top>=navigationGeometry.bar.top&&item.bottom<=navigationGeometry.bar.bottom,'The complete stale warning and history control remain visible in their navigation scroller');
+      assert(navigationGeometry.bar.height<=height*.35+1&&navigationGeometry.overflow==='auto','Navigation retains its own bounded scrolling owner');
+    }
     const windowGeometry=await evaluate(`(()=>{const box=selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,height:r.height};};return {outer:box('.evidence-content'),pager:box('[data-package-pager]'),list:box('[data-package-candidates]')};})()`);
+    packageGeometry.push({width,height,...windowGeometry,navigation:navigationGeometry});
+    console.log('Evidence package geometry',JSON.stringify(packageGeometry.at(-1)));
     assert(windowGeometry.pager.top>=windowGeometry.outer.top&&windowGeometry.pager.bottom<=windowGeometry.outer.bottom&&windowGeometry.pager.height>=24,`${width}x${height}: candidate paging must stay visible with the list`);
     assert(windowGeometry.pager.bottom<=windowGeometry.list.top&&windowGeometry.list.bottom<=windowGeometry.outer.bottom&&windowGeometry.list.top>=windowGeometry.outer.top,`${width}x${height}: pager and candidate list must fit together without overlap`);
     assert(windowGeometry.list.height>=100,`${width}x${height}: candidate list must retain a usable height`);
@@ -2378,7 +2774,7 @@ async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,scre
   assert.equal(await evaluate("document.querySelector('#screen-evidence').hidden"),false,'Narrow Backtraces must expose the package entry');
   assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),false,'Backtraces entry must dismiss the navigation popup');
   await geometry('narrow Backtraces return');await screenshot('evidence-narrow-reopened');
-  return {status:'passed',path:'browser development Evidence UI',source:'synthetic closed metadata fixture; authoritative native-writer HTTP checks are separate',viewports:[[1440,900],[760,560],[360,740]],checks:['Requests and narrow Backtraces pointer entry','exact scoped selection','explicit guarded export and retry','explicit browser download exact bytes; no automatic save','real file input exact-byte validation','invalid and unsupported states','writer refusal and unavailable store','Cancel and Escape focus','stale selection and Back/reopen','50-row paging','keyed refresh focus','Space/Tab keyboard selection','independent candidate/panel scrolling','narrow geometry and screenshots']};
+  return {status:'passed',path:'browser development Evidence UI',observations,packageGeometry,source:'synthetic closed metadata fixture; authoritative native-writer HTTP checks are separate',viewports:[[1440,900],[760,560],[360,740]],checks:['Requests and narrow Backtraces pointer entry','exact scoped selection','explicit guarded export and retry','explicit browser download exact bytes; no automatic save','real file input exact-byte validation','invalid and unsupported states','writer refusal and unavailable store','Cancel and Escape focus','stale selection and Back/reopen','50-row paging','keyed refresh focus','Space/Tab keyboard selection','independent candidate/panel scrolling','narrow geometry and screenshots']};
 }
 
 // Synthetic Memory data travels through the existing debugger transport fixture.
@@ -2845,14 +3241,70 @@ console.log('PASS Memory real render functions: 200 unchanged refreshes retain r
 }
 console.log('PASS Memory browser fixture validated debugger state, ETag200/304 and zero implicit actions (not rendered QA)');
 
-async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture}) {
+async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeText,screenshot,fixture}) {
   const ready=async()=>{for(let n=0;n<150;n++){if(await evaluate('!state.memorySearchPending && !state.debuggerActionPending'))return;await new Promise(resolve=>setTimeout(resolve,20));}throw Error('Memory action did not settle');};
-  const reveal=async selector=>{await evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'nearest'})`);};
-  const press=async selector=>{await reveal(selector);await click(selector);};
-  const geometry=async label=>{const bad=await evaluate(`Array.from(document.querySelectorAll('#screen-memory button, #screen-memory input, #screen-memory select, #screen-memory summary')).filter(node=>node.getClientRects().length).filter(node=>{const r=node.getBoundingClientRect();return r.width<1||r.right>innerWidth+1||r.left<0}).map(node=>node.id||node.textContent)`);assert.deepEqual(bad,[],label);};
-  await viewport(1440,900);await evaluate("showScreen('memory')");
+  const wheelReceipts=[];
+  const closed=async label=>{
+    assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),false,label+': Advanced must be closed');
+    assert.equal(await evaluate("Boolean(document.activeElement?.closest('#advanced-navigation .advanced-items'))"),false,label+': focus must not remain in the hidden chooser');
+  };
+  const unobscured=async(selector,label)=>{
+    const result=await evaluate(`(()=>{
+      const n=document.querySelector(${JSON.stringify(selector)});if(!n)return {missing:true};
+      const r=n.getBoundingClientRect();let top=0,bottom=innerHeight,left=0,right=innerWidth;
+      for(let p=n.parentElement;p;p=p.parentElement){const b=p.getBoundingClientRect(),s=getComputedStyle(p);if(s.overflowY!=='visible'){top=Math.max(top,b.top+p.clientTop);bottom=Math.min(bottom,b.top+p.clientTop+p.clientHeight);}if(s.overflowX!=='visible'){left=Math.max(left,b.left+p.clientLeft);right=Math.min(right,b.left+p.clientLeft+p.clientWidth);}}
+      const points=[[r.left+r.width/2,r.top+r.height/2],[r.left+3,r.top+3],[r.right-3,r.bottom-3]];
+      return {visible:r.width>0&&r.height>0&&r.left>=left-1&&r.right<=right+1&&r.top>=top-1&&r.bottom<=bottom+1,
+        covered:points.filter(([x,y])=>{const hit=document.elementFromPoint(x,y);return !hit||!n.contains(hit);}).length};
+    })()`);
+    assert.equal(result.visible,true,`${label}: ${selector} must fit its visible pane`);
+    assert.equal(result.covered,0,`${label}: ${selector} must be unobscured at center and corners`);
+  };
+  // Only dispatch native wheels through the existing settled, hit-tested helper.
+  // Resolve nested owner clipping before scrolling it; never assign scrollTop,
+  // call scrollIntoView, or let the pointer silently route into a child pane.
+  const reveal=async selector=>{
+    for(let attempt=0;attempt<32;attempt++){
+      const action=await evaluate(`(()=>{
+        const n=document.querySelector(${JSON.stringify(selector)});if(!n)throw Error('Missing Memory control');
+        const owners=[];for(let p=n.parentElement;p&&p.id!=='screen-memory';p=p.parentElement){if(['auto','scroll','overlay'].includes(getComputedStyle(p).overflowY)&&p.scrollHeight>p.clientHeight+1)owners.push(p);}
+        const box=p=>{const r=p.getBoundingClientRect();const inset=p.matches('.memory-results-list')?p.querySelector('.memory-results-head').getBoundingClientRect().height:0;return {top:r.top+p.clientTop+inset,bottom:r.top+p.clientTop+p.clientHeight};};
+        const r=n.getBoundingClientRect();let index=-1,delta=0;
+        for(let i=0;i<owners.length;i++){const b=box(owners[i]);delta=r.top<b.top?r.top-b.top:r.bottom>b.bottom?r.bottom-b.bottom:0;if(Math.abs(delta)>1){index=i;break;}}
+        if(index<0)return null;
+        // An inner scrollbar can itself be below the narrow outer viewport.
+        // First expose its actual wheel point via the next enclosing owner.
+        for(let i=index+1;i<owners.length;i++){const r=owners[index].getBoundingClientRect(),y=r.top+r.height/2,b=box(owners[i]);if(y<b.top+8||y>b.bottom-8){delta=y<b.top+8?y-b.top-8:y-b.bottom+8;index=i;}}
+        const owner=owners[index],name=owner.id?'#'+owner.id:owner.matches('.memory-grid')?'.memory-grid':owner.matches('.memory-search-pane')?'.memory-search-pane':owner.matches('.memory-receipt')?'.memory-receipt':owner.matches('.memory-results-list')?'.memory-results-list':null;
+        if(!name)throw Error('Unexpected Memory scroll owner');
+        const limit=Math.max(24,owner.clientHeight*.75);return {owner:name,delta:Math.sign(delta)*Math.min(Math.abs(delta),limit)};
+      })()`);
+      if(!action){await unobscured(selector,'Revealed Memory control');return;}
+      const receipt=await wheel(action.owner,action.delta,'scrollbar');
+      assert((receipt.result.scrollTop-receipt.point.scrollTop)*action.delta>0,`Native wheel must move intended Memory owner ${action.owner}`);
+      wheelReceipts.push({control:selector,owner:action.owner,delta:action.delta,before:receipt.point.scrollTop,after:receipt.result.scrollTop});
+    }
+    throw Error('Memory control could not be reached by native wheel: '+selector);
+  };
+  const press=async selector=>{await closed('Before '+selector);await reveal(selector);await click(selector);await closed('After '+selector);};
+  const geometry=async label=>{
+    await closed(label);
+    const bad=await evaluate(`Array.from(document.querySelectorAll('#screen-memory button, #screen-memory input, #screen-memory select, #screen-memory summary')).filter(node=>node.getClientRects().length).filter(node=>{const r=node.getBoundingClientRect();return r.width<1||r.right>innerWidth+1||r.left<0}).map(node=>node.id||node.textContent)`);assert.deepEqual(bad,[],label);
+    for(const selector of ['#screen-memory h1','#screen-memory .screen-subtitle','#memory-notice',...['live','snapshot','diff','origin'].map(mode=>'[data-memory-mode="'+mode+'"]')])await unobscured(selector,label);
+  };
+  const enter=async label=>{
+    await closed(label+' before opening');const posts=fixture.requests.length;
+    await click('#advanced-navigation > summary');
+    assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),true,label+': real pointer opens Advanced');
+    await click('#advanced-navigation .nav-button[data-screen="memory"]');
+    assert.equal(await evaluate("document.querySelector('#screen-memory').hidden"),false,label+': Memory workspace opens');
+    await closed(label);await geometry(label);
+    assert.equal(await evaluate("document.activeElement===document.querySelector('#advanced-navigation > summary')"),true,label+': focus returns to summary');
+    assert.equal(fixture.requests.length,posts,label+': navigation must not submit an action');
+  };
+  await viewport(1440,900);await enter('Initial wide pointer entry');
   for(let n=0;n<100 && !(await evaluate("state.debuggerSession?.target?.id==='memory-target-A'"));n++) await new Promise(resolve=>setTimeout(resolve,25));
-  await evaluate("elements.memoryPropertyQuery.value='fixture';elements.memoryValueQuery.value='fixture'");
+  await press('#memory-property-query');await typeText('fixture');await press('#memory-value-query');await typeText('fixture');
   await press('#memory-search-button');await ready();assert.equal(await evaluate('state.memoryResults.length'),50);
   assert.match(await evaluate("elements.memorySubmission.textContent"),/memory-target-A/);
   await press('.memory-result-row');await key('ArrowDown');assert.equal(await evaluate('state.selectedMemoryResultId'),'preview-1');
@@ -2915,23 +3367,42 @@ async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,screen
   for(let n=0;n<100 && !(await evaluate("state.debuggerSession?.target?.id==='memory-target-B'"));n++)await new Promise(resolve=>setTimeout(resolve,25));
   fixture.release();await ready();assert.equal(await evaluate('state.memorySearchStatus'),'unavailable');assert.equal(await evaluate('state.memoryResults.length'),0);
   fixture.mode='ready';await press('#memory-search-button');await ready();
-  for(const [width,height] of [[760,560],[360,740]]){
-    await viewport(width,height);await press('.memory-result-row');await geometry(`narrow ${width}`);await screenshot(`memory-${width}-result`);
+  for(const [width,height] of [[1440,900],[760,560],[360,740]]){
+    await viewport(width,height);
+    await press('[data-memory-mode="live"]');fixture.mode='pending';await press('#memory-search-button');
+    await waitFor('state.memorySearchPending && state.debuggerActionPending','Held live action did not start');
+    for(let n=0;n<150&&fixture.pending.length===0;n++)await new Promise(resolve=>setTimeout(resolve,20));
+    assert(fixture.pending.length>0,'Entry-preservation check requires a held native acknowledgement');
+    const draft=await evaluate("JSON.stringify({property:elements.memoryPropertyQuery.value,value:elements.memoryValueQuery.value,mode:state.memoryMode,operation:state.memoryOperation,receipt:elements.memorySubmission.textContent,criteria:elements.memorySubmittedCriteria.textContent})");
+    await click('.nav-button[data-screen="sources"]');await closed('Leave Memory with pending action');
+    await enter(`Pending Memory pointer re-entry ${width}`);
+    assert.equal(await evaluate('state.memorySearchPending && state.debuggerActionPending'),true,'Workspace navigation must retain the pending latch');
+    assert.equal(await evaluate("JSON.stringify({property:elements.memoryPropertyQuery.value,value:elements.memoryValueQuery.value,mode:state.memoryMode,operation:state.memoryOperation,receipt:elements.memorySubmission.textContent,criteria:elements.memorySubmittedCriteria.textContent})"),draft,'Workspace navigation must retain pending draft, owner and submitted receipt');
+    fixture.mode='ready';fixture.release();await ready();
+    await press('.memory-result-row');await geometry(`result ${width}`);await screenshot(`memory-${width}-result`);
     await press('[data-memory-mode="snapshot"]');await press('#memory-search-button');await ready();await reveal('.memory-detail-disclosure summary');await geometry(`snapshot ${width}`);await screenshot(`memory-${width}-retainers`);
+    const inspectionPosts=fixture.requests.length;
+    await press('[data-memory-mode="diff"]');
+    for(const selector of ['#memory-capture-baseline','#memory-clear-baseline','#memory-compare-snapshot'])await reveal(selector);
+    await geometry(`diff controls ${width}`);await screenshot(`memory-${width}-diff-controls`);
+    await press('[data-memory-mode="origin"]');
+    for(const selector of ['#memory-search-button','#memory-origin-before','#memory-origin-after','#memory-origin-stop','#memory-origin-reset'])await reveal(selector);
+    await geometry(`origin controls ${width}`);await screenshot(`memory-${width}-origin-controls`);
+    assert.equal(fixture.requests.length,inspectionPosts,'Inspecting controls and switching modes must not start, stop or reset native work');
   }
-  return {status:'passed',path:'real browser UI with synthetic native API fixture',viewports:[[1440,900],[760,560],[360,740]],checks:['four mode actions','submitted target and baseline receipts','50 rows','keyboard selection and refresh node identity','inert preview','empty vs unavailable','partial snapshot and disclosure','dominator-only diff','stop outcome and unproven source links','delayed target race','target/restart/context Stop retirement with automatic control recovery and following304','pointer mode recovery without implicit actions','responsive controls']};
+  return {status:'passed',path:'real browser UI with synthetic native API fixture',viewports:[[1440,900],[760,560],[360,740]],wheel_receipts:wheelReceipts,checks:['real Advanced entry and pending re-entry at all widths','closed chooser and unobscured headers, modes and acted-on controls','native settled wheel reaches intended panes without forced DOM scroll','navigation preserves pending draft, owner and submitted receipt with no implicit action','four mode actions','submitted target and baseline receipts','50 rows','keyboard selection and refresh node identity','inert preview','empty vs unavailable','partial snapshot and disclosure','dominator-only diff','stop outcome and unproven source links','delayed target race','target/restart/context Stop retirement with automatic control recovery and following304','pointer mode recovery without implicit actions','responsive controls']};
 }
 
 async function checkTrafficBrowser() {
   const executable = process.env.REB_UI_CHROMIUM;
   assert(executable, "Set REB_UI_CHROMIUM to the installed Chrome/Chromium executable. Sandbox flags are not overridden.");
-  const directory = await mkdtemp(join(tmpdir(), memoryBrowser ? "reb-memory-ui-" : collectionBrowser ? "reb-collection-ui-" : consoleBrowser ? "reb-console-ui-" : evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
-  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", memoryBrowser ? "memory-ui-qa" : collectionBrowser ? "collection-ui-qa" : consoleBrowser ? "console-ui-qa" : evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
+  const directory = await mkdtemp(join(tmpdir(), memoryBrowser ? "reb-memory-ui-" : investigationBrowser ? "reb-investigation-ui-" : collectionBrowser ? "reb-collection-ui-" : consoleBrowser ? "reb-console-ui-" : evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
+  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", memoryBrowser ? "memory-ui-qa" : investigationBrowser ? "investigation-ui-qa" : collectionBrowser ? "collection-ui-qa" : consoleBrowser ? "console-ui-qa" : evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
   await mkdir(output, {recursive: true});
   let trafficApiMode = "offline";
   const memoryFixture = memoryBrowser ? await memoryBrowserFixture() : null;
   const collectionFixture = collectionBrowser ? collectionBrowserFixture() : null;
-  const factsFixture = sourceFactsBrowser ? await sourceFactsBrowserFixture() : null;
+  const factsFixture = investigationBrowser ? investigationFixture(await sourceFactsBrowserFixture()) : sourceFactsBrowser ? await sourceFactsBrowserFixture() : null;
   const consoleFixture = consoleBrowser ? createConsoleFixture() : null;
   const evidenceFixture = evidenceBrowser ? evidenceBrowserFixture() : null;
   if(evidenceFixture){
@@ -2975,8 +3446,10 @@ async function checkTrafficBrowser() {
     socket = await trafficBrowserSocket(address);
     let commandId = 0;
     const runtimeErrors = [];
+    const browserDialogs = [];
     socket.addEventListener("message", event => {
       const message = JSON.parse(event.data);
+      if (message.method === "Page.javascriptDialogOpening") browserDialogs.push(message.params);
       if (message.method === "Runtime.exceptionThrown") runtimeErrors.push(message.params.exceptionDetails.exception?.description || message.params.exceptionDetails.text);
       const pending = commands.get(message.id);
       if (!pending) return;
@@ -3061,15 +3534,32 @@ async function checkTrafficBrowser() {
         const node = document.querySelector(${JSON.stringify(selector)}), r = node.getBoundingClientRect();
         const x = r.x+r.width/2, y = r.y+r.height/2, hit = document.elementFromPoint(x,y);
         if (r.width <= 0 || r.height <= 0 || r.left < 0 || r.right > innerWidth || r.top < 0 || r.bottom > innerHeight || !hit || !node.contains(hit)) throw new Error('Control is clipped or offscreen: '+${JSON.stringify(selector)});
-        return {x,y};
+        return {x,y,left:r.left,right:r.right,top:r.top,bottom:r.bottom,
+          hit:{id:hit.id,tag:hit.tagName},connectionOpen:document.querySelector('#native-console-connection')?.open};
       })()`);
-      await command("Input.dispatchMouseEvent", {type: "mousePressed", ...rect, button: "left", clickCount: 1});
-      await command("Input.dispatchMouseEvent", {type: "mouseReleased", ...rect, button: "left", clickCount: 1});
+      const receipt={selector,before:rect};
+      if(consoleBrowser)diagnostics.pointer_events=[...(diagnostics.pointer_events??[]).slice(-63),receipt];
+      await command("Input.dispatchMouseEvent", {type: "mousePressed", x:rect.x,y:rect.y, button: "left", clickCount: 1});
+      await command("Input.dispatchMouseEvent", {type: "mouseReleased", x:rect.x,y:rect.y, button: "left", clickCount: 1});
+      if(consoleBrowser)receipt.after=await evaluate(`(()=>{
+        const node=document.querySelector(${JSON.stringify(selector)}),r=node?.getBoundingClientRect(),hit=document.elementFromPoint(${rect.x},${rect.y});
+        return {left:r?.left,right:r?.right,top:r?.top,bottom:r?.bottom,ownsPoint:!!node?.contains(hit),hit:{id:hit?.id,tag:hit?.tagName},connectionOpen:document.querySelector('#native-console-connection')?.open};
+      })()`);
     };
     const key = async (value, code = value, native = {}) => {
       await command("Input.dispatchKeyEvent", {type: "keyDown", key: value, code, ...native});
       await command("Input.dispatchKeyEvent", {type: "keyUp", key: value, code, windowsVirtualKeyCode:native.windowsVirtualKeyCode});
     };
+    const dialog = async accept => {
+      const start = Date.now();
+      while (!browserDialogs.length && Date.now() - start < 5000) await new Promise(resolve => setTimeout(resolve, 25));
+      assert(browserDialogs.length, "The explicit replacement confirmation did not open");
+      const prompt = browserDialogs.shift();
+      assert.equal(prompt.type, "confirm");
+      assert.match(prompt.message, /Replace the current Decoder input and chain/);
+      await command("Page.handleJavaScriptDialog", {accept});
+    };
+    const typeText = text => command("Input.insertText", {text});
     const columnsAligned = async () => {
       const measured = await evaluate(`(() => {
         const measure = node => {
@@ -3149,7 +3639,7 @@ async function checkTrafficBrowser() {
     };
     captureFailure = async () => {
       const result = await command("Page.captureScreenshot", {format: "png"});
-      await writeFile(join(output, memoryBrowser ? "memory-failure.png" : collectionBrowser ? "collection-failure.png" : consoleBrowser ? "console-failure.png" : evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
+      await writeFile(join(output, memoryBrowser ? "memory-failure.png" : investigationBrowser ? "investigation-failure.png" : collectionBrowser ? "collection-failure.png" : consoleBrowser ? "console-failure.png" : evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
     };
     await viewport(1440, 900);
     await command("Page.navigate", {url: `http://127.0.0.1:${server.address().port}/`});
@@ -3159,8 +3649,11 @@ async function checkTrafficBrowser() {
     }
     assert(await evaluate("typeof renderRequests === 'function'"), "Application did not initialize");
     diagnostics.phase = "interactive validation";
-    if (memoryBrowser) {
-      validation = await checkMemoryInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:memoryFixture});
+    if (investigationBrowser) {
+      validation = await checkInvestigationInteractions({evaluate,viewport,click,key,wheel,screenshot,dialog,typeText,fixture:factsFixture});
+      assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during investigation QA");
+    } else if (memoryBrowser) {
+      validation = await checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeText,screenshot,fixture:memoryFixture});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Memory QA");
     } else if (collectionBrowser) {
       validation = await checkCollectionInteractions({evaluate,viewport,click,key,wheel,type:text=>command("Input.insertText",{text}),screenshot,fixture:collectionFixture});
@@ -3319,7 +3812,7 @@ async function checkTrafficBrowser() {
   await writeFile(join(output, "validation.json"), JSON.stringify(validation, null, 2));
   console.log(`PASS real Chromium ${memoryBrowser ? 'Memory workflow' : collectionBrowser ? 'Collection' : consoleBrowser ? 'Console' : evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
 }
-if (trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser || collectionBrowser || memoryBrowser) {await checkTrafficBrowser(); process.exit(0);}
+if (investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser || collectionBrowser || memoryBrowser) {await checkTrafficBrowser(); process.exit(0);}
 
 if (fieldsOnly) process.exit(0);
 const temporary = await mkdtemp(join(tmpdir(), "origin-trace-debugger-"));

@@ -43,6 +43,10 @@
 
       <div id="workspace" class="workspace">
         <main class="main">
+          <section id="investigation-navigation" class="investigation-navigation" aria-label="Investigation navigation" hidden>
+            <div class="investigation-controls"><button id="investigation-back" class="secondary-button" type="button" title="Previous investigation stop (Alt + Left)" disabled>Back</button><button id="investigation-forward" class="secondary-button" type="button" title="Next investigation stop (Alt + Right)" disabled>Forward</button><details><summary>Link context</summary><p id="investigation-notice" role="status" aria-live="polite"></p><span id="investigation-history-count"></span><button id="investigation-clear" class="secondary-button" type="button">Clear return history</button></details></div>
+            <div id="investigation-source-search" class="investigation-source-search" aria-label="Unverified Console source search" hidden></div>
+          </section>
           <section id="screen-traffic" class="screen" aria-label="Traffic">
             <section id="console-experiment-traffic" class="console-experiment-traffic" aria-label="Console experiment activity" hidden>
               <header><strong id="console-traffic-title">Console experiment activity</strong><button id="console-traffic-back" class="secondary-button" type="button">Back to captured traffic</button></header>
@@ -117,7 +121,7 @@
                 <div id="exchange-inspector" class="exchange-inspector" role="tabpanel" aria-labelledby="inspector-tab-headers"></div>
                 <div hidden id="request-inspector" class="request-inspector" role="tabpanel" aria-labelledby="inspector-tab-payload" tabindex="0">
                   <h1 id="request-prompt">Choose a request value and trace where it came from.</h1>
-                  <div id="request-package-entry" class="package-entry" hidden><button class="secondary-button" type="button" data-screen="evidence">Coverage &amp; metadata packages</button><span>Exact native identities; API markers do not establish completion.</span></div>
+                  <div id="request-package-entry" class="package-entry" hidden><button class="secondary-button" type="button" data-screen="evidence">Inspect observations &amp; artifacts</button><span>Recorded links, context correlations and missing evidence.</span></div>
                   <div id="field-tabs" class="field-tabs" role="tablist" aria-label="Request values">
                     <button id="field-tab-body" class="field-tab" type="button" role="tab" data-field-tab="body" aria-controls="field-tree" aria-selected="true">Body</button>
                     <button id="field-tab-headers" class="field-tab" type="button" role="tab" data-field-tab="headers" aria-controls="field-tree" aria-selected="false" tabindex="-1">Headers</button>
@@ -248,6 +252,7 @@
                 <label><span class="sr-only" hidden>Find in source</span><input id="source-search" class="source-search" type="search" placeholder="Find" aria-label="Find in source" title="Find text; Enter for next, Shift+Enter for previous (first 1000 matches)" /></label>
                 <button id="source-pretty" class="source-tool" type="button" aria-label="Pretty print source" title="Pretty print source" disabled>{ }</button>
                 <button id="source-wasm" class="source-tool" type="button" aria-label="Inspect WebAssembly module" aria-pressed="false" hidden>Inspect</button>
+                <button id="investigation-decode-range" class="source-tool" type="button" title="First select an Original bytes link in Facts; this copies at most 64 KiB without running a transformation" disabled>Decode range</button>
                 <button id="source-facts-toggle" class="source-tool" type="button" aria-controls="source-facts-details" aria-expanded="false" disabled>Facts</button>
                 <button id="source-deob" class="source-tool" type="button" aria-label="Show deobfuscated representation" title="Show deobfuscated representation" disabled>Deob</button>
                 <button id="source-hook-pivot" class="source-tool" type="button" aria-controls="hooks-workspace" aria-expanded="false" title="Open Runtime Hooks beside source" disabled>Hooks</button>
@@ -395,7 +400,7 @@
           <section id="screen-backtrace" class="screen" aria-label="Request origin trace" hidden>
             <header class="screen-head">
               <div><h1>Backtraces</h1><div id="backtrace-subtitle" class="screen-subtitle">Follow a request back to its recorded origin.</div></div>
-              <div class="screen-head-actions"><button class="secondary-button package-navigation" type="button" data-screen="evidence">Metadata packages</button><button class="secondary-button" type="button" data-screen="traffic">View traffic</button></div>
+              <div class="screen-head-actions"><button class="secondary-button package-navigation" type="button" data-screen="evidence">Evidence</button><button class="secondary-button" type="button" data-screen="traffic">View traffic</button></div>
             </header>
             <div class="trace-toolbar">
               <label for="trace-request">Request</label>
@@ -424,10 +429,28 @@
           <section id="screen-evidence" class="screen" aria-label="Supporting evidence" hidden>
             <header class="screen-head">
               <button class="back-button" type="button" data-screen="traffic" aria-label="Back to requests">←</button>
-              <div><h1>Supporting Evidence</h1><div class="screen-subtitle">Exact metadata selections and bounded coverage</div></div>
-              <div class="screen-head-actions"><button class="secondary-button" type="button" data-screen="backtrace">Backtrace</button></div>
+              <div><h1>Evidence</h1><div class="screen-subtitle">Inspect what was recorded and how it connects</div></div>
+              <div class="screen-head-actions"><button id="evidence-trace" class="secondary-button" type="button">Backtrace</button><button id="evidence-package-toggle" class="secondary-button" type="button" aria-expanded="false" aria-controls="evidence-package-mode">Metadata package</button></div>
             </header>
-            <div class="evidence-content">
+            <div id="evidence-investigation" class="evidence-investigation">
+              <section class="evidence-context" aria-label="Investigation context">
+                <div class="evidence-context-main"><div id="evidence-context-kind" class="evidence-eyebrow"></div><h2 id="evidence-context-title"></h2><p id="evidence-context-note"></p></div>
+                <div class="evidence-coverage"><strong id="evidence-count">0 observations</strong><span id="evidence-coverage-summary">Capture coverage unknown</span><details id="evidence-coverage-details"><summary>Coverage &amp; gaps</summary><div id="evidence-coverage-popover" class="evidence-coverage-popover" tabindex="0" aria-label="Coverage and gap details"><p id="evidence-gap-details"></p><p>Retained order is not a total execution order. Missing records do not prove that an operation did not occur.</p></div></details></div>
+              </section>
+              <div id="evidence-workspace-notice" class="evidence-workspace-notice" role="status" aria-live="polite" hidden></div>
+              <div class="evidence-mobile-tabs" role="tablist" aria-label="Evidence pane"><button type="button" id="evidence-observations-tab" role="tab" aria-controls="evidence-observations-pane" data-evidence-pane="observations" aria-selected="true">Observations</button><button type="button" id="evidence-detail-tab" role="tab" aria-controls="evidence-inspector" data-evidence-pane="detail" aria-selected="false" tabindex="-1">Selected record</button></div>
+              <div class="evidence-investigation-layout" data-evidence-pane="observations">
+                <section id="evidence-observations-pane" class="evidence-observations" aria-label="Recorded observations">
+                  <div class="evidence-observation-tools"><label class="evidence-search-label"><span>Filter observations</span><input aria-label="Filter observations" id="evidence-search" type="search" placeholder="Operation, payload, source…" autocomplete="off" /></label><label class="evidence-scope-label"><span>Show</span><select aria-label="Observation scope" id="evidence-scope"><option value="related">Request &amp; context</option><option value="all">Retained window</option></select></label></div>
+                  <div class="evidence-list-caption"><span>Recorded observations</span><span id="evidence-window-count"></span></div>
+                  <div id="evidence-rows" class="evidence-observation-list" tabindex="-1"></div>
+                  <div class="evidence-list-footer"><span id="evidence-order-note">Grouped by relationship · retained order within groups</span><div><button id="evidence-previous" class="secondary-button" type="button">Previous</button><button id="evidence-next" class="secondary-button" type="button">Next</button></div></div>
+                </section>
+                <aside id="evidence-inspector" class="evidence-inspector" tabindex="-1" aria-label="Selected recorded observation"></aside>
+              </div>
+            </div>
+            <div id="evidence-package-mode" class="evidence-content" hidden>
+              <div class="evidence-package-heading"><button id="evidence-return" class="secondary-button" type="button">← Return to observations</button><span>Explicit metadata selection · nothing is saved automatically</span></div>
               <section id="evidence-package-panel" class="evidence-package-panel" aria-label="Metadata package workflow">
                 <h2>Metadata packages</h2>
                 <p class="package-note">Metadata only; capture completeness is unknown. Export never stops writers.</p>
@@ -449,11 +472,6 @@
                 <p id="package-save-note" data-package-save-note class="package-note"></p>
                 <div data-package-report class="package-report"></div>
               </section>
-            <div class="evidence-tools"><span>Selected backtrace records</span><span id="evidence-count" class="evidence-count">0 events</span></div>
-            <div class="evidence-table" role="table" aria-label="Evidence events">
-              <div class="evidence-head" role="row"><span role="columnheader">Time</span><span role="columnheader">Source</span><span role="columnheader">Category</span><span role="columnheader">Operation</span><span role="columnheader">Correlation IDs</span><span role="columnheader">Value / artifact</span></div>
-              <div id="evidence-rows"></div>
-            </div>
             </div>
           </section>
 
@@ -1175,6 +1193,7 @@
                         <div class="decoder-view-tabs" role="group" aria-label="Output representation"><button class="secondary-button" type="button" data-decoder-view="text" aria-pressed="true">UTF-8</button><button class="secondary-button" type="button" data-decoder-view="hex" aria-pressed="false">Hex dump</button><button class="secondary-button" type="button" data-decoder-view="base64" aria-pressed="false">Base64</button></div>
                         <pre id="decoder-output" tabindex="0" data-empty-label="No bytes to display. Enter input to begin.">No bytes selected.</pre>
                         <div class="decoder-actions"><button id="decoder-copy-output" class="secondary-button" type="button" disabled>Copy visible output</button></div>
+                        <section id="investigation-decoder-origin" class="decoder-field-origin" aria-label="Decoded value evidence origin" hidden><p></p><button class="secondary-button" type="button">Open original evidence</button></section>
                         <section id="decoder-field-origin" class="decoder-field-origin" aria-label="Request field source search" hidden>
                           <p id="decoder-field-origin-label"></p>
                           <button id="decoder-find-sources" class="secondary-button" type="button" disabled>Find sources for result</button>
@@ -1289,6 +1308,7 @@
     <script src="pane_layout.js"></script>
     <script src="native_console_completion.js"></script>
     <script src="native_console.js"></script>
+    <script src="investigation_navigation.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

@@ -82,7 +82,7 @@ function trafficTypeLabel(type) {
 }
 
 // Keep table labels compact; filters and tooltips retain the full type names.
-const TRAFFIC_TABLE_TYPE_LABELS = Object.freeze({xhr: 'XHR/Fetch', doc: 'Doc', css: 'CSS', js: 'JS',
+const TRAFFIC_TABLE_TYPE_LABELS = Object.freeze({xhr: 'XHR/F', doc: 'Doc', css: 'CSS', js: 'JS',
   font: 'Font', img: 'Img', media: 'Media', socket: 'WS', wasm: 'Wasm'});
 function trafficTableTypeLabel(type) {
   return Object.hasOwn(TRAFFIC_TABLE_TYPE_LABELS, type) ? TRAFFIC_TABLE_TYPE_LABELS[type] : 'Other';
@@ -162,7 +162,7 @@ function renderTrafficRows(container, requests, {selectedId, newIds, matches, on
         trafficNode('span', 'request-host', `${target.host}${match ? ' · ' + match.label : ''}`));
       const numericStatus = Number(request.status);
       const status = trafficNode('span', request.failed || numericStatus >= 400 ? 'status-error'
-        : numericStatus >= 200 ? 'status-ok' : 'status-neutral', request.failed ? '(failed)' : request.status === 'pending' ? 'Pending' : String(request.status));
+        : numericStatus >= 200 ? 'status-ok' : 'status-neutral', request.failed ? 'Failed' : request.status === 'pending' ? 'Pending' : String(request.status));
       status.title = request.failed ? 'Request failed. Inspect the retained response state for details.'
         : request.status === 'pending' ? 'No terminal lifecycle event has been captured.' : `HTTP status ${request.status}`;
       const type = trafficNode('span', 'request-type', trafficTableTypeLabel(request.type));

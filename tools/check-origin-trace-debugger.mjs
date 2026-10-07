@@ -263,7 +263,7 @@ const ledger = new TrafficFixtureNode();
 const rowOptions = {selectedId: "3", newIds: new Set(["3"]), onSelect() {}, onKey() {}};
 trafficUI.renderTrafficRows(ledger, retainedTraffic.slice(0, 500), rowOptions);
 assert.equal(ledger.children[0].children[1].textContent, "Pending");
-assert.equal(ledger.children[0].children[2].textContent, "XHR/Fetch");
+assert.equal(ledger.children[0].children[2].textContent, "XHR/F");
 assert.equal(ledger.children[0].children[2].title, "Fetch/XHR");
 const selectedRow = ledger.children[3];
 selectedRow.focus(); ledger.scrollTop = 84;
@@ -282,7 +282,7 @@ for (const patch of [{status: 200, time: 4}, {status: 503, failed: true, time: 6
   assert.equal(ledger.scrollTop, 84);
   assert(!selectedRow.classList.contains("is-new"));
 }
-assert.equal(selectedRow.children[1].textContent, "(failed)");
+assert.equal(selectedRow.children[1].textContent, "Failed");
 trafficUI.renderTrafficRows(ledger, retainedTraffic.slice(1, 501), rowOptions);
 assert.equal(ledger.children[2], selectedRow);
 assert.equal(ledger.scrollTop, 56, "Retained-window eviction preserves the first visible row anchor");
@@ -1149,7 +1149,8 @@ async function checkTrafficBrowser() {
     await evaluate("(async()=>{while(state.refreshing) await new Promise(resolve=>setTimeout(resolve,20)); await refresh();})()");
     assert.equal(await evaluate("state.selectedRequestId"), "qa-22");
     await evaluate("Object.assign(state.requests[22], {status:'failed', failed:true, time:27}); state.requests[22].exchange.response={state:'error',reason:'Synthetic network failure',headers:[]}; renderRequests(); renderInspector()");
-    assert.match(await evaluate("document.querySelector('[data-request-id=\"qa-22\"]').textContent"), /failed/);
+    assert.equal(await evaluate("document.querySelector('[data-request-id=\"qa-22\"]').children[1].textContent"), "Failed");
+    assert(await evaluate("(()=>{const cell=document.querySelector('[data-request-id=\"qa-22\"]').children[1];return cell.clientWidth>0&&cell.scrollWidth<=cell.clientWidth;})()"), "Failed label must fit its compact status cell");
     await click('#inspector-tab-response');
     assert.match(await evaluate("document.querySelector('#exchange-inspector').textContent"), /Synthetic network failure/);
     assert.equal(await evaluate("elements.selectedStatus.textContent"), "failed");

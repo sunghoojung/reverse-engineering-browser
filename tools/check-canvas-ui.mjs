@@ -134,7 +134,8 @@ export async function checkCanvasInteractions({evaluate,viewport,click,key,wheel
     while(Date.now()<end){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,25));}
     assert.fail(`Canvas UI did not settle: ${message}`);
   };
-  const press=async(value)=>key(value,value,{windowsVirtualKeyCode:{Enter:13,Tab:9,ArrowRight:39,ArrowLeft:37}[value]});
+  // Native summary activation needs the Enter character, not only rawKeyDown.
+  const press=async(value)=>key(value,value,{windowsVirtualKeyCode:{Enter:13,Tab:9,ArrowRight:39,ArrowLeft:37}[value],...(value==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});
   const card=id=>`#signal-render-list .signal-render-card:nth-child(${6-Number(id)})`;
   const text=id=>evaluate(`document.querySelector(${JSON.stringify(card(id))})?.textContent`);
   const settle=()=>until("!state.refreshing&&!state.artifactRefreshing&&!state.canvasPreviewReads?.size");
@@ -198,12 +199,19 @@ export async function checkCanvasInteractions({evaluate,viewport,click,key,wheel
     await viewport(width,height);
     await reveal(card('5')+' .signal-canvas-frame');await geometry(`decoded preview ${width}`,card('5')+' .signal-canvas-frame');await screenshot(`canvas-${width}-decoded`);
     const disclosure=card('5')+' details:first-of-type > summary';
-    await reveal(disclosure);await click(disclosure);await press('Enter');await press('Enter');
+    const disclosureOpen=`document.querySelector(${JSON.stringify(card('5')+' details')})?.open`;
+    await reveal(disclosure);await click(disclosure);
+    await until(`${disclosureOpen}===true`,`pointer opens disclosure at ${width}`);
+    await press('Enter');
+    await until(`${disclosureOpen}===false`,`Enter closes disclosure at ${width}`);
+    await press('Enter');
+    await until(`${disclosureOpen}===true`,`Enter reopens disclosure at ${width}`);
     assert(await evaluate(`document.querySelector(${JSON.stringify(card('5')+' details')}).open`));
     await press('Tab');await key('Tab','Tab',{windowsVirtualKeyCode:9,modifiers:8});
     const focused=await geometry(`keyboard disclosure ${width}`,disclosure);
     assert(focused.focus&&focused.focusVisible&&focused.outline!=='none'&&parseFloat(focused.outlineWidth)>0);
     await screenshot(`canvas-${width}-keyboard`);await press('Enter');
+    await until(`${disclosureOpen}===false`,`Enter closes focused disclosure at ${width}`);
     assert.equal(await evaluate(`document.querySelector(${JSON.stringify(card('5')+' details')}).open`),false);
     await click('#signal-view-rendering');await retireSnapshot();await press('ArrowRight');await settle();
     assert.equal(await evaluate('state.signalView'),'activity');assert.equal(await evaluate('document.activeElement.id'),'signal-view-activity');

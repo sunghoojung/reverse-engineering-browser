@@ -69,14 +69,17 @@ export function createConsoleFixture() {
 // Deterministically model the browser's scroll clamping when the shared
 // divider temporarily expands a scrollport during restore/measure/reapply.
 async function checkConsolePaneScroll(root) {
-  let total=620, mainSize=360, trackWrites=0, serial=0, visible=true;const mutations=[];
+  let total=620, mainSize=360, trackWrites=0, serial=0, visible=true;const mutations=[],extraOwners=[];
   const queue=new Map(), documentEvents={}, windowEvents={}, parents=new Map();
-  const reading={scrollTop:0,contentHeight:300},innerReading={scrollTop:0,contentHeight:200},consoleReading={scrollTop:0};
+  const scrollOwner=(contentHeight,extent)=>{let top=0,left=0;return {isConnected:true,contentHeight,
+    get scrollTop(){return top;},set scrollTop(value){top=Math.max(0,Math.min(value,this.contentHeight-extent()));},
+    get scrollLeft(){return left;},set scrollLeft(value){left=Math.max(0,Math.min(value,400));}};};
+  const reading=scrollOwner(300,()=>mainSize),innerReading=scrollOwner(200,()=>mainSize-160),consoleReading=scrollOwner(800,()=>total-mainSize);
   const plainStyle=()=>({setProperty(){},removeProperty(){}});
   const node=()=>({id:'',hidden:false,dataset:{},style:plainStyle(),parentElement:null,attributes:{},classList:{add(){},remove(){}},listeners:{},setAttribute(k,v){this.attributes[k]=v;},addEventListener(k,v){this.listeners[k]=v;},getClientRects(){return [];},getBoundingClientRect(){return {left:0,right:360,top:0,bottom:total,width:360,height:total};},querySelector(){return node();}});
   const body=node();body.children=[];body.append=n=>body.children.push(n);
   const workspace=node();workspace.parentElement=body;
-  workspace.style={setProperty(name,value){if(name==='grid-template-rows'){trackWrites++;mainSize=Number.parseFloat(value);}},removeProperty(name){if(name==='grid-template-rows'){trackWrites++;mainSize=360;reading.scrollTop=Math.max(0,Math.min(reading.scrollTop,reading.contentHeight-mainSize));innerReading.scrollTop=Math.max(0,Math.min(innerReading.scrollTop,innerReading.contentHeight-(mainSize-160)));}}};
+  workspace.style={setProperty(name,value){if(name==='grid-template-rows'){trackWrites++;mainSize=Number.parseFloat(value);}},removeProperty(name){if(name==='grid-template-rows'){trackWrites++;mainSize=360;reading.scrollTop=Math.max(0,Math.min(reading.scrollTop,reading.contentHeight-mainSize));innerReading.scrollTop=Math.max(0,Math.min(innerReading.scrollTop,innerReading.contentHeight-(mainSize-160)));for(const owner of extraOwners)owner.scrollTop=0;}}};
   const main=node(),panel=node();main.id='main';panel.id='native-console-panel';
   main.getClientRects=panel.getClientRects=()=>visible?[{}]:[];main.parentElement=panel.parentElement=workspace;
   main.getBoundingClientRect=()=>({left:0,right:360,top:0,bottom:mainSize,width:360,height:mainSize});
@@ -100,12 +103,29 @@ async function checkConsolePaneScroll(root) {
     assert.equal(consoleReading.scrollTop,50,'Console scrolling must keep the upper pane independent');
     assert.equal(trackWrites,initialWrites,'A pure scroll must reposition dividers without rewriting layout tracks');
   }
+  // The ordinary broker refresh mutates observed hidden attributes even while
+  // the same pane remains on screen. Its full measurement must be transactional.
+  for(let i=0;i<3;i++){mutations[0]([{attributeName:'hidden'}]);flush();
+    assert.equal(reading.scrollTop,60,'A full mutation refresh must preserve the outer reading offset');
+    assert.equal(innerReading.scrollTop,40,'A full mutation refresh must preserve nested reading offsets');
+    assert.equal(consoleReading.scrollTop,50,'A full mutation refresh must preserve Console reading offset');
+  }
+  reading.scrollTop=17;innerReading.scrollLeft=90;mutations[0]([{attributeName:'hidden'}]);flush();
+  assert.equal(reading.scrollTop,17,'Current selection-driven offsets win over the last scroll-event value');assert.equal(innerReading.scrollLeft,90,'Horizontal reading offset is retained');
+  reading.scrollTop=60;reading.contentHeight=245;total=700;windowEvents.resize({type:'resize'});flush();
+  assert.equal(reading.scrollTop,14,'A real resize must clamp to the final extent, not the temporary default extent');
+  reading.contentHeight=300;reading.scrollTop=0;mutations[0]([{attributeName:'hidden'}]);flush();assert.equal(reading.scrollTop,0,'An explicit move to the top must not resurrect a prior offset');
+  innerReading.isConnected=false;mutations[0]([{attributeName:'hidden'}]);flush();innerReading.isConnected=true;innerReading.scrollTop=20;
+  mutations[0]([{attributeName:'hidden'}]);flush();assert.equal(innerReading.scrollTop,0,'Detached owners are pruned rather than retained across reinsertion');
   total=700;windowEvents.resize({type:'resize'});documentEvents.scroll({target:reading});flush();assert(trackWrites>initialWrites,'A coalesced resize still requires full layout');
   const resizedWrites=trackWrites;documentEvents.scroll({target:reading});windowEvents.resize({type:'resize'});flush();assert(trackWrites>resizedWrites,'A resize after scroll must upgrade the pending refresh');
   const handle=body.children.find(child=>child.id==='pane-divider-native-console'),beforeKey=mainSize;
   handle.listeners.keydown({key:'ArrowDown',preventDefault(){},stopPropagation(){}});assert.equal(mainSize,beforeKey+10,'Divider keyboard resize must remain active');assert.equal(handle.style.top,`${mainSize-4}px`,'Divider hit target follows its split');
   visible=false;mutations[0]([{attributeName:'hidden'}]);flush();assert.equal(handle.hidden,true,'Visibility changes must retire the divider');visible=true;mutations[0]([{attributeName:'hidden'}]);flush();assert.equal(handle.hidden,false,'Reopening must restore full layout measurement');
-  console.log('PASS Console pane-scroll clamp regression, nested owners, resize/visibility scheduling and divider keyboard geometry (geometry model; not rendered QA)');
+  for(let i=0;i<65;i++){const owner=scrollOwner(800,()=>100);owner.scrollTop=10;extraOwners.push(owner);documentEvents.scroll({target:owner});}flush();mutations[0]([{attributeName:'hidden'}]);flush();
+  assert.equal(extraOwners[0].scrollTop,0,'The oldest of 65 registered owners must be dropped');assert(extraOwners.slice(1).every(owner=>owner.scrollTop===10),'The 64 most recent owners remain preserved');
+  extraOwners[1].scrollTop=0;documentEvents.scroll({target:extraOwners[1]});flush();extraOwners[1].scrollTop=10;mutations[0]([{attributeName:'hidden'}]);flush();assert.equal(extraOwners[1].scrollTop,0,'Returning to the origin removes an owner from tracking');
+  console.log('PASS Console pane-scroll and mutation-refresh clamp regressions, nested/current offsets, final resize clamping, bounded/dropped/detached owners, resize/visibility scheduling and divider keyboard geometry (geometry model; not rendered QA)');
 }
 
 // Behavioral DOM fixture only. Pixel, hit testing and keyboard coverage use the
@@ -317,6 +337,14 @@ export async function checkConsoleInteractions({evaluate,viewport,click,key,whee
     const after=await evaluate("({outer:document.querySelector('#screen-traffic .request-pane').scrollTop,rows:document.querySelector('#request-rows').scrollTop,console:document.querySelector('#native-console-scroll').scrollTop})");
     recordGeometry({label:label+' nested ledger ownership',before,after});
     assert(after.rows>before.rows,`${label}: nested request ledger must scroll independently`);assert.equal(after.outer,before.outer,`${label}: nested wheel must not move its parent`);assert.equal(after.console,before.console,`${label}: nested wheel must not move Console`);
+    // Repeated real broker refreshes render Requests and Inspector while both
+    // scroll owners are mid-read. Never wait around or disable periodic refresh.
+    for(let i=0;i<3;i++){
+      await until("(async()=>{if(state.refreshing)return false;await refresh();await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));return true;})()",'An owned broker refresh must execute and finish');
+      const retained=await evaluate("({outer:document.querySelector('#screen-traffic .request-pane').scrollTop,rows:document.querySelector('#request-rows').scrollTop,console:document.querySelector('#native-console-scroll').scrollTop})");
+      recordGeometry({label:label+' broker refresh '+(i+1),before:after,after:retained});
+      assert.deepEqual(retained,after,`${label}: broker refresh must retain outer, ledger and Console reading offsets`);
+    }
     await wheel('#screen-traffic .request-pane',-1000,'scrollbar');
     assert.equal(await evaluate("document.querySelector('#request-rows').scrollTop"),after.rows,`${label}: scrolling the parent must preserve the nested reading position`);
   };

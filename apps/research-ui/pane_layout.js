@@ -24,6 +24,32 @@ function initializePaneLayout() {
   const persist = () => {
     try { localStorage.setItem(storageKey, JSON.stringify(saved)); } catch { /* Keep the current layout. */ }
   };
+  // Track actual scroll owners, not every descendant of all eight panes. Read
+  // their current offsets at refresh time so selection-driven moves still win.
+  const scrollOwners = new Set();
+  const rememberScroll = node => {
+    if (!node?.isConnected || typeof node.scrollTop !== 'number') return;
+    scrollOwners.delete(node);
+    if (node.scrollTop || node.scrollLeft) scrollOwners.add(node);
+    if (scrollOwners.size > 64) scrollOwners.delete(scrollOwners.values().next().value);
+  };
+  const preserveScroll = update => {
+    const positions = [];
+    for (const node of scrollOwners) {
+      if (!node.isConnected) { scrollOwners.delete(node); continue; }
+      positions.push([node, node.scrollLeft, node.scrollTop]);
+    }
+    update();
+    let moved = false;
+    for (const [node, left, top] of positions) {
+      if (!node.isConnected) { scrollOwners.delete(node); continue; }
+      // The browser clamps to the final extent after a genuine resize. Only
+      // the temporary default-track expansion must not erase reading position.
+      if (node.scrollLeft !== left) { node.scrollLeft = left; moved = true; }
+      if (node.scrollTop !== top) { node.scrollTop = top; moved = true; }
+    }
+    return moved;
+  };
   let scheduled = false, dragging = null, layoutRequired = false;
   const schedule = (positionOnly = false) => {
     // A real resize/visibility change wins if it coalesces with scrolling.
@@ -36,7 +62,9 @@ function initializePaneLayout() {
       clearTimeout(timeout);
       scheduled = false;
       const positionOnly = !layoutRequired; layoutRequired = false;
-      layouts.forEach(layout => layout.refresh(positionOnly));
+      const update = () => layouts.forEach(layout => layout.refresh(positionOnly));
+      if (positionOnly) update();
+      else if (preserveScroll(update)) layouts.forEach(layout => layout.refresh(true));
     };
     frame = requestAnimationFrame(refresh);
     // WebKit can suspend animation frames for an inactive native window while
@@ -100,7 +128,7 @@ function initializePaneLayout() {
       const tracks = [`${size}px`, 'minmax(0, 1fr)', ...geometry.tracks.slice(2)];
       parent.style.setProperty(property, tracks.join(' '));
     };
-    const refresh = (positionOnly = false) => {
+    const refreshGeometry = (positionOnly = false) => {
       // Scrolling changes clipping, not the split. Temporarily restoring the
       // default tracks can expand a nested scrollport and clamp its position.
       // Responsive/structural changes still measure from their CSS defaults.
@@ -136,6 +164,10 @@ function initializePaneLayout() {
         height: `${horizontal ? geometry.end - geometry.start : 8}px`
       });
     };
+    const refresh = (positionOnly = false) => {
+      if (positionOnly) { refreshGeometry(true); return; }
+      if (preserveScroll(() => refreshGeometry())) refreshGeometry(true);
+    };
     const setSize = size => {
       if (!geometry) return;
       saved[configuration.id] = Math.max(geometry.minimum[0], Math.min(geometry.total - geometry.minimum[1], size)) / geometry.total;
@@ -156,7 +188,7 @@ function initializePaneLayout() {
         refresh();
       }
     };
-    const layout = { refresh, finish };
+    const layout = { refresh: refreshGeometry, finish };
     handle.addEventListener('pointerdown', event => {
       if (!geometry || event.button !== 0 || dragging) return;
       event.preventDefault(); handle.focus(); handle.setPointerCapture(event.pointerId);
@@ -191,7 +223,7 @@ function initializePaneLayout() {
   observer.observe(document.querySelector('#exchange-inspector'), { childList: true });
   observer.observe(document.querySelector('#native-console-panel'), { attributes: true, attributeFilter: ['hidden'] });
   window.addEventListener('resize', schedule);
-  document.addEventListener('scroll', () => schedule(true), true);
+  document.addEventListener('scroll', event => { rememberScroll(event.target); schedule(true); }, true);
   window.addEventListener('blur', () => dragging?.layout.finish(false));
   schedule();
 }

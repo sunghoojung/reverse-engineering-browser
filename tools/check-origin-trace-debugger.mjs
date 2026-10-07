@@ -20,9 +20,10 @@ const collectionBrowser = process.argv[2] === "--collection-ui-browser";
 const consoleBrowser = process.argv[2] === "--console-ui-browser";
 const trafficBrowser = process.argv[2] === "--traffic-ui-browser";
 const sourceFactsBrowser = process.argv[2] === "--source-facts-ui-browser";
+const memoryBrowser = process.argv[2] === "--memory-ui-browser";
 const evidenceBrowser = process.argv[2] === "--evidence-ui-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
-const root = process.argv[fieldsOnly || trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser || collectionBrowser ? 3 : 2] || new URL("..", import.meta.url).pathname;
+const root = process.argv[fieldsOnly || trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser || collectionBrowser || memoryBrowser ? 3 : 2] || new URL("..", import.meta.url).pathname;
 await checkConsoleDOM(root);
 await checkCollectionController(root);
 // Facts are UI projections over the already validated Rust contract. These
@@ -951,7 +952,7 @@ const sourceSandbox = {state: sourceState, location: {protocol: "http:"},
     if (catalogFailure) throw new Error("Synthetic refresh disconnected");
     return {status: 200, ok: true, headers: {get: () => null}, json: async () => catalogReply};
   }};
-for (const name of ["renderSources", "rebuildTrafficRequests", "applyMemoryOriginTrace", "renderLiveBrowserTabCount",
+for (const name of ["renderSources", "rebuildTrafficRequests", "syncMemorySession", "applyMemoryOriginTrace", "renderLiveBrowserTabCount",
   "renderDebugger", "renderShellStatus", "renderNetworkNotice", "renderMemory", "renderFieldProvenance", "scheduleDebuggerRefresh",
   "renderSourceTree", "renderSourceTabs", "updateSourceDecorations"]) {
   sourceSandbox[name] = () => {};
@@ -2380,13 +2381,555 @@ async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,scre
   return {status:'passed',path:'browser development Evidence UI',source:'synthetic closed metadata fixture; authoritative native-writer HTTP checks are separate',viewports:[[1440,900],[760,560],[360,740]],checks:['Requests and narrow Backtraces pointer entry','exact scoped selection','explicit guarded export and retry','explicit browser download exact bytes; no automatic save','real file input exact-byte validation','invalid and unsupported states','writer refusal and unavailable store','Cancel and Escape focus','stale selection and Back/reopen','50-row paging','keyed refresh focus','Space/Tab keyboard selection','independent candidate/panel scrolling','narrow geometry and screenshots']};
 }
 
+// Synthetic Memory data travels through the existing debugger transport fixture.
+// It contains no page captures and does not execute getters or instrumentation.
+async function memoryBrowserFixture() {
+  const initial = JSON.parse(await readFile(join(root, 'apps/origin-trace-backend/assets/debugger-empty.json'), 'utf8'));
+  const target = {id:'memory-target-A',type:'page',title:'Memory fixture',url:'https://fixture.invalid/memory'};
+  const fixture = {session:{...initial,state:'running',target,targets:[target],generation:10},requests:[],pending:[],mode:'ready',
+    traceId:7,nextTraceId:7,stopState:'aborted',notModifiedCount:0,debuggerRequests:0};
+  fixture.idleTrace=()=>structuredClone(initial.memory_origin_trace);
+  const baseline = () => ({target_id:fixture.session.target.id,file_bytes:4096,captured_at_ms:1700000000000+fixture.session.generation});
+  const live = () => ({protocol_version:2,analyzed:150,total_objects:200,result_limit:50,duration_ms:5,
+    result_limit_reached:false,scan_limit_reached:false,property_limit_reached:false,timed_out:fixture.mode==='partial',
+    results:fixture.mode==='empty'?[]:Array.from({length:50},(_,i)=>({id:`preview-${i}`,class_name:`RetainedFixture${i}`,property_count:16,
+      properties_truncated:false,similarity:null,preview:Array.from({length:16},(_,j)=>({name:`property-${j}`,type:'string',value:j===0?'<img src=x onerror=alert(1)>':'synthetic inert value '.repeat(8)}))}))});
+  const snapshot = () => ({protocol_version:2,file_bytes:4096,total_nodes:100,analyzed_nodes:100,matched_nodes:fixture.mode==='empty'?0:50,reachable_nodes:90,
+    total_edges:120,indexed_edges:120,total_strings:30,duration_ms:4,result_limit:50,reference_limit:12,scope:'all',result_limit_reached:false,
+    node_limit_reached:fixture.mode==='partial',edge_limit_reached:false,string_limit_reached:false,retaining_paths_partial:false,
+    results:fixture.mode==='empty'?[]:Array.from({length:50},(_,i)=>({id:String(i+1),type:'object',name:`Snapshot node ${i+1}`,self_size:64,reachable:true,
+      incoming_reference_count:12,incoming_reference_limit_reached:false,retaining_path_complete:true,
+      retaining_path:[{edge_type:'property',edge:'retained',type:'object',name:'root fixture'}],
+      incoming_references:Array.from({length:12},(_,j)=>({source_id:String(j+100),edge_type:j===0?'internal':'property',edge:`edge-${j}`,source_type:'object',source_name:`referrer ${j}`}))}))});
+  const diff = () => ({protocol_version:1,baseline_file_bytes:4096,current_file_bytes:4096,baseline_nodes:100,current_nodes:101,
+    baseline_edges:120,current_edges:121,baseline_reachable_nodes:90,current_reachable_nodes:91,baseline_self_size:6400,current_self_size:6464,self_size_delta:64,
+    duration_ms:8,result_limit:50,group_result_limit_reached:false,dominator_result_limit_reached:false,aggregation_limit_reached:false,
+    baseline_node_limit_reached:false,baseline_edge_limit_reached:false,baseline_string_limit_reached:false,current_node_limit_reached:fixture.mode==='partial',
+    current_edge_limit_reached:false,current_string_limit_reached:false,retained_size_saturated:false,
+    groups:fixture.mode==='dominators'?[]:[{type:'object',name:'RetainedFixture',baseline_count:10,current_count:11,count_delta:1,baseline_self_size:640,current_self_size:704,self_size_delta:64}],
+    dominators:[{id:'7',type:'object',name:'Retained owner',baseline_retained_size:640,current_retained_size:704,retained_size_delta:64}]});
+  fixture.trace = state => ({...initial.memory_origin_trace,trace_id:fixture.traceId,state,target_id:fixture.session.target.id,query:'fixture',scope:'all',
+    before_steps:3,after_steps:8,started_at_ms:1700000000000+fixture.traceId,message:state==='armed'?'Trace armed. Trigger a page click.':'Stopped with bounded samples.',
+    step_count:state==='armed'?0:2,first_match_step:state==='armed'?null:2,partial:state!=='armed',limit_reason:null,
+    steps:state==='armed'?[]:[1,2].map(step=>({id:`trace-${fixture.traceId}-${step}`,step,captured_at_ms:1700000000000+step,capture_bytes:4096,duration_ms:2,
+      analyzed_nodes:80,total_nodes:100,indexed_edges:90,total_edges:120,matched:step===2,coverage_partial:true,is_first_match:step===2,
+      location:{script_id:'reused-script',url:'https://fixture.invalid/memory.js',function_name:`fixtureStep${step}`,line:3,column:0,framework_filtered:false},
+      match:step===2?{id:'7',type:'string',name:'fixture',self_size:16}:null}))});
+  fixture.action = async request => {
+    fixture.requests.push(structuredClone(request));
+    const generation = ++fixture.session.generation;
+    let body;
+    if(request.action==='search_live_objects') body={ok:true,generation,search:live()};
+    if(request.action==='search_heap_snapshot') body={ok:true,generation,snapshot:{...snapshot(),scope:request.scope??'all'}};
+    if(request.action==='capture_heap_diff_baseline') {fixture.session.heap_diff_baseline=baseline();body={ok:true,generation,baseline:structuredClone(fixture.session.heap_diff_baseline)};}
+    if(request.action==='clear_heap_diff_baseline') {fixture.session.heap_diff_baseline=null;body={ok:true,generation};}
+    if(request.action==='compare_heap_diff') body={ok:true,generation,diff:diff()};
+    if(request.action==='start_memory_origin_trace') {fixture.traceId=fixture.nextTraceId++;fixture.session.memory_origin_trace=fixture.trace('armed');body={ok:true,generation,trace:structuredClone(fixture.session.memory_origin_trace)};}
+    if(request.action==='stop_memory_origin_trace') {fixture.session.memory_origin_trace=fixture.trace(fixture.stopState);body={ok:true,generation,trace:structuredClone(fixture.session.memory_origin_trace)};}
+    if(request.action==='clear_memory_origin_trace') {fixture.session.memory_origin_trace=structuredClone(initial.memory_origin_trace);body={ok:true,generation};}
+    if(fixture.mode==='pending') await new Promise(resolve=>fixture.pending.push(resolve));
+    if(fixture.mode==='error') return null;
+    if(fixture.mode==='malformed') return {ok:true,generation,malformed:true};
+    return body;
+  };
+  fixture.release=()=>fixture.pending.splice(0).forEach(resolve=>resolve());
+  fixture.handle=async(request,response)=>{
+    const path=new URL(request.url,'http://127.0.0.1').pathname;
+    const json=(status,body,headers={})=>{if(!response.destroyed){response.writeHead(status,{'Content-Type':'application/json',...headers});response.end(JSON.stringify(body));}};
+    if(path==='/api/debugger'){
+      fixture.debuggerRequests++;const etag=`"memory-${fixture.session.generation}"`;
+      if(request.headers?.['if-none-match']===etag){fixture.notModifiedCount++;response.writeHead(304,{ETag:etag});response.end();}
+      else json(200,fixture.session,{ETag:etag});return true;
+    }
+    if(path==='/api/debugger/actions'){
+      let bytes='';for await(const chunk of request){bytes+=chunk;if(bytes.length>16384)throw Error('Fixture request limit');}
+      const body=await fixture.action(JSON.parse(bytes));json(body?200:503,body??{error:'Synthetic unavailable native action'});return true;
+    }
+    if(path==='/api/events'){json(200,{count:0,events:[],capture_mode:'demo',broker_connected:false,capture_controls_available:false});return true;}
+    if(path==='/api/artifacts'){json(200,{count:0,artifacts:[]});return true;}
+    return false;
+  };
+  return fixture;
+}
+
+const memoryAppSource=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
+const memoryControllerSource=memoryAppSource.slice(memoryAppSource.indexOf('      function memoryAttached()'),memoryAppSource.indexOf('      function debuggerValueText('));
+assert(memoryControllerSource.includes('finishMemoryOperation'));
+async function memoryControllerFixture() {
+  const fixture=await memoryBrowserFixture();
+  const state={memoryMode:'live',memoryResults:[],memorySearchPending:false,memorySearchStatus:'idle',memorySearchMeta:null,memoryTargetId:null,
+    memoryDiffBaseline:null,memoryScopeVersion:0,debuggerSession:structuredClone(fixture.session)};
+  const elements=Object.fromEntries(['memoryPropertyQuery','memoryValueQuery','memoryClassQuery','memoryShapeQuery','memorySimilarityThreshold','memoryRegex','memoryCaseSensitive','memoryShapeValues','memoryReferenceScope','memoryOriginBefore','memoryOriginAfter','memoryCaptureBaseline'].map(name=>[name,{value:'',checked:false,focus(){}}]));
+  elements.memoryPropertyQuery.value='fixture';elements.memoryValueQuery.value='fixture';elements.memorySimilarityThreshold.value='0.75';
+  elements.memoryReferenceScope.value='all';elements.memoryOriginBefore.value='3';elements.memoryOriginAfter.value='8';
+  const controller=runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+'\n'+memoryControllerSource+
+    ';renderMemory=()=>{};({runLiveObjectSearch,runHeapSnapshotSearch,captureHeapDiffBaseline,clearHeapDiffBaseline,runHeapSnapshotDiff,runMemoryOriginTrace,stopMemoryOriginTrace,clearMemoryOriginTrace,applyMemoryOriginTrace,syncMemorySession,memoryOwnerCurrent,setMemoryMode,isDebuggerResponse,isLiveObjectSearchResponse,isHeapSnapshotSearchResponse,isHeapSnapshotDiffResponse,isMemoryOriginTrace})',
+    {state,elements,Date,TextEncoder,formatByteSize:value=>`${value} bytes`,debuggerAction:request=>fixture.action(request),memoryOriginTraceActive:()=>['armed','capturing','stepping','stopping'].includes(state.debuggerSession.memory_origin_trace.state)});
+  assert(controller.isDebuggerResponse(fixture.session),'Memory fixture must enter through the genuine debugger validator');
+  return {fixture,state,elements,...controller};
+}
+for(const [mode,method] of [['live','runLiveObjectSearch'],['snapshot','runHeapSnapshotSearch'],['diff','captureHeapDiffBaseline'],['diff','runHeapSnapshotDiff'],['diff','clearHeapDiffBaseline'],['origin','runMemoryOriginTrace'],['origin','clearMemoryOriginTrace']]) {
+  const c=await memoryControllerFixture();c.state.memoryMode=mode;
+  if(method==='runHeapSnapshotDiff'||method==='clearHeapDiffBaseline') c.state.memoryDiffBaseline={target_id:'memory-target-A',captured_at_ms:1,file_bytes:4096};
+  c.fixture.mode='pending';const pending=c[method]();assert(c.state.memorySearchPending,method);
+  c.state.debuggerSession={...c.state.debuggerSession,target:{...c.state.debuggerSession.target,id:'memory-target-B'}};
+  c.fixture.release();await pending;
+  assert.equal(c.state.memoryTargetId,null,method+' must not relabel A as B');assert.equal(c.state.memoryResults.length,0);
+  assert.equal(c.state.memorySearchStatus,'unavailable');assert.equal(c.state.memorySearchPending,false);
+}
+for(const method of ['runLiveObjectSearch','runHeapSnapshotSearch']) {
+  const c=await memoryControllerFixture();c.state.memoryMode=method==='runLiveObjectSearch'?'live':'snapshot';
+  c.fixture.mode='pending';const pending=c[method]();await c[method]();assert.equal(c.fixture.requests.length,1,'Enter/repeated click cannot double submit');
+  const old=c.state.debuggerSession;const next={...old,scripts:[],target:{...old.target,id:'B'}};
+  c.syncMemorySession(old,next);c.syncMemorySession(next,old);c.fixture.release();await pending;
+  assert.equal(c.state.memorySearchStatus,'unavailable','A to B to A cannot revive operation');
+  c.fixture.mode='ready';await c[method]();const rows=c.state.memoryResults;const owner=c.state.memoryResultOwner;
+  c.fixture.mode='error';await c[method]();assert.equal(c.state.memoryResults,rows);assert.equal(c.state.memoryResultOwner,owner);
+  assert.match(c.state.memorySearchMessage,/unconfirmed/);
+}
+{
+  const c=await memoryControllerFixture();c.state.memoryMode='diff';await c.captureHeapDiffBaseline();
+  const original=c.state.memoryDiffBaseline;c.fixture.mode='pending';const pending=c.runHeapSnapshotDiff();
+  c.state.memoryDiffBaseline={...original,captured_at_ms:original.captured_at_ms+1};c.fixture.release();await pending;
+  assert.equal(c.state.memorySearchStatus,'unavailable');assert.equal(c.state.memorySearchMeta,null);
+  c.fixture.mode='ready';await c.runHeapSnapshotDiff();assert.equal(c.state.memoryResultOwner.baseline.captured_at_ms,c.state.memoryDiffBaseline.captured_at_ms);
+  const accepted=c.state.memoryDiffBaseline;c.syncMemorySession(c.state.debuggerSession,{...c.state.debuggerSession,generation:c.state.debuggerSession.generation,heap_diff_baseline:null});
+  assert.equal(c.state.memoryDiffBaseline,accepted,'older poll cannot erase accepted baseline receipt');
+  c.syncMemorySession(c.state.debuggerSession,{...c.state.debuggerSession,generation:0,heap_diff_baseline:null});
+  assert.equal(c.state.memoryDiffBaseline,null,'native generation reset retires a pre-restart baseline');
+}
+{
+  const c=await memoryControllerFixture();c.state.memoryMode='origin';
+  assert.equal(c.applyMemoryOriginTrace({...c.fixture.trace('armed'),target_id:'other'}),false);assert.equal(c.state.memorySearchPending,false);
+  assert.equal(c.applyMemoryOriginTrace(c.fixture.trace('aborted')),true);assert.equal(c.state.memorySearchPending,false);
+  assert.equal(c.applyMemoryOriginTrace(c.fixture.trace('armed')),false,'late armed response cannot regress a stopped trace');
+  c.state.memoryScopeVersion++;assert.equal(c.applyMemoryOriginTrace(c.fixture.trace('aborted')),false,'expired source identity never revives');
+}
+{
+  const c=await memoryControllerFixture();const prior={...c.state.debuggerSession,scripts:[{execution_context_id:1}]};
+  c.syncMemorySession(prior,{...prior,scripts:[{execution_context_id:2}]});assert.equal(c.state.memoryScopeVersion,1,'same-target context destruction expires preview');
+  const live=await c.fixture.action({action:'search_live_objects'});assert(c.isLiveObjectSearchResponse(live));
+  live.search.results.push(live.search.results[0]);assert.equal(c.isLiveObjectSearchResponse(live),false);
+  const snapshot=await c.fixture.action({action:'search_heap_snapshot'});assert(c.isHeapSnapshotSearchResponse(snapshot));
+  snapshot.snapshot.results[0].incoming_references.push(snapshot.snapshot.results[0].incoming_references[0]);assert.equal(c.isHeapSnapshotSearchResponse(snapshot),false);
+  assert(c.isHeapSnapshotDiffResponse(await c.fixture.action({action:'compare_heap_diff'})));
+  assert(c.isMemoryOriginTrace(c.fixture.trace('aborted')));
+}
+console.log('PASS Memory production controllers: target/context/mode/baseline ownership, A-B-A race, double submission, failure retention, monotonic trace, baseline poll ordering and 50-row/12-reference bounds (not rendered QA)');
+
+// Action replies and debugger long-polls share a native lifecycle. Exercise the
+// production transport + refresh functions, including the following 304, rather
+// than replacing that race with a UI-only action stub.
+for (const outcome of ['success', 'lost', 'malformed', 'old-generation', 'restart']) {
+  const fixture=await memoryBrowserFixture();
+  const state={memoryMode:'origin',memoryResults:[],memorySearchPending:false,memorySearchStatus:'idle',memorySearchMeta:null,memoryTargetId:null,
+    memoryDiffBaseline:null,memoryScopeVersion:0,debuggerSession:structuredClone(fixture.session),debuggerRefreshing:false,debuggerActionPending:false,
+    debuggerEtag:null,openScriptIds:[],requests:[],selectedScriptId:null,selectedRequestId:null,editingBreakpointId:null};
+  const elements={memoryValueQuery:{value:'fixture'},memoryOriginBefore:{value:'3'},memoryOriginAfter:{value:'8'},memoryReferenceScope:{value:'all'}};
+  let release;const response=new Promise(resolve=>{release=resolve;});let gets=0;const requests=[];
+  const terminal={...fixture.trace('found'),...(outcome==='restart'?{trace_id:1,started_at_ms:1700000010000}:{})};
+  const generation=outcome==='restart'?0:12;
+  const sandbox={state,elements,Date,TextEncoder,AbortController,setTimeout,clearTimeout,location:{protocol:'http:'},document:{hidden:false,querySelector:()=>({hidden:true})},
+    fetch:async(url,options)=>{requests.push({url,method:options.method??'GET',headers:options.headers});
+      if(options.method==='POST')return {ok:true,json:async()=>{const body=await response;if(body instanceof Error)throw body;return body;}};
+      if(++gets>1)return {status:304,ok:false};
+      return {status:200,ok:true,headers:{get:()=>`"${generation}"`},json:async()=>({...structuredClone(fixture.session),generation,memory_origin_trace:terminal})};},
+    memoryOriginTraceActive:()=>['armed','capturing','stepping','stopping'].includes(state.debuggerSession.memory_origin_trace.state)};
+  for(const name of ['renderDebugger','scheduleDebuggerRefresh','rebuildTrafficRequests','renderLiveBrowserTabCount','pruneLiveScriptContent','renderShellStatus','renderNetworkNotice','renderFieldProvenance'])sandbox[name]=()=>{};
+  const slice=(start,end)=>memoryAppSource.slice(memoryAppSource.indexOf(start),memoryAppSource.indexOf(end,memoryAppSource.indexOf(start)));
+  const controller=runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+'\n'+memoryControllerSource+'\n'+
+    slice('      async function debuggerAction(', '      function scheduleDebuggerRefresh(')+'\n'+
+    slice('      async function refreshDebugger(', '      async function refreshArtifacts(')+'\nrenderMemory=()=>{};({runMemoryOriginTrace,refreshDebugger})',sandbox);
+  const pending=controller.runMemoryOriginTrace();await controller.refreshDebugger();
+  assert.equal(state.debuggerRefreshFailed,false,outcome);assert.equal(state.debuggerSession.memory_origin_trace.state,'found');
+  release(outcome==='lost'?new Error('Synthetic lost action reply'):{ok:true,generation:outcome==='malformed'?'invalid':outcome==='old-generation'?9:11,trace:fixture.trace('armed')});
+  await pending;await controller.refreshDebugger();
+  assert.equal(state.memorySearchMeta.state,'found',outcome);assert.equal(state.memorySearchPending,false,outcome);
+  assert.equal(state.debuggerActionPending,false);assert.equal(requests[2].headers['If-None-Match'],`"${generation}"`);
+  assert.equal(state.memorySearchStatus,'unavailable',outcome+' retains an unobserved action acknowledgement separately from known native terminal state');
+}
+const memoryFixturePoll=(c,patch)=>{
+  const previous=c.state.debuggerSession,current={...structuredClone(c.fixture.session),...patch};
+  assert(c.isDebuggerResponse(current));c.state.debuggerSession=current;c.syncMemorySession(previous,current);
+  return c.applyMemoryOriginTrace(current.memory_origin_trace);
+};
+for(const newId of [1,7]) {
+  const c=await memoryControllerFixture();c.state.memoryMode='origin';assert(c.applyMemoryOriginTrace(c.fixture.trace('aborted')));
+  const oldOwner=c.state.memoryResultOwner;
+  memoryFixturePoll(c,{generation:0,memory_origin_trace:structuredClone(c.state.debuggerSession.memory_origin_trace)});
+  assert.equal(oldOwner.expired,true);
+  c.fixture.action=async()=>({ok:true,generation:1,trace:{...c.fixture.trace('armed'),trace_id:newId,started_at_ms:1700000010000}});
+  await c.runMemoryOriginTrace();assert.equal(c.state.memorySearchMeta.trace_id,newId);assert.equal(c.state.memorySearchStatus,'searching');
+  assert.notEqual(c.state.memoryResultOwner,oldOwner);assert.equal(c.state.memoryResultOwner.nativeEpoch,1);
+}
+for(const action of ['captureHeapDiffBaseline','clearHeapDiffBaseline']) {
+  const c=await memoryControllerFixture();c.state.memoryMode='diff';
+  if(action==='clearHeapDiffBaseline')await c.captureHeapDiffBaseline();
+  c.fixture.mode='pending';const pending=c[action]();const generation=c.fixture.session.generation+1;
+  const baseline={target_id:'memory-target-A',file_bytes:8192,captured_at_ms:1700000020000};
+  memoryFixturePoll(c,{generation,heap_diff_baseline:baseline});c.fixture.release();await pending;
+  assert.equal(c.state.memoryDiffBaseline,baseline);assert.equal(c.state.memoryBaselineGeneration,generation);
+  assert.match(c.state.memorySearchMessage,/acknowledged/);assert.match(c.state.memorySearchMessage,/Newer native baseline/);
+}
+for(const generation of [undefined,null,'not-a-number',-1,0.5,Number.MAX_SAFE_INTEGER+1,Infinity,NaN]) {
+  const acknowledgement=extra=>({ok:true,...(generation===undefined?{}:{generation}),...extra});
+  const reset=await memoryControllerFixture();reset.state.memoryMode='diff';await reset.captureHeapDiffBaseline();
+  const original=reset.state.memoryDiffBaseline,originalGeneration=reset.state.memoryBaselineGeneration;
+  reset.fixture.action=async()=>acknowledgement({});await reset.clearHeapDiffBaseline();
+  assert.equal(reset.state.memorySearchStatus,'unavailable');assert.equal(reset.state.memoryDiffBaseline,original);
+  assert.equal(reset.state.memoryBaselineGeneration,originalGeneration);assert.doesNotMatch(reset.state.memorySearchMessage,/file was deleted/);
+  memoryFixturePoll(reset,{generation:13,heap_diff_baseline:{target_id:'memory-target-A',file_bytes:8192,captured_at_ms:1700000030000}});
+  assert.equal(reset.state.memoryDiffBaseline.file_bytes,8192);assert.equal(reset.state.memoryBaselineGeneration,13);
+  const clear=await memoryControllerFixture();clear.state.memoryMode='origin';clear.applyMemoryOriginTrace(clear.fixture.trace('aborted'));
+  const rows=clear.state.memoryResults;clear.fixture.action=async()=>acknowledgement({});await clear.clearMemoryOriginTrace();
+  assert.equal(clear.state.memorySearchStatus,'unavailable');assert.equal(clear.state.memoryResults,rows);
+  const start=await memoryControllerFixture();start.state.memoryMode='origin';start.fixture.action=async()=>acknowledgement({trace:start.fixture.trace('armed')});
+  await start.runMemoryOriginTrace();assert.equal(start.state.memorySearchStatus,'unavailable');assert.equal(start.state.memorySearchMeta,null);
+  const stop=await memoryControllerFixture();stop.state.memoryMode='origin';stop.state.debuggerSession.memory_origin_trace=stop.fixture.trace('armed');
+  stop.applyMemoryOriginTrace(stop.state.debuggerSession.memory_origin_trace);stop.fixture.action=async()=>acknowledgement({trace:stop.fixture.trace('aborted')});
+  await stop.stopMemoryOriginTrace();assert.equal(stop.state.memorySearchStatus,'unavailable');assert.equal(stop.state.memorySearchMeta.state,'armed');
+}
+{
+  const c=await memoryControllerFixture();c.state.memoryMode='origin';c.applyMemoryOriginTrace(c.fixture.trace('aborted'));
+  c.fixture.mode='pending';const pending=c.clearMemoryOriginTrace();
+  const newer={...c.fixture.trace('armed'),trace_id:8,started_at_ms:1700000020000};
+  memoryFixturePoll(c,{generation:12,memory_origin_trace:newer});c.fixture.release();await pending;
+  assert.equal(c.state.memorySearchMeta.trace_id,8);assert.equal(c.state.memorySearchPending,true);
+  assert.match(c.state.memorySearchMessage,/newer validated native trace/);
+  const stop=await memoryControllerFixture();stop.state.memoryMode='origin';stop.state.debuggerSession.memory_origin_trace=stop.fixture.trace('armed');
+  stop.applyMemoryOriginTrace(stop.state.debuggerSession.memory_origin_trace);
+  stop.fixture.action=async()=>({ok:true,generation:9,trace:stop.fixture.trace('aborted')});
+  await stop.stopMemoryOriginTrace();assert.equal(stop.state.memorySearchStatus,'unavailable');assert.equal(stop.state.memorySearchMeta.state,'armed');
+  assert.equal(stop.state.memoryLastOperation.action,'stop_memory_origin_trace');
+}
+console.log('PASS Memory production action/poll/ETag304 reconciliation (success/lost/malformed/old generation/restart), lower/reused epoch trace IDs, stale capture/reset acknowledgements, malformed generation matrix and newer trace preservation on clear');
+
+// Deterministic browser-clock fixture over the production Memory + debugger
+// transport/refresh functions. The synthetic fetch deliberately ignores abort
+// to prove that request/body ownership is bounded independently of its producer.
+async function memoryRequestFixture(phase = 'body', rendered = false) {
+  const c=rendered ? await memoryRenderFixture() : await memoryControllerFixture();
+  if (rendered) Object.assign(c.document,{hidden:false,querySelector:()=>({hidden:true})});
+  Object.assign(c.state,{memoryOperation:null,debuggerActionOwner:null,debuggerRefreshing:false,debuggerActionPending:false,debuggerEtag:null,openScriptIds:[],requests:[],selectedScriptId:null,selectedRequestId:null,editingBreakpointId:null});
+  const timers=new Map(),transports=[],requests=[];let timerId=0,native=null,memoryRenders=0;
+  const flush=async()=>{for(let i=0;i<12;i++)await Promise.resolve();};
+  const sandbox={state:c.state,elements:c.elements,Date,TextEncoder,AbortController,
+    setTimeout:(callback,delay)=>{const id=++timerId;timers.set(id,{callback,delay});return id;},clearTimeout:id=>timers.delete(id),
+    formatByteSize:value=>`${value} bytes`,location:{protocol:'http:'},document:c.document??{hidden:false,querySelector:()=>({hidden:true})},
+    textElement:c.textElement,onMemoryRender:()=>{memoryRenders++;},
+    fetch:async(url,options)=>{
+      requests.push({url,method:options.method??'GET',headers:options.headers});
+      if(options.method!=='POST'){
+        const session=native??c.fixture.session,etag=`"${session.generation}"`;
+        if(options.headers?.['If-None-Match']===etag)return {status:304,ok:false};
+        return {status:200,ok:true,headers:{get:()=>etag},json:async()=>structuredClone(session)};
+      }
+      const request=JSON.parse(options.body),reply=await c.fixture.action(request);
+      let headersReady,bodyReady,bodyReads=0,statusReads=0;
+      const body=new Promise(resolve=>{bodyReady=resolve;});
+      const headers=new Promise(resolve=>{headersReady=()=>resolve({get ok(){statusReads++;return transport.ok;},json:()=>{bodyReads++;return body;}});});
+      const transport={request,reply,signal:options.signal,headersReady,ok:true,get bodyReads(){return bodyReads;},get statusReads(){return statusReads;},resolve:value=>{headersReady();bodyReady(value);}};
+      transports.push(transport);if(phase==='body')headersReady();return headers;
+    },memoryOriginTraceActive:()=>['armed','capturing','stepping','stopping'].includes(c.state.debuggerSession.memory_origin_trace.state)};
+  for(const name of ['renderDebugger','scheduleDebuggerRefresh','rebuildTrafficRequests','renderLiveBrowserTabCount','pruneLiveScriptContent','renderShellStatus','renderNetworkNotice','renderFieldProvenance'])sandbox[name]=()=>{};
+  const slice=(start,end)=>memoryAppSource.slice(memoryAppSource.indexOf(start),memoryAppSource.indexOf(end,memoryAppSource.indexOf(start)));
+  const api=runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+'\n'+memoryControllerSource+'\n'+
+    slice('      async function debuggerAction(', '      function scheduleDebuggerRefresh(')+'\n'+
+    slice('      async function refreshDebugger(', '      async function refreshArtifacts(')+'\n'+
+    (rendered?'const memoryRenderImplementation=renderMemory;renderMemory=()=>{onMemoryRender();memoryRenderImplementation();};':'renderMemory=()=>{};')+
+    '({renderMemory,debuggerAction,refreshDebugger,runLiveObjectSearch,runHeapSnapshotSearch,captureHeapDiffBaseline,clearHeapDiffBaseline,runHeapSnapshotDiff,runMemoryOriginTrace,stopMemoryOriginTrace,clearMemoryOriginTrace,applyMemoryOriginTrace,setMemoryMode})',sandbox);
+  return {...c,...api,timers,transports,requests,flush,get memoryRenderCount(){return memoryRenders;},
+    poll:async patch=>{native={...structuredClone(c.fixture.session),...patch};await api.refreshDebugger();await flush();},
+    fire:async()=>{const callbacks=[...timers.values()];timers.clear();for(const timer of callbacks)timer.callback();await flush();}};
+}
+const settleMemoryRequest=async pending=>{
+  let timeout;try {await Promise.race([pending,new Promise((_,reject)=>{timeout=setTimeout(()=>reject(new Error('Memory request did not settle after retirement')),1000);})]);}
+  finally {clearTimeout(timeout);}
+};
+for(const phase of ['headers','body']) {
+  const c=await memoryRequestFixture(phase);c.state.memoryMode='origin';
+  const pending=c.runMemoryOriginTrace();await c.flush();
+  const old=c.transports[0];assert.equal(c.timers.size,1);
+  await c.poll({generation:12,memory_origin_trace:c.fixture.trace('found')});await settleMemoryRequest(pending);await c.refreshDebugger();
+  assert.equal(c.state.memorySearchMeta.state,'found');assert.equal(c.state.memoryOperation,null);
+  assert.equal(c.state.memorySearchPending,false);assert.equal(c.state.debuggerActionPending,false);assert.equal(c.timers.size,0);
+  assert(old.signal.aborted);assert.equal(c.requests.filter(request=>request.method==='POST').length,1);
+  assert.match(c.state.memorySearchMessage,/acknowledgement remains unavailable/);
+  // A generic newer action keeps its original transport semantics and latch.
+  const newer=c.debuggerAction({action:'pause'});await c.flush();const newOwner=c.state.debuggerActionOwner;
+  assert.equal(c.timers.size,0,'Non-Memory callers do not inherit a deadline or abort signal');assert.equal(c.transports[1].signal,undefined);
+  old.resolve(old.reply);await c.flush();
+  assert.equal(old.bodyReads,phase==='headers'?0:1,'Retired late headers must not start body parsing');
+  assert.equal(old.statusReads,0,'Retired late body must not continue response processing');
+  assert.equal(c.state.debuggerActionOwner,newOwner);assert.equal(c.state.debuggerActionPending,true);assert.equal(c.state.debuggerError,null);
+  assert.equal(c.state.memorySearchMeta.state,'found','Late armed result cannot overwrite terminal native state');
+  c.transports[1].resolve({ok:true,generation:13});await settleMemoryRequest(newer);assert.equal(c.state.debuggerActionPending,false);
+}
+const memoryDeadlines=[['live','runLiveObjectSearch',30000],['snapshot','runHeapSnapshotSearch',120000],
+  ['diff','captureHeapDiffBaseline',90000],['diff','clearHeapDiffBaseline',15000],['diff','runHeapSnapshotDiff',150000],
+  ['origin','runMemoryOriginTrace',15000],['origin','stopMemoryOriginTrace',15000],['origin','clearMemoryOriginTrace',15000]];
+for(const phase of ['headers','body'])for(const [mode,method,deadline] of memoryDeadlines) {
+  const c=await memoryRequestFixture(phase);c.state.memoryMode=mode;
+  if(method==='clearHeapDiffBaseline'||method==='runHeapSnapshotDiff')c.state.memoryDiffBaseline={target_id:'memory-target-A',captured_at_ms:1,file_bytes:4096};
+  if(method==='stopMemoryOriginTrace'){
+    c.state.debuggerSession.memory_origin_trace=c.fixture.trace('armed');c.applyMemoryOriginTrace(c.state.debuggerSession.memory_origin_trace);
+  }
+  if(method==='clearMemoryOriginTrace')c.applyMemoryOriginTrace(c.fixture.trace('aborted'));
+  const pending=c[method]();await c.flush();assert.equal(c.timers.size,1,method);
+  assert.equal([...c.timers.values()][0].delay,deadline,method);await c.fire();await settleMemoryRequest(pending);
+  assert.equal(c.state.debuggerActionPending,false,method);assert.equal(c.state.debuggerActionOwner,null);assert.equal(c.timers.size,0);
+  assert.equal(c.state.memoryOperation,null);assert.equal(c.state.memorySearchPending,method==='stopMemoryOriginTrace');
+  assert.equal(c.state.memorySearchStatus,'unavailable');assert.match(c.state.memorySearchMessage,/Native completion is unknown/);
+  assert(c.transports[0].signal.aborted);assert.equal(c.requests.filter(request=>request.method==='POST').length,1,'Never retry a native action');
+  c.transports[0].resolve(c.transports[0].reply);await c.flush();
+  assert.equal(c.transports[0].bodyReads,phase==='headers'?0:1,method+' late headers');assert.equal(c.transports[0].statusReads,0,method+' late body continuation');
+  if(method==='stopMemoryOriginTrace'){await c.poll({generation:12,memory_origin_trace:c.fixture.trace('aborted')});assert.equal(c.state.memorySearchPending,false);}
+}
+for(const change of ['target','restart','context'])for(const phase of ['headers','body']) {
+  const c=await memoryRequestFixture(phase);c.state.memoryMode='live';
+  if(change==='context')c.state.debuggerSession.scripts=[{execution_context_id:1}];
+  const pending=c.runLiveObjectSearch();await c.flush();
+  await c.poll(change==='target'?{generation:12,target:{...c.fixture.session.target,id:'target-B'}}:change==='restart'?{generation:0}:{generation:12,scripts:[]});
+  await settleMemoryRequest(pending);assert.equal(c.state.memoryOperation,null);assert.equal(c.state.debuggerActionPending,false);assert.equal(c.state.memorySearchPending,false);
+  assert.equal(c.state.memoryResults.length,0);assert(c.transports[0].signal.aborted);assert.equal(c.timers.size,0);
+}
+{
+  const c=await memoryRequestFixture();const first=c.runLiveObjectSearch();await c.flush();const old=c.transports[0];
+  await c.fire();await settleMemoryRequest(first);
+  c.elements.memoryValueQuery.value='newer criteria';const second=c.runLiveObjectSearch();await c.flush();
+  const operation=c.state.memoryOperation,owner=c.state.debuggerActionOwner;
+  old.resolve(old.reply);await c.flush();assert.equal(c.state.memoryOperation,operation);assert.equal(c.state.debuggerActionOwner,owner);assert.equal(c.state.debuggerActionPending,true);
+  c.transports[1].resolve(c.transports[1].reply);await settleMemoryRequest(second);assert.equal(c.state.memoryResults.length,50);
+  assert.match(c.state.memoryResultOwner.criteria,/newer criteria/);assert.equal(c.timers.size,0);
+}
+{
+  const c=await memoryRequestFixture();c.state.memoryMode='origin';
+  const old=c.fixture.trace('found');c.state.debuggerSession.memory_origin_trace=old;c.applyMemoryOriginTrace(old);
+  const pending=c.runMemoryOriginTrace();await c.flush();
+  await c.poll({generation:12,memory_origin_trace:old});
+  assert(c.state.memoryOperation,'Unchanged old terminal trace cannot prove a new Start completed');assert.equal(c.timers.size,1);
+  await c.fire();await settleMemoryRequest(pending);assert.equal(c.state.debuggerActionPending,false);
+}
+{
+  const c=await memoryRequestFixture();
+  assert.equal(await c.debuggerAction({action:'pause'},{action:'pause'}),null,'Optional Memory scope cannot change a generic action contract');
+  assert.equal(c.transports.length,0);
+  const old=c.runLiveObjectSearch();await c.flush();
+  // Stress an owner handoff before the old finally runs. The replaced request
+  // must still terminate at its own deadline without unlocking the new owner.
+  c.state.debuggerActionPending=false;
+  const newer=c.debuggerAction({action:'pause'});await c.flush();const owner=c.state.debuggerActionOwner;
+  await c.fire();await settleMemoryRequest(old);
+  assert.equal(c.state.debuggerActionOwner,owner);assert.equal(c.state.debuggerActionPending,true);assert.equal(c.state.debuggerError,null);
+  c.transports[1].resolve({ok:true,generation:13});await settleMemoryRequest(newer);assert.equal(c.state.debuggerActionPending,false);
+}
+for(const phase of ['headers','body']) {
+  const c=await memoryRequestFixture(phase);const memory=c.runLiveObjectSearch();await c.flush();
+  const owner=c.state.debuggerActionOwner,parallel=c.debuggerAction({action:'cancel_repeater_request'});await c.flush();
+  assert.equal(c.transports[1].signal,undefined);assert.equal(c.timers.size,1);
+  c.transports[1].resolve({ok:true,generation:12});await settleMemoryRequest(parallel);
+  assert.equal(c.state.debuggerActionOwner,owner);assert.equal(c.state.debuggerActionPending,true,'Parallel controls cannot unlock the pending action');
+  c.transports[0].resolve(c.transports[0].reply);await settleMemoryRequest(memory);assert.equal(c.state.debuggerActionPending,false);
+  assert.equal(c.transports[0].bodyReads,1);assert.equal(c.transports[0].statusReads,1);assert.equal(c.timers.size,0);
+  const generic=c.debuggerAction({action:'pause'});await c.flush();const failed=c.transports[2];failed.ok=false;
+  failed.resolve({error:'Synthetic generic action rejected'});assert.equal(await generic,null);
+  assert.equal(c.state.debuggerError,'Synthetic generic action rejected');assert.equal(c.state.debuggerActionPending,false);
+  assert.equal(failed.bodyReads,1);assert.equal(failed.statusReads,1);assert.equal(c.timers.size,0);
+}
+for(const expiry of ['target','restart','context'])for(const phase of ['headers','body']) {
+  const c=await memoryRequestFixture(phase,true);c.state.memoryMode='origin';
+  const idle=structuredClone(c.fixture.session.memory_origin_trace);
+  c.state.debuggerSession.memory_origin_trace=c.fixture.trace('armed');c.applyMemoryOriginTrace(c.state.debuggerSession.memory_origin_trace);c.renderMemory();
+  if(expiry==='context')c.state.debuggerSession.scripts=[{execution_context_id:1}];
+  const pending=c.stopMemoryOriginTrace();await c.flush();
+  const patch=expiry==='target'?{generation:12,target:{...c.fixture.session.target,id:'target-B'}}:expiry==='restart'?{generation:0}:{generation:12,scripts:[]};
+  await c.poll({...patch,memory_origin_trace:idle});
+  await settleMemoryRequest(pending);await c.refreshDebugger();
+  assert.equal(c.state.debuggerActionPending,false);assert.equal(c.state.memorySearchPending,false);
+  assert.equal(c.elements.memorySearchButton.disabled,false,expiry+' '+phase+' search control recovers after 304');
+  assert(c.elements.memoryModeButtons.every(button=>button.disabled===false),expiry+' '+phase+' mode controls recover');
+  assert.equal(c.elements.memoryCaptureBaseline.disabled,false,expiry+' '+phase+' baseline control recovers');
+  assert(c.requests.at(-1).headers['If-None-Match'],'The unchanged poll must use the terminal ETag');
+  const renders=c.memoryRenderCount;c.transports[0].resolve(c.transports[0].reply);await c.flush();
+  assert.equal(c.memoryRenderCount,renders,'Late retired Stop does not redraw current controls');
+}
+{
+  const c=await memoryRequestFixture('body',true);c.renderMemory();
+  const owner={action:'search_live_objects',mode:'live',targetId:'memory-target-A',scopeVersion:0,nativeEpoch:0,pollSequence:0,submittedGeneration:10};
+  const old=c.debuggerAction({action:'search_live_objects'},owner);await c.flush();
+  c.state.debuggerActionPending=false;const newer=c.debuggerAction({action:'pause'});await c.flush();
+  const renders=c.memoryRenderCount,newOwner=c.state.debuggerActionOwner;
+  await c.fire();await settleMemoryRequest(old);
+  assert.equal(c.memoryRenderCount,renders,'Replaced Memory cleanup cannot redraw newer UI');
+  assert.equal(c.state.debuggerActionOwner,newOwner);assert.equal(c.state.debuggerActionPending,true);
+  c.transports[1].resolve({ok:true,generation:13});await settleMemoryRequest(newer);
+  assert.equal(c.memoryRenderCount,renders,'Generic cleanup does not broadly rerender Memory');
+}
+console.log('PASS Memory rendered Stop controls recover after target/restart/context expiry and 304 for headers/body; replaced-owner and generic cleanup do not rerender Memory');
+console.log('PASS Memory non-settling headers/body: terminal-poll retirement before 304, all eight native-compatible deadlines, target/restart/context expiry, abort cleanup, no retries, unchanged generic callers and late-old-response isolation of newer Memory/global latches');
+
+async function memoryRenderFixture() {
+  const c=await memoryControllerFixture();
+  const document={activeElement:null};
+  class MemoryNode extends TrafficFixtureNode {
+    get parentElement(){return this.parentNode;}
+    get firstChild(){return this.children[0]??null;}
+    matches(selector){return selector.split(',').some(value=>super.matches(value.trim()));}
+    focus(){document.activeElement=this;}
+    remove(){if(this.parentNode){if(this.contains(document.activeElement))document.activeElement=null;this.parentNode.children.splice(this.parentNode.children.indexOf(this),1);this.parentNode=null;}}
+    replaceChildren(...nodes){if(this.contains(document.activeElement))document.activeElement=null;super.replaceChildren(...nodes);}
+  }
+  document.createElement=tag=>new MemoryNode(tag);
+  const bindings=await readFile(join(root,'apps/research-ui/app_state.js'),'utf8');
+  const elements=Object.fromEntries([...bindings.matchAll(/        (memory\w+): document.querySelector/g)].map(match=>[match[1],new MemoryNode()]));
+  for(const [key,value] of Object.entries(c.elements))Object.assign(elements[key],value);
+  elements.memoryModeButtons=['live','snapshot','diff','origin'].map(mode=>{const node=new MemoryNode('button');node.dataset.memoryMode=mode;return node;});
+  const list=new MemoryNode();list.append(elements.memoryResults);
+  const pane=new MemoryNode();pane.append(list,elements.memoryDetail);
+  const textElement=(tag,className,text)=>{const node=new MemoryNode(tag);node.className=className;node.textContent=text;return node;};
+  const renderer=runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+'\n'+memoryControllerSource+
+    ';({renderMemory,selectMemoryResult,runLiveObjectSearch,runHeapSnapshotSearch,runHeapSnapshotDiff,setMemoryMode})',
+    {state:c.state,elements,document,textElement,Date,TextEncoder,formatByteSize:value=>`${value} bytes`,debuggerAction:request=>c.fixture.action(request)});
+  return {...c,...renderer,elements,document,list,textElement};
+}
+{
+  const c=await memoryRenderFixture();await c.runLiveObjectSearch();
+  assert.equal(c.elements.memoryResults.children.length,50);
+  c.selectMemoryResult('preview-10',true);const row=c.document.activeElement,detail=c.elements.memoryDetail.firstChild;
+  c.list.scrollTop=200;c.elements.memoryDetail.scrollTop=80;
+  for(let i=0;i<200;i++)c.renderMemory();
+  assert.equal(c.document.activeElement,row);assert.equal(c.elements.memoryDetail.firstChild,detail);
+  assert.equal(c.list.scrollTop,200);assert.equal(c.elements.memoryDetail.scrollTop,80);
+  assert.equal(c.elements.memoryResults.querySelectorAll('.memory-result-row').length,50);
+  const count=node=>1+node.children.reduce((sum,child)=>sum+count(child),0);
+  assert(count(c.elements.memoryDetail)<100,'Only selected live preview renders, never all 50 previews');
+  c.elements.memoryValueQuery.value='new failed criteria';c.fixture.mode='error';await c.runLiveObjectSearch();
+  assert.match(c.elements.memoryNotice.textContent,/Submitted to memory-target-A/);
+  assert.match(c.elements.memorySubmittedCriteria.textContent,/Retained result/);assert.match(c.elements.memorySubmittedCriteria.textContent,/Latest attempt/);assert.match(c.elements.memorySubmittedCriteria.textContent,/new failed criteria/);
+  c.fixture.mode='ready';
+  c.state.memoryScopeVersion++;c.renderMemory();assert.match(c.elements.memorySubmission.textContent,/Expired context/);assert.match(c.elements.memoryDetail.textContent,/Expired preview/);
+  c.setMemoryMode('snapshot');await c.runHeapSnapshotSearch();
+  const disclosure=c.elements.memoryDetail.querySelector('details');disclosure.open=false;disclosure.querySelector('summary').focus();
+  c.renderMemory();assert.equal(c.elements.memoryDetail.querySelector('details'),disclosure);assert.equal(disclosure.open,false);assert.equal(c.document.activeElement,disclosure.querySelector('summary'));
+  c.setMemoryMode('diff');c.state.memoryDiffBaseline={target_id:c.state.debuggerSession.target.id,captured_at_ms:1,file_bytes:4096};
+  c.fixture.mode='dominators';await c.runHeapSnapshotDiff();assert.equal(c.elements.memoryDetail.hidden,false);assert.match(c.elements.memoryDetail.textContent,/Retained owner/);
+  c.setMemoryMode('live');c.fixture.mode='malformed';await c.runLiveObjectSearch();assert.match(c.elements.memoryResults.textContent,/Results unavailable/);
+}
+{
+  const c=await memoryControllerFixture();c.fixture.mode='pending';const pending=c.runLiveObjectSearch();c.state.memoryMode='snapshot';c.fixture.release();await pending;assert.equal(c.state.memorySearchStatus,'unavailable');
+  const baseline=await memoryControllerFixture();baseline.state.memoryMode='diff';baseline.fixture.mode='error';await baseline.captureHeapDiffBaseline();
+  assert.equal(baseline.state.memoryDiffBaseline,null,'lost reply cannot claim captured baseline');
+  baseline.syncMemorySession(baseline.state.debuggerSession,baseline.fixture.session);
+  assert.equal(baseline.state.memoryDiffBaseline.target_id,'memory-target-A','validated native refresh can establish baseline after unknown outcome');
+}
+{
+  const c=await memoryControllerFixture();let pivot;
+  c.state.memorySearchPending=true;c.state.selectedField={value:'new criteria'};
+  c.elements.requestMemoryPivot={addEventListener:(_,callback)=>{pivot=callback;}};
+  const start=memoryAppSource.indexOf("      elements.requestMemoryPivot.addEventListener('click', () => {");
+  const end=memoryAppSource.indexOf('\n      });',start)+10;
+  runInNewContext(memoryAppSource.slice(start,end),{state:c.state,elements:c.elements,showScreen:()=>{}});
+  pivot();assert.equal(c.elements.memoryValueQuery.value,'fixture');assert.equal(c.state.memorySearchPending,true);
+}
+console.log('PASS Memory real render functions: 200 unchanged refreshes retain row/detail/focus/scroll, at most 50 rows and one detail, expired labels, disclosure, dominator-only diff, malformed versus empty and lost-baseline reconciliation (DOM fixture; not visual QA)');
+
+// Admit the exact Memory session through the existing validator and exercise
+// real conditional HTTP semantics before attempting a browser launch.
+{
+  const fixture=await memoryBrowserFixture();
+  const response=()=>({destroyed:false,writeHead(status,headers){this.status=status;this.headers=headers;},end(body){this.body=body;}});
+  const first=response();assert(await fixture.handle({url:'/api/debugger',headers:{}},first));
+  assert.equal(first.status,200);assert(ui.isDebuggerResponse(JSON.parse(first.body)));
+  const unchanged=response();assert(await fixture.handle({url:'/api/debugger',headers:{'if-none-match':first.headers.ETag}},unchanged));
+  assert.equal(unchanged.status,304);assert.equal(unchanged.body,undefined);assert.equal(fixture.notModifiedCount,1);assert.equal(fixture.requests.length,0);
+}
+console.log('PASS Memory browser fixture validated debugger state, ETag200/304 and zero implicit actions (not rendered QA)');
+
+async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture}) {
+  const ready=async()=>{for(let n=0;n<150;n++){if(await evaluate('!state.memorySearchPending && !state.debuggerActionPending'))return;await new Promise(resolve=>setTimeout(resolve,20));}throw Error('Memory action did not settle');};
+  const reveal=async selector=>{await evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'nearest'})`);};
+  const press=async selector=>{await reveal(selector);await click(selector);};
+  const geometry=async label=>{const bad=await evaluate(`Array.from(document.querySelectorAll('#screen-memory button, #screen-memory input, #screen-memory select, #screen-memory summary')).filter(node=>node.getClientRects().length).filter(node=>{const r=node.getBoundingClientRect();return r.width<1||r.right>innerWidth+1||r.left<0}).map(node=>node.id||node.textContent)`);assert.deepEqual(bad,[],label);};
+  await viewport(1440,900);await evaluate("showScreen('memory')");
+  for(let n=0;n<100 && !(await evaluate("state.debuggerSession?.target?.id==='memory-target-A'"));n++) await new Promise(resolve=>setTimeout(resolve,25));
+  await evaluate("elements.memoryPropertyQuery.value='fixture';elements.memoryValueQuery.value='fixture'");
+  await press('#memory-search-button');await ready();assert.equal(await evaluate('state.memoryResults.length'),50);
+  assert.match(await evaluate("elements.memorySubmission.textContent"),/memory-target-A/);
+  await press('.memory-result-row');await key('ArrowDown');assert.equal(await evaluate('state.selectedMemoryResultId'),'preview-1');
+  await evaluate("window.memoryFocused=document.activeElement;window.memoryDetailNode=elements.memoryDetail.firstChild;renderMemory();renderMemory()");
+  assert(await evaluate('document.activeElement===memoryFocused && elements.memoryDetail.firstChild===memoryDetailNode'));
+  assert.equal(await evaluate("elements.memoryDetail.querySelectorAll('img').length"),0,'captured-looking strings stay inert');
+  await geometry('wide live');await screenshot('memory-live-wide');
+  fixture.mode='error';await press('#memory-search-button');await ready();assert.equal(await evaluate('state.memoryResults.length'),50);assert.match(await evaluate('elements.memoryNotice.textContent'),/unconfirmed/);
+  fixture.mode='empty';await press('#memory-search-button');await ready();assert.equal(await evaluate('state.memorySearchStatus'),'empty');
+  fixture.mode='partial';await press('[data-memory-mode="snapshot"]');await press('#memory-search-button');await ready();
+  assert.equal(await evaluate('state.memorySearchStatus'),'partial');await press('.memory-detail-disclosure summary');
+  await evaluate('renderMemory()');assert.equal(await evaluate("elements.memoryDetail.querySelector('details').open"),false);
+  await screenshot('memory-snapshot-partial');
+  fixture.mode='ready';await press('[data-memory-mode="diff"]');await press('#memory-capture-baseline');await ready();
+  assert.match(await evaluate('elements.memoryBaselineMeta.textContent'),/memory-target-A/);
+  fixture.mode='dominators';await press('#memory-compare-snapshot');await ready();assert.equal(await evaluate('elements.memoryDetail.hidden'),false);
+  assert.match(await evaluate('elements.memoryDetail.textContent'),/Retained owner/);await screenshot('memory-diff-dominators');
+  fixture.mode='ready';await press('[data-memory-mode="origin"]');await press('#memory-search-button');
+  for(let n=0;n<100 && !(await evaluate("state.debuggerSession?.memory_origin_trace?.state==='armed'"));n++)await new Promise(resolve=>setTimeout(resolve,25));
+  await press('#memory-origin-stop');await ready();assert.match(await evaluate('elements.memoryDetail.textContent'),/Source link unavailable/);
+  assert.equal(await evaluate("elements.memoryDetail.querySelectorAll('button').length"),0);
+  await screenshot('memory-origin-stopped');
+  // Exercise the reviewed Stop-expiry control lifecycle through real pointer
+  // dispatch, native fixture polling and a following HTTP 304. Do not manually
+  // call renderMemory to recover the controls under test.
+  const waitFor=async(expression,label)=>{for(let n=0;n<150;n++){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,20));}throw Error(label);};
+  for(const expiry of ['target','restart','context']) {
+    fixture.mode='ready';await waitFor("!state.debuggerActionPending && !memoryOriginTraceActive()",'Prior trace did not reach native terminal state');
+    await press('#memory-search-button');
+    await waitFor("state.debuggerSession?.memory_origin_trace?.state==='armed' && !state.debuggerActionPending",'Origin did not arm for '+expiry);
+    if(expiry==='context'){
+      fixture.session.scripts=[{script_id:'memory-context',url:'https://fixture.invalid/memory.js',hash:'a'.repeat(64),source_map_url:'',language:'JavaScript',start_line:0,start_column:0,end_line:1,end_column:0,execution_context_id:9,length:32,has_source_url:false,is_module:false}];
+      fixture.session.generation++;await waitFor("state.debuggerSession.scripts.some(script=>script.execution_context_id===9)",'Context setup was not observed');
+    }
+    fixture.stopState='stopping';fixture.mode='pending';const posts=fixture.requests.length;
+    await press('#memory-origin-stop');
+    await waitFor("state.debuggerActionPending && state.memorySearchPending",'Stop request did not own its wait');
+    for(let n=0;n<150&&fixture.pending.length===0;n++)await new Promise(resolve=>setTimeout(resolve,20));
+    assert(fixture.pending.length>0,'Native Stop acknowledgement must remain held during expiry');
+    assert.equal(fixture.requests.length,posts+1);assert.equal(fixture.requests.at(-1).action,'stop_memory_origin_trace');
+    fixture.session.memory_origin_trace=fixture.idleTrace();
+    if(expiry==='target'){
+      fixture.session.target={...fixture.session.target,id:'memory-target-expiry'};
+      fixture.session.targets=[fixture.session.target];fixture.session.generation++;
+    }else if(expiry==='restart'){
+      fixture.session.generation=0;fixture.nextTraceId=1;
+    }else{fixture.session.scripts=[];fixture.session.generation++;}
+    await ready();
+    const previous304=fixture.notModifiedCount;
+    for(let n=0;n<150&&fixture.notModifiedCount===previous304;n++)await new Promise(resolve=>setTimeout(resolve,20));
+    assert(fixture.notModifiedCount>previous304,'Stop expiry must be followed by an unchanged native poll');
+    assert(await evaluate("!elements.memorySearchButton.disabled && elements.memoryModeButtons.every(button=>!button.disabled) && !elements.memoryCaptureBaseline.disabled"),expiry+' controls remain disabled after 304');
+    await geometry('Stop expiry '+expiry);await screenshot('memory-stop-expiry-'+expiry);
+    await press('[data-memory-mode="live"]');assert.equal(await evaluate('state.memoryMode'),'live');
+    await press('[data-memory-mode="origin"]');assert.equal(fixture.requests.length,posts+1,'Mode recovery must not resubmit Stop or start a capture');
+    fixture.mode='ready';fixture.stopState='aborted';fixture.release();await ready();
+  }
+  await press('[data-memory-mode="live"]');fixture.mode='pending';await press('#memory-search-button');
+  fixture.session={...fixture.session,target:{...fixture.session.target,id:'memory-target-B'},generation:fixture.session.generation+1};
+  for(let n=0;n<100 && !(await evaluate("state.debuggerSession?.target?.id==='memory-target-B'"));n++)await new Promise(resolve=>setTimeout(resolve,25));
+  fixture.release();await ready();assert.equal(await evaluate('state.memorySearchStatus'),'unavailable');assert.equal(await evaluate('state.memoryResults.length'),0);
+  fixture.mode='ready';await press('#memory-search-button');await ready();
+  for(const [width,height] of [[760,560],[360,740]]){
+    await viewport(width,height);await press('.memory-result-row');await geometry(`narrow ${width}`);await screenshot(`memory-${width}-result`);
+    await press('[data-memory-mode="snapshot"]');await press('#memory-search-button');await ready();await reveal('.memory-detail-disclosure summary');await geometry(`snapshot ${width}`);await screenshot(`memory-${width}-retainers`);
+  }
+  return {status:'passed',path:'real browser UI with synthetic native API fixture',viewports:[[1440,900],[760,560],[360,740]],checks:['four mode actions','submitted target and baseline receipts','50 rows','keyboard selection and refresh node identity','inert preview','empty vs unavailable','partial snapshot and disclosure','dominator-only diff','stop outcome and unproven source links','delayed target race','target/restart/context Stop retirement with automatic control recovery and following304','pointer mode recovery without implicit actions','responsive controls']};
+}
+
 async function checkTrafficBrowser() {
   const executable = process.env.REB_UI_CHROMIUM;
   assert(executable, "Set REB_UI_CHROMIUM to the installed Chrome/Chromium executable. Sandbox flags are not overridden.");
-  const directory = await mkdtemp(join(tmpdir(), collectionBrowser ? "reb-collection-ui-" : consoleBrowser ? "reb-console-ui-" : evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
-  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", collectionBrowser ? "collection-ui-qa" : consoleBrowser ? "console-ui-qa" : evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
+  const directory = await mkdtemp(join(tmpdir(), memoryBrowser ? "reb-memory-ui-" : collectionBrowser ? "reb-collection-ui-" : consoleBrowser ? "reb-console-ui-" : evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
+  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", memoryBrowser ? "memory-ui-qa" : collectionBrowser ? "collection-ui-qa" : consoleBrowser ? "console-ui-qa" : evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
   await mkdir(output, {recursive: true});
   let trafficApiMode = "offline";
+  const memoryFixture = memoryBrowser ? await memoryBrowserFixture() : null;
   const collectionFixture = collectionBrowser ? collectionBrowserFixture() : null;
   const factsFixture = sourceFactsBrowser ? await sourceFactsBrowserFixture() : null;
   const consoleFixture = consoleBrowser ? createConsoleFixture() : null;
@@ -2398,6 +2941,7 @@ async function checkTrafficBrowser() {
   const server = createServer(async (request, response) => {
     const path = new URL(request.url, "http://127.0.0.1").pathname;
     if (collectionFixture && await collectionFixture.handle(request, response)) return;
+    if (memoryFixture && await memoryFixture.handle(request, response)) return;
     if (factsFixture && await factsFixture.handle(request, response)) return;
     if (consoleFixture && await consoleFixture.handle(request, response)) return;
     if (evidenceFixture && await evidenceFixture.handle(request, response)) return;
@@ -2605,7 +3149,7 @@ async function checkTrafficBrowser() {
     };
     captureFailure = async () => {
       const result = await command("Page.captureScreenshot", {format: "png"});
-      await writeFile(join(output, collectionBrowser ? "collection-failure.png" : consoleBrowser ? "console-failure.png" : evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
+      await writeFile(join(output, memoryBrowser ? "memory-failure.png" : collectionBrowser ? "collection-failure.png" : consoleBrowser ? "console-failure.png" : evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
     };
     await viewport(1440, 900);
     await command("Page.navigate", {url: `http://127.0.0.1:${server.address().port}/`});
@@ -2615,7 +3159,10 @@ async function checkTrafficBrowser() {
     }
     assert(await evaluate("typeof renderRequests === 'function'"), "Application did not initialize");
     diagnostics.phase = "interactive validation";
-    if (collectionBrowser) {
+    if (memoryBrowser) {
+      validation = await checkMemoryInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:memoryFixture});
+      assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Memory QA");
+    } else if (collectionBrowser) {
       validation = await checkCollectionInteractions({evaluate,viewport,click,key,wheel,type:text=>command("Input.insertText",{text}),screenshot,fixture:collectionFixture});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Collection QA");
     } else if (consoleBrowser) {
@@ -2752,6 +3299,7 @@ async function checkTrafficBrowser() {
     catch (error) {failure ??= error; diagnostics.cleanup_error = String(error.message).slice(0, 2048);}
     factsFixture?.release(); consoleFixture?.release();
     collectionFixture?.release();
+    memoryFixture?.release();
     if (consoleFixture) {
       diagnostics.fixture_errors = consoleFixture.errors;
       try {await writeFile(join(output, 'console-fixture-receipts.json'), JSON.stringify({schema:'reb-console-ui-qa-v1',receipts:consoleFixture.receipts,errors:consoleFixture.errors}, null, 2));}
@@ -2769,9 +3317,9 @@ async function checkTrafficBrowser() {
   }
   if (failure) throw failure;
   await writeFile(join(output, "validation.json"), JSON.stringify(validation, null, 2));
-  console.log(`PASS real Chromium ${collectionBrowser ? 'Collection' : consoleBrowser ? 'Console' : evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
+  console.log(`PASS real Chromium ${memoryBrowser ? 'Memory workflow' : collectionBrowser ? 'Collection' : consoleBrowser ? 'Console' : evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
 }
-if (trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser || collectionBrowser) {await checkTrafficBrowser(); process.exit(0);}
+if (trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser || collectionBrowser || memoryBrowser) {await checkTrafficBrowser(); process.exit(0);}
 
 if (fieldsOnly) process.exit(0);
 const temporary = await mkdtemp(join(tmpdir(), "origin-trace-debugger-"));

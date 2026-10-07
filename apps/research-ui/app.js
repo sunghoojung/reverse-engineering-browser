@@ -7562,6 +7562,175 @@
         return ['running', 'paused'].includes(state.debuggerSession?.state);
       }
 
+      // One in-flight action and one bounded result. UI ownership is not native cancellation.
+      function memoryOwnerCurrent(owner) {
+        return Boolean(owner && !owner.expired && memoryAttached() && owner.targetId === state.debuggerSession?.target?.id &&
+          owner.scopeVersion === (state.memoryScopeVersion ?? 0));
+      }
+
+      function memoryBaselineKey(baseline) {
+        return baseline ? JSON.stringify([baseline.target_id, baseline.captured_at_ms, baseline.file_bytes]) : '';
+      }
+
+      function syncMemorySession(previous, current) {
+        state.memoryPollSequence = (state.memoryPollSequence ?? 0) + 1;
+        if (current.generation < previous?.generation) state.memoryNativeEpoch = (state.memoryNativeEpoch ?? 0) + 1;
+        const contexts = new Set((current?.scripts ?? []).filter(script => !script.target_type)
+          .map(script => script.execution_context_id));
+        const scriptIdentities = new Map((current?.scripts ?? []).filter(script => !script.target_type).map(script => [script.script_id, script.hash]));
+        const expired = current?.generation < previous?.generation ||
+          (previous?.scripts ?? []).some(script => !script.target_type && scriptIdentities.has(script.script_id) && scriptIdentities.get(script.script_id) !== script.hash) ||
+          (previous?.target?.id ?? null) !== (current?.target?.id ?? null) ||
+          (['running', 'paused'].includes(previous?.state) && !['running', 'paused'].includes(current?.state)) ||
+          (previous?.scripts ?? []).some(script => !script.target_type && !contexts.has(script.execution_context_id));
+        if (expired) state.memoryScopeVersion = (state.memoryScopeVersion ?? 0) + 1;
+        // Native baseline metadata is target-scoped, not a document identity.
+        if (current?.generation < previous?.generation || (previous?.target?.id ?? null) !== (current?.target?.id ?? null) ||
+            current.generation >= (state.memoryBaselineGeneration ?? 0)) {
+          state.memoryDiffBaseline = current?.heap_diff_baseline?.target_id === current?.target?.id
+            ? current.heap_diff_baseline : null;
+          state.memoryBaselineGeneration = current.generation;
+        }
+        if (expired && state.memoryMode === 'origin' && !state.memoryOperation) {
+          state.memorySearchPending = false;
+          state.memorySearchStatus = 'unavailable';
+          state.memorySearchMessage = 'Trace context expired. The retained sample is historical; native completion is unconfirmed until refreshed for its target.';
+        }
+        retireObsoleteMemoryRequest(current);
+      }
+
+      function memoryActionDeadline(action) {
+        // Native live search has 3+5+3 second commands and two 3 second releases.
+        // Heap capture is 3+60 seconds; search/diff workers add 20/60 seconds.
+        // These bound waiting for HTTP headers AND body, not native execution.
+        const deadlines = {search_live_objects: 30000, search_heap_snapshot: 120000,
+          capture_heap_diff_baseline: 90000, compare_heap_diff: 150000,
+          clear_heap_diff_baseline: 15000, start_memory_origin_trace: 15000,
+          stop_memory_origin_trace: 15000, clear_memory_origin_trace: 15000};
+        return Object.hasOwn(deadlines, action) ? deadlines[action] : 0;
+      }
+
+      function retireObsoleteMemoryRequest(current) {
+        const transport = state.debuggerActionOwner;
+        const operation = transport?.memoryOwner;
+        if (!operation || !transport.retire) return;
+        if (!memoryOwnerCurrent(operation) || operation.mode !== state.memoryMode ||
+            (operation.action === 'compare_heap_diff' && memoryBaselineKey(operation.baseline) !== memoryBaselineKey(state.memoryDiffBaseline))) {
+          transport.retire('Memory request ownership expired. Its native completion is unknown; no cancellation or retry was requested.');
+          return;
+        }
+        const trace = current.memory_origin_trace;
+        if (current.generation <= operation.submittedGeneration || !isMemoryOriginTrace(trace) ||
+            new Set(trace.steps.map(step => step.id)).size !== trace.steps.length) return;
+        const terminal = ['found', 'not_found', 'aborted', 'error'].includes(trace.state) && trace.target_id === operation.targetId;
+        const previousIdentity = trace.trace_id === operation.traceId && trace.started_at_ms === operation.traceStartedAt;
+        const request = transport.request;
+        const startedTrace = operation.action === 'start_memory_origin_trace' && terminal && !previousIdentity &&
+          trace.query === request.query && trace.scope === request.scope && trace.before_steps === request.before_steps && trace.after_steps === request.after_steps;
+        const stoppedTrace = operation.action === 'stop_memory_origin_trace' && terminal && previousIdentity;
+        const clearedTrace = operation.action === 'clear_memory_origin_trace' && trace.state === 'idle';
+        if (startedTrace || stoppedTrace || clearedTrace) {
+          transport.retire('A newer native trace lifecycle was observed. The action acknowledgement remains unavailable; ending this wait does not cancel or retry native work.');
+        }
+      }
+
+      function beginMemoryOperation(action, criteria = '') {
+        if (!memoryAttached() || state.memorySearchPending || state.debuggerActionPending) return null;
+        const operation = {
+          id: (state.memoryOperationSequence ?? 0) + 1, action, mode: state.memoryMode,
+          targetId: state.debuggerSession.target.id,
+          scopeVersion: state.memoryScopeVersion ?? 0, nativeEpoch: state.memoryNativeEpoch ?? 0,
+          pollSequence: state.memoryPollSequence ?? 0,
+          submittedAt: Date.now(), submittedGeneration: state.debuggerSession.generation, criteria,
+          traceId: state.debuggerSession.memory_origin_trace?.trace_id ?? 0,
+          traceStartedAt: state.debuggerSession.memory_origin_trace?.started_at_ms ?? 0,
+          baseline: state.memoryDiffBaseline ? { ...state.memoryDiffBaseline } : null
+        };
+        state.memoryOperationSequence = operation.id;
+        state.memoryOperation = operation;
+        state.memoryLastOperation = operation;
+        state.memorySearchPending = true;
+        return operation;
+      }
+
+      function finishMemoryOperation(operation, body) {
+        if (state.memoryOperation !== operation) return false;
+        state.memoryOperation = null;
+        state.memorySearchPending = false;
+        if (!memoryOwnerCurrent(operation) || operation.mode !== state.memoryMode ||
+            (body && Number.isSafeInteger(body.generation) && body.generation < operation.submittedGeneration) ||
+            (operation.action === 'compare_heap_diff' &&
+              memoryBaselineKey(operation.baseline) !== memoryBaselineKey(state.memoryDiffBaseline))) {
+          if (operation.mode === 'origin' && (state.memoryPollSequence ?? 0) > operation.pollSequence) {
+            // The old operation may belong to a prior epoch. Display the current
+            // validated poll without comparing its generation to that old reply.
+            applyMemoryOriginTrace(state.debuggerSession?.memory_origin_trace);
+          }
+          state.memorySearchStatus = 'unavailable';
+          state.memorySearchMessage = `The ${operation.action.replaceAll('_', ' ')} reply submitted to ${operation.targetId} at ${new Date(operation.submittedAt).toLocaleTimeString()} was discarded because target, context, mode, or baseline changed. Native completion is not cancelled or confirmed by discarding this reply.`;
+          renderMemory();
+          return false;
+        }
+        return true;
+      }
+
+      function isMemoryAcknowledgement(body, trace = false) {
+        return isPlainObject(body) && Object.keys(body).length === (trace ? 3 : 2) && body.ok === true &&
+          (!trace || Object.hasOwn(body, 'trace')) &&
+          isSafeIntegerInRange(body.generation, 0, Number.MAX_SAFE_INTEGER);
+      }
+
+      function memoryTracePollAfter(operation, generation = null) {
+        // Keep one authoritative session snapshot, not another trace payload queue.
+        // A completed poll can arrive while POST is pending; its ETag may make all
+        // following GETs 304, so reconcile it before accepting the action reply.
+        if (!memoryOwnerCurrent(operation) || operation.nativeEpoch !== (state.memoryNativeEpoch ?? 0) ||
+            (state.memoryPollSequence ?? 0) <= operation.pollSequence) return null;
+        const session = state.debuggerSession;
+        const trace = session?.memory_origin_trace;
+        if ((generation !== null && session.generation < generation) || !isMemoryOriginTrace(trace) ||
+            (trace.state !== 'idle' && trace.target_id !== operation.targetId) ||
+            new Set(trace.steps.map(step => step.id)).size !== trace.steps.length) return null;
+        return trace;
+      }
+
+      function reconcileMemoryOrigin(operation, body = null) {
+        const valid = isMemoryAcknowledgement(body, true);
+        const trace = memoryTracePollAfter(operation, valid ? body.generation : null) ?? (valid ? body.trace : null);
+        return trace ? applyMemoryOriginTrace(trace) : false;
+      }
+
+      function keepNewerMemoryBaseline(operation, body) {
+        if (body.generation >= (state.memoryBaselineGeneration ?? 0)) return false;
+        // The operation did complete, but its acknowledgement is not the current
+        // baseline. Do not lower the generation or delete a later client's data.
+        operation.acknowledgedGeneration = body.generation;
+        state.memorySearchStatus = 'ready';
+        state.memorySearchMessage = `${operation.action === 'clear_heap_diff_baseline' ? 'Reset' : 'Capture'} acknowledged for target ${operation.targetId} at generation ${body.generation}. Newer native baseline information at generation ${state.memoryBaselineGeneration} is retained.`;
+        renderMemory();
+        return true;
+      }
+
+      function memoryOperationFailed(message) {
+        state.memorySearchStatus = 'unavailable';
+        const attempt = state.memoryLastOperation;
+        const submitted = attempt ? `Submitted to ${attempt.targetId} at ${new Date(attempt.submittedAt).toLocaleTimeString()}. ` : '';
+        state.memorySearchMessage = `${submitted}${message} Completion is unconfirmed; no automatic retry. Any retained preview is from the last successful action. Refresh debugger state before choosing another action.`;
+      }
+
+      function commitMemoryOwner(operation) {
+        state.memoryResultOwner = operation;
+        state.memoryTargetId = operation.targetId;
+      }
+
+      function memoryResultSignature() {
+        // Live/snapshot/diff arrays are immutable until an explicit action. Origin
+        // refresh can replace at most 25 rows, so only that small window is hashed.
+        const rows = state.memoryMode === 'origin' ? JSON.stringify(state.memoryResults) : state.memoryResults;
+        return { rows, mode: state.memoryMode, selected: state.selectedMemoryResultId,
+          meta: state.memorySearchMeta, stale: !memoryOwnerCurrent(state.memoryResultOwner) };
+      }
+
       function selectMemoryResult(id, focus = false) {
         const result = state.memoryResults.find(candidate => candidate.id === id);
         if (!result) return;
@@ -7625,7 +7794,7 @@
             ? `${result.type} · ${formatSignedByteSize(result.self_size_delta)} self memory`
             : `${formatSignedByteSize(diff.self_size_delta)} total self memory · ${diff.duration_ms} ms native analysis`)
         );
-        summaryHead.append(summaryTitle, textElement('span', 'memory-readonly', 'Exact diff'));
+        summaryHead.append(summaryTitle, textElement('span', 'memory-readonly', Object.entries(diff).some(([key, value]) => (key.endsWith('_reached') || key === 'retained_size_saturated') && value) ? 'Bounded partial diff' : 'Indexed heap diff'));
         const facts = document.createElement('div'); facts.className = 'memory-properties';
         if (result) {
           facts.append(
@@ -7648,7 +7817,7 @@
         const ownersTitle = document.createElement('div');
         ownersTitle.append(
           textElement('h2', '', 'Top retained-memory changes'),
-          textElement('p', '', 'Exact dominators over reachable non-weak V8 heap edges')
+          textElement('p', '', 'Dominators over indexed reachable non-weak V8 heap edges; reported limits qualify this comparison')
         );
         ownersHead.append(ownersTitle, textElement('span', 'memory-readonly', 'Native C++'));
         const owners = document.createElement('div'); owners.className = 'memory-properties';
@@ -7682,21 +7851,15 @@
         const title = document.createElement('div');
         title.append(
           textElement('h2', '', result.location.function_name || '(anonymous)'),
-          textElement('p', '', debuggerLocationText(result.location, result.location.url))
+          textElement('p', '', `${result.location.url || '(recorded anonymous script)'}:${result.location.line + 1}:${result.location.column + 1}`)
         );
-        head.append(title, textElement('span', 'memory-readonly', result.is_first_match ? 'First appearance' : result.matched ? 'Present' : 'Not present'));
-        if (result.location.script_id && state.debuggerSession?.scripts.some(script => script.script_id === result.location.script_id)) {
-          const source = document.createElement('button'); source.type = 'button'; source.className = 'secondary-button'; source.textContent = 'Open source';
-          source.addEventListener('click', () => {
-            showScreen('sources');
-            revealDebuggerLocation(result.location);
-          });
-          head.append(source);
-        }
+        head.append(title, textElement('span', 'memory-readonly', result.is_first_match ? 'First appearance' : result.matched ? 'Observed' : result.coverage_partial ? 'Not found · partial' : 'Not found in sample'));
+        head.append(textElement('span', 'memory-source-unavailable',
+          'Source link unavailable: this trace records a script ID and location, without execution-context or source-hash identity.'));
         const facts = document.createElement('div'); facts.className = 'memory-properties';
         facts.append(
           memoryFactRow('trace step', result.is_first_match ? 'origin' : 'context', `${result.step} of ${trace?.step_count ?? result.step}`),
-          memoryFactRow('heap match', result.matched ? 'found' : 'absent', result.match ? `${result.match.type} · node ${result.match.id}` : 'No matching node in this snapshot'),
+          memoryFactRow('heap match', result.matched ? 'found' : 'absent', result.match ? `${result.match.type} · node ${result.match.id}` : result.coverage_partial ? 'No match in the inspected subset; absence is unproven' : 'No matching node in this sampled snapshot'),
           memoryFactRow('native probe', result.coverage_partial ? 'partial' : 'bounded', `${result.analyzed_nodes.toLocaleString()} of ${result.total_nodes.toLocaleString()} nodes · ${result.duration_ms} ms`),
           memoryFactRow('heap capture', 'temporary', `${formatByteSize(result.capture_bytes)} · deleted after probe`),
           memoryFactRow('source filter', result.location.framework_filtered ? 'applied' : 'direct', result.location.url || '(anonymous script)')
@@ -7709,7 +7872,7 @@
           textElement('h2', '', result.match ? result.match.name || `(${result.match.type})` : 'Temporal context'),
           textElement('p', '', result.match
             ? `${result.match.type} · ${result.match.self_size.toLocaleString()} self bytes`
-            : 'The value had not appeared at this function boundary')
+            : 'No value was found in the inspected nodes at this function boundary')
         );
         contextHead.append(contextTitle, textElement('span', 'memory-readonly', result.matched ? 'Native match' : 'Before window'));
         const explanation = textElement('div', 'memory-empty', result.is_first_match
@@ -7782,11 +7945,12 @@
             });
           }
           card.append(head, facts, path);
-          const referencesCard = document.createElement('article'); referencesCard.className = 'memory-detail-card';
+          const referencesCard = document.createElement('details'); referencesCard.className = 'memory-detail-card memory-detail-disclosure'; referencesCard.open = true;
+          const summary = textElement('summary', '', '3 · Incoming references'); referencesCard.append(summary);
           const referencesHead = document.createElement('header'); referencesHead.className = 'memory-detail-head';
           const referencesTitle = document.createElement('div');
           referencesTitle.append(
-            textElement('h2', '', 'Incoming references'),
+            textElement('h2', '', 'Referring nodes'),
             textElement('p', '', result.incoming_reference_limit_reached
               ? `Showing ${result.incoming_references.length} prioritized references of ${result.incoming_reference_count.toLocaleString()}`
               : `${result.incoming_reference_count.toLocaleString()} indexed references`)
@@ -7818,7 +7982,7 @@
           textElement('h2', '', result.class_name || 'Object'),
           textElement('p', '', `${result.property_count} own properties · ${similarity}`)
         );
-        head.append(title, textElement('span', 'memory-readonly', 'Read-only preview'));
+        head.append(title, textElement('span', 'memory-readonly', memoryOwnerCurrent(state.memoryResultOwner) ? 'Ephemeral preview' : 'Expired preview'));
         const properties = document.createElement('div'); properties.className = 'memory-properties';
         if (result.preview.length === 0) {
           properties.append(textElement('div', 'memory-empty', 'The matched object has no previewable own properties.'));
@@ -7849,31 +8013,39 @@
       function renderMemory() {
         const attached = memoryAttached();
         const targetId = state.debuggerSession?.target?.id ?? null;
-        const preserveDisconnectedOrigin = state.memoryMode === 'origin' && targetId === null &&
-          state.memorySearchMeta?.protocol_version === 1 && state.memorySearchMeta?.trace_id > 0;
-        if (state.memoryTargetId !== null && state.memoryTargetId !== targetId && !preserveDisconnectedOrigin) {
-          state.memoryResults = [];
-          state.selectedMemoryResultId = null;
-          state.memorySearchMeta = null;
-          state.memorySearchMessage = null;
-          state.memoryDiffBaseline = null;
-          state.memoryTargetId = null;
-          state.memorySearchStatus = attached ? 'idle' : 'offline';
-        } else if (!attached && state.memorySearchStatus !== 'searching' && !preserveDisconnectedOrigin) {
-          state.memorySearchStatus = 'offline';
-        } else if (attached && state.memorySearchStatus === 'offline') {
-          state.memorySearchStatus = 'idle';
-        }
+        const stale = state.memoryResultOwner && !memoryOwnerCurrent(state.memoryResultOwner);
+        if (!attached && !state.memorySearchPending && !state.memoryResultOwner && state.memorySearchStatus === 'idle') state.memorySearchStatus = 'offline';
+        if (attached && state.memorySearchStatus === 'offline') state.memorySearchStatus = 'idle';
+        elements.memoryTarget.textContent = attached ? `Selected target · ${targetId}` : 'Target unavailable';
+        elements.memoryTarget.title = targetId ?? 'No selected target';
+        const owner = state.memoryResultOwner;
+        const pending = state.memoryOperation;
+        elements.memorySubmission.textContent = pending
+          ? `Submitted to ${pending.targetId} · ${new Date(pending.submittedAt).toLocaleTimeString()} · ${pending.action.replaceAll('_', ' ')}. Waiting does not stop native work.`
+          : owner
+            ? `${stale ? 'Expired context · historical preview' : 'Last successful result'} · target ${owner.targetId} · ${new Date(owner.submittedAt).toLocaleTimeString()} · ${owner.action.replaceAll('_', ' ')}${owner.baseline && owner.action === 'compare_heap_diff' ? ` · submitted baseline ${owner.baseline.target_id} at ${new Date(owner.baseline.captured_at_ms).toLocaleTimeString()}` : ''}`
+            : state.memoryLastOperation
+              ? `Last submitted action · target ${state.memoryLastOperation.targetId} · ${new Date(state.memoryLastOperation.submittedAt).toLocaleTimeString()} · no accepted result`
+              : 'No submitted result. Editing criteria does not run a search.';
+        elements.memorySubmission.dataset.stale = String(Boolean(stale));
+        const attempt = state.memoryLastOperation;
+        elements.memorySubmittedCriteria.textContent = pending
+          ? `Pending attempt · target ${pending.targetId}\n${pending.criteria}`
+          : owner
+            ? `Retained result · target ${owner.targetId}\n${owner.criteria}${attempt && attempt !== owner ? `\n\nLatest attempt · target ${attempt.targetId} · ${new Date(attempt.submittedAt).toLocaleTimeString()}\n${attempt.criteria}` : ''}`
+            : attempt ? `Latest attempt · target ${attempt.targetId}\n${attempt.criteria}` : 'No submitted criteria';
+        const instructions = {live: 'Find an object by property, value, class, or shape. Inspect inert own-property previews.', snapshot: 'Capture once to find heap nodes, then follow retaining paths and incoming references.', diff: 'Capture a baseline, perform the page activity, then compare the current heap.', origin: 'Arm a bounded trace, trigger a page click, then inspect the first sampled appearance.'};
+        elements.memoryWorkflow.textContent = instructions[state.memoryMode];
         const snapshotMode = state.memoryMode === 'snapshot';
         const diffMode = state.memoryMode === 'diff';
         const originMode = state.memoryMode === 'origin';
         const liveMode = state.memoryMode === 'live';
         const originTrace = state.debuggerSession?.memory_origin_trace ?? null;
-        const originActive = originTrace && ['armed', 'capturing', 'stepping', 'stopping'].includes(originTrace.state);
+        const originActive = originTrace?.target_id === targetId && ['armed', 'capturing', 'stepping', 'stopping'].includes(originTrace.state);
         elements.memorySearchForm.dataset.mode = state.memoryMode;
         elements.memoryModeButtons.forEach(button => {
           button.setAttribute('aria-pressed', String(button.dataset.memoryMode === state.memoryMode));
-          button.disabled = state.memorySearchPending;
+          button.disabled = state.memorySearchPending || state.debuggerActionPending;
         });
         elements.memorySearchForm.querySelectorAll('.memory-live-only').forEach(element => {
           element.hidden = !liveMode;
@@ -7903,8 +8075,8 @@
             ? 'Capturing briefly pauses the target. Native C++ classifies root reachability and prioritizes hidden, internal, and weak incoming references. The temporary file is deleted immediately.'
             : 'Accessors are reported without invoking getters. Results are ephemeral and are never added to the evidence store.';
         const controls = elements.memorySearchForm.querySelectorAll('input, textarea, select');
-        controls.forEach(control => { control.disabled = !attached || state.memorySearchPending; });
-        elements.memorySearchButton.disabled = !attached || state.memorySearchPending;
+        controls.forEach(control => { control.disabled = !attached || state.memorySearchPending || state.debuggerActionPending; });
+        elements.memorySearchButton.disabled = !attached || state.memorySearchPending || state.debuggerActionPending;
         elements.memorySearchButton.setAttribute('aria-busy', String(state.memorySearchPending));
         elements.memorySearchButton.textContent = state.memorySearchPending
           ? originMode ? originTrace?.state === 'armed' ? 'Armed for page click...' : 'Tracing function boundaries...' : snapshotMode ? 'Capturing and indexing...' : 'Searching...'
@@ -7914,14 +8086,14 @@
         const baseline = state.memoryDiffBaseline;
         elements.memoryBaselineTitle.textContent = baseline ? 'Baseline ready' : 'Not captured';
         elements.memoryBaselineMeta.textContent = baseline
-          ? `${formatByteSize(baseline.file_bytes)} · captured ${new Date(baseline.captured_at_ms).toLocaleTimeString()}`
+          ? `Target ${baseline.target_id} · ${formatByteSize(baseline.file_bytes)} · captured ${new Date(baseline.captured_at_ms).toLocaleString()}. Native target-scoped baseline; document identity is not supplied.`
           : 'Capture the target before the activity you want to measure.';
-        elements.memoryCaptureBaseline.disabled = !attached || state.memorySearchPending;
-        elements.memoryClearBaseline.disabled = !baseline || state.memorySearchPending;
-        elements.memoryCompareSnapshot.disabled = !attached || !baseline || state.memorySearchPending;
-        elements.memoryCaptureBaseline.textContent = state.memorySearchPending && diffMode && !baseline
+        elements.memoryCaptureBaseline.disabled = !attached || state.memorySearchPending || state.debuggerActionPending;
+        elements.memoryClearBaseline.disabled = !attached || !baseline || baseline.target_id !== targetId || state.memorySearchPending || state.debuggerActionPending;
+        elements.memoryCompareSnapshot.disabled = !attached || !baseline || baseline.target_id !== targetId || state.memorySearchPending || state.debuggerActionPending;
+        elements.memoryCaptureBaseline.textContent = state.memoryOperation?.action === 'capture_heap_diff_baseline'
           ? 'Capturing baseline...' : baseline ? 'Replace baseline' : 'Capture baseline';
-        elements.memoryCompareSnapshot.textContent = state.memorySearchPending && diffMode && baseline
+        elements.memoryCompareSnapshot.textContent = state.memoryOperation?.action === 'compare_heap_diff'
           ? 'Capturing and comparing...' : 'Capture current and compare';
 
         const messages = diffMode ? {
@@ -7960,28 +8132,42 @@
           error: state.memorySearchMessage || 'Live object search failed.'
         };
         elements.memoryNotice.dataset.kind = state.memorySearchStatus;
-        elements.memoryNotice.textContent = messages[state.memorySearchStatus] ?? messages.idle;
-        elements.memoryResultLabel.textContent = diffMode ? 'Changed groups' : originMode ? 'Trace steps' : 'Matches';
+        elements.memoryNotice.textContent = state.memorySearchStatus === 'unavailable' ? state.memorySearchMessage : messages[state.memorySearchStatus] ?? messages.idle;
+        elements.memoryResultLabel.textContent = diffMode ? '2 · Changed groups' : originMode ? '2 · Sampled steps' : '2 · Matches';
         elements.memoryResultCount.textContent = String(state.memoryResults.length);
         elements.memoryResults.setAttribute('aria-label', diffMode ? 'Heap growth groups' : originMode ? 'Memory origin trace steps' : snapshotMode ? 'Heap snapshot matches' : 'Live object matches');
 
         const memoryResultsPane = elements.memoryDetail.parentElement;
+        const signature = memoryResultSignature();
+        const previous = state.memoryRenderSignature;
+        const sameRows = previous?.rows === signature.rows && previous?.mode === signature.mode;
+        const sameDetail = sameRows && previous?.selected === signature.selected && previous?.stale === signature.stale &&
+          (state.memoryResults.length > 0 || previous?.status === state.memorySearchStatus) &&
+          (originMode || previous?.meta === signature.meta);
+        if (sameDetail) return;
+        const focusedId = elements.memoryResults.contains(document.activeElement) ? document.activeElement?.dataset.resultId : null;
+        const resultsTop = elements.memoryResults.parentElement.scrollTop;
+        const detailTop = elements.memoryDetail.scrollTop;
+        state.memoryRenderSignature = {...signature, status: state.memorySearchStatus};
         if (state.memoryResults.length === 0) {
-          const empty = textElement('div', 'memory-empty', state.memorySearchStatus === 'empty'
+          const empty = textElement('div', 'memory-empty', state.memorySearchStatus === 'partial'
+            ? 'No matches in the inspected subset. Coverage limits prevent a claim of complete absence.'
+            : state.memorySearchStatus === 'empty'
             ? originMode
               ? 'The bounded trace contains no retained steps for this result.'
               : snapshotMode
               ? 'No heap nodes matched this value and reference scope. Adjust the value or scope.'
               : diffMode ? 'The compared heaps have no reported memory changes.'
                 : 'No objects matched. Broaden one criterion or lower the similarity threshold.'
-            : state.memorySearchStatus === 'error'
-              ? 'The last search did not replace any retained results.'
-                : diffMode ? 'Capture a baseline, use the page, then compare a second snapshot to see what grew.' : originMode ? 'Enter the value to trace, arm the trace, then perform the page action that creates it.' : snapshotMode ? 'Enter a value, then capture a snapshot to find matching objects and references.' : 'Enter a property name or value, then run a bounded live-object search.');
+            : ['error', 'unavailable'].includes(state.memorySearchStatus)
+              ? 'Results unavailable. No accepted results were returned; this is not an empty search.'
+                : diffMode ? state.memorySearchMeta ? 'No changed signature groups. Retained-owner changes are shown in the comparison detail.' : 'Capture a baseline, use the page, then compare a second snapshot to see what grew.' : originMode ? 'Enter the value to trace, arm the trace, then perform the page action that creates it.' : snapshotMode ? 'Enter a value, then capture a snapshot to find matching objects and references.' : 'Enter a property name or value, then run a bounded live-object search.');
           elements.memoryResults.removeAttribute('role');
           elements.memoryResults.replaceChildren(empty);
           memoryResultsPane?.setAttribute('data-empty', 'true');
-          elements.memoryDetail.hidden = true;
-          elements.memoryDetail.replaceChildren();
+          elements.memoryDetail.hidden = !(diffMode && state.memorySearchMeta);
+          if (diffMode && state.memorySearchMeta) { memoryResultsPane?.setAttribute('data-empty', 'false'); renderHeapDiffDetail(null); }
+          else elements.memoryDetail.replaceChildren();
           return;
         }
         memoryResultsPane?.setAttribute('data-empty', 'false');
@@ -7990,7 +8176,7 @@
         if (!state.memoryResults.some(result => result.id === state.selectedMemoryResultId)) {
           state.selectedMemoryResultId = state.memoryResults[0].id;
         }
-        elements.memoryResults.replaceChildren(...state.memoryResults.map(result => {
+        if (!sameRows) elements.memoryResults.replaceChildren(...state.memoryResults.map(result => {
           const row = document.createElement('button');
           row.type = 'button'; row.className = 'memory-result-row'; row.dataset.resultId = result.id;
           row.setAttribute('role', 'option');
@@ -8008,7 +8194,7 @@
           const metadata = diffMode
             ? `${result.type} · ${result.baseline_count.toLocaleString()} → ${result.current_count.toLocaleString()} objects (${formatSignedCount(result.count_delta)})`
             : originMode
-            ? `step ${result.step} · ${debuggerLocationText(result.location, result.location.url)} · ${result.analyzed_nodes.toLocaleString()} nodes in ${result.duration_ms} ms`
+            ? `step ${result.step} · ${`${result.location.url || '(recorded anonymous script)'}:${result.location.line + 1}:${result.location.column + 1}`} · ${result.analyzed_nodes.toLocaleString()} nodes in ${result.duration_ms} ms`
             : snapshotMode
             ? `${result.type} · ${result.self_size.toLocaleString()} self bytes · ${result.incoming_reference_count.toLocaleString()} incoming references`
             : `${result.property_count} properties · ${result.preview.slice(0, 5).map(property => property.name).join(', ') || 'no own properties'}`;
@@ -8021,15 +8207,52 @@
           row.addEventListener('keydown', moveMemorySelection);
           return row;
         }));
+        for (const row of elements.memoryResults.querySelectorAll('.memory-result-row')) {
+          const selected = row.dataset.resultId === state.selectedMemoryResultId;
+          row.setAttribute('aria-selected', String(selected)); row.tabIndex = selected ? 0 : -1;
+        }
+        const disclosure = elements.memoryDetail.querySelector('.memory-detail-disclosure');
+        const disclosureOpen = previous?.selected === signature.selected ? disclosure?.open : undefined;
+        const disclosureFocused = disclosure?.querySelector('summary') === document.activeElement;
         renderMemoryDetail();
+        const nextDisclosure = elements.memoryDetail.querySelector('.memory-detail-disclosure');
+        if (nextDisclosure && disclosureOpen !== undefined) nextDisclosure.open = disclosureOpen;
+        if (disclosureFocused) nextDisclosure?.querySelector('summary')?.focus({preventScroll: true});
+        elements.memoryResults.parentElement.scrollTop = resultsTop;
+        if (previous?.selected === signature.selected) elements.memoryDetail.scrollTop = detailTop;
+        if (focusedId) [...elements.memoryResults.querySelectorAll('.memory-result-row')]
+          .find(row => row.dataset.resultId === focusedId)?.focus({ preventScroll: true });
       }
 
       function applyMemoryOriginTrace(trace) {
-        if (!isMemoryOriginTrace(trace)) return false;
+        if (!isMemoryOriginTrace(trace) || new Set(trace.steps.map(step => step.id)).size !== trace.steps.length) return false;
+        const targetId = state.debuggerSession?.target?.id ?? null;
+        if (trace.state !== 'idle' && trace.target_id !== targetId) return false;
+        if (state.memoryOperation) return false;
+        const sameEpoch = state.memoryResultOwner?.nativeEpoch === (state.memoryNativeEpoch ?? 0) &&
+          state.memoryResultOwner?.targetId === targetId;
+        const previousTrace = state.memoryMode === 'origin' && sameEpoch ? state.memorySearchMeta : null;
+        if (previousTrace?.trace_id > trace.trace_id && trace.state !== 'idle') return false;
+        if (previousTrace?.trace_id === trace.trace_id && (previousTrace.step_count > trace.step_count ||
+            (!['armed', 'capturing', 'stepping', 'stopping'].includes(previousTrace.state) && ['armed', 'capturing', 'stepping', 'stopping'].includes(trace.state)))) return false;
+        if (sameEpoch && state.memorySearchMeta?.trace_id === trace.trace_id && !memoryOwnerCurrent(state.memoryResultOwner)) return false;
         const active = ['armed', 'capturing', 'stepping', 'stopping'].includes(trace.state);
         if (active && state.memoryMode !== 'origin') state.memoryMode = 'origin';
         if (state.memoryMode !== 'origin') return true;
+        if (trace.state === 'idle' && state.memoryResultOwner) {
+          state.memoryResultOwner.expired = true;
+          state.memorySearchPending = false;
+          state.memorySearchStatus = 'unavailable';
+          state.memorySearchMessage = 'The native trace is no longer available. Retained samples are historical; no active trace or complete absence is implied.';
+          return true;
+        }
         const previousFirstMatch = state.memorySearchMeta?.first_match_step ?? null;
+        if (trace.trace_id > 0 && (!sameEpoch || state.memorySearchMeta?.trace_id !== trace.trace_id)) {
+          state.memoryResultOwner = {targetId: trace.target_id, scopeVersion: state.memoryScopeVersion ?? 0, nativeEpoch: state.memoryNativeEpoch ?? 0,
+            submittedAt: trace.started_at_ms, action: 'start_memory_origin_trace', mode: 'origin',
+            criteria: `${trace.query} · ${trace.scope} · trace ${trace.trace_id}`, baseline: null};
+          state.memoryLastOperation = state.memoryResultOwner;
+        }
         state.memorySearchMeta = trace;
         state.memoryResults = trace.steps;
         state.memoryTargetId = trace.target_id;
@@ -8072,11 +8295,10 @@
           renderMemory();
           return;
         }
-        state.memorySearchPending = true;
+        const operation = beginMemoryOperation('start_memory_origin_trace', `${query} · ${elements.memoryReferenceScope.value} · ${beforeSteps} before / ${afterSteps} after`);
+        if (!operation) return;
         state.memorySearchStatus = 'searching';
         state.memorySearchMessage = 'Arming a bounded click-driven temporal trace.';
-        state.memoryResults = [];
-        state.selectedMemoryResultId = null;
         renderMemory();
         const body = await debuggerAction({
           action: 'start_memory_origin_trace', query,
@@ -8084,40 +8306,61 @@
           case_sensitive: false,
           before_steps: beforeSteps,
           after_steps: afterSteps
-        });
-        if (!isPlainObject(body) || body.ok !== true || !isMemoryOriginTrace(body.trace)) {
-          state.memorySearchPending = false;
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = state.debuggerError || 'The debugger returned malformed Memory Origin Trace state.';
+        }, operation);
+        if (!finishMemoryOperation(operation, body)) return;
+        if (!isMemoryAcknowledgement(body, true) || !isMemoryOriginTrace(body.trace) || body.trace.target_id !== operation.targetId ||
+            body.trace.query !== query || body.trace.scope !== elements.memoryReferenceScope.value ||
+            body.trace.before_steps !== beforeSteps || body.trace.after_steps !== afterSteps) {
+          reconcileMemoryOrigin(operation);
+          state.memoryLastOperation = operation;
+          memoryOperationFailed(state.debuggerError || 'The debugger returned malformed Memory Origin Trace state.');
           renderMemory();
           return;
         }
-        applyMemoryOriginTrace(body.trace);
+        if (!reconcileMemoryOrigin(operation, body)) memoryOperationFailed('The returned trace could not be adopted with its recorded identity.');
         renderMemory();
       }
 
       async function stopMemoryOriginTrace() {
-        if (!state.memorySearchPending) return;
-        const body = await debuggerAction({ action: 'stop_memory_origin_trace' });
-        if (!isPlainObject(body) || body.ok !== true) {
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = state.debuggerError || 'Memory Origin Trace could not be stopped.';
-          renderMemory();
-        }
+        const trace = state.debuggerSession?.memory_origin_trace;
+        if (!memoryOriginTraceActive() || trace?.target_id !== state.debuggerSession?.target?.id || state.debuggerActionPending) return;
+        const owner = {targetId: trace.target_id, scopeVersion: state.memoryScopeVersion ?? 0, nativeEpoch: state.memoryNativeEpoch ?? 0,
+          pollSequence: state.memoryPollSequence ?? 0, submittedGeneration: state.debuggerSession.generation,
+          action: 'stop_memory_origin_trace', mode: 'origin', submittedAt: Date.now(), criteria: `Stop trace ${trace.trace_id}`, baseline: null,
+          traceId: trace.trace_id, traceStartedAt: trace.started_at_ms};
+        state.memoryLastOperation = owner;
+        const body = await debuggerAction({ action: 'stop_memory_origin_trace' }, owner);
+        if (!memoryOwnerCurrent(owner) || state.debuggerSession?.memory_origin_trace?.trace_id !== trace.trace_id) return;
+        if (!isMemoryAcknowledgement(body, true) || body.generation < owner.submittedGeneration || !isMemoryOriginTrace(body.trace) || body.trace.trace_id !== trace.trace_id || body.trace.target_id !== owner.targetId) {
+          reconcileMemoryOrigin(owner);
+          memoryOperationFailed(state.debuggerError || 'The native stop outcome is unknown.');
+        } else reconcileMemoryOrigin(owner, body);
+        renderMemory();
       }
 
       async function clearMemoryOriginTrace() {
         if (state.memorySearchPending) return;
-        const body = await debuggerAction({ action: 'clear_memory_origin_trace' });
-        if (!isPlainObject(body) || body.ok !== true) {
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = state.debuggerError || 'Memory Origin Trace could not be cleared.';
-          renderMemory();
-          return;
+        const operation = beginMemoryOperation('clear_memory_origin_trace', 'Clear trace result');
+        if (!operation) return;
+        renderMemory();
+        const body = await debuggerAction({ action: 'clear_memory_origin_trace' }, operation);
+        if (!finishMemoryOperation(operation, body)) return;
+        if (!isMemoryAcknowledgement(body)) {
+          reconcileMemoryOrigin(operation);
+          state.memoryLastOperation = operation;
+          memoryOperationFailed(state.debuggerError || 'The native clear outcome is unknown.');
+          renderMemory(); return;
+        }
+        const newerTrace = memoryTracePollAfter(operation, body.generation);
+        if (newerTrace && newerTrace.state !== 'idle') {
+          applyMemoryOriginTrace(newerTrace);
+          state.memorySearchMessage = 'Clear acknowledged. A newer validated native trace is retained.';
+          renderMemory(); return;
         }
         state.memoryResults = [];
         state.selectedMemoryResultId = null;
         state.memorySearchMeta = null;
+        state.memoryResultOwner = null;
         state.memoryTargetId = null;
         state.memorySearchStatus = memoryAttached() ? 'idle' : 'offline';
         state.memorySearchMessage = 'Temporal trace result cleared.';
@@ -8156,15 +8399,15 @@
           elements.memoryPropertyQuery.focus();
           return;
         }
-        state.memorySearchPending = true;
+        const operation = beginMemoryOperation('search_live_objects', JSON.stringify(request));
+        if (!operation) return;
         state.memorySearchStatus = 'searching';
         state.memorySearchMessage = null;
         renderMemory();
-        const body = await debuggerAction(request);
-        state.memorySearchPending = false;
-        if (!isLiveObjectSearchResponse(body)) {
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = state.debuggerError || 'The debugger returned malformed live object results.';
+        const body = await debuggerAction(request, operation);
+        if (!finishMemoryOperation(operation, body)) return;
+        if (!isLiveObjectSearchResponse(body) || new Set(body.search.results.map(result => result.id)).size !== body.search.results.length) {
+          memoryOperationFailed(state.debuggerError || 'The debugger returned malformed live object results.');
           renderMemory();
           return;
         }
@@ -8172,7 +8415,7 @@
         state.memoryResults = search.results;
         state.selectedMemoryResultId = search.results[0]?.id ?? null;
         state.memorySearchMeta = search;
-        state.memoryTargetId = state.debuggerSession?.target?.id ?? null;
+        commitMemoryOwner(operation);
         const limits = [];
         if (search.timed_out) limits.push('time limit reached');
         if (search.result_limit_reached) limits.push(`${search.result_limit} result limit reached`);
@@ -8185,6 +8428,7 @@
       }
 
       async function runHeapSnapshotSearch() {
+        if (!memoryAttached() || state.memorySearchPending || state.debuggerActionPending) return;
         const query = elements.memoryValueQuery.value.trim();
         if (!query) {
           state.memorySearchStatus = 'error';
@@ -8193,18 +8437,18 @@
           elements.memoryValueQuery.focus();
           return;
         }
-        state.memorySearchPending = true;
+        const operation = beginMemoryOperation('search_heap_snapshot', `${query} · ${elements.memoryReferenceScope.value}`);
+        if (!operation) return;
         state.memorySearchStatus = 'searching';
         state.memorySearchMessage = null;
         renderMemory();
         const body = await debuggerAction({
           action: 'search_heap_snapshot', query, case_sensitive: false,
           scope: elements.memoryReferenceScope.value
-        });
-        state.memorySearchPending = false;
-        if (!isHeapSnapshotSearchResponse(body)) {
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = state.debuggerError || 'The native snapshot index returned malformed results.';
+        }, operation);
+        if (!finishMemoryOperation(operation, body)) return;
+        if (!isHeapSnapshotSearchResponse(body) || new Set(body.snapshot.results.map(result => result.id)).size !== body.snapshot.results.length || body.snapshot.scope !== elements.memoryReferenceScope.value) {
+          memoryOperationFailed(state.debuggerError || 'The native snapshot index returned malformed results.');
           renderMemory();
           return;
         }
@@ -8212,7 +8456,7 @@
         state.memoryResults = snapshot.results;
         state.selectedMemoryResultId = snapshot.results[0]?.id ?? null;
         state.memorySearchMeta = snapshot;
-        state.memoryTargetId = state.debuggerSession?.target?.id ?? null;
+        commitMemoryOwner(operation);
         const limits = [];
         if (snapshot.result_limit_reached) limits.push(`${snapshot.result_limit} result limit reached`);
         if (snapshot.node_limit_reached) limits.push('node limit reached');
@@ -8231,23 +8475,25 @@
 
       async function captureHeapDiffBaseline() {
         if (!memoryAttached() || state.memorySearchPending) return;
-        state.memorySearchPending = true;
+        const operation = beginMemoryOperation('capture_heap_diff_baseline', 'Capture baseline');
+        if (!operation) return;
         state.memorySearchStatus = 'searching';
         state.memorySearchMessage = 'Capturing the comparison baseline. The target may pause briefly.';
         renderMemory();
-        const body = await debuggerAction({ action: 'capture_heap_diff_baseline' });
-        state.memorySearchPending = false;
-        if (!isHeapDiffBaselineResponse(body)) {
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = state.debuggerError || 'The debugger returned malformed baseline metadata.';
+        const body = await debuggerAction({ action: 'capture_heap_diff_baseline' }, operation);
+        if (!finishMemoryOperation(operation, body)) return;
+        if (!isHeapDiffBaselineResponse(body) || body.baseline.target_id !== operation.targetId) {
+          memoryOperationFailed(state.debuggerError || 'The debugger returned malformed baseline metadata.');
           renderMemory();
           return;
         }
+        if (keepNewerMemoryBaseline(operation, body)) return;
+        state.memoryBaselineGeneration = body.generation;
         state.memoryDiffBaseline = body.baseline;
         state.memoryResults = [];
         state.selectedMemoryResultId = null;
         state.memorySearchMeta = null;
-        state.memoryTargetId = state.debuggerSession?.target?.id ?? null;
+        commitMemoryOwner(operation);
         state.memorySearchStatus = 'ready';
         state.memorySearchMessage = `${formatByteSize(body.baseline.file_bytes)} baseline captured. Run the activity you want to measure, then compare.`;
         renderMemory();
@@ -8255,16 +8501,19 @@
 
       async function clearHeapDiffBaseline() {
         if (state.memorySearchPending || !state.memoryDiffBaseline) return;
-        state.memorySearchPending = true;
+        const operation = beginMemoryOperation('clear_heap_diff_baseline', 'Reset baseline');
+        if (!operation) return;
         renderMemory();
-        const body = await debuggerAction({ action: 'clear_heap_diff_baseline' });
-        state.memorySearchPending = false;
-        if (!isPlainObject(body) || body.ok !== true) {
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = state.debuggerError || 'The heap comparison baseline could not be reset.';
+        const body = await debuggerAction({ action: 'clear_heap_diff_baseline' }, operation);
+        if (!finishMemoryOperation(operation, body)) return;
+        if (!isMemoryAcknowledgement(body)) {
+          memoryOperationFailed(state.debuggerError || 'The heap comparison baseline could not be reset.');
           renderMemory();
           return;
         }
+        if (keepNewerMemoryBaseline(operation, body)) return;
+        state.memoryBaselineGeneration = body.generation;
+        state.memoryResultOwner = null;
         state.memoryDiffBaseline = null;
         state.memoryResults = [];
         state.selectedMemoryResultId = null;
@@ -8276,22 +8525,22 @@
 
       async function runHeapSnapshotDiff() {
         if (!memoryAttached() || state.memorySearchPending) return;
-        if (!state.memoryDiffBaseline) {
+        if (!state.memoryDiffBaseline || state.memoryDiffBaseline.target_id !== state.debuggerSession?.target?.id) {
           state.memorySearchStatus = 'error';
           state.memorySearchMessage = 'Capture a baseline before comparing the heap.';
           renderMemory();
           elements.memoryCaptureBaseline.focus();
           return;
         }
-        state.memorySearchPending = true;
+        const operation = beginMemoryOperation('compare_heap_diff', 'Capture current and compare');
+        if (!operation) return;
         state.memorySearchStatus = 'searching';
-        state.memorySearchMessage = 'Capturing the current heap, then computing exact dominators and retained-size changes.';
+        state.memorySearchMessage = 'Capturing the current heap, then computing dominators and retained-size changes within the native index.';
         renderMemory();
-        const body = await debuggerAction({ action: 'compare_heap_diff' });
-        state.memorySearchPending = false;
+        const body = await debuggerAction({ action: 'compare_heap_diff' }, operation);
+        if (!finishMemoryOperation(operation, body)) return;
         if (!isHeapSnapshotDiffResponse(body)) {
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = state.debuggerError || 'The native heap comparison returned malformed results.';
+          memoryOperationFailed(state.debuggerError || 'The native heap comparison returned malformed results.');
           renderMemory();
           return;
         }
@@ -8299,7 +8548,7 @@
         state.memoryResults = diff.groups.map((group, index) => ({ ...group, id: `heap-diff-${index}` }));
         state.selectedMemoryResultId = state.memoryResults[0]?.id ?? null;
         state.memorySearchMeta = diff;
-        state.memoryTargetId = state.debuggerSession?.target?.id ?? null;
+        commitMemoryOwner(operation);
         const limits = [];
         if (diff.group_result_limit_reached) limits.push(`${diff.result_limit} group limit reached`);
         if (diff.dominator_result_limit_reached) limits.push(`${diff.result_limit} dominator limit reached`);
@@ -8317,8 +8566,11 @@
       }
 
       function setMemoryMode(mode) {
-        if (!['live', 'snapshot', 'diff', 'origin'].includes(mode) || state.memorySearchPending || mode === state.memoryMode) return;
+        if (!['live', 'snapshot', 'diff', 'origin'].includes(mode) || state.memorySearchPending || state.debuggerActionPending || mode === state.memoryMode) return;
         state.memoryMode = mode;
+        state.memoryTargetId = null;
+        state.memoryLastOperation = null;
+        state.memoryResultOwner = null;
         state.memoryResults = [];
         state.selectedMemoryResultId = null;
         state.memorySearchMeta = null;
@@ -8670,26 +8922,65 @@
         renderConsole();
       }
 
-      async function debuggerAction(request) {
+      async function debuggerAction(request, memoryOwner = null) {
         const parallelControl = ['cancel_repeater_request', 'cancel_automation_recipe'].includes(request.action);
         if ((state.debuggerActionPending && !parallelControl) || (memoryOriginTraceActive() && request.action !== 'stop_memory_origin_trace')) return null;
-        if (!parallelControl) state.debuggerActionPending = true;
+        const deadline = memoryOwner ? memoryActionDeadline(request.action) : 0;
+        if (memoryOwner && (!deadline || memoryOwner.action !== request.action)) return null;
+        const owner = {memoryOwner, request, retire: null};
+        if (!parallelControl) {
+          state.debuggerActionOwner = owner;
+          state.debuggerActionPending = true;
+        }
+        const current = () => parallelControl || state.debuggerActionOwner === owner;
         state.debuggerError = null;
         renderDebugger();
-        let result = null;
+        let result = null, timer = null, controller = null, retired = false;
         try {
-          const response = await fetch('/api/debugger/actions', {
-            method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request)
-          });
-          const body = await response.json();
-          if (!response.ok) throw new Error(body.error || `Debugger returned ${response.status}`);
-          result = body;
+          let retirement;
+          if (memoryOwner) {
+            controller = new AbortController();
+            retirement = new Promise((_, reject) => {
+              owner.retire = message => {
+                if (retired) return;
+                retired = true;
+                // Reject the UI wait even if a fetch/body implementation ignores
+                // abort. Abort only releases this HTTP read, never native work.
+                reject(new Error(message));
+                controller.abort();
+              };
+              timer = setTimeout(() => owner.retire?.(`Memory action acknowledgement exceeded ${deadline / 1000} seconds. Native completion is unknown; no cancellation or retry was requested.`), deadline);
+            });
+          }
+          const transport = (async () => {
+            const response = await fetch('/api/debugger/actions', {
+              method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
+              ...(controller ? {signal: controller.signal} : {})
+            });
+            if (memoryOwner && (retired || !current())) return null;
+            const body = await response.json();
+            if (memoryOwner && (retired || !current())) return null;
+            if (!response.ok) throw new Error(body.error || `Debugger returned ${response.status}`);
+            return body;
+          })();
+          const body = await (retirement ? Promise.race([transport, retirement]) : transport);
+          if (current() && !retired) result = body;
         } catch (error) {
-          state.debuggerError = error.message;
+          if (current()) state.debuggerError = error.message;
         } finally {
-          if (!parallelControl) state.debuggerActionPending = false;
-          renderDebugger();
-          if (!state.debuggerRefreshing) scheduleDebuggerRefresh(0);
+          if (timer !== null) clearTimeout(timer);
+          owner.retire = null;
+          if (current()) {
+            if (!parallelControl) {
+              state.debuggerActionOwner = null;
+              state.debuggerActionPending = false;
+            }
+            renderDebugger();
+            // Refresh current controls even when the Memory caller exits on an
+            // expired owner. Generic callers and replaced tokens do not redraw.
+            if (memoryOwner) renderMemory();
+            if (!state.debuggerRefreshing) scheduleDebuggerRefresh(0);
+          }
         }
         return result;
       }
@@ -8733,7 +9024,7 @@
           const previousPendingLine = state.pendingSourceLine ? `${state.pendingSourceLine.scriptId}:${state.pendingSourceLine.line}` : '';
           state.debuggerSession = body;
           rebuildTrafficRequests();
-          state.memoryDiffBaseline = body.heap_diff_baseline;
+          syncMemorySession(previousSession, body);
           applyMemoryOriginTrace(body.memory_origin_trace);
           state.debuggerEtag = response.headers.get('ETag');
           state.debuggerError = null;
@@ -9347,6 +9638,10 @@
       });
       elements.requestDecoderPivot.addEventListener('click', useSelectedFieldInDecoder);
       elements.requestMemoryPivot.addEventListener('click', () => {
+        if (state.memorySearchPending || state.debuggerActionPending) {
+          showScreen('memory', elements.requestMemoryPivot);
+          return;
+        }
         const selected = state.selectedField;
         if (!selected) return;
         let value = String(selected.value ?? '').trim();
@@ -9355,6 +9650,8 @@
         }
         value = value.replace(/(?:…|\.{3})+$/u, '').slice(0, 512);
         if (!value) return;
+        state.memoryResultOwner = null;
+        state.memoryLastOperation = null;
         state.memoryMode = 'live';
         state.memoryResults = [];
         state.selectedMemoryResultId = null;
@@ -10009,16 +10306,7 @@
       }));
       elements.memoryReferenceScope.addEventListener('change', () => {
         if (!['snapshot', 'origin'].includes(state.memoryMode) || state.memorySearchPending) return;
-        if (state.memoryMode === 'origin') {
-          state.memorySearchMessage = 'Reference scope changed. It will apply to the next trace.';
-          renderMemory();
-          return;
-        }
-        state.memoryResults = [];
-        state.selectedMemoryResultId = null;
-        state.memorySearchMeta = null;
-        state.memorySearchStatus = memoryAttached() ? 'idle' : 'offline';
-        state.memorySearchMessage = 'Reference scope changed. Capture a new snapshot to apply it.';
+        state.memorySearchMessage = 'Reference scope changed. It applies only to the next explicit action; the submitted result keeps its original scope.';
         renderMemory();
       });
       elements.memoryOriginStop.addEventListener('click', stopMemoryOriginTrace);

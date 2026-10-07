@@ -694,6 +694,37 @@ comparison, and advanced object search use native disclosures. Switching tools
 preserves form drafts and disclosure state. Scope is shown only for Interceptor
 and Automation, which support it.
 
+An action is acknowledged only after its `ok: true`, generation and required
+result groups validate for the submitted disposable lifetime. A transport success
+alone is insufficient. Missing, rejected, stale or malformed receipts leave the
+draft available and never trigger an automatic retry or a chained Repeater send.
+A newer validated poll is never replaced by an older receipt; changed newer
+groups also prevent that receipt from acknowledging the current draft; an already-running
+poll cannot undo an accepted receipt. Automation recipe/run aliases must match
+the validated records. Additive response fields are bounded to 64 levels, 65,536
+values and 4 Mi characters before retention or iterative comparison.
+
+Refreshes within the same lifetime preserve drafts and consent. A changed
+creation time, disposable target/session identity or observed generation reset
+erases disposable form values, confirmations, selections and hidden result DOM.
+Late replies cannot restore them, including an identity that leaves and returns.
+Expired in-flight reads release their UI busy controls even if transport stalls;
+this does not cancel native work or resend an action.
+Ownership is checked again after each awaited receipt, including the gap before
+its caller resumes. Repeater keeps the original complete request draft and
+selection/edit revision through Apply and Send; changed drafts require a fresh
+explicit Send. Collection keeps the original saved recipe and inherited variables,
+and rejects a changed lifetime, edited recipe or newer draft before sending.
+Changing the Collection selection alone never substitutes the newly selected
+recipe. Disposable run ownership is erased on lifetime replacement while saved
+Collection definitions and drafts remain intact.
+Saved automation definitions remain in authoritative backend state. Disposed
+Interceptor results may be inspected until creating another context; that new
+lifetime starts with an empty result, audit and rule even if creation fails.
+The browser-free production-function regressions run in the existing debugger
+checker under `make javascript-check`; they do not establish rendered/native QA.
+
+
 Repeater keeps method, URL, and Send in one command row above a persistent
 request-response split. Compare responses includes a Rust-generated body line diff
 with source line numbers, nearby context, newline markers, and explicit limits.

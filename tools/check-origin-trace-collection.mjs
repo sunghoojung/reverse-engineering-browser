@@ -14,6 +14,7 @@ export function collectionFixtureDocument() {
 export async function checkCollectionController(root, fixtureOnly = false) {
   const app = await readFile(join(root,'apps/research-ui/app.js'),'utf8');
   const models = await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8');
+  const experimentContext = app.slice(app.indexOf('      function experimentLifetimeKey('), app.indexOf('      function currentExperimentReceipt('));
   const section = app.slice(app.indexOf('      function collectionFolder('),app.indexOf('      const analystExactKeys'));
   const document = {activeElement:null};
   class Node {
@@ -47,8 +48,8 @@ export async function checkCollectionController(root, fixtureOnly = false) {
     isPlainObject:value=>value!==null&&typeof value==='object'&&!Array.isArray(value),utf8ByteLength:value=>Buffer.byteLength(value),parseExperimentHeaders:value=>value.trim()?JSON.parse(value):{},repeaterHeaderObject:headers=>Object.fromEntries(headers.map(header=>[header.name,header.value])),
     textElement,emptyListboxOption:(_,text)=>textElement('div','',text),experimentFact:(label,value)=>textElement('div','',label+value),
     requestInterception:()=>state.debuggerSession.request_interception,repeaterState:()=>state.debuggerSession.repeater,
-    runExperimentAction:request=>actionHandler(request),fetch:(url,options)=>new Promise((resolve,reject)=>{pending.push({url,options,resolve});options.signal?.addEventListener('abort',()=>reject(new Error('Aborted')),{once:true});})};
-  const ui=runInNewContext(models+'\n'+section+'\n;({renderApiCollection,renderCollectionExecution,selectCollectionFolder,selectCollectionRequest,saveCollectionRequest,saveCollectionFolder,refreshApiCollection,runCollectionRequest,createCollectionRequest,deleteCollectionRequest,moveCollectionTreeSelection,collectionNextRequestId,collectionHistoryEntries,isApiCollection,createCollectionFolder,duplicateCollectionRequest,deleteCollectionFolder})',context);
+    currentExperimentReceipt:response=>response,runExperimentAction:request=>actionHandler(request),fetch:(url,options)=>new Promise((resolve,reject)=>{pending.push({url,options,resolve});options.signal?.addEventListener('abort',()=>reject(new Error('Aborted')),{once:true});})};
+  const ui=runInNewContext(models+'\n'+experimentContext+'\n'+section+'\n;({renderApiCollection,renderCollectionExecution,selectCollectionFolder,selectCollectionRequest,saveCollectionRequest,saveCollectionFolder,refreshApiCollection,runCollectionRequest,createCollectionRequest,deleteCollectionRequest,moveCollectionTreeSelection,collectionNextRequestId,collectionHistoryEntries,isApiCollection,createCollectionFolder,duplicateCollectionRequest,deleteCollectionFolder})',context);
   if (fixtureOnly) return {ui,state,elements,pending,actions,document,setActionHandler:handler=>actionHandler=handler};
   assert(ui.isApiCollection(state.apiCollection));
   state.debuggerSession.repeater.history=[{collection_request_id:4,started_at_ms:1000},{collection_request_id:1,started_at_ms:999},{collection_request_id:1,started_at_ms:1001}];

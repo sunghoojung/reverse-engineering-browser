@@ -1240,6 +1240,7 @@ const sourceSandbox = {state: sourceState, location: {protocol: "http:"},
   document: {hidden: false, querySelector: selector => ({hidden: selector !== "#screen-sources" || !sourceVisible})},
   isPlainObject: value => value !== null && typeof value === "object" && !Array.isArray(value),
   isDebuggerResponse: value => value.valid !== false,
+  syncExperimentSession: (_, current) => current,
   selectedSource: () => sourceState.debuggerSession.scripts.find(script => script.script_id === sourceState.selectedScriptId),
   sourceDisplayName: script => script.script_id,
   fetch: async (url, options) => {
@@ -1461,6 +1462,352 @@ function sourceProductionFunction(name) {
   assert(end, name);
   return appSource.slice(start, start + end.index + end[0].length);
 }
+// Experiment receipts run through the actual POST and debugger polling path.
+// Only transport and rendering are synthetic; nothing executes or leaves here.
+async function experimentReceiptFixture() {
+  const session = JSON.parse(await readFile(join(root, 'apps/origin-trace-backend/assets/debugger-empty.json'), 'utf8'));
+  const target = {id:'disposable-fixture',type:'page',title:'Authored experiment',url:'about:blank'};
+  Object.assign(session, {generation:10,state:'running',target,targets:[target]});
+  Object.assign(session.request_interception,{experiment_id:1,created_at_ms:100,state:'ready',isolated:true,target_id:target.id});
+  for (const group of ['object_experiment','runtime_hooks','automation_recipes','repeater']) {
+    Object.assign(session[group],{session_id:1,state:'ready'});
+    if (group !== 'repeater') Object.assign(session[group],{isolated:true,target_id:target.id});
+  }
+  const state = {debuggerSession:session,debuggerRefreshing:false,debuggerActionPending:false,debuggerEtag:null,
+    openScriptIds:[],requests:[],selectedScriptId:null,selectedRequestId:null,editingBreakpointId:null,
+    repeaterVariablesDirty:true,repeaterDraftDirty:true,experimentMode:'repeater'};
+  const elements = Object.fromEntries(['repeaterVariables','repeaterRequestMethod','repeaterRequestBody','repeaterRequestTimeout',
+    'repeaterRequestHeaders','repeaterRequestUrl','objectConfirm','hooksConfirm','hooksFieldConfirm','automationConfirm',
+    'repeaterResponse','automationResult','hooksHits','automationLabel','automationSource','automationTrigger','automationEnabled'].map(name=>
+      [name,{value:'',checked:false,textContent:'',title:'',dataset:{}}]));
+  Object.assign(elements.repeaterVariables,{value:'{"draft":"keep"}'});
+  elements.repeaterRequestMethod.value='GET';elements.repeaterRequestTimeout.value='15000';elements.repeaterRequestUrl.value='https://fixture.invalid/request';
+  const fixture = {state,elements,requests:[],poll:session,action:async()=>({ok:true,generation:11,repeater:structuredClone(session.repeater)}),resets:0};
+  const sandbox = {state,elements,TextEncoder,AbortController,setTimeout,clearTimeout,location:{protocol:'http:'},
+    document:{hidden:false,querySelector:()=>({hidden:true})},memoryOriginTraceActive:()=>false,
+    fetch:async(url,options)=>{
+      fixture.requests.push({url,method:options.method??'GET',signal:options.signal,...(options.body?{request:JSON.parse(options.body)}:{})});
+      if (options.method === 'POST') {
+        const action=fixture.action;
+        if(fixture.headers)await fixture.headers;
+        return {ok:true,json:()=>action(JSON.parse(options.body))};
+      }
+      if (fixture.poll === 304) return {status:304,ok:false};
+      const reply = await fixture.poll;
+      return {status:200,ok:true,headers:{get:()=>`"fixture-${reply.generation}"`},json:async()=>structuredClone(reply)};
+    },resetAutomationEditor:()=>{fixture.resets++;}};
+  for (const name of ['renderDebugger','renderExperiment','renderRepeaterVariableStatus','scheduleDebuggerRefresh','rebuildTrafficRequests',
+    'renderLiveBrowserTabCount','pruneLiveScriptContent','renderShellStatus','renderNetworkNotice','renderFieldProvenance',
+    'syncMemorySession','applyMemoryOriginTrace','renderMemory']) sandbox[name]=()=>{};
+  const names = ['experimentLifetimeKey','experimentContextKey','currentExperimentReceipt','experimentEditorKey','repeaterSubmissionKey','experimentActionGroups','experimentReceiptBounded','experimentRecordMatches','isExperimentReceipt',
+    'clearExperimentLifetime','syncExperimentSession','runExperimentAction','debuggerAction','debuggerScriptCatalogSignature','refreshDebugger',
+    'prefillRepeaterRequest','markRepeaterDraftChanged','parseRepeaterVariables','applyRepeaterVariables','repeaterState','runRepeaterRequest','parseExperimentHeaders','saveAutomationRecipe'];
+  const controller = runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+'\n'+
+    names.map(sourceProductionFunction).join('\n')+'\n({'+names.join(',')+',isDebuggerResponse})',sandbox);
+  assert(controller.isDebuggerResponse(session),'Authored active fixture must satisfy the production debugger validator');
+  return {...fixture,...controller,fixture,sandbox};
+}
+const experimentPostCount = c => c.requests.filter(request=>request.method==='POST').length;
+for (const patch of [{ok:false,error:'Authored rejection'}, {ok:true}, {ok:true,generation:11,missingGroup:true},
+  ...[undefined,null,'11',NaN,-1,1,Number.MAX_SAFE_INTEGER+1].map(generation=>({ok:true,generation}))]) {
+  const c=await experimentReceiptFixture();const original=c.state.debuggerSession.repeater;
+  c.fixture.action=async()=>({...patch,...(Object.hasOwn(patch,'generation')&&!patch.missingGroup?{repeater:structuredClone(original)}:{})});
+  await c.runRepeaterRequest();
+  assert.equal(experimentPostCount(c),1,'A failed variables receipt must never continue to Send');
+  assert.equal(c.state.repeaterVariablesDirty,true);assert.equal(c.state.repeaterDraftDirty,true);
+  assert.equal(c.state.debuggerSession.repeater,original);assert.equal(c.state.experimentPending,false);
+  assert.match(c.state.experimentError,/acknowledgement|rejected|rejection/);
+}
+{
+  const c=await experimentReceiptFixture();const original=c.state.debuggerSession.repeater;
+  c.fixture.action=async request=>request.action==='configure_repeater_variables'
+    ? {ok:true,generation:11,repeater:structuredClone(original)} : {ok:false,error:'Authored run failure'};
+  await c.runRepeaterRequest();assert.equal(experimentPostCount(c),2);assert.equal(c.state.repeaterDraftDirty,true);
+  assert.equal(c.state.repeaterExpectedHistoryId,undefined,'A rejected run cannot select a claimed result');
+}
+{
+  const c=await experimentReceiptFixture();const updated={...c.state.debuggerSession.repeater,message:'Acknowledged fixture'};
+  c.fixture.action=async()=>({ok:true,generation:11,repeater:updated,additive:{future:'allowed'}});
+  assert(await c.applyRepeaterVariables());assert.equal(c.state.repeaterVariablesDirty,false);
+  assert.equal(c.state.debuggerSession.repeater.message,'Acknowledged fixture');assert.equal(experimentPostCount(c),1);
+}
+for (const changed of ['generation','created_at_ms','target_id','session_id']) {
+  const c=await experimentReceiptFixture();const old=structuredClone(c.state.debuggerSession);
+  for(const name of ['objectConfirm','hooksConfirm','hooksFieldConfirm','automationConfirm'])c.elements[name].checked=true;
+  c.elements.repeaterResponse.textContent='Old disposable response';c.elements.automationResult.textContent='Old recipe result';
+  c.elements.hooksHits.textContent='Old hook values';
+  c.fixture.poll={...structuredClone(old),generation:11};await c.refreshDebugger();
+  assert.equal(c.state.debuggerRefreshFailed,false);assert.equal(c.elements.repeaterVariables.value,'{"draft":"keep"}');
+  assert.equal(c.elements.automationConfirm.checked,true,'Same-lifetime refresh preserves explicit consent and drafts');
+  const next=structuredClone(old);next.generation=12;
+  if(changed==='generation')next.generation=1;
+  if(changed==='created_at_ms')next.request_interception.created_at_ms++;
+  if(changed==='target_id')next.request_interception.target_id='new-disposable';
+  if(changed==='session_id')next.repeater.session_id++;
+  c.fixture.poll=next;await c.refreshDebugger();assert.equal(c.state.debuggerRefreshFailed,false);
+  assert.equal(c.elements.repeaterVariables.value,'');assert.equal(c.elements.automationConfirm.checked,false);
+  assert.equal(c.elements.repeaterResponse.textContent,'');assert.equal(c.elements.automationResult.textContent,'');assert.equal(c.elements.hooksHits.textContent,'');
+}
+{
+  const c=await experimentReceiptFixture();let resolve;const pendingBody=new Promise(done=>{resolve=done;});
+  const old=structuredClone(c.state.debuggerSession);c.fixture.action=()=>pendingBody;
+  const pending=c.applyRepeaterVariables();
+  c.fixture.poll={...structuredClone(old),generation:11,request_interception:{...old.request_interception,created_at_ms:200}};
+  await c.refreshDebugger();assert.match(c.state.experimentError,/session changed/);c.fixture.poll={...old,generation:12};await c.refreshDebugger();
+  c.elements.repeaterVariables.value='{"new":"draft"}';c.state.repeaterVariablesDirty=true;
+  resolve({ok:true,generation:13,repeater:old.repeater});assert.equal(await pending,null);
+  assert.equal(c.elements.repeaterVariables.value,'{"new":"draft"}');assert.equal(c.state.repeaterVariablesDirty,true);
+  assert.equal(c.state.experimentError,null,'Retired completion cannot reintroduce an old-lifetime error');assert.equal(experimentPostCount(c),1);
+}
+{
+  const c=await experimentReceiptFixture();let resolve;const old=structuredClone(c.state.debuggerSession);
+  c.fixture.action=()=>new Promise(done=>{resolve=done;});const pending=c.applyRepeaterVariables();
+  const newer={...structuredClone(old),generation:12};newer.repeater.message='Newer validated poll';
+  c.fixture.poll=newer;await c.refreshDebugger();resolve({ok:true,generation:11,repeater:old.repeater});
+  assert.equal(await pending,null);assert.equal(c.state.repeaterVariablesDirty,true);assert.equal(c.state.debuggerSession.repeater.message,'Newer validated poll');
+  c.fixture.poll=304;await c.refreshDebugger();assert.equal(c.state.debuggerSession.repeater.message,'Newer validated poll');
+}
+{
+  const c=await experimentReceiptFixture();const old=structuredClone(c.state.debuggerSession);let releasePoll;
+  c.fixture.poll=new Promise(resolve=>{releasePoll=resolve;});const poll=c.refreshDebugger();
+  c.fixture.action=async()=>({ok:true,generation:11,repeater:{...old.repeater,message:'New receipt'}});
+  assert(await c.applyRepeaterVariables());releasePoll(old);await poll;
+  assert.equal(c.state.debuggerSession.repeater.message,'New receipt','An already-started GET cannot roll back a receipt');
+  assert.equal(c.state.debuggerEtag,null,'A retained receipt requires a fresh full snapshot, not permanent 304s on an older poll');
+  const posts=experimentPostCount(c);assert.equal(await c.runExperimentAction({action:'run_repeater_request'}),null);
+  assert.equal(experimentPostCount(c),posts,'Ambiguous receipt/poll ordering waits for a fresh snapshot before any target action');
+  c.fixture.poll=304;await c.refreshDebugger();assert.equal(c.state.debuggerSession.repeater.message,'New receipt');
+  c.elements.automationConfirm.checked=true;c.fixture.poll={...old,generation:1};await c.refreshDebugger();
+  assert.equal(c.elements.automationConfirm.checked,false,'A post-receipt native reset expires consent');
+}
+{
+  const c=await experimentReceiptFixture();const recipe={id:1,label:'Authored',trigger:'manual',enabled:true,source:'void 0',source_bytes:6};
+  const automation={...c.state.debuggerSession.automation_recipes,recipes:[recipe],source_bytes:6};
+  c.elements.automationLabel.value='Keep this draft';c.elements.automationSource.value='void 0';c.elements.automationTrigger.value='manual';
+  c.state.automationEditingRecipeId=null;
+  for(const alias of [null,{...recipe,label:'Wrong'}, {...recipe,source:undefined}]){
+    c.fixture.action=async()=>({ok:true,generation:11,automation_recipes:automation,recipe:alias});
+    await c.saveAutomationRecipe();assert.equal(c.fixture.resets,0);assert.equal(c.elements.automationLabel.value,'Keep this draft');
+  }
+  let deep={};for(let i=0;i<12000;i++)deep={next:deep};
+  assert.equal(c.experimentRecordMatches({deep},{deep}),false,'Deep additive fields must fail closed without recursive overflow');
+  c.fixture.action=async()=>({ok:true,generation:11,automation_recipes:automation,recipe:{...recipe,deep}});
+  await c.saveAutomationRecipe();assert.equal(c.fixture.resets,0);assert.match(c.state.experimentError,/invalid acknowledgement/);
+  c.fixture.action=async()=>({ok:true,generation:11,automation_recipes:automation,recipe:{...recipe,future:'allowed'}});
+  await c.saveAutomationRecipe();assert.equal(c.fixture.resets,1,'Matching bounded additive aliases remain compatible');
+}
+for (const action of ['configure_request_interception','run_request_interception','clear_request_interception_result',
+  'set_action_scope','close_experiment_page','create_experiment_page','navigate_object_experiment','search_object_experiment','mutate_object_experiment',
+  'add_runtime_hook','remove_runtime_hook','arm_runtime_hooks','disarm_runtime_hooks','clear_runtime_hook_hits',
+  'configure_runtime_field_test','compare_runtime_field_test','add_automation_recipe','update_automation_recipe',
+  'remove_automation_recipe','arm_automation_recipes','disarm_automation_recipes','cancel_automation_recipe','clear_automation_runs',
+  'run_automation_recipe','configure_repeater_variables','run_repeater_request','cancel_repeater_request','compare_repeater_history',
+  'clear_repeater_history','create_request_interception_experiment','dispose_request_interception_experiment']) {
+  const c=await experimentReceiptFixture();c.fixture.action=async()=>({ok:true,generation:11});
+  assert.equal(await c.runExperimentAction({action}),null,`${action} must require its group`);
+  assert.equal(experimentPostCount(c),1);assert.match(c.state.experimentError,/invalid acknowledgement/);
+}
+for (const action of ['create_request_interception_experiment','dispose_request_interception_experiment']) {
+  for (const pollFirst of [false,true]) {
+    const c=await experimentReceiptFixture(),created=structuredClone(c.state.debuggerSession);
+    const initial=JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/debugger-empty.json'),'utf8'));
+    const disposed={...structuredClone(created),generation:12};
+    for(const group of ['request_interception','action_scope','object_experiment','runtime_hooks','automation_recipes','repeater']){
+      disposed[group]={...initial[group],state:'disposed'};
+      if(group==='request_interception')Object.assign(disposed[group],{experiment_id:1,created_at_ms:100,disposed_at_ms:200});
+      else if(group!=='action_scope')disposed[group].session_id=1;
+    }
+    if(action==='create_request_interception_experiment'){
+      c.state.debuggerSession={...initial,generation:10,state:'running',target:created.target,targets:created.targets};
+    }
+    const after=action==='create_request_interception_experiment'?{...created,generation:12}:disposed;
+    assert(c.isDebuggerResponse(after));
+    const body={ok:true,generation:12,...Object.fromEntries(c.experimentActionGroups(action).map(group=>[group,after[group==='experiment'?'request_interception':group]]))};
+    let release;c.fixture.action=()=>new Promise(resolve=>{release=resolve;});
+    const pending=c.runExperimentAction({action});for(let tick=0;tick<12;tick++)await Promise.resolve();
+    if(pollFirst){c.fixture.poll=after;await c.refreshDebugger();assert.equal(c.state.debuggerRefreshFailed,false);}
+    assert.equal(typeof release,'function',JSON.stringify({action,pollFirst,error:c.state.experimentError,debuggerError:c.state.debuggerError,requests:c.requests}));
+    release(body);assert(await pending,`${action} must acknowledge its own ${pollFirst?'polled':'unpolled'} transition`);
+    assert.equal(c.state.debuggerSession.request_interception.state,after.request_interception.state);
+    assert.equal(c.state.experimentPending,false);
+  }
+}
+{
+  const c=await experimentReceiptFixture();let release;c.fixture.action=()=>new Promise(resolve=>{release=resolve;});
+  const pending=c.applyRepeaterVariables();for(let tick=0;tick<12;tick++)await Promise.resolve();c.elements.repeaterVariables.value='{"new":"draft"}';
+  release({ok:true,generation:11,repeater:structuredClone(c.state.debuggerSession.repeater)});assert.equal(await pending,null);
+  assert.equal(c.state.repeaterVariablesDirty,true,'Receipt for the submitted variables never cleans a newer draft');
+}
+{
+  const c=await experimentReceiptFixture();const old=structuredClone(c.state.debuggerSession);let release;
+  c.fixture.action=request=>request.action==='run_repeater_request'?new Promise(resolve=>{release=resolve;}):
+    {ok:true,generation:12,repeater:{...old.repeater,message:'Explicit cancel acknowledged'}};
+  const pending=c.runExperimentAction({action:'run_repeater_request'});
+  assert.equal(await c.runExperimentAction({action:'run_repeater_request'}),null,'Double Send stays blocked');
+  assert(await c.runExperimentAction({action:'cancel_repeater_request'}));
+  release({ok:true,generation:11,repeater:old.repeater});assert.equal(await pending,null);
+  assert.equal(c.state.debuggerSession.repeater.message,'Explicit cancel acknowledged');assert.equal(experimentPostCount(c),2);
+}
+{
+  const c=await experimentReceiptFixture();const old=structuredClone(c.state.debuggerSession);let release;
+  c.fixture.action=()=>new Promise(resolve=>{release=resolve;});const pending=c.applyRepeaterVariables();
+  c.fixture.poll={...old,generation:12};await c.refreshDebugger();
+  release({ok:true,generation:11,repeater:old.repeater});assert(await pending,'An older receipt with unchanged authoritative groups remains valid');
+}
+{
+  const c=await experimentReceiptFixture();let release;c.fixture.action=()=>new Promise(resolve=>{release=resolve;});
+  const pending=c.runRepeaterRequest();for(let tick=0;tick<12;tick++)await Promise.resolve();
+  c.elements.repeaterVariables.value='{"new":"draft"}';
+  release({ok:true,generation:11,repeater:structuredClone(c.state.debuggerSession.repeater)});await pending;
+  assert.equal(experimentPostCount(c),1,'New variable edits during Apply cannot trigger Send with the previous variables');
+}
+for (const phase of ['headers','body']) {
+  const c=await experimentReceiptFixture(),old=structuredClone(c.state.debuggerSession);let release;
+  const held=new Promise(resolve=>{release=resolve;});
+  if(phase==='headers'){c.fixture.headers=held;c.fixture.action=async()=>({ok:true,generation:11,repeater:old.repeater});}
+  else c.fixture.action=()=>held;
+  const pending=c.applyRepeaterVariables();for(let tick=0;tick<12;tick++)await Promise.resolve();
+  c.fixture.poll={...old,generation:12,request_interception:{...old.request_interception,created_at_ms:200}};
+  await c.refreshDebugger();assert.equal(c.state.debuggerRefreshFailed,false);
+  let settled=false;pending.then(()=>{settled=true;});for(let tick=0;tick<30;tick++)await Promise.resolve();
+  assert(settled,`${phase}: retiring a lifetime must release a producer that ignores abort`);assert.equal(await pending,null);
+  assert.equal(c.state.experimentPending,false);assert.equal(c.state.debuggerActionPending,false);
+  assert.equal(c.requests[0].signal.aborted,true);assert.equal(experimentPostCount(c),1);
+  let releaseNew;c.fixture.headers=null;c.fixture.action=()=>new Promise(resolve=>{releaseNew=resolve;});
+  c.elements.repeaterVariables.value='{"new":"draft"}';c.state.repeaterVariablesDirty=true;
+  const newer=c.applyRepeaterVariables();for(let tick=0;tick<12;tick++)await Promise.resolve();
+  release({ok:true,generation:11,repeater:old.repeater});for(let tick=0;tick<12;tick++)await Promise.resolve();
+  assert.equal(c.state.debuggerActionPending,true);assert.equal(c.state.experimentPending,true,'Late old completion cannot clear newer latches');
+  releaseNew({ok:true,generation:13,repeater:{...old.repeater,message:'New lifetime receipt'}});assert(await newer);
+  assert.equal(c.state.debuggerSession.repeater.message,'New lifetime receipt');assert.equal(c.state.debuggerActionPending,false);
+  assert.equal(experimentPostCount(c),2,'Only a new explicit action may send after expiry');
+}
+// A receipt's transport owner can finish before its caller resumes. These
+// tests keep the outer intent alive through that separate continuation boundary.
+const experimentTicks=async()=>{for(let tick=0;tick<20;tick++)await Promise.resolve();};
+{
+  const c=await experimentReceiptFixture(),old=structuredClone(c.state.debuggerSession);let releaseApply,releasePoll;
+  c.elements.repeaterVariables.value='';c.state.requests=[{id:'selected',method:'GET',path:'https://fixture.invalid/prefilled'}];
+  c.state.selectedRequestId='selected';c.sandbox.URL=URL;c.sandbox.refreshRepeaterStructuredEditors=()=>{};
+  c.sandbox.renderExperiment=()=>c.prefillRepeaterRequest();
+  c.sandbox.document.querySelector=selector=>({hidden:selector!=='#screen-experiments'});
+  c.fixture.action=request=>request.action==='configure_repeater_variables'?new Promise(resolve=>{releaseApply=resolve;}):
+    {ok:true,generation:13,repeater:structuredClone(c.state.debuggerSession.repeater)};
+  const pending=c.runRepeaterRequest();await experimentTicks();
+  c.fixture.poll=new Promise(resolve=>{releasePoll=resolve;});const poll=c.refreshDebugger();
+  releaseApply({ok:true,generation:11,repeater:old.repeater});
+  releasePoll({...old,generation:12,request_interception:{...old.request_interception,created_at_ms:200}});
+  await poll;await pending;assert.equal(c.state.debuggerRefreshFailed,false);
+  assert.equal(experimentPostCount(c),1,'Receipt-to-caller gap must not Send into a replacement lifetime after real Traffic prefill');
+  assert.equal(c.state.debuggerSession.request_interception.created_at_ms,200);
+}
+for(const change of ['body','url','method','headers','timeout','variables','selection','edit-and-return']){
+  const c=await experimentReceiptFixture(),old=structuredClone(c.state.debuggerSession);let release;
+  c.fixture.action=()=>new Promise(resolve=>{release=resolve;});const pending=c.runRepeaterRequest();await experimentTicks();
+  if(change==='selection')c.state.selectedRequestId='new-selection';
+  else if(change==='edit-and-return')c.markRepeaterDraftChanged();
+  else {
+    const field={body:'repeaterRequestBody',url:'repeaterRequestUrl',method:'repeaterRequestMethod',headers:'repeaterRequestHeaders',
+      timeout:'repeaterRequestTimeout',variables:'repeaterVariables'}[change];
+    c.elements[field].value+='changed';
+  }
+  const draft=c.repeaterSubmissionKey();release({ok:true,generation:11,repeater:old.repeater});await pending;
+  assert.equal(experimentPostCount(c),1,`${change}: a different draft/selection needs a new explicit Send`);
+  assert.equal(c.repeaterSubmissionKey(),draft);assert.equal(c.state.repeaterDraftDirty,true);
+}
+{
+  const c=await experimentReceiptFixture(),old=structuredClone(c.state.debuggerSession);let releaseApply,releaseRun,releasePoll;
+  c.fixture.action=request=>new Promise(resolve=>{if(request.action==='configure_repeater_variables')releaseApply=resolve;else releaseRun=resolve;});
+  const pending=c.runRepeaterRequest();await experimentTicks();await c.runRepeaterRequest();assert.equal(experimentPostCount(c),1);
+  releaseApply({ok:true,generation:11,repeater:old.repeater});await experimentTicks();assert.equal(experimentPostCount(c),2);
+  c.fixture.poll=new Promise(resolve=>{releasePoll=resolve;});const poll=c.refreshDebugger();
+  releaseRun({ok:true,generation:12,repeater:old.repeater});
+  releasePoll({...old,generation:13,request_interception:{...old.request_interception,created_at_ms:200}});
+  await poll;c.elements.repeaterRequestBody.value='new lifetime draft';c.state.repeaterDraftDirty=true;await pending;
+  assert.equal(c.elements.repeaterRequestBody.value,'new lifetime draft');assert.equal(c.state.repeaterDraftDirty,true);
+  assert.equal(c.state.repeaterExpectedHistoryId,null,'A run receipt cannot select a result in its replacement lifetime');
+}
+{
+  const c=await experimentReceiptFixture(),old=structuredClone(c.state.debuggerSession);
+  const receipt=await c.runExperimentAction({action:'configure_repeater_variables',variables:{}});assert(c.currentExperimentReceipt(receipt));
+  c.fixture.poll={...old,generation:12,request_interception:{...old.request_interception,created_at_ms:200}};await c.refreshDebugger();
+  c.fixture.poll={...old,generation:13};await c.refreshDebugger();
+  assert.equal(c.currentExperimentReceipt(receipt),null,'A-to-B-to-A cannot revalidate a delivered receipt');
+}
+// Combine the real Collection chain with the real Experiment POST/poll/receipt
+// functions. Its saved-library reads and rendering remain inert fixture data.
+for(const change of ['lifetime','saved-request','folder-variable','new-draft']){
+  const c=await experimentReceiptFixture(),old=structuredClone(c.state.debuggerSession);let releaseApply,releasePoll;
+  const saved={id:1,created_at_ms:100,updated_at_ms:100,name:'Authored recipe',folder_id:1,url:'https://fixture.invalid/owned',
+    method:'GET',headers:[],body:'',timeout_ms:15000,variables:[]};
+  const folders=[{id:1,variables:[]}];
+  Object.assign(c.state,{collectionSelectionVersion:0,collectionHistorySelectionVersion:0,collectionSelectedRequestId:1,
+    collectionRunPending:false,collectionFolderDirty:false,collectionDraftDirty:false,apiCollectionNeedsReload:false});
+  const run=runInNewContext(sourceProductionFunction('runCollectionRequest')+'\nrunCollectionRequest',{
+    ...c.sandbox,...c,collectionRequest:()=>saved,collectionPendingRunForSelection:()=>false,
+    requestInterception:()=>c.state.debuggerSession.request_interception,collectionFolderLineage:()=>folders,
+    repeaterHeaderObject:headers=>Object.fromEntries(headers.map(header=>[header.name,header.value])),
+    renderCollectionExecution(){},renderApiCollection(){},setCollectionNotice(kind,message){c.fixture.notice={kind,message};},rememberCollectionRunOwner(){}});
+  c.fixture.action=()=>new Promise(resolve=>{releaseApply=resolve;});const pending=run();await experimentTicks();
+  if(change==='lifetime'){
+    c.fixture.poll=new Promise(resolve=>{releasePoll=resolve;});const poll=c.refreshDebugger();
+    releaseApply({ok:true,generation:11,repeater:old.repeater});
+    releasePoll({...old,generation:12,request_interception:{...old.request_interception,created_at_ms:200}});await poll;
+  } else {
+    if(change==='saved-request')saved.url='https://fixture.invalid/replaced';
+    if(change==='folder-variable')folders[0].variables.push({name:'new',value:'value'});
+    if(change==='new-draft'){c.state.collectionDraftDirty=true;c.state.collectionDraftRevision=1;}
+    releaseApply({ok:true,generation:11,repeater:old.repeater});
+  }
+  await pending;assert.equal(experimentPostCount(c),1,`Collection ${change}: no second target action`);
+  assert.equal(c.state.collectionRunPending,false);
+}
+const experimentActiveRepeater=(repeater,url='https://fixture.invalid/request')=>({...repeater,state:'running',active_execution:{execution_id:1,
+  started_at_ms:500,request:{url,method:'GET',headers:[],body:'',timeout_ms:15000},resolved_url:url,resolved_method:'GET',
+  variable_names:[],collection_request_id:null,cancel_requested:false}});
+{
+  const c=await experimentReceiptFixture(),old=structuredClone(c.state.debuggerSession);
+  c.fixture.action=async request=>({ok:true,generation:request.action==='configure_repeater_variables'?11:12,
+    repeater:request.action==='configure_repeater_variables'?old.repeater:experimentActiveRepeater(old.repeater)});
+  await c.runRepeaterRequest();assert.equal(experimentPostCount(c),2);assert.equal(c.state.repeaterExpectedHistoryId,1);
+  assert.equal(c.state.repeaterDraftDirty,false);assert.equal(c.state.repeaterSubmissionOwner,null);
+}
+{
+  const c=await experimentReceiptFixture(),old=structuredClone(c.state.debuggerSession);let releaseOld,releaseNew,newer,started=false;
+  c.sandbox.document.querySelector=selector=>({hidden:selector!=='#screen-experiments'});
+  c.sandbox.renderExperiment=()=>{
+    if(started||!c.state.experimentContextEpoch)return;
+    started=true;c.elements.repeaterRequestUrl.value='https://fixture.invalid/new-intent';c.elements.repeaterVariables.value='';
+    newer=c.runRepeaterRequest();
+  };
+  c.fixture.action=request=>{
+    if(request.action==='run_repeater_request')return {ok:true,generation:14,repeater:experimentActiveRepeater(old.repeater,request.url)};
+    return new Promise(resolve=>{if(started)releaseNew=resolve;else releaseOld=resolve;});
+  };
+  const older=c.runRepeaterRequest();await experimentTicks();
+  c.fixture.poll={...old,generation:12,request_interception:{...old.request_interception,created_at_ms:200}};
+  await c.refreshDebugger();await older;await experimentTicks();
+  assert(c.state.repeaterSubmissionOwner,'Expired outer finally must retain the newer complete Send intent');
+  assert.equal(c.state.experimentPending,true);assert.equal(c.state.debuggerActionPending,true);
+  releaseOld({ok:true,generation:11,repeater:old.repeater});await experimentTicks();assert(c.state.repeaterSubmissionOwner);
+  releaseNew({ok:true,generation:13,repeater:old.repeater});await newer;
+  assert.equal(experimentPostCount(c),3);assert.equal(c.requests.filter(request=>request.method==='POST').at(-1).request.url,'https://fixture.invalid/new-intent');
+  assert.equal(c.state.repeaterSubmissionOwner,null);assert.equal(c.state.repeaterExpectedHistoryId,1);
+}
+{
+  const c=await experimentReceiptFixture(),old=structuredClone(c.state.debuggerSession);
+  c.state.collectionRunOwners=new Map([['old',{requestId:1}]]);c.state.collectionSubmittedOwners=[{requestId:1}];
+  c.state.collectionPendingRunSelection={executionId:1};c.state.collectionSelectedHistoryId=1;
+  c.state.collectionDraftDirty=true;c.elements.collectionRequestBody={value:'durable draft'};
+  c.fixture.poll={...old,generation:12,request_interception:{...old.request_interception,created_at_ms:200}};await c.refreshDebugger();
+  assert.equal(c.state.collectionRunOwners.size,0);assert.equal(c.state.collectionSubmittedOwners.length,0);
+  assert.equal(c.state.collectionPendingRunSelection,null);assert.equal(c.state.collectionSelectedHistoryId,null);
+  assert.equal(c.state.collectionDraftDirty,true);assert.equal(c.elements.collectionRequestBody.value,'durable draft');
+}
+console.log('PASS Experiments receipt-to-caller continuation ownership: exact reviewed prefill race, Repeater draft/selection changes, A-B-A delivered receipts, result consumer gap, and real Collection chain lifetime/request/variable guards (not rendered QA)');
+
+console.log('PASS Experiments production POST/poll receipts: HTTP-200 refusal, required groups/generations, no chained Send or automatic retries, valid success, stale poll/304 ordering, reused lifetime consent/result erasure, A-B-A ownership and bounded additive aliases (not rendered QA)');
+
 const ownershipFunctionNames = ['liveScriptIdentity', 'sourceIdentity', 'sourceIsCurrent', 'sourceReference', 'setSourceCursor', 'sourceCursorFor',
   'retireSourceAnalysis', 'releaseSourcePreview', 'boundSourcePreviews', 'boundSourceAnalysis',
   'liveSources', 'capturedSources', 'selectedSource', 'deobfuscationKey', 'sourceOwnedLiveText', 'validateSourceAnalysis', 'loadDeobfuscation',
@@ -3773,6 +4120,7 @@ for (const outcome of ['success', 'lost', 'malformed', 'old-generation', 'restar
       if(++gets>1)return {status:304,ok:false};
       return {status:200,ok:true,headers:{get:()=>`"${generation}"`},json:async()=>({...structuredClone(fixture.session),generation,memory_origin_trace:terminal})};},
     memoryOriginTraceActive:()=>['armed','capturing','stepping','stopping'].includes(state.debuggerSession.memory_origin_trace.state)};
+  sandbox.syncExperimentSession = (_, current) => current;
   for(const name of ['renderDebugger','scheduleDebuggerRefresh','rebuildTrafficRequests','renderLiveBrowserTabCount','pruneLiveScriptContent','renderShellStatus','renderNetworkNotice','renderFieldProvenance'])sandbox[name]=()=>{};
   const slice=(start,end)=>memoryAppSource.slice(memoryAppSource.indexOf(start),memoryAppSource.indexOf(end,memoryAppSource.indexOf(start)));
   const controller=runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+'\n'+memoryControllerSource+'\n'+
@@ -3869,6 +4217,7 @@ async function memoryRequestFixture(phase = 'body', rendered = false) {
       const transport={request,reply,signal:options.signal,headersReady,ok:true,get bodyReads(){return bodyReads;},get statusReads(){return statusReads;},resolve:value=>{headersReady();bodyReady(value);}};
       transports.push(transport);if(phase==='body')headersReady();return headers;
     },memoryOriginTraceActive:()=>['armed','capturing','stepping','stopping'].includes(c.state.debuggerSession.memory_origin_trace.state)};
+  sandbox.syncExperimentSession = (_, current) => current;
   for(const name of ['renderDebugger','scheduleDebuggerRefresh','rebuildTrafficRequests','renderLiveBrowserTabCount','pruneLiveScriptContent','renderShellStatus','renderNetworkNotice','renderFieldProvenance'])sandbox[name]=()=>{};
   const slice=(start,end)=>memoryAppSource.slice(memoryAppSource.indexOf(start),memoryAppSource.indexOf(end,memoryAppSource.indexOf(start)));
   const api=runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+'\n'+memoryControllerSource+'\n'+

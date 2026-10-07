@@ -144,6 +144,14 @@ explains reserved paths, private directories, limits and threat boundaries.
 CLI `--output PATH` is private, atomic and no-clobber for JSON or binary output;
 an export must pass validation before its final file is created.
 
+`POST /api/evidence/packages/compare` (`compare_evidence_packages`) validates two
+supplied original package documents and compares explicitly selected declared
+metadata facets. Exact scoped references, changed fields, unmatched/cross-scope
+ambiguities, unknown observer regimes and bounded deterministic pages remain
+visible. A declared hash match never reverifies absent raw bytes. This read-only
+operation does not touch stores, helpers, capture or network. See the
+[comparison contract](../../protocol/evidence-comparison-v1.md).
+
 ## Float32 diagnostics
 
 `POST /api/float32/compare` and `reb-api call compare_float32` inspect explicit raw

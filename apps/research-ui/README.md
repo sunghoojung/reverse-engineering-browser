@@ -23,7 +23,11 @@ available. Returns validate the exact retained session/event or artifact/hash,
 restore selected request/trace/source or Evidence record and visible pane,
 original range, focus and bounded pane
 scroll positions, and leave owner-managed drafts in place. Expired or ambiguous
-links remain visible and do not switch to similarly named evidence.
+links remain visible and do not switch to similarly named evidence. Sources
+returns wait for an evicted preview to finish rendering before restoring pane
+scroll and focus. Newer interaction cancels that delayed restoration. An evicted
+WASM inspection shows an explicit **Retry inspection** action; Back/Forward and
+later catalog refreshes do not silently rerun the analysis.
 On phones, expanded **Link context** uses a full-width row below Back/Forward;
 long explanations stay in the bounded navigation scroller above the workspace.
 
@@ -1183,6 +1187,20 @@ plus catalog refresh, passive entry, wrong analyzer identity/preview bytes,
 explicit retries, stable Find/scroll, keyboard file tabs and close cleanup at
 1440×900, 760×560 and 360×740. Production-function and DOM fixtures run in
 `make lint`; they do not replace real browser screenshots or native acceptance.
+
+The dedicated `--sources-history-ui-browser` mode adds real Back after the
+production eight-preview cache evicts captured and live documents. Native
+pointer, wheel and keyboard input save nonzero editor/navigator offsets and
+focus, hold reopen HTTP delivery, and await the actual loader's terminal receipt
+before checking restoration. Repeated eviction, Forward, newer input, failed
+reopen and explicit Retry are covered at 1440×900 and 760×560. Four other explicit
+WASM inspections evict an authored valid module's report through the production
+four-report cache. Back and a changed catalog must show the released state
+without another analysis; native Enter on Retry, held/error returns and the valid
+report are checked separately. The `sources-history-ui` CI job uploads screenshots,
+request/operation receipts and validation under `build/sources-history-ui-qa`.
+These small synthetic HTTP fixtures do not run a module or analyzed JavaScript,
+and this browser gate does not replace native macOS acceptance.
 
 ### Compare supplied packages
 

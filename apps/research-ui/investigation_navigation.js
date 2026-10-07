@@ -183,29 +183,64 @@ function restoreInvestigation(entry) {
     showScreen(entry.screen, document.querySelector('#investigation-back'));
     const revision = investigationRevision;
     const returningRange = source && entry.sourceRange && !entry.sourceFormatted && !entry.sourceDeobfuscated;
-    investigationPendingReturn = {revision, source: Boolean(returningRange)};
+    investigationPendingReturn = {revision, source: Boolean(returningRange), entry, ready: false, scheduled: false};
     const read = returningRange ? sourceFactsPanel.navigate(entry.sourceRange)
       : entry.screen === 'backtrace' && (!state.originTrace || state.originTraceKey !== originTraceSelection()?.key)
         ? refreshOriginTrace() : null;
     investigationNotice(entry.notice || `Returned to ${entry.label}. Existing drafts are preserved.`);
-    Promise.resolve(read).then(() => requestAnimationFrame(() => {
-      if (investigationPendingReturn?.revision === revision) investigationPendingReturn = null;
-      if (revision !== investigationRevision || !investigationContextMatches(entry)) return;
-      if (entry.screen === 'backtrace') {
-        if (state.originTraceStatus === 'error') {investigationNotice(`Return trace unavailable: ${state.originTraceError}`, 'unavailable'); return;}
-        const restoredRow = entry.traceRow?.startsWith('gap:') ? investigationGapKey(entry.traceGap) : entry.traceRow;
-        state.selectedTraceRow = restoredRow;
-        renderBacktrace();
-        if (entry.traceRow && (!restoredRow || state.selectedTraceRow !== restoredRow)) investigationNotice('The request trace was reopened, but its previously selected step is no longer retained.', 'stale');
-      }
-      const root = document.querySelector(`#screen-${entry.screen}`);
-      for (const saved of entry.scroll) {const node = root.matches(saved.selector) ? root : root.querySelector(saved.selector); if (node) {node.scrollTop = saved.top; node.scrollLeft = saved.left;}}
-      const focus = entry.focus && root.querySelector(entry.focus);
-      (focus ?? document.querySelector('#investigation-back')).focus({preventScroll:true});
-    }));
+    Promise.resolve(read).then(() => {
+      if (investigationPendingReturn?.revision !== revision) return;
+      investigationPendingReturn.ready = true;
+      resumeInvestigationReturn();
+    });
     return true;
   } finally {investigationRestore = false;}
 }
+// Preview loads can outlive the first return frame. The Sources owner calls
+// this after rendering, so loading placeholders never consume saved scroll.
+// Keep only the bounded history entry; readers continue owning their payloads.
+function resumeInvestigationReturn() {
+  const pending = investigationPendingReturn;
+  if (!pending?.ready || pending.scheduled) return;
+  const {entry, revision} = pending;
+  if (revision !== investigationRevision || !investigationContextMatches(entry)) {
+    investigationPendingReturn = null;
+    return;
+  }
+  if (investigationReturnLoading(entry)) return;
+  pending.scheduled = true;
+  requestAnimationFrame(() => {
+    if (investigationPendingReturn !== pending) return;
+    pending.scheduled = false;
+    if (revision !== investigationRevision || !investigationContextMatches(entry)) {
+      investigationPendingReturn = null;
+      return;
+    }
+    if (investigationReturnLoading(entry)) return;
+    investigationPendingReturn = null;
+    if (entry.screen === 'backtrace') {
+      if (state.originTraceStatus === 'error') {investigationNotice(`Return trace unavailable: ${state.originTraceError}`, 'unavailable'); return;}
+      const restoredRow = entry.traceRow?.startsWith('gap:') ? investigationGapKey(entry.traceGap) : entry.traceRow;
+      state.selectedTraceRow = restoredRow;
+      renderBacktrace();
+      if (entry.traceRow && (!restoredRow || state.selectedTraceRow !== restoredRow)) investigationNotice('The request trace was reopened, but its previously selected step is no longer retained.', 'stale');
+    }
+    const root = document.querySelector(`#screen-${entry.screen}`);
+    for (const saved of entry.scroll) {const node = root.matches(saved.selector) ? root : root.querySelector(saved.selector); if (node) {node.scrollTop = saved.top; node.scrollLeft = saved.left;}}
+    const focus = [entry.focus && root.querySelector(entry.focus), document.querySelector('#investigation-back'),
+      document.querySelector('#investigation-forward')].find(node => node && !node.disabled && !node.closest?.('[hidden]'));
+    focus?.focus({preventScroll:true});
+  });
+}
+
+function investigationReturnLoading(entry) {
+  if (entry.screen !== 'sources') return false;
+  const source = selectedSource();
+  return Boolean(source?.loading && sourceFactsPanel.original(source) === undefined ||
+    entry.sourceWasm && source?.kind === 'wasm' && !state.wasmCache.has(wasmKey(source)) &&
+    state.wasmRequests.get(wasmKey(source))?.status === 'loading');
+}
+
 function investigationSelectedGap() {
   const match = /^gap:(\d+):(\d+)$/.exec(state.selectedTraceRow ?? '');
   if (!match) return null;

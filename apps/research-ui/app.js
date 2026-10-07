@@ -7409,15 +7409,18 @@
           elements.sourceLanguage.textContent = 'WebAssembly';
           elements.sourceCode.hidden = true;
           elements.sourceCodeEmpty.hidden = false;
-          elements.sourceCodeEmpty.textContent = request?.status === 'error' ? request.error : 'Inspecting immutable module bytes…';
-          if (request?.status === 'error') {
+          const pending = request?.status === 'loading';
+          const message = request?.status === 'error' ? request.error : pending ? 'Inspecting immutable module bytes…'
+            : 'This inspection preview was released to keep Sources memory bounded. Inspect the immutable module again.';
+          elements.sourceCodeEmpty.textContent = message;
+          if (!pending) {
             const retry = textElement('button', 'secondary-button', 'Retry inspection');
             retry.type = 'button';
             retry.addEventListener('click', loadWasmInspection.bind(null, sourceReference(source), true));
             const panel = document.createElement('div');
             panel.className = 'wasm-inspection-error';
             panel.setAttribute('role', 'alert');
-            panel.append(textElement('p', '', request.error), retry);
+            panel.append(textElement('p', '', message), retry);
             elements.sourceCodeEmpty.replaceChildren(panel);
           }
           return;
@@ -7602,13 +7605,14 @@
         renderSourceContent(source, view);
         if (!investigationPassiveSource && state.sourceDeobfuscated && source?.kind === 'javascript' && !document.querySelector('#screen-sources').hidden) loadDeobfuscation(source);
         renderDeobfuscationReport(source);
+        resumeInvestigationReturn();
       }
 
       function sourceViewLabel(source, view = null) {
         if (state.sourceWasm && source?.kind === 'wasm' && source.source_type === 'artifact') {
           const report = state.wasmCache.get(wasmKey(source));
           const request = state.wasmRequests.get(wasmKey(source));
-          return report ? `${report.status === 'partial' ? 'Partial' : 'Static'} inspection · original byte offsets` : request?.status === 'error' ? 'Inspection failed · original bytes preserved' : 'Inspection pending';
+          return report ? `${report.status === 'partial' ? 'Partial' : 'Static'} inspection · original byte offsets` : request?.status === 'error' ? 'Inspection failed · original bytes preserved' : request?.status === 'loading' ? 'Inspection pending' : 'Inspection preview released';
         }
         view ??= source?.content !== undefined ? sourceDisplayView(source) : null;
         const original = source?.source_type === 'script' ? 'Live runtime source'
@@ -10045,7 +10049,7 @@
           const selected = state.artifacts.find(artifact => artifact.artifact_id === state.selectedArtifactId);
           if (selected) {
             loadArtifactContent(selected);
-            if (state.sourceWasm && selected.kind === 'wasm') loadWasmInspection(selected);
+            if (!investigationPassiveSource && state.sourceWasm && selected.kind === 'wasm') loadWasmInspection(selected);
           }
           if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
         } catch (error) {

@@ -19,6 +19,8 @@ import { createServer } from "node:http";
 import assert from "node:assert/strict";
 import {checkCollectionController, collectionBrowserFixture, checkCollectionInteractions} from "./check-origin-trace-collection.mjs";
 import {checkInvestigationCore, investigationFixture, checkInvestigationInteractions} from "./check-investigation-navigation.mjs";
+import {sourcesHistoryFixture, checkSourcesHistoryFixture, checkSourcesHistoryInteractions} from "./check-sources-history.mjs";
+const sourcesHistoryBrowser = process.argv[2] === "--sources-history-ui-browser";
 const canvasBrowser = process.argv[2] === "--canvas-ui-browser";
 const investigationBrowser = process.argv[2] === "--investigation-ui-browser";
 const collectionBrowser = process.argv[2] === "--collection-ui-browser";
@@ -31,7 +33,7 @@ const memoryBrowser = process.argv[2] === "--memory-ui-browser";
 const evidenceBrowser = process.argv[2] === "--evidence-ui-browser";
 const comparisonBrowser = process.argv[2] === "--evidence-comparison-ui-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
-const root = process.argv[fieldsOnly || canvasBrowser || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
+const root = process.argv[fieldsOnly || canvasBrowser || sourcesHistoryBrowser || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
 await checkConsoleDOM(root);
 await checkCollectionController(root);
 await checkInvestigationCore(root);
@@ -1844,15 +1846,15 @@ function ownedContext(patch = {}) {
     sourceDeobfuscated:false, sourceFormatted:false, sourceWasm:false, sessionMode:'live', ...patch.state};
   const sandbox = {console, state, TextEncoder, TextDecoder, Uint8Array, crypto, AbortController, setTimeout, clearTimeout,
     sourceFactsFields:sourceFactsUI.sourceFactsFields, sourceFactsIdentity:sourceFactsUI.sourceFactsIdentity, sourceFactsUnavailable:sourceFactsUI.sourceFactsUnavailable, sourceFactsReadBytes:sourceFactsUI.sourceFactsReadBytes,
-    sourceFactsPanel:{original:()=>undefined,cancel(){}}, investigationBeforeSelection(){}, location:{protocol:'http:'}, document:{querySelector:()=>({hidden:true})},
+    sourceFactsPanel:{original:()=>undefined,cancel(){}}, investigationBeforeSelection(){}, investigationPassiveSource:false, location:{protocol:'http:'}, document:{querySelector:()=>({hidden:true})},
     renderSources(){}, renderSourceHealth(){}, renderShellStatus(){}, renderFingerprintActivity(){},
     runtimeHooksState:()=>({workers:[], isolated:true, target_id:state.debuggerSession?.target?.id}),
     elements:{signalRenderList:new TrafficFixtureNode()}, ...canvasProductionRules,
     sourceName:source=>source.url, evidencePackagePanel:{sync(){}}, evidenceWorkspace:{sync(){}},
     ...patch, state};
-  const functions=[...ownershipFunctionNames,...(patch.functions??[])];
+  const functions = [...(patch.productionFunctions ?? ownershipFunctionNames), ...(patch.functions ?? [])];
   return {state, sandbox, api:runInNewContext(ownershipModels + ownershipSyntax + ownershipProvenanceSite + functions.map(sourceProductionFunction).join('\n') +
-    `;({${functions.join(',')},revealProvenanceSite})`, sandbox)};
+    (patch.productionSource ?? '') + `;({${functions.join(',')},revealProvenanceSite,${(patch.productionExports ?? []).join(',')}})`, sandbox)};
 }
 const sourceOwnershipReceipt = [];
 const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{resolve=done;}); return {promise,resolve};};
@@ -2344,6 +2346,134 @@ function ownedDerivedPayload(source, original, replacements) {
   }
   sourceOwnershipReceipt.push({test:'review_opaque_cdp_token_exact_full_live_text_and_late_owner',status:'passed',nulNormalizationUsedAsProof:false,providerFormats:2});
 }
+
+// Shared history must restore only after the actual preview renderer settles.
+// The DOM is inert: scroll clamping, geometry and keyboard acceptance still need CI.
+const sourceHistoryNavigation = await readFile(join(root,'apps/research-ui/investigation_navigation.js'),'utf8');
+async function sourceHistoryFixture(kind = 'artifact') {
+  const {document,elements}=sourceReviewDOM(),frames=[],reads=[],held=ownedDeferred();
+  elements.signalRenderList=document.createElement('div');
+  const text=Array.from({length:100},(_,line)=>`const row${line} = "${'x'.repeat(120)}";`).join('\n');
+  const artifact={...await ownedArtifact('7',text),content:text};
+  if(kind==='wasm'){artifact.kind='wasm';artifact.mime_type='application/wasm';}
+  const script={script_id:'live-7',target_id:'page-1',hash:'opaque-version',language:'JavaScript',length:text.length,url:artifact.url};
+  for(const name of ['sourceLocation','sourceSize','sourceHash','sourceViewKind','sourceWasm','sourcePretty','sourceDeob','sourceHookPivot','requestFilter'])elements[name]=document.createElement('button');
+  const screens=Object.fromEntries(['sources','tools','signals'].map(name=>[name,document.createElement('section')]));
+  for(const [name,node] of Object.entries(screens)){node.id=`screen-${name}`;node.hidden=name!=='sources';}
+  elements.sourceCodeWrap.id='source-code-wrap';elements.sourceTree.id='source-tree';
+  screens.sources.append(elements.sourceCodeWrap,elements.sourceTree,elements.sourcePretty);
+  screens.signals.append(elements.signalRenderList);
+  elements.sourceCodeWrap.append(elements.sourceCode,elements.sourceCodeEmpty);
+  elements.sourcePretty.id='source-pretty';
+  const back=document.createElement('button'),forward=document.createElement('button'),notice=document.createElement('p'),bar=document.createElement('div');back.id='investigation-back';forward.id='investigation-forward';
+  back.disabled=true;forward.disabled=true;
+  const byId=new Map([...Object.values(screens),...Object.values(elements),back,forward].filter(node=>node.id).map(node=>[`#${node.id}`,node]));
+  byId.set('#investigation-decode-range',document.createElement('button'));
+  for(const node of [...Object.values(screens),...Object.values(elements)]){
+    const matches=node.matches.bind(node);node.matches=selector=>selector.startsWith('#')?selector===`#${node.id}`:matches(selector);
+  }
+  screens.sources.querySelectorAll=selector=>selector.includes(',')?[elements.sourceCodeWrap,elements.sourceTree]:Object.values(elements).filter(node=>node.matches(selector));
+  screens.sources.querySelector=selector=>byId.get(selector)??null;
+  const navigation={open:false,contains:()=>false};
+  document.querySelector=selector=>selector==='.screen:not([hidden])'?Object.values(screens).find(node=>!node.hidden):selector==='#investigation-notice'?notice:selector==='#investigation-navigation'?bar:selector==='#advanced-navigation'?navigation:byId.get(selector)??null;
+  document.querySelectorAll=selector=>selector==='.screen'?Object.values(screens):[];
+  bar.querySelector=()=>({open:false});
+  const noop=()=>{};
+  const fixture=ownedContext({elements,document,CSS:{escape:value=>value},requestAnimationFrame:fn=>frames.push(fn),
+    state:{artifacts:[artifact],requests:[],decoderSteps:[],selectedArtifactId:kind==='script'?null:'7',selectedScriptId:kind==='script'?'live-7':null,
+      sourceCollection:kind==='script'?'page':'captured',debuggerSession:{target:{id:'page-1'},scripts:[script]},
+      sourceFactsOpen:false,openArtifactIds:['7'],openScriptIds:kind==='script'?['live-7']:[]},
+    sourceFactsPanel:{original:()=>undefined,sync:noop,cancel:noop},float32Panel:{cancel:noop},evidenceWorkspace:{setVisible:noop,sync:noop},
+    renderDebugger:noop,renderSourceTree:noop,renderSourceTabs:noop,renderSourceFacts:noop,renderDeobfuscationReport:noop,
+    renderTools:noop,refreshDecoderEngine:noop,formatByteSize:String,applySourceSearch:noop,memoryOriginTraceActive:()=>false,
+    appendSourceSyntax(node,tokens){node.textContent=tokens.map(token=>token.text).join('');},
+    fetch:async(url,options)=>{reads.push({url,signal:options.signal});if(url.startsWith('/api/artifacts?'))return Response.json({count:1,artifacts:[Object.fromEntries(sourceFactsUI.sourceFactsFields.filter(key=>Object.hasOwn(artifact,key)).map(key=>[key,artifact[key]]))]});return held.promise;},
+    productionFunctions:[...ownershipFunctionNames.filter(name=>!['renderSourceTabs','renderDeobfuscationReport'].includes(name)), 'renderSources','showScreen','wasmKey','loadWasmInspection'],
+    productionSource:sourceHistoryNavigation+'\ninvestigationNavigation=createInvestigationHistory({snapshot:investigationSnapshot,restore:restoreInvestigation,changed({back,forward}){document.querySelector("#investigation-back").disabled=!back;document.querySelector("#investigation-forward").disabled=!forward;}});',
+    productionExports:['investigationSnapshot','restoreInvestigation','retireInvestigationReturn','history:investigationNavigation','pendingReturn:()=>investigationPendingReturn']});
+  const {state,api}=fixture;
+  // Observe the actual production promises. A fixed number of setImmediate
+  // turns can expire before WebCrypto finishes, even though the UI is correct.
+  const completion=sourceOwnershipOperationObserver({artifact:api.loadArtifactContent,script:api.loadScriptContent,wasm:api.loadWasmInspection},api.sourceIdentity);
+  fixture.sandbox.loadArtifactContent=completion.wrappers.artifact;
+  fixture.sandbox.loadScriptContent=completion.wrappers.script;
+  fixture.sandbox.loadWasmInspection=completion.wrappers.wasm;
+  if(kind==='script')state.liveScriptContent.set(script.script_id,{identity:api.liveScriptIdentity(script),content:text,loading:false});
+  if(kind==='wasm'){
+    state.sourceWasm=true;
+    state.wasmCache.set(api.wasmKey(artifact),{...wasmReport,artifact_id:'7',sha256:artifact.sha256,byte_size:artifact.byte_size});
+    state.wasmRequests.set(api.wasmKey(artifact),{status:'ready'});
+  }
+  api.renderSources();elements.sourcePretty.focus();elements.sourceCodeWrap.scrollTop=713;elements.sourceCodeWrap.scrollLeft=143;elements.sourceTree.scrollTop=81;
+  const saved=api.investigationSnapshot();
+  api.showScreen('tools');
+  api.releaseSourcePreview(api.selectedSource());
+  if(kind==='wasm')state.wasmCache.clear();
+  frames.length=0;
+  const flush=async()=>{await new Promise(resolve=>setImmediate(resolve));for(const callback of frames.splice(0))callback();};
+  const settle=async()=>{
+    const deadline=Date.now()+5000;
+    do {
+      await flush();
+      if(completion.failures().pending===0&&api.pendingReturn()===null&&frames.length===0)return;
+      await new Promise(resolve=>setTimeout(resolve,1));
+    }while(Date.now()<deadline);
+    assert.fail('Sources history production loader/return did not reach observable completion');
+  };
+  return {...fixture,elements,document,held,reads,text,saved,frames,screens,notice,flush,settle};
+}
+for(const kind of ['artifact','script']) {
+  const fixture=await sourceHistoryFixture(kind),{api,held,reads,elements,document,text,flush}=fixture;
+  assert(api.history.back());await flush();assert.equal(reads.length,1,'Shared Back deduplicates the selected preview read');
+  assert.match(elements.sourceCodeEmpty.textContent,/Loading/);
+  held.resolve(kind==='script'?Response.json({protocol_version:1,script_id:'live-7',source:text,truncated:false}):new Response(text));
+  await fixture.settle();
+  assert.equal(elements.sourceCodeWrap.scrollTop,713,`${kind}: Back restores vertical scroll after preview completion`);
+  assert.equal(elements.sourceCodeWrap.scrollLeft,143,`${kind}: Back restores horizontal scroll after preview completion`);
+  assert.equal(elements.sourceTree.scrollTop,81);assert.equal(document.activeElement,elements.sourcePretty);
+  assert(api.history.forward());assert.equal(fixture.screens.tools.hidden,false);
+}
+for(const kind of ['artifact','script']) for(const interruption of ['interaction','forward','identity','error']) {
+  const fixture=await sourceHistoryFixture(kind),{api,state,held,elements,document,text,flush}=fixture;
+  assert(api.history.back());await flush();
+  if(interruption==='interaction')api.retireInvestigationReturn();
+  if(interruption==='forward')assert(api.history.forward());
+  if(interruption==='identity'){
+    if(kind==='artifact')state.artifacts[0]={...state.artifacts[0],session_id:'2',content:'newer source',loading:false};
+    else state.debuggerSession.scripts[0]={...state.debuggerSession.scripts[0],hash:'newer-version'};
+    api.renderSources();
+  }
+  elements.sourceTree.scrollTop=777;elements.sourceTree.focus();
+  held.resolve(interruption==='error'?new Response('{}',{status:503}):kind==='script'?Response.json({protocol_version:1,script_id:'live-7',source:text,truncated:false}):new Response(text));
+  await fixture.settle();
+  if(interruption==='error'){
+    assert.match(elements.sourceCodeEmpty.textContent,/unavailable/i);
+    assert.equal(document.activeElement.id,'investigation-forward','When saved focus and the consumed Back control are disabled, Forward owns focus');
+  } else {
+    assert.equal(elements.sourceTree.scrollTop,777,'Late readers cannot restore superseded pane scroll');
+    if(interruption==='forward')assert.notEqual(document.activeElement,elements.sourcePretty,'A Source reader cannot reclaim focus after Forward');
+    else assert.equal(document.activeElement,elements.sourceTree,`${kind}/${interruption}: late readers cannot reclaim newer focus`);
+  }
+  assert.equal(api.pendingReturn(),null,'Terminal or superseded returns release their metadata');
+}
+{
+  const fixture=await sourceHistoryFixture('wasm'),{api,held,reads,elements,text,flush}=fixture;
+  assert(api.history.back());held.resolve(new Response(text));
+  await fixture.settle();
+  assert.equal(reads.length,1,'Passive Back cannot automatically run an evicted static inspection');
+  assert.doesNotMatch(elements.sourceCodeEmpty.textContent,/Inspecting immutable module bytes/,'An evicted report with no read in flight is not loading');
+  assert.match(elements.sourceCodeEmpty.textContent,/released|Retry inspection/);
+  await api.refreshArtifacts();assert.equal(reads.filter(read=>read.url.startsWith('/api/wasm')).length,0,'A passive return stays passive on later catalog refresh');
+  assert.match(elements.sourceViewKind.textContent,/released/);
+  assert.equal(api.pendingReturn(),null);
+  let inspections=0;
+  fixture.sandbox.fetch=async()=>{inspections++;return Response.json({...wasmReport,artifact_id:'7',sha256:api.selectedSource().sha256,byte_size:api.selectedSource().byte_size});};
+  const retry=elements.sourceCodeEmpty.querySelector('button');assert.equal(retry.textContent,'Retry inspection');
+  api.retireInvestigationReturn();retry.listeners.click[0]();
+  await fixture.settle();
+  assert.equal(inspections,1);assert.equal(elements.sourceCode.hidden,false);assert.match(elements.sourceLanguage.textContent,/WASM disassembly/);
+}
+console.log('PASS shared Sources Back/Forward after preview and WASM report eviction through actual selection, shell, readers and renderer (DOM fixture; not rendered QA)');
 
 if (process.env.REB_SOURCE_OWNERSHIP_BACKEND_URL) {
   const endpoint=new URL(process.env.REB_SOURCE_OWNERSHIP_BACKEND_URL);
@@ -3289,6 +3419,7 @@ sourcesFixtureControl.liveDocuments.get('qa-control').text='const newer = 1;';so
 assert.equal(JSON.parse((await heldLiveControl).body).source,'const inert = "雪";');
 sourcesFixtureControl.liveMode='ready';
 console.log('PASS Sources browser fixture event/artifact/debugger admission, exact source text, inert analysis replies and held-body ownership routes (not rendered QA)');
+await checkSourcesHistoryFixture(await sourceFactsBrowserFixture(),root);
 
 // Test-only observation of the actual loader promises. Each wrapper calls its
 // loader exactly once with the original receiver/arguments and returns the same
@@ -5286,8 +5417,8 @@ await checkCanvasFixture(await canvasBrowserFixture(root,canvasFixtureOptions),s
 async function checkTrafficBrowser() {
   const executable = process.env.REB_UI_CHROMIUM;
   assert(float32FixtureOnly || executable, "Set REB_UI_CHROMIUM to the installed Chrome/Chromium executable. Sandbox flags are not overridden.");
-  const directory = await mkdtemp(join(tmpdir(), canvasBrowser ? "reb-canvas-ui-" : memoryBrowser ? "reb-memory-ui-" : investigationBrowser ? "reb-investigation-ui-" : float32Browser || float32FixtureOnly ? "reb-float32-ui-" : collectionBrowser ? "reb-collection-ui-" : consoleBrowser ? "reb-console-ui-" : comparisonBrowser ? "reb-comparison-ui-" : evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
-  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", canvasBrowser ? "canvas-ui-qa" : memoryBrowser ? "memory-ui-qa" : investigationBrowser ? "investigation-ui-qa" : float32Browser || float32FixtureOnly ? "float32-ui-qa" : collectionBrowser ? "collection-ui-qa" : consoleBrowser ? "console-ui-qa" : comparisonBrowser ? "comparison-ui-qa" : evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
+  const directory = await mkdtemp(join(tmpdir(), canvasBrowser ? "reb-canvas-ui-" : sourcesHistoryBrowser ? "reb-sources-history-ui-" : memoryBrowser ? "reb-memory-ui-" : investigationBrowser ? "reb-investigation-ui-" : float32Browser || float32FixtureOnly ? "reb-float32-ui-" : collectionBrowser ? "reb-collection-ui-" : consoleBrowser ? "reb-console-ui-" : comparisonBrowser ? "reb-comparison-ui-" : evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
+  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", canvasBrowser ? "canvas-ui-qa" : sourcesHistoryBrowser ? "sources-history-ui-qa" : memoryBrowser ? "memory-ui-qa" : investigationBrowser ? "investigation-ui-qa" : float32Browser || float32FixtureOnly ? "float32-ui-qa" : collectionBrowser ? "collection-ui-qa" : consoleBrowser ? "console-ui-qa" : comparisonBrowser ? "comparison-ui-qa" : evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
   await mkdir(output, {recursive: true});
   let trafficApiMode = "offline";
   const canvasFixture = canvasBrowser ? await canvasBrowserFixture(root,canvasFixtureOptions) : null;
@@ -5295,7 +5426,7 @@ async function checkTrafficBrowser() {
   const memoryFixture = memoryBrowser ? await memoryBrowserFixture() : null;
   const collectionFixture = collectionBrowser ? await collectionBrowserFixture(root) : null;
   let floatFixture;
-  const factsFixture = investigationBrowser ? investigationFixture(await sourceFactsBrowserFixture()) : sourceFactsBrowser ? await sourceFactsBrowserFixture() : null;
+  const factsFixture = sourcesHistoryBrowser ? await sourcesHistoryFixture(await sourceFactsBrowserFixture()) : investigationBrowser ? investigationFixture(await sourceFactsBrowserFixture()) : sourceFactsBrowser ? await sourceFactsBrowserFixture() : null;
   const consoleFixture = consoleBrowser ? createConsoleFixture() : null;
   const evidenceFixture = evidenceBrowser || comparisonBrowser ? evidenceBrowserFixture() : null;
   if(evidenceFixture){
@@ -5544,7 +5675,7 @@ async function checkTrafficBrowser() {
     };
     captureFailure = async () => {
       const result = await command("Page.captureScreenshot", {format: "png"});
-      await writeFile(join(output, canvasBrowser ? "canvas-failure.png" : memoryBrowser ? "memory-failure.png" : investigationBrowser ? "investigation-failure.png" : float32Browser ? "float32-failure.png" : collectionBrowser ? "collection-failure.png" : consoleBrowser ? "console-failure.png" : comparisonBrowser ? "comparison-failure.png" : evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
+      await writeFile(join(output, canvasBrowser ? "canvas-failure.png" : sourcesHistoryBrowser ? "sources-history-failure.png" : memoryBrowser ? "memory-failure.png" : investigationBrowser ? "investigation-failure.png" : float32Browser ? "float32-failure.png" : collectionBrowser ? "collection-failure.png" : consoleBrowser ? "console-failure.png" : comparisonBrowser ? "comparison-failure.png" : evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
     };
     await viewport(1440, 900);
     if (canvasFixture) await command("Page.addScriptToEvaluateOnNewDocument", {source:canvasFixture.installObserver});
@@ -5555,7 +5686,10 @@ async function checkTrafficBrowser() {
     }
     assert(await evaluate("typeof renderRequests === 'function'"), "Application did not initialize");
     diagnostics.phase = "interactive validation";
-    if (canvasBrowser) {
+    if (sourcesHistoryBrowser) {
+      validation = await checkSourcesHistoryInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:factsFixture,operationObserver:sourceOwnershipOperationObserver,waitForSettlement:waitForSourceOwnershipSettlement,record:value=>{(diagnostics.sources_history_checks??=[]).push(value);}});
+      assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Sources history QA");
+    } else if (canvasBrowser) {
       const navigatePolicy=()=>command("Page.navigate",{url:`http://127.0.0.1:${server.address().port}/?canvas_images=1&canvas_policy=blocked`});
       validation = await checkCanvasInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:canvasFixture,record:value=>canvasReceipts.push(value),navigatePolicy});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Canvas QA");
@@ -5711,6 +5845,7 @@ async function checkTrafficBrowser() {
     try {await lifecycle?.stop();}
     catch (error) {failure ??= error; diagnostics.cleanup_error = String(error.message).slice(0, 2048);}
     try { await floatFixture?.stop(); } catch (error) {failure ??= error; diagnostics.float32_cleanup_error = String(error.message);}
+    if(sourcesHistoryBrowser&&factsFixture) diagnostics.sources_history_requests={reads:factsFixture.reads,catalogs:factsFixture.catalogReads,rejectedWrites:factsFixture.rejectedWrites};
     canvasFixture?.release();
     if (canvasFixture) {
       try {await writeFile(join(output,"canvas-fixture-receipts.json"),JSON.stringify({schema:"reb-canvas-ui-qa-v1",receipts:canvasReceipts,requests:canvasFixture.requests},null,2));}
@@ -5736,9 +5871,9 @@ async function checkTrafficBrowser() {
   }
   if (failure) throw failure;
   await writeFile(join(output, float32FixtureOnly ? "fixture-validation.json" : "validation.json"), JSON.stringify(validation, null, 2));
-  console.log(`PASS ${float32FixtureOnly ? "real loopback fixture (not rendered QA)" : "real Chromium"} ${canvasBrowser ? 'Canvas' : memoryBrowser ? 'Memory workflow' : float32Browser || float32FixtureOnly ? 'Float32 diagnostics' : collectionBrowser ? 'Collection' : consoleBrowser ? 'Console' : comparisonBrowser ? 'Evidence supplied-package comparison' : evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
+  console.log(`PASS ${float32FixtureOnly ? "real loopback fixture (not rendered QA)" : "real Chromium"} ${canvasBrowser ? 'Canvas' : sourcesHistoryBrowser ? 'Sources history' : memoryBrowser ? 'Memory workflow' : float32Browser || float32FixtureOnly ? 'Float32 diagnostics' : collectionBrowser ? 'Collection' : consoleBrowser ? 'Console' : comparisonBrowser ? 'Evidence supplied-package comparison' : evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
 }
-if (canvasBrowser || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly) {await checkTrafficBrowser(); process.exit(0);}
+if (canvasBrowser || sourcesHistoryBrowser || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly) {await checkTrafficBrowser(); process.exit(0);}
 
 if (fieldsOnly) process.exit(0);
 const temporary = await mkdtemp(join(tmpdir(), "origin-trace-debugger-"));

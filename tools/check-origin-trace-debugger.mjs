@@ -4896,7 +4896,7 @@ async function checkTrafficBrowser() {
   await mkdir(output, {recursive: true});
   let trafficApiMode = "offline";
   const memoryFixture = memoryBrowser ? await memoryBrowserFixture() : null;
-  const collectionFixture = collectionBrowser ? collectionBrowserFixture() : null;
+  const collectionFixture = collectionBrowser ? await collectionBrowserFixture(root) : null;
   let floatFixture;
   const factsFixture = investigationBrowser ? investigationFixture(await sourceFactsBrowserFixture()) : sourceFactsBrowser ? await sourceFactsBrowserFixture() : null;
   const consoleFixture = consoleBrowser ? createConsoleFixture() : null;

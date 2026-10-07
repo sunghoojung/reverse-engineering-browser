@@ -146,6 +146,13 @@ Sources **Facts** is an explicit consumer of this exact contract. It accepts onl
 the selected captured JavaScript identity, pages at most 100 facts, labels
 unknown/truncated coverage, and navigates half-open UTF-8 ranges only after
 verifying the complete original bytes through the existing artifact chunk API.
+The Bindings explorer joins only admitted top-level operation targets to local
+binding IDs within the same report. Exact lexical bindings, ambiguous declaration
+candidates, unresolved names and property targets remain distinct. Read/write/call
+filters are projections of static operations, never runtime/dataflow claims or
+occurrence counts. Successful reanalysis resets selected report-local IDs;
+changing the view retires pending original-range navigation. This adds no wire
+fields, backend operations, persisted index or execution.
 The browser and native live workspace share the Rust HTTP adapter. The native
 stored-evidence `reb://` scheme explicitly reports unavailable and disables the
 action; it does not duplicate or weaken validation. See the

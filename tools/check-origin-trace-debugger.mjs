@@ -66,9 +66,156 @@ console.log('PASS actual fixture public-asset handler: Float32 bytes, canonical 
 // fixtures exercise identity and stale/cancelled request ownership, not JS execution.
 const sourceFactsUI = runInNewContext(
   (await readFile(join(root, 'apps/research-ui/source_facts.js'), 'utf8')) +
-  ';({sourceFactsFields,sourceFactsIdentity,sourceFactsUnavailable,isSourceFactsReport,sourceFactsPosition,sourceFactsReadBytes,createSourceFactsController})',
+  ';({sourceFactsFields,sourceFactsIdentity,sourceFactsUnavailable,isSourceFactsReport,sourceFactsPosition,sourceFactsReadBytes,createSourceFactsController,sourceFactsReferenceTarget,sourceFactsBindingOperations,sourceFactsOperationSummary,createSourceFactsPanel})',
   {TextEncoder, TextDecoder, Uint8Array, AbortController, setTimeout, clearTimeout, fetch, crypto},
 );
+function factsReferenceFixture(source) {
+  const text = '\ufefflet 雪 = "😀";\nfunction shadow(雪) { return 雪; }\nfunction closure() { return 雪; }\n雪++;\nvar duplicate; var duplicate;\nduplicate(); new duplicate();\nconst spare = 0;\nunknown; object.雪;\n' + '雪;\n'.repeat(105);
+  const bytes = new TextEncoder().encode(text);
+  const range = (needle, after = 0) => {const index = text.indexOf(needle, after); assert(index >= 0); return {start:Buffer.byteLength(text.slice(0,index)),end:Buffer.byteLength(text.slice(0,index+needle.length))};};
+  const full = {start:0,end:bytes.length};
+  const target = id => ({kind:'binding',binding_ids:[id],resolution:'lexical-only',name:'雪'});
+  const ambiguous = {kind:'ambiguous',binding_ids:[2,3],resolution:'duplicate-declarations',name:'duplicate'};
+  const operation = (id, kind, range, target, region_id=0) => ({id,region_id,order:id,range,kind,detail:{target}});
+  const operations = [
+    operation(0,'read',range('雪',text.indexOf('closure')),target(0),2),
+    operation(1,'read',range('雪',text.indexOf('return')),target(1),1),
+    operation(2,'read',range('雪++'),target(0)),operation(3,'write',range('雪++'),target(0)),
+    operation(4,'call',range('duplicate()'),ambiguous),operation(5,'construct',range('new duplicate()'),ambiguous),
+    operation(6,'read',range('unknown'),{kind:'unresolved',binding_ids:[],resolution:'dynamic-scope',name:'雪'}),
+    operation(7,'read',range('object.雪'),{kind:'property',object_range:range('object'),key_range:range('雪',text.indexOf('object')),computed:false}),
+  ];
+  let after=text.indexOf('object.雪;')+'object.雪;'.length;
+  for(let i=0;i<105;i++){const start=text.indexOf('雪;',after);operations.push(operation(8+i,'read',range('雪',start),target(0)));after=start+2;}
+  const scope = (id, needle) => ({id,parent_id:0,range:range(needle),kind:'function'});
+  const scopes = [{id:0,parent_id:null,range:full,kind:'program'},scope(1,'function shadow(雪) { return 雪; }'),scope(2,'function closure() { return 雪; }')];
+  const binding = (id,name,kind,scope_id,after=0) => ({id,name,kind,scope_id,range:range(name,after)});
+  const report = {schema:'reb-javascript-source-facts-v1',profile:'lexical-effects-v1',offset_unit:'utf-8-byte',source_bytes:bytes.length,source,ok:true,scopes,
+    bindings:[binding(0,'雪','let',0),binding(1,'雪','parameter',1,text.indexOf('shadow')),binding(2,'duplicate','var',0),binding(3,'duplicate','var',0,text.indexOf('duplicate;')+10),binding(4,'spare','const',0)],callables:[],
+    regions:scopes.map(({id,range})=>({id,parent_id:id?0:null,callable_id:null,range,kind:id?'conditional-then':'program',entry_order:id})),operations,
+    coverage:{status:'partial',truncated:false,diagnostics:[],frontiers:[{range:range('duplicate()'),reason:'unknown-call-mutation-or-throw'}]},
+    limits:{max_source_bytes:4194304,max_ast_nodes:32768,max_facts:16384,max_frontiers:256,max_binding_candidates:64,preflight_depth:128,preflight_nodes:500000}};
+  return {text,bytes,report};
+}
+const references = factsReferenceFixture();
+assert.deepEqual(Array.from(sourceFactsUI.sourceFactsBindingOperations(references.report,1),row=>row.id),[1],'Shadowed spelling must not join outer lexical operations');
+assert.equal(sourceFactsUI.sourceFactsBindingOperations(references.report,0,'read').length,107,'Closure and outer reads share the exact binding ID');
+assert.deepEqual(Array.from(sourceFactsUI.sourceFactsBindingOperations(references.report,0,'write'),row=>row.id),[3]);
+assert.deepEqual(Array.from(sourceFactsUI.sourceFactsBindingOperations(references.report,2),row=>row.id),[4,5]);
+assert.deepEqual(Array.from(sourceFactsUI.sourceFactsBindingOperations(references.report,3),row=>row.id),[4,5]);
+assert.equal(sourceFactsUI.sourceFactsBindingOperations(references.report,4).length,0);
+assert.equal(sourceFactsUI.sourceFactsBindingOperations(references.report,999).length,0);
+const referenceBindings = new Map(references.report.bindings.map(row=>[row.id,row]));
+assert.match(sourceFactsUI.sourceFactsOperationSummary(references.report.operations[4],referenceBindings),/Ambiguous.*runtime call target unknown/);
+assert.match(sourceFactsUI.sourceFactsOperationSummary(references.report.operations[6],referenceBindings),/Unresolved: dynamic-scope/);
+assert.match(sourceFactsUI.sourceFactsOperationSummary(references.report.operations[7],referenceBindings),/Property target; runtime object unknown/);
+for(const invalid of [{kind:'binding',binding_ids:[0,1],resolution:'lexical-only'},{kind:'ambiguous',binding_ids:[2,2],resolution:'duplicate-declarations'},{kind:'binding',binding_ids:[999],resolution:'lexical-only'},{kind:'binding',binding_ids:[0],resolution:'runtime'},{kind:'ambiguous',binding_ids:Array.from({length:65},(_,i)=>i),resolution:'duplicate-declarations'}]) {
+  assert.equal(sourceFactsUI.sourceFactsReferenceTarget({...references.report.operations[0],detail:{target:invalid}},referenceBindings),null);
+}
+assert.equal(sourceFactsUI.sourceFactsReferenceTarget({...references.report.operations[0],detail:{nested:{target:references.report.operations[0].detail.target}}},referenceBindings),null,'Arbitrary nested JSON is never lexical evidence');
+console.log('PASS Facts lexical joins: same-name shadowing, closures, reads/writes, ambiguous declaration candidates, unresolved/property refusal, malformed joins and operation filtering (not rendered QA)');
+async function checkFactsReferencePanel() {
+const panelSource = await readFile(join(root,'apps/research-ui/source_facts.js'),'utf8');
+const reference = factsReferenceFixture();
+let document;
+class FactsReviewNode {
+  constructor(tag) {
+    this.tagName = tag; this.children = []; this.dataset = {}; this.attributes = {};
+    this.listeners = {}; this._text = ''; this.value = ''; this.disabled = false;
+    this.selectionStart = 0; this.selectionEnd = 0; this.parentNode = null;
+  }
+  set textContent(value) { this._text = String(value); this.replaceChildren(); }
+  get textContent() { return this._text + this.children.map(child => child.textContent).join(''); }
+  append(...nodes) { for (const node of nodes) { node.parentNode = this; this.children.push(node); } }
+  replaceChildren(...nodes) {
+    for (const child of this.children) {
+      if (child.contains(document?.activeElement)) document.activeElement = null;
+      child.parentNode = null;
+    }
+    this.children = []; this.append(...nodes);
+  }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  getAttribute(name) { return this.attributes[name] ?? null; }
+  addEventListener(name, handler) { (this.listeners[name] ??= []).push(handler); }
+  fire(name, values = {}) { for (const handler of this.listeners[name] ?? []) handler({target: this, currentTarget: this, ...values}); }
+  click() { if (!this.disabled) this.fire('click'); }
+  contains(node) { return this === node || this.children.some(child => child.contains(node)); }
+  get isConnected() { return roots.some(root => root.contains(this)); }
+  focus() { if (this.isConnected) document.activeElement = this; }
+  setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
+  getClientRects() { return this.isConnected ? [1] : []; }
+  scrollIntoView() {}
+  matches(selector) {
+    if (selector.includes(',')) return selector.split(',').some(value => this.matches(value.trim()));
+    if (selector.startsWith('.')) return this.className?.split(' ').includes(selector.slice(1)) ?? false;
+    if (selector.startsWith('[')) {
+      const match = selector.match(/^\[([^=\]]+)(?:="?([^"\]]*)"?)?\]$/);
+      if (!match) return false;
+      const name = match[1];
+      const value = name.startsWith('data-') ? this.dataset[name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] : this.attributes[name];
+      return match[2] === undefined ? value !== undefined : value === match[2];
+    }
+    return selector === this.tagName;
+  }
+  querySelectorAll(selector) { return this.children.flatMap(child => [...(child.matches(selector) ? [child] : []), ...child.querySelectorAll(selector)]); }
+  querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null; }
+  closest(selector) { return this.matches(selector) ? this : this.parentNode?.closest(selector); }
+}
+const toggle = new FactsReviewNode('button');
+const details = new FactsReviewNode('details');
+const container = new FactsReviewNode('div');
+const roots = [toggle, details];
+details.append(new FactsReviewNode('summary'), container);
+details.open = true;
+document = {activeElement: null, createElement: tag => new FactsReviewNode(tag), querySelector: selector => ({'#source-facts-toggle': toggle, '#source-facts-details': details, '#source-facts-report': container}[selector])};
+let selected = {source_type: 'artifact', protocol_version: 1, artifact_id: '12', session_id: '11', navigation_id: '13', frame_id: '17', parent_artifact_id: '0', creator_event_id: '19', execution_context_id: '23', capture_origin: 'dynamic_javascript', kind: 'javascript', url: 'https://fixture.invalid/facts-12.js', mime_type: 'text/javascript', byte_size: reference.bytes.length, sha256: Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',reference.bytes)),byte=>byte.toString(16).padStart(2,'0')).join(''), sensitive: false};
+let reportError = false, finishOriginal, navigations = 0;
+const create = Function('document', 'location', 'fetch', `${panelSource}; return createSourceFactsPanel;`)(document, {protocol: 'http:'}, async url => url.startsWith('/api/artifacts/') ? new Promise(resolve=>{finishOriginal=()=>resolve(new Response(reference.bytes,{headers:{'X-Artifact-Total-Bytes':String(reference.bytes.length),'X-Artifact-Offset':'0','X-Artifact-Truncated':'false'}}));}) : reportError ? Response.json({error: 'Authored retry failure'}, {status: 503}) : Response.json(factsReferenceFixture(selected).report));
+const panel = create({getSource: () => selected, onNavigate() { navigations++; }, openSidebar() {}});
+const control = selector => { const node = container.querySelector(selector); assert(node, `Missing ${selector}`); return node; };
+const action = name => control(`[data-facts-action="${name}"]`);
+const category = value => { const node = control('[aria-label="JavaScript fact category"]'); node.value = value; node.fire('change'); };
+const row = id => control(`[data-fact-id="${id}"]`);
+panel.sync(selected); await panel.load();
+assert.equal(container.querySelectorAll('article').length, 100);
+category('bindings');
+const composingInput = control('[data-facts-binding-query]'); composingInput.focus();
+composingInput.fire('compositionstart'); composingInput.value = '雪';
+composingInput.fire('input', {isComposing: true});
+let composingEscapePrevented = false;
+details.fire('keydown',{key:'Escape',isComposing:true,preventDefault(){composingEscapePrevented=true;},stopPropagation(){}});
+assert.equal(details.open,true);assert.equal(composingEscapePrevented,false,'IME Escape must remain available to composition');
+assert(composingInput.isConnected, 'Composition must not detach its input');
+assert.equal(document.activeElement, composingInput);
+composingInput.fire('compositionend', {isComposing: false});
+assert.equal(container.querySelectorAll('article').length, 2);
+assert.equal(document.activeElement.value, '雪');
+row(1).querySelector('[data-facts-action="explore-binding"]').click();
+assert.equal(container.querySelectorAll('article').length, 1);
+assert.equal(container.querySelector('article').dataset.factId, '1', 'Shadowed name must not join outer references');
+action('reveal-declaration').click();
+for(let turn=0;turn<20&&!finishOriginal;turn++)await new Promise(resolve=>setTimeout(resolve,0));
+assert(finishOriginal,'Verified original read did not start');
+action('all-bindings').click();finishOriginal();
+await new Promise(resolve=>setTimeout(resolve,0));
+assert.equal(navigations,0,'Changing lexical selection must retire a pending original range');
+const retiredQuery = control('[data-facts-binding-query]');
+const retiredCategory = control('[aria-label="JavaScript fact category"]');
+const retiredExplore = action('explore-binding');
+selected = {...selected, artifact_id: '13'}; panel.sync(selected); await panel.load(); category('operations');
+const currentText = container.textContent;
+retiredQuery.value = 'must not leak'; retiredQuery.fire('input');
+retiredCategory.value = 'frontiers'; retiredCategory.fire('change'); retiredExplore.click();
+assert.equal(container.textContent, currentText, 'Detached controls must not change the newer source/report');
+category('bindings'); row(0).querySelector('[data-facts-action="explore-binding"]').click();
+reportError = true; await panel.load();
+assert(container.querySelector('.source-facts-binding').textContent.includes('Binding #0'), 'Failed retry must preserve the selected declaration');
+reportError = false; await panel.load();
+assert.equal(container.querySelector('.source-facts-binding'), null, 'Successful reanalysis must retire report-local binding selection');
+console.log('PASS offline Facts panel read-cancellation, composing-Escape, IME input lifetime, same-name shadowing, detached controls, failed-retry selection retention and successful-retry invalidation. Not rendered QA.');
+
+}
+await checkFactsReferencePanel();
 const factsBytes = new TextEncoder().encode('\ufeffconst 雪 = "😀";\n雪++;');
 const factsHash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', factsBytes)), byte => byte.toString(16).padStart(2, '0')).join('');
 const factsArtifact = {source_type:'artifact', protocol_version:1, artifact_id:'7', session_id:'11', navigation_id:'13', frame_id:'17', parent_artifact_id:'0', creator_event_id:'19', execution_context_id:'23', capture_origin:'dynamic_javascript', kind:'javascript', url:'https://fixture.invalid/facts.js', mime_type:'text/javascript', byte_size:factsBytes.length, sha256:factsHash, sensitive:false};
@@ -3292,7 +3439,7 @@ async function sourceFactsBrowserFixture() {
   const liveDocuments=new Map();
   const fixture = {mode:'partial',pending:[],requests:[],artifacts,bytes,snow,documents,debuggerState,liveDocuments,
     previewMode:'ready',previewPending:[],deobMode:'ready',deobPending:[],analysisRequests:[],previewRequests:[],
-    liveMode:'ready',livePending:[],liveRequests:[],rejectedWrites:[]};
+    liveMode:'ready',livePending:[],liveRequests:[],rejectedWrites:[],factsReports:new Map()};
   fixture.addLiveSource = (id,text) => {
     const lines=text.split('\n');
     const source={script_id:id,url:`https://fixture.invalid/${id}.js`,hash:`opaque-${id}-v1`,source_map_url:'',language:'JavaScript',
@@ -3343,7 +3490,7 @@ async function sourceFactsBrowserFixture() {
       if(!source){json(404,{error:'Synthetic exact source not found'});return true;}
       if(fixture.mode==='pending') await new Promise(resolve=>fixture.pending.push(resolve));
       if(fixture.mode==='error'){json(503,{error:'Synthetic worker unavailable',code:'dependency_unavailable',details:{}});return true;}
-      const value=report(source);
+      const value=fixture.factsReports.has(source.artifact_id)?{...fixture.factsReports.get(source.artifact_id),source}:report(source);
       if(fixture.mode==='malformed') value.source={...source,sha256:'b'.repeat(64)};
       json(200,value);return true;
     }
@@ -3501,6 +3648,73 @@ async function selectOptionByKeyboard(key, label) {
   if (process.platform !== 'darwin') await key('Enter', 'Enter', {windowsVirtualKeyCode:13, text:'\r', unmodifiedText:'\r'});
 }
 
+async function checkFactsReferenceInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture,sourceClick,press,until}) {
+  const reference = factsReferenceFixture();
+  await fixture.addSource('12',reference.text);fixture.factsReports.set('12',reference.report);await evaluate('refreshArtifacts()');
+  await click('[data-artifact-id="12"]');await click('#source-facts-toggle');
+  await until("sourceFactsPanel.model.report?.source.artifact_id==='12'",'Reference fixture did not load');
+  await sourceClick('[aria-label="JavaScript fact category"]');await selectOptionByKeyboard(key,'o');
+  await until("document.querySelectorAll('#source-facts-report .source-fact').length===100",'Reference operation list did not render');
+  await sourceClick('#source-facts-report [data-fact-id="0"] [data-facts-action="explore-binding"]');
+  assert.match(await evaluate("document.querySelector('.source-facts-binding').textContent"),/Binding #0 · 雪/);
+  assert.match(await evaluate("document.querySelector('#source-facts-report').textContent"),/of 108 lexical operations/);
+  await sourceClick('[data-facts-action="next"]');assert.equal(await evaluate("document.querySelectorAll('#source-facts-report .source-fact').length"),8);
+  await sourceClick('[aria-label="Lexical operation kind"]');await selectOptionByKeyboard(key,'w');
+  await until(`document.querySelector('[aria-label="Lexical operation kind"]').value==='write'`,'Write filter did not activate');
+  assert.equal(await evaluate("document.querySelectorAll('#source-facts-report .source-fact').length"),1);
+  assert.equal(await evaluate("document.querySelector('#source-facts-report .source-fact').dataset.factId"),'3');
+  await sourceClick('[data-facts-action="all-bindings"]');
+  // Native composition remains on one input until committed. These dispatched
+  // composition events supplement physical keyboard controls, not replace them.
+  await sourceClick('[data-facts-binding-query]');
+  assert(await evaluate(`(()=>{const input=document.activeElement;input.dispatchEvent(new CompositionEvent('compositionstart',{data:''}));input.value='雪';input.dispatchEvent(new InputEvent('input',{data:'雪',isComposing:true,bubbles:true}));const retained=input.isConnected&&document.activeElement===input;input.dispatchEvent(new CompositionEvent('compositionend',{data:'雪'}));return retained;})()`),'IME input was replaced during composition');
+  assert.equal(await evaluate("document.querySelectorAll('#source-facts-report .source-fact').length"),2);
+  assert.equal(await evaluate("document.activeElement.value"),'雪');
+  await sourceClick('#source-facts-report [data-fact-id="1"] [data-facts-action="explore-binding"]');
+  assert.match(await evaluate("document.querySelector('.source-facts-binding').textContent"),/scope #1/);
+  assert.equal(await evaluate("document.querySelectorAll('#source-facts-report .source-fact').length"),1);
+  assert.equal(await evaluate("document.querySelector('#source-facts-report .source-fact').dataset.factId"),'1');
+  await screenshot('source-facts-references-wide-shadowed');
+  // Real byte-reader request held while a newer selection cancels its owner.
+  fixture.previewMode='pending-body';await sourceClick('[data-facts-action="reveal-declaration"]');
+  const deadline=Date.now()+5000;while(!fixture.previewPending.length&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,25));assert(fixture.previewPending.length);
+  await sourceClick('[data-facts-action="all-bindings"]');const before=await evaluate('elements.sourcePosition.textContent');
+  fixture.previewMode='ready';fixture.releasePreview();await until("sourceFactsPanel.model.status!=='loading-source'",'Selection did not retire byte read');
+  assert.equal(await evaluate('elements.sourcePosition.textContent'),before,'Cancelled old declaration stole the source range');
+  await sourceClick('#source-facts-report [data-fact-id="0"] [data-facts-action="explore-binding"]');
+  await sourceClick('[data-facts-action="reveal-declaration"]');
+  await until("elements.sourcePosition.textContent.includes('Original UTF-8 bytes')",'Declaration byte reveal failed');
+  assert.match(await evaluate('elements.sourcePosition.textContent'),/Line 1, Column 6/);
+  assert(await evaluate("elements.sourceCode.querySelector('.source-text').textContent.startsWith('\\ufefflet 雪')"),'Reference reveal lost original BOM');
+  await sourceClick('[aria-label="JavaScript fact category"]');await selectOptionByKeyboard(key,'o');
+  await sourceClick('#source-facts-report [data-fact-id="4"] [data-facts-action="choose-candidate"]');
+  assert.equal(await evaluate("document.querySelectorAll('#source-facts-report .source-fact').length"),2);
+  assert.match(await evaluate("document.querySelector('#source-facts-report').textContent"),/ambiguous declaration candidates/);
+  await sourceClick('#source-facts-report [data-fact-id="2"] [data-facts-action="explore-binding"]');
+  assert.match(await evaluate("document.querySelector('#source-facts-report .source-facts-relation').textContent"),/Ambiguous.*runtime call target unknown/);
+  await sourceClick('[aria-label="Lexical operation kind"]');await selectOptionByKeyboard(key,'c');
+  assert.equal(await evaluate("document.querySelectorAll('#source-facts-report .source-fact').length"),1);
+  await viewport(360,740);await screenshot('source-facts-references-narrow-candidates');
+  assert(await evaluate('document.documentElement.scrollWidth<=innerWidth'),'Reference explorer overflowed the narrow viewport');
+  await sourceClick('[data-facts-action="all-bindings"]');await sourceClick('[data-facts-action="clear-candidates"]');
+  await sourceClick('#source-facts-report [data-fact-id="4"] [data-facts-action="explore-binding"]');
+  assert.match(await evaluate("document.querySelector('#source-facts-report').textContent"),/No admitted operations.*not proof of no runtime use/);
+  await screenshot('source-facts-references-narrow-empty');
+  await sourceClick('[data-facts-action="all-bindings"]');
+  await evaluate(`window.retiredFactsQuery=document.querySelector('[data-facts-binding-query]');window.retiredFactsCategory=document.querySelector('[aria-label="JavaScript fact category"]');window.retiredFactsExplore=document.querySelector('[data-facts-action=explore-binding]')`);
+  await sourceClick('[data-facts-action="close"]');await viewport(1440,900);
+  await click('#source-editor-tabs [aria-selected="true"]');await press('Delete');
+  assert.equal(await evaluate("state.openArtifactIds.includes('12')"),false,'Temporary reference tab must not alter later keyboard-tab order');
+  await click('[data-artifact-id="8"]');await click('#source-facts-toggle');
+  await until("document.querySelectorAll('#source-facts-report .source-fact').length>0",'Returning artifact facts unavailable');
+  const prior=await evaluate("document.querySelector('#source-facts-report').textContent");
+  await evaluate("retiredFactsQuery.value='must not leak';retiredFactsQuery.dispatchEvent(new Event('input'));retiredFactsCategory.value='frontiers';retiredFactsCategory.dispatchEvent(new Event('change'));retiredFactsExplore.click()");
+  assert.equal(await evaluate("document.querySelector('#source-facts-report').textContent"),prior,'Detached controls mutated the newer source report');
+  assert.equal(fixture.rejectedWrites.length,0,'Reference explorer attempted target execution');
+  assert.equal(fixture.documents.get('12').toString('utf8'),reference.text);
+  await sourceClick('[data-facts-action="close"]');
+}
+
 async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture,recordSourceCheck=()=>{}}) {
   const ownershipReceipts=[];
   const receipt=(label,detail)=>{const entry={label,...detail};ownershipReceipts.push(entry);recordSourceCheck(entry);};
@@ -3608,6 +3822,7 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
   // pointer, keyboard, scroll and screenshot driver. No analyzed code runs.
   if(await evaluate("document.querySelector('#source-facts-details').open"))await sourceClick('[data-facts-action="close"]');
   assert.equal(fixture.analysisRequests.length,0,'Selection and Facts must not start Deob');
+  await checkFactsReferenceInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture,sourceClick,press,until});
   const longSource=Array.from({length:600},(_,index)=>`const row${index} = ${index};`).join('\n');
   await fixture.addSource('9',longSource);await evaluate('refreshArtifacts()');
   fixture.previewMode='pending-body';await click('[data-artifact-id="9"]');
@@ -3796,7 +4011,7 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
   assert.equal(fixture.rejectedWrites.length,0,'Inspector executed a debugger mutation');
   await screenshot('deobfuscation-inspector-narrow-original');await viewport(1440,900);
   receipt('deobfuscation-inspector-controls',{changedSpans:7,recoveredTables:5,viewports:[1440,360],retryPreservesReport:true,cancelRetiresRequest:true,originalBytesPreserved:true});
-  return {status:'passed',ownership_receipts:ownershipReceipts,path:'browser development Sources UI',source:'synthetic captured artifacts and validated debugger replies; no analyzed JavaScript executed',viewports:[[1440,900],[760,560],[360,740]],checks:['exact changed-span snippets, keyboard navigation, paging, retry preservation, cancel terminal receipt and original reveal at wide/360px widths','live pretty/derived mapped gutters survive background refresh and navigate by real click','editor scroll and keyboard focus retained at wide/narrow widths','mixed-tab Home/End and selected focus','close pending live body and analyzer responses','same script ID/opaque token on replacement target rejects old body','no debugger mutation from mapped links','pending preview body plus catalog refresh','no automatic Deob on source entry','mismatched analyzer and preview hash refusal','explicit analysis and preview retry','unchanged editor scroll and Find occurrence','keyboard file tabs and Delete cleanup','real hit-tested Facts controls','offline HTTP artifact availability','100-row paging','keyboard categories and disclosure','UTF-8/BOM original-byte navigation','profile-complete/partial/truncated/unknown/unavailable/error states','identity rejection and prior-report retention','Cancel and explicit retry','stale selection','Close/Escape/reopen focus','narrow overlay dismissal','workspace return']};
+  return {status:'passed',ownership_receipts:ownershipReceipts,path:'browser development Sources UI',source:'synthetic captured artifacts and validated debugger replies; no analyzed JavaScript executed',viewports:[[1440,900],[760,560],[360,740]],checks:['binding-reference explorer, exact shadowing, operation filters and paging, candidate chooser, Unicode IME and BOM byte reveal, stale controls, cancelled reveal and 360px layouts','exact changed-span snippets, keyboard navigation, paging, retry preservation, cancel terminal receipt and original reveal at wide/360px widths','live pretty/derived mapped gutters survive background refresh and navigate by real click','editor scroll and keyboard focus retained at wide/narrow widths','mixed-tab Home/End and selected focus','close pending live body and analyzer responses','same script ID/opaque token on replacement target rejects old body','no debugger mutation from mapped links','pending preview body plus catalog refresh','no automatic Deob on source entry','mismatched analyzer and preview hash refusal','explicit analysis and preview retry','unchanged editor scroll and Find occurrence','keyboard file tabs and Delete cleanup','real hit-tested Facts controls','offline HTTP artifact availability','100-row paging','keyboard categories and disclosure','UTF-8/BOM original-byte navigation','profile-complete/partial/truncated/unknown/unavailable/error states','identity rejection and prior-report retention','Cancel and explicit retry','stale selection','Close/Escape/reopen focus','narrow overlay dismissal','workspace return']};
 }
 
 // Contract-valid synthetic investigation records, shared by the production-model

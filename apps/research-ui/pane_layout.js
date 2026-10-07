@@ -4,7 +4,7 @@ function initializePaneLayout() {
   const configurations = [
     { id: 'native-console', parent: '#workspace', panes: ['.main', '#native-console-panel'], axis: 'y', minimum: [180, 190], label: 'workspace and console' },
     { id: 'traffic', parent: '.traffic-grid', panes: ['.request-pane', '.detail-pane'], axis: 'y', minimum: [220, 220], label: 'Traffic list and inspector' },
-    { id: 'exchange', parent: '#exchange-inspector', panes: ['.exchange-pane:nth-child(2)', '.exchange-pane:last-child'], axis: 'x', minimum: [220, 220], label: 'Request and response' },
+    { id: 'traffic-columns', parent: '.traffic-grid', panes: ['.request-pane', '.detail-pane'], axis: 'x', minimum: [380, 360], label: 'Traffic list and inspector' },
     { id: 'repeater', parent: '.repeater-split', panes: ['.repeater-request-pane', '.repeater-response-pane'], axis: 'x', minimum: [320, 260], label: 'Repeater request and response' },
     { id: 'sources', parent: '#screen-sources', panes: ['.sources-navigator', '.sources-editor'], axis: 'x', minimum: [140, 320], label: 'Source navigator and editor' },
     { id: 'memory', parent: '.memory-grid', panes: ['.memory-search-pane', '.memory-results-pane'], axis: 'x', minimum: [220, 460], label: 'Memory criteria and results' },
@@ -69,10 +69,11 @@ function initializePaneLayout() {
       const total = horizontal ? a.width + b.width : a.height + b.height;
       const minimum = [...configuration.minimum];
       if (configuration.id === 'traffic') {
+        if (total > parent.getBoundingClientRect().height + 2) return null;
         const controls = [...panes[0].children].filter(child => !child.matches('.request-table'))
           .reduce((height, child) => height + child.getBoundingClientRect().height, 0);
         const emptyHeight = panes[0].querySelector('.request-empty')?.getBoundingClientRect().height ?? 0;
-        minimum[0] = Math.max(minimum[0], Math.ceil(controls + panes[0].querySelector('.request-head').getBoundingClientRect().height + Math.max(46, emptyHeight) + 2));
+        minimum[0] = Math.max(minimum[0], Math.ceil(controls + panes[0].querySelector('.request-head').getBoundingClientRect().height + Math.max(56, emptyHeight) + panes[0].querySelector('.request-window').getBoundingClientRect().height + 2));
         if (panes[1].querySelector('.exchange-html-preview')) minimum[1] = 320;
       }
       if (total < minimum[0] + minimum[1]) return null;

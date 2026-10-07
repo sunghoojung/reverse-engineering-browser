@@ -51,6 +51,31 @@ jobs:
         if: github.event_name == 'push'
         run: git show --check --oneline --no-renames HEAD
 
+  requests-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Exercise Requests in installed Chrome
+        run: |
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          printf 'Browser executable: %s\n' "$REB_UI_CHROMIUM"
+          node --version
+          node tools/check-origin-trace-debugger.mjs --traffic-ui-browser
+
+      - name: Upload rendered Requests QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: requests-ui-${{ github.run_id }}
+          path: build/requests-ui-qa
+          if-no-files-found: ignore
+          retention-days: 3
+
   test:
     timeout-minutes: 15
     strategy:

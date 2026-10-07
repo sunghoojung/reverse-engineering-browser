@@ -50,7 +50,7 @@
               <div id="console-traffic-events" class="console-traffic-events" role="log" aria-label="Experiment resource events"></div>
             </section>
             <section id="runtime-hook-traffic" class="runtime-hook-traffic" aria-label="Isolated worker request trail" tabindex="-1" hidden></section>
-            <div class="traffic-grid">
+            <div class="traffic-grid" data-detail-open="false">
               <div class="request-pane">
                 <div class="network-tools">
                   <label class="filter-box"><input id="request-filter" type="search" maxlength="512" placeholder="Search requests…" aria-label="Filter requests" /></label>
@@ -58,8 +58,7 @@
                     <option value="url">URL / method / status</option>
                     <option value="content">Include headers and bodies</option>
                   </select>
-                  <details class="request-filters" id="request-filters">
-                    <summary id="request-filter-label">All types</summary>
+                  <div class="request-filters" id="request-filters">
                   <div class="type-filters" aria-label="Resource type filters">
                     <button class="type-filter" type="button" data-filter="all" aria-pressed="true">All</button>
                     <button class="type-filter" type="button" data-filter="xhr" aria-pressed="false">Fetch/XHR</button>
@@ -73,7 +72,7 @@
                     <button class="type-filter" type="button" data-filter="wasm" aria-pressed="false">Wasm</button>
                     <button class="type-filter" type="button" data-filter="other" aria-pressed="false">Other</button>
                   </div>
-                  </details>
+                  </div>
                 </div>
 
                 <div id="request-search-status" class="request-search-status" role="status" aria-live="polite" hidden></div>
@@ -89,14 +88,15 @@
                 </div>
 
                 <div class="request-table">
-                  <div class="request-head" aria-hidden="true"><span>Name</span><span>Status</span><span>Type</span><span>Method</span><span>Time</span></div>
-                  <div id="request-rows" class="request-rows" role="listbox" aria-label="Captured requests"></div>
-                  <button id="request-latest" class="request-latest" type="button" hidden>New requests ↓</button>
+                  <div class="request-head" role="group" aria-label="Sort requests"><button type="button" data-request-sort="name" aria-pressed="false">Name<span aria-hidden="true"></span></button><button type="button" data-request-sort="status" aria-pressed="false">Status<span aria-hidden="true"></span></button><button type="button" data-request-sort="type" aria-pressed="false">Type<span aria-hidden="true"></span></button><button type="button" data-request-sort="method" aria-pressed="false">Method<span aria-hidden="true"></span></button><button type="button" data-request-sort="time" aria-pressed="false">Time<span aria-hidden="true"></span></button></div>
+                  <div id="request-rows" class="request-rows" role="listbox" aria-label="Captured requests" tabindex="0"></div>
+                  <div class="request-window"><span id="request-window-status">0 requests</span><button id="request-window-prev" type="button" aria-label="Previous 500 requests">Previous</button><button id="request-window-next" type="button" aria-label="Next 500 requests">Next</button><button id="request-latest" type="button" hidden>New requests</button><button id="request-order" type="button" title="Restore capture order">Capture order</button></div>
                 </div>
               </div>
 
-              <div class="detail-pane">
+              <div class="detail-pane" hidden>
                 <div class="selection-strip">
+                  <button id="request-detail-close" class="secondary-button" type="button" aria-label="Close request details" title="Close request details (Escape)">×</button>
                   <span id="selected-method" class="method-pill">POST</span>
                   <span id="selected-status" class="status-pill">201</span>
                   <span id="selected-url" class="selection-url">https://checkout.acme.test/cart</span>
@@ -105,14 +105,16 @@
                   <button id="request-collection-pivot" class="secondary-button" type="button">Save to Collection</button>
                 </div>
                 <div class="inspector-tabs" role="tablist" aria-label="Request inspector">
-                  <button id="inspector-tab-exchange" class="inspector-tab" type="button" role="tab" data-inspector-tab="exchange" aria-controls="exchange-inspector" aria-selected="true">Request / Response</button>
-                  <button id="inspector-tab-headers" class="inspector-tab" type="button" role="tab" data-inspector-tab="headers" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Headers</button>
-                  <button id="inspector-tab-payload" class="inspector-tab" type="button" role="tab" data-inspector-tab="payload" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Payload</button>
-                  <button id="inspector-tab-signals" class="inspector-tab" type="button" role="tab" data-inspector-tab="signals" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Signals</button>
+                  <button id="inspector-tab-headers" class="inspector-tab" type="button" role="tab" data-inspector-tab="headers" aria-controls="exchange-inspector" aria-selected="true">Headers</button>
+                  <button id="inspector-tab-payload" class="inspector-tab" type="button" role="tab" data-inspector-tab="payload" aria-controls="exchange-inspector" aria-selected="false" tabindex="-1">Payload</button>
+                  <button id="inspector-tab-preview" class="inspector-tab" type="button" role="tab" data-inspector-tab="preview" aria-controls="exchange-inspector" aria-selected="false" tabindex="-1">Preview</button>
+                  <button id="inspector-tab-response" class="inspector-tab" type="button" role="tab" data-inspector-tab="response" aria-controls="exchange-inspector" aria-selected="false" tabindex="-1">Response</button>
                   <button id="inspector-tab-initiator" class="inspector-tab" type="button" role="tab" data-inspector-tab="initiator" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Initiator</button>
                   <button id="inspector-tab-timing" class="inspector-tab" type="button" role="tab" data-inspector-tab="timing" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Timing</button>
+                  <button id="inspector-tab-signals" class="inspector-tab" type="button" role="tab" data-inspector-tab="signals" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Signals</button>
+                  <button id="inspector-tab-evidence" class="inspector-tab" type="button" role="tab" data-inspector-tab="evidence" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Evidence</button>
                 </div>
-                <div id="exchange-inspector" class="exchange-inspector" role="tabpanel" aria-labelledby="inspector-tab-exchange"></div>
+                <div id="exchange-inspector" class="exchange-inspector" role="tabpanel" aria-labelledby="inspector-tab-headers"></div>
                 <div hidden id="request-inspector" class="request-inspector" role="tabpanel" aria-labelledby="inspector-tab-payload" tabindex="0">
                   <h1 id="request-prompt">Choose a request value and trace where it came from.</h1>
                   <div id="field-tabs" class="field-tabs" role="tablist" aria-label="Request values">

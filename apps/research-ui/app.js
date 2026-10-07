@@ -497,6 +497,7 @@
         open.type = 'button';
         open.addEventListener('click', () => {
           state.inspectorTab = 'signals';
+          state.trafficDetailOpen = true;
           showScreen('traffic', open);
           renderInspector();
         });
@@ -596,6 +597,7 @@
           openRequest.type = 'button';
           openRequest.addEventListener('click', () => {
             state.inspectorTab = 'signals';
+            state.trafficDetailOpen = true;
             showScreen('traffic', openRequest);
             renderInspector();
             refreshRequestSignalProfile();
@@ -938,6 +940,7 @@
       }
 
       function resetRequestSelection() {
+        state.trafficSelectionNotice = state.selectedRequestId === null ? '' : 'The selected request left the retained capture window. Choose another request.';
         state.selectedRequestId = null;
         state.selectedField = null;
         state.originTrace = null;
@@ -1185,6 +1188,8 @@
         const groups = requestTabGroups();
         const availableTabs = new Set(groups.map(group => group.id));
         if (state.requestTabId !== 'all' && !availableTabs.has(state.requestTabId)) state.requestTabId = 'all';
+        const oldScopes = new Map([...elements.requestTabScopes.children].map(button => [button.dataset.scopeId, button]));
+        const focusedScope = elements.requestTabScopes.contains(document.activeElement) ? document.activeElement : null;
         const buttons = [{id: 'all', label: 'All tabs', count: state.requests.length}, ...groups.map((group, index) => {
           const domains = [...new Set(group.requests.map(requestDomain))];
           return {
@@ -1194,25 +1199,30 @@
             domains
           };
         })].map(scope => {
-          const button = document.createElement('button');
-          button.type = 'button';
-          button.className = 'request-tab-scope';
+          let button = oldScopes.get(scope.id);
+          const created = !button;
+          if (!button) {
+            button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'request-tab-scope';
+            button.dataset.scopeId = scope.id;
+            button.append(document.createElement('strong'), document.createElement('span'));
+          }
           button.setAttribute('role', 'tab');
           button.setAttribute('aria-selected', String(state.requestTabId === scope.id));
           button.tabIndex = state.requestTabId === scope.id ? 0 : -1;
-          const label = document.createElement('strong'); label.textContent = scope.label;
-          const count = document.createElement('span'); count.textContent = String(scope.count);
-          button.append(label, count);
+          if (button.children[0].textContent !== scope.label) button.children[0].textContent = scope.label;
+          if (button.children[1].textContent !== String(scope.count)) button.children[1].textContent = String(scope.count);
           button.title = scope.id === 'all' ? 'Show requests from every captured browser tab'
             : scope.id === 'unattributed' ? 'Events without a browser tab identifier'
               : `${scope.label} · ${scope.domains.join(', ')} · tab id ${scope.id}`;
-          button.addEventListener('click', () => {
+          if (created) button.addEventListener('click', () => {
             state.requestTabId = scope.id;
             state.requestDomain = 'all';
             renderRequests();
             elements.requestTabScopes.querySelector('[aria-selected="true"]')?.focus();
           });
-          button.addEventListener('keydown', event => {
+          if (created) button.addEventListener('keydown', event => {
             if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
             event.preventDefault();
             const tabs = [...elements.requestTabScopes.querySelectorAll('.request-tab-scope')];
@@ -1223,26 +1233,33 @@
           });
           return button;
         });
-        elements.requestTabScopes.replaceChildren(...buttons);
+        buttons.forEach((button, index) => {
+          if (elements.requestTabScopes.children[index] !== button) elements.requestTabScopes.insertBefore(button, elements.requestTabScopes.children[index] ?? null);
+        });
+        while (elements.requestTabScopes.children.length > buttons.length) elements.requestTabScopes.lastElementChild.remove();
+        if (focusedScope && document.activeElement !== focusedScope) (buttons.includes(focusedScope) ? focusedScope : buttons[0])?.focus({preventScroll: true});
 
         const scoped = state.requestTabId === 'all' ? state.requests
           : state.requests.filter(request => (request.tabId && request.tabId !== '0' ? request.tabId : 'unattributed') === state.requestTabId);
-        const domains = [...new Set(scoped.map(requestDomain))].sort((left, right) => left.localeCompare(right));
+        const domainCounts = new Map();
+        for (const request of scoped) { const domain = requestDomain(request); domainCounts.set(domain, (domainCounts.get(domain) ?? 0) + 1); }
+        const domains = [...domainCounts.keys()].sort((left, right) => left.localeCompare(right));
         if (state.requestDomain !== 'all' && !domains.includes(state.requestDomain)) state.requestDomain = 'all';
-        const options = [
-          ['all', `All domains (${scoped.length})`],
-          ...domains.map(domain => [domain, `${domain} (${scoped.filter(request => requestDomain(request) === domain).length})`])
-        ].map(([value, label]) => {
-          const option = document.createElement('option'); option.value = value; option.textContent = label;
-          return option;
+        const oldOptions = new Map([...elements.requestDomain.children].map(option => [option.value, option]));
+        const options = [['all', `All domains (${scoped.length})`], ...domains.map(domain => [domain, `${domain} (${domainCounts.get(domain)})`])]
+          .map(([value, label]) => {
+            const option = oldOptions.get(value) ?? document.createElement('option'); option.value = value;
+            if (option.textContent !== label) option.textContent = label;
+            return option;
+          });
+        options.forEach((option, index) => {
+          if (elements.requestDomain.children[index] !== option) elements.requestDomain.insertBefore(option, elements.requestDomain.children[index] ?? null);
         });
-        elements.requestDomain.replaceChildren(...options);
+        while (elements.requestDomain.children.length > options.length) elements.requestDomain.lastElementChild.remove();
         elements.requestDomain.value = state.requestDomain;
       }
 
       function renderRequests() {
-        const typeLabel = document.querySelector(`.type-filter[data-filter="${state.requestType}"]`)?.textContent || 'All';
-        document.querySelector('#request-filter-label').textContent = state.requestType === 'all' ? 'All types' : typeLabel;
         renderRequestScopes();
         const needle = elements.requestFilter.value.trim().toLowerCase();
         const includeContent = elements.requestSearchScope.value === 'content';
@@ -1254,10 +1271,10 @@
         );
         const search = trafficSearchRequests(scoped, needle, includeContent);
         state.trafficSearchMatches = search.matches;
-        const visible = scoped.filter(request => search.matches.has(request.id));
-        const filterKey = JSON.stringify([state.requestTabId, state.requestDomain, state.requestType, needle, includeContent]);
+        const visible = trafficSortedRequests(scoped.filter(request => search.matches.has(request.id)), state.trafficSort, state.trafficSortDirection);
+        const filterKey = JSON.stringify([state.requestTabId, state.requestDomain, state.requestType, needle, includeContent, state.trafficSort, state.trafficSortDirection]);
         const filterChanged = filterKey !== state.trafficFilterKey;
-        if (filterChanged) state.trafficPendingCount = 0;
+        if (filterChanged) { state.trafficNewIds.clear(); state.trafficWindowStart = 0; state.trafficWindowAnchor = null; }
         state.trafficFilterKey = filterKey;
         elements.requestSearchStatus.hidden = !includeContent;
         elements.requestSearchStatus.dataset.kind = search.omitted ? 'partial' : '';
@@ -1267,14 +1284,26 @@
             'Retained text only; truncated prefixes, redacted headers, and uncaptured or binary bodies limit coverage.';
         if (elements.requestSearchStatus.textContent !== searchMessage) elements.requestSearchStatus.textContent = searchMessage;
         const selectedIsVisible = visible.some(request => request.id === state.selectedRequestId);
-        const selectionCleared = state.selectedRequestId !== null && !selectedIsVisible;
+        const selectionCleared = state.selectedRequestId !== null && !state.requests.some(request => request.id === state.selectedRequestId);
         if (selectionCleared) resetRequestSelection();
         const knownIds = state.trafficKnownIds;
         const newIds = new Set(knownIds ? visible.filter(request => !knownIds.has(request.id)).map(request => request.id) : []);
         state.trafficKnownIds = new Set(state.requests.map(request => request.id));
-        const focusedId = document.activeElement?.closest?.('.request-row')?.dataset.requestId;
-        const atBottom = elements.requestRows.scrollHeight - elements.requestRows.scrollTop - elements.requestRows.clientHeight < 40;
-        const previousScrollTop = elements.requestRows.scrollTop;
+        if (!filterChanged) newIds.forEach(id => state.trafficNewIds.add(id));
+        for (const id of state.trafficNewIds) if (!state.trafficKnownIds.has(id)) state.trafficNewIds.delete(id);
+        const window = trafficWindow(visible, state.trafficWindowStart, state.trafficWindowAnchor);
+        state.trafficWindowStart = window.start;
+        state.trafficWindowAnchor = window.rows[0]?.id ?? null;
+        const selectedFiltered = state.selectedRequestId !== null && !selectedIsVisible;
+        document.querySelector('#request-window-status').textContent = `${visible.length ? window.start + 1 : 0}–${window.start + window.rows.length} of ${visible.length} matching · ${state.requests.length} retained${selectedFiltered ? ' · Selection outside filter' : ''}`;
+        document.querySelector('#request-window-prev').disabled = window.start === 0;
+        document.querySelector('#request-window-next').disabled = window.start + TRAFFIC_ROW_LIMIT >= visible.length;
+        document.querySelectorAll('[data-request-sort]').forEach(button => {
+          const active = button.dataset.requestSort === state.trafficSort;
+          button.setAttribute('aria-pressed', String(active));
+          button.setAttribute('aria-label', `${button.dataset.requestSort}: ${active ? state.trafficSortDirection === 1 ? 'ascending' : 'descending' : 'not sorted'}. Activate to sort.`);
+          button.querySelector('span').textContent = active ? state.trafficSortDirection === 1 ? ' ↑' : ' ↓' : '';
+        });
         elements.requestRows.setAttribute('role', 'listbox');
         if (visible.length === 0) {
           const empty = document.createElement('div');
@@ -1285,7 +1314,10 @@
               : state.sessionMode === 'demo' ? 'No developer evidence is available.' : 'No capture session is running.'
             : search.omitted ? 'No matches in inspected content. Narrow the filters to search the omitted requests.'
               : 'No requests match the current filters. Clear the filter or choose another type.';
+          const hadFocus = elements.requestRows.contains(document.activeElement);
           elements.requestRows.replaceChildren(empty);
+          elements.requestRows.tabIndex = 0;
+          if (hadFocus) elements.requestRows.focus({preventScroll: true});
           state.trafficPendingCount = 0;
           elements.requestLatest.hidden = true;
           renderRequestCount(0, state.requests.length);
@@ -1296,79 +1328,14 @@
           }
           return;
         }
-        const previousRows = new Map([...elements.requestRows.querySelectorAll('.request-row')]
-          .map(row => [row.dataset.requestId, row]));
-        const rows = visible.map((request, index) => {
-          const match = includeContent && needle ? search.matches.get(request.id) : null;
-          const renderKey = JSON.stringify([request.path, request.method, request.status, request.time,
-            request.type, request.origin, request.hostOnly, request.failed, request.id === state.selectedRequestId,
-            !selectedIsVisible && index === 0, match?.label]);
-          const previous = previousRows.get(String(request.id));
-          if (previous?.dataset.renderKey === renderKey) return previous;
-          const row = document.createElement('button');
-          row.type = 'button';
-          row.className = 'request-row';
-          row.setAttribute('role', 'option');
-          row.dataset.requestId = request.id;
-          row.dataset.renderKey = renderKey;
-          row.setAttribute('aria-selected', String(request.id === state.selectedRequestId));
-          row.dataset.origin = request.origin;
-          row.dataset.targetKind = request.targetKind ?? 'unknown';
-          if (newIds.has(request.id)) row.classList.add('is-new');
-          const origin = requestOriginLabel(request.origin);
-          const targetDescription = request.hostOnly ? 'host-only metadata' : 'request target';
-          row.setAttribute('aria-label', `${origin} ${targetDescription}: ${request.method} ${request.path}, ${request.status}, ${request.time}, request ${request.id}${match ? ', match in ' + match.label : ''}`);
-          row.tabIndex = request.id === state.selectedRequestId || !selectedIsVisible && index === 0 ? 0 : -1;
-
-          const target = trafficTargetParts(request);
-          const name = document.createElement('span'); name.className = 'request-name';
-          name.title = request.hostOnly
-            ? `${origin} host-only metadata: URL path, query, and fragment were not captured · ${request.id}`
-            : `${origin} ${request.method} ${request.path} · network · ${request.operation ?? 'sample'} · ${request.id}`;
-          const resource = document.createElement('span'); resource.className = 'request-resource'; resource.textContent = target.name;
-          const host = document.createElement('span'); host.className = 'request-host'; host.textContent = target.host || (request.origin === 'demo' ? 'Developer evidence' : '');
-          if (match) {
-            const location = document.createElement('span'); location.className = 'request-match'; location.textContent = ` · ${match.label}`;
-            host.append(location); host.title = host.textContent;
-          }
-          name.append(resource, host);
-          const method = document.createElement('span'); method.className = 'request-method'; method.textContent = request.method;
-          const status = document.createElement('span');
-          const numericStatus = Number(request.status);
-          status.className = request.failed || (Number.isFinite(numericStatus) && numericStatus >= 400)
-            ? 'status-error'
-            : Number.isFinite(numericStatus) && numericStatus >= 200
-              ? 'status-ok'
-              : 'status-neutral';
-          status.textContent = request.status === 'pending' ? 'Pending' : request.status;
-          status.title = request.status === 'pending'
-            ? 'This request has no terminal lifecycle event yet.'
-            : request.failed ? 'The request reported a failure.' : `HTTP status ${request.status}`;
-          const type = document.createElement('span'); type.className = 'request-type'; type.textContent = trafficTypeLabel(request.type);
-          const time = document.createElement('span'); time.className = 'request-time'; time.textContent = trafficTimeLabel(request.time);
-          row.append(name, status, type, method, time);
-          row.addEventListener('click', () => {
-            selectRequest(request.id);
-            focusRequestRow(request.id);
-          });
-          row.addEventListener('keydown', moveRequestSelection);
-          return row;
+        renderTrafficRows(elements.requestRows, window.rows, {
+          selectedId: state.selectedRequestId, newIds,
+          matches: includeContent && needle ? search.matches : null,
+          onSelect: id => { selectRequest(id); focusRequestRow(id); }, onKey: moveRequestSelection
         });
-        rows.forEach((row, index) => {
-          const current = elements.requestRows.children[index];
-          if (current !== row) elements.requestRows.insertBefore(row, current ?? null);
-        });
-        while (elements.requestRows.children.length > rows.length) elements.requestRows.lastElementChild.remove();
-        if (focusedId) focusRequestRow(focusedId);
-        if (atBottom) {
-          elements.requestRows.scrollTop = elements.requestRows.scrollHeight;
-          state.trafficPendingCount = 0;
-        } else {
-          elements.requestRows.scrollTop = previousScrollTop;
-          state.trafficPendingCount += newIds.size;
-        }
+        state.trafficPendingCount = state.trafficNewIds.size;
         elements.requestLatest.hidden = state.trafficPendingCount === 0;
-        elements.requestLatest.textContent = `${state.trafficPendingCount} new ${state.trafficPendingCount === 1 ? 'request' : 'requests'} ↓`;
+        elements.requestLatest.textContent = `${state.trafficPendingCount} new ${state.trafficPendingCount === 1 ? 'request' : 'requests'}`;
         renderRequestCount(visible.length, state.requests.length);
         if (selectionCleared) {
           updateSelectionSummary(null);
@@ -1383,7 +1350,7 @@
           elements.selectedStatus.textContent = '-';
           elements.selectedStatus.classList.remove('status-error');
           elements.selectedStatus.classList.add('status-neutral');
-          elements.selectedUrl.textContent = state.requests.length ? 'Select a request to inspect its evidence.' : 'No request selected';
+          elements.selectedUrl.textContent = state.trafficSelectionNotice || (state.requests.length ? 'Select a request to inspect its evidence.' : 'No request selected');
           elements.selectedUrl.title = '';
           elements.requestCopyUrl.disabled = true;
           return;
@@ -1402,10 +1369,13 @@
       }
 
       function selectRequest(id) {
-        if (elements.requestSearchScope.value === 'content' && state.trafficSearchMatches?.get(id)?.side) state.inspectorTab = 'exchange';
+        const match = elements.requestSearchScope.value === 'content' ? state.trafficSearchMatches?.get(id) : null;
+        if (match?.side) state.inspectorTab = match.mode === 'headers' ? 'headers' : match.side === 'Request' ? 'payload' : 'response';
         const request = state.requests.find(candidate => candidate.id === id);
         if (!request) return;
         state.selectedRequestId = id;
+        state.trafficDetailOpen = true;
+        state.trafficSelectionNotice = null;
         state.originTrace = null;
         state.selectedTraceRow = null;
         state.originTraceStatus = 'idle';
@@ -1452,6 +1422,7 @@
         const id = rows[next].dataset.requestId;
         selectRequest(id);
         focusRequestRow(id);
+        rows[next].scrollIntoView({block: 'nearest'});
       }
 
       function focusRequestRow(id) {
@@ -1539,7 +1510,7 @@
           tab.tabIndex = selected ? 0 : -1;
         });
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
-        if (state.inspectorTab === 'payload' && request?.traceable) {
+        if (state.inspectorTab === 'evidence' && request?.traceable) {
           elements.fieldTree.setAttribute('role', 'tabpanel');
           elements.fieldTree.setAttribute('aria-labelledby', `field-tab-${state.fieldTab}`);
           elements.fieldTree.tabIndex = 0;
@@ -1617,18 +1588,22 @@
           tab.tabIndex = selected ? 0 : -1;
         });
         const exchangeInspector = document.querySelector('#exchange-inspector');
-        const showingExchange = state.inspectorTab === 'exchange';
+        const showingExchange = ['headers', 'payload', 'preview', 'response'].includes(state.inspectorTab) || state.selectedRequestId === null;
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        updateSelectionSummary(request);
+        document.querySelector('.traffic-grid').dataset.detailOpen = String(state.trafficDetailOpen);
+        document.querySelector('.detail-pane').hidden = !state.trafficDetailOpen;
         exchangeInspector.hidden = !showingExchange;
+        exchangeInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
         const evidenceToggle = document.querySelector('#request-evidence-toggle');
-        evidenceToggle.textContent = showingExchange ? 'Evidence' : 'Request / Response';
-        evidenceToggle.setAttribute('aria-expanded', String(!showingExchange));
+        evidenceToggle.textContent = state.inspectorTab === 'evidence' ? 'Headers' : 'Evidence';
+        evidenceToggle.setAttribute('aria-expanded', String(state.inspectorTab === 'evidence'));
         evidenceToggle.disabled = !request;
         elements.requestCollectionPivot.disabled = !request;
         elements.requestInspector.hidden = showingExchange;
         document.querySelector('.detail-pane').classList.toggle('showing-exchange', showingExchange);
         if (showingExchange) {
-          renderTrafficExchange(exchangeInspector, request, value => {
+          renderTrafficDetails(exchangeInspector, request, state.inspectorTab, value => {
             resetDecoderChain('Value copied from the request inspector.');
             toolsElements.inputEncoding.value = 'text';
             toolsElements.input.value = value;
@@ -1636,16 +1611,16 @@
             setToolsTab('decoder');
             requestAnimationFrame(() => toolsElements.input.focus({preventScroll: true}));
           }, openFieldProvenance, elements.requestSearchScope.value === 'content' && state.trafficSearchMatches?.get(request?.id)?.side
-            ? {...state.trafficSearchMatches.get(request.id), query: elements.requestFilter.value.trim()} : null);
+            ? {...state.trafficSearchMatches.get(request.id), query: elements.requestFilter.value.trim()} : null, state.trafficSelectionNotice);
           return;
         }
         elements.requestInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
-        if (state.inspectorTab !== 'payload') {
+        if (state.inspectorTab !== 'evidence') {
           elements.fieldTree.removeAttribute('role');
           elements.fieldTree.removeAttribute('aria-labelledby');
           elements.fieldTree.tabIndex = -1;
         }
-        if (state.inspectorTab === 'payload') {
+        if (state.inspectorTab === 'evidence') {
           const traceable = Boolean(request?.traceable);
           const requestTraceable = Boolean(requestTraceRoot(request));
           elements.prompt.textContent = traceable
@@ -1656,20 +1631,6 @@
           elements.fieldTabs.hidden = !traceable;
           elements.traceDock.hidden = !traceable && !requestTraceable;
           renderFields();
-          return;
-        }
-        if (state.inspectorTab === 'headers') {
-          const traceable = Boolean(request?.traceable);
-          state.fieldTab = 'headers';
-          state.selectedField = traceable ? fieldSets.headers.find(field => field.traceable) : null;
-          elements.prompt.textContent = 'Request headers';
-          elements.fieldTabs.hidden = true;
-          elements.traceDock.hidden = !traceable;
-          if (traceable) {
-            renderFields();
-          } else {
-            renderInspectorMessage('Request header capture is disabled for this session.');
-          }
           return;
         }
         if (state.inspectorTab === 'signals') {
@@ -1710,6 +1671,15 @@
           elements.prompt.textContent = 'Initiator';
           elements.fieldTabs.hidden = true;
           elements.traceDock.hidden = true;
+          if (isFieldCallSites(request?.initiator) && request.initiator.sites.length) {
+            const rows = request.initiator.sites.flatMap((site, index) => [
+              {key: `call site ${index + 1}`, value: `${site.function || '(anonymous)'} · ${site.source || '(URL unavailable)'}:${site.line + 1}:${site.column + 1}`, type: 'observed'},
+              {key: 'source identity', value: `target ${site.target_id} · script ${site.script_id}${site.source_hash ? ' · hash ' + site.source_hash : ''}`, type: 'id'}
+            ]);
+            for (const gap of request.initiator.gaps) rows.push({key: 'capture gap', value: gap.replaceAll('_', ' '), type: 'unavailable'});
+            renderInspectorDetails(rows);
+            return;
+          }
           const lifecycleEvents = request?.events ?? [];
           const correlated = lifecycleEvents.find(event => event.protocol_version >= 2 && event.initiator_process_id > 0);
           const initiated = lifecycleEvents.find(event => event.type === 'request_initiated');
@@ -1750,13 +1720,14 @@
             renderInspectorDetails([
               { key: 'first event', value: request.firstTimestamp, type: 'ns' },
               { key: 'last event', value: request.lastTimestamp, type: 'ns' },
-              { key: 'duration', value: request.time, type: 'time' },
+              { key: 'duration', value: trafficTimeLabel(request.time), type: 'time' },
               { key: 'lifecycle', value: request.operation, type: 'state' },
-              { key: 'events', value: request.events.length, type: 'count' }
+              { key: 'events', value: request.events.length, type: 'count' },
+              { key: 'phase breakdown', value: 'DNS, connection, TLS, waiting and download phases were not captured.', type: 'unavailable' }
             ]);
           } else if (request) {
             renderInspectorDetails([
-              { key: 'duration', value: `${request.time} ms`, type: 'time' },
+              { key: 'duration', value: trafficTimeLabel(request.time), type: 'time' },
               { key: 'source', value: request.origin === 'demo' ? 'demo evidence' : 'sample workspace data', type: 'source' }
             ]);
           } else {
@@ -8395,13 +8366,7 @@
           state.nativeRequests = requestsFromEvents(state.events, eventOrigin);
           rebuildTrafficRequests();
           let selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
-          if (!selectedRequest && !elements.requestFilter.value.trim() && state.requestType === 'all') {
-            const preferred = state.requests[0];
-            state.selectedRequestId = preferred?.id ?? null;
-            state.fieldTab = 'body';
-            state.selectedField = preferred?.traceable ? fieldSets.body.find(field => field.traceable) : null;
-            selectedRequest = preferred ?? null;
-          }
+          if (!selectedRequest && state.selectedRequestId !== null) resetRequestSelection();
           updateSelectionSummary(selectedRequest);
           state.broker = brokerConnected ? 'connected' : 'unavailable';
           state.eventFailureKind = null;
@@ -8580,7 +8545,7 @@
       });
       document.addEventListener('keydown', event => {
         if (event.key !== 'Escape') return;
-        const disclosure = document.activeElement?.closest('#request-filters, #advanced-navigation');
+        const disclosure = document.activeElement?.closest('#advanced-navigation');
         if (!disclosure?.open) return;
         disclosure.open = false;
         disclosure.querySelector('summary').focus();
@@ -8594,15 +8559,9 @@
         if (navigation.contains(document.activeElement)) navigation.querySelector('summary').focus();
         navigation.open = false;
       });
-      document.addEventListener('click', event => {
-        const filters = document.querySelector('#request-filters');
-        if (filters.open && !filters.contains(event.target)) filters.open = false;
-      });
       document.querySelectorAll('.type-filter').forEach(button => button.addEventListener('click', () => {
         state.requestType = button.dataset.filter;
         state.requestDomain = 'all';
-        document.querySelector('#request-filters').open = false;
-        document.querySelector('#request-filter-label').focus();
         document.querySelectorAll('.type-filter').forEach(candidate => candidate.setAttribute('aria-pressed', String(candidate === button)));
         renderRequests();
       }));
@@ -8614,7 +8573,7 @@
       }));
       document.querySelectorAll('.inspector-tab').forEach(button => button.addEventListener('click', () => {
         state.inspectorTab = button.dataset.inspectorTab;
-        if (state.inspectorTab === 'payload' && state.fieldTab === 'headers') {
+        if (state.inspectorTab === 'evidence' && state.fieldTab === 'headers') {
           state.fieldTab = 'body';
           const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
           state.selectedField = request?.traceable ? fieldSets.body.find(field => field.traceable) : null;
@@ -8624,7 +8583,7 @@
         if (state.inspectorTab === 'signals') refreshRequestSignalProfile();
       }));
       document.querySelector('#request-evidence-toggle').addEventListener('click', () => {
-        state.inspectorTab = state.inspectorTab === 'exchange' ? 'payload' : 'exchange';
+        state.inspectorTab = state.inspectorTab === 'evidence' ? 'headers' : 'evidence';
         renderInspector();
       });
       enableTabKeyboardNavigation('.inspector-tab');
@@ -8644,16 +8603,43 @@
       });
       elements.requestFilter.addEventListener('input', renderRequests);
       elements.requestSearchScope.addEventListener('change', renderRequests);
-      elements.requestRows.addEventListener('scroll', () => {
-        if (elements.requestRows.scrollHeight - elements.requestRows.scrollTop - elements.requestRows.clientHeight < 40) {
-          state.trafficPendingCount = 0;
-          elements.requestLatest.hidden = true;
-        }
+      function closeRequestDetails() {
+        state.trafficDetailOpen = false;
+        renderInspector();
+        const row = [...elements.requestRows.querySelectorAll('.request-row')].find(node => node.dataset.requestId === state.selectedRequestId);
+        (row ?? elements.requestRows.querySelector('.request-row') ?? elements.requestRows).focus({preventScroll: true});
+      }
+      document.querySelector('#request-detail-close').addEventListener('click', closeRequestDetails);
+      document.querySelector('#screen-traffic').addEventListener('keydown', event => {
+        if (event.key !== 'Escape' || event.defaultPrevented) return;
+        const disclosure = event.target.closest?.('details');
+        if (disclosure?.open) { disclosure.open = false; disclosure.querySelector('summary')?.focus(); }
+        else if (event.target.matches?.('input, textarea, select')) return;
+        else if (state.trafficDetailOpen) closeRequestDetails();
+        else return;
+        event.preventDefault(); event.stopPropagation();
       });
+      document.querySelectorAll('[data-request-sort]').forEach(button => button.addEventListener('click', () => {
+        state.trafficSortDirection = state.trafficSort === button.dataset.requestSort ? -state.trafficSortDirection : 1;
+        state.trafficSort = button.dataset.requestSort;
+        renderRequests();
+      }));
+      document.querySelector('#request-order').addEventListener('click', () => {
+        state.trafficSort = 'capture'; state.trafficSortDirection = 1; renderRequests();
+      });
+      for (const [id, direction] of [['request-window-prev', -1], ['request-window-next', 1]]) {
+        document.getElementById(id).addEventListener('click', () => {
+          state.trafficWindowAnchor = null;
+          state.trafficWindowStart += TRAFFIC_ROW_LIMIT * direction;
+          renderRequests(); elements.requestRows.scrollTop = 0;
+        });
+      }
       elements.requestLatest.addEventListener('click', () => {
+        state.trafficSort = 'capture'; state.trafficSortDirection = 1;
+        renderRequests();
+        state.trafficWindowAnchor = null; state.trafficWindowStart = TRAFFIC_RETAINED_LIMIT;
+        state.trafficNewIds.clear(); renderRequests();
         elements.requestRows.scrollTop = elements.requestRows.scrollHeight;
-        state.trafficPendingCount = 0;
-        elements.requestLatest.hidden = true;
       });
       elements.requestCopyUrl.addEventListener('click', async () => {
         const selected = state.requests.find(request => request.id === state.selectedRequestId);

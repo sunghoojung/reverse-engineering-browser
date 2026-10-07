@@ -22,6 +22,12 @@ impl Server {
         Self::start_with_args(&[]).await
     }
     async fn start_with_args(args: &[String]) -> Self {
+        Self::start_with_options(args, false).await
+    }
+    async fn start_with_helper_canaries(helper_canaries: bool) -> Self {
+        Self::start_with_options(&[], helper_canaries).await
+    }
+    async fn start_with_options(args: &[String], helper_canaries: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         let endpoint = root.path().join("endpoint");
         let mut child = Command::new(env!("CARGO_BIN_EXE_origin-trace-backend"));
@@ -42,6 +48,30 @@ impl Server {
             .arg(root.path().join("analyst.json"))
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
+        if helper_canaries {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let helper = root.path().join("unexpected-helper.sh");
+                std::fs::write(
+                    &helper,
+                    b"#!/bin/sh\nprintf invoked > \"$0.invoked\"\nexit 98\n",
+                )
+                .unwrap();
+                std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+                for option in [
+                    "--decoder",
+                    "--debugger-transport",
+                    "--native-console",
+                    "--brave-binary",
+                    "--heap-snapshot",
+                    "--deobfuscator",
+                    "--analyst-runner",
+                ] {
+                    child.arg(option).arg(&helper);
+                }
+            }
+        }
         let mut child = child.args(args).spawn().unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         let url = loop {
@@ -216,7 +246,7 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 23, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 24, "Review route coverage when the API changes");
     let schemas = &spec["components"]["schemas"];
     let actions = schemas["DebuggerAction"]["oneOf"].as_array().unwrap();
     let results = &schemas["DebuggerResult"];
@@ -339,7 +369,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 23);
+    assert_eq!(operation_count, 24);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -2887,4 +2917,678 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
         std::fs::read(root.join("analysis/vm-analysis-v1.json")).unwrap(),
         stored
     );
+}
+
+const EVIDENCE_PACKAGE_ROUTE: &str = "/api/evidence/packages/validate";
+const GOLDEN_EVIDENCE_PACKAGE: &[u8] = include_bytes!("../assets/evidence-packages/golden-v1.json");
+const GOLDEN_EVIDENCE_PACKAGE_ID: &str =
+    "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7";
+
+fn golden_evidence_package() -> Value {
+    serde_json::from_slice(GOLDEN_EVIDENCE_PACKAGE).unwrap()
+}
+
+fn assert_untrusted_package_result(result: &Value, status: &str) {
+    assert_eq!(result["status"], status);
+    assert_eq!(result["origin"], "untrusted_input");
+    assert_eq!(result["authenticity"], "not_established");
+    assert_eq!(result["artifact_bytes"], "not_present_not_reverified");
+    assert!(serde_json::to_vec(result).unwrap().len() <= 64 * 1024);
+}
+
+async fn validate_package_http(server: &Server, bytes: &[u8], status: u16) -> Value {
+    let response = server
+        .client
+        .post(format!("{}{}", server.url, EVIDENCE_PACKAGE_ROUTE))
+        .header("content-type", "application/json")
+        .body(bytes.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert!(response.headers().get("etag").is_none());
+    serde_json::from_slice(
+        &assert_contract_response(response, "post", EVIDENCE_PACKAGE_ROUTE, status).await,
+    )
+    .unwrap()
+}
+
+fn duplicate_package_bodies() -> Vec<String> {
+    let golden = std::str::from_utf8(GOLDEN_EVIDENCE_PACKAGE).unwrap();
+    vec![
+        golden.replacen(
+            "\"protocol_version\": 1,",
+            "\"protocol_version\": 1, \"protocol_version\": 1,",
+            1,
+        ),
+        golden.replacen(
+            "\"session_id\": \"7\",",
+            "\"session_id\": \"7\", \"\\u0073ession_id\": \"7\",",
+            1,
+        ),
+        r#"{"records":{"events":[{"key":{"process_id":42,"process_id":43}}]}}"#.to_owned(),
+        r#"{"nested":{"PRIVATE_DUPLICATE_MEMBER":1,"PRIVATE_DUPLICATE_MEMBER":2}}"#.to_owned(),
+    ]
+}
+
+#[test]
+fn evidence_package_standalone_schema_and_openapi_components_are_identical() {
+    fn remap_refs(value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                for (name, value) in object {
+                    if name == "$ref" {
+                        let reference = value.as_str().unwrap();
+                        let name = reference.strip_prefix("#/$defs/").unwrap();
+                        assert!(name.starts_with("EvidencePackage"));
+                        *value = json!(format!("#/components/schemas/{name}"));
+                    } else {
+                        remap_refs(value);
+                    }
+                }
+            }
+            Value::Array(values) => values.iter_mut().for_each(remap_refs),
+            _ => (),
+        }
+    }
+    let standalone: Value = serde_json::from_str(include_str!(
+        "../../../protocol/evidence-package-v1.schema.json"
+    ))
+    .unwrap();
+    let spec = specification();
+    let mut embedded = standalone.clone();
+    let root = embedded.as_object_mut().unwrap();
+    root.remove("$schema");
+    root.remove("$id");
+    let mut definitions = root.remove("$defs").unwrap();
+    remap_refs(&mut embedded);
+    remap_refs(&mut definitions);
+    assert_eq!(spec["components"]["schemas"]["EvidencePackage"], embedded);
+    for (name, definition) in definitions.as_object().unwrap() {
+        assert!(name.starts_with("EvidencePackage"));
+        assert_eq!(spec["components"]["schemas"][name], *definition, "{name}");
+    }
+    let package = golden_evidence_package();
+    jsonschema::validator_for(&standalone)
+        .unwrap()
+        .validate(&package)
+        .unwrap();
+    assert_schema(
+        &spec,
+        &json!({"$ref":"#/components/schemas/EvidencePackage"}),
+        &package,
+        "Golden evidence package",
+    );
+    let operation = &spec["paths"][EVIDENCE_PACKAGE_ROUTE]["post"];
+    assert_eq!(operation["operationId"], "validate_evidence_package");
+    assert_eq!(operation["x-max-body-bytes"], 4 * 1024 * 1024);
+    assert_eq!(operation["x-reb-execution"]["effects"], json!(["analysis"]));
+    assert_eq!(
+        operation["x-reb-execution"]["state_dependent_effects"],
+        json!([])
+    );
+}
+
+#[tokio::test]
+async fn evidence_package_http_and_cli_validate_frozen_untrusted_metadata_without_store_access() {
+    fn snapshot(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, String> {
+        fn visit(
+            root: &Path,
+            path: &Path,
+            result: &mut std::collections::BTreeMap<std::path::PathBuf, String>,
+        ) {
+            for entry in std::fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let key = path.strip_prefix(root).unwrap().to_path_buf();
+                if entry.file_type().unwrap().is_dir() {
+                    result.insert(key, "directory".to_owned());
+                    visit(root, &path, result);
+                } else {
+                    result.insert(
+                        key,
+                        hex::encode(Sha256::digest(std::fs::read(path).unwrap())),
+                    );
+                }
+            }
+        }
+        let mut result = std::collections::BTreeMap::new();
+        visit(root, root, &mut result);
+        result
+    }
+    let server = Server::start_with_helper_canaries(true).await;
+    // Any attempt to interpret configured stores would encounter malformed data.
+    // Full directory snapshots also detect writes, blob changes and sidecars.
+    for file in [
+        "events.jsonl",
+        "trace.jsonl",
+        "signals.jsonl",
+        "artifacts/manifest.jsonl",
+        "artifacts/blobs/not-an-artifact.bin",
+        "collection.json",
+        "analyst.json",
+    ] {
+        server.file(file, b"PRIVATE_STORE_CANARY: not JSON or artifact bytes\n");
+    }
+    server.file("package.json", GOLDEN_EVIDENCE_PACKAGE);
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
+    let before = snapshot(server.root.path());
+    let package = golden_evidence_package();
+    assert_eq!(package["package_id"], GOLDEN_EVIDENCE_PACKAGE_ID);
+    assert_eq!(
+        origin_trace_backend::evidence_package::package_id(&package).unwrap(),
+        GOLDEN_EVIDENCE_PACKAGE_ID
+    );
+    let result = validate_package_http(&server, GOLDEN_EVIDENCE_PACKAGE, 200).await;
+    assert_untrusted_package_result(&result, "valid");
+    assert_eq!(result["package_id"], GOLDEN_EVIDENCE_PACKAGE_ID);
+    assert_eq!(result["issues"], json!([]));
+    assert_eq!(result["issues_truncated"], false);
+    assert_eq!(
+        result["checks"],
+        json!({"structure":"passed","semantic_digest":"passed","references":"passed","metadata_profile":"passed"})
+    );
+    assert_eq!(
+        result,
+        origin_trace_backend::evidence_package::validate_bytes(GOLDEN_EVIDENCE_PACKAGE).unwrap()
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["call", "validate_evidence_package", "--endpoint-file"])
+        .arg(server.root.path().join("endpoint"))
+        .arg("--body-file")
+        .arg(server.root.path().join("package.json"))
+        .arg("--show-headers")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        result
+    );
+    let headers: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(headers["status"], 200);
+    assert_eq!(headers["headers"]["cache-control"], "no-store");
+    assert_eq!(headers["headers"]["x-content-type-options"], "nosniff");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("PRIVATE_STORE_CANARY"));
+    let mut stdin_call = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "validate_evidence_package",
+            "--base-url",
+            &server.url,
+            "--body-file",
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(
+        &mut stdin_call.stdin.take().unwrap(),
+        GOLDEN_EVIDENCE_PACKAGE,
+    )
+    .unwrap();
+    let output = stdin_call.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        result
+    );
+    let output_path = server.root.path().join("not-created.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "validate_evidence_package",
+            "--base-url",
+            &server.url,
+        ])
+        .arg("--body-file")
+        .arg(server.root.path().join("package.json"))
+        .arg("--output")
+        .arg(&output_path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("JSON responses do not accept --output")
+    );
+    assert!(!output_path.exists());
+    assert_eq!(snapshot(server.root.path()), before);
+}
+
+#[test]
+fn evidence_package_cli_lists_and_describes_the_contract_without_a_server() {
+    let list = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .arg("list")
+        .output()
+        .unwrap();
+    assert!(list.status.success(), "{list:?}");
+    assert!(String::from_utf8(list.stdout).unwrap().lines().any(|line| {
+        line == "validate_evidence_package\tPOST\t/api/evidence/packages/validate"
+    }));
+    for command in [vec!["spec"], vec!["describe", "validate_evidence_package"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+            .args(&command)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stderr.is_empty());
+        let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            document["components"]["schemas"]
+                .get("EvidencePackage")
+                .is_some()
+        );
+        assert!(
+            document["components"]["schemas"]
+                .get("EvidencePackageValidationResult")
+                .is_some()
+        );
+        if command[0] == "describe" {
+            assert_eq!(document["method"], "POST");
+            assert_eq!(document["path"], EVIDENCE_PACKAGE_ROUTE);
+            assert_eq!(document["x-max-body-bytes"], 4 * 1024 * 1024);
+        } else {
+            assert_eq!(document, specification());
+        }
+    }
+}
+
+#[tokio::test]
+async fn evidence_package_duplicate_members_are_invalid_over_http_and_rejected_locally_by_cli() {
+    let server = Server::start().await;
+    let no_requests = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    no_requests.set_nonblocking(true).unwrap();
+    let unused_url = format!("http://{}", no_requests.local_addr().unwrap());
+    for (index, raw) in duplicate_package_bodies().iter().enumerate() {
+        let result = validate_package_http(&server, raw.as_bytes(), 200).await;
+        assert_untrusted_package_result(&result, "invalid");
+        assert_eq!(result["package_id"], Value::Null);
+        assert_eq!(result["checks"]["structure"], "failed");
+        assert_eq!(
+            result["issues"],
+            json!([{"code":"duplicate_json_key","section":"package","index":null}])
+        );
+        assert!(!result.to_string().contains("PRIVATE_DUPLICATE_MEMBER"));
+        let file = server.root.path().join(format!("duplicate-{index}.json"));
+        std::fs::write(&file, raw).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+            .args([
+                "call",
+                "validate_evidence_package",
+                "--base-url",
+                &unused_url,
+            ])
+            .arg("--body-file")
+            .arg(file)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "reb-api: The package contains a duplicate JSON key\n"
+        );
+        assert_eq!(
+            no_requests.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "CLI must reject duplicate members before contacting the endpoint"
+        );
+    }
+}
+
+#[tokio::test]
+async fn evidence_package_rehashed_contradictions_fail_over_http_and_cli() {
+    let server = Server::start_with_helper_canaries(true).await;
+    for case in [
+        "conflicting_target",
+        "present_target_in_hole",
+        "adjacent_holes",
+        "missing_hole_neighbor",
+        "known_truncation",
+    ] {
+        let mut package = golden_evidence_package();
+        if matches!(case, "adjacent_holes" | "missing_hole_neighbor") {
+            package["records"]["events"][1]["key"]["sequence_number"] = json!("5");
+            package["selection"]["events"][1]["sequence_number"] = json!("5");
+            for relation in package["relationships"].as_array_mut().unwrap() {
+                if relation["relation"] == "parent_event" {
+                    relation["from_key"]["sequence_number"] = json!("5");
+                }
+            }
+        }
+        let references: &[(usize, &str, &str)] = match case {
+            "conflicting_target" => &[
+                (0, "99", "outside_selection"),
+                (1, "99", "missing_in_retained_source"),
+            ],
+            "present_target_in_hole" => &[(1, "2", "outside_selection")],
+            "missing_hole_neighbor" => &[(1, "2", "missing_in_retained_source")],
+            _ => &[],
+        };
+        for (index, target, resolution) in references {
+            let event = &mut package["records"]["events"][*index];
+            event["parent_event_id"] = json!(target);
+            let from = event["key"].clone();
+            let mut to = from.clone();
+            to["sequence_number"] = json!(target);
+            package["relationships"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|r| !(r["from_key"] == from && r["relation"] == "parent_event"));
+            let mut relation = json!({"from_kind":"event","from_key":from,"relation":"parent_event","to_kind":"event","to_key":to,"resolution":resolution});
+            package["relationships"]
+                .as_array_mut()
+                .unwrap()
+                .push(relation.clone());
+            let limitation = if *resolution == "missing_in_retained_source" {
+                relation.as_object_mut().unwrap().remove("resolution");
+                relation["kind"] = json!("missing_reference");
+                package["gaps"].as_array_mut().unwrap().push(relation);
+                "reference_missing"
+            } else {
+                "reference_outside_selection"
+            };
+            package["coverage"]["events"]["limitations"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!(limitation));
+        }
+        let holes = match case {
+            "present_target_in_hole" => vec![("2", "2")],
+            "adjacent_holes" => vec![("2", "2"), ("3", "4")],
+            "missing_hole_neighbor" => vec![("3", "3")],
+            _ => vec![],
+        };
+        if !holes.is_empty() {
+            package["coverage"]["events"]["capture_state"] = json!("partial");
+            package["coverage"]["events"]["limitations"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("sequence_discontinuity"));
+        }
+        for (first, last) in holes {
+            package["gaps"].as_array_mut().unwrap().push(json!({"kind":"sequence_discontinuity","session_id":"7","process_id":42,"first_missing_sequence":first,"last_missing_sequence":last}));
+        }
+        if case == "known_truncation" {
+            package["records"]["events"][0]["flags"] = json!(1);
+            package["records"]["events"][0]["payload_truncated"] = Value::Null;
+            package["records"]["events"][0]["operation"] = Value::Null;
+        }
+        package["package_id"] =
+            json!(origin_trace_backend::evidence_package::package_id(&package).unwrap());
+        let raw = serde_json::to_vec(&package).unwrap();
+        let result = validate_package_http(&server, &raw, 200).await;
+        assert_untrusted_package_result(&result, "invalid");
+        assert_eq!(
+            result["checks"]["semantic_digest"], "passed",
+            "{case}: {result}"
+        );
+        let expected = if case == "conflicting_target" {
+            "invalid_reference_state"
+        } else {
+            "invalid_coverage"
+        };
+        assert!(
+            result["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|issue| issue["code"] == expected),
+            "{case}: {result}"
+        );
+        server.file("contradiction.json", &raw);
+        let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+            .args([
+                "call",
+                "validate_evidence_package",
+                "--base-url",
+                &server.url,
+                "--body-file",
+            ])
+            .arg(server.root.path().join("contradiction.json"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{case}: {output:?}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            result
+        );
+    }
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn evidence_package_versions_profiles_and_digest_changes_remain_validity_data() {
+    let server = Server::start().await;
+    for (field, value, code) in [
+        ("protocol_version", json!(2), "unsupported_version"),
+        (
+            "serialization_profile",
+            json!("future-serialization"),
+            "unsupported_profile",
+        ),
+        (
+            "redaction_profile",
+            json!("future-redaction"),
+            "unsupported_profile",
+        ),
+        (
+            "semantics_profile",
+            json!("future-semantics"),
+            "unsupported_profile",
+        ),
+    ] {
+        let mut package = golden_evidence_package();
+        package[field] = value;
+        let result =
+            validate_package_http(&server, &serde_json::to_vec(&package).unwrap(), 200).await;
+        assert_untrusted_package_result(&result, "unsupported");
+        assert_eq!(result["package_id"], Value::Null);
+        assert_eq!(result["issues"][0]["code"], code);
+        assert!(
+            result["checks"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|v| v == "not_run")
+        );
+        server.file("unsupported.json", &serde_json::to_vec(&package).unwrap());
+        let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+            .args([
+                "call",
+                "validate_evidence_package",
+                "--base-url",
+                &server.url,
+            ])
+            .arg("--body-file")
+            .arg(server.root.path().join("unsupported.json"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            result
+        );
+    }
+    let mut changed = golden_evidence_package();
+    changed["records"]["events"][0]["monotonic_time_ns"] = json!("11");
+    let mismatch =
+        validate_package_http(&server, &serde_json::to_vec(&changed).unwrap(), 200).await;
+    assert_untrusted_package_result(&mismatch, "invalid");
+    assert_eq!(mismatch["checks"]["semantic_digest"], "failed");
+    assert_eq!(mismatch["package_id"], Value::Null);
+    assert!(
+        mismatch["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["code"] == "digest_mismatch")
+    );
+    changed["package_id"] =
+        json!(origin_trace_backend::evidence_package::package_id(&changed).unwrap());
+    assert_ne!(changed["package_id"], GOLDEN_EVIDENCE_PACKAGE_ID);
+    let valid = validate_package_http(&server, &serde_json::to_vec(&changed).unwrap(), 200).await;
+    assert_untrusted_package_result(&valid, "valid");
+    assert_eq!(valid["package_id"], changed["package_id"]);
+}
+
+#[tokio::test]
+async fn evidence_package_closed_projection_rejects_rehashed_private_fields_without_echo() {
+    let server = Server::start().await;
+    let no_fetches = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    no_fetches.set_nonblocking(true).unwrap();
+    let private_url = format!(
+        "http://{}/PRIVATE_VALUE_CANARY",
+        no_fetches.local_addr().unwrap()
+    );
+    for (pointer, field) in [
+        ("", "PRIVATE_FIELD_NAME"),
+        ("/selection/events/0", "url"),
+        ("/provenance", "local_path"),
+        ("/coverage/events", "raw_error"),
+        ("/records/events/0", "payload"),
+        ("/records/events/0", "payload_encoding"),
+        ("/records/events/0", "payload_sha256"),
+        ("/records/events/0", "preview"),
+        ("/records/events/0", "url"),
+        ("/records/events/0", "headers"),
+        ("/records/artifacts/0", "content_path"),
+        ("/records/artifacts/0", "mime_type"),
+        ("/records/artifacts/0", "metadata"),
+        ("/records/artifacts/0", "bytes"),
+        ("/relationships/0", "source_path"),
+        ("/gaps/0", "snippet"),
+    ] {
+        let mut package = golden_evidence_package();
+        package.pointer_mut(pointer).unwrap()[field] = if field == "url" {
+            json!(private_url)
+        } else {
+            json!("PRIVATE_VALUE_CANARY")
+        };
+        package["package_id"] =
+            json!(origin_trace_backend::evidence_package::package_id(&package).unwrap());
+        let result =
+            validate_package_http(&server, &serde_json::to_vec(&package).unwrap(), 200).await;
+        assert_untrusted_package_result(&result, "invalid");
+        assert_eq!(result["checks"]["structure"], "failed", "{pointer}/{field}");
+        assert_eq!(result["checks"]["metadata_profile"], "failed");
+        assert!(
+            result["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|i| i["code"] == "forbidden_metadata_field")
+        );
+        let output = result.to_string();
+        assert!(!output.contains("PRIVATE_FIELD_NAME"));
+        assert!(!output.contains("PRIVATE_VALUE_CANARY"));
+        assert!(!output.contains(pointer) || pointer.is_empty());
+    }
+    let mut package = golden_evidence_package();
+    let mut invalid = package["records"]["events"][0].clone();
+    invalid["outcome"] = json!("PRIVATE_SUCCESS_CLAIM");
+    package["records"]["events"] = json!(vec![invalid; 80]);
+    let result = validate_package_http(&server, &serde_json::to_vec(&package).unwrap(), 200).await;
+    assert_untrusted_package_result(&result, "invalid");
+    assert_eq!(result["issues"].as_array().unwrap().len(), 64);
+    assert_eq!(result["issues_truncated"], true);
+    assert!(!result.to_string().contains("PRIVATE_SUCCESS_CLAIM"));
+    assert_eq!(
+        no_fetches.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "Validation must not fetch submitted references"
+    );
+}
+
+#[tokio::test]
+async fn evidence_package_raw_body_bounds_and_local_trust_are_enforced() {
+    let server = Server::start().await;
+    for raw in [
+        b"{".as_slice(),
+        b"{\"PRIVATE_MALFORMED_VALUE\":}".as_slice(),
+        b"{\"invalid_utf8\":\"\xff\"}".as_slice(),
+        b"[]".as_slice(),
+        b"null".as_slice(),
+        b"\"path-or-url-is-not-a-package\"".as_slice(),
+        b"1".as_slice(),
+    ] {
+        let error = validate_package_http(&server, raw, 400).await;
+        assert!(!error.to_string().contains("PRIVATE_MALFORMED_VALUE"));
+        assert!(!error.to_string().contains("invalid_utf8"));
+    }
+    let invalid = validate_package_http(&server, b"{}", 200).await;
+    assert_untrusted_package_result(&invalid, "invalid");
+    let mut maximum = GOLDEN_EVIDENCE_PACKAGE.to_vec();
+    maximum.resize(4 * 1024 * 1024, b' ');
+    assert_untrusted_package_result(
+        &validate_package_http(&server, &maximum, 200).await,
+        "valid",
+    );
+    // Advertise an oversized body without uploading it, to exercise framing
+    // rejection without depending on connection reset timing during an upload.
+    // Close this incomplete exchange instead of reusing its connection for
+    // subsequent validator assertions.
+    let response = server
+        .client
+        .post(format!("{}{}", server.url, EVIDENCE_PACKAGE_ROUTE))
+        .header("content-length", (4 * 1024 * 1024 + 1).to_string())
+        .header("connection", "close")
+        .send()
+        .await
+        .unwrap();
+    assert_contract_response(response, "post", EVIDENCE_PACKAGE_ROUTE, 400).await;
+    maximum.push(b' ');
+    server.file("too-large.json", &maximum);
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "validate_evidence_package",
+            "--base-url",
+            &server.url,
+        ])
+        .arg("--body-file")
+        .arg(server.root.path().join("too-large.json"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "reb-api: Request body exceeds its byte limit\n"
+    );
+    let oversized_string = serde_json::to_vec(&json!({"unknown":"x".repeat(4097)})).unwrap();
+    let limited = validate_package_http(&server, &oversized_string, 200).await;
+    assert_untrusted_package_result(&limited, "invalid");
+    assert_eq!(limited["issues"][0]["code"], "resource_limit");
+    for (header, value) in [
+        ("Host", "example.test:7319"),
+        ("Origin", "https://example.test"),
+        ("Sec-Fetch-Site", "cross-site"),
+    ] {
+        let response = server
+            .client
+            .post(format!("{}{}", server.url, EVIDENCE_PACKAGE_ROUTE))
+            .header(header, value)
+            .header("content-type", "application/json")
+            .body(GOLDEN_EVIDENCE_PACKAGE)
+            .send()
+            .await
+            .unwrap();
+        assert_contract_response(response, "post", EVIDENCE_PACKAGE_ROUTE, 403).await;
+    }
 }

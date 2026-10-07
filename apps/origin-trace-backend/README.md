@@ -111,3 +111,11 @@ For non-2xx responses whose body cannot be read within the existing timeout/size
 limit, JSON mode emits a fixed safe diagnostic with the observed HTTP status and
 keeps exit 2. Preflight and connection failures before HTTP headers keep ordinary
 CLI diagnostics and exit 2; no HTTP status is invented. Commands are never retried.
+
+`POST /api/evidence/packages/validate` and `reb-api call
+validate_evidence_package` validate supplied metadata packages inertly. The
+versioned [package contract](../../protocol/evidence-package-v1.md) defines
+bounded duplicate-rejecting parsing, canonical content identity, reference and
+coverage checks, and the exact metadata whitelist. Validity never authenticates
+an exporter or re-verifies omitted artifact bytes. This operation does not read
+or write configured evidence stores; selected-store export is not implemented.

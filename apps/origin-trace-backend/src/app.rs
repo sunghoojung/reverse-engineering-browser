@@ -7,7 +7,7 @@ use crate::{
     deobfuscation::Deobfuscator,
     durable,
     error::{Code, Error, Phase, Reason, Result},
-    evidence,
+    evidence, evidence_package,
     native_console::NativeConsole,
     origin_trace, validation, vm, wasm,
     workspace::{Kind, Store},
@@ -59,6 +59,7 @@ pub struct App {
     capture_stopped: AtomicBool,
     capture: Mutex<()>,
     io: Arc<Semaphore>,
+    package_io: Arc<Semaphore>,
     analysis: Mutex<Option<(String, Value)>>,
 }
 impl App {
@@ -90,6 +91,7 @@ impl App {
             capture_stopped: AtomicBool::new(false),
             capture: Mutex::new(()),
             io: Arc::new(Semaphore::new(4)),
+            package_io: Arc::new(Semaphore::new(2)),
             analysis: Mutex::new(None),
         });
         app.debugger.start().await;
@@ -114,6 +116,33 @@ impl App {
         })
         .await
         .map_err(|e| Error::new(500, e.to_string()))?
+    }
+    async fn validate_package(&self, bytes: Vec<u8>) -> Result<Value> {
+        // Share the existing blocking-I/O admission pool, with a narrower package
+        // cap and a single bounded wait. A dropped caller cannot release permits
+        // while its blocking validation work is still running.
+        let permits = tokio::time::timeout(Duration::from_secs(1), async {
+            let package = self.package_io.clone().acquire_owned().await.map_err(|_| {
+                Error::new(503, "Package validator is unavailable")
+                    .with_code(Code::DependencyUnavailable)
+            })?;
+            let io = self.io.clone().acquire_owned().await.map_err(|_| {
+                Error::new(503, "Package validator is unavailable")
+                    .with_code(Code::DependencyUnavailable)
+            })?;
+            Ok::<_, Error>((package, io))
+        })
+        .await
+        .map_err(|_| {
+            Error::new(408, "Package validator admission deadline exceeded")
+                .with_code(Code::Timeout)
+        })??;
+        tokio::task::spawn_blocking(move || {
+            let _permits = permits;
+            evidence_package::validate_bytes(&bytes)
+        })
+        .await
+        .map_err(|_| Error::new(500, "Package validator failed"))?
     }
     async fn broker_connected(&self) -> bool {
         self.options.socket.is_none() || socket_connected(self.options.socket.as_deref()).await
@@ -656,6 +685,12 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
             if bytes.len() != length {
                 return Err(Error::bad("The request body length is invalid"));
             }
+            if path == "/api/evidence/packages/validate" {
+                return app
+                    .validate_package(bytes.to_vec())
+                    .await
+                    .map(|value| axum::Json(value).into_response());
+            }
             let value: Value = serde_json::from_slice(&bytes)
                 .map_err(|_| Error::bad("The request body is malformed JSON"))?;
             if !value.is_object() {
@@ -812,4 +847,71 @@ fn validate_event(value: &Value) -> Result<()> {
         return Err(Error::new(500, "Event payload is invalid"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[tokio::test]
+    async fn package_admission_reasons_preserve_limits_and_release_waiting_permits() {
+        for (package_pool, closed) in [(true, true), (false, true), (true, false), (false, false)] {
+            let root = tempfile::tempdir().unwrap();
+            let mut options = Options::parse_from(["origin-trace-backend"]);
+            options.store = root.path().join("events.jsonl");
+            options.trace_store = root.path().join("trace.jsonl");
+            options.signal_store = root.path().join("signals.jsonl");
+            options.artifacts = root.path().join("artifacts");
+            options.api_collection = root.path().join("collection.json");
+            options.local_analyst = root.path().join("analyst.json");
+            // Avoid even the analyst's startup availability subprocess. No
+            // analysis is requested, so this executable is never launched.
+            options.analyst_runner = Some(std::env::current_exe().unwrap());
+            let app = App::new(options, 0).await;
+            let pool = if package_pool {
+                &app.package_io
+            } else {
+                &app.io
+            };
+            let held = if closed {
+                pool.close();
+                None
+            } else {
+                Some(
+                    pool.clone()
+                        .acquire_many_owned(pool.available_permits() as u32)
+                        .await
+                        .unwrap(),
+                )
+            };
+            let error = app.validate_package(b"{}".to_vec()).await.unwrap_err();
+            assert_eq!(error.status, if closed { 503 } else { 408 });
+            assert_eq!(
+                serde_json::to_value(&error).unwrap(),
+                json!({
+                    "error": if closed { "Package validator is unavailable" } else {
+                        "Package validator admission deadline exceeded"
+                    },
+                    "code": if closed { "dependency_unavailable" } else { "timeout" },
+                    "details": {}
+                })
+            );
+            drop(held);
+            if !closed {
+                let value = app
+                    .validate_package(
+                        include_bytes!("../assets/evidence-packages/golden-v1.json").to_vec(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(value["status"], "valid");
+                assert_eq!(app.package_io.available_permits(), 2);
+                assert_eq!(app.io.available_permits(), 4);
+            } else if !package_pool {
+                assert_eq!(app.package_io.available_permits(), 2);
+            }
+            app.stop().await;
+        }
+    }
 }

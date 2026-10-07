@@ -1,0 +1,1289 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://origin-trace.local/protocol/evidence-package-v1.schema.json",
+  "title": "Origin Trace Evidence Package v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "protocol_version",
+    "serialization_profile",
+    "redaction_profile",
+    "semantics_profile",
+    "package_id",
+    "selection",
+    "provenance",
+    "coverage",
+    "records",
+    "relationships",
+    "gaps"
+  ],
+  "properties": {
+    "format": {
+      "type": "string",
+      "const": "reb-evidence-package"
+    },
+    "protocol_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "serialization_profile": {
+      "type": "string",
+      "const": "reb-json-semantic-v1"
+    },
+    "redaction_profile": {
+      "type": "string",
+      "const": "reb-metadata-only-v1"
+    },
+    "semantics_profile": {
+      "type": "string",
+      "const": "reb-api-marker-v1"
+    },
+    "package_id": {
+      "$ref": "#/$defs/EvidencePackageId"
+    },
+    "selection": {
+      "$ref": "#/$defs/EvidencePackageSelection"
+    },
+    "provenance": {
+      "$ref": "#/$defs/EvidencePackageProvenance"
+    },
+    "coverage": {
+      "$ref": "#/$defs/EvidencePackageCoverage"
+    },
+    "records": {
+      "$ref": "#/$defs/EvidencePackageRecords"
+    },
+    "relationships": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "$ref": "#/$defs/EvidencePackageRelationship"
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "$ref": "#/$defs/EvidencePackageGap"
+      }
+    }
+  },
+  "description": "Version 1 closed metadata-only evidence package. Validity establishes internal consistency of supplied untrusted metadata, not producer authenticity, capture completeness, source availability, or artifact-byte verification. Semantic checks and canonical digest rules are defined in evidence-package-v1.md.",
+  "x-max-body-bytes": 4194304,
+  "x-max-parsed-nodes": 200000,
+  "x-max-depth": 32,
+  "x-max-string-utf8-bytes": 4096,
+  "$defs": {
+    "EvidencePackageUint64String": {
+      "type": "string",
+      "maxLength": 20,
+      "pattern": "^(?:0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]{1}|1844674407370955161[0-4]|18446744073709551615)$",
+      "description": "Canonical unsigned 64-bit decimal, 0 through 18446744073709551615; no sign or leading zeros.",
+      "not": {
+        "pattern": "[^0-9]"
+      }
+    },
+    "EvidencePackageNonzeroUint64String": {
+      "type": "string",
+      "maxLength": 20,
+      "pattern": "^(?:[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]{1}|1844674407370955161[0-4]|18446744073709551615)$",
+      "not": {
+        "pattern": "[^0-9]"
+      }
+    },
+    "EvidencePackageInt64String": {
+      "type": "string",
+      "maxLength": 20,
+      "pattern": "^(?:(?:0|[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-6]|9223372036854775807)|-(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7]|9223372036854775808))$",
+      "description": "Canonical signed 64-bit decimal, -9223372036854775808 through 9223372036854775807; no plus sign, leading zeros, or negative zero.",
+      "not": {
+        "pattern": "[^0-9-]"
+      }
+    },
+    "EvidencePackageId": {
+      "type": "string",
+      "pattern": "^reb-package-v1:sha256:[0-9a-f]{64}$",
+      "minLength": 86,
+      "maxLength": 86
+    },
+    "EvidencePackageEventKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "process_id",
+        "sequence_number"
+      ],
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/EvidencePackageNonzeroUint64String"
+        },
+        "process_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "sequence_number": {
+          "$ref": "#/$defs/EvidencePackageNonzeroUint64String"
+        }
+      }
+    },
+    "EvidencePackageArtifactKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "artifact_id"
+      ],
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/EvidencePackageNonzeroUint64String"
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/EvidencePackageNonzeroUint64String"
+        }
+      }
+    },
+    "EvidencePackageSelection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "events",
+        "artifacts"
+      ],
+      "properties": {
+        "events": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/EvidencePackageEventKey"
+          }
+        },
+        "artifacts": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/EvidencePackageArtifactKey"
+          }
+        }
+      },
+      "description": "Exact selected tuple keys. Duplicate identities are rejected by bounded semantic validation; ordering is normalized for the digest."
+    },
+    "EvidencePackageProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "origin",
+        "consistency",
+        "producer_build",
+        "browser_build",
+        "capture_configuration",
+        "capture_authorization",
+        "origin_scope"
+      ],
+      "properties": {
+        "origin": {
+          "type": "string",
+          "const": "configured_local_stores"
+        },
+        "consistency": {
+          "type": "string",
+          "enum": [
+            "cooperative_stopped_store_v1",
+            "empty_selection"
+          ]
+        },
+        "producer_build": {
+          "type": "null"
+        },
+        "browser_build": {
+          "type": "null"
+        },
+        "capture_configuration": {
+          "type": "null"
+        },
+        "capture_authorization": {
+          "type": "string",
+          "const": "not_attested"
+        },
+        "origin_scope": {
+          "type": "string",
+          "const": "unknown"
+        }
+      },
+      "description": "Untrusted exporter assertions, not facts established by supplied-package validation. Historical producer/browser build and capture configuration are unavailable in v1."
+    },
+    "EvidencePackageLimitation": {
+      "type": "string",
+      "enum": [
+        "capture_configuration_unknown",
+        "capture_gap",
+        "creator_identity_incomplete",
+        "metadata_only",
+        "origin_scope_unknown",
+        "payload_was_truncated",
+        "producer_build_unknown",
+        "reference_missing",
+        "reference_not_inspected",
+        "reference_outside_selection",
+        "sequence_discontinuity"
+      ]
+    },
+    "EvidencePackageEventCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selection_state",
+        "selected_count",
+        "source_scan",
+        "capture_state",
+        "limitations"
+      ],
+      "properties": {
+        "selection_state": {
+          "type": "string",
+          "enum": [
+            "complete",
+            "not_requested"
+          ]
+        },
+        "selected_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "source_scan": {
+          "type": "string",
+          "enum": [
+            "complete",
+            "not_read"
+          ]
+        },
+        "capture_state": {
+          "type": "string",
+          "enum": [
+            "unknown",
+            "partial"
+          ]
+        },
+        "limitations": {
+          "type": "array",
+          "maxItems": 11,
+          "items": {
+            "$ref": "#/$defs/EvidencePackageLimitation"
+          },
+          "uniqueItems": true
+        }
+      },
+      "description": "Retained-source scan and selection assertions never establish complete capture. Runtime checks exact counts, requested/read state, scoped gaps, and applicable limitations. Limitation order is normalized."
+    },
+    "EvidencePackageArtifactCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selection_state",
+        "selected_count",
+        "source_scan",
+        "capture_state",
+        "limitations"
+      ],
+      "properties": {
+        "selection_state": {
+          "type": "string",
+          "enum": [
+            "complete",
+            "not_requested"
+          ]
+        },
+        "selected_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "source_scan": {
+          "type": "string",
+          "enum": [
+            "complete",
+            "not_read"
+          ]
+        },
+        "capture_state": {
+          "type": "string",
+          "enum": [
+            "unknown",
+            "partial"
+          ]
+        },
+        "limitations": {
+          "type": "array",
+          "maxItems": 11,
+          "items": {
+            "$ref": "#/$defs/EvidencePackageLimitation"
+          },
+          "uniqueItems": true
+        }
+      },
+      "description": "Retained-source scan and selection assertions never establish complete capture. Runtime checks exact counts, requested/read state, scoped gaps, and applicable limitations. Limitation order is normalized."
+    },
+    "EvidencePackageCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selection",
+        "events",
+        "artifacts",
+        "excluded_sections"
+      ],
+      "properties": {
+        "selection": {
+          "type": "string",
+          "enum": [
+            "complete",
+            "empty"
+          ]
+        },
+        "events": {
+          "$ref": "#/$defs/EvidencePackageEventCoverage"
+        },
+        "artifacts": {
+          "$ref": "#/$defs/EvidencePackageArtifactCoverage"
+        },
+        "excluded_sections": {
+          "type": "array",
+          "maxItems": 6,
+          "items": {
+            "type": "string",
+            "enum": [
+              "analysis_documents",
+              "artifact_bytes",
+              "debugger_network",
+              "hook_values",
+              "signal_profiles",
+              "trace_edges"
+            ]
+          },
+          "uniqueItems": true,
+          "minItems": 6
+        }
+      }
+    },
+    "EvidencePackageOperation": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "AnalyserNode.getFloatFrequencyData",
+            "AnalyserNode.getByteFrequencyData",
+            "AnalyserNode.getFloatTimeDomainData",
+            "AnalyserNode.getByteTimeDomainData",
+            "AudioBuffer.getChannelData",
+            "AudioBuffer.copyFromChannel",
+            "BaseAudioContext.createDynamicsCompressor",
+            "BaseAudioContext.createAnalyser",
+            "BaseAudioContext.createOscillator",
+            "AudioNode.connect",
+            "AudioScheduledSourceNode.start",
+            "OfflineAudioContext.startRendering"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "EvidencePackageEventMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "protocol_version",
+        "monotonic_time_ns",
+        "navigation_id",
+        "frame_id",
+        "thread_id",
+        "tab_id",
+        "artifact_id",
+        "parent_event_id",
+        "request_id",
+        "browser_context_id_high",
+        "browser_context_id_low",
+        "initiator_request_id",
+        "initiator_process_id",
+        "category",
+        "type",
+        "status_code",
+        "error_code",
+        "resource_type",
+        "flags",
+        "encoded_data_length",
+        "decoded_body_length",
+        "payload_size",
+        "payload_truncated",
+        "operation",
+        "observation",
+        "outcome",
+        "placement"
+      ],
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/EvidencePackageEventKey"
+        },
+        "protocol_version": {
+          "type": "integer",
+          "enum": [
+            2,
+            3
+          ]
+        },
+        "monotonic_time_ns": {
+          "$ref": "#/$defs/EvidencePackageUint64String"
+        },
+        "navigation_id": {
+          "$ref": "#/$defs/EvidencePackageUint64String"
+        },
+        "frame_id": {
+          "$ref": "#/$defs/EvidencePackageUint64String"
+        },
+        "thread_id": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/EvidencePackageUint64String"
+        },
+        "parent_event_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidencePackageUint64String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "request_id": {
+          "$ref": "#/$defs/EvidencePackageUint64String"
+        },
+        "browser_context_id_high": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidencePackageUint64String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "browser_context_id_low": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidencePackageUint64String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "initiator_request_id": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "initiator_process_id": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "canvas",
+            "webgl",
+            "web_audio",
+            "navigator",
+            "permissions",
+            "storage",
+            "webrtc",
+            "wasm",
+            "network",
+            "vm",
+            "artifact",
+            "runtime"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "api_call",
+            "property_read",
+            "module_compiled",
+            "module_instantiated",
+            "request_started",
+            "response_completed",
+            "request_initiated",
+            "request_redirected",
+            "response_started",
+            "request_completed",
+            "request_failed",
+            "vm_finding",
+            "artifact_captured",
+            "artifact_capture_failed"
+          ]
+        },
+        "status_code": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resource_type": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "flags": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 7
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "encoded_data_length": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidencePackageInt64String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decoded_body_length": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidencePackageInt64String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "payload_size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        },
+        "payload_truncated": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operation": {
+          "$ref": "#/$defs/EvidencePackageOperation"
+        },
+        "observation": {
+          "type": "string",
+          "const": "marker_observed"
+        },
+        "outcome": {
+          "type": "string",
+          "const": "not_recorded"
+        },
+        "placement": {
+          "type": "string",
+          "const": "unknown"
+        }
+      },
+      "description": "Closed native metadata projection. Unknown category/type values and native gap records are not ordinary selectable events. Missing historical optional metadata is explicitly null; it is never fabricated as zero. A non-null operation requires web_audio/api_call, exact registry membership, and untruncated payload metadata.",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "protocol_version": {
+                "const": 2
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "tab_id": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "tab_id": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              }
+            }
+          }
+        }
+      ]
+    },
+    "EvidencePackageArtifactByteSize": {
+      "type": "string",
+      "maxLength": 8,
+      "pattern": "^(?:0|[1-9][0-9]{0,6}|1[0-5][0-9]{6}|16[0-6][0-9]{5}|167[0-6][0-9]{4}|1677[0-6][0-9]{3}|16777[0-1][0-9]{2}|1677720[0-9]{1}|1677721[0-5]|16777216)$",
+      "description": "Original artifact byte count as canonical unsigned decimal, at most 16777216 bytes. Artifact bytes are omitted and are not reverified by this validator.",
+      "not": {
+        "pattern": "[^0-9]"
+      }
+    },
+    "EvidencePackageArtifactMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "protocol_version",
+        "navigation_id",
+        "frame_id",
+        "parent_artifact_id",
+        "creator_event_id",
+        "execution_context_id",
+        "capture_origin",
+        "kind",
+        "byte_size",
+        "sha256",
+        "sensitive",
+        "verification",
+        "content"
+      ],
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/EvidencePackageArtifactKey"
+        },
+        "protocol_version": {
+          "type": "integer",
+          "const": 1
+        },
+        "navigation_id": {
+          "$ref": "#/$defs/EvidencePackageUint64String"
+        },
+        "frame_id": {
+          "$ref": "#/$defs/EvidencePackageUint64String"
+        },
+        "parent_artifact_id": {
+          "$ref": "#/$defs/EvidencePackageUint64String"
+        },
+        "creator_event_id": {
+          "$ref": "#/$defs/EvidencePackageUint64String"
+        },
+        "execution_context_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidencePackageUint64String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capture_origin": {
+          "type": "string",
+          "enum": [
+            "unknown",
+            "network_response",
+            "dynamic_javascript",
+            "webassembly_compile",
+            "webassembly_module",
+            "webassembly_instantiate",
+            "canvas_to_data_url"
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "javascript",
+            "wasm",
+            "source_map",
+            "response_body",
+            "canvas_data_url"
+          ]
+        },
+        "byte_size": {
+          "$ref": "#/$defs/EvidencePackageArtifactByteSize"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "sensitive": {
+          "type": "boolean"
+        },
+        "verification": {
+          "type": "string",
+          "const": "sha256_verified_at_export"
+        },
+        "content": {
+          "type": "string",
+          "const": "omitted"
+        }
+      },
+      "description": "Closed artifact metadata projection. The verification string is an untrusted export-time assertion. Kind, sensitivity, and capture-origin/context consistency are checked semantically. No URL, MIME, filesystem path, source text, or bytes are permitted."
+    },
+    "EvidencePackageRecords": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "events",
+        "artifacts"
+      ],
+      "properties": {
+        "events": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/EvidencePackageEventMetadata"
+          }
+        },
+        "artifacts": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/EvidencePackageArtifactMetadata"
+          }
+        }
+      }
+    },
+    "EvidencePackageReferenceResolution": {
+      "type": "string",
+      "enum": [
+        "included",
+        "outside_selection",
+        "missing_in_retained_source",
+        "not_inspected",
+        "insufficient_identity"
+      ]
+    },
+    "EvidencePackageParentEventRelationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from_kind",
+        "from_key",
+        "relation",
+        "to_kind",
+        "to_key",
+        "resolution"
+      ],
+      "properties": {
+        "from_kind": {
+          "type": "string",
+          "const": "event"
+        },
+        "from_key": {
+          "$ref": "#/$defs/EvidencePackageEventKey"
+        },
+        "relation": {
+          "type": "string",
+          "const": "parent_event"
+        },
+        "to_kind": {
+          "type": "string",
+          "const": "event"
+        },
+        "to_key": {
+          "$ref": "#/$defs/EvidencePackageEventKey"
+        },
+        "resolution": {
+          "type": "string",
+          "enum": [
+            "included",
+            "outside_selection",
+            "missing_in_retained_source",
+            "not_inspected"
+          ]
+        }
+      }
+    },
+    "EvidencePackageEventArtifactRelationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from_kind",
+        "from_key",
+        "relation",
+        "to_kind",
+        "to_key",
+        "resolution"
+      ],
+      "properties": {
+        "from_kind": {
+          "type": "string",
+          "const": "event"
+        },
+        "from_key": {
+          "$ref": "#/$defs/EvidencePackageEventKey"
+        },
+        "relation": {
+          "type": "string",
+          "const": "event_artifact"
+        },
+        "to_kind": {
+          "type": "string",
+          "const": "artifact"
+        },
+        "to_key": {
+          "$ref": "#/$defs/EvidencePackageArtifactKey"
+        },
+        "resolution": {
+          "type": "string",
+          "enum": [
+            "included",
+            "outside_selection",
+            "missing_in_retained_source",
+            "not_inspected"
+          ]
+        }
+      }
+    },
+    "EvidencePackageParentArtifactRelationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from_kind",
+        "from_key",
+        "relation",
+        "to_kind",
+        "to_key",
+        "resolution"
+      ],
+      "properties": {
+        "from_kind": {
+          "type": "string",
+          "const": "artifact"
+        },
+        "from_key": {
+          "$ref": "#/$defs/EvidencePackageArtifactKey"
+        },
+        "relation": {
+          "type": "string",
+          "const": "parent_artifact"
+        },
+        "to_kind": {
+          "type": "string",
+          "const": "artifact"
+        },
+        "to_key": {
+          "$ref": "#/$defs/EvidencePackageArtifactKey"
+        },
+        "resolution": {
+          "type": "string",
+          "enum": [
+            "included",
+            "outside_selection",
+            "missing_in_retained_source",
+            "not_inspected"
+          ]
+        }
+      }
+    },
+    "EvidencePackageArtifactCreatorRelationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from_kind",
+        "from_key",
+        "relation",
+        "to_kind",
+        "to_key",
+        "resolution"
+      ],
+      "properties": {
+        "from_kind": {
+          "type": "string",
+          "const": "artifact"
+        },
+        "from_key": {
+          "$ref": "#/$defs/EvidencePackageArtifactKey"
+        },
+        "relation": {
+          "type": "string",
+          "const": "artifact_creator"
+        },
+        "to_kind": {
+          "type": "string",
+          "const": "event"
+        },
+        "to_key": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidencePackageEventKey"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resolution": {
+          "$ref": "#/$defs/EvidencePackageReferenceResolution"
+        }
+      }
+    },
+    "EvidencePackageRelationship": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/EvidencePackageParentEventRelationship"
+        },
+        {
+          "$ref": "#/$defs/EvidencePackageEventArtifactRelationship"
+        },
+        {
+          "$ref": "#/$defs/EvidencePackageParentArtifactRelationship"
+        },
+        {
+          "$ref": "#/$defs/EvidencePackageArtifactCreatorRelationship"
+        }
+      ],
+      "description": "Every nonzero source reference has exactly one relationship. Runtime checks origins, resolution state, included targets and selected parent cycles. A creator sequence has no process identity in v1 and must remain unresolved with a null target."
+    },
+    "EvidencePackageQueueDropGap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "session_id",
+        "process_id",
+        "anchor_sequence",
+        "monotonic_time_ns",
+        "reported_dropped_count",
+        "count_state",
+        "occurrences"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "queue_drop_marker"
+        },
+        "session_id": {
+          "$ref": "#/$defs/EvidencePackageNonzeroUint64String"
+        },
+        "process_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "anchor_sequence": {
+          "$ref": "#/$defs/EvidencePackageNonzeroUint64String"
+        },
+        "monotonic_time_ns": {
+          "$ref": "#/$defs/EvidencePackageUint64String"
+        },
+        "reported_dropped_count": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidencePackageUint64String"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "count_state": {
+          "type": "string",
+          "enum": [
+            "reported",
+            "count_unknown"
+          ]
+        },
+        "occurrences": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "count_state": {
+                "const": "reported"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reported_dropped_count": {
+                "$ref": "#/$defs/EvidencePackageUint64String"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "reported_dropped_count": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "EvidencePackageSequenceDiscontinuityGap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "session_id",
+        "process_id",
+        "first_missing_sequence",
+        "last_missing_sequence"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "sequence_discontinuity"
+        },
+        "session_id": {
+          "$ref": "#/$defs/EvidencePackageNonzeroUint64String"
+        },
+        "process_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "first_missing_sequence": {
+          "$ref": "#/$defs/EvidencePackageNonzeroUint64String"
+        },
+        "last_missing_sequence": {
+          "$ref": "#/$defs/EvidencePackageNonzeroUint64String"
+        }
+      },
+      "description": "Inclusive nonempty sequence-hole observation within the selected stream window. This untrusted retained-source assertion is not independently re-established from omitted records."
+    },
+    "EvidencePackageParentEventMissingReferenceGap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "from_kind",
+        "from_key",
+        "relation",
+        "to_kind",
+        "to_key"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "missing_reference"
+        },
+        "from_kind": {
+          "type": "string",
+          "const": "event"
+        },
+        "from_key": {
+          "$ref": "#/$defs/EvidencePackageEventKey"
+        },
+        "relation": {
+          "type": "string",
+          "const": "parent_event"
+        },
+        "to_kind": {
+          "type": "string",
+          "const": "event"
+        },
+        "to_key": {
+          "$ref": "#/$defs/EvidencePackageEventKey"
+        }
+      }
+    },
+    "EvidencePackageEventArtifactMissingReferenceGap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "from_kind",
+        "from_key",
+        "relation",
+        "to_kind",
+        "to_key"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "missing_reference"
+        },
+        "from_kind": {
+          "type": "string",
+          "const": "event"
+        },
+        "from_key": {
+          "$ref": "#/$defs/EvidencePackageEventKey"
+        },
+        "relation": {
+          "type": "string",
+          "const": "event_artifact"
+        },
+        "to_kind": {
+          "type": "string",
+          "const": "artifact"
+        },
+        "to_key": {
+          "$ref": "#/$defs/EvidencePackageArtifactKey"
+        }
+      }
+    },
+    "EvidencePackageParentArtifactMissingReferenceGap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "from_kind",
+        "from_key",
+        "relation",
+        "to_kind",
+        "to_key"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "missing_reference"
+        },
+        "from_kind": {
+          "type": "string",
+          "const": "artifact"
+        },
+        "from_key": {
+          "$ref": "#/$defs/EvidencePackageArtifactKey"
+        },
+        "relation": {
+          "type": "string",
+          "const": "parent_artifact"
+        },
+        "to_kind": {
+          "type": "string",
+          "const": "artifact"
+        },
+        "to_key": {
+          "$ref": "#/$defs/EvidencePackageArtifactKey"
+        }
+      }
+    },
+    "EvidencePackageMissingReferenceGap": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/EvidencePackageParentEventMissingReferenceGap"
+        },
+        {
+          "$ref": "#/$defs/EvidencePackageEventArtifactMissingReferenceGap"
+        },
+        {
+          "$ref": "#/$defs/EvidencePackageParentArtifactMissingReferenceGap"
+        }
+      ],
+      "description": "Must correspond exactly to a missing_in_retained_source relationship. Artifact creator identity is incomplete, not a claim of source absence."
+    },
+    "EvidencePackageCreatorIdentityGap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "artifact_key",
+        "creator_event_id"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "creator_identity_incomplete"
+        },
+        "artifact_key": {
+          "$ref": "#/$defs/EvidencePackageArtifactKey"
+        },
+        "creator_event_id": {
+          "$ref": "#/$defs/EvidencePackageNonzeroUint64String"
+        }
+      }
+    },
+    "EvidencePackageGap": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/EvidencePackageQueueDropGap"
+        },
+        {
+          "$ref": "#/$defs/EvidencePackageSequenceDiscontinuityGap"
+        },
+        {
+          "$ref": "#/$defs/EvidencePackageMissingReferenceGap"
+        },
+        {
+          "$ref": "#/$defs/EvidencePackageCreatorIdentityGap"
+        }
+      ],
+      "description": "Closed safe coverage observations. Never contains raw payload or explanatory free text. Gap occurrences and sequence holes are not summed as unique lost events."
+    }
+  }
+}

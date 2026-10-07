@@ -1,0 +1,408 @@
+{
+  "schema_version": 2,
+  "cases": [
+    {
+      "id": "string-table-proxy",
+      "source": "const selected=[\"first\",\"second\"][1];const p=(a,b)=>a^b;const numeric=p(7,3);const result=[selected,numeric];",
+      "assume_intrinsics": false,
+      "required_transformations": [
+        "literal-index",
+        "proxy-call"
+      ],
+      "mode": "trusted-differential",
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "array",
+          2,
+          [
+            [
+              "0",
+              [
+                "string",
+                "second"
+              ]
+            ],
+            [
+              "1",
+              [
+                "number",
+                "4010000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ]
+    },
+    {
+      "id": "xor-decoder",
+      "source": "const decode=function(s,k){var out=\"\";for(var i=0;i<s.length;i++){out+=String.fromCharCode(s.charCodeAt(i)^k);}return out;};const result=decode(\"idmmn\",1);",
+      "assume_intrinsics": true,
+      "required_transformations": [
+        "custom-decoder"
+      ],
+      "mode": "trusted-differential",
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "hello"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ]
+    },
+    {
+      "id": "flattened-dispatch",
+      "source": "const decode=function(){var state=0,out=\"\";while(true){switch(state){case 0:out+=\"h\";state=2;break;case 2:out+=\"i\";state=1;break;case 1:return out;}}};const result=decode();",
+      "assume_intrinsics": false,
+      "required_transformations": [
+        "control-flow"
+      ],
+      "mode": "trusted-differential",
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "hi"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ]
+    },
+    {
+      "id": "jsfuck-coercion",
+      "source": "const result=(![]+[])[+[]];",
+      "assume_intrinsics": true,
+      "required_transformations": [
+        "literal-index"
+      ],
+      "mode": "trusted-differential",
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "f"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ]
+    },
+    {
+      "id": "effect-preservation",
+      "source": "let count=0;function effect(){count++;return 2;}const result=[void effect(),count];",
+      "assume_intrinsics": false,
+      "required_transformations": [],
+      "mode": "trusted-differential",
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "array",
+          2,
+          [
+            [
+              "0",
+              [
+                "undefined"
+              ]
+            ],
+            [
+              "1",
+              [
+                "number",
+                "3ff0000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ]
+    },
+    {
+      "id": "object-shorthand",
+      "mode": "trusted-differential",
+      "source": "const x=1;const result={x};",
+      "assume_intrinsics": false,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "object",
+          "plain",
+          [
+            [
+              "x",
+              [
+                "number",
+                "3ff0000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": []
+    },
+    {
+      "id": "object-explicit-property",
+      "mode": "trusted-differential",
+      "source": "const x=1;const result={x:x};",
+      "assume_intrinsics": false,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "object",
+          "plain",
+          [
+            [
+              "x",
+              [
+                "number",
+                "3ff0000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": []
+    },
+    {
+      "id": "object-computed-property",
+      "mode": "trusted-differential",
+      "source": "const x=1;const result={[x]:x};",
+      "assume_intrinsics": false,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "object",
+          "plain",
+          [
+            [
+              "1",
+              [
+                "number",
+                "3ff0000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": []
+    },
+    {
+      "id": "nested-shorthand",
+      "mode": "trusted-differential",
+      "source": "const x=1;const result={nested:{x},value:x};",
+      "assume_intrinsics": false,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "object",
+          "plain",
+          [
+            [
+              "nested",
+              [
+                "object",
+                "plain",
+                [
+                  [
+                    "x",
+                    [
+                      "number",
+                      "3ff0000000000000"
+                    ]
+                  ]
+                ]
+              ]
+            ],
+            [
+              "value",
+              [
+                "number",
+                "3ff0000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": []
+    },
+    {
+      "id": "unicode-shorthand",
+      "mode": "trusted-differential",
+      "source": "const 雪=1;const result={/* key */ 雪};",
+      "assume_intrinsics": false,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "object",
+          "plain",
+          [
+            [
+              "雪",
+              [
+                "number",
+                "3ff0000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": []
+    },
+    {
+      "id": "typed-value-boundaries",
+      "mode": "trusted-differential",
+      "source": "const result=[void 0,null,,NaN,Infinity,-Infinity,-0,true,1];",
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "array",
+          9,
+          [
+            [
+              "0",
+              [
+                "undefined"
+              ]
+            ],
+            [
+              "1",
+              [
+                "null"
+              ]
+            ],
+            [
+              "3",
+              [
+                "number",
+                "NaN"
+              ]
+            ],
+            [
+              "4",
+              [
+                "number",
+                "+Infinity"
+              ]
+            ],
+            [
+              "5",
+              [
+                "number",
+                "-Infinity"
+              ]
+            ],
+            [
+              "6",
+              [
+                "number",
+                "8000000000000000"
+              ]
+            ],
+            [
+              "7",
+              [
+                "boolean",
+                true
+              ]
+            ],
+            [
+              "8",
+              [
+                "number",
+                "3ff0000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": []
+    },
+    {
+      "id": "authored-throw-and-effects",
+      "mode": "trusted-differential",
+      "source": "let completion='normal';let result;const effects=[];try{effects.push('before');throw new TypeError('authored');}catch(error){completion='throw';result=error.name;}",
+      "expected_observation": [
+        "observation",
+        "throw",
+        [
+          "string",
+          "TypeError"
+        ],
+        [
+          "array",
+          1,
+          [
+            [
+              "0",
+              [
+                "string",
+                "before"
+              ]
+            ]
+          ]
+        ]
+      ],
+      "required_transformations": []
+    }
+  ]
+}

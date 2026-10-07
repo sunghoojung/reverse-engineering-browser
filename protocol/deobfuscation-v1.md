@@ -34,8 +34,18 @@ are private and removed when analysis finishes or fails.
 
 Invalid identifiers/modes or malformed source return 400, missing artifacts 404,
 unavailable live debugging or a busy worker 409, native parse failures 422,
-an abnormal worker exit 502, and a worker timeout 408. A failed UI request is not automatically retried.
+an abnormal worker exit 502, and a worker timeout 408. Derived-output validation
+failure also returns 422 with a qualified message that the original is preserved;
+it is not reported as an original-source parse error. A failed UI request is not automatically retried.
 The previous successful representation survives an explicit retry failure.
+
+After rewriting, the worker bounds and reparses the complete candidate using
+the original parse goal. A rejected candidate has `ok: false`,
+`error_kind: "derived-validation"`, `parsed: true` (the original parsed), original
+text in `derived_source`, and an empty `transformations` list. Its diagnostic
+uses a zero-width range at zero rather than attributing a generated error to
+original bytes. Existing source-parse failures do not carry this error kind.
+The candidate check proves syntax acceptance only and never executes the source.
 
 `assume_intrinsics=0|1` defaults to 0. Opt-in responses carry
 `analysis.assumptions: ["standard-intrinsics"]`; default responses carry an empty

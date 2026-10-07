@@ -1211,43 +1211,43 @@
         </main>
         <section id="native-console-panel" class="native-console-panel" aria-label="Native JavaScript console" hidden>
           <header class="native-console-head">
-            <button id="native-console-clear" type="button" class="icon-button" aria-label="Clear console" title="Clear console">⊘</button>
-            <select id="native-console-target" aria-label="Console document" disabled><option value="">Select a document</option></select>
-            <div id="native-console-filter-row" class="native-console-filter-row" hidden><input id="native-console-filter" type="search" aria-label="Filter console" placeholder="Filter" maxlength="256" /><select id="native-console-level" aria-label="Console message level"><option value="all">All levels</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="info">Info</option><option value="debug">Debug</option></select></div>
+            <strong class="native-console-title">Console</strong>
+            <label class="native-console-context"><span>Document</span><select id="native-console-target" aria-label="Console document" disabled><option value="">Select a document</option></select></label>
             <span class="native-console-head-spacer"></span>
+            <button id="native-console-search" type="button" class="native-console-button" title="Find in console (⌘ / Ctrl + F)" aria-controls="native-console-filter-row" aria-expanded="false">Find</button>
+            <button id="native-console-clear" type="button" class="native-console-button" aria-label="Clear console" title="Clear output and retained values; keep command history">Clear</button>
             <details id="native-console-connection" class="native-console-connection">
-              <summary aria-label="Console connection settings" title="Console connection settings"><span id="native-console-badge" class="native-console-badge">idle</span><span aria-hidden="true">⌄</span></summary>
+              <summary aria-label="Console connection settings" title="Console connection settings"><span id="native-console-badge" class="native-console-badge">Checking</span><span aria-hidden="true">⌄</span></summary>
               <div class="native-console-connection-body">
                 <strong>Disposable browser session</strong>
                 <div class="native-console-controls">
                   <input id="native-console-url" type="url" aria-label="Authorized page URL" maxlength="4096" placeholder="https://your-authorized-site.example" autocomplete="off" spellcheck="false" />
                   <button id="native-console-start" type="button" class="native-console-button native-console-primary" disabled>Connect</button>
                 </div>
+                <button id="native-console-check" type="button" class="native-console-button">Check availability</button>
                 <div class="native-console-session-actions">
                   <button id="native-console-refresh" type="button" class="native-console-button" disabled>Refresh documents</button>
                   <button id="native-console-stop" type="button" class="native-console-button" disabled>Disconnect</button>
                 </div>
                 <label class="native-console-setting"><input id="native-console-timestamps" type="checkbox" /> Show timestamps</label>
-                <button id="native-console-search" type="button" class="native-console-button">Find in console (⌘ / Ctrl + F)</button>
-                <details class="native-console-utilities"><summary>Research utilities</summary><p><code>$_</code> reads the last result. Expand a value to copy it, store it as <code>temp1</code>, or inspect its source. <code>await</code> accepts an async expression. Up/Down recalls history at the first/last line. Command history stays in memory after clearing output.</p><select id="native-console-snippets" aria-label="Console snippets" disabled><option>No snippets saved</option></select><button id="native-console-load-snippet" type="button" class="native-console-button">Load snippet</button><button id="native-console-forget" type="button" class="native-console-button">Forget command history</button></details>
-                <p>Commands run in the selected document and can change page state. Disconnect removes this disposable browser and profile.</p>
+                <details class="native-console-utilities"><summary>History &amp; utilities</summary><p><code>$_</code> reads the last result. Expand a value to copy it, store it as <code>temp1</code>, or inspect its source. <code>await</code> accepts an async expression. Up/Down recalls history at the first/last line. Clearing output keeps command history.</p><select id="native-console-snippets" aria-label="Console snippets" disabled><option>No snippets saved</option></select><button id="native-console-load-snippet" type="button" class="native-console-button">Load snippet</button><button id="native-console-forget" type="button" class="native-console-button">Forget command history</button></details>
+                <p>Commands can change the selected page. Disconnect removes this disposable browser and profile. Output and history stay in memory only; clear output before sharing.</p>
               </div>
             </details>
             <button id="native-console-close" type="button" class="icon-button" aria-label="Close console panel" title="Close panel (⌘ / Ctrl + J)">×</button>
           </header>
-          <div id="native-console-notice" class="native-console-notice" role="status" aria-live="polite">Open this panel to check the native console connection.</div>
-          <div class="native-console-scroll" id="native-console-scroll">
-            <div id="native-console-output" class="native-console-output" role="log" aria-live="polite" aria-label="Console results"><p class="native-console-empty">Start a session, then select the document whose <code>window</code> you want to inspect.</p></div>
-            <form id="native-console-form" class="native-console-input">
-              <span class="native-console-prompt" aria-hidden="true">&gt;</span>
-              <div class="native-console-editor">
-                <pre id="native-console-highlight" aria-hidden="true"></pre>
-                <textarea id="native-console-source" aria-label="JavaScript command" rows="1" maxlength="8192" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" aria-describedby="native-console-input-help" disabled></textarea>
-              </div>
-              <span id="native-console-input-help">Enter to run · Shift + Enter for a new line · Up/Down selects suggestions · Tab or Enter accepts · Escape dismisses · Ctrl + Space shows property suggestions</span>
-              <button id="native-console-run" type="submit" disabled hidden>Run</button>
-            </form>
+          <div id="native-console-filter-row" class="native-console-filter-row" hidden><input id="native-console-filter" type="search" aria-label="Filter console" placeholder="Find in retained output" maxlength="256" /><select id="native-console-level" aria-label="Console message level"><option value="all">All levels</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="info">Info</option><option value="debug">Debug</option></select><button id="native-console-filter-close" type="button" class="native-console-button" aria-label="Close console filter">×</button></div>
+          <div id="native-console-notice" class="native-console-notice" role="status" aria-live="polite" hidden></div>
+          <div class="native-console-scroll" id="native-console-scroll" tabindex="0" aria-label="Console transcript">
+            <div id="native-console-output" class="native-console-output" role="log" aria-live="polite" aria-label="Console results"></div>
+            <div id="native-console-empty" class="native-console-empty"><strong id="native-console-empty-title">Connect a disposable browser</strong><p id="native-console-empty-text">Choose an authorized page, then select its document to run JavaScript.</p><button id="native-console-empty-action" type="button" class="native-console-button native-console-primary">Session settings</button></div>
+            <p id="native-console-no-matches" class="native-console-empty" hidden>No matching output. Change the text or level filter.</p>
           </div>
+          <div class="native-console-transcript-footer"><span id="native-console-output-count">0 entries</span><button id="native-console-latest" type="button" class="native-console-button" hidden>Latest output ↓</button><span class="native-console-private">Ephemeral · disposable profile</span></div>
+          <form id="native-console-form" class="native-console-input">
+            <div class="native-console-composer-line"><span class="native-console-prompt" aria-hidden="true">&gt;</span><div class="native-console-editor"><pre id="native-console-highlight" aria-hidden="true"></pre><textarea id="native-console-source" aria-label="JavaScript command" rows="1" maxlength="8192" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" aria-describedby="native-console-input-help native-console-composer-status" disabled></textarea></div><button id="native-console-run" type="submit" class="native-console-button native-console-primary" disabled>Run</button></div>
+            <div class="native-console-composer-footer"><span id="native-console-composer-status" role="status">Select a document to run commands</span><span id="native-console-input-help">Enter runs · Shift + Enter adds a line<span class="native-console-extended-help"> · Ctrl + Space suggests · ↑↓ history</span></span></div>
+          </form>
         </section>
       </div>
 

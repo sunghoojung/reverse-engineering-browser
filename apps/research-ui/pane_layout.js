@@ -2,7 +2,7 @@
 function initializePaneLayout() {
   const storageKey = 'origin-trace.layout.v1';
   const configurations = [
-    { id: 'native-console', parent: '#workspace', panes: ['.main', '#native-console-panel'], axis: 'y', minimum: [180, 190], label: 'workspace and console' },
+    { id: 'native-console', parent: '#workspace', panes: ['.main', '#native-console-panel'], axis: 'y', minimum: [180, 240], label: 'workspace and console' },
     { id: 'traffic', parent: '.traffic-grid', panes: ['.request-pane', '.detail-pane'], axis: 'y', minimum: [220, 220], label: 'Traffic list and inspector' },
     { id: 'traffic-columns', parent: '.traffic-grid', panes: ['.request-pane', '.detail-pane'], axis: 'x', minimum: [380, 360], label: 'Traffic list and inspector' },
     { id: 'repeater', parent: '.repeater-split', panes: ['.repeater-request-pane', '.repeater-response-pane'], axis: 'x', minimum: [320, 260], label: 'Repeater request and response' },

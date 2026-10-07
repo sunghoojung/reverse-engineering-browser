@@ -1,3 +1,4 @@
+import {checkConsoleDOM, createConsoleFixture, checkConsoleInteractions} from './check-console-workspace.mjs';
 import { spawn } from "node:child_process";
 import { runInNewContext } from "node:vm";
 import {
@@ -14,11 +15,13 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
+const consoleBrowser = process.argv[2] === "--console-ui-browser";
 const trafficBrowser = process.argv[2] === "--traffic-ui-browser";
 const sourceFactsBrowser = process.argv[2] === "--source-facts-ui-browser";
 const evidenceBrowser = process.argv[2] === "--evidence-ui-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
-const root = process.argv[fieldsOnly || trafficBrowser || sourceFactsBrowser || evidenceBrowser ? 3 : 2] || new URL("..", import.meta.url).pathname;
+const root = process.argv[fieldsOnly || trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser ? 3 : 2] || new URL("..", import.meta.url).pathname;
+await checkConsoleDOM(root);
 // Facts are UI projections over the already validated Rust contract. These
 // fixtures exercise identity and stale/cancelled request ownership, not JS execution.
 const sourceFactsUI = runInNewContext(
@@ -1685,11 +1688,12 @@ async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,scre
 async function checkTrafficBrowser() {
   const executable = process.env.REB_UI_CHROMIUM;
   assert(executable, "Set REB_UI_CHROMIUM to the installed Chrome/Chromium executable. Sandbox flags are not overridden.");
-  const directory = await mkdtemp(join(tmpdir(), evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
-  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
+  const directory = await mkdtemp(join(tmpdir(), consoleBrowser ? "reb-console-ui-" : evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
+  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", consoleBrowser ? "console-ui-qa" : evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
   await mkdir(output, {recursive: true});
   let trafficApiMode = "offline";
   const factsFixture = sourceFactsBrowser ? await sourceFactsBrowserFixture() : null;
+  const consoleFixture = consoleBrowser ? createConsoleFixture() : null;
   const evidenceFixture = evidenceBrowser ? evidenceBrowserFixture() : null;
   if(evidenceFixture){
     await writeFile(join(directory,'golden.json'),packageGoldenBytes);
@@ -1698,6 +1702,7 @@ async function checkTrafficBrowser() {
   const server = createServer(async (request, response) => {
     const path = new URL(request.url, "http://127.0.0.1").pathname;
     if (factsFixture && await factsFixture.handle(request, response)) return;
+    if (consoleFixture && await consoleFixture.handle(request, response)) return;
     if (evidenceFixture && await evidenceFixture.handle(request, response)) return;
     if (path === "/api/events" && trafficApiMode === "malformed") {response.writeHead(200, {"Content-Type": "application/json"}); response.end('{"malformed":true}'); return;}
     if (path.startsWith("/api/")) {response.writeHead(503, {"Content-Type": "application/json"}); response.end('{"error":"Synthetic offline QA fixture"}'); return;}
@@ -1891,7 +1896,7 @@ async function checkTrafficBrowser() {
     };
     captureFailure = async () => {
       const result = await command("Page.captureScreenshot", {format: "png"});
-      await writeFile(join(output, evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
+      await writeFile(join(output, consoleBrowser ? "console-failure.png" : evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
     };
     await viewport(1440, 900);
     await command("Page.navigate", {url: `http://127.0.0.1:${server.address().port}/`});
@@ -1901,7 +1906,10 @@ async function checkTrafficBrowser() {
     }
     assert(await evaluate("typeof renderRequests === 'function'"), "Application did not initialize");
     diagnostics.phase = "interactive validation";
-    if (evidenceBrowser) {
+    if (consoleBrowser) {
+      validation = await checkConsoleInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:consoleFixture,type:text=>command("Input.insertText",{text})});
+      assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Console QA");
+    } else if (evidenceBrowser) {
       const setFile=async name=>{
         const doc=await command('DOM.getDocument');
         const input=await command('DOM.querySelector',{nodeId:doc.root.nodeId,selector:'[data-package-file]'});
@@ -2030,7 +2038,12 @@ async function checkTrafficBrowser() {
     commands.clear();
     try {await lifecycle?.stop();}
     catch (error) {failure ??= error; diagnostics.cleanup_error = String(error.message).slice(0, 2048);}
-    factsFixture?.release();
+    factsFixture?.release(); consoleFixture?.release();
+    if (consoleFixture) {
+      diagnostics.fixture_errors = consoleFixture.errors;
+      try {await writeFile(join(output, 'console-fixture-receipts.json'), JSON.stringify({schema:'reb-console-ui-qa-v1',receipts:consoleFixture.receipts,errors:consoleFixture.errors}, null, 2));}
+      catch (error) {failure ??= error; diagnostics.fixture_receipt_error = String(error.message).slice(0, 2048);}
+    }
     evidenceFixture?.release();
     server.closeAllConnections();
     if (server.listening) await new Promise(resolve => server.close(resolve));
@@ -2043,9 +2056,9 @@ async function checkTrafficBrowser() {
   }
   if (failure) throw failure;
   await writeFile(join(output, "validation.json"), JSON.stringify(validation, null, 2));
-  console.log(`PASS real Chromium ${evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
+  console.log(`PASS real Chromium ${consoleBrowser ? 'Console' : evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
 }
-if (trafficBrowser || sourceFactsBrowser || evidenceBrowser) {await checkTrafficBrowser(); process.exit(0);}
+if (trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser) {await checkTrafficBrowser(); process.exit(0);}
 
 if (fieldsOnly) process.exit(0);
 const temporary = await mkdtemp(join(tmpdir(), "origin-trace-debugger-"));

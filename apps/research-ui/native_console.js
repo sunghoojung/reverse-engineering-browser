@@ -7,8 +7,9 @@
   const history = [];
   let historyIndex = null, draft = '', historyBytes = 0;
   let session = null, available = false, pending = 0, disconnected = false, initialized = false;
-  let outputBytes = 0, removed = 0, partialTargets = false;
+  let outputBytes = 0, outputNodes = 0, removed = 0, partialTargets = false, outputGeneration = 0;
   let queue = Promise.resolve(), generation = 0, pollRunning = false;
+  let checking = false, submitting = false, commandNumber = 0, unread = 0;
   const numberId = value => typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value) && BigInt(value) <= 18446744073709551615n;
   const validState = value => value?.contract_version === 2 && ['ready', 'idle'].includes(value.state) &&
     (value.state === 'ready' ? numberId(value.session_id) : value.session_id === null);
@@ -19,18 +20,45 @@
   }
   function renderControls() {
     root.dataset.session = session ? 'ready' : 'idle';
-    const status = pending ? 'working' : session ? disconnected ? 'disconnected' : 'connected' : initialized && !available ? 'unavailable' : 'idle';
-    const badge = element('badge'); badge.textContent = status; badge.dataset.state = status;
+    const busy = pending || submitting;
+    const status = checking ? 'checking' : disconnected ? 'disconnected' : busy ? 'working' : session ? 'connected' : initialized && !available ? 'unavailable' : 'idle';
+    const badge = element('badge'); badge.textContent = {checking: 'Checking', disconnected: 'Connection lost', working: 'Working', connected: 'Connected', unavailable: 'Unavailable', idle: 'Connect'}[status]; badge.dataset.state = status;
     controls.connection.querySelector('summary').setAttribute('aria-label', `Console connection: ${status}. Session settings`);
-    controls.start.disabled = !!pending || !available || !!session;
-    controls.stop.disabled = !!pending || !session; controls.refresh.disabled = !!pending || !session;
-    controls.target.disabled = !!pending || !session || controls.target.options.length <= 1;
-    controls.url.disabled = !!pending || !!session;
-    // Keep the next draft editable while a command is running. Submission stays
-    // explicit and serialized; a delayed reply never replaces the next draft.
+    controls.start.disabled = !!busy || checking || !available || !!session;
+    controls.clear.disabled = !!busy;
+    controls.stop.disabled = !!busy || !session; controls.refresh.disabled = !!busy || !session;
+    controls.target.disabled = !!busy || !session || controls.target.options.length <= 1;
+    controls.url.disabled = !!busy || checking || !!session;
+    element('check').hidden = !!session || available; element('check').disabled = checking;
+    // The next draft stays editable. Only explicit submission is serialized.
     controls.source.disabled = disconnected || !session || !controls.target.value;
-    controls.run.disabled = !!pending || controls.source.disabled || !controls.source.value.trim();
+    controls.run.disabled = !!busy || controls.source.disabled || !controls.source.value.trim();
+    controls.run.textContent = submitting ? 'Running…' : 'Run';
+    element('composer-status').textContent = submitting ? 'Running · next draft stays editable' : disconnected ? 'Connection lost · refresh documents to recover' : !session ? 'Connect a disposable browser to begin' : !controls.target.value ? 'Select the document to execute in' : `Document ${controls.target.value} · ${encoder.encode(controls.source.value).length} / 8192 bytes`;
+    const emptyTitle = element('empty-title'), emptyText = element('empty-text'), emptyAction = element('empty-action');
+    emptyTitle.textContent = checking ? 'Checking native Console' : disconnected ? 'Connection interrupted' : !available && initialized ? 'Native Console unavailable' : !session ? 'Connect a disposable browser' : !controls.target.value ? 'Choose an execution document' : 'Ready for your first command';
+    emptyText.textContent = disconnected ? 'Your output and draft are preserved. Refresh the document list before continuing; commands are never retried.' : !available && initialized ? 'A rebuilt custom Brave and live backend are required. Check availability after they are ready.' : !session ? 'Enter an authorized page in Session settings. Commands run in a separate disposable profile.' : !controls.target.value ? 'Select a document above. If the page just opened or navigated, refresh the document list.' : 'Enter an expression below. Expand returned objects to inspect bounded native properties; getters remain unevaluated.';
+    emptyAction.textContent = checking ? 'Checking…' : !session ? available ? 'Session settings' : 'Check availability' : !controls.target.value ? 'Refresh documents' : 'Focus command';
+    emptyAction.disabled = checking || !!busy;
+    updateOutputState();
   }
+  function updateOutputState() {
+    const rows = [...controls.output.children], visible = rows.filter(row => !row.hidden).length;
+    element('empty').hidden = !!rows.length;
+    element('no-matches').hidden = !rows.length || !!visible;
+    element('output-count').textContent = `${visible === rows.length ? rows.length : `${visible} / ${rows.length}`} entries${removed ? ` · ${removed} older removed` : ''}`;
+    element('latest').hidden = !rows.length || atBottom();
+    element('latest').textContent = unread ? `${unread} new · Latest ↓` : 'Latest output ↓';
+  }
+  function atBottom() { return controls.scroll.scrollHeight - controls.scroll.scrollTop - controls.scroll.clientHeight < 40; }
+  function followLatest() { controls.scroll.scrollTop = controls.scroll.scrollHeight; unread = 0; updateOutputState(); }
+  controls.scroll.addEventListener('scroll', () => { if (atBottom()) unread = 0; updateOutputState(); });
+  element('latest').addEventListener('click', followLatest);
+  element('empty-action').addEventListener('click', () => {
+    if (!session) { if (!available) initialize(true); else { controls.connection.open = true; controls.url.focus(); } }
+    else if (!controls.target.value) controls.refresh.click();
+    else controls.source.focus();
+  });
   function clearTargets() {
     const option = document.createElement('option'); option.value = ''; option.textContent = 'Select a document';
     controls.target.replaceChildren(option); controls.target.title = 'Select a document';
@@ -56,19 +84,20 @@
         if (epoch !== generation) return null;
         disconnected = false; return apply ? apply(value) : value;
       } catch (error) {
-        if (epoch === generation) { clearTargets(); disconnected = true; notice(`${error.message}. Commands are never retried automatically.`, true); }
+        if (epoch === generation) { clearTargets(); disconnected = true; notice(`${error.message}. Commands are never retried automatically.`, true); renderControls(); }
         return null;
       } finally { if (!quiet) { --pending; renderControls(); } }
     };
     const result = queue.then(execute); queue = result.catch(() => {}); return result;
   }
-  function runtime(command, target = controls.target.value, quiet = false, identity = session) {
+  function runtime(command, target = controls.target.value, quiet = false, identity = session, epoch = generation) {
+    if (epoch !== generation) return Promise.resolve({status: 'error', text: 'This value belongs to an earlier document selection. Run a new command to inspect a current value.'});
     if (identity !== session) return Promise.resolve({status: 'error', text: 'This value belongs to a disconnected console session.'});
     if (!target || target !== controls.target.value) return Promise.resolve({status: 'error', text: 'Select the original document to inspect this value.'});
     return enqueue('runtime', {target_id: target, command}, value => {
       if (!value.runtime) {
         if (value.status === 'stale_target') { boundary('Document changed. Refresh and select the current document.'); clearTargets(); renderControls(); }
-        return {status: value.status || 'error', text: value.text || 'Runtime response unavailable'};
+        return {status: value.status || 'error', text: value.text || 'Runtime response unavailable', request_id: value.request_id};
       }
       const result = value.runtime;
       if (!['ok', 'error', 'exception', 'pending', 'rejected'].includes(result.status)) throw new TypeError('Malformed runtime status');
@@ -95,25 +124,35 @@
     const previous = Number(row.dataset.bytes || 0);
     const bytes = encoder.encode(row.textContent).length + encoder.encode(row.dataset.command || '').length;
     row.dataset.bytes = bytes; outputBytes += bytes - previous;
-    while (controls.output.children.length > 128 || outputBytes > 262144) {
+    const nodes = row.querySelectorAll('*').length + 1; outputNodes += nodes - Number(row.dataset.nodes || 0); row.dataset.nodes = nodes;
+    while (controls.output.children.length > 128 || outputBytes > 262144 || outputNodes > 8192) {
       const oldest = controls.output.firstElementChild;
-      outputBytes -= Number(oldest.dataset.bytes || 0); oldest.remove(); ++removed;
+      outputBytes -= Number(oldest.dataset.bytes || 0); outputNodes -= Number(oldest.dataset.nodes || 0); oldest.remove(); ++removed;
     }
-    if (removed) notice(`${removed} older entries removed from this bounded output.`);
+    // Eviction stays in the transcript footer, never replacing a transport error.
     filter();
   }
   function appendRow(row) {
-    controls.output.querySelector('.native-console-empty')?.remove();
-    const follow = controls.scroll.scrollHeight - controls.scroll.scrollTop - controls.scroll.clientHeight < 40;
+    const follow = atBottom();
+    const anchor = [...controls.output.children].find(child => child.getBoundingClientRect().bottom >= controls.scroll.getBoundingClientRect().top);
+    const top = anchor?.getBoundingClientRect().top;
     controls.output.append(row); boundRow(row);
-    if (follow) controls.scroll.scrollTop = controls.scroll.scrollHeight;
+    if (follow) followLatest();
+    else {
+      ++unread;
+      if (anchor?.isConnected) controls.scroll.scrollTop += anchor.getBoundingClientRect().top - top;
+      updateOutputState();
+    }
   }
   function boundary(text) {
     const row = document.createElement('div'); row.className = 'native-console-boundary'; row.textContent = text; appendRow(row);
   }
   function button(label, action) {
     const control = document.createElement('button'); control.type = 'button'; control.textContent = label;
-    control.addEventListener('click', action); return control;
+    control.addEventListener('click', async event => {
+      try { await action(event); }
+      catch (error) { notice(`${error.message}. The action was not retried.`, true); }
+    }); return control;
   }
   function location(container, value) {
     if (!value || typeof value.url !== 'string' || value.url.length > 2048 || !Number.isInteger(value.line) || value.line < 1) return;
@@ -122,7 +161,7 @@
       document.dispatchEvent(new CustomEvent('reb-console-location', {detail}));
       if (detail.unavailable) notice(`No source for ${value.url} in this evidence workspace. The console runs in a separate disposable browser.`);
     });
-    control.className = 'native-console-location'; control.title = 'Find corresponding source in this evidence workspace'; container.append(control);
+    control.className = 'native-console-location'; control.title = 'Search captured sources by URL; this disposable browser is a separate context'; control.setAttribute('aria-label', `Search captured sources by URL: ${value.url}, line ${value.line}`); container.append(control);
   }
   async function copy(text) {
     try { await navigator.clipboard.writeText(text); notice('Copied to clipboard.'); }
@@ -130,7 +169,7 @@
   }
   async function copyValue(value, scope) {
     if (value?.handle && value.type === 'object') {
-      const page = await runtime({operation: 'inspect', handle: value.handle, offset: 0}, scope.target, false, scope.session);
+      const page = await runtime({operation: 'inspect', handle: value.handle, offset: 0}, scope.target, false, scope.session, scope.generation);
       if (page?.status === 'ok') { await copy(JSON.stringify({preview: value.text, properties: page.properties, truncated: page.more}, null, 2)); return; }
     }
     await copy(value?.text || '');
@@ -145,42 +184,75 @@
       const summary = document.createElement('summary'); summary.textContent = `${value.text}${value.truncated ? ' …' : ''}`;
       const children = document.createElement('div'); children.className = 'native-console-properties';
       const actions = document.createElement('div'); actions.className = 'native-console-actions';
-      let loaded = false, offset = 0, loading = false;
-      async function inspect() {
-        if (loading) return; loading = true;
-        const result = await runtime({operation: 'inspect', handle: value.handle, offset}, scope.target, false, scope.session);
-        loading = false;
-        if (!disclosure.isConnected || !result) return;
-        if (result.status !== 'ok') { children.textContent = result.text || 'Inspection unavailable'; return; }
-        if (!Array.isArray(result.properties) || result.properties.length > 17 || typeof result.more !== 'boolean' || !Number.isInteger(result.offset)) { notice('Malformed property page.', true); return; }
-        loaded = true;
-        for (const property of result.properties) {
-          if (typeof property.name !== 'string' || property.name.length > 2048) continue;
-          const row = document.createElement('div'); row.className = 'native-console-property';
-          const name = document.createElement('span'); name.className = 'native-console-property-name'; name.textContent = `${property.name}: `;
-          row.append(name); renderValue(row, property.value, scope, depth + 1); children.append(row);
+      const status = document.createElement('div'); status.className = 'native-console-property-status'; status.setAttribute('role', 'status');
+      const pager = document.createElement('div'); pager.className = 'native-console-property-pager';
+      let loaded = false, offset = 0, nextOffset = 0, loading = false, released = false, retryOffset = 0, pageUnavailable = false, moreAvailable = false;
+      const previous = button('Previous properties', () => inspect(pageUnavailable ? 0 : Math.max(0, offset - 16)));
+      const more = button('Next properties', () => inspect(nextOffset));
+      const retry = button('Retry inspection', () => inspect(retryOffset)); retry.hidden = true;
+      previous.disabled = true; more.disabled = true; pager.hidden = true; pager.append(previous, more, retry);
+      async function inspect(pageOffset = 0) {
+        if (loading || released) return; loading = true; retryOffset = pageOffset;
+        let focusBeforeUpdate = null;
+        status.textContent = 'Loading properties…'; children.setAttribute('aria-busy', 'true');
+        // Keep keyboard focus on stable pager buttons while the request runs.
+        // The loading guard rejects repeat activation without disabling focus.
+        for (const control of [previous, more, retry]) control.setAttribute('aria-disabled', 'true');
+        try {
+          const result = await runtime({operation: 'inspect', handle: value.handle, offset: pageOffset}, scope.target, false, scope.session, scope.generation);
+          if (!disclosure.isConnected) return;
+          focusBeforeUpdate = document.activeElement;
+          if (!result || result.status !== 'ok') throw new Error(result?.text || 'Inspection unavailable. Refresh documents if the connection was lost.');
+          if (!Array.isArray(result.properties) || result.properties.length > 17 || typeof result.more !== 'boolean' || !Number.isInteger(result.offset) || result.offset < 0 || result.offset > Math.min(65536, pageOffset + 16) || result.more && result.offset <= pageOffset || result.offset < pageOffset && (result.more || result.properties.length !== 0)) throw new TypeError('Malformed property page.');
+          const fragment = document.createDocumentFragment();
+          for (const property of result.properties) {
+            if (typeof property.name !== 'string' || property.name.length > 2048) throw new TypeError('Malformed property name.');
+            checkValue(property.value);
+            const row = document.createElement('div'); row.className = 'native-console-property';
+            const name = document.createElement('span'); name.className = 'native-console-property-name'; name.textContent = `${property.name}: `;
+            row.append(name); renderValue(row, property.value, scope, depth + 1); fragment.append(row);
+          }
+          // Replace one property page. Navigating a large object never grows a
+          // permanent list or retains detached child pages and their handles.
+          children.replaceChildren(fragment); loaded = true; offset = pageOffset; nextOffset = result.offset; moreAvailable = result.more;
+          // Native enumeration uses min(live length, requested offset + 16).
+          // A live object can shrink below a previously available page.
+          pageUnavailable = pageOffset > 0 && !result.more && result.properties.length === 0 && result.offset <= pageOffset;
+          previous.textContent = pageUnavailable ? 'First properties' : 'Previous properties';
+          retry.textContent = pageUnavailable ? 'Reload this page' : 'Retry inspection'; retry.hidden = !pageUnavailable;
+          status.textContent = pageUnavailable ? `This page is no longer available (${result.offset} properties remain). Return to the first page or reload this page if the object changes.` : result.properties.length ? `Properties ${pageOffset + 1}–${result.offset || result.properties.length}${pageOffset === 0 && result.properties.some(property => property.name === '[[Prototype]]') ? ' + prototype' : ''}${result.truncated ? ' · limited to first 65536 indices' : ''}` : 'No inspectable properties.';
+          previous.disabled = offset === 0; more.disabled = !result.more;
+          pager.hidden = previous.disabled && more.disabled && retry.hidden;
+        } catch (error) {
+          status.textContent = `${error.message}${loaded ? ' Previous page preserved.' : ''}`;
+          previous.disabled = !loaded || offset === 0; more.disabled = !loaded || !moreAvailable;
+          retry.textContent = 'Retry inspection'; pager.hidden = false; retry.hidden = false;
+        } finally {
+          loading = false; children.setAttribute('aria-busy', 'false');
+          for (const control of [previous, more, retry]) control.removeAttribute('aria-disabled');
+          if ([previous, more, retry].includes(focusBeforeUpdate) && (focusBeforeUpdate.disabled || focusBeforeUpdate.hidden) &&
+              [focusBeforeUpdate, document.body].includes(document.activeElement)) {
+            (!previous.disabled ? previous : !more.disabled ? more : !retry.hidden ? retry : summary).focus();
+          }
+          boundRow(container.closest('.native-console-result'));
         }
-        offset = result.offset; more.hidden = !result.more;
-        if (result.truncated) children.append(document.createTextNode('Property listing limited to first 65536 indices.'));
-        const parent = container.closest('.native-console-result'); if (parent) boundRow(parent);
       }
-      const more = button('Load next 16 properties', inspect); more.hidden = true;
       actions.append(button('Copy properties', () => copyValue(value, scope)), button('Store as variable', async () => {
-        const result = await runtime({operation: 'store', handle: value.handle}, scope.target, false, scope.session);
+        const result = await runtime({operation: 'store', handle: value.handle}, scope.target, false, scope.session, scope.generation);
         if (result) notice(result.status === 'ok' ? `Stored as ${result.text} in the selected page.` : result.text, result.status !== 'ok');
       }), button('Release', async () => {
-        const result = await runtime({operation: 'release', handle: value.handle}, scope.target, false, scope.session);
-        if (result?.status === 'ok') { children.replaceChildren(); summary.textContent = `${value.text} (released)`; disclosure.open = false; }
+        const result = await runtime({operation: 'release', handle: value.handle}, scope.target, false, scope.session, scope.generation);
+        if (result?.status === 'ok') { released = true; loaded = true; children.replaceChildren(); summary.textContent = `${value.text} (released)`; status.textContent = 'Value released. Run a new command to inspect it again.'; pager.hidden = true; actionDetails.hidden = true; boundRow(container.closest('article')); }
       }));
       location(actions, value.location);
       if (value.type === 'function') actions.append(button('Show function source', async () => {
-        const result = await runtime({operation: 'source', handle: value.handle}, scope.target, false, scope.session);
-        if (result?.text) { const source = document.createElement('pre'); appendCommandColors(source, result.text); children.replaceChildren(source); disclosure.open = true; loaded = true; boundRow(container.closest('article')); }
+        const result = await runtime({operation: 'source', handle: value.handle}, scope.target, false, scope.session, scope.generation);
+        if (result?.text && disclosure.isConnected) { pager.hidden = true; status.textContent = result.status === 'ok' ? 'Native function source' : 'Source unavailable'; const source = document.createElement('pre'); appendCommandColors(source, result.text); children.replaceChildren(source); disclosure.open = true; loaded = true; boundRow(container.closest('article')); }
       }));
       if (value.text.startsWith('<')) actions.append(button('Event listeners', async () => {
-        const result = await runtime({operation: 'listeners', handle: value.handle}, scope.target, false, scope.session);
+        const result = await runtime({operation: 'listeners', handle: value.handle}, scope.target, false, scope.session, scope.generation);
         if (!result) return;
-        children.replaceChildren(); loaded = true; disclosure.open = true;
+        children.replaceChildren(); pager.hidden = true; status.textContent = 'Registered event listeners'; loaded = true; disclosure.open = true;
         if (result.status !== 'ok') { children.textContent = result.text; return; }
         if (!result.properties?.length) children.textContent = 'No registered listeners.';
         for (const property of (result.properties || []).slice(0, 32)) {
@@ -188,12 +260,14 @@
         }
         if (result.truncated) children.append(document.createTextNode('Listener listing truncated at 32.'));
         boundRow(container.closest('article'));
-      }), button('Monitor events', async () => { const result = await runtime({operation: 'monitor', handle: value.handle}, scope.target, false, scope.session); if (result) notice(result.text); }),
-      button('Stop monitoring', async () => { const result = await runtime({operation: 'unmonitor', handle: value.handle}, scope.target, false, scope.session); if (result) notice(result.text); }));
-      disclosure.append(summary, children, more, actions); container.append(disclosure);
-      disclosure.addEventListener('toggle', () => { if (disclosure.open && !loaded) inspect(); });
+      }), button('Monitor events', async () => { const result = await runtime({operation: 'monitor', handle: value.handle}, scope.target, false, scope.session, scope.generation); if (result) notice(result.text); }),
+      button('Stop monitoring', async () => { const result = await runtime({operation: 'unmonitor', handle: value.handle}, scope.target, false, scope.session, scope.generation); if (result) notice(result.text); }));
+      const actionDetails = document.createElement('details'); actionDetails.className = 'native-console-value-actions';
+      const actionSummary = document.createElement('summary'); actionSummary.textContent = 'Value actions'; actionDetails.append(actionSummary, actions);
+      disclosure.append(summary, status, children, pager, actionDetails); container.append(disclosure);
+      disclosure.addEventListener('toggle', () => { if (disclosure.open && !loaded && !retry.hidden) return; if (disclosure.open && !loaded) inspect(); });
       if (value.type === 'promise') {
-        actions.append(button('Await', () => awaitValue(container, value, scope)), button('Stop waiting', async () => { container.dataset.wait = String(Number(container.dataset.wait || 0) + 1); container.dataset.awaiting = 'false'; const result = await runtime({operation: 'cancel', handle: value.handle}, scope.target, false, scope.session); if (result) notice(result.text || 'Stopped waiting; page work continues.'); }));
+        actions.append(button('Await', () => awaitValue(container, value, scope)), button('Stop waiting', async () => { container.dataset.wait = String(Number(container.dataset.wait || 0) + 1); container.dataset.awaiting = 'false'; const result = await runtime({operation: 'cancel', handle: value.handle}, scope.target, false, scope.session, scope.generation); if (result) notice(result.text || 'Stopped waiting; page work continues.'); }));
       }
     } else {
       const output = document.createElement('span'); output.className = 'native-console-primitive'; output.dataset.type = value.type;
@@ -208,7 +282,7 @@
     container.dataset.awaiting = 'true';
     async function tick() {
       if (container.dataset.wait !== wait || !container.isConnected || token !== generation || session !== scope.session || controls.target.value !== scope.target) return;
-      const result = await runtime({operation: 'await', handle: value.handle}, scope.target, true, scope.session);
+      const result = await runtime({operation: 'await', handle: value.handle}, scope.target, true, scope.session, scope.generation);
       if (!result || !container.isConnected || container.dataset.wait !== wait || token !== generation || session !== scope.session || controls.target.value !== scope.target) return;
       if (result.status === 'pending' && Date.now() - started < 10000) { setTimeout(tick, 200); return; }
       container.dataset.awaiting = 'false';
@@ -224,7 +298,8 @@
   }
   function result(value, source, scope) {
     const row = document.createElement('article'); row.className = 'native-console-result'; row.dataset.status = value.status; row.dataset.requestId = value.request_id || '';
-    row.dataset.level = value.status === 'ok' ? 'result' : 'error'; row.dataset.command = source;
+    row.dataset.level = value.status === 'ok' ? 'result' : 'error'; row.dataset.command = source; row.dataset.commandId = scope.command; row.dataset.commandNumber = scope.command; row.dataset.consoleSession = scope.session; row.dataset.consoleDocument = scope.target;
+    row.setAttribute('aria-label', `Result for command ${scope.command}: ${value.status}`);
     const output = document.createElement('div'); output.className = 'native-console-value';
     row.append(output);
     if (value.value) { row.dataset.type = value.value.type; renderValue(output, value.value, scope); }
@@ -234,17 +309,18 @@
     const summary = document.createElement('summary'); summary.textContent = value.value?.truncated ? 'Truncated' : '⋯'; summary.setAttribute('aria-label', `Result details: ${value.status}`);
     const label = document.createElement('div'); label.className = 'native-console-result-type'; label.textContent = `${value.status} · session ${scope.session} · document ${scope.target} · disposable experiment`;
     label.append(button('Copy result', () => value.value ? copyValue(value.value, scope) : copy(value.text || '')), button('Save snippet', () => saveSnippet(source)), button('Experiment activity', async () => {
-      const reply = await runtime({operation: 'traffic'}, scope.target, false, scope.session);
+      const reply = await runtime({operation: 'traffic'}, scope.target, false, scope.session, scope.generation);
       if (reply?.status === 'ok') document.dispatchEvent(new CustomEvent('reb-console-traffic', {detail: {session: scope.session, target: scope.target, request: value.request_id, events: reply.events || [], dropped: reply.dropped || 0}}));
     })); details.append(summary, label); row.append(details); appendRow(row);
     if (value.value?.type === 'promise' && /^\s*await\b/.test(source)) awaitValue(output, value.value, scope, true);
     return row;
   }
-  function logs(value) {
+  function logs(value, epoch = outputGeneration) {
     if (!Array.isArray(value.messages) || value.messages.length > 32 || !Number.isInteger(value.dropped) || value.dropped < 0) throw new TypeError('Malformed console messages');
+    if (value.messages.some(message => !message || !['debug', 'info', 'warning', 'error'].includes(message.level) || typeof message.text !== 'string' || message.text.length > 8192 || typeof message.time !== 'number' || !Number.isFinite(message.time) || Math.abs(message.time) > 8640000000000000 || message.stack != null && (typeof message.stack !== 'string' || message.stack.length > 8192))) throw new TypeError('Malformed page message');
+    if (epoch !== outputGeneration) return;
     if (value.dropped) boundary(`${value.dropped} page messages dropped before delivery.`);
     for (const message of value.messages) {
-      if (!['debug', 'info', 'warning', 'error'].includes(message.level) || typeof message.text !== 'string' || message.text.length > 8192) throw new TypeError('Malformed page message');
       const row = document.createElement('article'); row.className = 'native-console-result native-console-log'; row.dataset.level = message.level;
       const time = document.createElement('span'); time.className = 'native-console-time'; time.textContent = new Date(message.time).toLocaleTimeString(); row.append(time);
       const output = document.createElement('pre'); output.textContent = message.text; row.append(output); location(row, message);
@@ -256,29 +332,39 @@
   async function poll() {
     if (pollRunning || root.hidden || !session || disconnected || !controls.target.value || pending) return;
     pollRunning = true;
-    try { const value = await runtime({operation: 'poll'}, controls.target.value, true); if (value?.status === 'ok') logs(value); }
+    const epoch = outputGeneration, context = generation;
+    try { const value = await runtime({operation: 'poll'}, controls.target.value, true); if (value?.status === 'ok') logs(value, epoch); }
+    catch (error) {
+      if (context === generation) { clearTargets(); disconnected = true; notice(`${error.message}. Refresh documents to recover. Commands were not retried.`, true); renderControls(); }
+    }
     finally { pollRunning = false; }
   }
   setInterval(poll, 500);
   function filter() {
     const query = controls.filter.value.toLocaleLowerCase(), level = controls.level.value;
     for (const row of controls.output.children) row.hidden = !!query && !(row.textContent + (row.dataset.command || '')).toLocaleLowerCase().includes(query) || level !== 'all' && row.dataset.level !== level;
+    updateOutputState();
   }
   controls.filter.addEventListener('input', filter); controls.level.addEventListener('change', filter);
-  function search() { element('filter-row').hidden = false; controls.filter.focus(); controls.filter.select(); }
+  function search() { element('filter-row').hidden = false; element('search').setAttribute('aria-expanded', 'true'); controls.filter.focus(); controls.filter.select(); }
+  function closeSearch() { controls.filter.value = ''; controls.level.value = 'all'; filter(); element('filter-row').hidden = true; element('search').setAttribute('aria-expanded', 'false'); (controls.source.disabled ? element('search') : controls.source).focus(); }
+  element('filter-close').addEventListener('click', closeSearch);
   element('search').addEventListener('click', search);
-  controls.filter.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); controls.filter.value = ''; controls.level.value = 'all'; filter(); element('filter-row').hidden = true; controls.source.focus(); } });
+  controls.filter.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); closeSearch(); } });
   element('timestamps').addEventListener('change', event => { root.dataset.timestamps = String(event.target.checked); });
   element('forget').addEventListener('click', () => { history.length = 0; historyBytes = 0; historyIndex = null; draft = ''; notice('Command history forgotten.'); });
-  async function initialize() {
-    if (initialized) return;
+  async function initialize(force = false) {
+    if (checking || initialized && !force) return;
+    checking = true; renderControls();
     try {
       const response = await fetch('/api/native-console', {cache: 'no-store'}); const value = await response.json();
       if (!response.ok || !validState(value) || typeof value.available !== 'boolean') throw new TypeError('Native console unavailable');
       available = value.available; session = value.session_id; initialized = true; notice(available ? '' : value.message, !available);
-    } catch (error) { notice(error.message, true); }
-    renderControls(); focusPrompt();
+    } catch (error) { initialized = true; available = false; notice(`${error.message}. Use Check availability to try again.`, true); }
+    checking = false; renderControls();
+    if (!root.hidden && root.contains(document.activeElement) && controls.source.disabled) focusPrompt();
   }
+  element('check').addEventListener('click', () => initialize(true));
   controls.start.addEventListener('click', () => {
     if (!controls.url.reportValidity() || !controls.url.value.trim()) return;
     enqueue('start', {url: controls.url.value.trim()}, value => { ++generation; session = value.session_id; targets(value); controls.connection.open = false; boundary('Disposable experiment connected. Select a document.'); });
@@ -323,9 +409,10 @@
   }
   function sizeInput() {
     controls.source.style.height = '26px';
-    controls.source.style.height = `${Math.min(150, Math.max(26, controls.source.scrollHeight))}px`;
+    controls.source.style.height = `${Math.min(108, Math.max(26, root.clientHeight - 170), Math.max(26, controls.source.scrollHeight))}px`;
     colorInput();
   }
+  new ResizeObserver(() => { if (!root.hidden) sizeInput(); }).observe(root);
   const completion = createNativeConsoleCompletion(controls.source, element('highlight'), root, async query => {
     if (!session || disconnected || !controls.target.value) return null;
     const result = await runtime({operation: 'complete', path: query.path, prefix: query.prefix}, controls.target.value, true);
@@ -335,10 +422,14 @@
   controls.source.addEventListener('scroll', syncInputMirror); new ResizeObserver(syncInputMirror).observe(controls.source);
   controls.source.addEventListener('input', () => { historyIndex = null; sizeInput(); renderControls(); });
   controls.clear.addEventListener('click', async () => {
-    const empty = document.createElement('p'); empty.className = 'native-console-empty'; empty.textContent = 'Select a document to begin.'; empty.hidden = !!controls.target.value;
-    controls.output.replaceChildren(empty); outputBytes = 0; removed = 0;
+    if (submitting || pending) return;
+    // Clear invalidates delayed transcript replies, not the native execution
+    // context. Queued/new explicit commands retain their document ownership.
+    ++outputGeneration;
+    controls.output.replaceChildren(); outputBytes = 0; outputNodes = 0; removed = 0; unread = 0; updateOutputState();
     if (session && controls.target.value && !disconnected) await runtime({operation: 'clear'});
-    notice('');
+    if (!disconnected) notice('');
+    renderControls();
   });
   const snippets = [];
   function saveSnippet(source) {
@@ -348,45 +439,56 @@
     snippets.forEach((text, index) => { const option = document.createElement('option'); option.value = index; option.textContent = text.split('\n')[0].slice(0, 64); select.append(option); });
     select.disabled = !snippets.length; notice('Snippet saved in this app session.');
   }
-  element('load-snippet').addEventListener('click', () => { const source = snippets[Number(element('snippets').value)]; if (source != null) { controls.source.value = source; sizeInput(); controls.source.focus(); } });
+  element('load-snippet').addEventListener('click', () => { const source = snippets[Number(element('snippets').value)]; if (source != null) { controls.source.value = source; sizeInput(); renderControls(); controls.connection.open = false; controls.source.focus(); } });
   function remember(source) {
     if (history.at(-1) === source) return;
     history.push(source); historyBytes += encoder.encode(source).length;
     while (history.length > 128 || historyBytes > 262144) historyBytes -= encoder.encode(history.shift()).length;
   }
   controls.form.addEventListener('submit', async event => {
-    event.preventDefault(); if (pending || !session || disconnected || !controls.target.value) return;
+    event.preventDefault(); if (submitting || pending || !session || disconnected || !controls.target.value) return;
     const source = controls.source.value;
     if (!source.trim() || encoder.encode(source).length > 8192) { notice('Enter 1 to 8192 UTF-8 bytes of JavaScript.', true); return; }
     const helper = source.trim().match(/^(copy|inspect|getEventListeners|monitorEvents|unmonitorEvents)\(([\s\S]*)\)\s*;?$/);
     if (helper && !helper[2].trim()) { notice('Enter an expression inside the console utility.', true); return; }
+    submitting = true; renderControls();
     completion.close(); historyIndex = null; remember(source); notice(partialTargets ? 'Document listing is partial.' : '');
-    const scope = {session, target: controls.target.value, url: controls.target.selectedOptions[0]?.dataset.url || ''};
-    controls.source.value = ''; sizeInput();
-    const commandRow = document.createElement('article'); commandRow.className = 'native-console-result native-console-command'; commandRow.dataset.level = 'result';
+    const scope = {session, generation, command: ++commandNumber, target: controls.target.value, url: controls.target.selectedOptions[0]?.dataset.url || ''};
+    controls.source.value = ''; sizeInput(); controls.source.focus();
+    const commandRow = document.createElement('article'); commandRow.className = 'native-console-result native-console-command'; commandRow.dataset.level = 'result'; commandRow.dataset.command = source; commandRow.dataset.commandId = scope.command; commandRow.dataset.commandNumber = scope.command; commandRow.dataset.consoleSession = scope.session; commandRow.dataset.consoleDocument = scope.target;
+    const commandStatus = document.createElement('span'); commandStatus.className = 'native-console-command-status'; commandStatus.textContent = `#${scope.command} · Running`; commandStatus.setAttribute('role', 'status'); commandRow.append(commandStatus);
     const expression = document.createElement('pre'); expression.className = 'native-console-expression'; expression.append(document.createTextNode('> ')); appendCommandColors(expression, source); commandRow.append(expression); appendRow(commandRow);
-    const value = await runtime({operation: 'evaluate', source: helper ? helper[2] : source}, scope.target, false, scope.session);
-    if (value) {
-      commandRow.dataset.requestId = value.request_id || '';
-      commandRow.dataset.level = value.status === 'ok' ? 'result' : 'error';
-      await poll();
-      if (helper && value.status === 'ok') {
-        const kind = helper[1];
-        if (kind === 'copy' && value.value) await copyValue(value.value, scope);
-        if (kind === 'inspect' && value.value?.location) {
-          const detail = {...value.value.location, unavailable: false}; document.dispatchEvent(new CustomEvent('reb-console-location', {detail}));
-        }
-        if (value.value?.handle && ['getEventListeners', 'monitorEvents', 'unmonitorEvents'].includes(kind)) {
-          const reply = await runtime({operation: kind === 'getEventListeners' ? 'listeners' : kind === 'monitorEvents' ? 'monitor' : 'unmonitor', handle: value.value.handle}, scope.target, false, scope.session);
-          if (reply?.properties) {
-            const row = result(value, source, scope); const output = document.createElement('div'); output.className = 'native-console-properties';
-            for (const property of reply.properties.slice(0, 32)) { const item = document.createElement('div'); item.className = 'native-console-property'; item.append(document.createTextNode(property.name + ': ')); renderValue(item, property.value, scope); output.append(item); }
-            row.append(output); boundRow(row);
-          } else result({status: reply?.status || 'error', text: reply?.text || 'Utility unavailable'}, source, scope);
-        } else { const row = result(value, source, scope); if (kind === 'inspect' && value.value?.handle) { const object = row.querySelector('.native-console-object'); if (object) object.open = true; } }
-      } else result(value, source, scope);
-    }
-    renderControls();
+    try {
+      const value = await runtime({operation: 'evaluate', source: helper ? helper[2] : source}, scope.target, false, scope.session, scope.generation);
+      if (value) {
+        commandStatus.textContent = `#${scope.command} · ${value.status === 'ok' ? 'Complete' : value.status}`;
+        commandRow.dataset.requestId = value.request_id || '';
+        commandRow.dataset.level = value.status === 'ok' ? 'result' : 'error';
+        await poll();
+        if (helper && value.status === 'ok') {
+          const kind = helper[1];
+          if (kind === 'copy' && value.value) await copyValue(value.value, scope);
+          if (kind === 'inspect' && value.value?.location) {
+            const detail = {...value.value.location, unavailable: false}; document.dispatchEvent(new CustomEvent('reb-console-location', {detail}));
+          }
+          if (value.value?.handle && ['getEventListeners', 'monitorEvents', 'unmonitorEvents'].includes(kind)) {
+            const reply = await runtime({operation: kind === 'getEventListeners' ? 'listeners' : kind === 'monitorEvents' ? 'monitor' : 'unmonitor', handle: value.value.handle}, scope.target, false, scope.session, scope.generation);
+            if (reply?.properties) {
+              const row = result(value, source, scope); const output = document.createElement('div'); output.className = 'native-console-properties';
+              for (const property of reply.properties.slice(0, 32)) { const item = document.createElement('div'); item.className = 'native-console-property'; item.append(document.createTextNode(property.name + ': ')); renderValue(item, property.value, scope); output.append(item); }
+              row.append(output); boundRow(row);
+            } else result({status: reply?.status || 'error', text: reply?.text || 'Utility unavailable'}, source, scope);
+          } else { const row = result(value, source, scope); if (kind === 'inspect' && value.value?.handle) { const object = row.querySelector('.native-console-object'); if (object) object.open = true; } }
+        } else result(value, source, scope);
+      } else {
+        commandStatus.textContent = `#${scope.command} · Outcome unavailable`;
+        commandRow.dataset.level = 'error';
+        const failure = document.createElement('p'); failure.className = 'native-console-command-failure'; failure.textContent = 'No confirmed result. The command may have changed page state. It was not retried.'; commandRow.append(failure);
+      }
+    } catch (error) {
+      commandStatus.textContent = `#${scope.command} · Result unavailable`;
+      commandRow.dataset.level = 'error'; notice(`${error.message}. The command was not retried.`, true);
+    } finally { submitting = false; boundRow(commandRow); renderControls(); }
   });
   function incomplete(source) {
     const tokens = sourcePrettyTokens(source, 'javascript');
@@ -422,9 +524,20 @@
     if (historyIndex === history.length) historyIndex = null;
     sizeInput(); renderControls();
   });
+  function positionConnection() {
+    if (!controls.connection.open) return;
+    const panel = root.getBoundingClientRect(), summary = controls.connection.querySelector('summary').getBoundingClientRect();
+    const menu = controls.connection.querySelector('.native-console-connection-body');
+    menu.style.maxHeight = `${Math.max(80, panel.bottom - summary.bottom - 10)}px`;
+    menu.style.width = `${Math.min(350, panel.width - 16)}px`;
+    menu.style.right = `${summary.right - panel.right + 8}px`;
+  }
+  controls.connection.addEventListener('toggle', positionConnection);
+  new ResizeObserver(positionConnection).observe(root);
   function focusPrompt() {
-    if (!session) controls.connection.open = true;
-    (session ? controls.source.disabled ? controls.target.disabled ? controls.refresh : controls.target : controls.source : controls.url).focus();
+    if (checking) { controls.connection.querySelector('summary').focus(); return; }
+    if (!session || controls.target.disabled && controls.source.disabled) controls.connection.open = true;
+    (session ? controls.source.disabled ? controls.target.disabled ? controls.refresh : controls.target : controls.source : available ? controls.url : element('check')).focus();
   }
   function setOpen(open) {
     root.hidden = !open; document.querySelector('#workspace').dataset.consoleOpen = String(open);

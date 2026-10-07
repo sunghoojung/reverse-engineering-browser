@@ -185,7 +185,7 @@ function createNativeConsoleCompletion(source, mirror, root, provider = null) {
   function position() {
     if (!current) return;
     const input = source.getBoundingClientRect();
-    const clip = document.querySelector('#native-console-scroll').getBoundingClientRect();
+    const clip = root.getBoundingClientRect();
     before.data = source.value.slice(0, source.selectionStart);
     measure.style.width = `${source.clientWidth}px`; measure.style.height = `${source.clientHeight}px`;
     const marker = caret.getBoundingClientRect();

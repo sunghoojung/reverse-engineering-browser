@@ -3287,9 +3287,68 @@ async function checkMemoryRowGutters() {
 }
 await checkMemoryRowGutters();
 
+// The browser receipt at 760x560 had 223px for 150px + 170px tracks.
+// Run the exact QA reveal/ownership code against those nested geometry rules;
+// the old non-scrollable parent must fail rather than moving a hidden screen.
+async function checkMemoryResponsiveOwners() {
+  const css=await readFile(join(root,'apps/research-ui/app.css'),'utf8');
+  const narrow=css.slice(css.indexOf('      @media (max-width: 950px) {'));
+  assert.match(narrow,/\.memory-results-pane \{ overflow: auto; grid-template-columns: 1fr; grid-template-rows: minmax\(150px, \.7fr\) minmax\(170px, 1fr\); \}/);
+  const source=await readFile(join(root,'tools/check-origin-trace-debugger.mjs'),'utf8');
+  const from=source.indexOf('  const wheelReceipts=',source.indexOf('async function checkMemoryInteractions('));
+  const to=source.indexOf('  await viewport(1440,900);',from);
+  const helpers=source.slice(from,to)+';({reveal,checkReadingScroll,scrollState,wheelReceipts})';
+  const results=[];
+  for(const width of [760,600,360])for(const prior of [false,true])for(const bounded of width===760&&!prior?[false,true]:[true]){
+    const height=width===360?740:560,phone=width<=650,gridTop=phone?(width===360?340:320):254,gridHeight=height-24-gridTop;
+    const nodes=[],bySelector=new Map();
+    const make=(selector,parent,x,y,w,h,content=h,overflow='visible')=>{
+      let top=0;const n={selector,id:selector.startsWith('#')?selector.slice(1):'',tagName:'DIV',className:selector.startsWith('.')?selector.slice(1):'',parentElement:parent,hidden:false,clientTop:0,clientLeft:0,scrollLeft:0,overflow,
+        get clientHeight(){return h;},get clientWidth(){return (typeof w==='function'?w():w)-(overflow==='auto'&&content>h?16:0);},get scrollHeight(){return content;},get scrollTop(){return top;},set scrollTop(value){top=Math.max(0,Math.min(content-h,value));},
+        getBoundingClientRect(){const p=parent?.getBoundingClientRect()??{left:0,top:0};const left=p.left+x,top=p.top+y-(parent?.scrollTop??0),width=typeof w==='function'?w():w;return {left,right:left+width,top,bottom:top+h,width,height:h};},
+        getClientRects(){return [this.getBoundingClientRect()];},getAttribute(){return null;},matches:s=>s===selector,contains(other){for(let p=other;p;p=p.parentElement)if(p===n)return true;return false;},querySelector:s=>bySelector.get(s)};
+      nodes.push(n);bySelector.set(selector,n);return n;
+    };
+    const html=make('html',null,0,0,width,height,height,'hidden'),body=make('body',html,0,0,width,height,height,'hidden'),workspace=make('#workspace',body,0,62,width,height-86,height-86,'hidden'),main=make('.main',workspace,0,0,width,height-86,height-86,'hidden'),screen=make('#screen-memory',main,0,37,width,height-123,height-123,'hidden');
+    const grid=make('.memory-grid',screen,0,gridTop-99,width,gridHeight,phone?940:gridHeight,phone?'auto':'visible');
+    const search=make('.memory-search-pane',grid,0,0,phone?()=>grid.clientWidth:245,phone?420:gridHeight,phone?420:381,phone?'visible':'auto');
+    const output=make('.memory-output',grid,phone?0:245,phone?420:0,()=>grid.clientWidth-(phone?0:245),phone?520:gridHeight);
+    const pane=make('#memory-results-pane',output,0,phone?60:59,()=>output.clientWidth,phone?460:223,phone?640:320,bounded?'auto':'visible');
+    const list=make('.memory-results-list',pane,0,0,()=>pane.clientWidth,phone?220:150,2736,'auto');make('.memory-results-head',list,0,0,()=>list.clientWidth,36);
+    const detail=make('#memory-detail',pane,0,phone?220:150,()=>pane.clientWidth,phone?420:170,1200,'auto');
+    const control=make('.memory-detail-disclosure summary',detail,12,350,()=>detail.clientWidth-24,38);
+    if(prior){list.scrollTop=108;detail.scrollTop=47;if(phone)grid.scrollTop=90;else search.scrollTop=23;}
+    const visible=n=>{let top=0,bottom=height,left=0,right=width;for(let p=n.parentElement;p;p=p.parentElement)if(p.overflow!=='visible'){const r=p.getBoundingClientRect();top=Math.max(top,r.top);bottom=Math.min(bottom,r.top+p.clientHeight);left=Math.max(left,r.left);right=Math.min(right,r.left+p.clientWidth);}return {top,bottom,left,right};};
+    const document={querySelector:s=>bySelector.get(s),querySelectorAll:()=>[],elementFromPoint:(x,y)=>{const r=control.getBoundingClientRect(),clip=visible(control);return x>=r.left&&x<=r.right&&y>=r.top&&y<=r.bottom&&x>=clip.left&&x<=clip.right&&y>=clip.top&&y<=clip.bottom?control:null;}};
+    const evaluate=async code=>JSON.parse(JSON.stringify(runInNewContext(code,{document,innerWidth:width,innerHeight:height,getComputedStyle:n=>({overflowX:n.overflow,overflowY:n.overflow})})));
+    const wheel=async(selector,delta,mode)=>{assert.equal(mode,'scrollbar');const n=bySelector.get(selector),r=n.getBoundingClientRect(),clip=visible(n),y=(r.top+r.bottom)/2;assert(y>=clip.top&&y<clip.bottom,'Native wheel point is clipped by a non-scrollable ancestor');const before=n.scrollTop;n.scrollTop+=delta;return {point:{scrollTop:before},result:{scrollTop:n.scrollTop}};};
+    const api=runInNewContext(helpers,{evaluate,wheel,assert:Object.assign((...args)=>assert(...args),assert,{deepEqual:(a,b,m)=>assert.deepEqual(JSON.parse(JSON.stringify(a)),JSON.parse(JSON.stringify(b)),m)}),recordMemoryCheck(){}});
+    let error=null;try{await api.reveal('.memory-detail-disclosure summary');await api.checkReadingScroll(width);}catch(e){error=String(e.message);}
+    if(!bounded)assert.match(error,/Native wheel point is clipped/,'The baseline must retain its unreachable-detail failure');else{assert.equal(error,null);assert(api.wheelReceipts.length>0);assert.equal(screen.scrollTop,0);if(width===760)assert(api.wheelReceipts.some(r=>r.owner==='#memory-results-pane'),'760px detail requires the newly bounded parent');}
+    results.push({width,prior,bounded,error,wheels:JSON.parse(JSON.stringify(api.wheelReceipts))});
+  }
+  console.log('PASS Memory 760px clipped-parent counterexample, 760/600/360 nested owner reachability, independent/restored detail scroll and inert reveals (exact QA planner and geometry model; not rendered QA)');
+  return results;
+}
+await checkMemoryResponsiveOwners();
+
 async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeText,screenshot,fixture,recordMemoryCheck=()=>{}}) {
   const ready=async()=>{for(let n=0;n<150;n++){if(await evaluate('!state.memorySearchPending && !state.debuggerActionPending'))return;await new Promise(resolve=>setTimeout(resolve,20));}throw Error('Memory action did not settle');};
-  const wheelReceipts=[];
+  const wheelReceipts=[],containmentReceipts=[];
+  const scrollState=async owner=>evaluate(`(()=>{
+    const selected=document.querySelector(${JSON.stringify(owner)});
+    return ['.memory-grid','.memory-search-pane','.memory-output','#memory-results-pane','.memory-results-list','#memory-detail','#screen-memory','.main','#workspace','body','html'].map(selector=>{const n=document.querySelector(selector),r=n.getBoundingClientRect(),s=getComputedStyle(n);let top=0,bottom=innerHeight;for(let p=n.parentElement;p;p=p.parentElement){if(getComputedStyle(p).overflowY!=='visible'){const b=p.getBoundingClientRect();top=Math.max(top,b.top+p.clientTop);bottom=Math.min(bottom,b.top+p.clientTop+p.clientHeight);}}return {selector,selected:n===selected,top:r.top,bottom:r.bottom,visibleHeight:Math.max(0,Math.min(r.bottom,bottom)-Math.max(r.top,top)),clip:{top,bottom},clientHeight:n.clientHeight,scrollHeight:n.scrollHeight,scrollTop:n.scrollTop,overflowY:s.overflowY};});
+  })()`);
+  const ownedWheel=async(owner,delta,control)=>{
+    const before=await scrollState(owner);recordMemoryCheck({kind:'scroll-plan',selector:control,label:'Before native owner wheel',owner,delta,before});
+    const receipt=await wheel(owner,delta,'scrollbar');
+    assert((receipt.result.scrollTop-receipt.point.scrollTop)*delta>0,`Native wheel must move intended Memory owner ${owner}`);
+    const after=await scrollState(owner);
+    for(let i=0;i<before.length;i++)if(!before[i].selected)assert.equal(after[i].scrollTop,before[i].scrollTop,`${control}: scrolling ${owner} must not move ${before[i].selector}`);
+    wheelReceipts.push({control,owner,delta,before:receipt.point.scrollTop,after:receipt.result.scrollTop});
+    recordMemoryCheck({kind:'scroll-result',selector:control,label:'After native owner wheel',owner,delta,after});
+    return receipt;
+  };
   const closed=async label=>{
     assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),false,label+': Advanced must be closed');
     assert.equal(await evaluate("Boolean(document.activeElement?.closest('#advanced-navigation .advanced-items'))"),false,label+': focus must not remain in the hidden chooser');
@@ -3334,9 +3393,7 @@ async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeTe
         const limit=Math.max(24,owner.clientHeight*.75);return {owner:name,delta:Math.sign(delta)*Math.min(Math.abs(delta),limit)};
       })()`);
       if(!action){await unobscured(selector,'Revealed Memory control');return;}
-      const receipt=await wheel(action.owner,action.delta,'scrollbar');
-      assert((receipt.result.scrollTop-receipt.point.scrollTop)*action.delta>0,`Native wheel must move intended Memory owner ${action.owner}`);
-      wheelReceipts.push({control:selector,owner:action.owner,delta:action.delta,before:receipt.point.scrollTop,after:receipt.result.scrollTop});
+      await ownedWheel(action.owner,action.delta,selector);
     }
     throw Error('Memory control could not be reached by native wheel: '+selector);
   };
@@ -3345,6 +3402,25 @@ async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeTe
     await closed(label);
     const bad=await evaluate(`Array.from(document.querySelectorAll('#screen-memory button, #screen-memory input, #screen-memory select, #screen-memory summary')).filter(node=>node.getClientRects().length).filter(node=>{const r=node.getBoundingClientRect();return r.width<1||r.right>innerWidth+1||r.left<0}).map(node=>node.id||node.textContent)`);assert.deepEqual(bad,[],label);
     for(const selector of ['#screen-memory h1','#screen-memory .screen-subtitle','#memory-notice',...['live','snapshot','diff','origin'].map(mode=>'[data-memory-mode="'+mode+'"]')])await unobscured(selector,label);
+  };
+  const checkReadingScroll=async width=>{
+    const before=await scrollState('#memory-detail');
+    const detail=before.find(p=>p.selector==='#memory-detail'),results=before.find(p=>p.selector==='#memory-results-pane');
+    assert(detail.visibleHeight>=Math.min(120,detail.clientHeight),'A reached Memory detail must expose useful reading space');
+    if(width<=950)assert.equal(results.overflowY,'auto','Stacked Memory results need their own scroll container');
+    for(const pane of before.filter(p=>['#screen-memory','.main','#workspace','body','html'].includes(p.selector)))assert.equal(pane.scrollTop,0,`${pane.selector} must not be programmatically scrolled to expose clipped Memory content`);
+    const available=detail.scrollHeight-detail.clientHeight-detail.scrollTop;
+    const delta=available>=24?Math.min(56,available):detail.scrollTop>=24?-Math.min(56,detail.scrollTop):0;
+    assert.notEqual(delta,0,'Snapshot fixture must exercise a genuinely scrollable detail');
+    const moved=await ownedWheel('#memory-detail',delta,'retaining-reference reading');
+    const restored=await ownedWheel('#memory-detail',moved.point.scrollTop-moved.result.scrollTop,'restore retaining-reference reading');
+    assert.equal(restored.result.scrollTop,moved.point.scrollTop,'Inverse native wheel must restore the original detail offset before reveal');
+    await reveal('.memory-detail-disclosure summary');
+    const inertBefore=await scrollState('#memory-detail'),count=wheelReceipts.length;
+    await reveal('.memory-detail-disclosure summary');
+    assert.equal(wheelReceipts.length,count,'Revealing an already visible control must issue no wheel');
+    assert.deepEqual(await scrollState('#memory-detail'),inertBefore,'An inert reveal must preserve every reading position');
+    const receipt={width,panes:await scrollState('#memory-detail')};containmentReceipts.push(receipt);recordMemoryCheck({kind:'containment',selector:'#memory-detail',label:`Reading geometry ${width}`,...receipt});
   };
   const enter=async label=>{
     await closed(label+' before opening');const posts=fixture.requests.length;
@@ -3421,7 +3497,7 @@ async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeTe
   for(let n=0;n<100 && !(await evaluate("state.debuggerSession?.target?.id==='memory-target-B'"));n++)await new Promise(resolve=>setTimeout(resolve,25));
   fixture.release();await ready();assert.equal(await evaluate('state.memorySearchStatus'),'unavailable');assert.equal(await evaluate('state.memoryResults.length'),0);
   fixture.mode='ready';await press('#memory-search-button');await ready();
-  for(const [width,height] of [[1440,900],[760,560],[360,740]]){
+  for(const [width,height] of [[1440,900],[760,560],[600,560],[360,740]]){
     await viewport(width,height);
     await press('[data-memory-mode="live"]');fixture.mode='pending';await press('#memory-search-button');
     await waitFor('state.memorySearchPending && state.debuggerActionPending','Held live action did not start');
@@ -3434,7 +3510,7 @@ async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeTe
     assert.equal(await evaluate("JSON.stringify({property:elements.memoryPropertyQuery.value,value:elements.memoryValueQuery.value,mode:state.memoryMode,operation:state.memoryOperation,receipt:elements.memorySubmission.textContent,criteria:elements.memorySubmittedCriteria.textContent})"),draft,'Workspace navigation must retain pending draft, owner and submitted receipt');
     fixture.mode='ready';fixture.release();await ready();
     await press('.memory-result-row');await geometry(`result ${width}`);await screenshot(`memory-${width}-result`);
-    await press('[data-memory-mode="snapshot"]');await press('#memory-search-button');await ready();await reveal('.memory-detail-disclosure summary');await geometry(`snapshot ${width}`);await screenshot(`memory-${width}-retainers`);
+    await press('[data-memory-mode="snapshot"]');await press('#memory-search-button');await ready();await reveal('.memory-detail-disclosure summary');if(width<=950)await checkReadingScroll(width);await geometry(`snapshot ${width}`);await screenshot(`memory-${width}-retainers`);
     const inspectionPosts=fixture.requests.length;
     await press('[data-memory-mode="diff"]');
     for(const selector of ['#memory-capture-baseline','#memory-clear-baseline','#memory-compare-snapshot'])await reveal(selector);
@@ -3444,7 +3520,7 @@ async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeTe
     await geometry(`origin controls ${width}`);await screenshot(`memory-${width}-origin-controls`);
     assert.equal(fixture.requests.length,inspectionPosts,'Inspecting controls and switching modes must not start, stop or reset native work');
   }
-  return {status:'passed',path:'real browser UI with synthetic native API fixture',viewports:[[1440,900],[760,560],[360,740]],wheel_receipts:wheelReceipts,checks:['real Advanced entry and pending re-entry at all widths','closed chooser and unobscured headers, modes and acted-on controls','native settled wheel reaches intended panes without forced DOM scroll','navigation preserves pending draft, owner and submitted receipt with no implicit action','four mode actions','submitted target and baseline receipts','50 rows','keyboard selection and refresh node identity','inert preview','empty vs unavailable','partial snapshot and disclosure','dominator-only diff','stop outcome and unproven source links','delayed target race','target/restart/context Stop retirement with automatic control recovery and following304','pointer mode recovery without implicit actions','responsive controls']};
+  return {status:'passed',path:'real browser UI with synthetic native API fixture',viewports:[[1440,900],[760,560],[600,560],[360,740]],wheel_receipts:wheelReceipts,containment_receipts:containmentReceipts,checks:['independent bounded result/detail scrolling with unchanged siblings and hidden ancestors','inert repeated reveal preserves reading offsets at 760/600/360','real Advanced entry and pending re-entry at all widths','closed chooser and unobscured headers, modes and acted-on controls','native settled wheel reaches intended panes without forced DOM scroll','navigation preserves pending draft, owner and submitted receipt with no implicit action','four mode actions','submitted target and baseline receipts','50 rows','keyboard selection and refresh node identity','inert preview','empty vs unavailable','partial snapshot and disclosure','dominator-only diff','stop outcome and unproven source links','delayed target race','target/restart/context Stop retirement with automatic control recovery and following304','pointer mode recovery without implicit actions','responsive controls']};
 }
 
 async function checkTrafficBrowser() {

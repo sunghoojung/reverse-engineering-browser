@@ -92,9 +92,9 @@ fn validate_derived(source: &str, source_type: SourceType) -> Result<(), &'stati
     if source.len() > MAX_DERIVED_BYTES {
         return Err("derived output exceeds its byte limit; original source is preserved");
     }
-    preflight::check(source).map_err(|_| {
-        "derived output failed bounded syntax preflight; original source is preserved"
-    })?;
+    preflight::check(source).map_err(
+        |_| "derived output failed bounded syntax preflight; original source is preserved",
+    )?;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, source_type).parse();
     if !parsed.diagnostics.is_empty() {
@@ -179,7 +179,7 @@ fn analyze(request: Request) -> Response {
         let mut folder =
             fold::Folder::new(&request.source, &parsed.program, request.assume_intrinsics);
         folder.visit_program(&parsed.program);
-        transformations_truncated = folder.truncated;
+        transformations_truncated = folder.is_truncated();
         folder.rewrites.sort_by_key(|fold| fold.original_start);
         // Copy untouched slices once, instead of repeatedly shifting the tail.
         derived_source.clear();
@@ -381,7 +381,11 @@ mod tests {
                 .contains("original source is preserved")
         );
         assert!(
-            validate_derived(&"x".repeat(MAX_DERIVED_BYTES + 1), SourceType::unambiguous()).is_err()
+            validate_derived(
+                &"x".repeat(MAX_DERIVED_BYTES + 1),
+                SourceType::unambiguous()
+            )
+            .is_err()
         );
         assert!(
             validate_derived(
@@ -390,6 +394,180 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn visible_intrinsic_mutations_and_exposure_suppress_proxy_modeling() {
+        for prefix in [
+            "delete \"\".__proto__.charAt;",
+            "\"\".__proto__.charAt++;",
+            "delete \"\"[\"__proto__\"][\"charAt\"];",
+            "\"\"[\"__proto__\"][\"charAt\"]++;",
+            "Reflect.defineProperty(\"\".__proto__,\"charAt\",{value:function(){return \"changed\"}});",
+            "const prototype=\"\".__proto__;",
+            "Reflect[\"defineProperty\"](\"\"[\"__proto__\"],\"charAt\",{value:function(){return \"changed\"}});",
+        ] {
+            let source = format!("{prefix}const f=s=>s.charAt(0);const result=f(\"ab\");");
+            let response = analyze(Request {
+                source,
+                assume_intrinsics: true,
+                function_at_byte: None,
+            });
+            assert!(response.ok);
+            assert!(response.derived_source.contains("f(\"ab\")"));
+            assert!(response.transformations.iter().all(|rewrite| rewrite.kind != "proxy-call" && rewrite.kind != "custom-decoder"));
+        }
+    }
+
+    #[test]
+    fn small_owned_array_decoder_still_recovers_a_primitive_result() {
+        let response = analyze(Request {
+            source: "const f=function(){var a=[0];for(var i=0;i<3;i++){a=[a,a]}return a.length};const result=f();".to_string(),
+            assume_intrinsics: true,
+            function_at_byte: None,
+        });
+        assert!(response.ok);
+        assert!(!response.transformations_truncated);
+        assert!(response.derived_source.ends_with("const result=(2);"));
+    }
+
+    #[test]
+    fn direct_intrinsics_are_opt_in_with_exact_original_byte_receipts() {
+        for (expression, replacement) in [
+            ("String.fromCharCode(65,66)", "(\"AB\")"),
+            ("\"abc\".charCodeAt(1)", "(98)"),
+            ("\"abc\".charAt(1)", "(\"b\")"),
+            ("\"a😀b\".indexOf(\"b\")", "(3)"),
+            ("String.fromCharCode(0xd83d,0xde00)", "(\"😀\")"),
+            ("\"😀\".charCodeAt(0)", "(55357)"),
+        ] {
+            let source = format!("\u{feff}const 雪=\"😀\";\r\nconst result={expression};");
+            let disabled = analyze(Request {
+                source: source.clone(),
+                assume_intrinsics: false,
+                function_at_byte: None,
+            });
+            assert!(disabled.ok);
+            assert_eq!(disabled.derived_source, source);
+            let enabled = analyze(Request {
+                source: source.clone(),
+                assume_intrinsics: true,
+                function_at_byte: None,
+            });
+            assert!(enabled.ok);
+            assert!(!enabled.transformations_truncated);
+            assert_eq!(enabled.transformations.len(), 1);
+            let rewrite = &enabled.transformations[0];
+            let start = source.find(expression).unwrap();
+            assert_eq!(rewrite.kind, "intrinsic-call");
+            assert_eq!(rewrite.original_start as usize, start);
+            assert_eq!(rewrite.original_end as usize, start + expression.len());
+            assert_eq!(rewrite.replacement, replacement);
+            assert_eq!(
+                enabled.derived_source,
+                source.replace(expression, replacement)
+            );
+        }
+    }
+
+    #[test]
+    fn direct_dispatch_keeps_existing_proxy_and_enclosing_fold_paths() {
+        for (source, required) in [
+            (
+                "const p=(a,b)=>a^b;const result=[String.fromCharCode(65),p(7,3)];",
+                vec!["intrinsic-call", "proxy-call"],
+            ),
+            (
+                "const result=\"2|0|1\".split(\"|\")[0];",
+                vec!["literal-index"],
+            ),
+            (
+                "const result=String.fromCharCode(65)+String.fromCharCode(66);",
+                vec!["constant-fold"],
+            ),
+        ] {
+            let response = analyze(Request {
+                source: source.to_string(),
+                assume_intrinsics: true,
+                function_at_byte: None,
+            });
+            assert!(response.ok);
+            for kind in required {
+                assert!(
+                    response
+                        .transformations
+                        .iter()
+                        .any(|rewrite| rewrite.kind == kind)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn direct_intrinsic_refusals_keep_calls_unresolved() {
+        for source in [
+            "const result=String.fromCharCode(0xd800);",
+            "const result=String.fromCharCode(1/0);",
+            "const result=\"😀\".charAt(0);",
+            "const result=\"abc\".charCodeAt(10);",
+            "const result=\"abc\".charAt(0.5);",
+            "const result=\"abc\".charAt(1,2);",
+            "const result=\"abc\"?.charAt(1);",
+            "const result=\"abc\".charAt?.(1);",
+            "const result=\"abc\"[\"charAt\"](1);",
+            "const result=String.fromCharCode(...[65]);",
+            "const result=\"a|b\".split(/\\|/)[0];",
+            "const code=String.fromCharCode;const result=code(65);",
+            "const String={fromCharCode:function(){return \"shadow\"}};const result=String.fromCharCode(65);",
+            "const inspect=eval;const result=\"abc\".charAt(0);",
+            "let count=0;const object={valueOf(){count++;return 65;}};const result=String.fromCharCode(object);",
+            "let count=0;const object={get text(){count++;return \"ab\";}};const result=object.text.charAt(0);",
+        ] {
+            let response = analyze(Request {
+                source: source.to_string(),
+                assume_intrinsics: true,
+                function_at_byte: None,
+            });
+            assert!(response.ok, "{source}");
+            assert!(
+                response
+                    .transformations
+                    .iter()
+                    .all(|rewrite| rewrite.kind != "intrinsic-call"),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_intrinsic_resource_boundaries_preserve_the_original_call() {
+        let split = format!(
+            "const result={:?}.split(\"|\")[0];",
+            format!("{}a", "a|".repeat(256))
+        );
+        let response = analyze(Request {
+            source: split.clone(),
+            assume_intrinsics: true,
+            function_at_byte: None,
+        });
+        assert!(response.ok);
+        assert!(response.transformations_truncated);
+        assert_eq!(response.derived_source, split);
+        for source in [
+            format!(
+                "const result=String.fromCharCode({});",
+                vec!["65"; 257].join(",")
+            ),
+            format!("const result={:?}.charAt(0);", "a".repeat(16 * 1024 + 1)),
+        ] {
+            let response = analyze(Request {
+                source: source.clone(),
+                assume_intrinsics: true,
+                function_at_byte: None,
+            });
+            assert!(response.ok);
+            assert_eq!(response.derived_source, source);
+        }
     }
 
     #[test]

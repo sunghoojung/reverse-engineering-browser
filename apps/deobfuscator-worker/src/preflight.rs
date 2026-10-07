@@ -73,15 +73,14 @@ pub fn function_at(source: &str, offset: usize) -> Result<Option<FunctionLocatio
                 | "method_definition"
                 | "generator_function_declaration"
                 | "generator_function"
-        ) {
-            if let Some(body) = candidate.child_by_field_name("body") {
-                return Ok(Some(FunctionLocation {
-                    kind: kind.to_string(),
-                    start: candidate.start_byte() as u32,
-                    end: candidate.end_byte() as u32,
-                    body_start: body.start_byte() as u32,
-                }));
-            }
+        ) && let Some(body) = candidate.child_by_field_name("body")
+        {
+            return Ok(Some(FunctionLocation {
+                kind: kind.to_string(),
+                start: candidate.start_byte() as u32,
+                end: candidate.end_byte() as u32,
+                body_start: body.start_byte() as u32,
+            }));
         }
         node = candidate.parent();
     }

@@ -12,6 +12,8 @@ native-probe-compile: $(NATIVE_PROBE_QUEUE_OBJECT)
 lint: format-check shellcheck python-check javascript-check repository-check workflow-check
 	cargo fmt --check --manifest-path apps/origin-trace-backend/Cargo.toml
 	cargo clippy --locked --manifest-path apps/origin-trace-backend/Cargo.toml -- -D warnings
+	cargo fmt --check --manifest-path apps/deobfuscator-worker/Cargo.toml
+	cargo clippy --locked --all-targets --manifest-path apps/deobfuscator-worker/Cargo.toml -- -D warnings
 
 deob-worker-build:
 	@command -v cargo >/dev/null 2>&1 || { echo "Cargo is not installed" >&2; exit 1; }
@@ -64,6 +66,6 @@ clean:
 
 javascript-check:
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is not installed" >&2; exit 1; }
-	@set -e; for source in apps/research-ui/*.js apps/runtime-hook-demo/*.mjs tools/*.mjs; do node --check "$$source"; done
+	@set -e; for source in apps/research-ui/*.js apps/runtime-hook-demo/*.mjs tools/*.mjs tools/*.cjs; do node --check "$$source"; done
 	node tools/check-origin-trace-debugger.mjs --field-provenance-only
 	node tools/check-origin-trace-package.mjs --contract-only

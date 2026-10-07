@@ -86,10 +86,10 @@ impl Folder<'_> {
                     }
                 }
                 for _ in 0..4096 {
-                    if let Some(test) = &s.test {
-                        if !self.eval(test, next)?.truthy() {
-                            return Some(Flow::Next);
-                        }
+                    if let Some(test) = &s.test
+                        && !self.eval(test, next)?.truthy()
+                    {
+                        return Some(Flow::Next);
                     }
                     match self.statement(&s.body, next)? {
                         result @ Flow::Return(_) => return Some(result),
@@ -201,37 +201,51 @@ impl Folder<'_> {
                 let AssignmentTarget::AssignmentTargetIdentifier(id) = &e.left else {
                     return None;
                 };
-                let old = self.constants.get(id.name.as_str())?.clone();
+                let old = self
+                    .constants
+                    .get(id.name.as_str())?
+                    .try_clone(&mut self.value_budget)?;
                 let value = self.eval(&e.right, depth)?;
                 let result = match e.operator {
                     A::Assign => value,
-                    A::Addition => match old.add(&value) {
+                    A::Addition => match old.add(&value, &mut self.value_budget) {
                         Some(value) => value,
                         None => {
                             self.truncated = true;
                             return None;
                         }
                     },
-                    A::Subtraction => Value::Number(old.number()? - value.number()?),
-                    A::BitwiseXOR => {
-                        Value::Number(f64::from(int32(old.number()?) ^ int32(value.number()?)))
-                    }
-                    A::BitwiseOR => {
-                        Value::Number(f64::from(int32(old.number()?) | int32(value.number()?)))
-                    }
+                    A::Subtraction => Value::Number(
+                        old.number(&mut self.value_budget)?
+                            - value.number(&mut self.value_budget)?,
+                    ),
+                    A::BitwiseXOR => Value::Number(f64::from(
+                        int32(old.number(&mut self.value_budget)?)
+                            ^ int32(value.number(&mut self.value_budget)?),
+                    )),
+                    A::BitwiseOR => Value::Number(f64::from(
+                        int32(old.number(&mut self.value_budget)?)
+                            | int32(value.number(&mut self.value_budget)?),
+                    )),
                     _ => return None,
                 };
                 if matches!(&result, Value::Number(n) if !n.is_finite()) {
                     return None;
                 }
-                self.constants.insert(id.name.to_string(), result.clone());
+                self.constants.insert(
+                    id.name.to_string(),
+                    result.try_clone(&mut self.value_budget)?,
+                );
                 Some(result)
             }
             Expression::UpdateExpression(e) => {
                 let SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = &e.argument else {
                     return None;
                 };
-                let n = self.constants.get(id.name.as_str())?.number()?;
+                let n = self
+                    .constants
+                    .get(id.name.as_str())?
+                    .number(&mut self.value_budget)?;
                 let old = n;
                 let n = n + if e.operator == UpdateOperator::Increment {
                     1.0
@@ -255,6 +269,21 @@ impl Folder<'_> {
         }
     }
 
+    // Recognize only existing modeled static calls. Unknown calls must keep
+    // reaching the ordinary closed-proxy path rather than being swallowed here.
+    pub(super) fn intrinsic_call_shape(call: &CallExpression<'_>) -> bool {
+        let Expression::StaticMemberExpression(member) = &call.callee else {
+            return false;
+        };
+        !call.optional
+            && !member.optional
+            && (matches!(
+                member.property.name.as_str(),
+                "charCodeAt" | "charAt" | "indexOf" | "split"
+            ) || (member.property.name == "fromCharCode"
+                && matches!(&member.object, Expression::Identifier(id) if id.name == "String")))
+    }
+
     pub(super) fn intrinsic(&mut self, call: &CallExpression<'_>, depth: usize) -> Option<Value> {
         let Expression::StaticMemberExpression(member) = &call.callee else {
             return None;
@@ -268,35 +297,42 @@ impl Folder<'_> {
         } else {
             Some(self.eval(&member.object, depth)?)
         };
-        let mut args = Vec::new();
         if call.arguments.len() > 256 {
             return None;
         }
+        self.value_budget
+            .reserve(0, call.arguments.len() * std::mem::size_of::<Value>())?;
+        let mut args = Vec::with_capacity(call.arguments.len());
         for argument in &call.arguments {
             args.push(self.eval(argument.as_expression()?, depth)?);
         }
         if from_char_code {
-            let units: Option<Vec<_>> = args
-                .iter()
-                .map(|v| Some(int32(v.number()?) as u16))
-                .collect();
-            return Some(Value::String(String::from_utf16(&units?).ok()?));
+            self.value_budget
+                .reserve(1, std::mem::size_of::<Value>() + args.len() * 6)?;
+            let mut units = Vec::with_capacity(args.len());
+            for value in &args {
+                units.push(int32(value.number(&mut self.value_budget)?) as u16);
+            }
+            return Some(Value::String(String::from_utf16(&units).ok()?));
         }
         let Value::String(text) = receiver? else {
             return None;
         };
         match member.property.name.as_str() {
             "charCodeAt" | "charAt" if args.len() == 1 => {
-                let index = args[0].number()?;
+                let index = args[0].number(&mut self.value_budget)?;
                 if index < 0.0 || index.fract() != 0.0 {
                     return None;
                 }
                 let unit = text.encode_utf16().nth(index as usize);
                 if member.property.name == "charAt" {
-                    return Some(Value::String(match unit {
-                        None => String::new(),
-                        Some(unit) => char::from_u32(u32::from(unit))?.to_string(),
-                    }));
+                    return match unit {
+                        None => Value::string("", &mut self.value_budget),
+                        Some(unit) => Value::character(
+                            char::from_u32(u32::from(unit))?,
+                            &mut self.value_budget,
+                        ),
+                    };
                 }
                 Some(Value::Number(f64::from(unit?)))
             }
@@ -304,24 +340,29 @@ impl Folder<'_> {
                 let Value::String(separator) = &args[0] else {
                     return None;
                 };
-                let parts: Vec<String> = if separator.is_empty() {
-                    text.encode_utf16()
-                        .take(257)
-                        .map(|unit| char::from_u32(u32::from(unit)).map(|c| c.to_string()))
-                        .collect::<Option<Vec<_>>>()?
+                let count = if separator.is_empty() {
+                    text.encode_utf16().take(257).count()
                 } else {
-                    text.split(separator)
-                        .take(257)
-                        .map(str::to_string)
-                        .collect()
+                    text.split(separator).take(257).count()
                 };
-                if parts.len() > 256 {
+                if count > 256 {
                     self.truncated = true;
                     return None;
                 }
-                Some(Value::Array(
-                    parts.into_iter().map(|s| Some(Value::String(s))).collect(),
-                ))
+                let mut parts = self.value_budget.array(count)?;
+                if separator.is_empty() {
+                    for unit in text.encode_utf16() {
+                        parts.push(Some(Value::character(
+                            char::from_u32(u32::from(unit))?,
+                            &mut self.value_budget,
+                        )?));
+                    }
+                } else {
+                    for part in text.split(separator) {
+                        parts.push(Some(Value::string(part, &mut self.value_budget)?));
+                    }
+                }
+                Value::array(parts, &mut self.value_budget)
             }
             "indexOf" if args.len() == 1 => {
                 let Value::String(needle) = &args[0] else {

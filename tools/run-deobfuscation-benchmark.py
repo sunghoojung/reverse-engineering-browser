@@ -21,66 +21,14 @@ DEFAULT_WORKER = ROOT / "apps/deobfuscator-worker/target/debug/reb-deobfuscator-
 WORKER_TIMEOUT_SECONDS = 5
 NODE_TIMEOUT_SECONDS = 3
 
-# Appended at script scope, rather than wrapping the fixture in a function or
-# try block which would change directives, lexical scope and top-level `this`.
-# This is a trusted-test observation format, not an untrusted-code sandbox or
-# a generic serializer. Accessors, symbols, cycles and exotic objects fail closed.
-OBSERVE = r"""
-;(() => {
-  const {isProxy} = require('node:util').types;
-  const seen = new Set();
-  let nodes = 0;
-  const encode = (value, depth = 0) => {
-    if (++nodes > 10000 || depth > 64) throw Error('observation budget exceeded');
-    if (value === null) return ['null'];
-    switch (typeof value) {
-      case 'undefined': return ['undefined'];
-      case 'boolean': return ['boolean', value];
-      case 'string':
-        if (value.length > 65536) throw Error('observation string budget exceeded');
-        return ['string', value];
-      case 'number': {
-        if (Number.isNaN(value)) return ['number', 'NaN'];
-        if (value === Infinity) return ['number', '+Infinity'];
-        if (value === -Infinity) return ['number', '-Infinity'];
-        const bytes = Buffer.alloc(8);
-        bytes.writeDoubleBE(value);
-        return ['number', bytes.toString('hex')];
-      }
-      case 'object': break;
-      default: throw Error('unsupported observation type');
-    }
-    if (isProxy(value)) throw Error('proxy observation');
-    if (seen.has(value)) throw Error('cyclic or shared observation object');
-    seen.add(value);
-    const array = Array.isArray(value);
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== (array ? Array.prototype : Object.prototype) && prototype !== null) {
-      throw Error('unsupported observation prototype');
-    }
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    const keys = Reflect.ownKeys(descriptors);
-    if (keys.length > 10000) throw Error('observation property budget exceeded');
-    const entries = [];
-    for (const key of keys) {
-      if (typeof key !== 'string') throw Error('symbol observation key');
-      const descriptor = descriptors[key];
-      if (!Object.hasOwn(descriptor, 'value')) throw Error('accessor observation');
-      if (array && key === 'length') continue;
-      entries.push([key, encode(descriptor.value, depth + 1)]);
-    }
-    // Array length plus present own keys preserves holes and extra properties.
-    return array ? ['array', value.length, entries]
-      : ['object', prototype === null ? 'null' : 'plain', entries];
-  };
-  const kind = typeof completion === 'undefined' ? 'normal' : completion;
-  if (kind !== 'normal' && kind !== 'throw') throw Error('unsupported completion kind');
-  const observation = ['observation', kind, encode(result),
-    encode(typeof effects === 'undefined' ? [] : effects)];
-  const text = JSON.stringify(observation);
-  if (text.length > 1048576) throw Error('observation output budget exceeded');
-  process.stdout.write(text);
-})();
+# The preload captures observer dependencies before fixture mutations, without
+# wrapping the fixture or displacing its leading directives. Only the final
+# observation call is appended in the original top-level lexical scope.
+OBSERVER = ROOT / "tools/deobfuscation-observer.cjs"
+OBSERVE = """
+;__rebObserveFixtureV2(result,
+  typeof completion === 'undefined' ? 'normal' : completion,
+  typeof effects === 'undefined' ? [] : effects);
 """
 
 
@@ -146,7 +94,7 @@ def run_worker(worker: Path, case: dict[str, object]) -> tuple[dict[str, object]
 def node_result(node: str, source: str) -> object:
     probe = source + "\n" + OBSERVE
     completed = subprocess.run(
-        [node, "--max-old-space-size=64", "-e", probe],
+        [node, "--max-old-space-size=64", "--require", str(OBSERVER), "-e", probe],
         text=True,
         capture_output=True,
         timeout=NODE_TIMEOUT_SECONDS,
@@ -175,13 +123,50 @@ def oracle_self_test(node: str) -> int:
         ("missing effect", "const result=0; const effects=['a'];", "const result=0; const effects=[];"),
         ("completion", "const result='TypeError';", "const result='TypeError'; const completion='throw';"),
     ]
+    host_controls = [
+        ("NaN predicate", "Number.isNaN=()=>true;", "NaN", "1"),
+        ("descriptors", "Object.getOwnPropertyDescriptors=()=>({});", "{}", "{x:1}"),
+        ("own keys", "Reflect.ownKeys=()=>[];", "{}", "{x:1}"),
+        ("JSON serializer", "JSON.stringify=()=>\"[\\\"masked\\\"]\";", "1", "2"),
+        ("array toJSON", "Array.prototype.toJSON=function(){return 'masked';};", "[1]", "[2]"),
+        ("object toJSON", "Object.prototype.toJSON=function(){return 'masked';};", "{}", "{x:1}"),
+        ("array push", "Array.prototype.push=function(){};", "[1]", "[2]"),
+        ("array iterator", "Array.prototype[Symbol.iterator]=function(){throw Error('observer iterator invoked');};", "[1]", "[2]"),
+        ("array kind", "Array.isArray=()=>false;", "[1]", "[2]"),
+        ("own descriptor check", "Object.hasOwn=()=>false;", "{}", "{x:1}"),
+        ("prototype lookup", "Object.getPrototypeOf=()=>null;", "{}", "{x:1}"),
+        ("float reader", "DataView.prototype.getUint8=()=>0;", "1", "2"),
+        ("file descriptor writer", "require('node:fs').writeSync=function(){};", "1", "2"),
+        ("float writer", "DataView.prototype.setFloat64=function(){};", "1", "2"),
+        ("stdout writer", "process.stdout.write=function(){};", "1", "2"),
+    ]
+    for label, prefix, original, wrong in host_controls:
+        expected = node_result(node, "const result=" + original + ";")
+        observed = node_result(node, prefix + "const result=" + original + ";")
+        if canonical_observation(observed) != canonical_observation(expected):
+            raise BenchmarkFailure(f"fixture mutation changed the observer: {label}")
+        controls.append((label, prefix + "const result=" + original + ";", prefix + "const result=" + wrong + ";"))
+    strict = node_result(node, "'use strict';const result=(function(){return this===undefined;})();")
+    if canonical_observation(strict[2]) != canonical_observation(["boolean", True]):
+        raise BenchmarkFailure("observer displaced the fixture strict directive")
+    scope = node_result(node, "'use strict';var __rebScopeFixture=1;const result=[this===globalThis,globalThis.__rebScopeFixture===1,(function(){return this===undefined;})()];")
+    expected_scope = ["array", 3, [[str(index), ["boolean", True]] for index in range(3)]]
+    if canonical_observation(scope[2]) != canonical_observation(expected_scope):
+        raise BenchmarkFailure("observer changed top-level this, var scope, or strict behavior")
+    lexical = node_result(node, "const SafeSet=17;const tag=19;const result=SafeSet+tag;")
+    if canonical_observation(lexical) != canonical_observation(node_result(node, "const result=36;")):
+        raise BenchmarkFailure("observer polluted the fixture lexical scope")
     for label, original, wrong in controls:
         if canonical_observation(node_result(node, original)) == canonical_observation(node_result(node, wrong)):
             raise BenchmarkFailure(f"oracle accepted wrong-output control: {label}")
     for source in [
         "const result={get x(){process.stdout.write('getter-called');return 1;}};",
         "const result=()=>0;",
+        "Set.prototype.has=()=>false;const a={};const result=[a,a];",
+        "Set.prototype.add=function(){};const a={};const result=[a,a];",
+        "Set=class{has(){return false;}add(){}};const a={};const result=[a,a];",
         "const result=new Proxy({}, {});",
+        "require('node:util').types.isProxy=()=>false;const result=new Proxy({}, {ownKeys(){process.stdout.write('proxy-trap');return [];}});",
         "const result=new Proxy({}, {getPrototypeOf(){process.stdout.write('proxy-trap');return Object.prototype;},ownKeys(){process.stdout.write('proxy-trap');return [];}});",
     ]:
         try:
@@ -224,6 +209,10 @@ def run_case(worker: Path, node: str, case: dict[str, object]) -> dict[str, obje
     missing = sorted(required_kinds - observed_kinds)
     if missing:
         raise BenchmarkFailure(f"{identifier}: missing transformations {missing}")
+
+    forbidden = sorted(set(case.get("forbidden_transformations", [])) & observed_kinds)
+    if forbidden:
+        raise BenchmarkFailure(f"{identifier}: forbidden transformations {forbidden}")
 
     original_result = node_result(node, source)
     derived_result = node_result(node, derived)

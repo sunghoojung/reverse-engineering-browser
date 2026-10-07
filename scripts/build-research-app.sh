@@ -15,7 +15,6 @@ resources_path="${contents_path}/Resources"
 swift_source="${repo_root}/apps/research-ui/macos/OriginTraceApp.swift"
 trace_document_source="${repo_root}/apps/research-ui/macos/OriginTraceDocument.swift"
 analyst_runner_source="${repo_root}/apps/research-ui/macos/AnalystRunner.swift"
-analyst_runner_core="${repo_root}/apps/research-ui/analyst_runner_core.js"
 live_session_source="${repo_root}/apps/research-ui/macos/LiveSessionCoordinator.swift"
 decoder_service_source="${repo_root}/apps/research-ui/macos/DecoderService.swift"
 decoder_binary="${repo_root}/build/reb-decoder"
@@ -33,11 +32,9 @@ fi
 
 mkdir -p "${macos_path}" "${resources_path}"
 cp "${repo_root}/apps/research-ui/macos/Info.plist" "${contents_path}/Info.plist"
-for asset in index.html app.css app_state.js evidence_models.js evidence_package.js source_syntax.js source_facts.js traffic_view.js request_value_test.js field_provenance.js pane_layout.js native_console_completion.js native_console.js app.js; do
-  cp "${repo_root}/apps/research-ui/${asset}" "${resources_path}/${asset}"
-done
 mkdir -p "${research_ui_resources}"
-for asset in index.html app.css app_state.js evidence_models.js evidence_package.js source_syntax.js source_facts.js traffic_view.js request_value_test.js field_provenance.js pane_layout.js native_console_completion.js native_console.js app.js analyst_runner_core.js analyst_runner_node.js; do
+# One explicit packaged copy serves both the native scheme and live HTTP UI.
+for asset in index.html app.css app_state.js evidence_models.js evidence_package.js source_syntax.js source_facts.js investigation_navigation.js traffic_view.js request_value_test.js field_provenance.js pane_layout.js native_console_completion.js native_console.js app.js analyst_runner_core.js analyst_runner_node.js; do
   cp "${repo_root}/apps/research-ui/${asset}" "${research_ui_resources}/${asset}"
 done
 cargo build --locked --release --manifest-path "${repo_root}/apps/origin-trace-backend/Cargo.toml"
@@ -49,7 +46,6 @@ chmod 755 "${macos_path}/OriginTraceWasmInspector"
 chmod 755 "${macos_path}/OriginTraceBackend" "${macos_path}/OriginTraceVMAnalyzer" "${macos_path}/OriginTraceAPI"
 cp "${repo_root}/scripts/run-live-session.sh" "${resources_path}/run-live-session.sh"
 chmod 755 "${resources_path}/run-live-session.sh"
-cp "${analyst_runner_core}" "${resources_path}/analyst_runner_core.js"
 cp "${decoder_binary}" "${macos_path}/OriginTraceDecoder"
 chmod 755 "${macos_path}/OriginTraceDecoder"
 cp "${repo_root}/build/reb-event-broker" "${macos_path}/OriginTraceEventBroker"

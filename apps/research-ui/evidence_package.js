@@ -731,10 +731,14 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
     // Bounded view state only. Shared navigation may restore this without
     // retaining payloads, source text, reports or package bytes in history.
     snapshot: () => ({requestKey, selectedKey, page, pane, packages}),
-    canRestore(value) {const current = evidenceObservationModel(getContext()); return Boolean(value && value.requestKey === current.requestKey && (!value.selectedKey || current.rows.some(row => row.key === value.selectedKey && !row.duplicate)));},
+    canRestore(value, request = getContext().request) {const current = evidenceObservationModel({...getContext(), request}); return Boolean(value && value.requestKey === current.requestKey && (!value.selectedKey || current.rows.some(row => row.key === value.selectedKey && !row.duplicate)));},
     restore(value) {
       if (!this.canRestore(value)) return false;
-      sync(); selectedKey = value.selectedKey; page = Number.isSafeInteger(value.page) ? Math.max(0, Math.min(99, value.page)) : 0;
+      // Shared return may run while hidden. Adopt the verified context before
+      // ordinary visibility reconciliation, preserving the current filter draft.
+      model = evidenceObservationModel(getContext()); requestKey = model.requestKey;
+      selectedKey = value.selectedKey; page = Number.isSafeInteger(value.page) ? Math.max(0, Math.min(99, value.page)) : 0;
+      listSignature = ''; rebuild();
       detailSignature = 'restoring'; setPane(value.pane === 'detail' ? 'detail' : 'observations'); showPackages(Boolean(value.packages), false); sync();
       const outside = Boolean(selectedKey && !filtered.some(row => row.key === selectedKey));
       message(outside ? 'The restored observation is outside the current filter. Its details remain visible.' : '', outside);

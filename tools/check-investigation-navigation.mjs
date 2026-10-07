@@ -1,0 +1,354 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {join} from 'node:path';
+import {runInNewContext,createContext,runInContext} from 'node:vm';
+
+export async function checkInvestigationCore(root) {
+  const app = await readFile(join(root,'apps/research-ui/app.js'),'utf8');
+  const requestRoot = app.slice(app.indexOf('      function requestTraceRoot('),app.indexOf('      function requestSignalProfileSelection('));
+  const source = await readFile(join(root,'apps/research-ui/investigation_navigation.js'),'utf8');
+  const model = runInNewContext(`function integerText(event,field){return String(event[field]);}\n${requestRoot}\n${source}\n;({investigationId,investigationEventIdentity,investigationArtifactIdentity,investigationScriptIdentity,investigationRequestIdentity,investigationSame,investigationResolve,createInvestigationHistory})`);
+  const event={session_id:'18446744073709551615',process_id:17,sequence_number:'9007199254740993',request_id:'91',type:'request_started'};
+  const request={id:'native',origin:'live',operation:'request_started',events:[event]};
+  const identity=model.investigationRequestIdentity(request);
+  assert.equal(identity.session,event.session_id);assert.equal(identity.sequence,event.sequence_number);
+  for(const bad of ['01','-1','18446744073709551616','1e3',NaN,9007199254740992,{},null]) assert.equal(model.investigationId(bad),null);
+  for(const field of ['session_id','sequence_number','process_id']) assert.equal(model.investigationEventIdentity({...event,[field]:'0'}),null);
+  assert.equal(model.investigationRequestIdentity({...request,origin:'demo'}),null);
+  const cdp=model.investigationRequestIdentity({...request,operation:'cdp_completed',tabId:'target-1',protocolRequestId:'cdp-7',firstTimestamp:1n});
+  assert.equal(cdp.type,'debugger-request');assert.equal(model.investigationSame(cdp,identity),false,'A host/time correlation is not an exact native request');
+  const artifact={session_id:'11',artifact_id:'7',sha256:'a'.repeat(64),byte_size:100};
+  const artifactId=model.investigationArtifactIdentity(artifact);
+  for(const altered of [{session_id:'12'},{sha256:'b'.repeat(64)},{byte_size:99},{artifact_id:'8'}]) assert.equal(model.investigationSame(artifactId,model.investigationArtifactIdentity({...artifact,...altered})),false);
+  const script={script_id:'live-1',target_id:'target-1',hash:'opaque-token',execution_context_id:7,start_line:2,start_column:3,length:40};
+  const scriptId=model.investigationScriptIdentity(script);assert.equal(scriptId.type,'live-script');
+  for(const field of ['script_id','target_id','hash']) {
+    assert(model.investigationScriptIdentity({...script,[field]:'x'.repeat(256)}));
+    for(const value of ['x'.repeat(257),'x'.repeat(2*1024*1024),'']) assert.equal(model.investigationScriptIdentity({...script,[field]:value}),null);
+  }
+  for(const field of ['execution_context_id','start_line','start_column','length']) {
+    assert.equal(model.investigationSame(scriptId,model.investigationScriptIdentity({...script,[field]:script[field]+1})),false);
+    assert.equal(model.investigationScriptIdentity({...script,[field]:Number.MAX_SAFE_INTEGER+1}),null);
+  }
+  assert.equal(model.investigationResolve(artifactId,[],model.investigationArtifactIdentity).status,'stale');
+  assert.equal(model.investigationResolve(artifactId,[artifact,artifact],model.investigationArtifactIdentity).status,'ambiguous');
+  assert.equal(model.investigationResolve(artifactId,[{...artifact,session_id:'12'},artifact],model.investigationArtifactIdentity).record,artifact);
+  let current=0, allow=true, view;
+  const history=model.createInvestigationHistory({snapshot:()=>({value:current}),restore:entry=>{if(!allow)return false;current=entry.value;return true;},changed:next=>{view=next;}});
+  for(let i=0;i<100;i++){history.record();current++;}
+  assert.equal(view.count,24); assert.equal(view.back.value,99);
+  allow=false;assert.equal(history.back(),false);assert.equal(view.count,24);assert.equal(current,100,'Unavailable destination must leave source intact');
+  allow=true;assert(history.back());assert.equal(current,99);assert(history.forward());assert.equal(current,100);
+  for(let i=0;i<24;i++) assert(history.back());assert.equal(current,76);assert.equal(history.back(),false);
+  history.record();current=101;assert.equal(history.forward(),false,'New branch retires forward history');
+  history.clear();assert.equal(view.count,0);
+  assert(!/localStorage|sessionStorage|pushState|replaceState/.test(source),'Evidence navigation never persists history');
+  for(const asset of ['apps/origin-trace-backend/src/app.rs','apps/research-ui/macos/OriginTraceApp.swift','scripts/build-research-app.sh','apps/research-ui/index.html']) assert((await readFile(join(root,asset),'utf8')).includes('investigation_navigation.js'),asset);
+  const evidence = runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+';({isBrokerResponse,isOriginTraceResponse})');
+  const fixture = investigationFixture({handle:async()=>false,release(){}});
+  assert(evidence.isBrokerResponse({count:1,events:[fixture.event]}),'Synthetic investigation event must pass normal broker admission');
+  assert(evidence.isOriginTraceResponse(fixture.trace),'Synthetic trace must pass the production trace contract');
+  await checkInvestigationReturns(root);
+  await checkCollectionNavigation(root, source);
+  console.log('PASS investigation exact identity, u64 boundaries, CDP correlation separation, stale/ambiguous resolution, bounded branching return history and packaged asset wiring (not rendered QA)');
+}
+
+export function investigationFixture(base) {
+  const event={protocol_version:2,session_id:'11',process_id:17,thread_id:1,sequence_number:'41',monotonic_time_ns:'1000000',navigation_id:'13',frame_id:'17',artifact_id:'7',parent_event_id:'0',request_id:'91',category:'network',type:'request_started',payload_size:Buffer.byteLength('POST fixture.invalid'),payload_encoding:'hex',payload:Buffer.from('POST fixture.invalid').toString('hex'),initiator_request_id:0,initiator_process_id:0,resource_type:13,flags:0,status_code:0,error_code:0,encoded_data_length:'0',decoded_body_length:'0',payload_truncated:false};
+  const trace={contract_version:1,document_kind:'origin-trace',request_id:'91',status:'partial',steps:[{event:{session_id:'11',process_id:17,sequence_number:'41'},monotonic_time_ns:'1000000',frame_id:'17',artifact_id:'7',request_id:'91',category:'network',operation:'request_started',relation:'trace_target',confidence:'observed',value:'POST fixture.invalid'}],gaps:[{reason:'no_predecessor',after_step:0,detail:'No earlier relationship was retained in this synthetic investigation.'}],artifacts:[],coverage:{linked_steps:0,observed_links:0,correlated_links:0,gap_count:1,percent:0}};
+  const fixture={...base,event,trace,traceMode:'ready',artifactMode:'ready',tracePending:[],calls:[],session:'11'};
+  fixture.handle=async(request,response)=>{
+    const url=new URL(request.url,'http://127.0.0.1');fixture.calls.push({path:url.pathname,method:request.method||'GET'});
+    if(fixture.calls.length>1024)fixture.calls.shift();
+    const json=value=>{if(!response.destroyed){response.writeHead(200,{'Content-Type':'application/json'});response.end(JSON.stringify(value));}};
+    if(url.pathname==='/api/events'){json({count:1,events:[{...event,session_id:fixture.session}],capture_mode:'live',broker_connected:true});return true;}
+    if(url.pathname==='/api/artifacts'){const artifacts=fixture.artifactMode==='missing'?base.artifacts.filter(item=>item.artifact_id!=='7'):fixture.artifactMode==='ambiguous'?[...base.artifacts,base.artifacts[0]]:base.artifacts;json({count:artifacts.length,artifacts});return true;}
+    if(url.pathname==='/api/origin-trace'){
+      if(fixture.traceMode==='pending')await new Promise(resolve=>fixture.tracePending.push(resolve));
+      json(fixture.traceMode==='foreign'?{...trace,steps:[{...trace.steps[0],event:{...trace.steps[0].event,session_id:'99'}}]}:trace);return true;
+    }
+    return base.handle(request,response);
+  };
+  fixture.releaseTrace=()=>{for(const done of fixture.tracePending.splice(0))done();};
+  fixture.release=()=>{fixture.releaseTrace();base.release();};
+  return fixture;
+}
+
+export async function checkInvestigationInteractions({evaluate,viewport,click,key,wheel,screenshot,dialog,typeText,fixture}) {
+  const until=async(expression,message)=>{const start=Date.now();while(Date.now()-start<5000){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,25));}assert.fail(message);};
+  const enter=()=>key('Enter','Enter',{windowsVirtualKeyCode:13,text:'\r',unmodifiedText:'\r'});
+  const paneClick=async selector=>{
+    const delta=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});const p=n?.closest('#source-sidebar .debug-panes, .trace-inspector, .decoder-column');if(!n)throw Error('Missing control');if(!p)return 0;const r=n.getBoundingClientRect(),b=p.getBoundingClientRect();return r.top<b.top?r.top-b.top:r.bottom>b.bottom?r.bottom-b.bottom:0})()`);
+    if(delta){const parent=await evaluate(`(()=>{const p=document.querySelector(${JSON.stringify(selector)}).closest('#source-sidebar .debug-panes, .trace-inspector, .decoder-column');if(p.id)return '#'+p.id;return p.classList.contains('debug-panes')?'#source-sidebar .debug-panes':p.classList.contains('trace-inspector')?'.trace-inspector':'.decoder-column'})()`);await wheel(parent,delta);}
+    await click(selector);
+  };
+  await until('state.requests.length===1 && state.artifacts.length===2','Synthetic request and sources did not load');
+  const derivedBefore=fixture.calls.filter(call=>call.path==='/api/deobfuscation').length;
+  await click('.request-row'); await click('#request-evidence-toggle');
+  const origin=await evaluate('({id:state.selectedRequestId,tab:state.inspectorTab})');
+  await click('#trace-origin');
+  await until('state.originTraceStatus===\'ready\'','Request trace did not load');
+  assert.match(await evaluate("document.querySelector('#trace-step-details').textContent"),/No value flow|Recorded event link|Recorded link/);
+  await paneClick('[data-investigation-source]');
+  await until('state.selectedArtifactId===\'7\' && selectedSource().content!==undefined','Trace source did not open');
+  await click('#source-facts-toggle');
+  await until("document.querySelectorAll('#source-facts-report .source-fact').length>0",'Facts did not render');
+  await paneClick('.source-fact > button');
+  await until("!document.querySelector('#investigation-decode-range').disabled",'Verified original range cannot be decoded');
+  const sourcePosition=await evaluate("({top:document.querySelector('#source-sidebar .debug-panes').scrollTop,code:elements.sourceCodeWrap.scrollTop})");
+  await screenshot('investigation-source-original');
+  await click('#investigation-decode-range');
+  assert.equal(await evaluate('investigationScreen()'),'tools');
+  assert.equal(await evaluate('toolsElements.inputEncoding.value'),'base64');
+  assert.equal(await evaluate('toolsElements.input.value'),Buffer.from('雪').toString('base64'));
+  assert.equal(await evaluate('state.decoderSteps.length'),0,'Opening Decoder must not run a transform');
+  assert.match(await evaluate("document.querySelector('#investigation-decoder-origin').textContent"),/original bytes.*SHA-256/);
+  await screenshot('investigation-decoder-evidence');
+  await click('#investigation-back');
+  await until("investigationScreen()==='sources'",'Back to original source failed');
+  assert.equal(await evaluate('state.selectedArtifactId'),'7');
+  await until("document.activeElement.id==='investigation-decode-range'",'Source trigger focus was not restored');
+  assert.equal(await evaluate("document.querySelector('#source-sidebar .debug-panes').scrollTop"),sourcePosition.top,'Source details scroll was not restored');
+  assert.equal(await evaluate('elements.sourceCodeWrap.scrollTop'),sourcePosition.code,'Original source scroll was not restored');
+  await click('#investigation-back');await until("investigationScreen()==='backtrace'",'Back to trace failed');
+  assert(await evaluate('Boolean(state.selectedTraceRow)'),'Trace selection was lost');
+  await evaluate("document.querySelector('#investigation-back').focus()");await enter();await until("investigationScreen()==='traffic'",'Keyboard Back to request failed');
+  assert.equal(await evaluate('state.selectedRequestId'),origin.id);assert.equal(await evaluate('state.inspectorTab'),origin.tab);
+  assert.equal(await evaluate('document.activeElement.id'),'trace-origin','Origin trigger focus was not restored');
+  assert.equal(await evaluate('toolsElements.input.value'),Buffer.from('雪').toString('base64'),'Decoder draft was lost on return');
+  await screenshot('investigation-returned-request');
+  // Native keyboard activation of the shared return controls.
+  await click('#investigation-forward');await until("investigationScreen()==='backtrace'",'Forward failed');
+  await key('ArrowLeft','ArrowLeft',{windowsVirtualKeyCode:37,modifiers:1});
+  await until("investigationScreen()==='traffic'",'Alt+Left failed');
+  await key('ArrowRight','ArrowRight',{windowsVirtualKeyCode:39,modifiers:1});
+  await until("investigationScreen()==='backtrace'",'Alt+Right failed');
+  await click('#investigation-forward');await until("investigationScreen()==='sources'",'Forward to Sources failed');
+  await click('#investigation-forward');await until("investigationScreen()==='tools'",'Forward to Decoder failed');
+  await click('#decoder-input');await key('a','KeyA',{windowsVirtualKeyCode:65,modifiers:2});await key('Backspace','Backspace',{windowsVirtualKeyCode:8});await typeText('bmV3ZXI=');
+  await until("toolsElements.input.value==='bmV3ZXI='",'Editing the Decoder draft through its control failed');
+  assert.match(await evaluate("document.querySelector('#investigation-decoder-origin').textContent"),/Input changed/);
+  await paneClick('#investigation-decoder-origin button');
+  await until("investigationScreen()==='sources' && document.querySelector('#source-position').textContent.includes('Original UTF-8 bytes')",'Open original evidence did not reveal the verified range');
+  assert.equal(await evaluate('toolsElements.input.value'),'bmV3ZXI=','Origin navigation replaced a newer Decoder draft');
+  const replace=async accept=>{
+    const pending=paneClick('#investigation-decode-range');let clickError;pending.catch(error=>{clickError=error;});
+    try {await dialog(accept);await pending;} catch(error) {await pending.catch(()=>{});throw clickError||error;}
+  };
+  await replace(false);assert.equal(await evaluate('investigationScreen()'),'sources');assert.equal(await evaluate('toolsElements.input.value'),'bmV3ZXI=');
+  await replace(true);await until("investigationScreen()==='tools'",'Confirmed handoff did not open Decoder');
+  assert.equal(await evaluate('toolsElements.input.value'),Buffer.from('雪').toString('base64'));
+  assert.equal(await evaluate('state.decoderSteps.length'),0,'Replacement automatically executed a transformation');
+  await screenshot('investigation-confirmed-replacement');
+  for(let stop=0;stop<24 && await evaluate('investigationScreen()')!=='backtrace';stop++)await click('#investigation-back');
+  await until("investigationScreen()==='backtrace'",'Could not return to the exact trace after origin/replacement actions');
+  assert.equal(fixture.calls.filter(call=>call.path==='/api/deobfuscation').length,derivedBefore,'Investigation pivots automatically requested derived analysis');
+  // Synthetic delivery faults exercise production identity and cancellation gates.
+  fixture.traceMode='foreign';await click('#trace-load');await until("state.originTraceStatus==='error'",'Foreign session trace was accepted');
+  assert.match(await evaluate('state.originTraceError'),/different captured session/);
+  fixture.traceMode='pending';await click('#trace-load');
+  const start=Date.now();while(!fixture.tracePending.length&&Date.now()-start<5000)await new Promise(resolve=>setTimeout(resolve,25));
+  assert(fixture.tracePending.length);await click('#investigation-back');fixture.traceMode='ready';fixture.releaseTrace();
+  await new Promise(resolve=>setTimeout(resolve,100));assert.equal(await evaluate('investigationScreen()'),'traffic');assert.notEqual(await evaluate('state.originTraceStatus'),'loading');
+  fixture.artifactMode='missing';await evaluate('refreshArtifacts()');
+  await click('#trace-origin');await until("state.originTraceStatus==='ready'",'Retry trace failed');
+  assert(await evaluate("document.querySelector('[data-investigation-source]').disabled"));
+  assert.match(await evaluate("document.querySelector('#trace-step-details').textContent"),/not retained/);
+  fixture.artifactMode='ambiguous';await evaluate('refreshArtifacts();').then(()=>evaluate('renderBacktrace()'));
+  assert.match(await evaluate("document.querySelector('#trace-step-details').textContent"),/Multiple retained artifacts/);
+  fixture.artifactMode='ready';await evaluate('refreshArtifacts()');await evaluate('renderBacktrace()');
+  await paneClick('[data-investigation-source]');
+  // Console location is a search, never exact artifact navigation or byte offsets.
+  const before=await evaluate('state.selectedArtifactId');
+  await evaluate("document.dispatchEvent(new CustomEvent('reb-console-location',{detail:{url:'https://fixture.invalid/facts-8.js',line:999,unavailable:false}}))");
+  assert.equal(await evaluate('state.selectedArtifactId'),before);
+  assert.match(await evaluate("document.querySelector('#investigation-source-search').textContent"),/do not verify shared identity/);
+  await click('#investigation-source-search button:last-child');
+  // An old request identity cannot silently reopen a reused ID in a new session.
+  fixture.session='12';await evaluate('refresh()');await until("state.events[0]?.session_id==='12'",'Session change did not load');
+  await click('#investigation-back');assert.equal(await evaluate('investigationScreen()'),'sources');
+  assert.match(await evaluate("document.querySelector('#investigation-notice').textContent"),/Return unavailable/);
+  for(const size of [[760,560],[360,740]]){
+    await viewport(...size);await click('#investigation-navigation summary');
+    if(!await evaluate("document.querySelector('#investigation-navigation details').open"))await click('#investigation-navigation summary');
+    assert(await evaluate("(()=>{const b=document.querySelector('#investigation-back').getBoundingClientRect();return b.left>=0&&b.right<=innerWidth&&b.top>=0&&b.bottom<=innerHeight})()"));
+    await screenshot(`investigation-return-unavailable-${size[0]}`);
+  }
+  assert.equal(fixture.calls.filter(call=>call.method!=='GET').length,0,'Investigation navigation issued an action request');
+  return {status:'passed',path:'existing browser development driver',source:'original synthetic request + immutable UTF-8/BOM artifact + explicit synthetic trace/facts delivery',viewports:[[1440,900],[760,560],[360,740]],checks:['request → trace → exact session artifact → verified original UTF-8 range → Decoder evidence → Back','no derived-analysis request or automatic transform/send/capture/action','real Open original evidence click','native decline/confirm replacement dialogs preserve newer drafts','preserved request/trace/source selection, Decoder draft and trigger focus','keyboard Back/Forward','missing and ambiguous source','foreign-session trace rejection','interrupted trace delivery','Console URL search does not navigate','session-change stale return','bounded narrow controls']};
+}
+
+// These regressions exercise the production navigation and selection functions,
+// including the independently reproduced same-workspace and retained-root races.
+async function checkInvestigationReturns(root) {
+  const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
+  const nav=await readFile(join(root,'apps/research-ui/investigation_navigation.js'),'utf8');
+  const section=(a,b)=>app.slice(app.indexOf(a),app.indexOf(b));
+  const selection=section('      function selectRequest(', '      function moveRequestSelection(');
+  const artifactSelection=section('      function sourceArtifactIdentityMatches(', '      function selectScript(');
+  const rootFunction=section('      function requestTraceRoot(', '      function requestSignalProfileSelection(');
+  const traceSelection=section('      function originTraceSelection(', '      async function refreshOriginTrace(');
+  const traceReader=section('      async function refreshOriginTrace(', '      function traceStepDetails(');
+  function setup() {
+    let screen='sources', traceReads=0, cancelled=0;
+    const raf=[], focused=[], sourceReads=[], renders=[];
+    const pane={id:'pane',scrollTop:0,scrollLeft:0,focus(){focused.push('pane');},matches:s=>s==='#pane'};
+    const trigger={id:'source-trigger',focus(){focused.push('source-trigger');}};
+    const back={focus(){focused.push('back');}};
+    const rootNode={id:'screen-sources',dataset:{},scrollTop:0,scrollLeft:0,contains:()=>true,matches:s=>s==='#screen-sources',querySelector:s=>s==='#pane'?pane:s==='#source-trigger'?trigger:null,querySelectorAll:()=>[pane]};
+    const notice={textContent:''}, panel={dataset:{},querySelector:()=>({open:false})}, consolePanel={dataset:{}};
+    const requests=[1,2].map(n=>({id:`request-${n}`,origin:'live',operation:'request_started',events:[{session_id:'11',process_id:17,sequence_number:String(n),request_id:String(n),type:'request_started'}]}));
+    const artifacts=[7,8].map(n=>({session_id:'11',artifact_id:String(n),sha256:'a'.repeat(64),byte_size:100,kind:'javascript'}));
+    const state={requests,artifacts,selectedRequestId:'request-2',selectedArtifactId:'7',selectedScriptId:null,selectedRuntimeHookRequest:null,originTrace:{steps:[]},originTraceGeneration:0,signalProfileGeneration:0,decoderSteps:[],openArtifactIds:[],inspectorTab:'evidence',fieldTab:'body',sourceFormatted:false,sourceDeobfuscated:false,sourceWasm:false};
+    const globals={state,CSS:{escape:s=>s},Promise,URLSearchParams,AbortController,TextDecoder,setTimeout,clearTimeout,location:{protocol:'http:'},
+      sourceFactsReadBytes:async response=>new TextEncoder().encode(JSON.stringify(await response.json())),
+      document:{activeElement:trigger,querySelector:s=>s==='.screen:not([hidden])'?{id:`screen-${screen}`}:s==='#investigation-notice'?notice:s==='#investigation-navigation'?panel:s==='#investigation-back'?back:s.startsWith('#screen-')?rootNode:s==='#console-experiment-traffic'?consolePanel:null},
+      requestAnimationFrame:fn=>raf.push(fn),integerText:(e,k)=>String(e[k]),sourceFactsPanel:{navigate:()=>null,cancel:()=>{cancelled++;}},
+      selectedSource:()=>state.artifacts.find(a=>a.artifact_id===state.selectedArtifactId),liveSources:()=>[],runtimeHooksState:()=>null,
+      renderInspector(){},renderRequests(){},renderEvidence(){},renderBacktrace(){},refreshRequestSignalProfile(){},updateSelectionSummary(){},renderRuntimeHookTraffic(){},
+      sourceIdentity:source=>JSON.stringify([source.session_id,source.artifact_id,source.sha256]),retireSourceAnalysis(){},renderSourceHealth(){},
+      renderSources:()=>renders.push({id:state.selectedArtifactId,passive:run('investigationPassiveSource')}),loadArtifactContent:async artifact=>{sourceReads.push(artifact.artifact_id);},
+      fieldSets:{body:[]},elements:{requestSearchScope:{value:'all'},prompt:{},sourceCodeWrap:{focus(){focused.push('code');}}},
+      showScreen:name=>{screen=name;run('investigationBeforeScreen('+JSON.stringify(name)+')');},
+      refreshOriginTrace:async()=>{traceReads++;state.originTrace={steps:[{event:state.requests.find(r=>r.id===state.selectedRequestId).events[0]}],gaps:[]};state.originTraceStatus='ready';state.originTraceKey=run('originTraceSelection().key');}};
+    const context=createContext(globals);const run=code=>runInContext(code,context);
+    run(rootFunction+'\n'+selection+'\n'+artifactSelection+'\n'+traceSelection+'\n'+nav);
+    return {run,context,state,pane,raf,focused,notice,sourceReads,renders,setScreen:value=>{screen=value;},traceReads:()=>traceReads,cancelled:()=>cancelled,
+      async flush(){await Promise.resolve();await Promise.resolve();for(const callback of raf.splice(0))callback();}};
+  }
+  {
+    const t=setup();t.context.selectedSource=()=>({source_type:'script',script_id:'live-1',target_id:'target-1',hash:'x'.repeat(2*1024*1024)});
+    const saved=t.run('investigationSnapshot()');assert.equal(saved.script.unavailable,true);assert.equal(Object.hasOwn(saved.script,'owner'),false);
+    assert(JSON.stringify(saved).length<8192,'An oversized live owner must never be copied into history');
+    t.context.entry=saved;assert.equal(t.run('restoreInvestigation(entry)'),false);assert.match(t.notice.textContent,/bounded navigation metadata/);
+    assert.deepEqual(t.sourceReads,[],'Unavailable ownership must not degrade to a generic Sources return');
+  }
+  const sourceEntry=t=>({screen:'sources',label:'Sources',artifact:t.run('investigationArtifactIdentity(state.artifacts[0])'),script:null,request:null,sourceRange:{start:1,end:3},sourceFormatted:false,sourceDeobfuscated:false,sourceWasm:false,focus:'#source-trigger',scroll:[{selector:'#pane',top:20,left:0}],notice:'original source'});
+  for(const interaction of ['different-artifact','same-artifact-interaction']) {
+    const t=setup();t.setScreen('tools');let resolve;t.context.sourceFactsPanel.navigate=()=>new Promise(done=>{resolve=done;});
+    t.context.entry=sourceEntry(t);assert(t.run('restoreInvestigation(entry)'));t.pane.scrollTop=777;
+    if(interaction==='different-artifact')t.state.selectedArtifactId='8';else t.run('retireInvestigationReturn()');
+    resolve();await t.flush();assert.equal(t.pane.scrollTop,777);assert.deepEqual(t.focused,[]);
+    if(interaction==='same-artifact-interaction')assert.equal(t.cancelled(),2);
+  }
+  {
+    const t=setup();t.context.entry=t.run('investigationSnapshot()');assert(t.context.entry.scroll.some(item=>item.selector==='#pane'&&item.top===0));
+    t.pane.scrollTop=777;assert(t.run('restoreInvestigation(entry)'));await t.flush();assert.equal(t.pane.scrollTop,0);
+  }
+  {
+    const t=setup();t.setScreen('tools');t.context.entry={screen:'backtrace',label:'Backtrace',request:t.run('investigationRequestIdentity(state.requests[0])'),traceRow:'17:1',scroll:[],focus:null};
+    assert(t.run('restoreInvestigation(entry)'));await t.flush();assert.equal(t.traceReads(),1);assert.equal(t.state.originTraceStatus,'ready');assert.equal(t.state.selectedTraceRow,'17:1');
+  }
+  {
+    const t=setup();t.setScreen('tools');const rows=['target-A','target-B'].map((target,index)=>({id:'same',origin:'live',operation:'cdp_completed',tabId:target,protocolRequestId:'native-1',firstTimestamp:BigInt(index+1)}));
+    t.state.requests=rows;t.state.selectedRequestId=null;t.context.route={kind:'request',identity:t.run('investigationRequestIdentity(state.requests[1])')};
+    assert.equal(t.run('openInvestigation(route)'),false);assert.equal(t.state.selectedRequestId,null);assert.match(t.notice.textContent,/disambiguate/);
+    assert.equal(t.run('selectRequest("same", route.identity)'),false,'Actual selection boundary must retain the exact identity, not first-match an ID');
+    assert.equal(t.state.selectedRequestId,null);
+  }
+  {
+    const t=setup();t.setScreen('tools');t.state.selectedArtifactId='8';t.context.route={kind:'artifact',identity:t.run('investigationArtifactIdentity(state.artifacts[0])')};
+    assert(t.run('openInvestigation(route)'));assert.deepEqual(t.sourceReads,['7']);assert(t.renders.every(item=>item.id==='7'&&item.passive));
+  }
+  {
+    const t=setup();t.state.originTrace={steps:[{event:t.state.requests[0].events[0]},{event:t.state.requests[1].events[0]}],gaps:[{after_step:0,reason:'missing_event',detail:'Original gap'}]};t.state.selectedTraceRow='gap:0:0';
+    t.context.saved=t.run('investigationSelectedGap()');t.state.originTrace.steps.reverse();t.state.originTrace.gaps[0].after_step=1;
+    assert.equal(t.run('investigationGapKey(saved)'),'gap:1:0');t.state.originTrace.gaps[0].detail='Different gap';assert.equal(t.run('investigationGapKey(saved)'),null);
+    const dynamic={dataset:{},id:'',localName:'button'};t.context.dynamic=dynamic;t.context.owner={contains:()=>true,querySelectorAll:()=>[],querySelector:()=>null};
+    assert.equal(t.run('investigationSelector(dynamic,owner,true)'),null,'Ordinal focus cannot target a different dynamic record');
+  }
+  for(const phase of ['fetch','body','304']) {
+    const t=setup();t.run(traceReader);const fixture=investigationFixture({handle:async()=>false,release(){}});
+    const request={id:'stable-row',origin:'live',operation:'request_started',events:[fixture.event]};t.state.requests=[request];t.state.selectedRequestId=request.id;
+    t.state.originTrace=fixture.trace;t.state.originTraceKey=t.run('originTraceSelection().key');t.state.originTraceEtag='old';
+    t.context.isOriginTraceResponse=()=>true;
+    let release,bodyStarted=false;
+    const response={ok:true,status:phase==='304'?304:200,headers:{get:()=>null},json:()=>{bodyStarted=true;return phase==='body'?new Promise(done=>{release=()=>done(fixture.trace);}):Promise.resolve(fixture.trace);}};
+    t.context.fetch=()=>phase==='body'?Promise.resolve(response):new Promise(done=>{release=()=>done(response);});
+    const pending=t.context.refreshOriginTrace();if(phase==='body'){for(let turn=0;turn<10&&!bodyStarted;turn++)await Promise.resolve();assert(bodyStarted);}
+    t.state.requests=[{...request,events:[{...fixture.event,sequence_number:'42',type:'response_completed'}]}];release();await pending;
+    assert.equal(t.state.originTrace,null);assert.equal(t.state.originTraceStatus,'error');assert.match(t.state.originTraceError,/selected request event changed/);
+  }
+  {
+    const t=setup();t.run(traceReader);const fixture=investigationFixture({handle:async()=>false,release(){}});
+    t.state.requests=[{id:'same',origin:'live',operation:'request_started',events:[fixture.event]}];t.state.selectedRequestId='same';
+    t.context.isOriginTraceResponse=()=>true;const pending=[];let deadline;
+    t.context.setTimeout=(callback,delay)=>{assert.equal(delay,10000);deadline=callback;return 1;};t.context.clearTimeout=()=>{};
+    t.context.fetch=(url,{signal})=>new Promise((resolve,reject)=>{pending.push({resolve,signal});signal.addEventListener('abort',()=>reject(Object.assign(new Error('Aborted'),{name:'AbortError'})),{once:true});});
+    const first=t.context.refreshOriginTrace(),firstController=t.state.originTraceController;
+    const second=t.context.refreshOriginTrace();assert.equal(firstController.signal.aborted,true);await first;
+    assert.equal(t.state.originTraceStatus,'loading');assert.equal(pending.length,2);
+    pending[1].resolve({ok:true,status:200,headers:{get:()=>null},json:async()=>fixture.trace});await second;
+    assert.equal(t.state.originTraceStatus,'ready');assert.equal(t.state.originTraceController,null);
+    const timed=t.context.refreshOriginTrace();deadline();await timed;assert.equal(t.state.originTraceStatus,'error');assert.match(t.state.originTraceError,/timed out or was cancelled/);assert.equal(t.state.originTraceController,null);
+  }
+  {
+    const event={session_id:'11',process_id:17,sequence_number:'42',request_id:'91',type:'response_completed'};
+    const state={selectedRequestId:'same',selectedField:{path:'selected'},requests:[{id:'same',origin:'live',operation:'response_completed',events:[event]}],originTraceKey:'same:11:17:41',originTrace:{steps:[{event:{...event,sequence_number:'41'},monotonic_time_ns:'1',confidence:'observed',category:'network',operation:'request_started',frame_id:'1',request_id:'91',artifact_id:'7',value:'prior root'}],gaps:[]}};
+    const node=()=>({children:[],setAttribute(){},append(...children){this.children.push(...children);},replaceChildren(...children){this.children=children;}});
+    const elements={evidenceRows:node(),evidenceCount:node(),evidenceLinkCount:node()};
+    const context=createContext({state,elements,evidencePackagePanel:{sync(){}},evidenceWorkspace:{sync(){}},sampleEvidence:[{value:'must not substitute sample data'}],document:{querySelectorAll:()=>[],querySelector:()=>({hidden:true}),createElement:node},integerText:(event,key)=>String(event[key]),formatMilliseconds:String,renderBacktrace(){}});
+    runInContext(rootFunction+'\n'+section('      function renderEvidence(', '      async function refreshOriginTrace('),context);
+    context.renderEvidence();assert.equal(elements.evidenceRows.children.length,0);assert.equal(elements.evidenceLinkCount.textContent,'0','Completed stale trace cannot become an Evidence count');
+    state.originTrace=null;context.renderEvidence();assert.equal(elements.evidenceRows.children.length,0,'Live requests never fall back to sample evidence');
+  }
+  console.log('PASS production return ownership, zero scroll, exact trace reread, stable gap/focus identity, actual request-ID collision guard, original-only source pivot and fetch/body/304 retained-root races (not rendered QA)');
+}
+
+// Receiving Collection controller stays authoritative for draft guards and
+// confirmed persistence. No captured identity is copied into its document.
+async function checkCollectionNavigation(root, navigation) {
+  const {checkCollectionController} = await import('./check-origin-trace-collection.mjs');
+  const deferred = () => {let resolve; const promise = new Promise(done => {resolve=done;}); return {promise,resolve};};
+  const setup = async () => {
+    const fixture = await checkCollectionController(root, true);
+    const {state,elements,ui} = fixture;
+    let screen='traffic', notice='', focus=0;
+    const raf=[];
+    state.requests=[{id:'cdp-1',origin:'live',operation:'cdp_completed',tabId:'page-1',protocolRequestId:'7',firstTimestamp:1n,method:'POST',path:'https://fixture.invalid/path?secret=omitted#fragment'}];
+    state.selectedRequestId='cdp-1';
+    elements.requestCollectionPivot={textContent:'Add to Collection'};
+    elements.collectionRequestName.focus=()=>{focus++;};
+    const context=createContext({state,elements,URL,Number,sourceFactsPanel:{},requestAnimationFrame:fn=>raf.push(fn),renderInspector(){},
+      refreshApiCollection:ui.refreshApiCollection,createCollectionRequest:ui.createCollectionRequest,
+      document:{querySelector:()=>({id:`screen-${screen}`})},
+      showScreen:name=>{screen=name;}});
+    runInContext(navigation+`;investigationNotice=message=>{noticeWriter(message);};`,Object.assign(context,{noticeWriter:value=>{notice=value;}}));
+    return {...fixture,context,run:code=>runInContext(code,context),screen:()=>screen,notice:()=>notice,focus:()=>focus,flush:()=>raf.splice(0).forEach(fn=>fn())};
+  };
+  const settle=async(t,code,mutate)=>{
+    const pending=t.run(code);assert.equal(t.pending.length,1);
+    mutate?.();t.pending.shift().resolve({ok:true,status:304,headers:{get:()=>null}});
+    for(let i=0;i<10;i++)await Promise.resolve();return pending;
+  };
+  {
+    const t=await setup();t.state.collectionDraftDirty=true;t.state.collectionRequestDraftId=1;t.state.collectionRequestDraftCreatedAt=1000;
+    assert.equal(await settle(t,'copyInvestigationRequestToCollection()'),null);assert.equal(t.pending.length,0);
+    assert.equal(t.state.collectionDraftDirty,true);assert.equal(t.screen(),'traffic');assert.match(t.notice(),/Unsaved edits|declined/);
+  }
+  for(const change of ['request','session','interaction']) {
+    const t=await setup();assert.equal(await settle(t,'copyInvestigationRequestToCollection()',()=>{
+      if(change==='request')t.state.selectedRequestId='other';else if(change==='session')t.state.requests[0].tabId='other';else t.run('retireInvestigationReturn()');
+    }),null);assert.equal(t.pending.length,0);assert.equal(t.screen(),'traffic');
+  }
+  for(const outcome of ['success','newer','refused']) {
+    const t=await setup();const first=t.run('copyInvestigationRequestToCollection()');
+    assert.equal(await t.run('copyInvestigationRequestToCollection()'),null,'Repeat copy must not start a second write');
+    t.pending.shift().resolve({ok:true,status:304,headers:{get:()=>null}});for(let i=0;i<10;i++)await Promise.resolve();
+    assert.equal(t.pending.length,1);const action=t.pending.shift();assert.equal(action.url,'/api/api-collection/actions');
+    const submitted=JSON.parse(action.options.body);assert(!action.options.body.includes('secret'));assert(!action.options.body.includes('protocolRequestId'));
+    const saved=structuredClone(t.state.apiCollection);saved.generation++;
+    saved.requests=submitted.requests.map(value=>({...value,created_at_ms:value.created_at_ms??2000,updated_at_ms:2000}));
+    if(outcome==='newer')t.run('retireInvestigationReturn()');
+    action.resolve({ok:outcome!=='refused',status:outcome==='refused'?500:200,json:async()=>outcome==='refused'?{error:'save refused'}:saved});
+    const id=await first;t.flush();
+    assert.equal(t.focus(),outcome==='success'?1:0,'Late copy cannot focus another workspace');
+    assert.equal(t.screen(),outcome==='success'?'api-collection':'traffic');
+    assert.equal(t.actions.length,0,'Copy never sends or evaluates a request');
+    if(outcome==='refused')assert.equal(id,null);else {
+      assert(Number.isSafeInteger(id));const recipe=t.state.apiCollection.requests.find(item=>item.id===id);
+      assert.equal(recipe.url,'https://fixture.invalid/path');assert.equal(recipe.body,'');assert.equal(recipe.headers.length,0);assert.equal(recipe.variables.length,0);
+    }
+  }
+  console.log('PASS exact request→Collection confirmed copy, query stripping, actual dirty guard, stale selection/session/interaction, repeated copy, failed save, late focus and no execution (not rendered QA)');
+}

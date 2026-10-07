@@ -148,7 +148,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent("app.css")),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/pane_layout.js", "/app.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/source_syntax.js", "/source_facts.js", "/traffic_view.js", "/request_value_test.js", "/field_provenance.js", "/native_console_completion.js", "/native_console.js":
+      case "/pane_layout.js", "/app.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/source_syntax.js", "/source_facts.js", "/investigation_navigation.js", "/traffic_view.js", "/request_value_test.js", "/field_provenance.js", "/native_console_completion.js", "/native_console.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -2717,7 +2717,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     configureApplicationMenu()
     configureApplicationIcon(resourcesURL: resourcesURL)
 
-    let indexURL = resourcesURL.appendingPathComponent("index.html")
+    let researchUIURL = resourcesURL.appendingPathComponent("research-ui", isDirectory: true)
+    let indexURL = researchUIURL.appendingPathComponent("index.html")
     let eventStoreURL = configuredEventStore(resourcesURL: resourcesURL)
     let traceStoreURL = configuredTraceStore(eventStoreURL: eventStoreURL)
     let signalStoreURL = configuredSignalStore(eventStoreURL: eventStoreURL)
@@ -2726,7 +2727,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     let localAnalystStoreURL = configuredLocalAnalystStore()
     let analystRunnerURL = Bundle.main.bundleURL
       .appendingPathComponent("Contents/MacOS/OriginTraceAnalystRunner")
-    let analystRunnerCoreURL = resourcesURL.appendingPathComponent("analyst_runner_core.js")
+    let analystRunnerCoreURL = researchUIURL.appendingPathComponent("analyst_runner_core.js")
     let decoderExecutableURL = Bundle.main.bundleURL
       .appendingPathComponent("Contents/MacOS/OriginTraceDecoder")
     let handler = LocalContentHandler(
@@ -2782,6 +2783,21 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       return
     }
     webView.load(URLRequest(url: requestedUIURL ?? localApplicationURL))
+    if smokeTest && ProcessInfo.processInfo.environment["REB_APP_SMOKE_LIVE_FAILURE"] == "1" {
+      // Exercise the real startup failure path without a browser or modal dialog.
+      liveSessionCoordinator.start(
+        braveExecutableURL: resourcesURL.appendingPathComponent("__missing_smoke_browser__"),
+        captureNetworkContent: false,
+        useSystemKeychain: false,
+        ready: { _ in
+          print("SMOKE_ERROR Unexpected live session readiness")
+          NSApp.terminate(nil)
+        },
+        failed: { [weak self] message in
+          self?.presentLiveSessionError(message, captureMode: .metadata, useSystemKeychain: false)
+        }
+      )
+    }
     if !smokeTest && requestedUIURL == nil && automaticLiveSessionEnabled() {
       requestAutomaticLiveSession()
     }
@@ -3254,6 +3270,11 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     useSystemKeychain: Bool
   ) {
     guard NSApp.isRunning else { return }
+    if smokeTest {
+      print("SMOKE_LIVE_FAILURE \(message)")
+      automaticSessionSuppressed = true
+      return
+    }
     let alert = NSAlert()
     alert.alertStyle = .critical
     alert.messageText = "Live capture could not start"
@@ -3285,7 +3306,19 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
         window.__rebSmokeAnalyst = null;
         window.__rebSmokeDecoder = null;
         window.__rebSmokeDeobfuscation = null;
-        void (async () => {
+        return (async () => {
+          const assets = ['index.html', ...[...document.querySelectorAll('script[src], link[rel="stylesheet"]')]
+            .map(node => node.getAttribute('src') ?? node.getAttribute('href'))];
+          for (const asset of assets) {
+            const response = await fetch('/' + asset);
+            if (!response.ok || !(await response.text()).length) throw new Error(`Packaged asset failed: ${asset}`);
+          }
+          window.__rebSmokeAssets = assets.length;
+          for (const privatePath of ['analyst_runner_core.js', 'analyst_runner_node.js',
+            'run-live-session.sh', 'OriginTrace.icns', 'research-ui/app.js']) {
+            if ((await fetch('/' + privatePath)).status !== 404) throw new Error(`Private asset exposed: ${privatePath}`);
+          }
+          window.__rebSmokePrivateAssetsBlocked = true;
           const artifacts = await fetch('/api/artifacts?limit=500').then(response => response.json());
           const source = artifacts.artifacts?.find(artifact => artifact.kind === 'javascript');
           if (source) {
@@ -3418,11 +3451,11 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
           workspaceHeight: document.querySelector('#repeater-workspace')?.getBoundingClientRect().height,
           splitHeight: document.querySelector('.repeater-split')?.getBoundingClientRect().height
         };
-        })().catch(error => { window.__rebSmokeExerciseError = String(error); });
-        true
+        return true;
+        })().catch(error => { window.__rebSmokeExerciseError = String(error); return false; });
         """
-      webView.evaluateJavaScript(exercise) { _, exerciseError in
-        if let exerciseError {
+      webView.callAsyncJavaScript(exercise, arguments: [:], in: nil, in: .page) { result in
+        if case .failure(let exerciseError) = result {
           print("SMOKE_ERROR \(exerciseError.localizedDescription)")
           NSApp.terminate(nil)
           return
@@ -3431,6 +3464,11 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
           let inspection = """
             JSON.stringify({
               title: document.title,
+              location: location.href,
+              captureMode: state.sessionMode,
+              packageAssetCount: window.__rebSmokeAssets,
+              packagePrivateAssetsBlocked: window.__rebSmokePrivateAssetsBlocked === true,
+              stylesLoaded: [...document.styleSheets].some(sheet => sheet.href?.endsWith('/app.css')),
               nativeShell: document.documentElement.classList.contains('native-shell'),
               requests: document.querySelectorAll('.request-row').length,
               fields: document.querySelectorAll('.field-row').length,

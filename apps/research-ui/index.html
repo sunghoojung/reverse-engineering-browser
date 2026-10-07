@@ -43,6 +43,10 @@
 
       <div id="workspace" class="workspace">
         <main class="main">
+          <section id="investigation-navigation" class="investigation-navigation" aria-label="Investigation navigation" hidden>
+            <div class="investigation-controls"><button id="investigation-back" class="secondary-button" type="button" title="Previous investigation stop (Alt + Left)" disabled>Back</button><button id="investigation-forward" class="secondary-button" type="button" title="Next investigation stop (Alt + Right)" disabled>Forward</button><details><summary>Link context</summary><p id="investigation-notice" role="status" aria-live="polite"></p><span id="investigation-history-count"></span><button id="investigation-clear" class="secondary-button" type="button">Clear return history</button></details></div>
+            <div id="investigation-source-search" class="investigation-source-search" aria-label="Unverified Console source search" hidden></div>
+          </section>
           <section id="screen-traffic" class="screen" aria-label="Traffic">
             <section id="console-experiment-traffic" class="console-experiment-traffic" aria-label="Console experiment activity" hidden>
               <header><strong id="console-traffic-title">Console experiment activity</strong><button id="console-traffic-back" class="secondary-button" type="button">Back to captured traffic</button></header>
@@ -248,6 +252,7 @@
                 <label><span class="sr-only" hidden>Find in source</span><input id="source-search" class="source-search" type="search" placeholder="Find" aria-label="Find in source" title="Find text; Enter for next, Shift+Enter for previous (first 1000 matches)" /></label>
                 <button id="source-pretty" class="source-tool" type="button" aria-label="Pretty print source" title="Pretty print source" disabled>{ }</button>
                 <button id="source-wasm" class="source-tool" type="button" aria-label="Inspect WebAssembly module" aria-pressed="false" hidden>Inspect</button>
+                <button id="investigation-decode-range" class="source-tool" type="button" title="First select an Original bytes link in Facts; this copies at most 64 KiB without running a transformation" disabled>Decode range</button>
                 <button id="source-facts-toggle" class="source-tool" type="button" aria-controls="source-facts-details" aria-expanded="false" disabled>Facts</button>
                 <button id="source-deob" class="source-tool" type="button" aria-label="Show deobfuscated representation" title="Show deobfuscated representation" disabled>Deob</button>
                 <button id="source-hook-pivot" class="source-tool" type="button" aria-controls="hooks-workspace" aria-expanded="false" title="Open Runtime Hooks beside source" disabled>Hooks</button>
@@ -959,75 +964,85 @@
 
           <section id="screen-api-collection" class="screen" aria-label="API Collection" hidden>
             <header class="screen-head">
-              <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
-              <div><h1>Collection</h1><div class="screen-subtitle">Save a request, then run it in an isolated context.</div></div>
-              <div class="screen-head-actions"><span id="collection-generation" class="memory-readonly">Generation 0</span><span class="memory-readonly">Local only</span></div>
+              <div><h1>Collection</h1><div class="screen-subtitle">Author saved requests. Test them in an isolated context.</div></div>
+              <div class="screen-head-actions"><span class="memory-readonly">Local only</span></div>
             </header>
-            <div id="collection-notice" class="collection-notice" data-kind="loading" role="status" aria-live="polite">Loading your local collection…</div>
+            <div class="collection-statusbar"><div id="collection-notice" class="collection-notice" data-kind="loading" role="status" aria-live="polite">Loading your local collection…</div><button id="collection-retry" class="secondary-button" type="button" hidden>Retry load</button></div>
             <div id="collection-grid" class="collection-grid">
-              <aside class="collection-pane" aria-label="Collection tree">
-                <div class="collection-pane-head"><div><h2>Saved requests</h2><p>Requests you can run again.</p></div><span id="collection-count" class="experiment-card-badge">0</span></div>
+              <aside class="collection-pane collection-library" aria-label="Collection library">
+                <div class="collection-pane-head"><div><h2>Saved requests</h2></div><span id="collection-count" class="experiment-card-badge">0</span></div>
                 <div class="collection-pane-actions">
-                  <button id="collection-new-folder" class="secondary-button" type="button">New folder</button>
                   <button id="collection-new-request" class="secondary-button" type="button">New request</button>
+                  <button id="collection-new-folder" class="secondary-button" type="button">New folder</button>
                 </div>
                 <div id="collection-new-folder-form" class="collection-form" hidden>
                   <label>Folder name<input id="collection-new-folder-name" type="text" maxlength="128" autocomplete="off" /></label>
                   <div class="collection-form-actions"><button id="collection-confirm-folder" class="trace-button collection-primary" type="button">Create folder</button><button id="collection-cancel-folder" class="secondary-button" type="button">Cancel</button></div>
                 </div>
                 <div id="collection-tree" class="collection-tree" role="tree" aria-label="API Collection folders and requests"></div>
-                <article class="collection-scope-card">
-                  <header class="collection-pane-head"><div><h2>Folder variables</h2><p>Variables apply to requests in this folder.</p></div></header>
+                <details class="collection-scope-card">
+                  <summary class="workspace-disclosure-title">Folder settings <span id="collection-folder-draft-status"></span></summary>
                   <form id="collection-folder-form" class="collection-form">
+                    <p class="collection-help">Root and ancestor variables are inherited. Request variables override them.</p>
                     <label>Name<input id="collection-folder-name" type="text" maxlength="128" autocomplete="off" /></label>
                     <label>Parent folder<select id="collection-folder-parent"></select></label>
                     <label>Variables (JSON)<textarea id="collection-folder-variables" maxlength="40000" spellcheck="false" placeholder='{"host":"api.example.test"}'></textarea></label>
-                    <div class="collection-form-actions"><button id="collection-save-folder" class="trace-button collection-primary" type="submit">Save folder</button><button id="collection-delete-folder" class="secondary-button" type="button">Delete folder</button></div>
+                    <div class="collection-form-actions"><button id="collection-save-folder" class="trace-button collection-primary" type="submit">Save folder</button><button id="collection-discard-folder" class="secondary-button" type="button" disabled>Discard edits</button><button id="collection-delete-folder" class="secondary-button" type="button">Delete folder</button></div>
                   </form>
-                </article>
+                </details>
               </aside>
 
-              <section class="collection-pane" aria-label="Saved request editor">
-                <div class="collection-pane-head"><div><h2>Request</h2><p>Edit the method and URL, then save before running.</p></div><span id="collection-request-badge" class="experiment-card-badge" data-kind="offline">No request</span></div>
+              <section class="collection-pane collection-editor-pane" aria-label="Saved request editor">
+                <div class="collection-pane-head"><div><h2 id="collection-editor-title">Request</h2><p id="collection-draft-status" role="status">Select a saved request to edit.</p></div><span id="collection-request-badge" class="experiment-card-badge" data-kind="offline">No request</span></div>
                 <div id="collection-editor-empty" class="collection-editor-empty">
-                  <h2>Start with a request</h2>
-                  <p>Create one here, or import a method and URL from Traffic.</p>
-                  <div class="collection-empty-actions">
-                    <button id="collection-empty-new-request" class="trace-button" type="button">New request</button>
-                  </div>
+                  <h2>Start with a request</h2><p>Create one here, or use Save to Collection in Requests to import its method and query-free URL.</p>
+                  <div class="collection-empty-actions"><button id="collection-empty-new-request" class="trace-button" type="button">New request</button></div>
                 </div>
                 <form id="collection-request-form" class="collection-form" hidden>
-                  <div class="collection-form-row"><label>Name<input id="collection-request-name" type="text" maxlength="128" autocomplete="off" /></label><label>Folder<select id="collection-request-folder"></select></label></div>
-                  <label>Request URL<input id="collection-request-url" type="text" maxlength="8192" placeholder="https://{{host}}/path/{{id}}" autocomplete="off" /></label>
-                  <div class="collection-form-row"><label>Method<input id="collection-request-method" type="text" maxlength="256" value="GET" autocomplete="off" /></label><label>Timeout (ms)<input id="collection-request-timeout" type="number" min="100" max="30000" step="100" value="15000" /></label></div>
-                  <label>Headers (JSON)<textarea id="collection-request-headers" maxlength="20000" spellcheck="false" placeholder='{"accept":"application/json"}'></textarea></label>
-                  <label>Body<textarea id="collection-request-body" maxlength="65536" spellcheck="false" placeholder='{"id":"{{id}}"}'></textarea></label>
-                  <label>Request variables (JSON)<textarea id="collection-request-variables" maxlength="40000" spellcheck="false" placeholder='{"id":"42"}'></textarea></label>
+                  <div class="collection-command-row"><label>Method<input id="collection-request-method" type="text" maxlength="256" value="GET" autocomplete="off" /></label><label>Request URL<input id="collection-request-url" type="text" maxlength="8192" placeholder="https://{{host}}/path/{{id}}" autocomplete="off" /></label></div>
+                  <div class="collection-author-actions"><button id="collection-save-request" class="secondary-button" type="submit">Save request</button><button id="collection-run" class="trace-button" type="button" disabled>Run saved request</button><button id="collection-discard-request" class="secondary-button" type="button" disabled>Discard edits</button></div>
+                  <p id="collection-run-help" class="collection-help">Save your request before running it.</p>
+                  <details class="collection-properties" open><summary>Request settings</summary>
+                    <div class="collection-form-row"><label>Name<input id="collection-request-name" type="text" maxlength="128" autocomplete="off" /></label><label>Folder<select id="collection-request-folder"></select></label></div>
+                    <label>Timeout (ms)<input id="collection-request-timeout" type="number" min="100" max="30000" step="100" value="15000" /></label>
+                    <div class="collection-author-actions"><button id="collection-duplicate-request" class="secondary-button" type="button">Duplicate saved</button><button id="collection-delete-request" class="secondary-button" type="button">Delete request</button></div>
+                  </details>
+                  <div class="collection-tabs" role="tablist" aria-label="Request content">
+                    <button id="collection-tab-headers" type="button" role="tab" data-collection-tab="headers" aria-selected="true" aria-controls="collection-panel-headers">Headers</button>
+                    <button id="collection-tab-body" type="button" role="tab" data-collection-tab="body" aria-selected="false" aria-controls="collection-panel-body" tabindex="-1">Body</button>
+                    <button id="collection-tab-variables" type="button" role="tab" data-collection-tab="variables" aria-selected="false" aria-controls="collection-panel-variables" tabindex="-1">Variables</button>
+                  </div>
+                  <section id="collection-panel-headers" class="collection-content-panel" role="tabpanel" aria-labelledby="collection-tab-headers"><label>Headers (JSON)<textarea id="collection-request-headers" maxlength="20000" spellcheck="false" placeholder='{"accept":"application/json"}'></textarea></label><p class="collection-help">Credential, cookie and transport-owned headers are rejected.</p></section>
+                  <section id="collection-panel-body" class="collection-content-panel" role="tabpanel" aria-labelledby="collection-tab-body" hidden><label>Request body<textarea id="collection-request-body" maxlength="65536" spellcheck="false" placeholder='{"id":"{{id}}"}'></textarea></label><p class="collection-help">Up to 64 KiB. GET and HEAD requests cannot include a body.</p></section>
+                  <section id="collection-panel-variables" class="collection-content-panel" role="tabpanel" aria-labelledby="collection-tab-variables" hidden><label>Request variables (JSON)<textarea id="collection-request-variables" maxlength="40000" spellcheck="false" placeholder='{"id":"42"}'></textarea></label><p class="collection-help">Text values replace {{name}} placeholders when you explicitly run a saved request.</p></section>
                   <div id="collection-variable-status" class="collection-variable-status" role="status" aria-live="polite"><span class="collection-variable-chip">No variables used</span></div>
-                  <div class="collection-form-actions"><button id="collection-save-request" class="trace-button collection-primary" type="submit">Save request</button><button id="collection-duplicate-request" class="secondary-button" type="button">Duplicate</button><button id="collection-delete-request" class="secondary-button" type="button">Delete</button></div>
-                  <p class="experiment-privacy">Traffic import copies only method and URL without query or fragment. Captured headers, cookies, bodies, and credentials are never imported.</p>
                 </form>
               </section>
 
               <aside class="collection-pane collection-run-pane" aria-label="Collection execution">
-                <article class="collection-run-card">
-                  <header><div><h2>Run request</h2><p id="collection-context-message">No disposable request-lab context exists.</p></div><span id="collection-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span></header>
-                  <div class="collection-form-actions collection-form"><button id="collection-create-context" class="trace-button collection-primary" type="button">Create isolated context</button><button id="collection-run" class="secondary-button" type="button" disabled>Run selected</button><button id="collection-cancel" class="secondary-button" type="button" disabled>Cancel active</button></div>
+                <details class="collection-run-card collection-context" open>
+                  <summary class="workspace-disclosure-title">Isolated context <span id="collection-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span></summary>
+                  <p id="collection-context-message" class="collection-help">No disposable request-lab context exists.</p>
+                  <div class="collection-author-actions"><button id="collection-create-context" class="secondary-button" type="button">Create isolated context</button><button id="collection-cancel" class="secondary-button" type="button" disabled>Cancel active run</button></div>
+                </details>
+                <article class="collection-run-card collection-response-card">
+                  <header><div><h2>Response</h2><p id="collection-response-meta">No completed run selected.</p></div><span id="collection-response-badge" class="experiment-card-badge" data-kind="offline">No response</span></header>
+                  <div class="collection-tabs" role="tablist" aria-label="Response content">
+                    <button id="collection-response-tab-body" type="button" role="tab" data-collection-response-tab="body" aria-selected="true" aria-controls="collection-response">Body</button>
+                    <button id="collection-response-tab-headers" type="button" role="tab" data-collection-response-tab="headers" aria-selected="false" aria-controls="collection-response" tabindex="-1">Headers</button>
+                  </div>
+                  <div id="collection-response" class="repeater-response experiment-empty" role="tabpanel" aria-labelledby="collection-response-tab-body" tabindex="0">Run a saved request to inspect its bounded response.</div>
                 </article>
-                <article class="collection-run-card">
-                  <header><div><h2>Execution history</h2><p>Ephemeral, bounded, and erased with the isolated context.</p></div><span id="collection-history-badge" class="experiment-card-badge" data-kind="offline">0 runs</span></header>
+                <details class="collection-run-card collection-history-card">
+                  <summary class="workspace-disclosure-title">Run history <span id="collection-history-badge" class="experiment-card-badge" data-kind="offline">0 runs</span></summary>
+                  <p class="collection-help">This request’s retained runs. Erased with the isolated context.</p>
                   <div id="collection-history" class="collection-run-history" role="listbox" aria-label="Selected request execution history"><div class="experiment-empty" role="option" aria-disabled="true" aria-selected="false">No executions for this request.</div></div>
-                </article>
-                <article class="collection-run-card">
-                  <header><div><h2>Response</h2><p id="collection-response-meta">Select a completed execution.</p></div><span id="collection-response-badge" class="experiment-card-badge" data-kind="offline">No response</span></header>
-                  <div id="collection-response" class="repeater-response experiment-empty">Run the selected request to inspect its bounded response.</div>
-                </article>
-                <article class="collection-run-card">
-                  <header><div><h2>Storage and limits</h2><p>Saved locally, separate from captured evidence.</p></div><span class="experiment-card-badge">Contract v1</span></header>
-                  <div class="experiment-context-facts"><div class="experiment-context-fact"><span>Collection</span><strong>32 folders / 128 requests</strong></div><div class="experiment-context-fact"><span>Document</span><strong>2 MiB atomic file</strong></div></div>
-                  <div class="experiment-context-facts"><div class="experiment-context-fact"><span>Variables</span><strong>32 / 32 KiB per scope</strong></div><div class="experiment-context-fact"><span>Bodies</span><strong>64 KiB</strong></div></div>
-                  <p class="collection-storage-note">The store is user-owned and permission-restricted. Runs stay in ephemeral Repeater memory and never enter captured evidence.</p>
-                </article>
+                </details>
+                <details class="collection-run-card collection-limits">
+                  <summary class="workspace-disclosure-title">Storage and limits</summary>
+                  <p id="collection-generation" class="collection-storage-note">Generation 0</p>
+                  <p class="collection-storage-note">Saved locally in a permission-restricted 2 MiB document. Up to 32 folders, 128 requests and 32 variables per scope. Runs stay in bounded, ephemeral Repeater memory and never enter captured evidence. Imported requests include only a method and query-free URL.</p>
+                </details>
               </aside>
             </div>
           </section>
@@ -1171,6 +1186,7 @@
                         <div class="decoder-view-tabs" role="group" aria-label="Output representation"><button class="secondary-button" type="button" data-decoder-view="text" aria-pressed="true">UTF-8</button><button class="secondary-button" type="button" data-decoder-view="hex" aria-pressed="false">Hex dump</button><button class="secondary-button" type="button" data-decoder-view="base64" aria-pressed="false">Base64</button></div>
                         <pre id="decoder-output" tabindex="0" data-empty-label="No bytes to display. Enter input to begin.">No bytes selected.</pre>
                         <div class="decoder-actions"><button id="decoder-copy-output" class="secondary-button" type="button" disabled>Copy visible output</button></div>
+                        <section id="investigation-decoder-origin" class="decoder-field-origin" aria-label="Decoded value evidence origin" hidden><p></p><button class="secondary-button" type="button">Open original evidence</button></section>
                         <section id="decoder-field-origin" class="decoder-field-origin" aria-label="Request field source search" hidden>
                           <p id="decoder-field-origin-label"></p>
                           <button id="decoder-find-sources" class="secondary-button" type="button" disabled>Find sources for result</button>
@@ -1285,6 +1301,7 @@
     <script src="pane_layout.js"></script>
     <script src="native_console_completion.js"></script>
     <script src="native_console.js"></script>
+    <script src="investigation_navigation.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

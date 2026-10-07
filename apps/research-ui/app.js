@@ -974,6 +974,7 @@
       }
 
       function resetRequestSelection() {
+        state.originTraceController?.abort();
         state.trafficSelectionNotice = state.selectedRequestId === null ? '' : 'The selected request left the retained capture window. Choose another request.';
         state.selectedRequestId = null;
         state.selectedField = null;
@@ -1403,7 +1404,15 @@
         elements.requestCopyUrl.disabled = request.hostOnly;
       }
 
-      function selectRequest(id) {
+      function selectRequest(id, expectedIdentity = null) {
+        if (expectedIdentity) {
+          const candidates = state.requests.filter(candidate => candidate.id === id);
+          if (candidates.length !== 1 || !investigationSame(expectedIdentity, investigationRequestIdentity(candidates[0]))) {
+            investigationNotice('The exact request cannot be selected: its row identifier is missing, changed or ambiguous.', 'ambiguous'); return false;
+          }
+        }
+        investigationBeforeSelection();
+        state.originTraceController?.abort();
         const match = elements.requestSearchScope.value === 'content' ? state.trafficSearchMatches?.get(id) : null;
         if (match?.side) state.inspectorTab = match.mode === 'headers' ? 'headers' : match.side === 'Request' ? 'payload' : 'response';
         const request = state.requests.find(candidate => candidate.id === id);
@@ -1466,7 +1475,7 @@
       }
 
       function requestTraceRoot(request) {
-        if (request?.origin !== 'live') return null;
+        if (request?.origin !== 'live' || request.protocolRequestId || String(request.operation).startsWith('cdp_')) return null;
         const candidates = request.events ?? [];
         return candidates.find(event => event.type === 'request_started' && integerText(event, 'request_id') !== '0') ??
           candidates.find(event => event.type === 'request_initiated' && integerText(event, 'request_id') !== '0') ??
@@ -1558,7 +1567,7 @@
           const empty = document.createElement('div');
           empty.className = 'field-empty';
           empty.textContent = request?.origin === 'live'
-            ? 'Structured fields were not captured. Request-level origin evidence is still available.'
+            ? request.protocolRequestId ? 'This debugger request has no exact native-event link. Host, method and timing matches are correlation only.' : 'Structured fields were not captured. Request-level origin evidence is still available.'
             : request?.origin === 'demo'
               ? 'Demo request fields are not traceable. Select a live request for broker-backed origin evidence.'
               : request
@@ -1640,13 +1649,10 @@
         elements.requestInspector.hidden = showingExchange;
         document.querySelector('.detail-pane').classList.toggle('showing-exchange', showingExchange);
         if (showingExchange) {
-          renderTrafficDetails(exchangeInspector, request, state.inspectorTab, value => {
-            resetDecoderChain('Value copied from the request inspector.');
-            toolsElements.inputEncoding.value = 'text';
-            toolsElements.input.value = value;
-            showScreen('tools');
-            setToolsTab('decoder');
-            requestAnimationFrame(() => toolsElements.input.focus({preventScroll: true}));
+          renderTrafficDetails(exchangeInspector, request, state.inspectorTab, (value, selection) => {
+            const identity = investigationRequestIdentity(request);
+            investigationDecode(value, {route: identity ? {kind: 'request', identity, inspectorTab: state.inspectorTab} : null,
+              description: `${selection.side} · ${selection.path} · selected inspector value. UTF-8 string bytes are retained; raw HTTP byte offsets are unavailable.${identity ? '' : ' Exact request identity is unavailable.'}`});
           }, openFieldProvenance, elements.requestSearchScope.value === 'content' && state.trafficSearchMatches?.get(request?.id)?.side
             ? {...state.trafficSearchMatches.get(request.id), query: elements.requestFilter.value.trim()} : null, state.trafficSelectionNotice);
           return;
@@ -1786,7 +1792,8 @@
               : 'Experiments use the attached debugger target; selecting a request field is optional.';
           });
         evidenceWorkspace.sync();
-        elements.evidenceLinkCount.textContent = String(state.originTrace?.steps?.length ?? 0);
+        const currentTrace = state.originTraceKey === originTraceSelection()?.key ? state.originTrace : null;
+        elements.evidenceLinkCount.textContent = String(currentTrace?.steps?.length ?? 0);
         if (!document.querySelector('#screen-backtrace').hidden) renderBacktrace();
       }
 
@@ -1799,11 +1806,12 @@
           request,
           root,
           requestID,
-          key: `${request.id}:${root.process_id}:${integerText(root, 'sequence_number')}`
+          key: `${request.id}:${integerText(root, 'session_id')}:${root.process_id}:${integerText(root, 'sequence_number')}`
         };
       }
 
       async function refreshOriginTrace() {
+        state.originTraceController?.abort();
         const generation = ++state.originTraceGeneration;
         const selection = originTraceSelection();
         if (!selection || location.protocol === 'file:') {
@@ -1812,6 +1820,18 @@
           renderBacktrace();
           return;
         }
+        const controller = new AbortController();
+        state.originTraceController = controller;
+        const timer = setTimeout(() => controller.abort(), 10000);
+        const ownsSelection = () => {
+          if (generation !== state.originTraceGeneration) return false;
+          if (originTraceSelection()?.key === selection.key) return true;
+          state.originTraceGeneration += 1;
+          state.originTrace = null; state.originTraceKey = null; state.originTraceEtag = null;
+          state.selectedTraceRow = null; state.originTraceStatus = 'error';
+          state.originTraceError = 'The selected request event changed while reading its trace. Load the current trace explicitly.';
+          renderBacktrace(); return false;
+        };
         state.originTraceStatus = 'loading';
         state.originTraceError = null;
         renderBacktrace();
@@ -1824,25 +1844,33 @@
             root_process_id: String(selection.root.process_id),
             root_sequence_number: integerText(selection.root, 'sequence_number')
           });
-          const response = await fetch(`/api/origin-trace?${parameters}`, { cache: 'no-store', headers });
-          if (generation !== state.originTraceGeneration) return;
-          if (response.status === 304 && state.originTrace) {
+          const response = await fetch(`/api/origin-trace?${parameters}`, { cache: 'no-store', headers, signal: controller.signal });
+          if (!ownsSelection()) return;
+          if (response.status === 304 && state.originTrace && state.originTraceKey === selection.key) {
             state.originTraceStatus = 'ready';
             renderBacktrace();
             return;
           }
           if (!response.ok) throw new Error(`Origin trace store returned ${response.status}`);
-          const body = await response.json();
-          if (generation !== state.originTraceGeneration) return;
+          const bytes = await sourceFactsReadBytes(response, 1024 * 1024, controller.signal);
+          const body = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
+          if (!ownsSelection()) return;
           if (!isOriginTraceResponse(body)) throw new TypeError('Malformed origin trace response');
+          if (body.request_id !== selection.requestID || body.steps.length && !investigationSame(investigationEventIdentity(body.steps[0].event), investigationEventIdentity(selection.root))) {
+            throw new TypeError('Trace root belongs to a different captured session or event. Exact linkage is unavailable.');
+          }
           state.originTrace = body;
           state.originTraceStatus = 'ready';
           state.originTraceKey = selection.key;
           state.originTraceEtag = response.headers.get('ETag');
         } catch (error) {
-          if (generation !== state.originTraceGeneration) return;
+          if (!ownsSelection()) return;
           state.originTraceStatus = 'error';
-          state.originTraceError = error.message;
+          state.originTraceError = controller.signal.aborted ? 'The trace read timed out or was cancelled. Load the current trace explicitly.' : error.message.replace(/source-facts/gi, 'trace');
+        } finally {
+          clearTimeout(timer);
+          controller.abort();
+          if (state.originTraceController === controller) state.originTraceController = null;
         }
         renderBacktrace();
         renderEvidence();
@@ -1893,12 +1921,13 @@
         metadata.append(textElement('summary', '', 'Evidence identifiers'), identifiers);
         panel.append(facts, metadata);
         if (step.value) panel.append(textElement('h4', '', 'Captured value'), textElement('pre', 'trace-value', step.value));
-        const artifact = state.artifacts.find(candidate => candidate.artifact_id === step.artifact_id);
-        if (artifact) {
-          const open = textElement('button', 'secondary-button', 'Open source'); open.type = 'button';
-          open.addEventListener('click', () => { showScreen('sources', open); selectArtifact(artifact.artifact_id); });
-          panel.append(open);
-        }
+        const sourceLink = investigationTraceArtifact(step);
+        const open = textElement('button', 'secondary-button', 'Open retained source'); open.type = 'button';
+        open.dataset.investigationSource = 'true'; open.disabled = sourceLink.status !== 'ready';
+        open.addEventListener('click', () => openInvestigation({kind: 'artifact', identity: sourceLink.identity,
+          relation: `Trace step S${step.event.session_id}:P${step.event.process_id}:E${step.event.sequence_number} records this artifact. Trace relationship: ${step.confidence === 'observed' ? 'recorded link' : 'shared identifiers only'}. No value flow is implied.`}));
+        panel.append(open);
+        if (sourceLink.status !== 'ready') panel.append(textElement('p', 'trace-detail-message', sourceLink.message));
       }
 
       function traceStepElement(model) {
@@ -1952,7 +1981,7 @@
         elements.traceLoad.textContent = state.originTrace ? 'Refresh trace' : 'Load trace';
         elements.backtraceSubtitle.textContent = selection
           ? `${request.method} ${request.path}` : 'Request events and their recorded predecessors';
-        const trace = selection ? state.originTrace : null;
+        const trace = selection && state.originTraceKey === selection.key ? state.originTrace : null;
         const hasSteps = Boolean(trace?.steps.length);
         elements.traceContent.hidden = !hasSteps;
         elements.traceEmpty.hidden = hasSteps;
@@ -3129,6 +3158,7 @@
       }
 
       function revealRuntimeHookRequest(request) {
+        if (investigationScreen() === 'traffic') investigationNavigation?.record();
         state.selectedRuntimeHookRequest = {sessionId: runtimeHooksState()?.session_id, id: request.id};
         state.runtimeHookTrafficKey = null;
         showScreen('traffic');
@@ -3193,14 +3223,11 @@
       }
 
       function revealRuntimeHookHit(hit) {
-        const definition = runtimeHooksState()?.definitions.find(candidate => candidate.id === hit.hook_id);
-        const sources = liveSources().filter(candidate => candidate.target_id === hit.target_id);
-        const source = hit.script_id !== undefined
-          ? sources.find(candidate => hit.script_id && hit.source_hash && candidate.script_id === hit.script_id && candidate.hash === hit.source_hash)
-          : sources.find(candidate => candidate.script_id === definition?.script_id) ??
-            sources.find(candidate => candidate.url === hit.source);
+        const sources = liveSources().filter(candidate => candidate.target_id === hit.target_id &&
+          hit.script_id && hit.source_hash && candidate.script_id === hit.script_id && candidate.hash === hit.source_hash);
+        const source = sources.length === 1 ? sources[0] : null;
         if (!source) {
-          state.experimentError = 'The source for this hit is no longer attached.';
+          state.experimentError = 'This hit has no unambiguous attached target, script and hash identity. A URL match cannot establish its original source location.';
           showScreen('sources');
           if (!state.sourceHooksOpen) openSourceHooks(false, false);
           else renderRuntimeHooks();
@@ -3208,10 +3235,13 @@
         }
         showScreen('sources');
         if (!state.sourceHooksOpen) openSourceHooks(false, false);
-        selectScript(source.script_id, hit.line);
-        state.sourceCursor = {scriptId: source.script_id, line: hit.line, column: hit.column};
+        if (selectScript(source.script_id, hit.line) === false) return;
+        if (!setSourceCursor(source, hit.line, hit.column)) return;
         elements.sourcePosition.textContent = `Line ${hit.line + 1}, Column ${hit.column + 1}`;
-        requestAnimationFrame(() => elements.sourceCodeWrap.focus({preventScroll: true}));
+        const identity = sourceIdentity(source);
+        requestAnimationFrame(() => {
+          if (sourceIdentity(selectedSource()) === identity && !document.querySelector('#screen-sources').hidden) elements.sourceCodeWrap.focus({preventScroll: true});
+        });
       }
 
       function renderRuntimeHooks() {
@@ -3905,7 +3935,7 @@
         const hooks = runtimeHooksState();
         if (source?.source_type !== 'script' || state.sourceDeobfuscated || state.sourceFormatted || !hooks?.isolated ||
             hooks.target_id !== state.debuggerSession?.target?.id) return false;
-        const cursor = state.sourceCursor?.scriptId === source.script_id ? state.sourceCursor : null;
+        const cursor = sourceCursorFor(source);
         const line = cursor?.line ?? source.start_line;
         elements.hooksScript.value = source.script_id;
         elements.hooksEntryMode.value = 'source';
@@ -4080,6 +4110,17 @@
         return values.reduce((maximum, value) => Math.max(maximum, value.id), 0) + 1;
       }
 
+      function collectionNextRequestId() {
+        // Do not recycle a deleted recipe ID while its ephemeral runs still exist.
+        const repeater = repeaterState();
+        return Math.max(collectionNextId(state.apiCollection.requests),
+          (state.collectionPendingSubmission?.requestId ?? 0) + 1,
+          ...(state.collectionSubmittedOwners ?? []).filter(owner => owner.targetId === requestInterception()?.target_id &&
+            owner.experimentId === requestInterception()?.experiment_id).map(owner => owner.requestId + 1),
+          ...[...(repeater?.history ?? []), repeater?.active_execution].map(entry =>
+            Number.isSafeInteger(entry?.collection_request_id) ? entry.collection_request_id + 1 : 1));
+      }
+
       function collectionVariablesFromText(value, label) {
         const source = value.trim();
         if (!source) return [];
@@ -4123,6 +4164,10 @@
       function collectionRequestDraft() {
         const request = collectionRequest();
         if (!request) throw new TypeError('Select a saved request first.');
+        if (state.apiCollectionNeedsReload || state.collectionRequestDraftId !== request.id ||
+            state.collectionRequestDraftCreatedAt !== request.created_at_ms) {
+          throw new TypeError('The request draft owner changed. Discard these edits and retry load before saving.');
+        }
         const timeout = Number(elements.collectionRequestTimeout.value);
         if (!Number.isInteger(timeout) || timeout < 100 || timeout > 30000) {
           throw new TypeError('Timeout must be between 100 and 30000 ms.');
@@ -4163,50 +4208,76 @@
       }
 
       async function refreshApiCollection(force = false) {
-        if (state.apiCollectionRefreshing || location.protocol === 'file:') return false;
+        if (state.apiCollectionRefreshing || state.apiCollectionSaving || location.protocol === 'file:') return false;
         state.apiCollectionRefreshing = true;
+        const version = state.apiCollectionVersion;
+        const controller = new AbortController();
+        const deadline = setTimeout(() => controller.abort(), 15000);
         if (!state.apiCollectionLoaded) setCollectionNotice('loading', 'Loading your local collection…');
         try {
           const headers = !force && state.apiCollectionEtag ? {'If-None-Match': state.apiCollectionEtag} : {};
-          const response = await fetch('/api/api-collection', {cache: 'no-store', headers});
+          const response = await fetch('/api/api-collection', {cache: 'no-store', headers, signal: controller.signal});
+          if (version !== state.apiCollectionVersion) return false;
           if (response.status === 304) return true;
-          if (!response.ok) throw new Error(`API Collection store returned ${response.status}`);
+          if (!response.ok) throw new Error(`Collection store returned ${response.status}`);
           const body = await response.json();
-          if (!isApiCollection(body)) throw new TypeError('Malformed API Collection response');
+          if (version !== state.apiCollectionVersion) return false;
+          if (!isApiCollection(body)) throw new TypeError('Malformed Collection response');
+          if (body.generation < state.apiCollection.generation) return false;
+          const missingRequest = state.collectionDraftDirty && !body.requests.some(item => item.id === state.collectionRequestDraftId &&
+            item.created_at_ms === state.collectionRequestDraftCreatedAt);
+          const missingFolder = state.collectionFolderDirty && !body.folders.some(item => item.id === state.collectionFolderDraftId);
+          if (missingRequest || missingFolder) {
+            state.apiCollectionEtag = null;
+            state.apiCollectionNeedsReload = true;
+            setCollectionNotice('conflict', 'The edited item was removed or replaced in another window. Your edits remain here. Discard them, then retry load to see the current collection.');
+            return false;
+          }
           state.apiCollection = body;
+          state.apiCollectionNeedsReload = false;
           state.apiCollectionLoaded = true;
           state.apiCollectionEtag = response.headers.get('ETag');
           if (!collectionFolder(state.collectionSelectedFolderId)) state.collectionSelectedFolderId = 1;
           if (!collectionRequest()) state.collectionSelectedRequestId = null;
+          else state.collectionSelectedFolderId = collectionRequest().folder_id;
           setCollectionNotice(body.requests.length ? 'ready' : 'empty', body.requests.length
-            ? `${body.requests.length} saved ${body.requests.length === 1 ? 'request' : 'requests'} loaded from the permission-restricted local store.`
-            : 'Start by creating a saved request or importing one from Traffic.');
-          renderApiCollection();
+            ? `${body.requests.length} saved ${body.requests.length === 1 ? 'request' : 'requests'} · local collection loaded.`
+            : 'Create a saved request, or import a method and query-free URL from Requests.');
           return true;
         } catch (error) {
-          setCollectionNotice('error', `API Collection unavailable: ${error.message}. The last valid collection remains visible.`);
-          renderApiCollection();
+          if (version !== state.apiCollectionVersion) return false;
+          state.apiCollectionEtag = null;
+          setCollectionNotice('error', `Collection load failed: ${controller.signal.aborted ? 'timed out' : error.message}. The last valid collection and your edits remain visible.`);
           return false;
         } finally {
+          clearTimeout(deadline);
           state.apiCollectionRefreshing = false;
+          renderApiCollection();
         }
       }
 
       async function replaceApiCollection(folders, requests, successMessage) {
         if (state.apiCollectionSaving) return false;
+        if (state.apiCollectionNeedsReload) {
+          setCollectionNotice('conflict', 'Discard the stale edits and retry load before changing this collection.'); return false;
+        }
         state.apiCollectionSaving = true;
-        setCollectionNotice('saving', 'Saving one atomic API Collection generation…');
+        state.apiCollectionVersion += 1;
+        const controller = new AbortController();
+        const deadline = setTimeout(() => controller.abort(), 15000);
+        setCollectionNotice('saving', 'Saving collection changes locally…');
         renderApiCollection();
         try {
           const response = await fetch('/api/api-collection/actions', {
             method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(collectionReplacement(folders, requests))
+            body: JSON.stringify(collectionReplacement(folders, requests)), signal: controller.signal
           });
           const body = await response.json();
           if (response.status === 409) {
             state.apiCollectionEtag = null;
-            await refreshApiCollection(true);
-            setCollectionNotice('conflict', body.error || 'The collection changed in another window. The current generation was reloaded.');
+            state.apiCollectionSaving = false;
+            const refreshed = await refreshApiCollection(true);
+            if (refreshed || state.apiCollectionStatus === 'saving') setCollectionNotice('conflict', `${body.error || 'The collection changed in another window.'} Your edits are retained; retry load and review them before saving again.`);
             return false;
           }
           if (!response.ok) throw new Error(body.error || `API Collection store returned ${response.status}`);
@@ -4217,16 +4288,18 @@
           setCollectionNotice('ready', successMessage);
           return true;
         } catch (error) {
-          setCollectionNotice('error', `API Collection was not changed: ${error.message}`);
+          state.apiCollectionEtag = null;
+          setCollectionNotice('error', `Save could not be confirmed: ${controller.signal.aborted ? 'timed out' : error.message}. Your edits are retained. Retry load before saving again.`);
           return false;
         } finally {
+          clearTimeout(deadline);
           state.apiCollectionSaving = false;
           renderApiCollection();
         }
       }
 
       function collectionFolderOptions(selectedId, excludedIds = new Set()) {
-        return state.apiCollection.folders
+        const options = state.apiCollection.folders
           .filter(folder => !excludedIds.has(folder.id))
           .sort((left, right) => collectionFolderLineage(left.id).map(item => item.name).join('/').localeCompare(
             collectionFolderLineage(right.id).map(item => item.name).join('/')
@@ -4237,31 +4310,54 @@
             option.selected = folder.id === selectedId;
             return option;
           });
+        if (selectedId && !options.some(option => option.value === String(selectedId))) {
+          const unavailable = document.createElement('option'); unavailable.value = String(selectedId);
+          unavailable.textContent = `Unavailable folder #${selectedId}`; unavailable.selected = true; unavailable.disabled = true;
+          options.push(unavailable);
+        }
+        return options;
+      }
+
+      function collectionMayLeaveDraft() {
+        if (state.apiCollectionSaving) return false;
+        if (!state.apiCollectionLoaded) { setCollectionNotice('error', 'Load the local collection before changing it.'); return false; }
+        if (state.apiCollectionNeedsReload) { setCollectionNotice('conflict', 'Discard stale edits and retry load before changing the selected item.'); return false; }
+        if (state.collectionDraftDirty || state.collectionFolderDirty) {
+          setCollectionNotice('conflict', 'Unsaved edits remain with the selected item. Save or discard them before switching, creating, duplicating or deleting.');
+          return false;
+        }
+        return true;
       }
 
       function selectCollectionFolder(folderId, focus = false) {
-        if (!collectionFolder(folderId)) return;
+        if (!collectionFolder(folderId)) return false;
+        if (folderId === state.collectionSelectedFolderId && state.collectionSelectedRequestId === null) return true;
+        if (!collectionMayLeaveDraft()) return false;
         state.collectionSelectedFolderId = folderId;
         state.collectionSelectedRequestId = null;
         state.collectionFolderDraftId = null;
-        state.collectionFolderDirty = false;
         state.collectionDeleteFolderId = null;
+        state.collectionSelectionVersion += 1;
         renderApiCollection();
         if (focus) elements.collectionTree.querySelector(`[data-folder-id="${folderId}"]`)?.focus({preventScroll: true});
+        return true;
       }
 
       function selectCollectionRequest(requestId, focus = false) {
         const request = collectionRequest(requestId);
-        if (!request) return;
+        if (!request) return false;
+        if (requestId === state.collectionSelectedRequestId) return true;
+        if (!collectionMayLeaveDraft()) return false;
         state.collectionSelectedRequestId = requestId;
         state.collectionSelectedFolderId = request.folder_id;
-        state.collectionExpandedFolderIds.add(request.folder_id);
+        collectionFolderLineage(request.folder_id).forEach(folder => state.collectionExpandedFolderIds.add(folder.id));
         state.collectionRequestDraftId = null;
-        state.collectionDraftDirty = false;
         state.collectionDeleteRequestId = null;
         state.collectionSelectedHistoryId = null;
+        state.collectionSelectionVersion += 1;
         renderApiCollection();
         if (focus) elements.collectionTree.querySelector(`[data-request-id="${requestId}"]`)?.focus({preventScroll: true});
+        return true;
       }
 
       function moveCollectionTreeSelection(event) {
@@ -4271,26 +4367,50 @@
         const index = rows.indexOf(row);
         if (index < 0) return;
         event.preventDefault();
-        if (row.dataset.folderId && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
+        if (['ArrowLeft', 'ArrowRight'].includes(event.key)) {
           const folderId = Number(row.dataset.folderId);
-          const expanded = state.collectionExpandedFolderIds.has(folderId);
+          if (!folderId) {
+            if (event.key === 'ArrowLeft') selectCollectionFolder(collectionRequest(Number(row.dataset.requestId))?.folder_id, true);
+            return;
+          }
+          const expanded = folderId === 1 || state.collectionExpandedFolderIds.has(folderId);
           if (event.key === 'ArrowRight' && !expanded) state.collectionExpandedFolderIds.add(folderId);
           else if (event.key === 'ArrowLeft' && expanded && folderId !== 1) state.collectionExpandedFolderIds.delete(folderId);
           else if (event.key === 'ArrowLeft') {
-            const parentId = collectionFolder(folderId)?.parent_id;
-            if (parentId !== null && parentId !== undefined) selectCollectionFolder(parentId, true);
-            return;
-          } else return;
-          renderApiCollection();
+            selectCollectionFolder(collectionFolder(folderId)?.parent_id, true); return;
+          } else if (rows[index + 1]) { rows[index + 1].focus(); return; }
+          renderCollectionTree();
           elements.collectionTree.querySelector(`[data-folder-id="${folderId}"]`)?.focus();
           return;
         }
         const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
           : Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
-        rows[next].click(); rows[next].focus();
+        const target = rows[next];
+        if (target.dataset.requestId) selectCollectionRequest(Number(target.dataset.requestId), true);
+        else selectCollectionFolder(Number(target.dataset.folderId), true);
+      }
+
+      function selectCollectionContent(tab, response = false, focus = false) {
+        const allowed = response ? ['body', 'headers'] : ['headers', 'body', 'variables'];
+        if (!allowed.includes(tab)) return;
+        state[response ? 'collectionResponseTab' : 'collectionRequestTab'] = tab;
+        const attribute = response ? 'collection-response-tab' : 'collection-tab';
+        document.querySelectorAll(`[data-${attribute}]`).forEach(button => {
+          const selected = button.getAttribute(`data-${attribute}`) === tab;
+          button.setAttribute('aria-selected', String(selected)); button.tabIndex = selected ? 0 : -1;
+          if (!response) document.getElementById(button.getAttribute('aria-controls')).hidden = !selected;
+          if (selected && focus) button.focus({preventScroll: true});
+        });
+        if (response) {
+          elements.collectionResponse.setAttribute('aria-labelledby', `collection-response-tab-${tab}`);
+          elements.collectionResponse.dataset.renderKey = '';
+          renderCollectionExecution();
+        }
       }
 
       function renderCollectionTree() {
+        const focused = elements.collectionTree.contains(document.activeElement) ? document.activeElement?.dataset : null;
+        const scrollTop = elements.collectionTree.scrollTop;
         const rows = [];
         const appendFolder = (folder, level) => {
           const children = state.apiCollection.folders.filter(candidate => candidate.parent_id === folder.id)
@@ -4300,6 +4420,8 @@
           const hasChildren = children.length > 0 || requests.length > 0;
           const expanded = folder.id === 1 || state.collectionExpandedFolderIds.has(folder.id);
           const row = document.createElement('button'); row.type = 'button'; row.className = 'collection-tree-row';
+          row.disabled = state.apiCollectionSaving;
+          row.title = collectionFolderLineage(folder.id).map(item => item.name).join(' / ');
           row.dataset.folderId = String(folder.id); row.style.setProperty('--collection-depth', String(level - 1));
           row.setAttribute('role', 'treeitem'); row.setAttribute('aria-level', String(level));
           row.setAttribute('aria-selected', String(!state.collectionSelectedRequestId && state.collectionSelectedFolderId === folder.id));
@@ -4308,8 +4430,8 @@
           row.append(textElement('span', 'collection-tree-glyph', hasChildren ? expanded ? '▾' : '▸' : '·'),
             textElement('span', 'collection-tree-name', folder.name),
             textElement('span', 'collection-tree-meta', `${requests.length}`));
-          row.addEventListener('click', () => selectCollectionFolder(folder.id));
-          row.addEventListener('dblclick', () => { if (hasChildren && folder.id !== 1) {
+          row.addEventListener('click', () => selectCollectionFolder(folder.id, true));
+          row.addEventListener('dblclick', () => { if (!state.apiCollectionSaving && hasChildren && folder.id !== 1) {
             if (expanded) state.collectionExpandedFolderIds.delete(folder.id); else state.collectionExpandedFolderIds.add(folder.id);
             renderApiCollection();
           }});
@@ -4319,6 +4441,8 @@
           children.forEach(child => appendFolder(child, level + 1));
           requests.forEach(request => {
             const requestRow = document.createElement('button'); requestRow.type = 'button'; requestRow.className = 'collection-tree-row';
+            requestRow.disabled = state.apiCollectionSaving;
+            requestRow.title = `${request.name} · ${request.method} ${request.url}`;
             requestRow.dataset.requestId = String(request.id); requestRow.style.setProperty('--collection-depth', String(level));
             requestRow.setAttribute('role', 'treeitem'); requestRow.setAttribute('aria-level', String(level + 1));
             requestRow.setAttribute('aria-selected', String(state.collectionSelectedRequestId === request.id));
@@ -4326,30 +4450,37 @@
             requestRow.append(textElement('span', 'collection-tree-glyph', '↗'),
               textElement('span', 'collection-tree-name', request.name),
               textElement('span', 'collection-tree-meta', request.method));
-            requestRow.addEventListener('click', () => selectCollectionRequest(request.id));
+            requestRow.addEventListener('click', () => selectCollectionRequest(request.id, true));
             requestRow.addEventListener('keydown', moveCollectionTreeSelection);
             rows.push(requestRow);
           });
         };
         appendFolder(collectionFolder(1), 1);
         elements.collectionTree.replaceChildren(...rows);
+        elements.collectionTree.scrollTop = scrollTop;
+        if (focused?.requestId) elements.collectionTree.querySelector(`[data-request-id="${focused.requestId}"]`)?.focus({preventScroll: true});
+        else if (focused?.folderId) elements.collectionTree.querySelector(`[data-folder-id="${focused.folderId}"]`)?.focus({preventScroll: true});
       }
 
       function renderCollectionFolderForm() {
-        const folder = collectionFolder(state.collectionSelectedFolderId) ?? collectionFolder(1);
-        if (state.collectionFolderDraftId !== folder.id || !state.collectionFolderDirty) {
+        const folder = collectionFolder(state.collectionFolderDirty ? state.collectionFolderDraftId : state.collectionSelectedFolderId) ?? collectionFolder(1);
+        const keepDraft = state.collectionFolderDraftId === folder.id && state.collectionFolderDirty;
+        const parentId = keepDraft ? Number(elements.collectionFolderParent.value) : folder.parent_id ?? 1;
+        if (!keepDraft) {
           state.collectionFolderDraftId = folder.id;
           elements.collectionFolderName.value = folder.name;
           elements.collectionFolderVariables.value = collectionVariablesText(folder.variables);
         }
         const excluded = collectionDescendantIds(folder.id); excluded.add(folder.id);
-        elements.collectionFolderParent.replaceChildren(...collectionFolderOptions(folder.parent_id ?? 1, excluded));
-        elements.collectionFolderParent.value = String(folder.parent_id ?? 1);
+        elements.collectionFolderParent.replaceChildren(...collectionFolderOptions(parentId, excluded));
+        elements.collectionFolderParent.value = String(parentId);
         const root = folder.id === 1;
         elements.collectionFolderName.disabled = root || state.apiCollectionSaving;
         elements.collectionFolderParent.disabled = root || state.apiCollectionSaving;
         elements.collectionFolderVariables.disabled = state.apiCollectionSaving;
-        elements.collectionSaveFolder.disabled = state.apiCollectionSaving;
+        elements.collectionSaveFolder.disabled = state.apiCollectionSaving || state.apiCollectionNeedsReload;
+        elements.collectionDiscardFolder.disabled = state.apiCollectionSaving || !state.collectionFolderDirty;
+        elements.collectionFolderDraftStatus.textContent = state.collectionFolderDirty ? `· ${folder.name} · Unsaved` : '';
         elements.collectionDeleteFolder.disabled = root || state.apiCollectionSaving;
         elements.collectionDeleteFolder.textContent = state.collectionDeleteFolderId === folder.id ? 'Confirm delete' : 'Delete folder';
       }
@@ -4390,10 +4521,17 @@
         elements.collectionEditorEmpty.hidden = Boolean(request);
         elements.collectionRequestForm.hidden = !request;
         elements.collectionRequestBadge.dataset.kind = request ? '' : 'offline';
-        elements.collectionRequestBadge.textContent = request ? request.method : 'No request';
+        elements.collectionRequestBadge.textContent = request ? `#${request.id}` : 'No request';
+        elements.collectionEditorTitle.textContent = request?.name ?? 'Request';
+        elements.collectionDraftStatus.textContent = !request ? 'Select a saved request to edit.' : state.collectionDraftDirty
+          ? 'Unsaved edits · Save or discard before switching.' : `${collectionFolderLineage(request.folder_id).map(folder => folder.name).join(' / ')} · Saved`;
         if (!request) return;
-        if (state.collectionRequestDraftId !== request.id || !state.collectionDraftDirty) {
+        const keepDraft = state.collectionRequestDraftId === request.id &&
+          state.collectionRequestDraftCreatedAt === request.created_at_ms && state.collectionDraftDirty;
+        const folderId = keepDraft ? Number(elements.collectionRequestFolder.value) : request.folder_id;
+        if (!keepDraft) {
           state.collectionRequestDraftId = request.id;
+          state.collectionRequestDraftCreatedAt = request.created_at_ms;
           elements.collectionRequestName.value = request.name;
           elements.collectionRequestFolder.value = String(request.folder_id);
           elements.collectionRequestUrl.value = request.url;
@@ -4404,30 +4542,90 @@
           elements.collectionRequestBody.value = request.body;
           elements.collectionRequestVariables.value = collectionVariablesText(request.variables);
         }
-        elements.collectionRequestFolder.replaceChildren(...collectionFolderOptions(request.folder_id));
-        elements.collectionRequestFolder.value = String(request.folder_id);
+        elements.collectionRequestFolder.replaceChildren(...collectionFolderOptions(folderId));
+        elements.collectionRequestFolder.value = String(folderId);
         elements.collectionRequestForm.querySelectorAll('input, textarea, select').forEach(field => {
           field.disabled = state.apiCollectionSaving;
         });
-        elements.collectionSaveRequest.disabled = state.apiCollectionSaving;
+        elements.collectionSaveRequest.disabled = state.apiCollectionSaving || state.apiCollectionNeedsReload;
+        elements.collectionDiscardRequest.disabled = state.apiCollectionSaving || !state.collectionDraftDirty;
         elements.collectionDuplicateRequest.disabled = state.apiCollectionSaving || state.apiCollection.requests.length >= 128;
         elements.collectionDeleteRequest.disabled = state.apiCollectionSaving;
-        elements.collectionDeleteRequest.textContent = state.collectionDeleteRequestId === request.id ? 'Confirm delete' : 'Delete';
+        elements.collectionDeleteRequest.textContent = state.collectionDeleteRequestId === request.id ? 'Confirm delete' : 'Delete request';
         renderCollectionVariableStatus();
       }
 
+      function collectionRunKey(executionId) {
+        return JSON.stringify([requestInterception()?.target_id, requestInterception()?.experiment_id, executionId]);
+      }
+
+      function rememberCollectionRunOwner(key, owner) {
+        const owners = state.collectionRunOwners ??= new Map();
+        owners.set(key, {requestId: owner.requestId, createdAt: owner.createdAt});
+        while (owners.size > 25) owners.delete(owners.keys().next().value);
+        return owners.get(key);
+      }
+
+      function collectionObservedRunOwner(entry, active = false) {
+        const executionId = active ? entry?.execution_id : entry?.id;
+        if (!entry || !Number.isSafeInteger(executionId)) return null;
+        const key = collectionRunKey(executionId);
+        const known = state.collectionRunOwners?.get(key);
+        if (known) return known;
+        // Polling can observe a run before its POST acknowledgement, or after
+        // that acknowledgement is lost. Dispatch ownership must already exist.
+        const candidates = (state.collectionSubmittedOwners ?? []).filter(owner =>
+          owner.targetId === requestInterception()?.target_id && owner.experimentId === requestInterception()?.experiment_id &&
+          owner.requestId === entry.collection_request_id && owner.executionId === undefined && executionId > owner.afterExecutionId);
+        if (!candidates.length) return null;
+        const owner = candidates[0];
+        if (candidates.some(candidate => candidate.createdAt !== owner.createdAt)) return {ambiguous: true};
+        owner.executionId = executionId;
+        return rememberCollectionRunOwner(key, owner);
+      }
+
+      function collectionRunBelongsToRequest(entry, active = false) {
+        const owner = collectionObservedRunOwner(entry, active);
+        const request = collectionRequest();
+        if (!request || !entry || entry.collection_request_id !== request.id || !Number.isSafeInteger(entry.started_at_ms) || entry.started_at_ms < request.created_at_ms) return false;
+        return !owner || !owner.ambiguous && owner.requestId === request.id && owner.createdAt === request.created_at_ms;
+      }
+
       function collectionHistoryEntries() {
-        const requestId = state.collectionSelectedRequestId;
-        return (repeaterState()?.history ?? []).filter(entry => entry.collection_request_id === requestId);
+        return (repeaterState()?.history ?? []).filter(entry => collectionRunBelongsToRequest(entry));
+      }
+
+      function collectionPendingRunForSelection() {
+        const pending = state.collectionPendingRunSelection;
+        if (!pending) return null;
+        const request = collectionRequest();
+        if (pending.selection !== state.collectionSelectionVersion || pending.historySelection !== state.collectionHistorySelectionVersion ||
+            pending.requestId !== request?.id || pending.createdAt !== request?.created_at_ms ||
+            pending.key !== collectionRunKey(pending.executionId) || !requestInterception()?.isolated) {
+          state.collectionPendingRunSelection = null;
+          return null;
+        }
+        return pending;
       }
 
       function renderCollectionResponse(entry) {
+        const repeater = repeaterState();
+        const running = ['running', 'cancelling'].includes(repeater?.state) &&
+          collectionRunBelongsToRequest(repeater?.active_execution, true);
+        const pending = collectionPendingRunForSelection();
+        const pendingLabel = running ? ' · another run in progress' : pending ? ` · waiting for run ${pending.executionId}` : '';
+        const key = JSON.stringify([requestInterception()?.experiment_id, state.collectionSelectedRequestId,
+          entry?.id, state.collectionResponseTab, entry ? 'complete' : pending?.executionId ?? (running ? repeater.state : 'idle')]);
+        if (entry) elements.collectionResponseMeta.textContent = `Run ${entry.id} · ${entry.resolved_request.method} ${entry.resolved_request.url}${pendingLabel}`;
+        if (elements.collectionResponse.dataset.renderKey === key) return;
+        elements.collectionResponse.dataset.renderKey = key;
         if (!entry) {
           elements.collectionResponse.className = 'repeater-response experiment-empty';
-          elements.collectionResponse.textContent = 'Run the selected request to inspect its bounded response.';
-          elements.collectionResponseMeta.textContent = 'Select a completed execution.';
+          elements.collectionResponse.textContent = pending ? `Waiting for acknowledged run ${pending.executionId} to appear in history…` : running ? 'Waiting for this request’s response…'
+            : collectionRequest() ? 'Run this saved request to inspect its bounded response.' : 'Select a saved request to inspect its runs.';
+          elements.collectionResponseMeta.textContent = pending ? `Run ${pending.executionId} acknowledged; response pending.` : running ? 'An explicit run is in progress.' : 'No completed run for this request.';
           elements.collectionResponseBadge.dataset.kind = 'offline';
-          elements.collectionResponseBadge.textContent = 'No response';
+          elements.collectionResponseBadge.textContent = pending ? running && repeater.state === 'cancelling' ? 'Cancelling' : 'Awaiting response' : running ? repeater.state === 'cancelling' ? 'Cancelling' : 'Running' : 'No response';
           return;
         }
         const response = entry.response;
@@ -4435,17 +4633,23 @@
         summary.append(experimentFact('Status', response.ok ? `${response.status} ${response.status_text}`.trim() : entry.state.replaceAll('_', ' ')),
           experimentFact('Duration', `${response.duration_ms} ms`),
           experimentFact('Body', `${utf8ByteLength(response.body)} bytes${response.body_truncated ? ' · truncated' : ''}`));
-        const headers = document.createElement('div'); headers.className = 'repeater-response-headers';
-        if (response.headers.length) headers.append(...response.headers.map(header => {
-          const row = document.createElement('div'); row.className = 'repeater-response-header';
-          row.append(textElement('span', '', header.name), textElement('span', '', header.value)); return row;
-        }));
-        else headers.append(textElement('div', 'experiment-empty', 'No response headers.'));
-        const body = document.createElement('pre'); body.className = 'experiment-result-body';
-        body.textContent = response.ok ? response.body || '(empty response body)' : response.error;
+        let content;
+        if (state.collectionResponseTab === 'headers') {
+          content = document.createElement('div'); content.className = 'repeater-response-headers';
+          if (response.headers.length) content.append(...response.headers.map(header => {
+            const row = document.createElement('div'); row.className = 'repeater-response-header';
+            row.append(textElement('span', '', header.name), textElement('span', '', header.value)); return row;
+          }));
+          else content.append(textElement('div', 'experiment-empty', 'No response headers were retained.'));
+          if (response.headers_truncated) content.append(textElement('p', 'collection-help', 'Response headers were truncated; only the retained subset is shown.'));
+        } else {
+          content = document.createElement('pre'); content.className = 'experiment-result-body';
+          content.textContent = response.ok ? response.body || '(empty response body)' : response.error;
+        }
         elements.collectionResponse.className = 'repeater-response';
-        elements.collectionResponse.replaceChildren(summary, headers, body);
-        elements.collectionResponseMeta.textContent = `run ${entry.id} · ${entry.resolved_request.method} ${entry.resolved_request.url}`;
+        elements.collectionResponse.replaceChildren(summary, content);
+        elements.collectionResponse.scrollTop = 0;
+        elements.collectionResponseMeta.textContent = `Run ${entry.id} · ${entry.resolved_request.method} ${entry.resolved_request.url}${pendingLabel}`;
         elements.collectionResponseBadge.dataset.kind = response.ok ? '' : 'error';
         elements.collectionResponseBadge.textContent = response.ok ? 'Complete' : entry.state.replaceAll('_', ' ');
       }
@@ -4453,6 +4657,12 @@
       function renderCollectionExecution() {
         const experiment = requestInterception();
         const repeater = repeaterState();
+        const history = collectionHistoryEntries();
+        const pendingSelection = collectionPendingRunForSelection();
+        if (pendingSelection && history.some(entry => entry.id === pendingSelection.executionId)) {
+          state.collectionSelectedHistoryId = pendingSelection.executionId;
+          state.collectionPendingRunSelection = null;
+        }
         const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
         const active = ['running', 'cancelling'].includes(repeater?.state);
         const contextReady = attached && experiment?.isolated && experiment.target_id === state.debuggerSession?.target?.id &&
@@ -4460,42 +4670,65 @@
         elements.collectionContextBadge.dataset.kind = repeater?.state === 'error' ? 'error' : contextReady ? '' : 'offline';
         elements.collectionContextBadge.textContent = active ? repeater.state === 'cancelling' ? 'Cancelling' : 'Running'
           : contextReady ? 'Isolated' : experiment?.state === 'creating' ? 'Creating' : 'Not created';
-        elements.collectionContextMessage.textContent = contextReady
-          ? 'Disposable page attached with no baseline cookies or storage.'
-          : attached ? repeater?.message ?? 'Create the shared isolated Request Lab context.'
-            : 'Attach an authorized browser target before creating a context.';
+        elements.collectionContextMessage.textContent = active
+          ? `Request #${repeater.active_execution?.collection_request_id ?? 'external'} is ${repeater.state}. Cancellation does not undo an already sent request.`
+          : contextReady ? 'Disposable page attached. Baseline cookies and storage are excluded.'
+            : attached ? repeater?.message ?? 'Create the shared isolated Request Lab context.'
+              : 'Attach an authorized browser target before creating a context.';
         elements.collectionCreateContext.disabled = !attached || Boolean(experiment?.isolated) ||
           state.experimentPending || state.debuggerActionPending;
-        elements.collectionRun.disabled = !collectionRequest() || !contextReady || active || state.experimentPending || state.apiCollectionSaving;
+        elements.collectionRun.disabled = !collectionRequest() || !contextReady || active || state.experimentPending ||
+          state.apiCollectionSaving || state.apiCollectionNeedsReload || state.collectionRunPending || Boolean(collectionPendingRunForSelection()) || state.debuggerActionPending || state.collectionFolderDirty;
+        elements.collectionRun.textContent = state.collectionRunPending ? 'Submitting…' : state.collectionDraftDirty ? 'Save & Run' : 'Run saved request';
+        elements.collectionRunHelp.textContent = collectionPendingRunForSelection() ? 'The acknowledged run is awaiting its response. Selecting another run only changes the displayed result.'
+          : state.collectionFolderDirty ? 'Save or discard folder variables before running.'
+          : !attached ? 'A browser target and isolated context are required to run.'
+            : !contextReady ? active ? 'Wait for the active run, or cancel it in Isolated context.' : 'Create an isolated context to run this request.'
+              : state.collectionDraftDirty ? 'Save & Run saves these edits locally, then sends that saved request once.'
+                : 'Run sends the saved method, URL, headers and body once. Selecting a request never sends it.';
         elements.collectionCancel.disabled = !active || state.debuggerActionPending || repeater?.state === 'cancelling';
-        const history = collectionHistoryEntries();
         if (!history.some(entry => entry.id === state.collectionSelectedHistoryId)) {
           state.collectionSelectedHistoryId = history.at(-1)?.id ?? null;
         }
         elements.collectionHistoryBadge.textContent = `${history.length} ${history.length === 1 ? 'run' : 'runs'}`;
         elements.collectionHistoryBadge.dataset.kind = history.length ? '' : 'offline';
-        if (!history.length) elements.collectionHistory.replaceChildren(
-          emptyListboxOption('experiment-empty', collectionRequest() ? 'No executions for this request.' : 'Select a saved request.')
-        );
-        else elements.collectionHistory.replaceChildren(...[...history].reverse().map(entry => {
-          const row = document.createElement('button'); row.type = 'button'; row.className = 'collection-history-row';
-          row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(entry.id === state.collectionSelectedHistoryId));
-          row.tabIndex = entry.id === state.collectionSelectedHistoryId ? 0 : -1;
-          row.append(textElement('span', '', `${entry.resolved_request.method} ${entry.resolved_request.url}`),
-            textElement('strong', '', entry.response.ok ? String(entry.response.status) : entry.state.replaceAll('_', ' ')),
-            textElement('small', '', `run ${entry.id} · ${entry.response.duration_ms} ms · ${new Date(entry.completed_at_ms).toLocaleTimeString()}`));
-          row.addEventListener('click', () => { state.collectionSelectedHistoryId = entry.id; renderCollectionExecution(); });
-          row.addEventListener('keydown', event => {
-            if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
-            event.preventDefault();
-            const rows = [...elements.collectionHistory.querySelectorAll('.collection-history-row')];
-            const index = rows.indexOf(row);
-            const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
-              : Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
-            rows[next].click(); rows[next].focus();
-          });
-          return row;
-        }));
+        const historyKey = JSON.stringify([experiment?.experiment_id, state.collectionSelectedRequestId,
+          state.collectionSelectedHistoryId, history.map(entry => entry.id)]);
+        if (elements.collectionHistory.dataset.renderKey !== historyKey) {
+          const focusedId = elements.collectionHistory.contains(document.activeElement) ? document.activeElement?.dataset.runId : null;
+          const scrollTop = elements.collectionHistory.scrollTop;
+          elements.collectionHistory.dataset.renderKey = historyKey;
+          if (!history.length) elements.collectionHistory.replaceChildren(
+            emptyListboxOption('experiment-empty', collectionRequest() ? 'No executions for this request.' : 'Select a saved request.')
+          );
+          else elements.collectionHistory.replaceChildren(...[...history].reverse().map(entry => {
+            const row = document.createElement('button'); row.type = 'button'; row.className = 'collection-history-row';
+            row.dataset.runId = String(entry.id);
+            row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(entry.id === state.collectionSelectedHistoryId));
+            row.tabIndex = entry.id === state.collectionSelectedHistoryId ? 0 : -1;
+            row.append(textElement('span', '', `${entry.resolved_request.method} ${entry.resolved_request.url}`),
+              textElement('strong', '', entry.response.ok ? String(entry.response.status) : entry.state.replaceAll('_', ' ')),
+              textElement('small', '', `Run ${entry.id} · ${entry.response.duration_ms} ms · ${new Date(entry.completed_at_ms).toLocaleTimeString()}`));
+            row.addEventListener('click', () => {
+              state.collectionHistorySelectionVersion += 1;
+              state.collectionPendingRunSelection = null;
+              state.collectionSelectedHistoryId = entry.id; renderCollectionExecution();
+              elements.collectionHistory.querySelector(`[data-run-id="${entry.id}"]`)?.focus({preventScroll: true});
+            });
+            row.addEventListener('keydown', event => {
+              if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+              event.preventDefault();
+              const rows = [...elements.collectionHistory.querySelectorAll('.collection-history-row')];
+              const index = rows.indexOf(row);
+              const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
+                : Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
+              rows[next].click();
+            });
+            return row;
+          }));
+          elements.collectionHistory.scrollTop = scrollTop;
+          if (focusedId) elements.collectionHistory.querySelector(`[data-run-id="${focusedId}"]`)?.focus({preventScroll: true});
+        }
         renderCollectionResponse(history.find(entry => entry.id === state.collectionSelectedHistoryId) ?? null);
       }
 
@@ -4511,11 +4744,13 @@
         }
         elements.collectionGeneration.textContent = `Generation ${state.apiCollection.generation}`;
         elements.collectionCount.textContent = `${state.apiCollection.requests.length} / 128`;
-        elements.collectionNewFolder.disabled = state.apiCollectionSaving || state.apiCollection.folders.length >= 32 ||
+        elements.collectionNewFolder.disabled = !state.apiCollectionLoaded || state.apiCollectionNeedsReload || state.apiCollectionSaving || state.apiCollection.folders.length >= 32 ||
           collectionFolderDepth(state.collectionSelectedFolderId) >= 4;
-        elements.collectionNewRequest.disabled = state.apiCollectionSaving || state.apiCollection.requests.length >= 128;
+        elements.collectionNewRequest.disabled = !state.apiCollectionLoaded || state.apiCollectionNeedsReload || state.apiCollectionSaving || state.apiCollection.requests.length >= 128;
         elements.collectionNotice.dataset.kind = state.apiCollectionStatus;
         elements.collectionNotice.textContent = state.apiCollectionMessage;
+        elements.collectionRetry.hidden = !['error', 'conflict'].includes(state.apiCollectionStatus);
+        elements.collectionRetry.disabled = state.apiCollectionRefreshing || state.apiCollectionSaving;
         renderCollectionTree();
         renderCollectionFolderForm();
         renderCollectionRequestForm();
@@ -4523,12 +4758,13 @@
       }
 
       async function createCollectionFolder() {
+        if (!collectionMayLeaveDraft()) return;
         const name = elements.collectionNewFolderName.value.trim();
         if (!name) { setCollectionNotice('error', 'Enter a folder name.'); return; }
         const parentId = state.collectionSelectedFolderId;
         const folder = {id: collectionNextId(state.apiCollection.folders), name, parent_id: parentId, variables: []};
         if (await replaceApiCollection([...state.apiCollection.folders, folder], state.apiCollection.requests, `Folder “${name}” created.`)) {
-          state.collectionSelectedFolderId = folder.id;
+          selectCollectionFolder(folder.id);
           state.collectionExpandedFolderIds.add(parentId);
           elements.collectionNewFolderForm.hidden = true;
           elements.collectionNewFolderName.value = '';
@@ -4537,7 +4773,7 @@
       }
 
       async function saveCollectionFolder() {
-        const folder = collectionFolder(state.collectionSelectedFolderId);
+        const folder = collectionFolder(state.collectionFolderDraftId);
         if (!folder) return;
         try {
           const replacement = {
@@ -4559,6 +4795,10 @@
         try {
           const request = collectionRequest();
           const draft = collectionRequestDraft();
+          if (state.collectionFolderDirty && draft.folder_id !== state.collectionFolderDraftId) {
+            setCollectionNotice('conflict', 'Save or discard the current folder edits before moving this request.');
+            return false;
+          }
           const requests = state.apiCollection.requests.map(candidate => candidate.id === request.id ? draft : candidate);
           if (await replaceApiCollection(state.apiCollection.folders, requests, `Request “${draft.name}” saved.`)) {
             state.collectionSelectedFolderId = draft.folder_id;
@@ -4572,7 +4812,8 @@
         return false;
       }
 
-      async function createCollectionRequest(template = null) {
+      async function createCollectionRequest(template = null, {focus = true} = {}) {
+        if (!collectionMayLeaveDraft()) return null;
         const folderId = state.collectionSelectedFolderId;
         const base = template?.name || 'New request';
         const siblingNames = new Set(state.apiCollection.requests.filter(request => request.folder_id === folderId)
@@ -4580,24 +4821,28 @@
         let name = base;
         for (let suffix = 2; siblingNames.has(name.toLocaleLowerCase()); suffix += 1) name = `${base} ${suffix}`;
         const request = {
-          id: collectionNextId(state.apiCollection.requests), folder_id: folderId, name,
+          id: collectionNextRequestId(), folder_id: folderId, name,
           url: template?.url || 'https://example.test/', method: template?.method || 'GET', headers: [], body: '',
           timeout_ms: 15000, variables: []
         };
         if (await replaceApiCollection(state.apiCollection.folders, [...state.apiCollection.requests, request], `Request “${name}” created.`)) {
+          state.collectionSelectionVersion += 1;
           state.collectionSelectedRequestId = request.id;
           state.collectionExpandedFolderIds.add(folderId);
           state.collectionRequestDraftId = null;
           state.collectionDraftDirty = false;
           renderApiCollection();
-          requestAnimationFrame(() => elements.collectionRequestName.focus({preventScroll: true}));
+          if (focus) requestAnimationFrame(() => elements.collectionRequestName.focus({preventScroll: true}));
+          return request.id;
         }
+        return null;
       }
 
       async function duplicateCollectionRequest() {
+        if (!collectionMayLeaveDraft()) return;
         const source = collectionRequest();
         if (!source) return;
-        const id = collectionNextId(state.apiCollection.requests);
+        const id = collectionNextRequestId();
         const siblingNames = new Set(state.apiCollection.requests.filter(request => request.folder_id === source.folder_id)
           .map(request => request.name.toLocaleLowerCase()));
         let name = `${source.name} copy`;
@@ -4605,12 +4850,14 @@
         const duplicate = {...source, id, name};
         delete duplicate.created_at_ms; delete duplicate.updated_at_ms;
         if (await replaceApiCollection(state.apiCollection.folders, [...state.apiCollection.requests, duplicate], `Request “${name}” duplicated.`)) {
+          state.collectionSelectionVersion += 1;
           state.collectionSelectedRequestId = id; state.collectionRequestDraftId = null; state.collectionDraftDirty = false;
           renderApiCollection();
         }
       }
 
       async function deleteCollectionRequest() {
+        if (!collectionMayLeaveDraft()) return;
         const request = collectionRequest();
         if (!request) return;
         if (state.collectionDeleteRequestId !== request.id) {
@@ -4619,6 +4866,7 @@
         }
         if (await replaceApiCollection(state.apiCollection.folders,
           state.apiCollection.requests.filter(candidate => candidate.id !== request.id), `Request “${request.name}” deleted.`)) {
+          state.collectionSelectionVersion += 1;
           state.collectionSelectedRequestId = null; state.collectionDeleteRequestId = null;
           state.collectionRequestDraftId = null; state.collectionDraftDirty = false;
           renderApiCollection();
@@ -4626,6 +4874,7 @@
       }
 
       async function deleteCollectionFolder() {
+        if (!collectionMayLeaveDraft()) return;
         const folder = collectionFolder(state.collectionSelectedFolderId);
         if (!folder || folder.id === 1) return;
         const hasContents = state.apiCollection.folders.some(candidate => candidate.parent_id === folder.id) ||
@@ -4644,26 +4893,73 @@
 
       async function runCollectionRequest() {
         const request = collectionRequest();
-        if (!request) return;
-        if (state.collectionDraftDirty && !(await saveCollectionRequest())) return;
+        if (!request || state.collectionRunPending || collectionPendingRunForSelection() || state.apiCollectionSaving || state.apiCollectionNeedsReload || state.experimentPending || state.debuggerActionPending) return;
+        if (state.collectionFolderDirty) {
+          setCollectionNotice('conflict', 'Save or discard folder variables before running a request.'); return;
+        }
+        const selection = state.collectionSelectionVersion;
+        const historySelection = state.collectionHistorySelectionVersion;
+        const targetId = state.debuggerSession?.target?.id;
+        const experimentId = requestInterception()?.experiment_id;
+        const ready = () => ['running', 'paused'].includes(state.debuggerSession?.state) && targetId === state.debuggerSession?.target?.id &&
+          experimentId === requestInterception()?.experiment_id && requestInterception()?.target_id === targetId && requestInterception()?.isolated &&
+          ['ready', 'error'].includes(requestInterception()?.state) && ['ready', 'error'].includes(repeaterState()?.state);
+        if (!ready()) { setCollectionNotice('error', 'Create an isolated context before running.'); return; }
+        state.collectionRunPending = true;
+        state.collectionPendingSubmission = {requestId: request.id, createdAt: request.created_at_ms, targetId, experimentId};
+        renderCollectionExecution();
+        let savedEdits = false;
         try {
+          if (state.collectionDraftDirty) {
+            // The button explicitly says Save & Run. Selection and plain saves never send.
+            if (!(await saveCollectionRequest())) return;
+            savedEdits = true;
+          }
           const saved = collectionRequest(request.id);
           const variables = {};
           collectionFolderLineage(saved.folder_id).forEach(folder => folder.variables.forEach(variable => {
             variables[variable.name] = variable.value;
           }));
           saved.variables.forEach(variable => { variables[variable.name] = variable.value; });
-          if (!await runExperimentAction({action: 'configure_repeater_variables', variables})) return;
-          const previousId = repeaterState()?.history.at(-1)?.id ?? 0;
-          const response = await runExperimentAction({
-            action: 'run_repeater_request', url: saved.url, method: saved.method,
+          const payload = {action: 'run_repeater_request', url: saved.url, method: saved.method,
             headers: repeaterHeaderObject(saved.headers), body: saved.body, timeout_ms: saved.timeout_ms,
-            collection_request_id: saved.id
-          });
-          const executionId = response?.repeater?.active_execution?.execution_id ?? response?.repeater?.history.at(-1)?.id;
-          if (Number.isSafeInteger(executionId) && executionId > previousId) state.collectionSelectedHistoryId = executionId;
+            collection_request_id: saved.id};
+          if (!ready()) throw new Error('The isolated context changed before the request could run.');
+          if (!await runExperimentAction({action: 'configure_repeater_variables', variables})) {
+            throw new Error(state.experimentError || 'Request variables could not be configured.');
+          }
+          if (!ready()) throw new Error('The isolated context changed before the request could run.');
+          if (state.apiCollectionNeedsReload || collectionRequest(saved.id)?.created_at_ms !== saved.created_at_ms) {
+            throw new Error('The saved request was removed or replaced before sending. No request was sent.');
+          }
+          const previousId = repeaterState()?.history.at(-1)?.id ?? 0;
+          const submittedOwners = state.collectionSubmittedOwners ??= [];
+          const submission = {...state.collectionPendingSubmission, afterExecutionId: previousId};
+          submittedOwners.push(submission);
+          if (submittedOwners.length > 25) submittedOwners.shift();
+          const response = await runExperimentAction(payload);
+          if (!response) throw new Error(state.experimentError || 'The run could not be confirmed. It was not automatically retried.');
+          const acknowledgement = response.repeater?.active_execution?.collection_request_id === saved.id
+            ? response.repeater.active_execution : response.repeater?.history.findLast(entry => entry.collection_request_id === saved.id && entry.id > previousId);
+          const executionId = acknowledgement?.execution_id ?? acknowledgement?.id;
+          if (!Number.isSafeInteger(executionId) || executionId <= previousId) {
+            throw new Error('The run acknowledgement did not identify this request. Its outcome is unknown and it was not retried.');
+          }
+          const key = JSON.stringify([targetId, experimentId, executionId]);
+          submission.executionId = executionId;
+          rememberCollectionRunOwner(key, {requestId: saved.id, createdAt: saved.created_at_ms});
+          if (selection === state.collectionSelectionVersion && historySelection === state.collectionHistorySelectionVersion &&
+              state.collectionSelectedRequestId === saved.id && collectionRequest()?.created_at_ms === saved.created_at_ms) {
+            state.collectionPendingRunSelection = {key, executionId, requestId: saved.id, createdAt: saved.created_at_ms, selection, historySelection};
+          }
+          setCollectionNotice('ready', `${savedEdits ? 'Edits saved. ' : ''}Run submitted for “${saved.name}”. Responses remain tied to that submitted request.`);
+        } catch (error) {
+          setCollectionNotice('error', `${savedEdits ? 'Edits saved. ' : ''}${error.message}`);
+        } finally {
+          state.collectionPendingSubmission = null;
+          state.collectionRunPending = false;
           renderApiCollection();
-        } catch (error) { setCollectionNotice('error', error.message); renderApiCollection(); }
+        }
       }
 
       const analystExactKeys = (value, keys) => isPlainObject(value) &&
@@ -5657,6 +5953,7 @@
         toolsElements.decoderPanel.hidden = state.toolsTab !== 'decoder';
         toolsElements.jwtPanel.hidden = state.toolsTab !== 'jwt';
         renderDecoder();
+        renderInvestigationDecoder();
         renderJwt();
       }
 
@@ -5672,6 +5969,7 @@
       }
 
       function resetDecoderChain(message = 'Decoder chain cleared. Input was preserved.') {
+        investigationDecoderOrigin = null;
         clearDecoderFieldOrigin();
         state.decoderInputSnapshot = null;
         state.decoderSteps = [];
@@ -5688,12 +5986,9 @@
         if (selected.type === 'str') {
           try { const decoded = JSON.parse(value); if (typeof decoded === 'string') value = decoded; } catch { /* Keep captured display text. */ }
         }
-        resetDecoderChain('Selected request value copied into a fresh decoder chain.');
-        toolsElements.inputEncoding.value = 'text';
-        toolsElements.input.value = value;
-        showScreen('tools', elements.requestDecoderPivot);
-        setToolsTab('decoder');
-        requestAnimationFrame(() => toolsElements.input.focus({preventScroll: true}));
+        const identity = investigationRequestIdentity(state.requests.find(request => request.id === state.selectedRequestId));
+        investigationDecode(value, {route: identity ? {kind: 'request', identity, inspectorTab: 'evidence'} : null,
+          description: `Selected request field ${selected.path}. This is the displayed field value; raw HTTP byte offsets are unavailable.`});
       }
 
       async function runJwtAction(action) {
@@ -5953,7 +6248,117 @@
       }
 
       function liveScriptIdentity(script) {
-        return JSON.stringify([script.target_id ?? state.debuggerSession?.target?.id ?? '', script.hash]);
+        return JSON.stringify([script.target_id ?? state.debuggerSession?.target?.id ?? '', script.script_id, script.hash,
+          script.execution_context_id ?? null, script.start_line ?? 0, script.start_column ?? 0, script.length ?? null]);
+      }
+
+
+      // Source ownership never comes from a URL. Captured documents reuse the
+      // Facts identity; live documents include the actual page/worker target.
+      function sourceIdentity(source) {
+        if (!source) return null;
+        if (source.source_type === 'script' || (source.artifact_id === undefined && source.script_id !== undefined)) {
+          return JSON.stringify(['script', source.script_id, liveScriptIdentity(source),
+            source.execution_context_id ?? null, source.start_line ?? 0, source.start_column ?? 0]);
+        }
+        return sourceFactsIdentity({...source, source_type: 'artifact'});
+      }
+
+      function sourceIsCurrent(source) {
+        const candidates = source.source_type === 'script' || (source.artifact_id === undefined && source.script_id !== undefined)
+          ? (state.debuggerSession?.scripts ?? []).filter(value => value.script_id === source.script_id && !state.staleScriptIds?.has(value.script_id))
+          : state.artifacts.filter(value => value.artifact_id === source.artifact_id);
+        return candidates.length === 1 && sourceIdentity(candidates[0]) === sourceIdentity(source);
+      }
+
+      function sourceReference(source) {
+        // Navigator/tab/Quick Open handlers must not keep an evicted document
+        // alive through a hidden DOM closure. Keep descriptors, never payloads.
+        return Object.fromEntries(Object.entries(source).filter(([key]) => !['content', 'deobfuscation', 'controller'].includes(key)));
+      }
+
+      function setSourceCursor(source, line, column) {
+        if (source?.source_type !== 'script' || !sourceIsCurrent(source) ||
+            sourceIdentity(selectedSource()) !== sourceIdentity(source) ||
+            state.sourceDeobfuscated || state.sourceFormatted || state.sourceWasm ||
+            !Number.isSafeInteger(line) || line < 0 || !Number.isSafeInteger(column) || column < 0) return false;
+        state.sourceCursor = {identity: sourceIdentity(source), representation: 'original', scriptId: source.script_id, line, column};
+        return true;
+      }
+
+      function sourceCursorFor(source) {
+        return !state.sourceDeobfuscated && !state.sourceFormatted && !state.sourceWasm &&
+          state.sourceCursor?.identity === sourceIdentity(source) && state.sourceCursor?.representation === 'original'
+          ? state.sourceCursor : null;
+      }
+
+      function retireSourceAnalysis(except = null) {
+        for (const request of state.deobfuscationRequests?.values() ?? []) {
+          if (request.status !== 'loading' || request.identity === except) continue;
+          request.status = 'error';
+          request.error = 'Analysis was cancelled when its source changed. Retry explicitly.';
+          request.controller?.abort();
+          delete request.controller;
+        }
+      }
+
+      function releaseSourcePreview(source) {
+        const identity = sourceIdentity(source);
+        const preview = source.source_type === 'script'
+          ? state.liveScriptContent.get(source.script_id)
+          : state.artifacts.find(value => sourceIdentity(value) === identity);
+        if (source.source_type === 'script') {
+          if (preview?.identity === liveScriptIdentity(source)) {
+            preview.controller?.abort();
+            state.liveScriptContent.delete(source.script_id);
+          }
+        } else if (preview) {
+          preview.controller?.abort();
+          for (const field of ['content', 'contentTruncated', 'loading', 'loadError', 'controller', 'previewUsed', 'contentVerified', 'contentLossy']) delete preview[field];
+        }
+        for (const cache of [state.deobfuscationRequests, state.deobfuscationCache, state.sourceFormatCache]) {
+          for (const [key, value] of cache ?? []) {
+            if (!key.startsWith(`${identity}|`)) continue;
+            value.controller?.abort(); cache.delete(key);
+          }
+        }
+        if (state.sourceEditorView?.identity === identity) state.sourceEditorView = null;
+        if (state.sourceCursor?.identity === identity) state.sourceCursor = null;
+      }
+
+      function boundSourcePreviews(protectedSource = null) {
+        const protectedIdentity = sourceIdentity(selectedSource() ?? protectedSource);
+        const entries = [
+          ...(state.artifacts ?? []).filter(source => source.kind !== 'canvas_data_url').map(source => ({source, preview: source})),
+          ...(state.debuggerSession?.scripts ?? []).map(source => ({source: {...source, source_type: 'script'}, preview: state.liveScriptContent.get(source.script_id)}))
+        ].filter(({preview}) => preview && (preview.loading || preview.content !== undefined));
+        entries.sort((a, b) => (a.preview.previewUsed ?? 0) - (b.preview.previewUsed ?? 0));
+        let characters = entries.reduce((sum, {preview}) => sum + (preview.content?.length ?? 0), 0);
+        let documents = entries.length;
+        // Metadata/open tabs remain. Reopening an evicted preview reloads it.
+        // Text is at most 16 MiB of UTF-16 units across eight preview owners.
+        for (const {source, preview} of entries) {
+          if (documents <= 8 && characters <= 8 * 1024 * 1024) break;
+          if (sourceIdentity(source) === protectedIdentity) continue;
+          characters -= preview.content?.length ?? 0; documents -= 1;
+          releaseSourcePreview(source);
+        }
+      }
+
+      function boundSourceAnalysis(cache, maximum, characterLimit, segmentLimit) {
+        let characters = 0, segments = 0, wireBytes = 0;
+        for (const value of cache.values()) {
+          wireBytes += value.sourceDocumentBytes ?? 0;
+          characters += (value.original_source?.length ?? value.sourceInput?.length ?? 0) + (value.representation?.text?.length ?? value.text?.length ?? 0);
+          segments += value.representation?.segments?.length ?? value.segments?.length ?? 0;
+        }
+        for (const [key, value] of cache) {
+          if (cache.size <= maximum && characters <= characterLimit && segments <= segmentLimit && wireBytes <= 32 * 1024 * 1024) break;
+          wireBytes -= value.sourceDocumentBytes ?? 0;
+          characters -= (value.original_source?.length ?? value.sourceInput?.length ?? 0) + (value.representation?.text?.length ?? value.text?.length ?? 0);
+          segments -= value.representation?.segments?.length ?? value.segments?.length ?? 0;
+          cache.delete(key);
+        }
       }
 
       function pruneLiveScriptContent() {
@@ -5972,6 +6377,7 @@
         return (state.debuggerSession?.scripts ?? []).filter(script => !staleScriptIds.has(script.script_id)).map(script => {
           const entry = state.liveScriptContent.get(script.script_id);
           const cached = entry?.identity === liveScriptIdentity(script) ? entry : {};
+          const analysis = state.deobfuscationCache?.get(deobfuscationKey({...script, source_type: 'script', target_id: script.target_id ?? state.debuggerSession?.target?.id, sha256: script.hash}));
           return {
             ...script,
             ...cached,
@@ -5986,7 +6392,7 @@
             byte_size: script.length,
             sha256: script.hash,
             sensitive: false,
-            deobfuscation: state.deobfuscationCache?.get(deobfuscationKey({key: `script:${script.script_id}`, target_id: state.debuggerSession?.target?.id, sha256: script.hash})) ?? null
+            deobfuscation: analysis && sourceOwnedLiveText({...script, source_type: 'script'}) === analysis.original_source ? analysis : null
           };
         });
       }
@@ -6051,13 +6457,14 @@
       }
 
       function selectedSource() {
-        if (state.selectedScriptId !== null) {
-          return liveSources().find(source => source.script_id === state.selectedScriptId) ?? null;
-        }
-        return capturedSources().find(source => source.artifact_id === state.selectedArtifactId) ?? null;
+        const matches = state.selectedScriptId !== null
+          ? liveSources().filter(source => source.script_id === state.selectedScriptId)
+          : capturedSources().filter(source => source.artifact_id === state.selectedArtifactId);
+        return matches.length === 1 ? matches[0] : null;
       }
 
       function sourceTreeRow(label, glyph, depth, source = null, meta = '') {
+        if (source) source = sourceReference(source);
         const row = document.createElement('button');
         row.type = 'button';
         row.className = 'source-tree-row';
@@ -6150,10 +6557,14 @@
       }
 
       function renderSourceTabs() {
-        const sources = [
-          ...state.openScriptIds.map(id => liveSources().find(source => source.script_id === id)),
-          ...state.openArtifactIds.map(id => capturedSources().find(source => source.artifact_id === id))
-        ].filter(Boolean);
+        const focusedIdentity = elements.sourceEditorTabs.contains(document.activeElement) ? document.activeElement.dataset.sourceIdentity : null;
+        const index = (sources, field) => {
+          const result = new Map();
+          for (const source of sources) result.set(source[field], result.has(source[field]) ? null : sourceReference(source));
+          return result;
+        };
+        const live = index(liveSources(), 'script_id'), captured = index(capturedSources(), 'artifact_id');
+        const sources = [...state.openScriptIds.map(id => live.get(id)), ...state.openArtifactIds.map(id => captured.get(id))].filter(Boolean);
         if (sources.length === 0) {
           const placeholder = document.createElement('span');
           placeholder.className = 'source-tab-placeholder';
@@ -6161,12 +6572,14 @@
           elements.sourceEditorTabs.replaceChildren(placeholder);
           return;
         }
-        const tabs = sources.map(source => {
+        const tabs = sources.map((source, index) => {
           const tab = document.createElement('button');
           tab.type = 'button';
           tab.className = 'source-editor-tab';
           tab.setAttribute('role', 'tab');
-          tab.setAttribute('aria-label', sourceDisplayName(source));
+          tab.setAttribute('aria-label', `${sourceDisplayName(source)}. Press Delete to close.`);
+          tab.setAttribute('aria-keyshortcuts', 'Delete');
+          tab.dataset.sourceIdentity = sourceIdentity(source);
           tab.title = source.url || sourceDisplayName(source);
           const selected = source.source_type === 'script'
             ? source.script_id === state.selectedScriptId
@@ -6193,9 +6606,26 @@
             if (source.source_type === 'script') selectScript(source.script_id);
             else selectArtifact(source.artifact_id);
           });
+          tab.addEventListener('keydown', event => {
+            const keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End', 'Delete'];
+            if (!keys.includes(event.key)) return;
+            event.preventDefault();
+            if (event.key === 'Delete') {
+              closeSource(source);
+              (elements.sourceEditorTabs.querySelector('[aria-selected="true"]') ?? elements.sourceTree.querySelector('button'))?.focus({preventScroll: true});
+              return;
+            }
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? sources.length - 1
+              : (index + (event.key === 'ArrowRight' ? 1 : -1) + sources.length) % sources.length;
+            const target = sources[next];
+            if (target.source_type === 'script') selectScript(target.script_id);
+            else selectArtifact(target.artifact_id);
+            elements.sourceEditorTabs.querySelector('[aria-selected="true"]')?.focus({preventScroll: true});
+          });
           return tab;
         });
         elements.sourceEditorTabs.replaceChildren(...tabs);
+        if (focusedIdentity) tabs.find(tab => tab.dataset.sourceIdentity === focusedIdentity)?.focus({preventScroll: true});
         const selectedTab = tabs.find(tab => tab.getAttribute('aria-selected') === 'true');
         if (selectedTab) {
           const tabBounds = selectedTab.getBoundingClientRect();
@@ -6278,7 +6708,7 @@
         const rows = [...elements.sourceCode.querySelectorAll('.source-line[data-line]')];
         const {matches, truncated} = findSourceOccurrences(rows.map(row => row.querySelector('.source-text').textContent), query);
         const source = selectedSource();
-        const cursor = state.sourceCursor?.scriptId === source?.script_id ? state.sourceCursor : null;
+        const cursor = sourceCursorFor(source);
         const matchingLines = new Set(matches.map(match => match.line));
         rows.forEach((row, index) => row.classList.toggle('search-match', matchingLines.has(index)));
         globalThis.CSS?.highlights?.delete('source-search-match');
@@ -6294,7 +6724,7 @@
         const transformed = state.sourceDeobfuscated || state.sourceFormatted;
         const column = match.column + (transformed ? 0 : sourceRuntimeColumn(source, match.line));
         if (source?.source_type === 'script' && !transformed) {
-          state.sourceCursor = {scriptId: source.script_id, line, column};
+          setSourceCursor(source, line, column);
           rows.forEach(candidate => candidate.classList.toggle('cursor', candidate === row));
         }
         elements.sourcePosition.textContent = `${state.sourceSearchIndex + 1} of ${matches.length}${truncated ? '+' : ''} matches · Line ${line + 1}, Column ${column + 1}`;
@@ -6351,21 +6781,13 @@
         return breakpointLinesForSource(source).get(line) ?? null;
       }
 
-      function sourceTextFingerprint(value) {
-        let hash = 2166136261;
-        for (let index = 0; index < value.length; index += 1) {
-          hash ^= value.charCodeAt(index);
-          hash = Math.imul(hash, 16777619);
-        }
-        return `${value.length}:${(hash >>> 0).toString(16)}`;
-      }
-
       function sourceFormattedView(source, value, variant) {
-        const key = `${source.key}|${source.sha256 ?? source.hash ?? ''}|${variant}|${sourceTextFingerprint(value)}`;
-        if (state.sourceFormatCache.has(key)) return state.sourceFormatCache.get(key);
-        const formatted = prettyPrintSource(source, value);
+        const key = `${sourceIdentity(source)}|${variant}`;
+        const prior = state.sourceFormatCache.get(key);
+        if (prior?.sourceInput === value) return prior;
+        const formatted = {...prettyPrintSource(source, value), sourceInput: value};
         state.sourceFormatCache.set(key, formatted);
-        while (state.sourceFormatCache.size > 8) state.sourceFormatCache.delete(state.sourceFormatCache.keys().next().value);
+        boundSourceAnalysis(state.sourceFormatCache, 2, 6 * 1024 * 1024, 500000);
         return formatted;
       }
 
@@ -6378,7 +6800,7 @@
             return {content: rows.map(row => row.byte_offset === null ? `;; ${row.text}` : `${row.kind === 'instruction' ? `func ${row.function_index}`.padEnd(11) : row.kind.padEnd(11)} ${row.text}`).join('\n'), lineMap: null, wasmRows: rows};
           }
         }
-        const original = sourceFactsPanel.original(source) ?? source.deobfuscation?.original_source ?? source.content ?? '';
+        const original = sourceFactsPanel.original(source) ?? source.content ?? '';
         const derived = state.sourceDeobfuscated && source.kind === 'javascript' ? sourceDerivedView(source) : null;
         const active = derived?.text ?? original;
         const formatResult = state.sourceFormatted
@@ -6392,12 +6814,22 @@
           formatted,
           formatError: formatResult?.error ?? null,
           content: formatted?.text ?? active,
-          lineMap: sourceRepresentationLineMap(original, active, derived, formatted)
+          lineMap: sourceRepresentationLineMap(derived ? source.deobfuscation.original_source : original, active, derived, formatted)
         };
       }
 
+      function retrySourcePreview(source) {
+        const identity = sourceIdentity(source);
+        if (sourceIdentity(selectedSource()) !== identity || !sourceIsCurrent(source)) return;
+        if (source.source_type === 'script') loadScriptContent(source);
+        else loadArtifactContent(state.artifacts.find(value => sourceIdentity(value) === identity), {retry: true});
+      }
+
       function renderSourceContent(source, view = null) {
+        const identity = sourceIdentity(source);
+        const resetEditor = () => {state.sourceEditorView = null; elements.sourceCode.replaceChildren();};
         if (!source) {
+          resetEditor();
           elements.sourceLanguage.textContent = 'Plain text';
           elements.sourceCode.hidden = true;
           elements.sourceCodeEmpty.hidden = false;
@@ -6406,6 +6838,7 @@
         }
         if (state.sourceWasm && source.kind === 'wasm' && source.source_type === 'artifact' && !state.wasmCache.has(wasmKey(source))) {
           const request = state.wasmRequests.get(wasmKey(source));
+          resetEditor();
           elements.sourceLanguage.textContent = 'WebAssembly';
           elements.sourceCode.hidden = true;
           elements.sourceCodeEmpty.hidden = false;
@@ -6413,7 +6846,7 @@
           if (request?.status === 'error') {
             const retry = textElement('button', 'secondary-button', 'Retry inspection');
             retry.type = 'button';
-            retry.addEventListener('click', () => loadWasmInspection(source, true));
+            retry.addEventListener('click', loadWasmInspection.bind(null, sourceReference(source), true));
             const panel = document.createElement('div');
             panel.className = 'wasm-inspection-error';
             panel.setAttribute('role', 'alert');
@@ -6423,26 +6856,47 @@
           return;
         }
         if (source.loading && sourceFactsPanel.original(source) === undefined) {
+          resetEditor();
           elements.sourceLanguage.textContent = 'Detecting syntax';
           elements.sourceCode.hidden = true;
           elements.sourceCodeEmpty.hidden = false;
           elements.sourceCodeEmpty.textContent = source.source_type === 'script' ? 'Loading live script source…' : 'Loading immutable artifact bytes…';
           return;
         }
-        if (source.loadError && sourceFactsPanel.original(source) === undefined) {
+        if ((source.loadError || source.content === undefined) && sourceFactsPanel.original(source) === undefined) {
+          resetEditor();
           elements.sourceLanguage.textContent = 'Unavailable';
           elements.sourceCode.hidden = true;
           elements.sourceCodeEmpty.hidden = false;
-          elements.sourceCodeEmpty.textContent = source.loadError;
+          const retry = textElement('button', 'secondary-button', 'Retry source');
+          retry.type = 'button';
+          retry.addEventListener('click', retrySourcePreview.bind(null, sourceReference(source)));
+          elements.sourceCodeEmpty.replaceChildren(document.createTextNode(source.loadError || 'This preview was released to keep Sources memory bounded. Reopen its immutable bytes.'), retry);
           return;
         }
         view ??= sourceDisplayView(source);
         const content = view.content;
+        const representation = JSON.stringify([identity, state.sourceWasm, state.sourceDeobfuscated, state.sourceFormatted,
+          state.sourceDeobfuscated ? deobfuscationKey(source) : null, state.pendingSourceLine?.identity, state.pendingSourceLine?.line]);
+        const mapping = view.wasmRows ? state.wasmCache.get(wasmKey(source)) : view.derived ?? null;
+        const formatting = view.formatted ?? null;
+        const previous = state.sourceEditorView;
+        if (previous?.representation === representation && previous.content === content && previous.mapping === mapping && previous.formatting === formatting) {
+          updateSourceDecorations();
+          return;
+        }
+        elements.sourceCodeEmpty.replaceChildren();
+        const sameOwner = previous?.identity === identity && previous.representation === representation && previous.mapping === mapping && previous.formatting === formatting;
+        const scroll = {top: elements.sourceCodeWrap.scrollTop, left: elements.sourceCodeWrap.scrollLeft};
+        const focused = elements.sourceCode.contains(document.activeElement)
+          ? {line: document.activeElement.closest('.source-line')?.dataset.line, gutter: document.activeElement.classList.contains('source-gutter')} : null;
+        state.sourceEditorView = {identity, representation, content, mapping, formatting};
         const lineMap = view.lineMap;
         const lines = content.split('\n');
         const renderedLines = lines.slice(0, 20000);
         const breakpointsByLine = breakpointLinesForSource(source);
         const tokenizer = createSourceTokenizer(view.wasmRows ? {kind: 'plain', mime_type: 'text/plain'} : source);
+        const cursor = sourceCursorFor(source);
         const nodes = renderedLines.map((line, index) => {
           const runtimeLine = sourceRuntimeLine(source, index);
           const mapped = lineMap ? lineMap[index] ?? null : null;
@@ -6452,10 +6906,10 @@
           row.dataset.line = String(runtimeLine + 1);
           const breakpoint = breakpointsByLine.get(runtimeLine) ?? null;
           if (breakpoint) row.classList.add('breakpoint');
-          if (source.source_type === 'script' && state.pendingSourceLine?.scriptId === source.script_id && state.pendingSourceLine.line === runtimeLine) {
+          if (source.source_type === 'script' && !state.sourceDeobfuscated && !state.sourceFormatted && state.pendingSourceLine?.identity === identity && state.pendingSourceLine.line === runtimeLine) {
             row.classList.add('current');
           }
-          if (source.source_type === 'script' && state.sourceCursor?.scriptId === source.script_id && state.sourceCursor.line === runtimeLine) {
+          if (source.source_type === 'script' && cursor?.line === runtimeLine) {
             row.classList.add('cursor');
           }
           const gutter = document.createElement('button');
@@ -6509,20 +6963,30 @@
         elements.sourceLanguage.textContent = view.wasmRows ? 'WASM disassembly · byte offsets' : `${sourceSyntaxLabel(tokenizer.language)}${tokenizer.truncated ? ' · color limit reached' : ''}`;
         elements.sourceCode.hidden = false;
         elements.sourceCodeEmpty.hidden = true;
-        elements.sourceCodeWrap.scrollTop = 0;
-        applySourceSearch();
-        elements.sourceCode.querySelector('.source-line.current')?.scrollIntoView({ block: 'center' });
+        if (sameOwner) {
+          elements.sourceCodeWrap.scrollTop = scroll.top;
+          elements.sourceCodeWrap.scrollLeft = scroll.left;
+          const row = [...elements.sourceCode.children].find(value => value.dataset.line === focused?.line);
+          const target = focused?.gutter ? row?.querySelector('.source-gutter') : row;
+          if (target) {target.tabIndex = -1; target.focus({preventScroll: true});}
+        } else {
+          elements.sourceCodeWrap.scrollTop = 0;
+          elements.sourceCodeWrap.scrollLeft = 0;
+          applySourceSearch();
+          elements.sourceCode.querySelector('.source-line.current')?.scrollIntoView({block: 'center'});
+        }
       }
 
       function updateSourceDecorations() {
         const source = selectedSource();
-        if (source?.source_type !== 'script' || elements.sourceCode.hidden) return;
+        if (source?.source_type !== 'script' || elements.sourceCode.hidden || state.sourceDeobfuscated || state.sourceFormatted || state.sourceWasm) return;
         const breakpointsByLine = breakpointLinesForSource(source);
+        const identity = sourceIdentity(source);
         const enabled = source.target_type !== 'worker' && !state.sourceDeobfuscated && !state.sourceFormatted && ['running', 'paused'].includes(state.debuggerSession?.state) && !memoryOriginTraceActive();
         elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row => {
           const runtimeLine = Number(row.dataset.line) - 1;
           const breakpoint = breakpointsByLine.get(runtimeLine) ?? null;
-          const current = state.pendingSourceLine?.scriptId === source.script_id && state.pendingSourceLine.line === runtimeLine;
+          const current = !state.sourceDeobfuscated && !state.sourceFormatted && state.pendingSourceLine?.identity === identity && state.pendingSourceLine.line === runtimeLine;
           row.classList.toggle('breakpoint', Boolean(breakpoint));
           row.classList.toggle('current', current);
           const gutter = row.querySelector('.source-gutter');
@@ -6536,6 +7000,7 @@
       function renderSources() {
         const source = selectedSource();
         sourceFactsPanel.sync(source);
+        syncInvestigationRange(source);
         const view = source?.content !== undefined ? sourceDisplayView(source) : null;
         document.querySelectorAll('[data-source-collection]').forEach(tab => {
           const selected = tab.dataset.sourceCollection === state.sourceCollection;
@@ -6568,7 +7033,7 @@
         elements.sourceHookPivot.disabled = !['running', 'paused'].includes(state.debuggerSession?.state);
         elements.sourceHookPivot.setAttribute('aria-expanded', String(state.sourceHooksOpen));
         renderSourceContent(source, view);
-        if ((source?.source_type === 'script' || source?.source_type === 'artifact') && source.kind === 'javascript') loadDeobfuscation(source);
+        if (!investigationPassiveSource && state.sourceDeobfuscated && source?.kind === 'javascript' && !document.querySelector('#screen-sources').hidden) loadDeobfuscation(source);
         renderDeobfuscationReport(source);
       }
 
@@ -6579,10 +7044,13 @@
           return report ? `${report.status === 'partial' ? 'Partial' : 'Static'} inspection · original byte offsets` : request?.status === 'error' ? 'Inspection failed · original bytes preserved' : 'Inspection pending';
         }
         view ??= source?.content !== undefined ? sourceDisplayView(source) : null;
-        const original = source?.source_type === 'script' ? 'Live runtime source' : 'Original evidence';
+        const original = source?.source_type === 'script' ? 'Live runtime source'
+          : sourceFactsPanel.original(source) !== undefined ? 'Verified original evidence'
+          : `Original evidence preview${source?.contentLossy ? ' · lossy UTF-8 display' : ''}${source?.contentTruncated ? ' · truncated' : ''}`;
         if (view?.formatError) return `${original} · ${view.formatError}`;
         if (state.sourceDeobfuscated && sourceDerivedView(source)) {
-          return `${state.sourceFormatted ? 'Pretty printed derived' : 'Derived'} · mapped to original source`;
+          const status = state.deobfuscationRequests.get(deobfuscationKey(source))?.status;
+          return `${state.sourceFormatted ? 'Pretty printed derived' : 'Derived'} · mapped to original source${status === 'error' ? ' · last successful analysis' : status === 'loading' ? ' · reanalyzing' : ''}`;
         }
         if (!state.sourceDeobfuscated || !source) {
           return state.sourceFormatted && source ? `Pretty printed ${original.toLowerCase()} · mapped to original source` : original;
@@ -6597,10 +7065,11 @@
       }
 
       function revealOriginalLine(source, line, column) {
+        if (sourceIdentity(selectedSource()) !== sourceIdentity(source)) return;
         state.sourceDeobfuscated = false;
         state.sourceFormatted = false;
         if (source.source_type === 'script') {
-          state.sourceCursor = {scriptId: source.script_id, line: sourceRuntimeLine(source, line), column: (column ?? 0) + sourceRuntimeColumn(source, line)};
+          setSourceCursor(source, sourceRuntimeLine(source, line), (column ?? 0) + sourceRuntimeColumn(source, line));
         }
         renderSources();
         const runtimeLine = sourceRuntimeLine(source, line);
@@ -6609,6 +7078,8 @@
           row.tabIndex = -1;
           row.focus({preventScroll: true});
           row.scrollIntoView({block: 'center'});
+        } else {
+          elements.sourcePosition.textContent = `Original line ${runtimeLine + 1} is outside the displayed preview. Facts can read verified original-byte ranges.`;
         }
       }
 
@@ -6628,6 +7099,7 @@
         const highlight = sourceOccurrenceRange(text, {column: position.column,
           length: Math.min(position.length, text.textContent.length - position.column)});
         if (highlight && globalThis.Highlight && globalThis.CSS?.highlights) CSS.highlights.set('source-search-match', new Highlight(highlight));
+        rememberInvestigationRange(source, range);
         elements.sourcePosition.textContent = `Original UTF-8 bytes [${range.start}, ${range.end}) · Line ${position.line + 1}, Column ${position.column + 1}${position.multiline ? ' · range continues on following lines' : ''}`;
         if (highlight) {
           const bounds = highlight.getBoundingClientRect();
@@ -6637,39 +7109,126 @@
       }
 
       function deobfuscationKey(source) {
-        return `${source.key}|${source.target_id ?? ''}|${source.sha256 ?? ''}|intrinsics:${Boolean(state.deobfuscationAssumeIntrinsics)}`;
+        return `${sourceIdentity(source)}|intrinsics:${Boolean(state.deobfuscationAssumeIntrinsics)}`;
+      }
+
+      function sourceOwnedLiveText(source) {
+        if (source?.source_type !== 'script' || !sourceIsCurrent(source)) return null;
+        const entry = state.liveScriptContent.get(source.script_id);
+        return entry?.identity === liveScriptIdentity(source) && !entry.loading && !entry.loadError &&
+          entry.contentTruncated === false && typeof entry.content === 'string' && entry.sourceTextLength === entry.content.length
+          ? entry.content : null;
+      }
+
+      async function validateSourceAnalysis(payload, source, assumeIntrinsics, liveOriginal = null) {
+        const original = payload?.original_source;
+        const representation = payload?.representation;
+        const expectedAssumptions = assumeIntrinsics ? ['standard-intrinsics'] : [];
+        if (payload?.schema !== 'deobfuscation-analysis-v1' || payload.mode !== 'derived' || payload.source_truncated !== false ||
+            payload.artifact_id !== (source.source_type === 'artifact' ? source.artifact_id : null) ||
+            payload.script_id !== (source.source_type === 'script' ? source.script_id : null) ||
+            typeof original !== 'string' || original.length > 4 * 1024 * 1024 ||
+            !/^[0-9a-f]{64}$/.test(payload.analysis?.source?.sha256) ||
+            (source.source_type === 'artifact' && (!/^[0-9a-f]{64}$/.test(source.sha256) || payload.analysis.source.sha256 !== source.sha256)) ||
+            (source.source_type === 'script' && (liveOriginal === null || original !== liveOriginal)) ||
+            JSON.stringify(payload.analysis?.assumptions) !== JSON.stringify(expectedAssumptions) ||
+            typeof representation?.text !== 'string' || representation.text.length > 4 * 1024 * 1024 ||
+            !Array.isArray(representation.segments) || representation.segments.length > 250000 ||
+            !['utf-8-byte', 'unicode-code-point', undefined].includes(representation.offset_unit)) {
+          throw new Error('The analyzer response does not match the submitted source and representation.');
+        }
+        const boundedText = (value, maximum = 4096) => typeof value === 'string' && value.length <= maximum;
+        const rows = (value, check, maximum = 64) => value === undefined || (Array.isArray(value) && value.length <= maximum && value.every(check));
+        const analysis = payload.analysis;
+        if (!rows(analysis.omissions, value => boundedText(value)) ||
+            !rows(analysis.classification?.evidence, value => value && boundedText(value.id, 128) && boundedText(value.detail)) ||
+            (analysis.classification?.label !== undefined && !boundedText(analysis.classification.label, 128)) ||
+            (analysis.source.lines !== undefined && (!Number.isSafeInteger(analysis.source.lines) || analysis.source.lines < 0 || analysis.source.lines > 4194305)) ||
+            (analysis.representation?.status !== undefined && !boundedText(analysis.representation.status, 128)) ||
+            (analysis.representation?.segment_count !== undefined && analysis.representation.segment_count !== representation.segments.length) ||
+            !rows(analysis.representation?.transformations, value => value && boundedText(value.id, 128) && boundedText(value.detail) && Number.isSafeInteger(value.count) && value.count >= 0) ||
+            !rows(analysis.string_tables, value => value && boundedText(value.kind, 128) && Number.isSafeInteger(value.offset) && value.offset >= 0 &&
+              Number.isSafeInteger(value.entry_count) && value.entry_count >= 0 && rows(value.encodings, entry => boundedText(entry, 128)) &&
+              (value.decoded_preview === undefined || boundedText(value.decoded_preview)))) {
+          throw new Error('The analyzer returned malformed or oversized report metadata.');
+        }
+        const bytes = new TextEncoder().encode(original);
+        if (new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes) !== original ||
+            bytes.length > 4 * 1024 * 1024 || payload.analysis.source.byte_size !== bytes.length ||
+            (source.source_type === 'artifact' && bytes.length !== source.byte_size)) throw new Error('The analyzer source byte size changed.');
+        if (!globalThis.crypto?.subtle) throw new Error('SHA-256 verification is unavailable in this workspace.');
+        const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), byte => byte.toString(16).padStart(2, '0')).join('');
+        if (hash !== payload.analysis.source.sha256 || (source.source_type === 'artifact' && hash !== source.sha256)) {
+          throw new Error('The analyzer original bytes do not match their UTF-8 SHA-256.');
+        }
+        const segments = sourceSegmentsUTF16(original, representation.text, representation.segments, representation.offset_unit);
+        let end = 0, originalEnd = 0;
+        for (const segment of segments) {
+          if (!['verbatim', 'synthetic', 'replacement'].includes(segment.kind) ||
+              ![segment.original_start, segment.original_end, segment.derived_start, segment.derived_end].every(Number.isSafeInteger) ||
+              segment.derived_start !== end || segment.derived_end <= end || segment.derived_end > representation.text.length ||
+              segment.original_start < originalEnd || segment.original_end < segment.original_start || segment.original_end > original.length ||
+              (segment.kind === 'synthetic' && segment.original_start !== segment.original_end) ||
+              (segment.kind === 'verbatim' && original.slice(segment.original_start, segment.original_end) !== representation.text.slice(segment.derived_start, segment.derived_end))) {
+            throw new Error('The analyzer returned an invalid original-source map.');
+          }
+          end = segment.derived_end; originalEnd = segment.original_end;
+        }
+        if (end !== representation.text.length) throw new Error('The analyzer source map is incomplete.');
       }
 
       async function loadDeobfuscation(source, {retry = false} = {}) {
         const sourceId = source?.source_type === 'artifact' ? source.artifact_id : source?.script_id;
         const sourceParam = source?.source_type === 'artifact' ? 'artifact_id' : 'script_id';
-        if (!sourceId) return;
+        if (!sourceId || !sourceIsCurrent(source)) return;
         const key = deobfuscationKey(source);
+        const identity = sourceIdentity(source);
+        const liveOwner = source.source_type === 'script' ? state.liveScriptContent.get(source.script_id) : null;
+        const liveOriginal = source.source_type === 'script' ? sourceOwnedLiveText(source) : null;
+        if (source.source_type === 'script' && state.deobfuscationCache.get(key)?.original_source !== liveOriginal) state.deobfuscationCache.delete(key);
+        const assumeIntrinsics = Boolean(state.deobfuscationAssumeIntrinsics);
         const previous = state.deobfuscationRequests.get(key);
         if (previous?.status === 'loading' || (!retry && (previous?.status === 'error' || state.deobfuscationCache.has(key)))) return;
-        const request = {status: 'loading', error: null};
+        retireSourceAnalysis();
+        const controller = new AbortController();
+        const request = {status: 'loading', error: null, identity, controller};
         state.deobfuscationRequests.set(key, request);
-        for (const [oldKey, oldRequest] of state.deobfuscationRequests) {
-          if (state.deobfuscationRequests.size <= 128) break;
-          if (oldKey !== key && oldRequest.status !== 'loading') state.deobfuscationRequests.delete(oldKey);
-        }
+        while (state.deobfuscationRequests.size > 128) state.deobfuscationRequests.delete(state.deobfuscationRequests.keys().next().value);
+        const current = () => state.deobfuscationRequests.get(key) === request && request.status === 'loading' &&
+          !controller.signal.aborted && sourceIsCurrent(source) && deobfuscationKey(source) === key &&
+          (source.source_type !== 'script' || state.liveScriptContent.get(source.script_id) === liveOwner);
+        const timeout = setTimeout(() => {
+          if (state.deobfuscationRequests.get(key) !== request || request.status !== 'loading') return;
+          request.status = 'error'; request.error = 'Analysis timed out. Retry explicitly; original bytes are preserved.';
+          controller.abort();
+          if (sourceIdentity(selectedSource()) === identity) renderSources();
+        }, 10000);
         try {
-          const response = await fetch(`/api/deobfuscation?${sourceParam}=${encodeURIComponent(sourceId)}&mode=derived&assume_intrinsics=${state.deobfuscationAssumeIntrinsics ? 1 : 0}`, {cache: 'no-store'});
-          const payload = await response.json();
+          if (source.source_type === 'script' && liveOriginal === null) throw new Error('Load the complete owned live source before analyzing it; truncated previews cannot establish exact text.');
+          const response = await fetch(`/api/deobfuscation?${sourceParam}=${encodeURIComponent(sourceId)}&mode=derived&assume_intrinsics=${assumeIntrinsics ? 1 : 0}`, {cache: 'no-store', signal: controller.signal});
+          const bytes = await sourceFactsReadBytes(response, 33 * 1024 * 1024, controller.signal);
+          if (!current()) return;
+          if (bytes.length > 32 * 1024 * 1024) throw new Error('The analyzer response exceeds the retained-document budget.');
+          const payload = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
           if (!response.ok) throw new Error(payload.error || `Deobfuscation analysis returned ${response.status}`);
-          if (payload.schema !== 'deobfuscation-analysis-v1' || !payload.analysis || !payload.representation || typeof payload.original_source !== 'string') {
-            throw new Error('The analyzer returned an invalid document.');
-          }
+          await validateSourceAnalysis(payload, source, assumeIntrinsics, liveOriginal);
+          if (!current()) return;
+          payload.sourceDocumentBytes = bytes.length;
           state.deobfuscationCache.delete(key);
           state.deobfuscationCache.set(key, payload);
-          // Each document may contain several MiB. Retain at most eight sources.
-          while (state.deobfuscationCache.size > 8) state.deobfuscationCache.delete(state.deobfuscationCache.keys().next().value);
+          boundSourceAnalysis(state.deobfuscationCache, 8, 8 * 1024 * 1024, 250000);
           request.status = 'ready';
         } catch (error) {
+          if (!current()) return;
           request.status = 'error';
-          request.error = error.message;
+          request.error = `Analysis unavailable: ${String(error.message).slice(0, 1024)} Original bytes are preserved.`;
         } finally {
-          if (selectedSource()?.key === source.key) renderSources();
+          clearTimeout(timeout);
+          delete request.controller;
+          if (state.deobfuscationRequests.get(key) === request && request.status === 'loading') {
+            request.status = 'error'; request.error = 'The source changed before analysis completed. Retry explicitly.';
+          }
+          if (sourceIdentity(selectedSource()) === identity) renderSources();
         }
       }
 
@@ -6697,8 +7256,8 @@
         if (request?.status === 'error') {
           const retry = textElement('button', 'secondary-button', 'Retry analysis');
           retry.type = 'button';
-          retry.addEventListener('click', () => loadDeobfuscation(target, {retry: true}));
-          container.replaceChildren(document.createTextNode(request.error), retry);
+          retry.addEventListener('click', loadDeobfuscation.bind(null, sourceReference(target), {retry: true}));
+          container.replaceChildren(document.createTextNode(`${request.error}${target.deobfuscation ? ' The last successful derived view remains available.' : ''}`), retry);
           return;
         }
         const payload = target.deobfuscation;
@@ -6710,6 +7269,7 @@
         const classification = analysis.classification ?? {};
         const representation = analysis.representation ?? {};
         const rows = [
+          ...(request?.status === 'loading' ? [deobfuscationRow('Status', 'Reanalyzing; the last successful report remains visible.')] : []),
           deobfuscationRow('Classification', `${classification.label ?? 'unclassified'}${classification.confidence == null ? '' : ` · confidence ${classification.confidence}`}`),
           deobfuscationRow('Representation', `${representation.status ?? 'unknown'} · ${representation.segment_count ?? 0} mapped segments${representation.truncated ? ' · truncated' : ''}`),
           deobfuscationRow('Source', `${analysis.source?.lines ?? 0} lines · ${formatByteSize(analysis.source?.byte_size ?? 0)}`),
@@ -6740,25 +7300,55 @@
         container.replaceChildren(deobfuscationRow('Engine', payload.engine === 'rust-oxc' ? 'Static AST deobfuscation (Rust)' : 'Classification and formatting'), ...rows, ...assumptions, evidence, ...(analysis.omissions?.length ? [] : [tables]), transformations, ...omissions);
       }
 
-      async function loadArtifactContent(artifact) {
-        if (artifact.content !== undefined || artifact.loading) return;
-        artifact.loading = true;
-        artifact.loadError = null;
+      async function loadArtifactContent(artifact, {retry = false} = {}) {
+        if (!sourceIsCurrent(artifact) || artifact.content !== undefined || artifact.loading || (artifact.loadError && !retry)) return;
+        const identity = sourceIdentity(artifact);
+        const controller = new AbortController();
+        artifact.loading = true; artifact.loadError = null; artifact.controller = controller;
+        artifact.previewUsed = state.sourcePreviewSequence = (state.sourcePreviewSequence ?? 0) + 1;
+        boundSourcePreviews(artifact);
+        const current = () => sourceIsCurrent(artifact) && state.artifacts.includes(artifact) && artifact.controller === controller && !controller.signal.aborted;
+        const timeout = setTimeout(() => {
+          if (artifact.controller !== controller) return;
+          artifact.loading = false; artifact.loadError = 'Artifact loading timed out. Retry explicitly.';
+          delete artifact.controller; controller.abort();
+          if (sourceIdentity(selectedSource()) === identity) renderSources();
+        }, 10000);
         renderSources();
         try {
-          const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?limit=2097152`, { cache: 'no-store' });
+          const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?limit=2097152`, {cache: 'no-store', signal: controller.signal});
           if (!response.ok) throw new Error(`Artifact store returned ${response.status}`);
-          const buffer = await response.arrayBuffer();
+          const buffer = await sourceFactsReadBytes(response, 2097152, controller.signal);
+          if (!current()) return;
+          if (buffer.length !== Math.min(artifact.byte_size, 2097152)) throw new Error('The artifact preview byte size changed.');
+          const total = response.headers.get('X-Artifact-Total-Bytes');
+          if (total !== null && Number(total) !== artifact.byte_size) throw new Error('The artifact total byte size changed.');
+          if (artifact.byte_size <= 2097152 && globalThis.crypto?.subtle) {
+            const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', buffer)), byte => byte.toString(16).padStart(2, '0')).join('');
+            if (!current()) return;
+            if (hash !== artifact.sha256) throw new Error('The artifact bytes do not match the selected SHA-256.');
+            artifact.contentVerified = true;
+          }
+          if (artifact.kind !== 'wasm') {
+            try {new TextDecoder('utf-8', {fatal: true}).decode(buffer); artifact.contentLossy = false;}
+            catch {artifact.contentLossy = true;}
+          }
+          // Hex is only a view: do not expand 2 MiB to 131,072 rows while the
+          // editor can display only 20,000. The immutable blob is untouched.
           artifact.content = artifact.kind === 'wasm'
-            ? formatWasmHex(buffer)
-            : new TextDecoder('utf-8', { fatal: false }).decode(buffer);
-          artifact.contentTruncated = response.headers.get('X-Artifact-Truncated') === '1';
-          if (artifact.contentTruncated) artifact.content += '\n\n[Viewer preview limited to the first 2 MB]';
+            ? formatWasmHex(buffer.subarray(0, 20000 * 16))
+            : new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(buffer);
+          artifact.contentTruncated = artifact.byte_size > buffer.length || (artifact.kind === 'wasm' && buffer.length > 20000 * 16);
+          if (artifact.contentTruncated) artifact.content += artifact.kind === 'wasm'
+            ? '\n\n[Hex preview limited to the first 20,000 rows; original bytes are unchanged]'
+            : '\n\n[Viewer preview limited to the first 2 MiB; original bytes are unchanged]';
+          boundSourcePreviews();
         } catch (error) {
-          artifact.loadError = `Artifact bytes are unavailable: ${error.message}`;
+          if (current()) artifact.loadError = `Artifact bytes are unavailable: ${String(error.message).slice(0, 1024)}`;
         } finally {
-          artifact.loading = false;
-          renderSources();
+          clearTimeout(timeout);
+          if (artifact.controller === controller) {artifact.loading = false; delete artifact.controller;}
+          if (sourceIdentity(selectedSource()) === identity) renderSources();
         }
       }
 
@@ -6795,9 +7385,30 @@
         }
       }
 
-      function selectArtifact(artifactId, line = null) {
-        const artifact = state.artifacts.find(candidate => candidate.artifact_id === artifactId);
-        if (!artifact) return;
+      // Same exact tuple as investigation-navigation v1. Kept here so a
+      // standalone Evidence pivot can verify the receiving selection boundary.
+      function sourceArtifactIdentityMatches(source, identity) {
+        return identity?.type === 'captured-artifact' && identity.session !== '0' && identity.artifact !== '0' && identity.session === source?.session_id &&
+          identity.artifact === source?.artifact_id && identity.sha256 === source?.sha256 &&
+          /^[0-9a-f]{64}$/.test(identity.sha256) && Number.isSafeInteger(identity.bytes) &&
+          identity.bytes >= 0 && identity.bytes === source?.byte_size;
+      }
+
+      function selectArtifact(artifactId, line = null, {identity: expectedIdentity = null, passive = false} = {}) {
+        const matches = state.artifacts.filter(candidate => candidate.artifact_id === artifactId);
+        if (matches.length !== 1 || (expectedIdentity && !sourceArtifactIdentityMatches(matches[0], expectedIdentity))) {
+          state.sourceNoticeKind = 'warning';
+          state.sourceNotice = 'This exact artifact is missing, changed or ambiguous across retained sessions. No source was opened.';
+          renderSourceHealth();
+          return false;
+        }
+        const artifact = matches[0];
+        investigationPassiveSource = passive;
+        state.sourceNotice = null;
+        const identity = sourceIdentity(artifact);
+        retireSourceAnalysis(identity);
+        investigationBeforeSelection();
+        sourceFactsPanel.cancel();
         state.sourceCollection = 'captured';
         state.selectedScriptId = null;
         state.selectedArtifactId = artifactId;
@@ -6808,20 +7419,32 @@
         if (!state.openArtifactIds.includes(artifactId)) state.openArtifactIds.push(artifactId);
         renderSources();
         loadArtifactContent(artifact).then(() => {
-          if (line !== null && state.sourceCollection === 'captured' && state.selectedArtifactId === artifactId) {
+          if (line !== null && state.sourceCollection === 'captured' && state.selectedArtifactId === artifactId && sourceIdentity(selectedSource()) === identity) {
             const source = selectedSource();
             if (source?.content !== undefined) revealOriginalLine(source, line, 0);
           }
         });
+        return true;
       }
 
       function selectScript(scriptId, line = null) {
-        const source = liveSources().find(candidate => candidate.script_id === scriptId);
-        if (!source) return;
+        const candidates = liveSources().filter(candidate => candidate.script_id === scriptId);
+        if (candidates.length !== 1) {
+          state.sourceNoticeKind = 'warning';
+          state.sourceNotice = 'This live script ID is missing or ambiguous. Refresh the Page catalog before opening it.';
+          renderSourceHealth();
+          return false;
+        }
+        const source = candidates[0];
+        investigationPassiveSource = false;
+        state.sourceNotice = null;
+        retireSourceAnalysis(sourceIdentity(source));
+        investigationBeforeSelection();
+        sourceFactsPanel.cancel();
         state.sourceCollection = 'page';
         state.selectedScriptId = scriptId;
         state.selectedArtifactId = null;
-        state.pendingSourceLine = line === null ? null : { scriptId, line };
+        state.pendingSourceLine = line === null ? null : { identity: sourceIdentity(source), scriptId, line };
         state.sourceDeobfuscated = false;
         state.sourceFormatted = false;
         state.sourceWasm = false;
@@ -6832,6 +7455,8 @@
       }
 
       function closeSource(source) {
+        if (!sourceIsCurrent(source)) return;
+        releaseSourcePreview(source);
         if (source.source_type === 'script') {
           const closedIndex = state.openScriptIds.indexOf(source.script_id);
           state.openScriptIds = state.openScriptIds.filter(id => id !== source.script_id);
@@ -6854,29 +7479,39 @@
         state.sourceFormatted = false;
         state.sourceWasm = false;
         renderSources();
+        const selected = selectedSource();
+        if (selected?.source_type === 'script') loadScriptContent(selected);
+        else if (selected) loadArtifactContent(state.artifacts.find(value => sourceIdentity(value) === sourceIdentity(selected)));
       }
 
       async function loadScriptContent(source) {
         const identity = liveScriptIdentity(source);
-        const attached = () => !state.staleScriptIds.has(source.script_id) &&
-          (state.debuggerSession?.scripts ?? []).some(script =>
-            script.script_id === source.script_id && liveScriptIdentity(script) === identity);
+        const attached = () => sourceIsCurrent({...source, source_type: 'script'});
         if (!attached()) return;
         const existing = state.liveScriptContent.get(source.script_id);
         if (existing?.identity === identity && (existing.content !== undefined || existing.loading)) return;
         existing?.controller?.abort();
         const controller = new AbortController();
-        const pending = { identity, loading: true, loadError: null, controller };
+        const previewUsed = state.sourcePreviewSequence = (state.sourcePreviewSequence ?? 0) + 1;
+        const pending = { identity, loading: true, loadError: null, controller, previewUsed };
         state.liveScriptContent.set(source.script_id, pending);
+        boundSourcePreviews(source);
         // Longer than the backend's CDP deadline, but bound stalled HTTP/body reads too.
-        const timeout = setTimeout(() => controller.abort(), 15000);
+        const timeout = setTimeout(() => {
+          if (state.liveScriptContent.get(source.script_id) !== pending) return;
+          state.liveScriptContent.set(source.script_id, {identity, loading: false,
+            loadError: 'Live source is unavailable: Loading timed out after 15 seconds. Retry source explicitly.'});
+          controller.abort();
+          if (sourceIdentity(selectedSource()) === sourceIdentity(source)) renderSources();
+        }, 15000);
         const stillCurrent = () => state.liveScriptContent.get(source.script_id) === pending && attached();
         try {
           renderSources();
           const response = await fetch(`/api/debugger/source?script_id=${encodeURIComponent(source.script_id)}`, {
             cache: 'no-store', signal: controller.signal
           });
-          const body = await response.json();
+          const bytes = await sourceFactsReadBytes(response, 13 * 1024 * 1024, controller.signal);
+          const body = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
           if (!stillCurrent()) return;
           const responseError = body?.error || `Debugger returned ${response.status}`;
           if (!response.ok) {
@@ -6888,17 +7523,22 @@
             throw new Error(responseError);
           }
           if (!isPlainObject(body) || body.protocol_version !== 1 || body.script_id !== source.script_id ||
-              typeof body.source !== 'string' || typeof body.truncated !== 'boolean') throw new TypeError('Malformed debugger source response');
+              typeof body.source !== 'string' || body.source.length > 2097152 || typeof body.truncated !== 'boolean') throw new TypeError('Malformed debugger source response');
+          const sourceBytes = new TextEncoder().encode(body.source);
+          if (sourceBytes.length > 2097152) throw new TypeError('The live source exceeded its byte limit');
+          // CDP's hash is an opaque owner/version token, not a UTF-8 digest.
+          // Deob validates against this exact complete text and its own SHA-256.
           const content = source.kind === 'wasm'
             ? body.source
             : body.source + (body.truncated ? '\n\n[Live source preview limited to the first 2 MB]' : '');
-          state.liveScriptContent.set(source.script_id, { identity, loading: false, loadError: null, content,
+          state.liveScriptContent.set(source.script_id, { identity, loading: false, loadError: null, content, previewUsed,
             sourceTextLength: body.source.length, contentTruncated: body.truncated });
+          boundSourcePreviews();
         } catch (error) {
           if (!stillCurrent()) return;
-          const message = error.name === 'AbortError'
+          const message = controller.signal.aborted || error.name === 'AbortError'
             ? 'Loading timed out after 15 seconds. Select the source to retry.' : error.message;
-          state.liveScriptContent.set(source.script_id, { identity, loading: false, loadError: `Live source is unavailable: ${message}` });
+          state.liveScriptContent.set(source.script_id, { identity, loading: false, loadError: `Live source is unavailable: ${String(message).slice(0, 1024)}` });
           state.sourceNoticeKind = 'warning';
           state.sourceNotice = `Live source ${sourceDisplayName(source)} could not be loaded. The last debugger catalog remains visible.`;
         } finally {
@@ -6917,7 +7557,7 @@
 
       function renderQuickOpen() {
         const needle = elements.quickOpenInput.value.trim().toLowerCase();
-        const matches = [...liveSources(), ...capturedSources()].filter(source =>
+        const matches = [...liveSources(), ...capturedSources()].map(sourceReference).filter(source =>
           !needle || `${sourceDisplayName(source)} ${source.url}`.toLowerCase().includes(needle)
         );
         const rows = matches.map(source => {
@@ -8249,6 +8889,7 @@
           state.artifactCatalogSignature = catalogSignature;
           if (body.artifacts.length === 0) {
             if (state.sessionMode === 'live') {
+              for (const artifact of state.artifacts) releaseSourcePreview(artifact);
               state.artifacts = [];
               state.openArtifactIds = [];
               state.selectedArtifactId = null;
@@ -8258,18 +8899,14 @@
             }
             return;
           }
-          const existing = new Map(state.artifacts.map(artifact => [artifact.artifact_id, artifact]));
+          const existing = new Map(state.artifacts.map(artifact => [sourceIdentity(artifact), artifact]));
+          const incoming = new Set(body.artifacts.map(sourceIdentity));
+          for (const artifact of state.artifacts) if (!incoming.has(sourceIdentity(artifact))) releaseSourcePreview(artifact);
           state.artifacts = body.artifacts.map(artifact => {
-            const prior = existing.get(artifact.artifact_id);
-            const cached = prior?.sha256 === artifact.sha256 ? prior : null;
-            return {
-              ...artifact,
-              origin: state.sessionMode === 'live' ? 'live' : 'demo',
-              content: cached?.content,
-              loading: cached?.loading,
-              loadError: cached?.loadError,
-              contentTruncated: cached?.contentTruncated
-            };
+            const prior = existing.get(sourceIdentity(artifact));
+            // Preserve the pending operation's owner, never clone loading state.
+            const descriptor = Object.fromEntries(sourceFactsFields.filter(field => Object.hasOwn(artifact, field)).map(field => [field, artifact[field]]));
+            return Object.assign(prior ?? {}, descriptor, {origin: state.sessionMode === 'live' ? 'live' : 'demo'});
           });
           await Promise.all(state.artifacts
             .filter(artifact => artifact.kind === 'canvas_data_url')
@@ -8304,6 +8941,12 @@
 
       function showScreen(name, trigger = null) {
         const screenName = name === 'backtraces' ? 'backtrace' : name;
+        investigationBeforeScreen(screenName);
+        if (screenName !== 'backtrace' && state.originTraceStatus === 'loading') {
+          state.originTraceController?.abort();
+          state.originTraceGeneration += 1;
+          state.originTraceStatus = state.originTrace ? 'ready' : 'idle';
+        }
         evidenceWorkspace.setVisible(screenName === 'evidence');
         if (screenName !== 'sources') sourceFactsPanel.cancel();
         if (screenName !== 'sources' && state.sourceHooksOpen) closeSourceHooks(false);
@@ -8349,7 +8992,9 @@
           renderVmLab();
         }
         if (!trigger?.classList.contains('nav-button')) {
+          const revision = investigationRevision;
           requestAnimationFrame(() => {
+            if (revision !== investigationRevision || investigationScreen() !== screenName) return;
             if (screenName === 'traffic') {
               const selectedRow = [...elements.requestRows.querySelectorAll('.request-row')]
                 .find(row => row.dataset.requestId === state.selectedRequestId);
@@ -8507,6 +9152,7 @@
       }
 
       document.querySelectorAll('[data-screen]').forEach(button => button.addEventListener('click', async () => {
+        if (button.classList.contains('back-button') && investigationNavigation?.back()) return;
         showScreen(button.dataset.screen, button);
         if (button.dataset.screen === 'backtrace' && originTraceSelection()) await refreshOriginTrace();
         if (button.dataset.screen === 'signals') await refreshRequestSignalProfile();
@@ -8699,9 +9345,9 @@
           candidate.setAttribute('aria-pressed', String(candidate.dataset.filter === 'all')));
         renderRequests();
       });
-      elements.traceButton.addEventListener('click', async () => {
-        showScreen('backtrace', elements.traceButton);
-        await refreshOriginTrace();
+      elements.traceButton.addEventListener('click', () => {
+        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        openInvestigation({kind: 'trace', identity: investigationRequestIdentity(request), relation: 'Captured request → recorded trace. Shared-identifier relationships and missing predecessors remain explicit.'});
       });
       elements.requestRepeaterPivot.addEventListener('click', () => {
         state.experimentMode = 'repeater';
@@ -8711,30 +9357,7 @@
         showScreen('experiments', elements.requestRepeaterPivot);
         requestAnimationFrame(() => elements.repeaterRequestUrl.focus({preventScroll: true}));
       });
-      elements.requestCollectionPivot.addEventListener('click', async () => {
-        await refreshApiCollection();
-        const selected = state.requests.find(request => request.id === state.selectedRequestId);
-        if (!selected) return;
-        let requestUrl = selected.path;
-        if (!/^https?:\/\//iu.test(requestUrl)) {
-          requestUrl = `https://checkout.acme.test${requestUrl.startsWith('/') ? '' : '/'}${requestUrl}`;
-        }
-        try {
-          const parsed = new URL(requestUrl);
-          parsed.search = '';
-          parsed.hash = '';
-          const pathName = parsed.pathname.split('/').filter(Boolean).at(-1) || parsed.hostname;
-          await createCollectionRequest({
-            name: `${selected.method} ${pathName}`,
-            url: parsed.toString(),
-            method: /^[A-Z][A-Z0-9!#$%&'*+.^_`|~-]{0,31}$/u.test(selected.method) ? selected.method : 'GET'
-          });
-          showScreen('api-collection', elements.requestCollectionPivot);
-        } catch {
-          setCollectionNotice('error', 'The selected request URL cannot be imported safely.');
-          showScreen('api-collection', elements.requestCollectionPivot);
-        }
-      });
+      elements.requestCollectionPivot.addEventListener('click', copyInvestigationRequestToCollection);
       elements.requestDecoderPivot.addEventListener('click', useSelectedFieldInDecoder);
       elements.requestMemoryPivot.addEventListener('click', () => {
         const selected = state.selectedField;
@@ -8793,17 +9416,21 @@
         renderSources();
       });
       elements.sourceDeob.addEventListener('click', () => {
+        investigationPassiveSource = false;
+        sourceFactsPanel.cancel();
         state.sourceDeobfuscated = !state.sourceDeobfuscated;
         renderSources();
       });
       elements.sourceWasm.addEventListener('click', () => {
         const source = selectedSource();
         if (source?.kind !== 'wasm' || source.source_type !== 'artifact') return;
+        sourceFactsPanel.cancel();
         state.sourceWasm = !state.sourceWasm;
         if (state.sourceWasm) loadWasmInspection(source);
         renderSources();
       });
       elements.sourcePretty.addEventListener('click', () => {
+        sourceFactsPanel.cancel();
         state.sourceFormatted = !state.sourceFormatted;
         renderSources();
       });
@@ -8825,7 +9452,7 @@
         const transformed = state.sourceDeobfuscated || state.sourceFormatted;
         const column = sourceClickColumn(line, event) + (transformed ? 0 : sourceRuntimeColumn(source, localLine));
         if (source?.source_type === 'script' && !transformed) {
-          state.sourceCursor = {scriptId: source.script_id, line: runtimeLine, column};
+          setSourceCursor(source, runtimeLine, column);
           elements.sourceCode.querySelectorAll('.source-line').forEach(row => row.classList.toggle('cursor', row === line));
           if (state.sourceHooksOpen && prefillHookFromSource(source)) renderRuntimeHooks();
         }
@@ -9165,7 +9792,35 @@
         const index = history.findIndex(entry => entry.id === state.repeaterSelectedHistoryId);
         if (index >= 0 && index < history.length - 1) loadRepeaterHistoryEntry(history[index + 1]);
       });
+      elements.collectionRetry.addEventListener('click', () => refreshApiCollection(true));
+      elements.collectionDiscardRequest.addEventListener('click', () => {
+        if (state.apiCollectionSaving) return;
+        state.collectionDraftDirty = false; state.collectionRequestDraftId = null;
+        setCollectionNotice(state.apiCollectionNeedsReload ? 'conflict' : 'ready', state.apiCollectionNeedsReload
+          ? 'Request edits discarded. Retry load to inspect the current collection.' : 'Request edits discarded. The saved request is unchanged.'); renderApiCollection();
+      });
+      elements.collectionDiscardFolder.addEventListener('click', () => {
+        if (state.apiCollectionSaving) return;
+        state.collectionFolderDirty = false; state.collectionFolderDraftId = null;
+        setCollectionNotice(state.apiCollectionNeedsReload ? 'conflict' : 'ready', state.apiCollectionNeedsReload
+          ? 'Folder edits discarded. Retry load to inspect the current collection.' : 'Folder edits discarded. Saved variables are unchanged.'); renderApiCollection();
+      });
+      for (const response of [false, true]) {
+        const attribute = response ? 'collection-response-tab' : 'collection-tab';
+        const tabs = [...document.querySelectorAll(`[data-${attribute}]`)];
+        tabs.forEach((tab, index) => {
+          tab.addEventListener('click', () => selectCollectionContent(tab.getAttribute(`data-${attribute}`), response));
+          tab.addEventListener('keydown', event => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+              : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+            selectCollectionContent(tabs[next].getAttribute(`data-${attribute}`), response, true);
+          });
+        });
+      }
       elements.collectionNewFolder.addEventListener('click', () => {
+        if (!collectionMayLeaveDraft()) return;
         elements.collectionNewFolderForm.hidden = false;
         elements.collectionNewFolderName.value = '';
         requestAnimationFrame(() => elements.collectionNewFolderName.focus());
@@ -9173,6 +9828,7 @@
       elements.collectionCancelFolder.addEventListener('click', () => {
         elements.collectionNewFolderForm.hidden = true;
         elements.collectionNewFolderName.value = '';
+        elements.collectionNewFolder.focus();
       });
       elements.collectionConfirmFolder.addEventListener('click', createCollectionFolder);
       elements.collectionNewFolderName.addEventListener('keydown', event => {
@@ -9189,6 +9845,9 @@
       elements.collectionFolderForm.querySelectorAll('input, textarea, select').forEach(field => field.addEventListener('input', () => {
         state.collectionFolderDirty = true;
         state.collectionDeleteFolderId = null;
+        elements.collectionFolderDraftStatus.textContent = '· Unsaved';
+        elements.collectionDiscardFolder.disabled = false;
+        renderCollectionExecution();
       }));
       elements.collectionDeleteFolder.addEventListener('click', deleteCollectionFolder);
       elements.collectionRequestForm.addEventListener('submit', event => {
@@ -9197,17 +9856,26 @@
       elements.collectionRequestForm.querySelectorAll('input, textarea, select').forEach(field => field.addEventListener('input', () => {
         state.collectionDraftDirty = true;
         state.collectionDeleteRequestId = null;
+        elements.collectionDraftStatus.textContent = 'Unsaved edits · Save or discard before switching.';
+        elements.collectionDiscardRequest.disabled = false;
         renderCollectionVariableStatus();
+        renderCollectionExecution();
       }));
       elements.collectionDuplicateRequest.addEventListener('click', duplicateCollectionRequest);
       elements.collectionDeleteRequest.addEventListener('click', deleteCollectionRequest);
       elements.collectionCreateContext.addEventListener('click', async () => {
-        await runExperimentAction({action: 'create_request_interception_experiment'});
+        if (state.experimentPending || elements.collectionCreateContext.disabled) return;
+        elements.collectionCreateContext.disabled = true;
+        const result = await runExperimentAction({action: 'create_request_interception_experiment'});
+        if (!result) setCollectionNotice('error', state.experimentError || 'Isolated context could not be created.');
         renderApiCollection();
       });
       elements.collectionRun.addEventListener('click', runCollectionRequest);
       elements.collectionCancel.addEventListener('click', async () => {
-        await runExperimentAction({action: 'cancel_repeater_request'});
+        if (elements.collectionCancel.disabled) return;
+        elements.collectionCancel.disabled = true;
+        const result = await runExperimentAction({action: 'cancel_repeater_request'});
+        if (!result) setCollectionNotice('error', state.experimentError || 'Cancellation could not be confirmed.');
         renderApiCollection();
       });
       analystElements.newFolder.addEventListener('click', createAnalystFolder);
@@ -9384,11 +10052,14 @@
           if (!/^[1-9][0-9]{0,19}$/.test(record.event_id) || record.document_id !== target || typeof record.origin !== 'string' || record.origin.length > 256 || typeof record.method !== 'string' || record.method.length > 16 || !Number.isInteger(record.status) || !Number.isFinite(record.time)) continue;
           consoleTraffic.set(`${session}:${target}:${record.event_id}`, {...record, session});
         }
+        if (investigationScreen() === 'traffic') investigationNavigation?.record();
         while (consoleTraffic.size > 128) consoleTraffic.delete(consoleTraffic.keys().next().value);
         showScreen('traffic'); document.querySelector('#screen-traffic').dataset.consoleTraffic = 'true';
         document.querySelector('#console-experiment-traffic').hidden = false;
+        document.querySelector('#console-experiment-traffic').dataset.session = session;
+        document.querySelector('#console-experiment-traffic').dataset.document = target;
         document.querySelector('#console-traffic-title').textContent = `Console experiment · document ${target}`;
-        document.querySelector('#console-traffic-notice').textContent = `Session ${session}. Metadata only; paths, queries, headers and bodies are excluded. “After command” indicates observation order, not proven causation.${dropped ? ` ${dropped} events dropped before delivery.` : ''}`;
+        document.querySelector('#console-traffic-notice').textContent = `Session ${session}. Metadata only; paths, queries, headers and bodies are excluded. “After evaluation request” indicates observation order, not proven causation.${dropped ? ` ${dropped} events dropped before delivery.` : ''}`;
         const container = document.querySelector('#console-traffic-events'); container.replaceChildren();
         const records = [...consoleTraffic.values()].filter(record => record.session === session && record.document_id === target);
         if (!records.length) container.textContent = 'No completed resources observed in this document since connection. Run a request, then open Experiment activity again.';
@@ -9396,11 +10067,17 @@
           const row = document.createElement('article'); row.className = 'console-traffic-event';
           const overview = document.createElement('div'); overview.className = 'console-traffic-overview';
           for (const text of [record.method, record.status || `error ${record.network_error}`, record.origin]) { const item = document.createElement('span'); item.textContent = String(text); overview.append(item); }
-          const command = document.createElement('button'); command.type = 'button'; command.className = 'native-console-location'; command.textContent = record.after_request_id === '0' ? 'Background activity' : `After command #${record.after_request_id}`;
+          const command = document.createElement('button'); command.type = 'button'; command.className = 'native-console-location'; command.textContent = record.after_request_id === '0' ? 'Background activity' : `After evaluation request ${record.after_request_id}`;
+          command.disabled = record.after_request_id === '0';
           command.addEventListener('click', () => {
             if (!/^[1-9][0-9]{0,19}$/.test(record.after_request_id)) return;
-            const result = document.querySelector(`#native-console-output [data-request-id="${record.after_request_id}"]`);
-            result?.scrollIntoView({block: 'center'});
+            const candidates = [...document.querySelectorAll('#native-console-output [data-request-id]')].filter(row =>
+              row.dataset.requestId === record.after_request_id && row.dataset.consoleSession === session && row.dataset.consoleDocument === target);
+            const result = candidates.find(row => row.classList.contains('native-console-command')) ?? candidates[0];
+            if (!result) {investigationNotice('This evaluation belongs to a Console session or document whose output is no longer retained.', 'stale'); return;}
+            if (document.querySelector('#native-console-panel').hidden) document.querySelector('#native-console-toggle').click();
+            result.tabIndex = -1; result.focus({preventScroll: true}); result.scrollIntoView({block: 'center'});
+            investigationNotice(`Console session ${session} · document ${target} · evaluation request ${record.after_request_id}${result.dataset.commandNumber ? ` · displayed command #${result.dataset.commandNumber}` : ''}. Observation order is not proof of causation.`);
           });
           overview.append(command);
           const details = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = `Event #${record.event_id} · resource ${record.resource_id}`;
@@ -9408,12 +10085,7 @@
         }
       });
       document.addEventListener('reb-console-location', event => {
-        const {url, line} = event.detail;
-        const script = liveSources().find(source => source.url === url);
-        const artifact = capturedSources().find(source => source.url === url);
-        if (script) { showScreen('sources'); selectScript(script.script_id, Math.max(0, line - 1)); }
-        else if (artifact) { showScreen('sources'); selectArtifact(artifact.artifact_id, Math.max(0, line - 1)); }
-        else event.detail.unavailable = true;
+        if (!investigationSourceSearch(event.detail ?? {})) event.detail.unavailable = true;
       });
       document.addEventListener('keydown', event => {
         if (event.defaultPrevented || event.target.closest?.('#native-console-panel')) return;
@@ -9499,4 +10171,5 @@
         setInterval(refresh, 2000);
       }
 
+      initializeInvestigationNavigation();
       initializePaneLayout();

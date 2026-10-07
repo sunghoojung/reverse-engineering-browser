@@ -95,7 +95,9 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-      - name: Exercise Evidence metadata in installed Chrome
+      - name: Exercise linked Evidence in installed Chrome
+        env:
+          REB_UI_REQUIRE_EVIDENCE_NAVIGATION: "1"
         if: ${{ !cancelled() }}
         run: |
           REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
@@ -138,6 +140,46 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+      - name: Exercise Collection in installed Chrome
+        if: ${{ !cancelled() }}
+        run: |
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          node tools/check-origin-trace-debugger.mjs --collection-ui-browser
+
+      - name: Upload rendered Collection QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: collection-ui-${{ github.run_id }}
+          path: build/collection-ui-qa
+          if-no-files-found: ignore
+          retention-days: 3
+
+  investigation-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Exercise connected investigation workflow
+        run: |
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          node tools/check-origin-trace-debugger.mjs --investigation-ui-browser
+
+      - name: Upload rendered investigation QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: investigation-ui-${{ github.run_id }}
+          path: build/investigation-ui-qa
+          if-no-files-found: ignore
+          retention-days: 3
+
   test:
     timeout-minutes: 15
     strategy:
@@ -170,6 +212,22 @@ jobs:
       - name: Verify macOS application signature
         if: matrix.os == 'macos-latest'
         run: codesign --verify --deep --strict "build/Origin Trace.app"
+
+      - name: Exercise relocated macOS package and live launcher
+        if: matrix.os == 'macos-latest'
+        run: |
+          export ORIGIN_TRACE_TEST_BROWSER="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+          test -x "$ORIGIN_TRACE_TEST_BROWSER"
+          node tools/check-origin-trace-package.mjs
+
+      - name: Upload native package diagnostics
+        if: matrix.os == 'macos-latest' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-package-${{ github.run_id }}
+          path: build/package-qa
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Upload macOS application preview
         if: matrix.os == 'macos-latest' && github.event_name == 'pull_request' && success()

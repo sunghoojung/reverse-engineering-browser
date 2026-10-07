@@ -849,3 +849,79 @@ browser URLs without it remain browser mode. `make app-build` exercises the
 actual compiled Swift normalization helper before signing, without starting an
 application window. This helper check does not establish native clipboard or
 rendered WebKit behavior.
+
+### Sources document ownership and recovery
+
+Opening a file reads its preview only. **Deob** explicitly starts inert static
+analysis; entering Sources from another workspace never starts it. Analyzer
+responses must match the submitted artifact or live script, its session or
+actual page/worker target, SHA-256, source byte size, intrinsic assumptions and
+original-source map. SHA-256 is recomputed over the returned original text.
+Live CDP hashes remain opaque owner/version tokens. The analyzer's original
+UTF-8 text must equal the exact complete live text held by that submitted
+preview owner, and its UTF-8 SHA-256 is recomputed separately. Missing, loading
+or truncated live previews cannot authenticate analysis. Replacing the preview
+owner retires pending results; a cached derived result is shown only while its
+original text still equals the current complete owned live text. No V8 hash
+normalization or pinned-engine implementation is inferred.
+Changed or closed owners cannot accept a late response, and analyzer text never
+replaces the original preview. A failed explicit retry preserves only the last
+successful analysis for the same identity. URLs are display/search hints, not
+proof of ownership.
+
+Artifact catalog refreshes preserve an exact pending preview owner. Changing
+its session, hash or descriptor retires that read. Preview failures and deadlines
+show **Retry source**; they do not silently retry during refresh. Preview bodies
+reuse the Facts bounded streaming reader: 2 MiB raw artifact bytes, 13 MiB for
+escaped live-source JSON, and 33 MiB for an analyzer envelope, with at most
+65,536 chunks. Artifact and analyzer deadlines are ten seconds, including body
+reads and SHA-256 work; the live-source deadline is fifteen seconds. Cancellation
+retires ownership without waiting for a stalled producer's cleanup. Full artifact
+previews verify SHA-256 when WebCrypto is available; partial or lossy text is
+visibly a preview. Exact byte navigation still belongs to the existing Facts
+verified-original reader.
+
+The editor retains at most eight preview owners and 16 MiB of UTF-16 preview
+text across captured and live files. The selected owner is pinned; older preview
+bytes can be evicted while their tab and immutable catalog metadata remain.
+**Retry source** or reopening the file loads it again. Closing a file cancels its
+preview/Deob reads and releases its preview, Deob and formatting cache entries.
+Tab, navigator, Quick Open and retry handlers retain descriptors only; obsolete
+empty/retry controls are removed when the editor becomes ready. Hidden UI
+closures cannot keep evicted preview or analysis payloads alive. This never
+deletes captured evidence. Canvas thumbnails and the existing bounded
+Facts/WASM inspectors retain their separate ownership contracts. WASM Hex expands
+only the first 20,000 display rows, rather than formatting the whole 2 MiB input.
+
+Deob retains at most eight documents, 16 MiB of original/derived UTF-16 text and
+250,000 map segments and 32 MiB of serialized response data in total. Formatting retains at most two documents, 12 MiB
+of input/output UTF-16 text and 500,000 segments. These are explicit text/entry
+budgets, not JavaScript heap or process-RSS guarantees. The editor DOM and Facts'
+independently verified original also use memory; no duplicate history of source
+bytes is introduced.
+
+Unchanged source/representation refreshes keep the editor DOM, scroll, Find
+occurrence and focus, including enabled original-source map links in pretty or
+derived views. Runtime decoration refresh never relabels those links as
+breakpoints. Runtime cursors and Hook setup are scoped to the exact
+script target, hash, context and original representation. Sources and Field trace
+use the same identity-checked cursor receiver and honor refused source selection.
+Hook-hit jumps require
+that exact identity; a legacy URL-only hit remains unavailable. Delayed focus
+cannot move to a newer selected source. Open-file tabs support
+Left/Right, Home/End and Delete to close, with focus returning to the next tab.
+The existing Rosé Pine Moon tokens and editor-first layout are unchanged.
+
+Cross-workspace callers can pass the investigation-navigation v1 tuple to
+`selectArtifact(id, line, {identity})`: `{type:'captured-artifact', session,
+artifact, sha256, bytes}`. `sourceArtifactIdentityMatches` advertises this guarded
+receiving boundary. Selection returns false before any read when that identity
+is stale or the artifact ID is globally ambiguous. When shared investigation
+navigation is present, callers should continue using its `openInvestigation`
+adapter and bounded Back/Forward trail.
+
+The existing `--source-facts-ui-browser` driver additionally covers pending body
+plus catalog refresh, passive entry, wrong analyzer identity/preview bytes,
+explicit retries, stable Find/scroll, keyboard file tabs and close cleanup at
+1440×900, 760×560 and 360×740. Production-function and DOM fixtures run in
+`make lint`; they do not replace real browser screenshots or native acceptance.

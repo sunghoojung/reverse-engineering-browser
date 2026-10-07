@@ -3286,7 +3286,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .collection-statusbar > button { flex-shrink: 0; margin: 5px 10px 5px 0; }
 #collection-grid { grid-template-columns: minmax(200px, .6fr) minmax(320px, 1.15fr) minmax(290px, 1fr); }
 .collection-library { display: flex; flex-direction: column; }
-.collection-library .collection-tree { min-height: 90px; flex: 1 1 auto; overflow: auto; }
+.collection-library .collection-tree { min-height: 90px; flex: 1 1 auto; align-content: start; overflow: auto; }
 .collection-library .collection-scope-card { flex: 0 0 auto; max-height: 65%; overflow: auto; }
 .collection-tree-row:focus-visible, .collection-history-row:focus-visible, .collection-tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .collection-pane-head h2, .collection-pane-head p { overflow-wrap: anywhere; }
@@ -3330,12 +3330,14 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   #collection-grid .collection-run-pane { grid-column: 2; border-top: 1px solid var(--line); }
 }
 @media (max-width: 760px) {
-  #collection-grid, #collection-grid[data-state="empty"] { grid-template-columns: minmax(0, 1fr); overflow: auto; align-content: start; }
-  #collection-grid .collection-pane { min-height: 0; overflow: visible; }
+  #collection-grid, #collection-grid[data-state="empty"] { grid-template-columns: minmax(0, 1fr); grid-auto-rows: max-content; overflow: auto; align-content: start; }
+  #collection-grid .collection-pane { min-height: 0; max-height: none; overflow: visible; }
   #collection-grid .collection-library .collection-tree { flex: none; min-height: 70px; max-height: 150px; overflow: auto; }
   #collection-grid .collection-library .collection-scope-card { max-height: none; }
-  #collection-grid .collection-editor-pane { min-height: 320px; }
-  #collection-request-form { overflow: visible; }
+  /* The outer workspace scrolls here; shrinking a flex form would paint its
+     lower controls beneath the following result pane. */
+  #collection-grid .collection-editor-pane { display: block; min-height: 320px; }
+  #collection-request-form { flex: none; min-height: auto; overflow: visible; }
   #collection-grid .collection-run-pane { grid-column: 1; }
   .collection-form-row { grid-template-columns: minmax(0, 1fr); }
   .collection-response-card .repeater-response { flex: none; min-height: 160px; max-height: 300px; }

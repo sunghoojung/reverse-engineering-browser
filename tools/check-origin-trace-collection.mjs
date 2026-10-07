@@ -135,12 +135,27 @@ export async function checkCollectionInteractions({evaluate,viewport,click,key,w
   };
   const press=value=>key(value,value,{windowsVirtualKeyCode:{Enter:13,Escape:27,Home:36,End:35,ArrowDown:40,ArrowRight:39,ArrowLeft:37,Tab:9}[value]});
   const fill=async(selector,text)=>{await click(selector);await key('a','KeyA',{modifiers:2,windowsVirtualKeyCode:65});await type(text);};
-  // Narrow Collection is intentionally a vertically scrolling authoring desk.
-  // Reveal controls only using real wheel input in its explicit workspace scroller.
+  const narrowGeometry=[];
+  const checkNarrowGeometry=async label=>{
+    const geometry=await evaluate(`(()=>{
+      const box=node=>{const r=node.getBoundingClientRect();return {id:node.id||node.className,top:r.top,bottom:r.bottom,left:r.left,right:r.right,height:r.height,clientHeight:node.clientHeight,scrollHeight:node.scrollHeight,overflowY:getComputedStyle(node).overflowY};};
+      const library=document.querySelector('.collection-library'),editor=document.querySelector('.collection-editor-pane'),form=document.querySelector('#collection-request-form');
+      return {viewport:[innerWidth,innerHeight],grid:box(document.querySelector('#collection-grid')),library:box(library),editor:box(editor),form:box(form),run:box(document.querySelector('.collection-run-pane')),
+        libraryChildren:[...library.children].filter(node=>node.getClientRects().length).map(box),formChildren:[...form.children].filter(node=>node.getClientRects().length).map(box)};
+    })()`);
+    narrowGeometry.push({label,...geometry});
+    const contains=(parent,child)=>child.top>=parent.top-1&&child.bottom<=parent.bottom+1;
+    assert(geometry.libraryChildren.every(child=>contains(geometry.library,child)),`Collection library controls exceed their pane: ${JSON.stringify(geometry)}`);
+    assert(contains(geometry.editor,geometry.form)&&geometry.formChildren.every(child=>contains(geometry.form,child)),`Collection editor controls exceed their pane: ${JSON.stringify(geometry)}`);
+    assert(geometry.library.bottom<=geometry.editor.top+1&&geometry.editor.bottom<=geometry.run.top+1,`Collection panes overlap: ${JSON.stringify(geometry)}`);
+    assert(geometry.grid.scrollHeight>geometry.grid.clientHeight,'Narrow authoring must use the outer workspace scroller');
+  };
+  // The stacked workspace owns scrolling. Native scrollbar-wheel input avoids
+  // accidentally scrolling a nested textarea, tree or response under its center.
   const reveal=async selector=>{
     for(let attempt=0;attempt<20;attempt++){
-      const delta=await evaluate(`(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(), g=document.querySelector('#collection-grid').getBoundingClientRect();return r.top<g.top?r.top-g.top-8:r.bottom>g.bottom?r.bottom-g.bottom+8:0;})()`);
-      if(!delta)return;await wheel('#collection-grid',delta);
+      const delta=await evaluate(`(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(),g=document.querySelector('#collection-grid').getBoundingClientRect(),top=Math.max(0,g.top),bottom=Math.min(innerHeight,g.bottom);return r.top<top?r.top-top-8:r.bottom>bottom?r.bottom-bottom+8:0;})()`);
+      if(!delta)return;await wheel('#collection-grid',delta,'scrollbar');
     }
     throw new Error(`Collection control could not be revealed: ${selector}`);
   };
@@ -232,18 +247,18 @@ export async function checkCollectionInteractions({evaluate,viewport,click,key,w
   fixture.mode='error';await click('#collection-retry');await wait('!state.apiCollectionRefreshing');assert.equal(await evaluate('state.collectionSelectedRequestId'),1);
   await screenshot('collection-offline-retained-response');fixture.mode='ready';await click('#collection-retry');await wait('!state.apiCollectionRefreshing');
   for(const [width,height] of [[760,650],[360,740]]){
-    await viewport(width,height);await reveal('#collection-tab-body');await click('#collection-tab-body');await press('ArrowRight');assert.equal(await evaluate('state.collectionRequestTab'),'variables');
-    await screenshot(`collection-${width}-editor`);
+    await viewport(width,height);await checkNarrowGeometry(`${width} initial`);await reveal('#collection-tab-body');await click('#collection-tab-body');await press('ArrowRight');assert.equal(await evaluate('state.collectionRequestTab'),'variables');
+    await checkNarrowGeometry(`${width} variables`);await screenshot(`collection-${width}-editor`);
     await reveal('.collection-response-card');await click('#collection-response-tab-headers');
     assert(await evaluate('document.documentElement.scrollWidth <= innerWidth'),'Collection must not overflow the viewport horizontally');
     assert(await evaluate("document.querySelector('#collection-response').getBoundingClientRect().height>=130"));
-    await screenshot(`collection-${width}-response`);
+    await checkNarrowGeometry(`${width} response`);await screenshot(`collection-${width}-response`);
   }
   await viewport(1440,900);await evaluate("document.querySelector('#collection-grid').scrollTop=0");
   fixture.document.requests=[];fixture.document.folders=fixture.document.folders.slice(0,1);fixture.document.generation++;await evaluate('refreshApiCollection(true)');
   assert.equal(await evaluate('elements.collectionRequestForm.hidden'),true);assert.match(await evaluate('elements.collectionEditorEmpty.textContent'),/Start with a request/);
   await screenshot('collection-empty');
-  return {status:'passed',path:'browser development Collection UI',source:'synthetic local collection store and scripted debugger transport; no target requests',viewports:[[1440,900],[760,650],[360,740]],checks:['hit-tested request selection and authoring','real keyboard input and tabs','explicit draft guard and discard','invalid/failed/conflicting saves retain edits','explicit Save & Run and duplicate-click suppression','backend-shaped immediate acknowledgement and later completion snapshot','completion before delayed/lost acknowledgement preserves recipe identity','resolved submission does not hide later replacement runs','newer draft and explicit history selection beat late results','recycled dirty-owner rejection and reload','submitted request identity after selection change','inert truncated response and independent scrolling','response/history focus retention','malformed/offline load and retry','narrow scrollable authoring and results','empty collection']};
+  return {status:'passed',path:'browser development Collection UI',source:'synthetic local collection store and scripted debugger transport; no target requests',viewports:[[1440,900],[760,650],[360,740]],narrow_geometry:narrowGeometry,checks:['hit-tested request selection and authoring','real keyboard input and tabs','explicit draft guard and discard','invalid/failed/conflicting saves retain edits','explicit Save & Run and duplicate-click suppression','backend-shaped immediate acknowledgement and later completion snapshot','completion before delayed/lost acknowledgement preserves recipe identity','resolved submission does not hide later replacement runs','newer draft and explicit history selection beat late results','recycled dirty-owner rejection and reload','submitted request identity after selection change','inert truncated response and independent scrolling','response/history focus retention','malformed/offline load and retry','intrinsic narrow pane/form containment with no overlap','real outer-scrollbar wheel revealing and hit-tested controls','narrow scrollable authoring and results','empty collection']};
 }
 
 async function checkCollectionOwnership(root) {

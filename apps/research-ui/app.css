@@ -3361,6 +3361,10 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .investigation-source-search p { flex-basis: 100%; margin: 6px 0; overflow-wrap: anywhere; }
 .investigation-navigation [hidden], .investigation-navigation[hidden] { display: none; }
 .investigation-navigation :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (max-width: 600px) {
+  /* Explanations need a reading row, not the narrow space beside Back/Forward. */
+  .investigation-controls > details[open] { flex-basis: 100%; }
+}
 
 /* Evidence is an observation notebook, with packaging as a separate action mode. */
 .evidence-investigation { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); background: var(--bg); }

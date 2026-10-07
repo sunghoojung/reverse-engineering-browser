@@ -2654,6 +2654,7 @@ async function checkEvidenceObservationInteractions({evaluate,viewport,click,key
 
 async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture,setFile,verifyDownload}) {
   const observations=await checkEvidenceObservationInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture});
+  const packageGeometry=[];
   const status=()=>evaluate('evidencePackagePanel.controller.model.status');
   const until=async(expression,message)=>{const deadline=Date.now()+5000;while(Date.now()<deadline){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,25));}assert.fail(message);};
   const ready=()=>until("evidencePackagePanel.controller.model.status==='ready'",'Validated metadata did not become ready');
@@ -2739,7 +2740,26 @@ async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,scre
   await reveal('[data-package-selected]');await screenshot('evidence-selected-pages');
   for(const [width,height] of [[760,560],[360,740]]){
     await viewport(width,height);await reveal('[data-package-window]');await geometry(`${width}x${height}`);
+    if(width<=600){
+      const contextState=()=>evaluate("(()=>{const details=document.querySelector('#investigation-navigation details');return {open:details.open,notice:document.querySelector('#investigation-notice').textContent,selection:document.querySelector('[data-package-selection]').textContent,candidates:[...document.querySelectorAll('[data-package-candidates] input')].map(n=>[n.dataset.packageKey,n.checked]),candidateScroll:document.querySelector('[data-package-candidates]').scrollTop};})()");
+      const beforeContext=await contextState();
+      assert(beforeContext.open,'Stale return context remains disclosed during phone package inspection');
+      assert.match(beforeContext.notice,/Return unavailable:.*Nothing was fetched or recaptured/);
+      await click('#investigation-navigation details > summary');
+      assert.equal((await contextState()).open,false);
+      await click('#investigation-navigation details > summary');
+      assert.deepEqual(await contextState(),beforeContext,'Link context toggles must preserve the exact package selection, candidate scroll and complete warning');
+      await reveal('[data-package-window]');
+    }
+    const navigationGeometry=await evaluate(`(()=>{const box=selector=>{const n=document.querySelector(selector),r=n.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,height:r.height};};return {bar:box('#investigation-navigation'),controls:box('.investigation-controls'),details:box('#investigation-navigation details'),back:box('#investigation-back'),forward:box('#investigation-forward'),notice:box('#investigation-notice'),clear:box('#investigation-clear'),overflow:getComputedStyle(document.querySelector('#investigation-navigation')).overflowY};})()`);
+    if(width<=600){
+      assert(navigationGeometry.details.left<=navigationGeometry.controls.left+1&&navigationGeometry.details.right>=navigationGeometry.controls.right-1&&navigationGeometry.details.top>=Math.max(navigationGeometry.back.bottom,navigationGeometry.forward.bottom), 'Open phone Link context occupies a full-width row below Back/Forward');
+      for(const item of [navigationGeometry.notice,navigationGeometry.clear])assert(item.left>=navigationGeometry.bar.left&&item.right<=navigationGeometry.bar.right&&item.top>=navigationGeometry.bar.top&&item.bottom<=navigationGeometry.bar.bottom,'The complete stale warning and history control remain visible in their navigation scroller');
+      assert(navigationGeometry.bar.height<=height*.35+1&&navigationGeometry.overflow==='auto','Navigation retains its own bounded scrolling owner');
+    }
     const windowGeometry=await evaluate(`(()=>{const box=selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,height:r.height};};return {outer:box('.evidence-content'),pager:box('[data-package-pager]'),list:box('[data-package-candidates]')};})()`);
+    packageGeometry.push({width,height,...windowGeometry,navigation:navigationGeometry});
+    console.log('Evidence package geometry',JSON.stringify(packageGeometry.at(-1)));
     assert(windowGeometry.pager.top>=windowGeometry.outer.top&&windowGeometry.pager.bottom<=windowGeometry.outer.bottom&&windowGeometry.pager.height>=24,`${width}x${height}: candidate paging must stay visible with the list`);
     assert(windowGeometry.pager.bottom<=windowGeometry.list.top&&windowGeometry.list.bottom<=windowGeometry.outer.bottom&&windowGeometry.list.top>=windowGeometry.outer.top,`${width}x${height}: pager and candidate list must fit together without overlap`);
     assert(windowGeometry.list.height>=100,`${width}x${height}: candidate list must retain a usable height`);
@@ -2753,7 +2773,7 @@ async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,scre
   assert.equal(await evaluate("document.querySelector('#screen-evidence').hidden"),false,'Narrow Backtraces must expose the package entry');
   assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),false,'Backtraces entry must dismiss the navigation popup');
   await geometry('narrow Backtraces return');await screenshot('evidence-narrow-reopened');
-  return {status:'passed',path:'browser development Evidence UI',observations,source:'synthetic closed metadata fixture; authoritative native-writer HTTP checks are separate',viewports:[[1440,900],[760,560],[360,740]],checks:['Requests and narrow Backtraces pointer entry','exact scoped selection','explicit guarded export and retry','explicit browser download exact bytes; no automatic save','real file input exact-byte validation','invalid and unsupported states','writer refusal and unavailable store','Cancel and Escape focus','stale selection and Back/reopen','50-row paging','keyed refresh focus','Space/Tab keyboard selection','independent candidate/panel scrolling','narrow geometry and screenshots']};
+  return {status:'passed',path:'browser development Evidence UI',observations,packageGeometry,source:'synthetic closed metadata fixture; authoritative native-writer HTTP checks are separate',viewports:[[1440,900],[760,560],[360,740]],checks:['Requests and narrow Backtraces pointer entry','exact scoped selection','explicit guarded export and retry','explicit browser download exact bytes; no automatic save','real file input exact-byte validation','invalid and unsupported states','writer refusal and unavailable store','Cancel and Escape focus','stale selection and Back/reopen','50-row paging','keyed refresh focus','Space/Tab keyboard selection','independent candidate/panel scrolling','narrow geometry and screenshots']};
 }
 
 async function checkTrafficBrowser() {
@@ -2895,10 +2915,17 @@ async function checkTrafficBrowser() {
         const node = document.querySelector(${JSON.stringify(selector)}), r = node.getBoundingClientRect();
         const x = r.x+r.width/2, y = r.y+r.height/2, hit = document.elementFromPoint(x,y);
         if (r.width <= 0 || r.height <= 0 || r.left < 0 || r.right > innerWidth || r.top < 0 || r.bottom > innerHeight || !hit || !node.contains(hit)) throw new Error('Control is clipped or offscreen: '+${JSON.stringify(selector)});
-        return {x,y};
+        return {x,y,left:r.left,right:r.right,top:r.top,bottom:r.bottom,
+          hit:{id:hit.id,tag:hit.tagName},connectionOpen:document.querySelector('#native-console-connection')?.open};
       })()`);
-      await command("Input.dispatchMouseEvent", {type: "mousePressed", ...rect, button: "left", clickCount: 1});
-      await command("Input.dispatchMouseEvent", {type: "mouseReleased", ...rect, button: "left", clickCount: 1});
+      const receipt={selector,before:rect};
+      if(consoleBrowser)diagnostics.pointer_events=[...(diagnostics.pointer_events??[]).slice(-63),receipt];
+      await command("Input.dispatchMouseEvent", {type: "mousePressed", x:rect.x,y:rect.y, button: "left", clickCount: 1});
+      await command("Input.dispatchMouseEvent", {type: "mouseReleased", x:rect.x,y:rect.y, button: "left", clickCount: 1});
+      if(consoleBrowser)receipt.after=await evaluate(`(()=>{
+        const node=document.querySelector(${JSON.stringify(selector)}),r=node?.getBoundingClientRect(),hit=document.elementFromPoint(${rect.x},${rect.y});
+        return {left:r?.left,right:r?.right,top:r?.top,bottom:r?.bottom,ownsPoint:!!node?.contains(hit),hit:{id:hit?.id,tag:hit?.tagName},connectionOpen:document.querySelector('#native-console-connection')?.open};
+      })()`);
     };
     const key = async (value, code = value, native = {}) => {
       await command("Input.dispatchKeyEvent", {type: "keyDown", key: value, code, ...native});

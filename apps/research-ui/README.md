@@ -24,6 +24,8 @@ restore selected request/trace/source or Evidence record and visible pane,
 original range, focus and bounded pane
 scroll positions, and leave owner-managed drafts in place. Expired or ambiguous
 links remain visible and do not switch to similarly named evidence.
+On phones, expanded **Link context** uses a full-width row below Back/Forward;
+long explanations stay in the bounded navigation scroller above the workspace.
 
 A captured request opens its recorded Backtrace. **Open retained source** uses
 that step's session and artifact identity. A Facts **Original bytes** link

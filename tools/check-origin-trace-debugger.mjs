@@ -1694,6 +1694,149 @@ function trafficDevtoolsAddress(text) {
   return `ws://127.0.0.1:${match[1]}${match[2]}`;
 }
 
+// Browser.downloadProgress is the completion boundary. A final filename can be
+// reserved before bytes are written, without any visible .crdownload sibling.
+// One explicit download is allowed per QA run; late events can never own a retry.
+function trafficBrowserDownloadObserver({timeoutMs=5000,setTimer=setTimeout,clearTimer=clearTimeout}={}) {
+  let active=null,used=false,closed=false;
+  const events=[];
+  const finish=(error,value)=>{
+    if(!active)return;
+    const owner=active;active=null;clearTimer(owner.timer);
+    if(error)owner.reject(error);else owner.resolve(value);
+  };
+  return {
+    arm(frameId,filename) {
+      assert(!closed&&!used,'Browser download observer is closed or already used');
+      assert(typeof frameId==='string'&&frameId.length>0&&frameId.length<=256,'A verified download frame is required');
+      assert(typeof filename==='string'&&filename.length>0&&filename.length<=256,'A bounded expected download filename is required');
+      used=true;
+      const completion=new Promise((resolve,reject)=>{active={frameId,filename,guid:null,resolve,reject,timer:null};});
+      // Events, timeout, or socket failure can precede the caller awaiting it.
+      completion.catch(()=>{});
+      active.timer=setTimer(()=>finish(new Error('Browser download did not complete before its deadline')),timeoutMs);
+      return {completion,cancel:()=>finish(new Error('Browser download observation cancelled'))};
+    },
+    observe(message) {
+      if(!active||!['Browser.downloadWillBegin','Browser.downloadProgress'].includes(message.method))return;
+      const p=message.params??{};
+      if(typeof p.guid!=='string'||!p.guid.length||p.guid.length>128){finish(new Error('Invalid browser download GUID'));return;}
+      const event={method:message.method,guid:p.guid,state:typeof p.state==='string'?p.state.slice(0,32):null,
+        frameId:typeof p.frameId==='string'?p.frameId.slice(0,256):null,filename:typeof p.suggestedFilename==='string'?p.suggestedFilename.slice(0,256):null,
+        receivedBytes:Number.isFinite(p.receivedBytes)?p.receivedBytes:null,totalBytes:Number.isFinite(p.totalBytes)?p.totalBytes:null};
+      events.push(event);if(events.length>32)events.shift();
+      if(message.method==='Browser.downloadWillBegin') {
+        if(p.frameId!==active.frameId||p.suggestedFilename!==active.filename){finish(new Error('Unexpected browser download frame or filename'));return;}
+        if(active.guid!==null){finish(new Error('More than one browser download began'));return;}
+        active.guid=p.guid;return;
+      }
+      // An unrelated or pre-begin progress event cannot complete this download.
+      if(p.guid!==active.guid)return;
+      if(p.state==='canceled'){finish(new Error('Browser download was canceled'));return;}
+      if(!['inProgress','completed'].includes(p.state)){finish(new Error('Invalid browser download state'));return;}
+      if(p.state==='completed')finish(null,{guid:active.guid,frameId:active.frameId,filename:active.filename,state:p.state});
+    },
+    close(reason='Browser QA cleanup') {closed=true;finish(new Error(reason));},
+    receipts:()=>events.map(event=>({...event}))
+  };
+}
+
+async function verifyTrafficBrowserDownload({observer,frameId,directory,expectedBytes,trigger}) {
+  const filename='selected.reb-evidence.json';
+  assert.deepEqual(await readdir(directory),[],'Validation must not automatically save a file');
+  const receipt=observer.arm(frameId,filename);
+  try {
+    const [,completed]=await Promise.all([Promise.resolve().then(trigger),receipt.completion]);
+    // Never poll for matching bytes: completed-but-empty, partial or corrupt
+    // output must fail the same exact-byte assertion as any other bad download.
+    const saved=await readFile(join(directory,filename));
+    assert.deepEqual(new Uint8Array(saved),expectedBytes,'Browser download must preserve exact validated bytes');
+    assert.deepEqual(await readdir(directory),[filename]);
+    return completed;
+  } finally {receipt.cancel();}
+}
+
+// Synthetic CDP events and real temporary files exercise the exact verifier.
+// They are not a rendered-browser or native-download acceptance result.
+const downloadTestRoot=await mkdtemp(join(tmpdir(),'reb-download-check-'));
+try {
+  const bytes=new Uint8Array([123,34,111,107,34,58,116,114,117,101,125]);
+  const filename='selected.reb-evidence.json',frameId='download-frame';
+  const begin=(guid='owned',frame=frameId,name=filename)=>({method:'Browser.downloadWillBegin',params:{guid,frameId:frame,suggestedFilename:name}});
+  const progress=(state,guid='owned')=>({method:'Browser.downloadProgress',params:{guid,state,receivedBytes:bytes.length,totalBytes:bytes.length}});
+  const setup=async label=>{
+    const directory=join(downloadTestRoot,label);await mkdir(directory);
+    const timers=new Map();let nextTimer=0;
+    const observer=trafficBrowserDownloadObserver({setTimer:(callback,delay)=>{assert.equal(delay,5000);timers.set(++nextTimer,callback);return nextTimer;},clearTimer:id=>timers.delete(id)});
+    return {directory,observer,timers,path:join(directory,filename),timeout(){for(const callback of [...timers.values()])callback();}};
+  };
+  {
+    const t=await setup('reserved-final');let entered;
+    const ready=new Promise(resolve=>{entered=resolve;});let settled=false;
+    const pending=verifyTrafficBrowserDownload({...t,frameId,expectedBytes:bytes,trigger:async()=>{
+      t.observer.observe(begin());await writeFile(t.path,new Uint8Array());entered();
+    }});
+    pending.then(()=>{settled=true;},()=>{settled=true;});await ready;await new Promise(resolve=>setImmediate(resolve));
+    const premature=await readFile(t.path);
+    assert.equal((await readdir(t.directory)).every(name=>!name.endsWith('.crdownload')),true,'The old readiness heuristic accepts the reserved final name');
+    assert.equal(premature.length,0);assert.notDeepEqual(new Uint8Array(premature),bytes,'The old read reproduces a false corrupt-download failure');
+    assert.equal(settled,false,'File existence must not finish the actual verifier');
+    t.observer.observe(progress('completed','foreign'));await Promise.resolve();assert.equal(settled,false,'A foreign GUID cannot release file verification');
+    await writeFile(t.path,bytes);t.observer.observe(progress('completed'));
+    assert.equal((await pending).guid,'owned');assert.equal(t.timers.size,0);
+  }
+  {
+    const t=await setup('early-terminal');
+    const completed=await verifyTrafficBrowserDownload({...t,frameId,expectedBytes:bytes,trigger:async()=>{
+      await writeFile(t.path,bytes);t.observer.observe(begin());t.observer.observe(progress('completed'));
+      await Promise.resolve(); // Terminal event arrives before trigger acknowledgement.
+    }});
+    assert.equal(completed.state,'completed');assert.equal(t.timers.size,0);
+  }
+  for(const mode of ['canceled','wrong-guid','wrong-frame','wrong-name','duplicate-begin','timeout','close','trigger-error','corrupt','partial','empty','extra-file','missing-file']) {
+    const t=await setup(mode);
+    const pending=verifyTrafficBrowserDownload({...t,frameId,expectedBytes:bytes,trigger:async()=>{
+      if(mode==='trigger-error')throw new Error('Synthetic click failure');
+      if(mode!=='missing-file')await writeFile(t.path,mode==='empty'?new Uint8Array():mode==='corrupt'?new Uint8Array(bytes.length):mode==='partial'?bytes.slice(0,3):bytes);
+      if(mode==='extra-file')await writeFile(join(t.directory,'unexpected.json'),bytes);
+      t.observer.observe(begin('owned',mode==='wrong-frame'?'foreign-frame':frameId,mode==='wrong-name'?'other.json':filename));
+      if(mode==='duplicate-begin')t.observer.observe(begin('other'));
+      else if(mode==='canceled')t.observer.observe(progress('canceled'));
+      else if(mode==='close')t.observer.close('Synthetic socket closed');
+      else if(mode==='timeout'||mode==='wrong-guid'){
+        if(mode==='wrong-guid')t.observer.observe(progress('completed','foreign'));
+        t.timeout();t.observer.observe(progress('completed')); // Late success cannot undo failure.
+      } else t.observer.observe(progress('completed'));
+    }});
+    await assert.rejects(pending,error=>{
+      const expected=mode==='canceled'?/was canceled/:mode==='timeout'||mode==='wrong-guid'?/deadline/:mode==='close'?/socket closed/:mode==='trigger-error'?/click failure/:mode==='wrong-frame'||mode==='wrong-name'?/frame or filename/:mode==='duplicate-begin'?/More than one/:mode==='missing-file'?/ENOENT/:mode==='extra-file'?/Expected values/:/exact validated bytes/;
+      assert.match(error.message,expected,mode);return true;
+    });
+    assert.equal(t.timers.size,0,mode+': completion observer must release its timer');
+    assert.throws(()=>t.observer.arm(frameId,filename),/closed or already used/,'Late events cannot be assigned to a retried owner');
+    t.observer.close();
+  }
+  {
+    const t=await setup('unsolicited-file');let triggered=false;
+    await writeFile(t.path,bytes);
+    await assert.rejects(verifyTrafficBrowserDownload({...t,frameId,expectedBytes:bytes,trigger:()=>{triggered=true;}}),/must not automatically save/);
+    assert.equal(triggered,false);assert.equal(t.timers.size,0);t.observer.close();
+  }
+  {
+    const t=await setup('before-wait-registration'),receipt=t.observer.arm(frameId,filename);
+    t.observer.observe(begin());t.observer.observe(progress('completed'));
+    assert.equal((await receipt.completion).guid,'owned','A terminal event before awaiting must remain available');
+    assert.equal(t.timers.size,0);t.observer.close();
+  }
+  {
+    const t=await setup('bounded-events'),receipt=t.observer.arm(frameId,filename);
+    t.observer.observe(begin());
+    for(let n=0;n<1000;n++)t.observer.observe(progress('inProgress','other-'+n));
+    assert.equal(t.observer.receipts().length,32);t.timeout();await assert.rejects(receipt.completion,/deadline/);assert.equal(t.timers.size,0);
+  }
+  console.log('PASS exact browser-download completion receipt: reserved-file race, early terminal events, matched GUID, cancellation, timeout/late/foreign events, cleanup/bounds, corrupt/empty/missing/extra output (synthetic CDP and filesystem, not rendered QA)');
+} finally {await rm(downloadTestRoot,{recursive:true,force:true});}
+
 function trafficBrowserProcess(executable, args) {
   const grouped = process.platform !== "win32";
   const started = performance.now();
@@ -3324,7 +3467,7 @@ async function checkMemoryResponsiveOwners() {
   const narrow=css.slice(css.indexOf('      @media (max-width: 950px) {'));
   assert.match(narrow,/\.memory-results-pane \{ overflow: auto; grid-template-columns: 1fr; grid-template-rows: minmax\(150px, \.7fr\) minmax\(170px, 1fr\); \}/);
   const source=await readFile(join(root,'tools/check-origin-trace-debugger.mjs'),'utf8');
-  const from=source.indexOf('  const wheelReceipts=',source.indexOf('async function checkMemoryInteractions('));
+  const from=source.indexOf('  const wheelReceipts=',source.indexOf('\nasync function checkMemoryInteractions('));
   const to=source.indexOf('  await viewport(1440,900);',from);
   const helpers=source.slice(from,to)+';({reveal,checkReadingScroll,scrollState,wheelReceipts})';
   const results=[];
@@ -3361,6 +3504,96 @@ async function checkMemoryResponsiveOwners() {
 }
 await checkMemoryResponsiveOwners();
 
+// Run the actual screen transition, pane scheduler and entry assertions with
+// rendering deferred. This models event ordering, not Chromium layout or paint.
+async function checkMemoryEntryReadiness() {
+  const driver=await readFile(join(root,'tools/check-origin-trace-debugger.mjs'),'utf8');
+  const start=driver.indexOf('  const wheelReceipts=',driver.indexOf('\nasync function checkMemoryInteractions('));
+  const helpers=driver.slice(start,driver.indexOf('  await viewport(1440,900);',start))+';({enter,geometry})';
+  const layoutSource=await readFile(join(root,'apps/research-ui/pane_layout.js'),'utf8');
+  const appSource=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
+  const showScreen=appSource.slice(appSource.indexOf('      function showScreen('),appSource.indexOf('\n      async function refresh()',appSource.indexOf('      function showScreen(')));
+  const box=(left,top,width,height)=>({x:left,y:top,left,top,right:left+width,bottom:top+height,width,height});
+  for(const ordering of ['before-frame','frame-before-entry','timeout-before-entry']) {
+    const frames=new Map(),timers=new Map(),mutations=[],nodes=new Map(),checks=[];let serial=0,painted=0,focusWrites=0;
+    const node=(selector,rect=null,parent=null)=>{
+      const n={id:selector.startsWith('#')?selector.slice(1):'',tagName:'DIV',className:'',dataset:{},hidden:false,parentElement:parent,style:{setProperty(){},removeProperty(){}},attributes:{},listeners:{},clientTop:0,clientLeft:0,scrollTop:0,scrollLeft:0,
+        classList:{add(){},remove(){},contains:()=>false},getAttribute(k){return this.attributes[k]??null;},setAttribute(k,v){this.attributes[k]=v;},removeAttribute(k){delete this.attributes[k];},addEventListener(k,v){this.listeners[k]=v;},
+        getBoundingClientRect(){return n.className==='pane-divider'?box(parseFloat(n.style.left)||0,parseFloat(n.style.top)||0,parseFloat(n.style.width)||0,parseFloat(n.style.height)||0):rect??box(0,0,0,0);},getClientRects(){for(let p=n;p;p=p.parentElement)if(p.hidden)return [];const r=n.getBoundingClientRect();return r.width&&r.height?[r]:[];},
+        get clientHeight(){return rect?.height??0;},get clientWidth(){return rect?.width??0;},get scrollHeight(){return this.clientHeight;},
+        matches:s=>s===selector,closest:()=>null,contains(other){for(let p=other;p;p=p.parentElement)if(p===n)return true;return false;},querySelector:s=>nodes.get(s)??node(s),focus(){focusWrites++;document.activeElement=n;}};
+      nodes.set(selector,n);return n;
+    };
+    const body=node('body',box(0,0,760,560));body.children=[];body.append=n=>body.children.push(n);
+    const main=node('main',box(0,62,760,474),body),sources=node('#screen-sources',box(0,99,760,437),main),memory=node('#screen-memory',box(0,99,760,437),main);memory.hidden=true;
+    // An admissible Sources split crossing the CI snapshot-button center.
+    // The real receipt identifies the hit owner, but did not record its bounds.
+    const split=175.53125;
+    const navigator=node('.sources-navigator',box(0,99,split,437),sources),editor=node('.sources-editor',box(split,99,760-split,437),sources);
+    sources.querySelector=s=>s==='.sources-navigator'?navigator:s==='.sources-editor'?editor:node('.source-editor-toolbar');
+    const summary=node('#advanced-navigation > summary',box(365,31,76,30),body),navigation=node('#advanced-navigation',null,body);navigation.open=false;navigation.querySelector=()=>summary;
+    const trigger=node('#advanced-navigation .nav-button[data-screen="memory"]',null,navigation);trigger.classList.contains=s=>s==='nav-button';
+    const control=(selector,rect)=>{const n=node(selector,rect,memory);n.tagName=selector.includes('mode=')?'BUTTON':'DIV';return n;};
+    control('#screen-memory h1',box(17,109,388,15));control('#screen-memory .screen-subtitle',box(17,129,388,33));control('#memory-notice',box(0,173,760,34));
+    control('[data-memory-mode="live"]',box(14,215,97.5625,30));const snapshot=control('[data-memory-mode="snapshot"]',box(117.5625,215,115.9375,30));
+    control('[data-memory-mode="diff"]',box(239.5,215,86,30));control('[data-memory-mode="origin"]',box(331.5,215,97,30));
+    const intersects=(r,x,y)=>x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom;
+    const document={body,activeElement:summary,createElement:()=>node(''),addEventListener(){},
+      querySelector:s=>nodes.get(s)??node(s),querySelectorAll:s=>s==='.screen'?[sources,memory]:s==='.nav-button'?[]:s.includes('.pane-divider')?body.children:s.startsWith('#pane-divider-memory')?[]:[],
+      elementFromPoint(x,y){const handle=body.children.find(n=>!n.hidden&&intersects(box(parseFloat(n.style.left),parseFloat(n.style.top),parseFloat(n.style.width),parseFloat(n.style.height)),x,y));if(handle)return handle;return [...nodes.values()].reverse().find(n=>n.getClientRects().length&&intersects(n.getBoundingClientRect(),x,y));}};
+    const enqueue=(queue,fn)=>{queue.set(++serial,fn);return serial;};
+    const context={document,window:{addEventListener(){}},innerWidth:760,innerHeight:560,
+      localStorage:{getItem:()=>null,setItem(){throw Error('Entry must not persist a split');}},isPlainObject:v=>!!v&&typeof v==='object',
+      requestAnimationFrame:fn=>enqueue(frames,fn),cancelAnimationFrame:id=>frames.delete(id),setTimeout:fn=>enqueue(timers,fn),clearTimeout:id=>timers.delete(id),
+      MutationObserver:class{constructor(fn){mutations.push(fn);}observe(){}},ResizeObserver:class{observe(){}},
+      getComputedStyle:n=>({display:n===sources?'grid':'block',visibility:'visible',pointerEvents:'auto',overflowX:'hidden',overflowY:'hidden',getPropertyValue:()=>`${split}px ${760-split}px`})};
+    const flush=queue=>{const pending=[...queue];for(const [id,fn]of pending)if(queue.delete(id))fn();};
+    const frame=()=>{flush(frames);painted++;};
+    runInNewContext(layoutSource+';initializePaneLayout();',context);frame();
+    const divider=body.children.find(n=>n.id==='pane-divider-sources');assert.equal(divider.hidden,false);
+    const state={originTraceStatus:'idle',sourceHooksOpen:false};
+    const transition=runInNewContext(showScreen+';showScreen',{...context,state,investigationBeforeScreen(){},evidenceWorkspace:{setVisible(){}},sourceFactsPanel:{cancel(){}},float32Panel:{cancel(){}},renderMemory(){},renderDebugger(){},renderSources(){},selectedSource:()=>null});
+    const fixture={requests:[]};let readyExpressions=0;
+    const evaluate=async code=>{
+      const result=runInNewContext(code,context);
+      if(result&&typeof result.then==='function'){
+        readyExpressions++;const before=frames.size;
+        assert(before>0,'Readiness must queue a native render observation');
+        for(let n=0;n<4&&frames.size;n++)frame();
+      }
+      const serialized=JSON.stringify(await result);return serialized===undefined?undefined:JSON.parse(serialized);
+    };
+    const click=async selector=>{
+      if(selector==='#advanced-navigation > summary'){navigation.open=true;document.activeElement=trigger;return;}
+      assert.equal(selector,'#advanced-navigation .nav-button[data-screen="memory"]');
+      transition('memory',trigger);mutations[0]([{attributeName:'hidden'}]);
+      if(ordering==='frame-before-entry')frame();else if(ordering==='timeout-before-entry')flush(timers);
+    };
+    const api=runInNewContext(helpers,{evaluate,click,fixture,assert:Object.assign((...args)=>assert(...args),assert,{deepEqual:(a,b,m)=>assert.deepEqual(JSON.parse(JSON.stringify(a)),JSON.parse(JSON.stringify(b)),m)}),recordMemoryCheck:r=>checks.push(r)});
+    if(ordering==='before-frame'){
+      await click('#advanced-navigation > summary');await click('#advanced-navigation .nav-button[data-screen="memory"]');
+      assert.equal(sources.hidden,true);assert.equal(divider.hidden,false,'Hidden source keeps its body-level handle until scheduled layout');
+      await assert.rejects(api.geometry('Pre-paint counterexample'),/must be unobscured at center and corners/);
+      const receipt=checks.at(-1);assert.equal(receipt.selector,'[data-memory-mode="snapshot"]');assert.equal(receipt.covered,1);assert.equal(receipt.points[0].hit.id,divider.id);assert(receipt.points.slice(1).every(p=>p.owned));
+      assert.equal(receipt.allDividers.length,8);const sourceDivider=receipt.allDividers.find(d=>d.node.id===divider.id);
+      assert.equal(sourceDivider.hidden,false);assert.equal(sourceDivider.rendered,true);assert.equal(sourceDivider.pointerEvents,'auto');assert(intersects(sourceDivider.rect,receipt.points[0].x,receipt.points[0].y));
+      transition('sources',trigger);mutations[0]([{attributeName:'hidden'}]);frame();
+    }
+    const before=painted,previousFocus=focusWrites;
+    await api.enter('Painted Memory entry '+ordering);
+    assert.equal(divider.hidden,true);assert.equal(readyExpressions,1);assert(painted>=before+2,'Entry waits across two native frame boundaries');
+    assert.equal(fixture.requests.length,0);assert.equal(focusWrites,previousFocus+1,'Only production chooser dismissal restores focus');
+    assert.equal(snapshot.scrollTop,0);assert(checks.at(-1).covered===0);
+    // Readiness observes completion once; a persistent foreign overlay must
+    // still fail the original strict guard, rather than being waited away.
+    Object.defineProperty(divider,'hidden',{get:()=>false,set(){}});
+    await assert.rejects(api.enter('Persistent foreign divider'),/must be unobscured at center and corners/);
+    assert.equal(checks.at(-1).covered,1);
+  }
+  console.log('PASS Memory pre-paint Sources divider counterexample, native-frame entry readiness, frame/timer ordering and persistent-overlay rejection (production functions; not rendered QA)');
+}
+await checkMemoryEntryReadiness();
+
 async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeText,screenshot,fixture,recordMemoryCheck=()=>{}}) {
   const ready=async()=>{for(let n=0;n<150;n++){if(await evaluate('!state.memorySearchPending && !state.debuggerActionPending'))return;await new Promise(resolve=>setTimeout(resolve,20));}throw Error('Memory action did not settle');};
   const wheelReceipts=[],containmentReceipts=[];
@@ -3390,9 +3623,10 @@ async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeTe
       const r=rect(n),owners=[];let top=0,bottom=innerHeight,left=0,right=innerWidth;
       for(let p=n.parentElement;p;p=p.parentElement){const b=p.getBoundingClientRect(),s=getComputedStyle(p);if(s.overflowY!=='visible'){top=Math.max(top,b.top+p.clientTop);bottom=Math.min(bottom,b.top+p.clientTop+p.clientHeight);}if(s.overflowX!=='visible'){left=Math.max(left,b.left+p.clientLeft);right=Math.min(right,b.left+p.clientLeft+p.clientWidth);}if(owners.length<8&&['auto','scroll','overlay','hidden','clip'].some(value=>s.overflowX===value||s.overflowY===value))owners.push({node:identify(p),rect:rect(p),overflowX:s.overflowX,overflowY:s.overflowY,scrollTop:p.scrollTop,clientHeight:p.clientHeight,scrollHeight:p.scrollHeight});}
       const points=[[r.left+r.width/2,r.top+r.height/2],[r.left+3,r.top+3],[r.right-3,r.bottom-3]].map(([x,y])=>{const hit=document.elementFromPoint(x,y);return {x,y,owned:!!hit&&n.contains(hit),hit:identify(hit)};});
-      const dividers=[...document.querySelectorAll('#pane-divider-memory, #pane-divider-memory-detail')].filter(node=>!node.hidden&&node.getClientRects().length).map(node=>({node:identify(node),rect:rect(node),controls:node.getAttribute('aria-controls'),orientation:node.getAttribute('aria-orientation')}));
+      const allDividers=[...document.querySelectorAll('.pane-divider')].map(node=>{const style=getComputedStyle(node);return {node:identify(node),rect:rect(node),hidden:node.hidden,rendered:!!node.getClientRects().length,display:style.display,visibility:style.visibility,pointerEvents:style.pointerEvents,controls:node.getAttribute('aria-controls'),orientation:node.getAttribute('aria-orientation')};});
+      const dividers=allDividers.filter(d=>!d.hidden&&d.rendered&&['pane-divider-memory','pane-divider-memory-detail'].includes(d.node.id));
       const resizeOverlaps=n.matches('.memory-result-row')?dividers.filter(d=>Math.min(r.right,d.rect.right)>Math.max(r.left,d.rect.left)&&Math.min(r.bottom,d.rect.bottom)>Math.max(r.top,d.rect.top)).map(d=>d.node.id):[];
-      return {node:identify(n),rect:r,clip:{top,bottom,left,right},owners,points,dividers,resizeOverlaps,
+      return {node:identify(n),rect:r,clip:{top,bottom,left,right},owners,points,dividers,allDividers,resizeOverlaps,
         visible:r.width>0&&r.height>0&&r.left>=left-1&&r.right<=right+1&&r.top>=top-1&&r.bottom<=bottom+1,
         covered:points.filter(point=>!point.owned).length};
     })()`);
@@ -3457,6 +3691,10 @@ async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeTe
     assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),true,label+': real pointer opens Advanced');
     await click('#advanced-navigation .nav-button[data-screen="memory"]');
     assert.equal(await evaluate("document.querySelector('#screen-memory').hidden"),false,label+': Memory workspace opens');
+    // showScreen changes visibility before the shared pane scheduler retires
+    // Sources' body-level resize handle. Observe the painted entry boundary
+    // before strict geometry, just as Console does; never retry a failed hit.
+    await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
     await closed(label);await geometry(label);
     assert.equal(await evaluate("document.activeElement===document.querySelector('#advanced-navigation > summary')"),true,label+': focus returns to summary');
     assert.equal(fixture.requests.length,posts,label+': navigation must not submit an action');
@@ -3586,6 +3824,7 @@ async function checkTrafficBrowser() {
   let lifecycle, socket, validation, failure, captureFailure;
   let diagnostics = {executable, args, phase: "fixture server"};
   const commands = new Map();
+  const downloads = trafficBrowserDownloadObserver();
   await rm(join(output, "validation.json"), {force: true});
   try {
     if (float32Browser || float32FixtureOnly) {
@@ -3614,6 +3853,7 @@ async function checkTrafficBrowser() {
     const browserDialogs = [];
     socket.addEventListener("message", event => {
       const message = JSON.parse(event.data);
+      downloads.observe(message);
       if (message.method === "Page.javascriptDialogOpening") browserDialogs.push(message.params);
       if (message.method === "Runtime.exceptionThrown") runtimeErrors.push(message.params.exceptionDetails.exception?.description || message.params.exceptionDetails.text);
       const pending = commands.get(message.id);
@@ -3622,6 +3862,7 @@ async function checkTrafficBrowser() {
       if (message.error) pending.reject(new Error(JSON.stringify(message.error))); else pending.resolve(message.result);
     });
     const rejectCommands = reason => {
+      downloads.close(reason);
       for (const pending of commands.values()) {clearTimeout(pending.timer); pending.reject(new Error(reason));}
       commands.clear();
     };
@@ -3836,15 +4077,10 @@ async function checkTrafficBrowser() {
         await command('DOM.setFileInputFiles',{nodeId:input.nodeId,files:[join(directory,name+'.json')]});
       };
       const downloadDirectory=join(directory,'downloads');await mkdir(downloadDirectory);
-      await command('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:downloadDirectory},false);
+      await command('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:downloadDirectory,eventsEnabled:true},false);
+      const frameId=(await command('Page.getFrameTree')).frameTree.frame.id;
       const verifyDownload=async trigger=>{
-        assert.deepEqual(await readdir(downloadDirectory),[],'Validation must not automatically save a file');
-        await trigger();
-        const deadline=Date.now()+5000;let saved;
-        while(Date.now()<deadline){try{saved=await readFile(join(downloadDirectory,'selected.reb-evidence.json'));if((await readdir(downloadDirectory)).every(name=>!name.endsWith('.crdownload')))break;}catch{}await new Promise(resolve=>setTimeout(resolve,25));}
-        assert(saved,'Explicit Download did not produce a completed file');
-        assert.deepEqual(new Uint8Array(saved),packageGoldenBytes,'Browser download must preserve exact validated bytes');
-        assert.deepEqual(await readdir(downloadDirectory),['selected.reb-evidence.json']);
+        diagnostics.download=await verifyTrafficBrowserDownload({observer:downloads,frameId,directory:downloadDirectory,expectedBytes:packageGoldenBytes,trigger});
       };
       validation=await checkEvidenceInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:evidenceFixture,setFile,verifyDownload});
       assert.deepEqual(runtimeErrors,[],"Application raised uncaught errors during Evidence QA");
@@ -3954,6 +4190,8 @@ async function checkTrafficBrowser() {
       catch (screenshotError) {diagnostics.failure_screenshot_error = String(screenshotError.message).slice(0, 2048);}
     }
   } finally {
+    downloads.close();
+    diagnostics.download_events=downloads.receipts();
     socket?.close();
     for (const pending of commands.values()) {clearTimeout(pending.timer); pending.reject(new Error("Browser QA cleanup"));}
     commands.clear();

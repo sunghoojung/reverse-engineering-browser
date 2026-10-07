@@ -6,6 +6,29 @@ ignored by the parent repository. Project-wide authorization and capture policy
 is in [SAFETY.md](../../../SAFETY.md); this guide describes the
 browser integration's enforcement details.
 
+## Native proxy-container foundation
+
+The separate `proxy_policy` target provides dependency-free native policy and
+group-intent validation. It is not linked to browser routing or enabled UI.
+The separate `proxy_partition_adapter` target adds BrowserContext-owned,
+one-shot snapshot restore and typed native proxy preparation. Successful
+preparation still returns runtime-blocked; neither target is linked into routing.
+Run `make native-proxy-policy-check` for offline policy/restore/group-transfer checks.
+With an initialized, synchronized pinned Chromium checkout and generated build,
+compile and run the native adapter suite from the Chromium source directory:
+
+```sh
+autoninja -C out/Component_arm64 brave/components/reverse_engineering_browser:proxy_partition_adapter_unittests
+out/Component_arm64/proxy_partition_adapter_unittests
+```
+
+This suite evaluates native rules and parameter preparation without opening
+network contexts or sockets. It is not ordinary repository CI or browser-level
+transport/isolation coverage. See
+[the v1 contract](../../../protocol/native-proxy-containers-v1.md) and
+[pinned architecture](../../../docs/architecture/native-proxy-containers.md)
+before adding a native network hook; ordinary groups do not isolate traffic.
+
 ## Native console
 
 The disabled-by-default native console is a separate mutation path. Patch 0011

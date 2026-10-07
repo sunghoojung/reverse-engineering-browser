@@ -1,13 +1,16 @@
 native-build-test:
 	./scripts/check-native-build.sh
 
-check: all native-probe-compile native-build-test workspace-check deob-benchmark
+check: all native-probe-compile native-proxy-policy-check native-build-test workspace-check deob-benchmark
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 	REB_SOURCE_FACTS_TEST_WORKER="$(abspath $(or $(CARGO_TARGET_DIR),apps/deobfuscator-worker/target))/debug/reb-deobfuscator-worker" \
 		cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml source_facts_real_worker_http_and_cli -- --ignored
 
 native-probe-compile: $(NATIVE_PROBE_QUEUE_OBJECT)
+
+native-proxy-policy-check: $(NATIVE_PROXY_POLICY_TEST)
+	$(NATIVE_PROXY_POLICY_TEST)
 
 lint: format-check shellcheck python-check javascript-check repository-check workflow-check
 	cargo fmt --check --manifest-path apps/origin-trace-backend/Cargo.toml
@@ -26,7 +29,7 @@ sanitize:
 		OPT_CXXFLAGS="-O1 -g" \
 		EXTRA_CXXFLAGS="-fsanitize=$(SANITIZERS) -fno-omit-frame-pointer" \
 		EXTRA_LDFLAGS="-fsanitize=$(SANITIZERS)" \
-		all native-probe-compile
+		all native-probe-compile native-proxy-policy-check
 
 format:
 	@if command -v $(CLANG_FORMAT) >/dev/null 2>&1; then \

@@ -12,6 +12,8 @@ DEBUGGER_TRANSPORT_BINARY := $(BUILD_DIR)/reb-debugger-transport
 NATIVE_CONSOLE_BINARY := $(BUILD_DIR)/reb-console
 NATIVE_CONSOLE_IO_OBJECT := $(BUILD_DIR)/browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_console_io.o
 NATIVE_PROBE_QUEUE_OBJECT := $(BUILD_DIR)/browser/integration/brave/overlay/components/reverse_engineering_browser/common/native_probe_queue.o
+NATIVE_PROXY_POLICY_OBJECT := $(BUILD_DIR)/browser/integration/brave/overlay/components/reverse_engineering_browser/browser/native_proxy_policy.o
+NATIVE_PROXY_POLICY_TEST := $(BUILD_DIR)/check-native-proxy-policy
 ORIGIN_TRACE_BACKEND := apps/origin-trace-backend/target/debug/origin-trace-backend
 VM_ANALYZER := apps/origin-trace-backend/target/debug/origin-trace-vm
 
@@ -54,7 +56,11 @@ $(NATIVE_CONSOLE_BINARY): $(BUILD_DIR)/apps/native-console/main.o $(NATIVE_CONSO
 $(BUILD_DIR)/apps/native-console/main.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
 $(DECODER_BINARY): LDLIBS += $(ZLIB_LIBS)
 
-$(APP_BINARIES):
+$(NATIVE_PROXY_POLICY_TEST): $(BUILD_DIR)/tools/check-native-proxy-policy.o $(NATIVE_PROXY_POLICY_OBJECT)
+
+$(BUILD_DIR)/tools/check-native-proxy-policy.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
+
+$(APP_BINARIES) $(NATIVE_PROXY_POLICY_TEST):
 	@mkdir -p $(@D)
 	$(CXX) $(filter %.o,$^) $(LDFLAGS) $(LDLIBS) -o $@
 
@@ -73,9 +79,10 @@ $(BUILD_DIR)/%.o: %.cc
 # Discover dependency files without adding sources to any link target implicitly.
 NATIVE_CPP_SOURCES := $(wildcard src/*/*.cpp apps/*/main.cpp services/*/main.cpp)
 NATIVE_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(NATIVE_CPP_SOURCES)) \
-	$(NATIVE_PROBE_QUEUE_OBJECT) $(NATIVE_CONSOLE_IO_OBJECT)
+	$(NATIVE_PROBE_QUEUE_OBJECT) $(NATIVE_CONSOLE_IO_OBJECT) $(NATIVE_PROXY_POLICY_OBJECT) \
+	$(BUILD_DIR)/tools/check-native-proxy-policy.o
 
 $(NATIVE_OBJECTS): mk/config.mk mk/native.mk
-$(APP_BINARIES): mk/native.mk
+$(APP_BINARIES) $(NATIVE_PROXY_POLICY_TEST): mk/native.mk
 
 -include $(NATIVE_OBJECTS:.o=.d)

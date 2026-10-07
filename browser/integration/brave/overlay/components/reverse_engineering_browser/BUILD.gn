@@ -3,7 +3,9 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this file,
 # You can obtain one at https://mozilla.org/MPL/2.0/.
 
+import("//build/config/ui.gni")
 import("//mojo/public/tools/bindings/mojom.gni")
+import("//testing/test.gni")
 
 mojom("mojom") {
   sources = [
@@ -23,6 +25,56 @@ source_set("queue") {
 
 source_set("console_protocol") {
   sources = [ "common/native_console_protocol.h" ]
+}
+
+# Preparation-only, deliberately not linked into the browser target until the
+# native creation, network and lifecycle gates in native-proxy-containers-v1.md
+# have browser-level coverage. This target does not enable routing or a UI.
+source_set("proxy_policy") {
+  sources = [
+    "browser/native_proxy_policy.cc",
+    "browser/native_proxy_policy.h",
+  ]
+}
+
+# Typed preparation only. Nothing in :browser depends on this target: preparing
+# params does not authorize creating a NetworkContext or navigating a tab.
+source_set("proxy_partition_adapter") {
+  sources = [
+    "browser/native_proxy_partition_adapter.cc",
+    "browser/native_proxy_partition_adapter.h",
+  ]
+
+  public_deps = [
+    ":proxy_policy",
+    "//base",
+    "//services/network/public/mojom",
+  ]
+  deps = [
+    "//content/public/browser",
+    "//net",
+  ]
+}
+
+# This suite needs the pinned Chromium toolchain. The standalone policy check
+# cannot compile or exercise these native types and must not stand in for it.
+test("proxy_partition_adapter_unittests") {
+  use_xvfb = use_xvfb_in_this_config
+
+  sources = [ "browser/native_proxy_partition_adapter_unittest.cc" ]
+
+  deps = [
+    ":proxy_partition_adapter",
+    "//base/test:test_support",
+    "//content/public/browser",
+    "//content/test:run_all_unittests",
+    "//content/test:test_support",
+    "//mojo/public/cpp/bindings",
+    "//net",
+    "//net/traffic_annotation:test_support",
+    "//testing/gtest",
+    "//url",
+  ]
 }
 
 component("renderer_sink") {

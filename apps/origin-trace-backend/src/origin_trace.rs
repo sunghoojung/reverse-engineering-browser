@@ -69,10 +69,14 @@ pub fn build(
     edges: &[Value],
     artifacts: &[Value],
     request_id: &str,
+    session_id: Option<&str>,
     root_process: Option<u32>,
     root_sequence: Option<&str>,
 ) -> Result<Value> {
     validation::canonical(&json!(request_id), 64, false, "request_id")?;
+    if let Some(session) = session_id {
+        validation::canonical(&json!(session), 64, true, "session_id")?;
+    }
     if root_process.is_some() != root_sequence.is_some() {
         return Err(Error::bad(
             "Root process ID and sequence number must be supplied together",
@@ -157,14 +161,24 @@ pub fn build(
     let candidates: Vec<_> = events
         .iter()
         .filter(|e| {
-            e["type"] != "gap" && e["category"] == "network" && e["request_id"] == request_id
+            e["type"] != "gap"
+                && e["category"] == "network"
+                && e["request_id"] == request_id
+                && session_id.is_none_or(|session| e["session_id"] == session)
+                && root_process.is_none_or(|pid| e["process_id"] == pid)
+                && root_sequence.is_none_or(|sequence| e["sequence_number"] == sequence)
         })
         .collect();
-    let preferred = if let (Some(pid), Some(sequence)) = (root_process, root_sequence) {
+    // Operation preference only selects a lifecycle event within one session.
+    // A reused request ID must not silently prefer another session's start.
+    let ambiguous_session = candidates
+        .iter()
+        .map(|event| event["session_id"].as_str().unwrap())
+        .collect::<BTreeSet<_>>()
+        .len()
+        > 1;
+    let preferred = if root_process.is_some() {
         candidates
-            .into_iter()
-            .filter(|e| e["process_id"] == pid && e["sequence_number"] == sequence)
-            .collect::<Vec<_>>()
     } else {
         let mut selected = Vec::new();
         for operation in ["request_started", "request_initiated", ""] {
@@ -183,11 +197,11 @@ pub fn build(
     let mut gaps = Vec::new();
     let mut observed = 0;
     let mut correlated = 0;
-    let status = if preferred.len() > 1 && root_process.is_none() {
+    let status = if ambiguous_session || preferred.len() > 1 {
         gaps.push(gap(
             "ambiguous_request",
             0,
-            "More than one request start uses this identifier. Select a concrete request row.",
+            "More than one retained request matches these selectors. Supply session_id and a concrete root process/sequence pair.",
         ));
         "ambiguous"
     } else if preferred.len() != 1 {

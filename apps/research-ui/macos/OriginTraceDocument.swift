@@ -23,12 +23,16 @@ enum OriginTraceDocumentBuilder {
     edges: [[String: Any]],
     artifacts: [[String: Any]],
     requestID: String,
+    sessionID: String? = nil,
     rootProcessID: UInt32?,
     rootSequenceNumber: String?,
     maxSteps: Int = 32
   ) throws -> [String: Any] {
     guard canonicalUInt64(requestID) != nil else {
       throw traceError("Request ID must be a canonical unsigned 64-bit integer")
+    }
+    if let sessionID, nonzeroUInt64(sessionID) == nil {
+      throw traceError("Session ID must be a canonical nonzero unsigned 64-bit integer")
     }
     guard (rootProcessID == nil) == (rootSequenceNumber == nil) else {
       throw traceError("Root process ID and sequence number must be supplied together")
@@ -74,31 +78,32 @@ enum OriginTraceDocumentBuilder {
     let candidates = events.filter {
       $0["type"] as? String != "gap"
         && $0["category"] as? String == "network" && $0["request_id"] as? String == requestID
+        && (sessionID == nil || $0["session_id"] as? String == sessionID)
+        && (rootProcessID == nil || processID($0["process_id"]) == rootProcessID)
+        && (rootSequenceNumber == nil || $0["sequence_number"] as? String == rootSequenceNumber)
     }
-    let root: [String: Any]?
-    if let rootProcessID, let rootSequenceNumber {
-      let exact = candidates.filter {
-        processID($0["process_id"]) == rootProcessID
-          && $0["sequence_number"] as? String == rootSequenceNumber
-      }
-      root = exact.count == 1 ? exact[0] : nil
+    // Lifecycle preference cannot select between different captured sessions.
+    let ambiguousSession = Set(candidates.compactMap { $0["session_id"] as? String }).count > 1
+    let preferred: [[String: Any]]
+    if rootProcessID != nil {
+      preferred = candidates
     } else {
       let started = candidates.filter { $0["type"] as? String == "request_started" }
       let initiated = candidates.filter { $0["type"] as? String == "request_initiated" }
-      let preferred = !started.isEmpty ? started : (!initiated.isEmpty ? initiated : candidates)
-      if preferred.count > 1 {
-        return emptyDocument(
-          requestID: requestID,
-          status: "ambiguous",
-          gaps: [[
-            "reason": "ambiguous_request",
-            "after_step": 0,
-            "detail": "More than one request start uses this identifier. Select a concrete request row.",
-          ]]
-        )
-      }
-      root = preferred.first
+      preferred = !started.isEmpty ? started : (!initiated.isEmpty ? initiated : candidates)
     }
+    if ambiguousSession || preferred.count > 1 {
+      return emptyDocument(
+        requestID: requestID,
+        status: "ambiguous",
+        gaps: [[
+          "reason": "ambiguous_request",
+          "after_step": 0,
+          "detail": "More than one retained request matches these selectors. Supply session_id and a concrete root process/sequence pair.",
+        ]]
+      )
+    }
+    let root = preferred.first
     guard let root else {
       return emptyDocument(requestID: requestID, status: "empty", gaps: [])
     }

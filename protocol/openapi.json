@@ -867,7 +867,7 @@
       "get": {
         "operationId": "get_origin_trace",
         "summary": "get origin trace",
-        "description": "Bounded recent evidence window: 10000 events, 30000 edges, 10000 artifacts. An empty/ambiguous/partial document is a successful result, not a missing-resource error.",
+        "description": "Bounded recent evidence window: 10000 events, 30000 edges, 10000 artifacts. Optional session_id limits selection to that exact captured session. Supply it with root_process_id and root_sequence_number for an exact event. Omitted selectors remain backward-compatible only for unambiguous matches; cross-session or multiple-root matches return ambiguous without selecting a trace. A missing exact match is empty, with no fallback. An empty/ambiguous/partial document is a successful result, not a missing-resource error.",
         "tags": [
           "origin-trace"
         ],
@@ -951,6 +951,15 @@
             "description": "",
             "schema": {
               "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": false,
+            "description": "Exact captured session identity. Keep as a canonical decimal string. Omit only when the remaining selectors identify an unambiguous match.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
             }
           },
           {

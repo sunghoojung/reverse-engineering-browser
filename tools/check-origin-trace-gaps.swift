@@ -19,6 +19,7 @@ enum OriginTraceGapChecks {
           edges: (item["edges"] as! [String]).map { edges[$0]! },
           artifacts: [],
           requestID: query["request_id"] as! String,
+          sessionID: query["session_id"] as? String,
           rootProcessID: (query["root_process_id"] as? Int).map { UInt32($0) },
           rootSequenceNumber: query["root_sequence_number"] as? String
         )
@@ -35,6 +36,9 @@ enum OriginTraceGapChecks {
       if let root = steps.first {
         precondition(root["request_id"] as! String == "9007199254740995", name)
         precondition(root["value"] as! String == "synthetic request", name)
+      }
+      if let sessions = item["step_sessions"] as? [String] {
+        precondition(steps.map { ($0["event"] as! [String: Any])["session_id"] as! String } == sessions, name)
       }
       let gaps = result["gaps"] as! [[String: Any]]
       precondition(gaps.map { $0["reason"] as! String } == item["gap_reasons"] as! [String], name)
@@ -54,6 +58,6 @@ enum OriginTraceGapChecks {
     )
     let reasons = (bounded["gaps"] as! [[String: Any]]).map { $0["reason"] as! String }
     precondition(reasons == ["step_limit", "capture_gap"])
-    print("PASS native Origin Trace shared gap regressions and step-limit coverage")
+    print("PASS native Origin Trace shared gap/session regressions and step-limit coverage")
   }
 }

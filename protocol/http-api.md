@@ -99,6 +99,29 @@ five-second manifest or thirty-second verification deadline expires.
 This is not HTTP Range/206 pagination. Events and artifacts expose a bounded
 recent tail, not a cursor or stable exhaustive export.
 
+## Exact request trace selection
+
+`get_origin_trace` accepts optional `session_id` in addition to `request_id` and
+its existing paired `root_process_id` / `root_sequence_number` selectors. Send all
+four for an exact retained request event:
+
+```sh
+reb-api call get_origin_trace --endpoint-file /tmp/reb-api-endpoint \
+  --param session_id=7 --param request_id=91 \
+  --param root_process_id=42 --param root_sequence_number=3
+```
+
+Session IDs are nonzero canonical uint64 decimal strings. The UI forwards the
+selected row's exact session identity; unsafe numeric identities and ambiguous
+rows are rejected before fetching. Existing unambiguous calls without a session
+continue to work. Multiple retained matches, including the same process/sequence
+in different sessions, return the existing `ambiguous` status and
+`ambiguous_request` gap with no steps. This intentionally replaces the previous
+misleading `empty` result for a reused process/sequence pair. Lifecycle preference
+never chooses between different sessions. Missing exact matches remain `empty`,
+without falling back to another session or event. Session selection participates
+in the ETag. The v1 response shape, stored evidence and capture policy are unchanged.
+
 ## Error reasons and uncertain outcomes
 
 JSON error responses retain their existing HTTP status and human `error` text,

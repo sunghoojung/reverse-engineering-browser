@@ -83,6 +83,12 @@ render_icon 512 icon_512x512.png
 render_icon 1024 icon_512x512@2x.png
 xcrun iconutil -c icns "${iconset_path}" -o "${resources_path}/OriginTrace.icns"
 
+xcrun swiftc -parse-as-library \
+  "${trace_document_source}" "${repo_root}/tools/check-origin-trace-gaps.swift" \
+  -o "${repo_root}/build/check-origin-trace-gaps"
+"${repo_root}/build/check-origin-trace-gaps" \
+  "${repo_root}/apps/origin-trace-backend/assets/origin-trace-gap-cases.json"
+
 xcrun swiftc \
   -parse-as-library \
   -framework Cocoa \

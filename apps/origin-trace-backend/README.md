@@ -25,6 +25,10 @@ a browser, covering exact UTF-8 handoffs, source identity, search cancellation,
 chain prefixes, and bounds. These checks run in CI through `make lint`.
 `cargo test` covers HTTP
 contracts, locality, bounded reads, durable state conflicts, and worker shutdown.
+The `origin_trace_gap` HTTP regressions cover native queue markers sharing their
+anchor identity, missing anchors, repeated markers, unrelated streams, malformed
+markers, genuine duplicate events, exact large IDs, and bounded coverage. The
+native Swift builder runs the same synthetic cases during `make app-build`.
 
 The listener accepts only `127.0.0.1`, `localhost`, or `::1`; every API request
 validates Host, Origin, and fetch-site headers. Static serving allowlists the

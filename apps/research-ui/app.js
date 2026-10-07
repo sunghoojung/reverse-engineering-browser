@@ -1493,33 +1493,54 @@
       }
 
       function requestSignalProfileSelection() {
-        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        const candidates = state.requests.filter(candidate => candidate.id === state.selectedRequestId);
+        const request = candidates.length === 1 ? candidates[0] : null;
         const root = requestSignalRoot(request);
         if (!request || !root) return null;
+        const requestID = integerText(root, 'request_id');
+        const sessionID = integerText(root, 'session_id');
+        const rootProcessID = root.process_id;
+        const rootSequenceNumber = integerText(root, 'sequence_number');
         return {
-          request,
-          root,
-          requestID: integerText(root, 'request_id'),
-          sessionID: integerText(root, 'session_id'),
-          key: `${request.id}:${integerText(root, 'session_id')}:${root.process_id}:${integerText(root, 'sequence_number')}`
+          requestID, sessionID, rootProcessID, rootSequenceNumber,
+          key: JSON.stringify([request.id, sessionID, requestID, rootProcessID, rootSequenceNumber])
         };
       }
 
       async function refreshRequestSignalProfile() {
         const generation = ++state.signalProfileGeneration;
         const selection = requestSignalProfileSelection();
+        const render = () => {
+          if (state.inspectorTab === 'signals') renderInspector();
+          if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
+        };
+        if (state.signalProfileKey !== selection?.key || location.protocol === 'file:') {
+          state.signalProfile = null;
+          state.signalProfileKey = null;
+          state.signalProfileEtag = null;
+        }
         if (!selection || location.protocol === 'file:') {
           state.signalProfile = null;
           state.signalProfileStatus = 'empty';
           state.signalProfileError = null;
-          if (state.inspectorTab === 'signals') renderInspector();
-          if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
+          render();
           return;
         }
+        const ownsSelection = () => {
+          if (generation !== state.signalProfileGeneration) return false;
+          if (requestSignalProfileSelection()?.key === selection.key) return true;
+          state.signalProfileGeneration += 1;
+          state.signalProfile = null;
+          state.signalProfileKey = null;
+          state.signalProfileEtag = null;
+          state.signalProfileStatus = 'error';
+          state.signalProfileError = 'The selected request event changed while reading its signal profile. Select the request again.';
+          render();
+          return false;
+        };
         state.signalProfileStatus = 'loading';
         state.signalProfileError = null;
-        if (state.inspectorTab === 'signals') renderInspector();
-        if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
+        render();
         try {
           const headers = state.signalProfileKey === selection.key && state.signalProfileEtag
             ? { 'If-None-Match': state.signalProfileEtag }
@@ -1527,12 +1548,15 @@
           const parameters = new URLSearchParams({
             session_id: selection.sessionID,
             request_id: selection.requestID,
-            root_process_id: String(selection.root.process_id),
-            root_sequence_number: integerText(selection.root, 'sequence_number')
+            root_process_id: String(selection.rootProcessID),
+            root_sequence_number: selection.rootSequenceNumber
           });
           const response = await fetch(`/api/request-signal-profile?${parameters}`, { cache: 'no-store', headers });
-          if (generation !== state.signalProfileGeneration) return;
+          if (!ownsSelection()) return;
           if (response.status === 304) {
+            if (!headers['If-None-Match'] || state.signalProfileKey !== selection.key) {
+              throw new TypeError('Request signal profile returned an unowned cached response');
+            }
             state.signalProfileStatus = state.signalProfile ? 'ready' : 'empty';
           } else if (response.status === 404) {
             state.signalProfile = null;
@@ -1542,19 +1566,24 @@
           } else {
             if (!response.ok) throw new Error(`Request signal profile store returned ${response.status}`);
             const body = await response.json();
+            if (!ownsSelection()) return;
             if (!isRequestSignalProfile(body)) throw new TypeError('Malformed request signal profile');
+            if (body.session_id !== selection.sessionID || body.request_id !== selection.requestID ||
+                body.root_event.process_id !== selection.rootProcessID || body.root_event.sequence_number !== selection.rootSequenceNumber) {
+              throw new TypeError('Signal profile belongs to a different captured request or event. Exact linkage is unavailable.');
+            }
             state.signalProfile = body;
             state.signalProfileStatus = 'ready';
             state.signalProfileKey = selection.key;
             state.signalProfileEtag = response.headers.get('ETag');
           }
         } catch (error) {
-          if (generation !== state.signalProfileGeneration) return;
+          if (!ownsSelection()) return;
+          state.signalProfileEtag = null;
           state.signalProfileStatus = 'error';
           state.signalProfileError = error.message;
         }
-        if (state.inspectorTab === 'signals') renderInspector();
-        if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
+        render();
       }
 
       function renderFields() {
@@ -2016,7 +2045,8 @@
           missing_event: 'Missing event · predecessor not retained',
           no_predecessor: 'Missing predecessor · no recorded link',
           cycle: 'Trace stopped · correlation cycle',
-          step_limit: 'Trace stopped · step limit reached'
+          step_limit: 'Trace stopped · step limit reached',
+          capture_gap: 'Capture incomplete · native queue drops'
         };
         (trace?.steps ?? []).forEach((step, index) => {
           models.push({key: `${step.event.process_id}:${step.event.sequence_number}`, index: String(index + 1),
@@ -2040,11 +2070,10 @@
         if (active) traceStepDetails(active); else elements.traceStepDetails.replaceChildren();
         if (hasSteps) {
           const {linked_steps: linked, gap_count: gaps} = trace.coverage;
-          const possible = linked + gaps;
-          const links = possible ? `${linked} of ${possible} predecessor links recorded` : 'No predecessor links were needed';
-          const gapsText = gaps ? `${gaps} missing predecessor${gaps === 1 ? '' : 's'}` : 'no missing predecessors';
-          elements.coverageValue.textContent = `${trace.coverage.percent}% predecessor coverage · ${links} · ${gapsText}`;
-          elements.coverageValue.title = 'Coverage counts recorded predecessor links against explicit missing-predecessor gaps.';
+          const links = `${linked} recorded predecessor link${linked === 1 ? '' : 's'}`;
+          const gapsText = `${gaps} reported gap${gaps === 1 ? '' : 's'}`;
+          elements.coverageValue.textContent = `${trace.coverage.percent}% trace coverage · ${links} · ${gapsText}`;
+          elements.coverageValue.title = 'Coverage counts recorded predecessor links against named gaps. Queue-drop markers describe retained streams and do not identify missing links or prove value flow.';
         } else {
           elements.coverageValue.textContent = '';
           elements.coverageValue.removeAttribute?.('title');

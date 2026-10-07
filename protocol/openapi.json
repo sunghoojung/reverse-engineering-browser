@@ -4181,7 +4181,8 @@
                   "missing_event",
                   "no_predecessor",
                   "cycle",
-                  "step_limit"
+                  "step_limit",
+                  "capture_gap"
                 ]
               },
               "after_step": {

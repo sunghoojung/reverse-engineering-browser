@@ -56,14 +56,36 @@ Before recursive Oxc parsing, a heap-backed Tree-sitter preflight admits only
 error-free JavaScript trees with depth at most 128 and at most 500,000 nodes,
 within one second. Excessive nesting returns a recoverable diagnostic and leaves
 the next JSON-line request usable. Both grammars must support the input syntax.
+Before accepting rewrites, the complete derived text passes the same bounded
+preflight and Oxc parser with the original parse goal. Derived text is capped at
+4 MiB plus the 512 KiB replacement budget. A failed check returns
+`error_kind: "derived-validation"`, preserves the original text, and discards
+all rewrite receipts. This establishes syntax acceptance, not semantic equivalence.
+Object shorthand properties retain their original spelling and are not folded.
 
 `make deob-benchmark` runs the worker against the versioned technique corpus in
 `tools/fixtures/deobfuscation-benchmark/`.
-Each case compares the original and derived observable result in Node, requires
+Each reviewed fixture in `corpus-v2.json` compares original and derived typed
+observations in Node, requires
 the expected transformation families, rejects budget truncation, and reports
 wall time, rewrite count, changed-source coverage, and child peak RSS. The
 fixtures are repository-owned regression programs, not captured or untrusted
 malware samples.
+The runner rejects manifests outside this fixture directory. It is a trusted
+developer test tool, never a sandbox or a route for analyzing captured code.
+Observations distinguish undefined, null, array holes and own property presence,
+boolean/number types, exact binary64 finite numbers (including negative zero),
+NaN and infinities. JSON string escapes preserve UTF-16 units. Fixtures can
+explicitly report `completion` (normal or throw) and an ordered `effects` array;
+the harness does not wrap the source or catch its exceptions. Accessors, exotic
+objects, symbols, cycles and shared-object identity are unsupported observations.
+Descriptor attributes and runtime behavior beyond these authored observations
+are not compared. The oracle has depth, property, string, output, time and Node
+heap limits; these do not make execution of untrusted JavaScript safe.
+Run `python3 tools/run-deobfuscation-benchmark.py --oracle-self-test` without a
+worker to verify that ten deliberately wrong observations are rejected. Every
+full benchmark also runs those controls. Reported source coverage is changed
+original bytes, and child peak RSS includes both Node and worker processes.
 
 ## Inert source facts
 

@@ -104,6 +104,13 @@ original source exactly. A replacement maps to its entire original expression;
 positions within it map to that expression's start. The adapter rebuilds the
 output from these records and rejects inconsistencies. Safe rewrites and their
 limits are documented in [method coverage](deobfuscation-method-coverage.md).
+Sources additionally verifies complete contiguous original coverage, UTF-8
+boundaries, nonempty replacements and coherent supplied rewrite totals before
+offering a one-span inspector. Its bounded snippets, explicit paging, retained
+retry result and request cancellation are described in the
+[UI guide](../../apps/research-ui/README.md#deobfuscation-engines). A selected
+span is labelled a mapped replacement; per-span rule explanations are unavailable
+in this contract. No runtime equivalence claim follows from syntax or mapping.
 
 Display pretty printing has a separate UTF-16 map and can introduce synthetic
 whitespace. The UI composes that map with the AST map when both controls are

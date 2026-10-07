@@ -123,19 +123,20 @@ function createSourceFactsController({getSource, onChange, onNavigate, protocol,
   const model = {key: null, source: null, status: 'idle', report: null, original: null, error: '', notice: '', revision: 0};
   let generation = 0;
   let active = null;
+  let activeOwner = null;
   const change = () => { model.revision += 1; onChange(model); };
   const cancel = (message = 'Request cancelled. Any bounded worker already started may finish; its result will not be applied.') => {
     if (!active) return;
-    generation += 1; active.abort(); active = null;
+    generation += 1; active.abort(); active = null; activeOwner = null;
     model.status = model.report ? 'ready' : 'idle'; model.notice = message; change();
   };
   const sync = source => {
     const key = sourceFactsIdentity(source);
     if (key === model.key && source?.source_type === model.source?.source_type && source?.kind === model.source?.kind) return;
-    generation += 1; active?.abort(); active = null;
+    generation += 1; active?.abort(); active = null; activeOwner = null;
     Object.assign(model, {key, source, status: 'idle', report: null, original: null, error: '', notice: ''}); change();
   };
-  const run = async (mode, range) => {
+  const run = async (mode, range, {owner = null, isCurrent = () => true} = {}) => {
     sync(getSource());
     const source = model.source;
     const unavailable = sourceFactsUnavailable(source, protocol);
@@ -143,14 +144,14 @@ function createSourceFactsController({getSource, onChange, onNavigate, protocol,
     if (active) return;
     const key = model.key;
     const token = ++generation;
-    const controller = new AbortController(); active = controller;
-    const current = () => token === generation && sourceFactsIdentity(getSource()) === key && !controller.signal.aborted;
+    const controller = new AbortController(); active = controller; activeOwner = owner;
+    const current = () => token === generation && sourceFactsIdentity(getSource()) === key && !controller.signal.aborted && isCurrent();
     const timer = setTimeout(() => {
       if (token !== generation) return;
       if (sourceFactsIdentity(getSource()) !== key) { sync(getSource()); return; }
       // WebCrypto cannot be aborted. Retire ownership immediately so a digest
       // that finishes after the deadline cannot leave the view busy or navigate.
-      generation += 1; active = null; controller.abort();
+      generation += 1; active = null; activeOwner = null; controller.abort();
       model.status = 'error'; model.error = 'Source facts timed out. Retry explicitly; original evidence is unchanged.'; change();
     }, deadline);
     model.status = mode === 'facts' ? 'loading' : 'loading-source'; model.error = ''; model.notice = ''; change();
@@ -204,10 +205,19 @@ function createSourceFactsController({getSource, onChange, onNavigate, protocol,
     } finally {
       clearTimeout(timer);
       controller.abort();
-      if (token === generation) { active = null; change(); }
+      if (token === generation) {
+        active = null; activeOwner = null;
+        if (!isCurrent()) {
+          model.status = model.report ? 'ready' : 'idle';
+          model.error = '';
+          model.notice = 'Original range request no longer matches its analysis; late results were ignored.';
+        }
+        change();
+      }
     }
   };
-  return {model, sync, cancel, load: () => run('facts'), navigate: range => run('source', range),
+  return {model, sync, cancel, load: () => run('facts'), navigate: (range, options) => run('source', range, options),
+    cancelOwned(owner, message) { if (!active || activeOwner !== owner) return false; cancel(message); return true; },
     original: source => sourceFactsIdentity(source) === model.key ? model.original?.text : undefined};
 }
 

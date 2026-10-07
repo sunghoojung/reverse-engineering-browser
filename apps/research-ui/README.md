@@ -762,6 +762,31 @@ Failed analysis remains visible until **Retry analysis** is selected. A failed
 retry retains the last successful result. Source selection does not switch the
 Sources editor away from original evidence. The UI retains at most eight analysis
 documents and distinguishes source hashes and debugger targets in its cache.
+The report retains the last successful summary and snippets during a retry or
+failure. **Cancel analysis** retires the current request; a worker may still
+finish, but its late response cannot replace the report. Cancellation and errors
+require an explicit retry.
+
+The report's changed-span inspector shows one validated replacement at a time,
+with Previous/Next, exact half-open UTF-8 ranges, and original/derived snippets
+limited to 2,048 UTF-16 units each. Snippets scroll independently; truncation is
+visible and never splits a surrogate pair. In the HTTP live workspace or browser
+development UI, **Reveal original range** verifies captured original bytes
+through the existing Facts path. Stored-evidence native mode displays an explicit
+unavailable reason for that navigation. Live scripts require
+their currently owned complete source text and target identity. Neither path
+executes source. Pretty printing remains a separate display layer.
+
+Transformation families, heuristic classification signals, recovered table
+summaries, and assumptions/limits have explicit counts and four-row paging.
+Generic omissions do not hide recovered tables. Raw table entries are not shown;
+only bounded admitted summary fields and previews are displayed. Family totals
+are whole-report metadata, not invented explanations for a selected replacement.
+Classification is labelled as a heuristic, not a probability or equivalence proof.
+Missing legacy change metadata is shown as unavailable; code-point maps do not
+offer exact UTF-8 change inspection. Small selection/page/disclosure metadata
+lives with its bounded cached analysis and disappears on eviction. History does
+not restore intrinsic options or the selected change.
 The [versioned contract](../../protocol/deobfuscation-v1.md) defines source-map
 units and how native replacements map back to their original expressions.
 

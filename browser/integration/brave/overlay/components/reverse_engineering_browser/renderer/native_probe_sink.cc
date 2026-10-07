@@ -6,6 +6,7 @@
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 
 #include <algorithm>
+#include <limits>
 #include <string_view>
 
 #include "base/process/process_handle.h"
@@ -77,7 +78,7 @@ NativeProbeSink& NativeProbeSink::Get() {
   return sink;
 }
 
-void NativeProbeSink::SetEmitters(const NativeProbeEmitter emitter,
+void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
                                   const NativeGeneratedArtifactEmitter artifact_emitter,
                                   const std::uint64_t session_id,
                                   const std::uint64_t category_mask,
@@ -92,7 +93,17 @@ void NativeProbeSink::SetEmitters(const NativeProbeEmitter emitter,
   // generation.
   emitter_.store(nullptr, std::memory_order_release);
   artifact_emitter_.store(nullptr, std::memory_order_release);
+  // Claims rely on generation ordering. Fail closed instead of ever reusing a
+  // generation if the serialized control sequence exhausts the counter.
+  if (config_generation_.load(std::memory_order_relaxed) >=
+      std::numeric_limits<std::uint64_t>::max() - 1) {
+    config_generation_.store(std::numeric_limits<std::uint64_t>::max(), std::memory_order_release);
+    return;
+  }
   config_generation_.fetch_add(1, std::memory_order_acq_rel);
+  // If a reader sees any replacement policy field, its acquire fence also
+  // observes the preceding odd generation and rejects the mixed snapshot.
+  std::atomic_thread_fence(std::memory_order_release);
   const bool active = emitter && artifact_emitter;
   session_id_.store(active ? session_id : 0, std::memory_order_relaxed);
   category_mask_.store(active ? category_mask : 0, std::memory_order_relaxed);
@@ -102,6 +113,23 @@ void NativeProbeSink::SetEmitters(const NativeProbeEmitter emitter,
   emitter_.store(emitter, std::memory_order_relaxed);
   artifact_emitter_.store(artifact_emitter, std::memory_order_relaxed);
   config_generation_.fetch_add(1, std::memory_order_release);
+}
+
+bool NativeProbeSink::CanAdmitEvent(const NativeProbeEvent& event,
+                                    const std::uint64_t config_generation) const noexcept {
+  if ((config_generation & 1U) != 0 ||
+      config_generation_.load(std::memory_order_acquire) != config_generation) {
+    return false;
+  }
+  const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
+  const std::uint64_t category_mask = category_mask_.load(std::memory_order_relaxed);
+  const std::uint64_t expires_at = expires_at_monotonic_ns_.load(std::memory_order_relaxed);
+  const NativeRendererProbeEmitter emitter = emitter_.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  return config_generation_.load(std::memory_order_acquire) == config_generation && emitter &&
+         session_id != 0 && event.header.session_id == session_id &&
+         (category_mask & NativeProbeCategoryMask(event.header.category)) != 0 &&
+         MonotonicTimeNs() < expires_at;
 }
 
 bool NativeProbeSink::IsCanvasImageCaptureEnabled() const noexcept {
@@ -183,24 +211,24 @@ void NativeProbeSink::RecordPropertyRead(const NativeProbeCategory category,
 
 void NativeProbeSink::RecordApiCallOnce(const NativeProbeCategory category,
                                         const std::string_view operation,
-                                        std::atomic<std::uint64_t>& observed_session_id) noexcept {
+                                        std::atomic<std::uint64_t>& observed_generation) noexcept {
   static_cast<void>(
-      RecordSurfaceOperation(category, NativeProbeType::kApiCall, operation, &observed_session_id));
+      RecordSurfaceOperation(category, NativeProbeType::kApiCall, operation, &observed_generation));
 }
 
 void NativeProbeSink::RecordPropertyReadOnce(
     const NativeProbeCategory category,
     const std::string_view operation,
-    std::atomic<std::uint64_t>& observed_session_id) noexcept {
+    std::atomic<std::uint64_t>& observed_generation) noexcept {
   static_cast<void>(RecordSurfaceOperation(category, NativeProbeType::kPropertyRead, operation,
-                                           &observed_session_id));
+                                           &observed_generation));
 }
 
 std::uint64_t NativeProbeSink::RecordSurfaceOperation(
     const NativeProbeCategory category,
     const NativeProbeType type,
     const std::string_view operation,
-    std::atomic<std::uint64_t>* const observed_session_id) noexcept {
+    std::atomic<std::uint64_t>* const observed_generation) noexcept {
   if (!emitter_.load(std::memory_order_acquire)) [[likely]] {
     return 0;
   }
@@ -218,7 +246,7 @@ std::uint64_t NativeProbeSink::RecordSurfaceOperation(
   const std::uint64_t expires_at_monotonic_ns =
       expires_at_monotonic_ns_.load(std::memory_order_relaxed);
   const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
-  const NativeProbeEmitter emitter = emitter_.load(std::memory_order_relaxed);
+  const NativeRendererProbeEmitter emitter = emitter_.load(std::memory_order_relaxed);
   std::atomic_thread_fence(std::memory_order_acquire);
   if (config_generation_.load(std::memory_order_acquire) != config_generation || !emitter ||
       (category_mask & NativeProbeCategoryMask(category)) == 0 ||
@@ -226,15 +254,14 @@ std::uint64_t NativeProbeSink::RecordSurfaceOperation(
     return 0;
   }
 
-  if (observed_session_id) {
-    std::uint64_t observed = observed_session_id->load(std::memory_order_acquire);
-    while (observed != session_id) {
-      if (observed_session_id->compare_exchange_weak(
-              observed, session_id, std::memory_order_acq_rel, std::memory_order_acquire)) {
-        break;
-      }
-    }
-    if (observed == session_id) {
+  if (observed_generation) {
+    std::uint64_t observed = observed_generation->load(std::memory_order_relaxed);
+    // Even values claim an in-flight or accepted observation. A failed claim
+    // releases to generation - 1, preserving a watermark above every older
+    // configuration. One CAS bounds work under competing same-site callers.
+    if (observed >= config_generation ||
+        !observed_generation->compare_exchange_strong(observed, config_generation,
+                                                      std::memory_order_relaxed)) {
       return 0;
     }
   }
@@ -251,7 +278,15 @@ std::uint64_t NativeProbeSink::RecordSurfaceOperation(
       frame_id_provider_.load(std::memory_order_relaxed);
   event.header.frame_id = frame_id_provider ? frame_id_provider() : 0;
   SetPayload(event, operation);
-  emitter(event);
+  if (!emitter(event, config_generation)) {
+    if (observed_generation) {
+      std::uint64_t claimed = config_generation;
+      // Never erase a newer configuration's claim or its failure watermark.
+      observed_generation->compare_exchange_strong(claimed, config_generation - 1,
+                                                   std::memory_order_relaxed);
+    }
+    return 0;
+  }
   return event.header.sequence_number;
 }
 
@@ -297,7 +332,7 @@ void NativeProbeSink::RecordRequestInitiated(const std::int32_t request_id,
   const std::uint64_t expires_at_monotonic_ns =
       expires_at_monotonic_ns_.load(std::memory_order_relaxed);
   const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
-  const NativeProbeEmitter emitter = emitter_.load(std::memory_order_relaxed);
+  const NativeRendererProbeEmitter emitter = emitter_.load(std::memory_order_relaxed);
   std::atomic_thread_fence(std::memory_order_acquire);
   if (config_generation_.load(std::memory_order_acquire) != config_generation || !emitter ||
       (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) == 0 ||
@@ -329,7 +364,7 @@ void NativeProbeSink::RecordRequestInitiated(const std::int32_t request_id,
       event.header.flags |= static_cast<std::uint16_t>(NativeProbeFlag::kPayloadTruncated);
     }
   }
-  emitter(event);
+  static_cast<void>(emitter(event, config_generation));
 }
 
 }  // namespace reb

@@ -60,13 +60,20 @@ Selected V8 Math functions, Intl constructors, locale-sensitive formatting,
 and timezone-offset reads emit Runtime operations through V8's existing
 use-counter callback. Each event records a fixed property or operation name and
 never retains arguments or return values. Generated non-Canvas callbacks and
-V8 counters emit the first observation of each call site per capture session,
-which preserves broad coverage during repetitive timing or Math loops.
+V8 counters deduplicate each native binding site after its first accepted
+renderer-ring insertion in a capture configuration. A full renderer ring counts
+the drop and leaves that site eligible on a later call after capacity returns.
+Concurrent same-site callers make one bounded claim attempt; configuration
+changes invalidate old claims even when a session ID is reused. This sampling
+is per renderer process and native binding site, not per JavaScript call site,
+document, or navigation. Renderer admission does not confirm downstream queue,
+broker, or evidence-store delivery and does not guarantee complete coverage.
 Lower-level Canvas, WebGL, and Web
 Audio hooks cover selected internal Blink paths; generator exclusions prevent
 double counting where those hooks overlap. The fingerprint category-mask bits
-are `1`, `2`, `4`, `8`, `16`, `32`, `64`, and `2048`; disabled or expired calls
-return before sequence assignment.
+are `1`, `2`, `4`, `8`, `16`, `32`, `64`, and `2048`; calls already disabled or
+expired at the sink return before sequence assignment. Transport admission
+rechecks the generation, session, category, and expiration before ring insertion.
 
 The V8 Math allowlist follows the cross-engine functions exercised by
 [CreepJS](https://github.com/abrahamjuliot/creepjs): `acos`, `acosh`, `asin`,

@@ -1,3 +1,5 @@
+import {checkTrafficComparisonController,checkCapturedComparisonInteractions} from './check-traffic-comparison-ui.mjs';
+import {checkTrafficComparisonModel} from './check-traffic-comparison.mjs';
 import {canvasBrowserFixture,checkCanvasFixture,checkCanvasInteractions} from './check-canvas-ui.mjs';
 import {checkConsoleDOM, createConsoleFixture, checkConsoleInteractions} from './check-console-workspace.mjs';
 import {checkFloat32Model,float32BrowserFixture,checkFloat32Fixture,checkFloat32Interactions} from './check-float32-ui.mjs';
@@ -34,6 +36,8 @@ const evidenceBrowser = process.argv[2] === "--evidence-ui-browser";
 const comparisonBrowser = process.argv[2] === "--evidence-comparison-ui-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
 const root = process.argv[fieldsOnly || canvasBrowser || sourcesHistoryBrowser || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
+await checkTrafficComparisonModel(root);
+await checkTrafficComparisonController(root);
 await checkConsoleDOM(root);
 await checkCollectionController(root);
 await checkInvestigationCore(root);
@@ -593,6 +597,8 @@ assert.equal(bodyCache.size, 0);
 networkModels.requestsFromDebuggerNetwork(binaryNetwork, [], bodyCache);
 assert.equal(networkModels.requestsFromDebuggerNetwork({...binaryNetwork, capture_enabled: false}, [], bodyCache).length, 0);
 assert.equal(bodyCache.size, 0);
+const truncatedMethodNetwork=networkSnapshot([networkRecord('method-truncated',{method_truncated:true})]);
+assert.equal(networkModels.requestsFromDebuggerNetwork(truncatedMethodNetwork)[0].methodTruncated,true);
 console.log("PASS indexed Traffic correlation, stable ties, body reuse, current-window eviction, capture-off and content search");
 
 // A minimal DOM verifies the real reconciliation code and bounded state, not
@@ -1152,14 +1158,14 @@ const summaryState = {selectedRequestId: "current", requests: [uiRequest("curren
 const summaryElements = {};
 for (const name of ["selectedMethod", "selectedStatus", "selectedUrl", "requestCopyUrl", "requestCollectionPivot", "requestInspector", "requestSearchScope", "requestFilter"]) summaryElements[name] = new TrafficFixtureNode();
 summaryElements.requestSearchScope.value = "url";
-const summaryNodes = new Map(["#exchange-inspector", ".traffic-grid", ".detail-pane", "#request-evidence-toggle", "#request-package-entry"].map(key => [key, new TrafficFixtureNode()]));
+const summaryNodes = new Map(["#exchange-inspector", "#traffic-comparison", ".traffic-grid", ".detail-pane", "#request-evidence-toggle", "#request-package-entry"].map(key => [key, new TrafficFixtureNode()]));
 let renderedSummaryRequest;
 const summaryInspector = runInNewContext(
   appSection("      function updateSelectionSummary(", "      function selectRequest(") +
   appSection("      function renderInspector()", "      function renderEvidence()") + ";renderInspector", {
     state: summaryState, elements: summaryElements, evidencePackagePanel: {sync() {}},
     document: {querySelectorAll: () => [], querySelector: selector => summaryNodes.get(selector)},
-    renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;}, openFieldProvenance() {},
+    renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;}, renderTrafficComparison() {}, openFieldProvenance() {},
   });
 for (const [status, failed] of [["pending", false], [200, false], ["failed", true]]) {
   summaryState.requests = [{...summaryState.requests[0], status, failed}];
@@ -5820,8 +5826,9 @@ async function checkTrafficBrowser() {
     await evaluate("state.requests=[]; renderRequests(); renderInspector()");
     assert.match(await evaluate("elements.requestRows.textContent"), /No developer evidence/);
     await screenshot("requests-empty");
+    const capturedComparison = await checkCapturedComparisonInteractions({evaluate,viewport,click,key,wheel,screenshot,emptyDebugger:JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/debugger-empty.json'),'utf8'))});
     assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during rendered QA");
-    validation = {status: "passed", path: "browser development UI", source: "synthetic fixture", viewports: [[1440,900],[600,800],[360,740]], checks: ["500-row bound and paging", "synchronized selected summary", "visible bounded narrow split", "independent ledger and body scrolling", "hit-tested pointer controls", "pending to response to failed", "equal-length updates", "stable focus and scroll", "sort/filter selection", "dismissal and Escape", "eviction", "arrow-key rows and tabs", "malformed JSON", "sandboxed HTML", "reduced motion", "Back to traffic", "new capture", "empty/malformed/offline"]};
+    validation = {capturedComparison,status: "passed", path: "browser development UI", source: "synthetic fixture", viewports: [[1440,900],[600,800],[360,740]], checks: ["500-row bound and paging", "synchronized selected summary", "visible bounded narrow split", "independent ledger and body scrolling", "hit-tested pointer controls", "pending to response to failed", "equal-length updates", "stable focus and scroll", "sort/filter selection", "dismissal and Escape", "eviction", "arrow-key rows and tabs", "malformed JSON", "sandboxed HTML", "reduced motion", "Back to traffic", "new capture", "empty/malformed/offline"]};
     }
     diagnostics.phase = "validated";
     }

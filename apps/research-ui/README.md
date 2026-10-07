@@ -319,7 +319,9 @@ while keeping Origin Trace's own controls and Rosé Pine Moon palette.
 Traffic’s **Compare** tab pins one exact retained request as a baseline. Select
 another request to compare method, URL, status, request/response headers, and
 request/response bodies without replaying either request. **Clear baseline**
-releases the reference. Demo/sample rows cannot be pinned. Native references use
+releases the reference. Concise baseline and selected-request summaries stay
+visible; their disclosure expands the full exact capture identifiers. Demo/sample
+rows cannot be pinned. Native references use
 session/process/event/request IDs; CDP references use target/protocol-request/start
 identity and are never promoted to native provenance. Loss of the exact retained
 record, duplicate identities, an observed target change or debugger generation

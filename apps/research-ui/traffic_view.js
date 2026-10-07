@@ -699,11 +699,13 @@ function renderTrafficComparison(container, request, active) {
     const clear = trafficNode('button', 'secondary-button', 'Clear baseline'); clear.type = 'button'; clear.id = 'traffic-comparison-clear';
     toolbar.append(pin, clear);
     const status = trafficNode('p', 'traffic-comparison-notice'); status.setAttribute('role', 'status');
-    const identities = trafficNode('div', 'traffic-comparison-identities');
+    const identityDisclosure = trafficNode('details', 'traffic-comparison-identities');
+    const identitySummary = trafficNode('summary', '', 'Capture identities');
+    const identities = trafficNode('div', ''); identityDisclosure.append(identitySummary, identities);
     const result = trafficNode('div', 'traffic-comparison-results');
     result.tabIndex = 0; result.setAttribute('aria-label', 'Captured request comparison results');
-    container.append(toolbar, status, identities, result);
-    container.rebComparison = {pin, clear, status, identities, result, key: null, byteSnapshots: [], byteRevision: 0};
+    container.append(toolbar, status, identityDisclosure, result);
+    container.rebComparison = {pin, clear, status, identities, identitySummary, result, key: null, byteSnapshots: [], byteRevision: 0};
     pin.addEventListener('click', () => {
       const selected = state.requests.find(value => value.id === state.selectedRequestId);
       trafficComparisonController.pin(selected, state.requests, trafficComparisonOwner());
@@ -730,7 +732,7 @@ function renderTrafficComparison(container, request, active) {
     ? 'Select a captured request as baseline, then choose another request from the ledger. Comparison stays local and sends no requests.'
     : investigationSame(selectedIdentity, trafficComparisonController.identity)
       ? 'Baseline selected. Choose another captured request to compare.'
-      : 'Comparing the current retained snapshots. Byte equality and JSON structure are separate; missing or truncated content stays inconclusive.');
+      : 'Baseline → selected. Comparing retained content locally; capture limits remain visible.');
   // Match the pure model's original exchange inputs, without inspector-only
   // HTTP empty-body fallbacks becoming evidence in the invalidation key.
   const left = baseline?.exchange, right = request?.exchange;
@@ -752,10 +754,18 @@ function renderTrafficComparison(container, request, active) {
     return prior.revision;
   });
   const key = JSON.stringify([trafficComparisonController.identity, selectedIdentity, selectedUnique, byteKeys,
-    ...[baseline, request].map(value => [value?.method, value?.path, value?.status, value?.hostOnly, value?.urlTruncated, value?.methodTruncated, value?.targetKind]),
+    ...[baseline, request].map(value => [value?.id, value?.method, value?.path, value?.status, value?.hostOnly, value?.urlTruncated, value?.methodTruncated, value?.targetKind]),
     ...records.map(record => [trafficPaneSignature(record, null), record?.headersTruncated, record?.headers_truncated])]);
   if (view.key === key) return;
   view.key = key;
+  const shortLabel = value => {
+    if (!value) return 'not selected';
+    let path = String(value.path ?? '');
+    try {path = new URL(path).pathname;} catch {}
+    const id = String(value.id ?? '');
+    return `${value.method} ${path.slice(0,40)}${path.length > 40 ? '…' : ''} · ${id.length > 16 ? '…' + id.slice(-16) : id}`;
+  };
+  view.identitySummary.textContent = `Baseline: ${shortLabel(baseline)} → selected: ${shortLabel(request)} (full IDs)`;
   view.identities.replaceChildren();
   if (baseline) view.identities.append(trafficNode('p', '', `Baseline: ${trafficComparisonLabel(baseline)}`));
   if (request) view.identities.append(trafficNode('p', '', `Selected: ${trafficComparisonLabel(request)}`));

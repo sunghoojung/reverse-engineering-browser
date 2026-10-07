@@ -2297,6 +2297,15 @@ await assert.rejects(waitForSourceOwnershipSettlement(settlementObserver.read,se
 await assert.rejects(waitForSourceOwnershipSettlement(settlementObserver.read,{...observedPending[0],identity:'other-owner'}),/exact receipt/);
 console.log('PASS Sources held-operation terminal receipts: same promise/arguments/receiver, delayed stale-commit refusal, rejection, exact identity and bounded nonsettlement (not rendered QA)');
 
+// macOS uses a native popup for clicked selects; CDP arrow keys do not drive
+// that popup. Use the focused HTML select's keyboard type-ahead instead.
+// Keep real input events and the caller's selected-value assertion on all OSes.
+async function selectOptionByKeyboard(key, label) {
+  for (const letter of label) await key(letter, letter === ' ' ? 'Space' : `Key${letter.toUpperCase()}`, {
+    windowsVirtualKeyCode:letter.toUpperCase().charCodeAt(0), text:letter, unmodifiedText:letter,
+  });
+}
+
 async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture,recordSourceCheck=()=>{}}) {
   const ownershipReceipts=[];
   const receipt=(label,detail)=>{const entry={label,...detail};ownershipReceipts.push(entry);recordSourceCheck(entry);};
@@ -2340,7 +2349,7 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
   await sourceClick('[data-facts-action="previous"]');
   await sourceClick('[data-facts-action="previous"]');
   await sourceClick('#source-facts-report select');
-  await press('Home');await press('ArrowDown');await press('Enter');
+  await selectOptionByKeyboard(key, 'b');
   await until("document.querySelector('#source-facts-report select').value==='bindings'",'Keyboard category selection failed');
   assert.equal(await evaluate("document.querySelectorAll('#source-facts-report .source-fact').length"),1);
   await sourceClick('.source-fact > button');
@@ -2353,7 +2362,7 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
   await until("document.querySelector('.source-facts-coverage').textContent.includes('Complete within lexical-effects-v1 only')",'Complete coverage must remain profile-relative');
   fixture.mode='truncated';await sourceClick('[data-facts-action="retry-facts"]');
   await until("document.querySelector('.source-facts-coverage').textContent.includes('TRUNCATED')",'Truncated coverage was hidden');
-  await sourceClick('#source-facts-report select');await press('End');await press('Enter');
+  await sourceClick('#source-facts-report select');await selectOptionByKeyboard(key, 'u');
   await until("document.querySelector('#source-facts-report select').value==='frontiers'",'Unknown-frontier category did not open');
   assert.match(await evaluate("document.querySelector('.source-fact').textContent"),/abrupt-completion/);
   fixture.mode='error';await sourceClick('[data-facts-action="retry-facts"]');
@@ -2383,7 +2392,7 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
   await press('Enter');await until("document.querySelector('#source-facts-details').open",'Keyboard reopen failed');
   await press('Escape');assert.equal(await evaluate("document.querySelector('#source-facts-details').open"),false);
   await viewport(760,560);await click('#source-facts-toggle');
-  await sourceClick('#source-facts-report select');await press('Home');await press('ArrowDown');await press('Enter');
+  await sourceClick('#source-facts-report select');await selectOptionByKeyboard(key, 'b');
   await until("document.querySelector('#source-facts-report select').value==='bindings'",'Narrow category failed');
   await screenshot('source-facts-narrow-details');
   await sourceClick('.source-fact > button');
@@ -2447,9 +2456,9 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
   };
   // Real browser interaction over validated synthetic debugger replies. The
   // fixture's JavaScript is rendered as text, never loaded into a target page.
-  await click('#source-search');await key('a','KeyA',{modifiers:2,windowsVirtualKeyCode:65});
+  await click('#source-search');await key('a','KeyA',{modifiers:process.platform==='darwin'?4:2,windowsVirtualKeyCode:65,...(process.platform==='darwin'?{commands:['selectAll']}:{})});
   const selectedQuery=await evaluate('({focused:document.activeElement===elements.sourceSearch,value:elements.sourceSearch.value,start:elements.sourceSearch.selectionStart,end:elements.sourceSearch.selectionEnd})');
-  assert.deepEqual(selectedQuery,{focused:true,value:'row',start:0,end:3},'Ctrl+A must select the complete prior source query before clearing it');
+  assert.deepEqual(selectedQuery,{focused:true,value:'row',start:0,end:3},'The platform select-all shortcut must select the complete prior source query before clearing it');
   await key('Backspace','Backspace',{windowsVirtualKeyCode:8});
   assert.equal(await evaluate('elements.sourceSearch.value'),'');
   const liveText="const owner = 'one';\n"+Array.from({length:180},(_,index)=>`const liveRow${index}={value:${index}};`).join('\n');
@@ -4154,7 +4163,7 @@ async function checkEvidenceComparisonInteractions({evaluate,viewport,click,key,
   await evaluate(`state.events=${JSON.stringify(fixture.events)};state.artifacts=${JSON.stringify(fixture.artifacts)};state.sessionMode='demo';state.requests=[{id:'comparison-package-request',path:'https://fixture.invalid/comparison-package',method:'GET',status:200,time:1,type:'xhr',origin:'demo',tabId:'qa-tab',operation:'synthetic_qa',events:state.events,exchange:{request:{state:'empty',headers:[]},response:{state:'empty',headers:[]}}}];state.selectedRequestId='comparison-package-request';renderRequests();evidenceWorkspace.sync();window.packageReturnKey=evidenceWorkspace.snapshot().selectedKey`);
   assert.equal(await evaluate("document.querySelectorAll('[data-package-candidates] input:checked').length"),0);
   for(let i=1;i<=4;i++)await hit(`[data-package-candidates] label:nth-child(${i}) input`);
-  await hit('[data-package-scope]');await key('End','End',{windowsVirtualKeyCode:35});await press('Enter');await until("document.querySelector('[data-package-scope]').value==='artifacts'");
+  await hit('[data-package-scope]');await selectOptionByKeyboard(key, 'retained a');await until("document.querySelector('[data-package-scope]').value==='artifacts'");
   for(let i=1;i<=2;i++)await hit(`[data-package-candidates] label:nth-child(${i}) input`);
   await hit('[data-package-export]');await until("evidencePackagePanel.controller.model.status==='ready'");assert.deepEqual(new Uint8Array(fixture.lastValidation),packageGoldenBytes);
   await hit('[data-package-upload] > summary');await setFile('package','golden');await hit('[data-package-validate]');await until("evidencePackagePanel.controller.model.status==='ready'");assert.deepEqual(new Uint8Array(fixture.lastValidation),packageGoldenBytes);await screenshot('comparison-existing-package-tools');
@@ -4327,7 +4336,7 @@ async function checkTrafficBrowser() {
       })()`);
     };
     const key = async (value, code = value, native = {}) => {
-      await command("Input.dispatchKeyEvent", {type: "keyDown", key: value, code, ...native});
+      await command("Input.dispatchKeyEvent", {type: native.text ? "keyDown" : "rawKeyDown", key: value, code, ...native});
       await command("Input.dispatchKeyEvent", {type: "keyUp", key: value, code, windowsVirtualKeyCode:native.windowsVirtualKeyCode});
     };
     const dialog = async accept => {

@@ -21,6 +21,7 @@ import { createServer } from "node:http";
 import assert from "node:assert/strict";
 import {checkCollectionController, collectionBrowserFixture, checkCollectionInteractions} from "./check-origin-trace-collection.mjs";
 import {checkInvestigationCore, investigationFixture, checkInvestigationInteractions} from "./check-investigation-navigation.mjs";
+import {checkNotebookCore, notebookFixture, checkNotebookInteractions} from './check-investigation-notebook.mjs';
 import {sourcesHistoryFixture, checkSourcesHistoryFixture, checkSourcesHistoryInteractions} from "./check-sources-history.mjs";
 const sourcesHistoryBrowser = process.argv[2] === "--sources-history-ui-browser";
 const canvasBrowser = process.argv[2] === "--canvas-ui-browser";
@@ -41,6 +42,7 @@ await checkTrafficComparisonController(root);
 await checkConsoleDOM(root);
 await checkCollectionController(root);
 await checkInvestigationCore(root);
+await checkNotebookCore(root);
 await checkFloat32Model(root);
 // The fixture serves the same declared public leaves as the product. Inspect
 // raw origin-form paths before URL normalization, so encoded/traversing paths
@@ -5672,7 +5674,7 @@ async function checkTrafficBrowser() {
   const memoryFixture = memoryBrowser ? await memoryBrowserFixture() : null;
   const collectionFixture = collectionBrowser ? await collectionBrowserFixture(root) : null;
   let floatFixture;
-  const factsFixture = sourcesHistoryBrowser ? await sourcesHistoryFixture(await sourceFactsBrowserFixture()) : investigationBrowser ? investigationFixture(await sourceFactsBrowserFixture()) : sourceFactsBrowser ? await sourceFactsBrowserFixture() : null;
+  const factsFixture = sourcesHistoryBrowser ? await sourcesHistoryFixture(await sourceFactsBrowserFixture()) : investigationBrowser ? await notebookFixture(investigationFixture(await sourceFactsBrowserFixture()), root) : sourceFactsBrowser ? await sourceFactsBrowserFixture() : null;
   const consoleFixture = consoleBrowser ? createConsoleFixture() : null;
   const evidenceFixture = evidenceBrowser || comparisonBrowser ? evidenceBrowserFixture() : null;
   if(evidenceFixture){
@@ -5940,7 +5942,9 @@ async function checkTrafficBrowser() {
       validation = await checkCanvasInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:canvasFixture,record:value=>canvasReceipts.push(value),navigatePolicy});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Canvas QA");
     } else if (investigationBrowser) {
+      const notebookValidation = await checkNotebookInteractions({evaluate,viewport,click,key,wheel,screenshot,typeText,fixture:factsFixture,reloadPage:()=>command('Page.reload')});
       validation = await checkInvestigationInteractions({evaluate,viewport,click,key,wheel,screenshot,dialog,typeText,fixture:factsFixture});
+      validation.notebook = notebookValidation;
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during investigation QA");
     } else if (memoryBrowser) {
       validation = await checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeText,screenshot,fixture:memoryFixture,recordMemoryCheck:value=>{diagnostics.memory_control_checks=[...(diagnostics.memory_control_checks??[]).slice(-63),value];}});

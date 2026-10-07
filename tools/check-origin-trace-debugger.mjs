@@ -897,7 +897,7 @@ async function checkTrafficBrowser() {
   });
   const args = ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${directory}`,
     "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "about:blank"];
-  let lifecycle, socket, validation, failure;
+  let lifecycle, socket, validation, failure, captureFailure;
   let diagnostics = {executable, args, phase: "fixture server"};
   const commands = new Map();
   await rm(join(output, "validation.json"), {force: true});
@@ -961,19 +961,41 @@ async function checkTrafficBrowser() {
       await command("Input.dispatchKeyEvent", {type: "keyDown", key: value, code});
       await command("Input.dispatchKeyEvent", {type: "keyUp", key: value, code});
     };
-    const columnsAligned = () => evaluate(`(() => {
-      const heads = [...document.querySelector('.request-head').children];
-      const cells = [...document.querySelector('.request-row').children];
-      return heads.every((head, index) => {
-        if (!head.getClientRects().length) return !cells[index].getClientRects().length;
-        const a = head.getBoundingClientRect(), b = cells[index].getBoundingClientRect();
-        return Math.abs(a.left-b.left) <= 1 && Math.abs(a.right-b.right) <= 1;
-      });
-    })()`);
+    const columnsAligned = async () => {
+      const measured = await evaluate(`(() => {
+        const measure = node => {
+          if (!node) return null;
+          const r = node.getBoundingClientRect(), style = getComputedStyle(node);
+          return {visible: node.getClientRects().length > 0, left:r.left, right:r.right, top:r.top,
+            width:r.width, height:r.height, clientWidth:node.clientWidth, scrollWidth:node.scrollWidth,
+            display:style.display, paddingLeft:style.paddingLeft, paddingRight:style.paddingRight,
+            borderLeft:style.borderLeftWidth, borderRight:style.borderRightWidth,
+            columns:style.gridTemplateColumns, gutter:style.scrollbarGutter, overflowY:style.overflowY};
+        };
+        const screen = document.querySelector('#screen-traffic');
+        const header = document.querySelector('.request-head');
+        const row = document.querySelector('.request-row');
+        return {viewport:{width:innerWidth,height:innerHeight}, screenHidden:screen.hidden,
+          screen:measure(screen), header:measure(header), ledger:measure(document.querySelector('.request-rows')),
+          row:measure(row), heads:[...header.children].map(measure), cells:[...row.children].map(measure)};
+      })()`);
+      diagnostics.request_geometry = [...(diagnostics.request_geometry ?? []).slice(-3), measured];
+      return !measured.screenHidden && measured.screen.visible && measured.header.visible && measured.row.visible &&
+        measured.header.width > 0 && measured.row.width > 0 && measured.heads.some(head => head.visible) &&
+        measured.heads.every((head, index) => {
+          const cell = measured.cells[index];
+          if (!head.visible) return cell && !cell.visible;
+          return cell?.visible && Math.abs(head.left-cell.left) <= 1 && Math.abs(head.right-cell.right) <= 1;
+        });
+    };
     const screenshot = async name => {
       await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
       const result = await command("Page.captureScreenshot", {format: "png"});
       await writeFile(join(output, `${name}.png`), Buffer.from(result.data, "base64"));
+    };
+    captureFailure = async () => {
+      const result = await command("Page.captureScreenshot", {format: "png"});
+      await writeFile(join(output, "requests-failure.png"), Buffer.from(result.data, "base64"));
     };
     await viewport(1440, 900);
     await command("Page.navigate", {url: `http://127.0.0.1:${server.address().port}/`});
@@ -1068,6 +1090,10 @@ async function checkTrafficBrowser() {
   } catch (error) {
     failure = error;
     diagnostics.failure = String(error.stack ?? error).slice(0, 65536);
+    if (captureFailure && socket?.readyState === 1) {
+      try {await captureFailure();}
+      catch (screenshotError) {diagnostics.failure_screenshot_error = String(screenshotError.message).slice(0, 2048);}
+    }
   } finally {
     socket?.close();
     for (const pending of commands.values()) {clearTimeout(pending.timer); pending.reject(new Error("Browser QA cleanup"));}

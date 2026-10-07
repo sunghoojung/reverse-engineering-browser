@@ -131,6 +131,13 @@ export async function checkCapturedComparisonInteractions({evaluate,viewport,cli
     const before=await evaluate("document.querySelector('#traffic-comparison').scrollTop");assert(before>0);
     await screenshot(`requests-comparison-${width}-changes`);
     await evaluate('renderInspector()');assert.equal(await evaluate("document.querySelector('#traffic-comparison').scrollTop"),before);
+    const fieldSelector='#traffic-comparison [data-label="Request body"] .traffic-comparison-rows li';
+    const fieldDelta=await evaluate(`(()=>{const r=document.querySelector(${JSON.stringify(fieldSelector)}).getBoundingClientRect(),p=document.querySelector('#traffic-comparison').getBoundingClientRect();return r.top<p.top+8?r.top-p.top-8:r.bottom>p.bottom-8?r.bottom-p.bottom+8:0;})()`);
+    if(fieldDelta)await wheel('#traffic-comparison',fieldDelta);
+    const field=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(fieldSelector)}),r=n.getBoundingClientRect(),p=document.querySelector('#traffic-comparison').getBoundingClientRect(),hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return {text:n.textContent,visible:r.top>=p.top&&r.bottom<=p.bottom&&r.left>=0&&r.right<=innerWidth&&r.bottom<=innerHeight,hit:!!hit&&n.contains(hit)};})()`);
+    assert(field.visible&&field.hit,'Changed JSON field must be fully visible and hit-testable after native scrolling');
+    assert.match(field.text,/a~1b~0\/count.*Baseline: 1.*Selected: 2/);
+    await screenshot(`requests-comparison-${width}-field`);
     await wheel('#traffic-comparison',-10000);
     await click('#traffic-comparison-clear');assert.equal(await evaluate('trafficComparisonController.identity'),null);
     assert.equal(await evaluate('document.activeElement.id'),'traffic-comparison-pin');
@@ -159,5 +166,5 @@ export async function checkCapturedComparisonInteractions({evaluate,viewport,cli
     assert(await evaluate('elements.requestRows.scrollTop>0'),'Healthy ledger responds to native wheel input');
   }
   await evaluate("Object.assign(state,comparisonOriginal);delete window.comparisonOriginal;renderRequests();renderInspector()");
-  return {viewports:[[1440,900],[760,560],[360,740]],checks:['exact baseline pin and selected request comparison','native keyboard pin/clear','JSON pointer escaping and large integers','inert text','independent narrow scrolling','unchanged refresh','generation restart and eviction expire permanently']};
+  return {viewports:[[1440,900],[760,560],[360,740]],checks:['exact baseline pin and selected request comparison','native keyboard pin/clear','JSON pointer escaping and large integers','inert text','independent narrow scrolling','unchanged refresh','generation restart and eviction expire permanently','content-sized headers without warning overlap','healthy 520-row hidden-warning/search tracks','changed JSON field visible and hit-tested at every viewport']};
 }

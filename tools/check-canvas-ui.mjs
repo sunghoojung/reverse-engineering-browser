@@ -9,16 +9,14 @@ import {runInNewContext} from 'node:vm';
 export async function canvasBrowserFixture(root, {artifact, png, pngUrl, chunk}) {
   const pixels=Buffer.concat(Array.from({length:16},()=>Buffer.from([0,...Array.from({length:16},()=>[255,0,0,255]).flat()])));
   const valid=pngUrl(png({width:16,height:16,idat:[chunk('IDAT',deflateSync(pixels))]}));
-  // A truncated zlib stream can load as a partial image in Chrome. Use a
-  // complete one-row stream with an invalid PNG filter type instead: method 0
-  // permits only 0..4 (https://www.w3.org/TR/png-3/ section 9.2). The browser
-  // must produce the error event; production admission still checks structure.
-  const invalidScanline=deflateSync(Buffer.from([255,255,0,0,255]));
+  // Chrome CI loaded both authored malformed scanlines without error events.
+  // Exercise native load failure separately under an authored img-src policy;
+  // the ordinary page uses only these valid tiny PNGs for decoder acceptance.
   const documents=new Map([
     ['5',valid],
     ['4',pngUrl(png({width:100000,height:100000}))],
     ['3',valid.replace('image/png','image/webp')],
-    ['2',pngUrl(png({idat:[chunk('IDAT',invalidScanline)]}))],
+    ['2',valid],
     ['1',valid],
   ]);
   const artifacts=await Promise.all([...documents].map(([id,text])=>artifact(id,text)));
@@ -27,7 +25,12 @@ export async function canvasBrowserFixture(root, {artifact, png, pngUrl, chunk})
     navigation_id:1,frame_id:1,artifact_id:Number(source.artifact_id),parent_event_id:0,process_id:1,thread_id:1,
     payload_encoding:'hex',payload:Buffer.from('canvas.toDataURL').toString('hex'),payload_size:16}));
   const debuggerState=JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/debugger-empty.json'),'utf8'));
-  const fixture={documents,artifacts,events,requests:[],pending:[],readError:true,hold:false,catalogError:false,revision:1,active:true};
+  const fixture={documents,artifacts,events,requests:[],pending:[],readError:true,hold:false,catalogError:false,revision:1,active:true,phase:'normal'};
+  fixture.documentHeaders=raw=>{
+    const url=new URL(raw,'http://127.0.0.1');
+    return url.pathname==='/'&&url.searchParams.get('canvas_policy')==='blocked'
+      ? {'Content-Security-Policy':"img-src 'none'"} : {};
+  };
   fixture.handle=async(request,response)=>{
     const url=new URL(request.url,'http://127.0.0.1'),path=url.pathname;
     const json=(status,value,headers={})=>{response.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store',...headers});response.end(JSON.stringify(value));};
@@ -44,7 +47,7 @@ export async function canvasBrowserFixture(root, {artifact, png, pngUrl, chunk})
     if(/^\/api\/artifacts\/[0-9]+\/content$/.test(path)){
       const id=path.split('/')[3],text=documents.get(id);
       if(!text){json(404,{error:'Unknown authored Canvas artifact'});return true;}
-      const receipt={id,path,method:request.method??'GET',limit:url.searchParams.get('limit'),status:id==='1'&&fixture.readError?503:200,held:fixture.hold};fixture.requests.push(receipt);
+      const receipt={id,path,phase:fixture.phase,method:request.method??'GET',limit:url.searchParams.get('limit'),status:id==='1'&&fixture.readError?503:200,held:fixture.hold};fixture.requests.push(receipt);
       if(receipt.status===503){json(503,{error:'Authored retryable Canvas read failure'});return true;}
       const bytes=Buffer.from(text);
       response.writeHead(200,{'Content-Type':'application/octet-stream','X-Artifact-Total-Bytes':String(bytes.length),'X-Artifact-Truncated':'false'});
@@ -60,15 +63,16 @@ export async function canvasBrowserFixture(root, {artifact, png, pngUrl, chunk})
   // fixtures must NEVER reach a decoder, even if production admission regresses.
   // Safe sources pass straight through to Chrome. No product function is patched.
   fixture.installObserver=`(() => {
-    const known=new Map(${JSON.stringify([[documents.get('5'),'valid'],[documents.get('4'),'oversized'],[documents.get('3'),'unsupported'],[documents.get('2'),'decode-error']])});
-    const safe=new Set(${JSON.stringify([documents.get('5'),documents.get('2')])});
-    const receipt=window.canvasBrowserReceipt={assignments:[],blocked:[],loads:[],errors:[]};
+    const known=new Map(${JSON.stringify([[documents.get('5'),'valid'],[documents.get('4'),'oversized'],[documents.get('3'),'unsupported']])});
+    const safe=new Set(${JSON.stringify([documents.get('5')])});
+    const receipt=window.canvasBrowserReceipt={assignments:[],blocked:[],loads:[],errors:[],violations:[]};
+    window.addEventListener('securitypolicyviolation',event=>receipt.violations.push({directive:event.effectiveDirective,blockedURI:event.blockedURI,disposition:event.disposition}));
     const observe=(image,value) => {
       const id=known.get(String(value));
       receipt.assignments.push({id:id??'unknown',safe:safe.has(String(value))});
       if(!safe.has(String(value))){receipt.blocked.push(id??'unknown');throw new Error('Unsafe Canvas QA source reached the native image sink');}
-      image.addEventListener('load',()=>receipt.loads.push({id,width:image.naturalWidth,height:image.naturalHeight}),{once:true});
-      image.addEventListener('error',()=>receipt.errors.push({id}),{once:true});
+      image.addEventListener('load',event=>receipt.loads.push({id,width:image.naturalWidth,height:image.naturalHeight,trusted:event.isTrusted}),{once:true});
+      image.addEventListener('error',event=>receipt.errors.push({id,trusted:event.isTrusted}),{once:true});
     };
     const source=Object.getOwnPropertyDescriptor(HTMLImageElement.prototype,'src');
     Object.defineProperty(HTMLImageElement.prototype,'src',{...source,set(value){observe(this,value);source.set.call(this,value);}});
@@ -91,11 +95,10 @@ export async function checkCanvasFixture(fixture, models, inspect) {
   assert.deepEqual({...inspect(fixture.documents.get('5'))},{width:16,height:16,pixels:256});
   assert.match(inspect(fixture.documents.get('4')).reason,/4096-pixel/);
   assert.match(inspect(fixture.documents.get('3')).reason,/only static PNG/);
-  assert.equal(inspect(fixture.documents.get('2')).reason,undefined,'The small corrupt IDAT must reach the real decoder');
-  const rejected=Buffer.from(fixture.documents.get('2').split(',')[1],'base64'),badOffset=rejected.indexOf(Buffer.from('IDAT'));
-  assert.deepEqual({...inspect(fixture.documents.get('2'))},{width:1,height:1,pixels:1});
-  assert.deepEqual([...inflateSync(rejected.subarray(badOffset+4,badOffset+4+rejected.readUInt32BE(badOffset-4)))],[255,255,0,0,255],
-    'The rejection fixture is a complete five-byte RGBA scanline with invalid filter 255, not truncated compressed input');
+  assert.deepEqual({...inspect(fixture.documents.get('2'))},{width:16,height:16,pixels:256});
+  assert.deepEqual(fixture.documentHeaders('/?canvas_images=1'),{});
+  assert.deepEqual(fixture.documentHeaders('/?canvas_images=1&canvas_policy=blocked'),{'Content-Security-Policy':"img-src 'none'"});
+  assert.deepEqual(fixture.documentHeaders('/api/artifacts?canvas_policy=blocked'),{},'Only the fresh HTML document carries the image policy');
   const valid=Buffer.from(fixture.documents.get('5').split(',')[1],'base64'),offset=valid.indexOf(Buffer.from('IDAT'));
   const scanlines=inflateSync(valid.subarray(offset+4,offset+4+valid.readUInt32BE(offset-4)));
   assert.equal(scanlines.length,16*(1+16*4));assert.deepEqual([...scanlines.subarray(1,5)],[255,0,0,255]);
@@ -110,7 +113,7 @@ export async function checkCanvasFixture(fixture, models, inspect) {
   const nativeAssignments=[];
   class FixtureElement {setAttribute(name,value){nativeAssignments.push({name,value});}}
   class FixtureImage extends FixtureElement {set src(value){nativeAssignments.push({name:'src',value});}get src(){return '';}addEventListener(){}}
-  const observer={window:{},HTMLImageElement:FixtureImage,Element:FixtureElement};
+  const observer={window:{addEventListener(){}},HTMLImageElement:FixtureImage,Element:FixtureElement};
   runInNewContext(fixture.installObserver,observer);
   for(const id of ['4','3']){
     assert.throws(()=>{new FixtureImage().src=fixture.documents.get(id);},/Unsafe Canvas QA source/);
@@ -122,10 +125,10 @@ export async function checkCanvasFixture(fixture, models, inspect) {
   fixture.catalogError=true;assert.equal((await response('/api/artifacts')).status,503);fixture.catalogError=false;
   assert.equal((await response('/api/debugger/actions',{method:'POST'})).status,405);
   fixture.active=false;fixture.revision++;assert.equal(JSON.parse((await response('/api/artifacts')).body).count,0);
-  console.log('PASS authored Canvas browser fixture routes, validators, hashes, bounded pixels, refusal/decode-error inputs, held body, retry and read-only boundary (not rendered QA)');
+  console.log('PASS authored Canvas browser fixture routes, validators, hashes, bounded pixels, refusal inputs and isolated image-policy header, held body, retry and read-only boundary (not rendered QA)');
 }
 
-export async function checkCanvasInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture,record}) {
+export async function checkCanvasInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture,record,navigatePolicy}) {
   const until=async(expression,message=expression)=>{
     const end=Date.now()+7000;
     while(Date.now()<end){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,25));}
@@ -146,7 +149,7 @@ export async function checkCanvasInteractions({evaluate,viewport,click,key,wheel
     record({label,...value});
   };
   const retireSnapshot=()=>evaluate("window.canvasRetiredImages=[...document.querySelectorAll('#signal-render-list img')]");
-  const decoded=()=>until("document.querySelector('#signal-render-list img')?.naturalWidth===16&&[...document.querySelectorAll('#signal-render-list img')].every(image=>image.complete&&image.naturalWidth===16)&&document.querySelector('#signal-render-list').textContent.includes('browser could not decode')");
+  const decoded=()=>until("document.querySelector('#signal-render-list img')?.naturalWidth===16&&[...document.querySelectorAll('#signal-render-list img')].every(image=>image.complete&&image.naturalWidth===16)");
   const open=async()=>{await click('.nav-button[data-screen="signals"]');await settle();await decoded();};
   const reveal=async(selector)=>{
     // Only the owned gallery scrolls. Never force a screen/ancestor offset.
@@ -174,21 +177,19 @@ export async function checkCanvasInteractions({evaluate,viewport,click,key,wheel
   assert.equal(fixture.requests.length,0,'Hidden Canvas descriptors must not load content');await clean('initial hidden gallery');
   await screenshot('canvas-hidden');
   await open();
-  await until("canvasBrowserReceipt.errors.some(item=>item.id==='decode-error')&&document.querySelector('#signal-render-list').textContent.includes('browser could not decode')");
   assert.match(await text('4'),/4096-pixel/);assert.match(await text('3'),/only static PNG/);
-  assert.match(await text('2'),/browser could not decode this PNG/);assert.match(await text('1'),/503/);
+  assert.match(await text('1'),/503/);
   assert.equal(fixture.requests.length,5);assert(fixture.requests.every(request=>request.limit==='2097152'));
   const accepted=await evaluate(`(()=>{const image=document.querySelector(${JSON.stringify(card('5')+' img')}),canvas=document.createElement('canvas');
     canvas.width=canvas.height=1;const context=canvas.getContext('2d');context.drawImage(image,0,0);return {complete:image.complete,width:image.naturalWidth,height:image.naturalHeight,pixel:[...context.getImageData(0,0,1,1).data]};})()`);
   assert.deepEqual(accepted,{complete:true,width:16,height:16,pixel:[255,0,0,255]});record({label:'native decoder pixels',...accepted});
   assert(await evaluate(`state.artifacts.filter(a=>['2','3','4','5'].includes(a.artifact_id)).every(a=>a.contentVerified&&a.content===new Map(${JSON.stringify([...fixture.documents])}).get(a.artifact_id))`),'Exact captured text stays unchanged');
   assert.deepEqual(await evaluate('canvasBrowserReceipt.blocked'),[]);
-  assert(await evaluate("canvasBrowserReceipt.assignments.every(item=>item.safe&&['valid','decode-error'].includes(item.id))"),'Only the tiny valid and corrupt PNG may reach src');
+  assert(await evaluate("canvasBrowserReceipt.assignments.every(item=>item.safe&&item.id==='valid')"),'Only valid tiny PNGs may reach src');
   for(let repeat=0;repeat<3;repeat++)await refresh();
   assert.equal(fixture.requests.length,5,'Refresh cannot retry failed or refused previews');
   await reveal(card('4')+' .signal-canvas-frame');await geometry('oversize refusal',card('4')+' .signal-canvas-frame');await screenshot('canvas-oversize-refused');
   await reveal(card('3')+' .signal-canvas-frame');await screenshot('canvas-unsupported');
-  await reveal(card('2')+' .signal-canvas-frame');await screenshot('canvas-native-decode-error');
   fixture.readError=false;
   await reveal(card('1')+' button');await click(card('1')+' button');await settle();
   await until(`document.querySelector(${JSON.stringify(card('1')+' img')})?.naturalWidth===16`);
@@ -223,9 +224,35 @@ export async function checkCanvasInteractions({evaluate,viewport,click,key,wheel
   fixture.catalogError=false;await refresh();await decoded();
   await retireSnapshot();fixture.active=false;fixture.revision++;await refresh();await clean('empty live catalog');
   assert.match(await evaluate("document.querySelector('#signal-render-list').textContent"),/No Canvas readback/);await screenshot('canvas-empty');
-  const sink=await evaluate('canvasBrowserReceipt');assert.deepEqual(sink.blocked,[]);record({label:'native image sink receipts',...sink});
+  await click('.nav-button[data-screen="traffic"]');await settle();await clean('normal phase closes before policy navigation');
+  const sink=await evaluate('canvasBrowserReceipt');assert.deepEqual(sink.blocked,[]);assert.deepEqual(sink.errors,[]);record({label:'normal native image sink receipts',...sink});
+  // A fresh document gets a real response CSP, not a replaced Image/error API.
+  // Its valid admitted PNGs must raise trusted native error events and exercise
+  // production's existing error label/retirement. This is load-policy coverage,
+  // not a claim that Chrome rejects any particular corrupt compressed payload.
+  fixture.active=true;fixture.revision++;fixture.phase='image-policy';
+  const policyStart=fixture.requests.length;
+  await navigatePolicy();
+  await until("location.search.includes('canvas_policy=blocked')&&typeof state!=='undefined'&&state.artifacts.length===5&&!state.refreshing&&!state.artifactRefreshing");
+  assert.equal(fixture.requests.length,policyStart,'Fresh policy page also discovers hidden metadata without image reads');
+  await viewport(1440,900);await click('.nav-button[data-screen="signals"]');await settle();
+  await until("canvasBrowserReceipt.errors.some(item=>item.id==='valid'&&item.trusted)&&canvasBrowserReceipt.violations.some(item=>item.directive==='img-src'&&item.disposition==='enforce')&&document.querySelectorAll('#signal-render-list img[src]').length===0&&[...state.canvasPreviewOwners.values()].filter(owner=>['5','2','1'].includes(owner.artifact.artifact_id)).every(owner=>owner.imageError?.includes('browser could not decode'))");
+  for(const id of ['5','2','1'])assert.match(await text(id),/browser could not decode this PNG/);
+  assert.match(await text('4'),/4096-pixel/);assert.match(await text('3'),/only static PNG/);
+  assert(await evaluate(`state.artifacts.every(a=>a.contentVerified&&a.content===new Map(${JSON.stringify([...fixture.documents])}).get(a.artifact_id))`),'Policy failure cannot alter verified captured text');
+  assert.equal(fixture.requests.length-policyStart,5);
+  for(let repeat=0;repeat<3;repeat++)await refresh();
+  assert.equal(fixture.requests.length-policyStart,5,'Native image errors cannot trigger automatic content refetch');
+  for(const [width,height] of [[1440,900],[360,740]]){
+    await viewport(width,height);await reveal(card('5')+' .signal-canvas-frame');
+    await geometry(`native policy load-error ${width}`,card('5')+' .signal-canvas-frame');await screenshot(`canvas-${width}-native-policy-error`);
+  }
+  const policy=await evaluate('canvasBrowserReceipt');assert.deepEqual(policy.blocked,[]);assert.deepEqual(policy.loads,[]);
+  assert(policy.errors.length>=3&&policy.errors.every(error=>error.id==='valid'&&error.trusted),'Each admitted valid image must fail through a trusted native event');
+  record({label:'isolated CSP native load-error receipts',policy:"img-src 'none'",...policy});
+  await viewport(1440,900);await retireSnapshot();await click('.nav-button[data-screen="traffic"]');await settle();await clean('policy error gallery close releases ownership');
   assert(fixture.requests.every(request=>request.method==='GET'),'The UI must never mutate capture state');
   return {status:'passed',path:'installed Chrome, production Canvas UI with authored HTTP evidence',viewports:[[1440,900],[600,800],[360,740]],
-    checks:['hidden metadata-only discovery','real 16x16 PNG decode and pixel readback','oversized/unsupported refused before native src','real 1x1 decoder error label','explicit read-error retry','stable refresh without refetch','keyboard disclosure and Activity/Overview tabs','wide/narrow gallery geometry','close and reopen','abort pending bodies and refuse late completion','catalog failure/recovery and empty cleanup'],
-    limits:['Only authored tiny PNGs enter Chrome decoding. The giant-header sink tripwire must never fire.','No production admission or ownership functions are mocked. HTTP responses are synthetic; this is not native capture or backend acceptance.','Source removal and declared-pixel accounting do not measure decoder allocation, native caches, JavaScript heap or process RSS; no immediate native-memory reclamation claim.','Not macOS native-shell acceptance.']};
+    checks:['hidden metadata-only discovery','real 16x16 PNG decode and pixel readback','oversized/unsupported refused before native src','isolated CSP native image load-error events and existing error label','explicit read-error retry','stable refresh without refetch','keyboard disclosure and Activity/Overview tabs','wide/narrow gallery geometry','close and reopen','abort pending bodies and refuse late completion','catalog failure/recovery and empty cleanup'],
+    limits:['Only authored tiny PNGs enter Chrome decoding. The giant-header sink tripwire must never fire.','No production admission or ownership functions are mocked. HTTP responses are synthetic; this is not native capture or backend acceptance.','Source removal and declared-pixel accounting do not measure decoder allocation, native caches, JavaScript heap or process RSS; no immediate native-memory reclamation claim.','The image-error phase uses CSP img-src none on a fresh document with valid PNGs; it does not establish corrupt-stream decoder rejection.','Not macOS native-shell acceptance.']};
 }

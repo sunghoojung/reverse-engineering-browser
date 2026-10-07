@@ -5305,6 +5305,7 @@ async function checkTrafficBrowser() {
   }
   const server = createServer(async (request, response) => {
     const path = new URL(request.url, "http://127.0.0.1").pathname;
+    for (const [name,value] of Object.entries(canvasFixture?.documentHeaders(request.url)??{})) response.setHeader(name,value);
     if (canvasFixture && await canvasFixture.handle(request, response)) return;
     if (collectionFixture && await collectionFixture.handle(request, response)) return;
     if (memoryFixture && await memoryFixture.handle(request, response)) return;
@@ -5555,7 +5556,8 @@ async function checkTrafficBrowser() {
     assert(await evaluate("typeof renderRequests === 'function'"), "Application did not initialize");
     diagnostics.phase = "interactive validation";
     if (canvasBrowser) {
-      validation = await checkCanvasInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:canvasFixture,record:value=>canvasReceipts.push(value)});
+      const navigatePolicy=()=>command("Page.navigate",{url:`http://127.0.0.1:${server.address().port}/?canvas_images=1&canvas_policy=blocked`});
+      validation = await checkCanvasInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:canvasFixture,record:value=>canvasReceipts.push(value),navigatePolicy});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Canvas QA");
     } else if (investigationBrowser) {
       validation = await checkInvestigationInteractions({evaluate,viewport,click,key,wheel,screenshot,dialog,typeText,fixture:factsFixture});

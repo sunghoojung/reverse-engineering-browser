@@ -639,8 +639,12 @@ Screenshots, browser diagnostics and fixture receipts are written under
 `build/canvas-ui-qa/`. A fail-closed observer at the native image source setter
 records assignments and fails the test before any rejected giant-header fixture
 can enter decoding; accepted tiny images use Chrome's real decoder. No product
-admission or ownership function is replaced. These receipts do not establish
-native capture, macOS behavior, decoder-memory reclamation or process RSS bounds.
+admission or ownership function is replaced. A separate fresh document uses
+an authored `img-src 'none'` response policy to trigger real image load errors
+and verify the existing error label and cleanup. This is policy/load-error
+coverage, not evidence that Chrome rejects corrupt compressed PNG streams.
+These receipts do not establish native capture, macOS behavior, decoder-memory
+reclamation or process RSS bounds.
 
 The fingerprint workspace scopes Rendering and Activity to a captured browser
 tab, all tabs, or explicitly unattributed events. The selected tab is a stable

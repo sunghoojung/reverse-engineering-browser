@@ -66,7 +66,7 @@ console.log('PASS actual fixture public-asset handler: Float32 bytes, canonical 
 // fixtures exercise identity and stale/cancelled request ownership, not JS execution.
 const sourceFactsUI = runInNewContext(
   (await readFile(join(root, 'apps/research-ui/source_facts.js'), 'utf8')) +
-  ';({sourceFactsFields,sourceFactsIdentity,sourceFactsUnavailable,isSourceFactsReport,sourceFactsPosition,sourceFactsReadBytes,createSourceFactsController,sourceFactsReferenceTarget,sourceFactsBindingOperations,sourceFactsOperationSummary,createSourceFactsPanel})',
+  ';({sourceFactsFields,sourceFactsIdentity,sourceFactsUnavailable,isSourceFactsReport,sourceFactsPosition,sourceFactsReadBytes,createSourceFactsController,sourceFactsReferenceTarget,sourceFactsBindingOperations,sourceFactsOperationSummary,sourceFactsReferenceContext,createSourceFactsPanel})',
   {TextEncoder, TextDecoder, Uint8Array, AbortController, setTimeout, clearTimeout, fetch, crypto},
 );
 function factsReferenceFixture(source) {
@@ -105,6 +105,10 @@ assert.deepEqual(Array.from(sourceFactsUI.sourceFactsBindingOperations(reference
 assert.deepEqual(Array.from(sourceFactsUI.sourceFactsBindingOperations(references.report,3),row=>row.id),[4,5]);
 assert.equal(sourceFactsUI.sourceFactsBindingOperations(references.report,4).length,0);
 assert.equal(sourceFactsUI.sourceFactsBindingOperations(references.report,999).length,0);
+const cachedReferenceContext = sourceFactsUI.sourceFactsReferenceContext(references.report);
+assert.equal(sourceFactsUI.sourceFactsReferenceContext(references.report),cachedReferenceContext,'Filters and paging reuse one bounded report context');
+assert.equal(cachedReferenceContext.target(references.report.operations[0]),references.report.operations[0].detail.target,'Cache retains the existing target, never copies candidate arrays');
+assert.notEqual(sourceFactsUI.sourceFactsReferenceContext(structuredClone(references.report)),cachedReferenceContext,'Reanalysis must receive a fresh report-local cache');
 const referenceBindings = new Map(references.report.bindings.map(row=>[row.id,row]));
 assert.match(sourceFactsUI.sourceFactsOperationSummary(references.report.operations[4],referenceBindings),/Ambiguous.*runtime call target unknown/);
 assert.match(sourceFactsUI.sourceFactsOperationSummary(references.report.operations[6],referenceBindings),/Unresolved: dynamic-scope/);
@@ -176,14 +180,19 @@ const control = selector => { const node = container.querySelector(selector); as
 const action = name => control(`[data-facts-action="${name}"]`);
 const category = value => { const node = control('[aria-label="JavaScript fact category"]'); node.value = value; node.fire('change'); };
 const row = id => control(`[data-fact-id="${id}"]`);
-panel.sync(selected); await panel.load();
+panel.sync(selected);
+const idleArtifact = selected;
+selected = {source_type:'script',kind:'javascript'};panel.sync(selected);
+selected = idleArtifact;assert.doesNotThrow(()=>panel.sync(selected),'Idle captured → unsupported → captured must rebuild the retained DOM');
+await panel.load();
 assert.equal(container.querySelectorAll('article').length, 100);
 category('bindings');
 const composingInput = control('[data-facts-binding-query]'); composingInput.focus();
 composingInput.fire('compositionstart'); composingInput.value = '雪';
 composingInput.fire('input', {isComposing: true});
-let composingEscapePrevented = false;
-details.fire('keydown',{key:'Escape',isComposing:true,preventDefault(){composingEscapePrevented=true;},stopPropagation(){}});
+let composingEscapePrevented = false, composingEscapeStopped = false;
+details.fire('keydown',{key:'Escape',isComposing:true,preventDefault(){composingEscapePrevented=true;},stopPropagation(){composingEscapeStopped=true;}});
+assert.equal(composingEscapeStopped,true,'IME Escape must not bubble into the document Sources shortcut and toggle Console');
 assert.equal(details.open,true);assert.equal(composingEscapePrevented,false,'IME Escape must remain available to composition');
 assert(composingInput.isConnected, 'Composition must not detach its input');
 assert.equal(document.activeElement, composingInput);
@@ -196,7 +205,11 @@ assert.equal(container.querySelector('article').dataset.factId, '1', 'Shadowed n
 action('reveal-declaration').click();
 for(let turn=0;turn<20&&!finishOriginal;turn++)await new Promise(resolve=>setTimeout(resolve,0));
 assert(finishOriginal,'Verified original read did not start');
-action('all-bindings').click();finishOriginal();
+const pendingAllBindings = action('all-bindings');
+panel.cancel('A newer interaction retired this original-range return.');
+assert(pendingAllBindings.isConnected,'Capture-phase cancellation must preserve the pending click target');
+pendingAllBindings.click();assert(control('[data-facts-binding-query]'),'The original click must still change the view after capture cancellation');
+finishOriginal();
 await new Promise(resolve=>setTimeout(resolve,0));
 assert.equal(navigations,0,'Changing lexical selection must retire a pending original range');
 const retiredQuery = control('[data-facts-binding-query]');
@@ -3667,7 +3680,7 @@ async function checkFactsReferenceInteractions({evaluate,viewport,click,key,whee
   // Native composition remains on one input until committed. These dispatched
   // composition events supplement physical keyboard controls, not replace them.
   await sourceClick('[data-facts-binding-query]');
-  assert(await evaluate(`(()=>{const input=document.activeElement;input.dispatchEvent(new CompositionEvent('compositionstart',{data:''}));input.value='雪';input.dispatchEvent(new InputEvent('input',{data:'雪',isComposing:true,bubbles:true}));const retained=input.isConnected&&document.activeElement===input;input.dispatchEvent(new CompositionEvent('compositionend',{data:'雪'}));return retained;})()`),'IME input was replaced during composition');
+  assert(await evaluate(`(()=>{const input=document.activeElement;input.dispatchEvent(new CompositionEvent('compositionstart',{data:''}));input.value='雪';input.dispatchEvent(new InputEvent('input',{data:'雪',isComposing:true,bubbles:true}));const retained=input.isConnected&&document.activeElement===input;const escape=new KeyboardEvent('keydown',{key:'Escape',isComposing:true,bubbles:true,cancelable:true});input.dispatchEvent(escape);if(escape.defaultPrevented)throw Error('IME Escape was consumed by a global shortcut');input.dispatchEvent(new CompositionEvent('compositionend',{data:'雪'}));return retained;})()`),'IME input was replaced during composition');
   assert.equal(await evaluate("document.querySelectorAll('#source-facts-report .source-fact').length"),2);
   assert.equal(await evaluate("document.activeElement.value"),'雪');
   await sourceClick('#source-facts-report [data-fact-id="1"] [data-facts-action="explore-binding"]');

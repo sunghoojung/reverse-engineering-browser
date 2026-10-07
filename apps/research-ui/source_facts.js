@@ -83,19 +83,36 @@ function sourceFactsReferenceTarget(operation, bindings) {
   return target;
 }
 
+// Reports are immutable admitted JSON. Cache one target reference per operation,
+// never a binding × operation expansion. Replacement/eviction releases the weak
+// report owner; IDs and cached admissions never cross report boundaries.
+const sourceFactsReferenceCaches = new WeakMap();
+function sourceFactsReferenceContext(report) {
+  let context = sourceFactsReferenceCaches.get(report);
+  if (!context) {
+    const bindings = new Map(report.bindings.map(binding => [binding.id, binding]));
+    const targets = new WeakMap();
+    context = {bindings, target(operation) {
+      if (!targets.has(operation)) targets.set(operation, sourceFactsReferenceTarget(operation, bindings));
+      return targets.get(operation);
+    }};
+    sourceFactsReferenceCaches.set(report, context);
+  }
+  return context;
+}
+
 function sourceFactsBindingOperations(report, bindingId, kind = 'all') {
-  const bindings = new Map(report.bindings.map(binding => [binding.id, binding]));
-  if (!bindings.has(bindingId)) return [];
+  const context = sourceFactsReferenceContext(report);
+  if (!context.bindings.has(bindingId)) return [];
   // At most 16,384 admitted facts and 64 candidates per target. Do not expand a
   // binding x operation index or clone source bytes/history for this projection.
   return report.operations.filter(operation => {
     if (kind !== 'all' && operation.kind !== kind) return false;
-    return sourceFactsReferenceTarget(operation, bindings)?.binding_ids.includes(bindingId);
+    return context.target(operation)?.binding_ids.includes(bindingId);
   });
 }
 
-function sourceFactsOperationSummary(operation, bindings) {
-  const target = sourceFactsReferenceTarget(operation, bindings);
+function sourceFactsOperationSummary(operation, bindings, target = sourceFactsReferenceTarget(operation, bindings)) {
   const detail = operation.detail?.target;
   const relationship = target ? target.kind === 'binding' ? 'Exact lexical binding' : 'Ambiguous declaration candidate'
     : detail?.kind === 'unresolved' ? `Unresolved: ${String(detail.resolution ?? 'unknown').slice(0, 128)}`
@@ -266,6 +283,7 @@ function createSourceFactsPanel({getSource, onNavigate, openSidebar}) {
   let viewKey = null, viewReport = null;
   let bindingId = null, candidates = null, query = '', operationKind = 'all', bindingPage = 0;
   let navigationOwner = {}, renderOwner = {};
+  let retainedView = null, retainedReport = null, retainedKey = null;
   const node = (tag, text, className = '') => { const element = document.createElement(tag); element.textContent = text; element.className = className; return element; };
   const button = (text, action, key) => { const owner = renderOwner; const element = node('button', text, 'secondary-button'); element.type = 'button'; element.dataset.factsAction = key ?? text.toLowerCase().replaceAll(' ', '-'); element.addEventListener('click', () => { if (owner === renderOwner) action(); }); return element; };
   const controller = createSourceFactsController({getSource, onChange: render, onNavigate, protocol: location.protocol});
@@ -283,6 +301,22 @@ function createSourceFactsPanel({getSource, onNavigate, openSidebar}) {
       void controller.navigate(range, {owner, isCurrent: () => currentReport(report) && owner === navigationOwner});
     }
   };
+  function renderStatus(model) {
+    const busy = ['loading', 'loading-source'].includes(model.status);
+    const status = container.querySelector('.source-facts-status');
+    status.textContent = model.error || (busy ? model.status === 'loading' ? 'Analyzing immutable JavaScript…' : 'Verifying original UTF-8 bytes…' : model.notice || (model.report ? 'Analysis response loaded. Original evidence is unchanged.' : 'No facts loaded. Analysis never executes this source.'));
+    status.setAttribute('role', model.error ? 'alert' : 'status');
+    const run = container.querySelector('[data-facts-run]'), cancel = container.querySelector('[data-facts-cancel]');
+    const focused = document.activeElement;
+    run.textContent = model.report || model.status === 'error' ? 'Retry facts' : 'Analyze captured source';
+    run.dataset.factsAction = model.report || model.status === 'error' ? 'retry-facts' : 'analyze-captured-source';
+    run.hidden = busy; cancel.hidden = !busy;
+    const retained = container.querySelector('.source-facts-retained');
+    if (retained) retained.hidden = !model.error;
+    for (const control of container.querySelectorAll('[data-facts-original]')) control.disabled = busy;
+    if (busy && (focused === run || focused?.dataset.factsOriginal !== undefined)) cancel.focus({preventScroll: true});
+    else if (!busy && focused === cancel) run.focus({preventScroll: true});
+  }
   function render(model) {
     const focused = container.contains(document.activeElement) ? document.activeElement : null;
     const focusedRow = focused?.closest('[data-fact-id]')?.dataset.factId;
@@ -303,17 +337,25 @@ function createSourceFactsPanel({getSource, onNavigate, openSidebar}) {
     toggle.setAttribute('aria-expanded', String(details.open));
     if (rendered === model.revision) return;
     rendered = model.revision;
+    // Shared navigation retires reads in a capture-phase pointer/key listener.
+    // Updating status must not detach the intended click/IME target mid-event.
+    if (!unavailable && retainedKey === model.key && retainedReport === model.report && retainedView === navigationOwner) {
+      renderStatus(model);
+      return;
+    }
     renderOwner = {};
     const controlOwner = renderOwner;
     const content = [];
     const renderedOwner = navigationOwner;
-    if (unavailable) { container.replaceChildren(node('p', unavailable)); return; }
+    if (unavailable) { retainedKey = null; retainedReport = null; retainedView = null; container.replaceChildren(node('p', unavailable)); return; }
     content.push(node('p', `Session ${model.source.session_id} · artifact ${model.source.artifact_id} · ${model.source.byte_size} original bytes`, 'source-facts-identity'));
     content.push(node('p', `SHA-256 ${model.source.sha256}`, 'source-facts-identity'));
     content.push(node('p', 'Static lexical facts only. Shadowed declarations retain distinct IDs; ambiguous bindings remain candidates. Neither proves initialized values, dataflow or runtime call targets. Local order assumes region entry and normal completion.'));
     const actions = node('div', '', 'source-facts-actions');
     const busy = ['loading', 'loading-source'].includes(model.status);
-    actions.append(busy ? button('Cancel', () => controller.cancel()) : button(model.report || model.status === 'error' ? 'Retry facts' : 'Analyze captured source', () => controller.load()), button('Close', () => { details.open = false; controller.cancel(); toggle.focus(); }));
+    const run = button('Analyze captured source', () => controller.load()); run.dataset.factsRun = '';
+    const cancel = button('Cancel', () => controller.cancel()); cancel.dataset.factsCancel = '';
+    actions.append(run, cancel, button('Close', () => { details.open = false; controller.cancel(); toggle.focus(); }));
     content.push(actions);
     const status = node('p', model.error || (busy ? model.status === 'loading' ? 'Analyzing immutable JavaScript…' : 'Verifying original UTF-8 bytes…' : model.notice || (model.report ? 'Analysis response loaded. Original evidence is unchanged.' : 'No facts loaded. Analysis never executes this source.')), 'source-facts-status');
     status.setAttribute('role', model.error ? 'alert' : 'status'); content.push(status);
@@ -322,7 +364,7 @@ function createSourceFactsPanel({getSource, onNavigate, openSidebar}) {
       const coverage = report.coverage;
       content.push(node('p', `${coverage.status === 'complete' ? 'Complete within lexical-effects-v1 only' : coverage.status === 'partial' ? 'Partial coverage: unknown effects remain' : 'Analysis unavailable'} · ${coverage.truncated ? 'TRUNCATED: analysis budget reached' : 'Analysis not truncated'} · ${coverage.frontiers.length} unknown frontiers`, 'source-facts-coverage'));
       for (const message of coverage.diagnostics) content.push(node('p', message));
-      if (model.error) content.push(node('p', 'The last successful facts remain visible for these exact original bytes.'));
+      content.push(node('p', 'The last successful facts remain visible for these exact original bytes.', 'source-facts-retained'));
       const select = document.createElement('select'); select.className = 'debug-select'; select.setAttribute('aria-label', 'JavaScript fact category');
       for (const name of [...sourceFactsTables, 'frontiers']) {
         const rows = name === 'frontiers' ? coverage.frontiers : report[name];
@@ -336,7 +378,8 @@ function createSourceFactsPanel({getSource, onNavigate, openSidebar}) {
         redraw('[aria-label="JavaScript fact category"]');
       });
       content.push(select);
-      const bindings = new Map(report.bindings.map(binding => [binding.id, binding]));
+      const referenceContext = sourceFactsReferenceContext(report);
+      const bindings = referenceContext.bindings;
       const explore = id => {
         if (!ownsView() || !bindings.has(id)) return;
         bindingPage = page; category = 'bindings'; bindingId = id; page = 0; operationKind = 'all';
@@ -355,7 +398,7 @@ function createSourceFactsPanel({getSource, onNavigate, openSidebar}) {
             redraw('[data-facts-binding-query]');
           }, 'all-bindings');
           const declaration = button('Reveal declaration', () => navigate(binding.range, report, renderedOwner), 'reveal-declaration');
-          declaration.disabled = busy;
+          declaration.disabled = busy; declaration.dataset.factsOriginal = '';
           heading.append(back, declaration);
           heading.append(node('p', 'Lexical operations, not runtime uses or dataflow. Multiple operations can describe the same source occurrence. Candidate rows do not identify a unique declaration.'));
           const filter = document.createElement('select'); filter.className = 'debug-select'; filter.setAttribute('aria-label', 'Lexical operation kind');
@@ -404,13 +447,13 @@ function createSourceFactsPanel({getSource, onNavigate, openSidebar}) {
         item.dataset.factId = String(row.id ?? 'frontier');
         const title = `${row.id === undefined ? 'Unknown' : `#${row.id}`} ${row.kind ?? row.reason}${row.name === undefined ? '' : ` · ${row.name.slice(0, 256)}${row.name.length > 256 ? '…' : ''}`}`;
         item.append(node('strong', title));
-        const link = button(`Original bytes [${row.range.start}, ${row.range.end})`, () => navigate(row.range, report, renderedOwner)); link.disabled = busy; item.append(link);
+        const link = button(`Original bytes [${row.range.start}, ${row.range.end})`, () => navigate(row.range, report, renderedOwner)); link.disabled = busy; link.dataset.factsOriginal = ''; item.append(link);
         if (category === 'bindings' && !binding) {
           item.append(node('p', `Scope #${row.scope_id} · ${row.kind} declaration`));
           item.append(button('Find lexical operations', () => explore(row.id), 'explore-binding'));
         } else if (category === 'operations' || binding) {
-          item.append(node('p', sourceFactsOperationSummary(row, bindings), 'source-facts-relation'));
-          const target = sourceFactsReferenceTarget(row, bindings);
+          item.append(node('p', sourceFactsOperationSummary(row, bindings, referenceContext.target(row)), 'source-facts-relation'));
+          const target = referenceContext.target(row);
           if (target && !binding) {
             if (target.kind === 'binding') {
               const declaration = bindings.get(target.binding_ids[0]);
@@ -431,6 +474,8 @@ function createSourceFactsPanel({getSource, onNavigate, openSidebar}) {
       content.push(list);
     }
     container.replaceChildren(...content);
+    retainedKey = model.key; retainedReport = model.report; retainedView = navigationOwner;
+    renderStatus(model);
     // Replacing rows must not drop keyboard ownership during a read/retry.
     // A verified byte reveal deliberately focuses the editor before this render,
     // so it never matches `focused` and cannot have its focus stolen here.
@@ -438,7 +483,7 @@ function createSourceFactsPanel({getSource, onNavigate, openSidebar}) {
       const controls = [...container.querySelectorAll('button, input, select')];
       let replacement = controls.find(control => focusedAction ? control.dataset.factsAction === focusedAction &&
         control.closest('[data-fact-id]')?.dataset.factId === focusedRow : focusedLabel && control.getAttribute('aria-label') === focusedLabel);
-      if (!replacement || replacement.disabled) replacement = controls.find(control => ['cancel', 'retry-facts', 'analyze-captured-source'].includes(control.dataset.factsAction));
+      if (!replacement || replacement.disabled || replacement.hidden) replacement = controls.find(control => !control.hidden && ['cancel', 'retry-facts', 'analyze-captured-source'].includes(control.dataset.factsAction));
       replacement?.focus({preventScroll: true});
     }
   }
@@ -449,7 +494,8 @@ function createSourceFactsPanel({getSource, onNavigate, openSidebar}) {
     details.querySelector('summary').focus(); details.scrollIntoView({block: 'nearest'});
   });
   details.addEventListener('keydown', event => {
-    if (event.key === 'Escape' && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); event.stopPropagation(); details.open = false; controller.cancel(); toggle.focus(); }
+    if (event.key === 'Escape' && (event.isComposing || event.keyCode === 229)) { event.stopPropagation(); return; }
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); details.open = false; controller.cancel(); toggle.focus(); }
   });
   details.addEventListener('toggle', () => { if (!details.open) controller.cancel(); toggle.setAttribute('aria-expanded', String(details.open)); });
   return {...controller, sync(source) { controller.sync(source); render(controller.model); }};

@@ -97,7 +97,7 @@ fn validate_derived(source: &str, source_type: SourceType) -> Result<(), &'stati
     })?;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, source_type).parse();
-    if parsed.panicked || !parsed.diagnostics.is_empty() {
+    if !parsed.diagnostics.is_empty() {
         return Err("derived output failed syntax validation; original source is preserved");
     }
     Ok(())

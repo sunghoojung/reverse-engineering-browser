@@ -2148,6 +2148,8 @@
       .memory-results-pane[data-empty="true"] { grid-template-columns: 1fr; }
       .memory-results-pane[data-empty="true"] .memory-results-list { border-right: 0; }
       .memory-results-list { min-width: 0; overflow: auto; border-right: 1px solid var(--line); }
+      /* Keep row hit targets clear of both halves of the shared 8px resize handles. */
+      #memory-results { padding-inline: 4px; }
       .memory-results-head { display: grid; grid-template-columns: minmax(0, 1fr) 62px; gap: 8px; padding: 9px 11px; border-bottom: 1px solid var(--line); color: var(--faint); font: 650 10px var(--mono); letter-spacing: normal; text-transform: uppercase; }
       .memory-result-row { width: 100%; min-height: 54px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 8px; padding: 9px 11px; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; color: var(--text); text-align: left; }
       .memory-result-row:hover { background: var(--panel-3); }

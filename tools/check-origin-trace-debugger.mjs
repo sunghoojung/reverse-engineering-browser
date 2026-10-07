@@ -2133,7 +2133,10 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
   };
   // Real browser interaction over validated synthetic debugger replies. The
   // fixture's JavaScript is rendered as text, never loaded into a target page.
-  await click('#source-search');await key('a','KeyA',{modifiers:2});await key('Backspace','Backspace',{windowsVirtualKeyCode:8});
+  await click('#source-search');await key('a','KeyA',{modifiers:2,windowsVirtualKeyCode:65});
+  const selectedQuery=await evaluate('({focused:document.activeElement===elements.sourceSearch,value:elements.sourceSearch.value,start:elements.sourceSearch.selectionStart,end:elements.sourceSearch.selectionEnd})');
+  assert.deepEqual(selectedQuery,{focused:true,value:'row',start:0,end:3},'Ctrl+A must select the complete prior source query before clearing it');
+  await key('Backspace','Backspace',{windowsVirtualKeyCode:8});
   assert.equal(await evaluate('elements.sourceSearch.value'),'');
   const liveText="const owner = 'one';\n"+Array.from({length:180},(_,index)=>`const liveRow${index}={value:${index}};`).join('\n');
   fixture.addLiveSource('qa-live-source',liveText);await evaluate('refreshDebugger()');

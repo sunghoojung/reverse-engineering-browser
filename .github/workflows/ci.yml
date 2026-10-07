@@ -26,8 +26,12 @@ jobs:
 
       - name: Install lightweight linters
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes shellcheck
+          # Hosted images include ShellCheck; avoid an unnecessary apt mirror dependency.
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes shellcheck
+          fi
+          shellcheck --version
           python3 -m venv /tmp/reb-ci-tools
           /tmp/reb-ci-tools/bin/pip install --disable-pip-version-check \
             clang-format==18.1.8 ruff==0.12.8
@@ -116,6 +120,60 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+      - name: Exercise Memory workflow in installed Chrome
+        if: ${{ !cancelled() }}
+        run: |
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          node tools/check-origin-trace-debugger.mjs --memory-ui-browser
+
+      - name: Upload rendered Memory QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: memory-ui-${{ github.run_id }}
+          path: build/memory-ui-qa
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Exercise Float32 diagnostics with the actual backend
+        if: ${{ !cancelled() }}
+        run: |
+          cargo build --locked --manifest-path apps/origin-trace-backend/Cargo.toml
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          node tools/check-origin-trace-debugger.mjs --float32-ui-browser
+
+      - name: Upload rendered Float32 QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: float32-ui-${{ github.run_id }}
+          path: build/float32-ui-qa
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Exercise supplied comparisons in Evidence
+        env:
+          REB_UI_REQUIRE_EVIDENCE_NAVIGATION: "1"
+        if: ${{ !cancelled() }}
+        run: |
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          node tools/check-origin-trace-debugger.mjs --evidence-comparison-ui-browser
+
+      - name: Upload rendered Evidence comparison QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: evidence-comparison-ui-${{ github.run_id }}
+          path: build/comparison-ui-qa
+          if-no-files-found: ignore
+          retention-days: 3
+
   console-ui:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -155,6 +213,29 @@ jobs:
           name: collection-ui-${{ github.run_id }}
           path: build/collection-ui-qa
           if-no-files-found: ignore
+          retention-days: 3
+
+  canvas-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Exercise Canvas previews in installed Chrome
+        run: |
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          node tools/check-origin-trace-debugger.mjs --canvas-ui-browser
+
+      - name: Upload rendered Canvas QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: canvas-ui-${{ github.run_id }}
+          path: build/canvas-ui-qa
+          if-no-files-found: error
           retention-days: 3
 
   investigation-ui:

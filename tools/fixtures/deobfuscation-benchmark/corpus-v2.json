@@ -1,0 +1,1581 @@
+{
+  "schema_version": 2,
+  "cases": [
+    {
+      "id": "string-table-proxy",
+      "source": "const selected=[\"first\",\"second\"][1];const p=(a,b)=>a^b;const numeric=p(7,3);const result=[selected,numeric];",
+      "assume_intrinsics": false,
+      "required_transformations": [
+        "literal-index",
+        "proxy-call"
+      ],
+      "mode": "trusted-differential",
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "array",
+          2,
+          [
+            [
+              "0",
+              [
+                "string",
+                "second"
+              ]
+            ],
+            [
+              "1",
+              [
+                "number",
+                "4010000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ]
+    },
+    {
+      "id": "xor-decoder",
+      "source": "const decode=function(s,k){var out=\"\";for(var i=0;i<s.length;i++){out+=String.fromCharCode(s.charCodeAt(i)^k);}return out;};const result=decode(\"idmmn\",1);",
+      "assume_intrinsics": true,
+      "required_transformations": [
+        "custom-decoder"
+      ],
+      "mode": "trusted-differential",
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "hello"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ]
+    },
+    {
+      "id": "flattened-dispatch",
+      "source": "const decode=function(){var state=0,out=\"\";while(true){switch(state){case 0:out+=\"h\";state=2;break;case 2:out+=\"i\";state=1;break;case 1:return out;}}};const result=decode();",
+      "assume_intrinsics": false,
+      "required_transformations": [
+        "control-flow"
+      ],
+      "mode": "trusted-differential",
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "hi"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ]
+    },
+    {
+      "id": "jsfuck-coercion",
+      "source": "const result=(![]+[])[+[]];",
+      "assume_intrinsics": true,
+      "required_transformations": [
+        "literal-index"
+      ],
+      "mode": "trusted-differential",
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "f"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ]
+    },
+    {
+      "id": "effect-preservation",
+      "source": "let count=0;function effect(){count++;return 2;}const result=[void effect(),count];",
+      "assume_intrinsics": false,
+      "required_transformations": [],
+      "mode": "trusted-differential",
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "array",
+          2,
+          [
+            [
+              "0",
+              [
+                "undefined"
+              ]
+            ],
+            [
+              "1",
+              [
+                "number",
+                "3ff0000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ]
+    },
+    {
+      "id": "object-shorthand",
+      "mode": "trusted-differential",
+      "source": "const x=1;const result={x};",
+      "assume_intrinsics": false,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "object",
+          "plain",
+          [
+            [
+              "x",
+              [
+                "number",
+                "3ff0000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": []
+    },
+    {
+      "id": "object-explicit-property",
+      "mode": "trusted-differential",
+      "source": "const x=1;const result={x:x};",
+      "assume_intrinsics": false,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "object",
+          "plain",
+          [
+            [
+              "x",
+              [
+                "number",
+                "3ff0000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": []
+    },
+    {
+      "id": "object-computed-property",
+      "mode": "trusted-differential",
+      "source": "const x=1;const result={[x]:x};",
+      "assume_intrinsics": false,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "object",
+          "plain",
+          [
+            [
+              "1",
+              [
+                "number",
+                "3ff0000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": []
+    },
+    {
+      "id": "nested-shorthand",
+      "mode": "trusted-differential",
+      "source": "const x=1;const result={nested:{x},value:x};",
+      "assume_intrinsics": false,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "object",
+          "plain",
+          [
+            [
+              "nested",
+              [
+                "object",
+                "plain",
+                [
+                  [
+                    "x",
+                    [
+                      "number",
+                      "3ff0000000000000"
+                    ]
+                  ]
+                ]
+              ]
+            ],
+            [
+              "value",
+              [
+                "number",
+                "3ff0000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": []
+    },
+    {
+      "id": "unicode-shorthand",
+      "mode": "trusted-differential",
+      "source": "const 雪=1;const result={/* key */ 雪};",
+      "assume_intrinsics": false,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "object",
+          "plain",
+          [
+            [
+              "雪",
+              [
+                "number",
+                "3ff0000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": []
+    },
+    {
+      "id": "typed-value-boundaries",
+      "mode": "trusted-differential",
+      "source": "const result=[void 0,null,,NaN,Infinity,-Infinity,-0,true,1];",
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "array",
+          9,
+          [
+            [
+              "0",
+              [
+                "undefined"
+              ]
+            ],
+            [
+              "1",
+              [
+                "null"
+              ]
+            ],
+            [
+              "3",
+              [
+                "number",
+                "NaN"
+              ]
+            ],
+            [
+              "4",
+              [
+                "number",
+                "+Infinity"
+              ]
+            ],
+            [
+              "5",
+              [
+                "number",
+                "-Infinity"
+              ]
+            ],
+            [
+              "6",
+              [
+                "number",
+                "8000000000000000"
+              ]
+            ],
+            [
+              "7",
+              [
+                "boolean",
+                true
+              ]
+            ],
+            [
+              "8",
+              [
+                "number",
+                "3ff0000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": []
+    },
+    {
+      "id": "authored-throw-and-effects",
+      "mode": "trusted-differential",
+      "source": "let completion='normal';let result;const effects=[];try{effects.push('before');throw new TypeError('authored');}catch(error){completion='throw';result=error.name;}",
+      "expected_observation": [
+        "observation",
+        "throw",
+        [
+          "string",
+          "TypeError"
+        ],
+        [
+          "array",
+          1,
+          [
+            [
+              "0",
+              [
+                "string",
+                "before"
+              ]
+            ]
+          ]
+        ]
+      ],
+      "required_transformations": []
+    },
+    {
+      "id": "prototype-delete",
+      "mode": "trusted-differential",
+      "source": "let completion=\"normal\",result;try{delete \"\".__proto__.charAt;const f=s=>s.charAt(0);result=f(\"ab\");}catch(error){completion=\"throw\";result=error.name;}",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "throw",
+        [
+          "string",
+          "TypeError"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "proxy-call",
+        "custom-decoder"
+      ]
+    },
+    {
+      "id": "prototype-delete-computed",
+      "mode": "trusted-differential",
+      "source": "let completion=\"normal\",result;try{delete \"\"[\"__proto__\"][\"charAt\"];const f=s=>s.charAt(0);result=f(\"ab\");}catch(error){completion=\"throw\";result=error.name;}",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "throw",
+        [
+          "string",
+          "TypeError"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "proxy-call",
+        "custom-decoder"
+      ]
+    },
+    {
+      "id": "prototype-update",
+      "mode": "trusted-differential",
+      "source": "let completion=\"normal\",result;try{\"\".__proto__.charAt++;const f=s=>s.charAt(0);result=f(\"ab\");}catch(error){completion=\"throw\";result=error.name;}",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "throw",
+        [
+          "string",
+          "TypeError"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "proxy-call",
+        "custom-decoder"
+      ]
+    },
+    {
+      "id": "prototype-update-computed",
+      "mode": "trusted-differential",
+      "source": "let completion=\"normal\",result;try{\"\"[\"__proto__\"][\"charAt\"]++;const f=s=>s.charAt(0);result=f(\"ab\");}catch(error){completion=\"throw\";result=error.name;}",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "throw",
+        [
+          "string",
+          "TypeError"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "proxy-call",
+        "custom-decoder"
+      ]
+    },
+    {
+      "id": "reflect-prototype-write",
+      "mode": "trusted-differential",
+      "source": "Reflect.defineProperty(\"\".__proto__,\"charAt\",{value:function(){return \"changed\"}});const f=s=>s.charAt(0);const result=f(\"ab\");",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "changed"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "proxy-call",
+        "custom-decoder"
+      ]
+    },
+    {
+      "id": "reflect-computed-prototype-write",
+      "mode": "trusted-differential",
+      "source": "Reflect[\"defineProperty\"](\"\"[\"__proto__\"],\"charAt\",{value:function(){return \"changed\"}});const f=s=>s.charAt(0);const result=f(\"ab\");",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "changed"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "proxy-call",
+        "custom-decoder"
+      ]
+    },
+    {
+      "id": "prototype-exposure-refusal",
+      "mode": "trusted-differential",
+      "source": "const prototype=\"\".__proto__;const f=s=>s.charAt(0);const result=f(\"ab\");",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "a"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "proxy-call",
+        "custom-decoder"
+      ]
+    },
+    {
+      "id": "nested-array-growth-small",
+      "mode": "trusted-differential",
+      "source": "const f=function(){var a=[0];for(var i=0;i<3;i++){a=[a,a]}return a.length};const result=f();",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "number",
+          "4000000000000000"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [
+        "custom-decoder"
+      ]
+    },
+    {
+      "id": "small-string-aliases",
+      "mode": "trusted-differential",
+      "source": "const a=\"abcdefgh\";const b=a;const c=b;const d=c;const result=d;",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "abcdefgh"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [
+        "constant-propagation"
+      ]
+    },
+    {
+      "id": "direct-from-char-code-disabled",
+      "mode": "trusted-differential",
+      "source": "const result=String.fromCharCode(65,66);",
+      "assume_intrinsics": false,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "AB"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-from-char-code-enabled",
+      "mode": "trusted-differential",
+      "source": "const result=String.fromCharCode(65,66);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "AB"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-char-code-at-disabled",
+      "mode": "trusted-differential",
+      "source": "const result=\"abc\".charCodeAt(1);",
+      "assume_intrinsics": false,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "number",
+          "4058800000000000"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-char-code-at-enabled",
+      "mode": "trusted-differential",
+      "source": "const result=\"abc\".charCodeAt(1);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "number",
+          "4058800000000000"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-char-at-disabled",
+      "mode": "trusted-differential",
+      "source": "const result=\"abc\".charAt(1);",
+      "assume_intrinsics": false,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "b"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-char-at-enabled",
+      "mode": "trusted-differential",
+      "source": "const result=\"abc\".charAt(1);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "b"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-utf16-index-disabled",
+      "mode": "trusted-differential",
+      "source": "const result=\"a😀b\".indexOf(\"b\");",
+      "assume_intrinsics": false,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "number",
+          "4008000000000000"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-utf16-index-enabled",
+      "mode": "trusted-differential",
+      "source": "const result=\"a😀b\".indexOf(\"b\");",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "number",
+          "4008000000000000"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-split-index-disabled",
+      "mode": "trusted-differential",
+      "source": "const result=\"2|0|1\".split(\"|\")[0];",
+      "assume_intrinsics": false,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "2"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-split-index-enabled",
+      "mode": "trusted-differential",
+      "source": "const result=\"2|0|1\".split(\"|\")[0];",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "2"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [
+        "literal-index"
+      ]
+    },
+    {
+      "id": "direct-nested-concat-disabled",
+      "mode": "trusted-differential",
+      "source": "const result=String.fromCharCode(65)+String.fromCharCode(66);",
+      "assume_intrinsics": false,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "AB"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-nested-concat-enabled",
+      "mode": "trusted-differential",
+      "source": "const result=String.fromCharCode(65)+String.fromCharCode(66);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "AB"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [
+        "constant-fold"
+      ]
+    },
+    {
+      "id": "direct-surrogate-pair",
+      "mode": "trusted-differential",
+      "source": "const result=String.fromCharCode(0xd83d,0xde00);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "😀"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-surrogate-unit-number",
+      "mode": "trusted-differential",
+      "source": "const result=\"😀\".charCodeAt(0);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "number",
+          "40eb07a000000000"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-char-at-out-of-range",
+      "mode": "trusted-differential",
+      "source": "const result=\"abc\".charAt(30);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          ""
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-proxy-coexistence",
+      "mode": "trusted-differential",
+      "source": "const p=(a,b)=>a^b;const result=[String.fromCharCode(65),p(7,3)];",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "array",
+          2,
+          [
+            [
+              "0",
+              [
+                "string",
+                "A"
+              ]
+            ],
+            [
+              "1",
+              [
+                "number",
+                "4010000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [
+        "intrinsic-call",
+        "proxy-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-lone-surrogate",
+      "mode": "trusted-differential",
+      "source": "const result=String.fromCharCode(0xd800);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "\ud800"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-lone-surrogate-char",
+      "mode": "trusted-differential",
+      "source": "const result=\"😀\".charAt(0);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "\ud83d"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-nonfinite-input",
+      "mode": "trusted-differential",
+      "source": "const result=String.fromCharCode(1/0);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "\u0000"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-nonfinite-result",
+      "mode": "trusted-differential",
+      "source": "const result=\"abc\".charCodeAt(30);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "number",
+          "NaN"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-fractional-index",
+      "mode": "trusted-differential",
+      "source": "const result=\"abc\".charAt(0.5);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "a"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-extra-arity",
+      "mode": "trusted-differential",
+      "source": "const result=\"abc\".charAt(1,2);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "b"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-optional-member",
+      "mode": "trusted-differential",
+      "source": "const result=\"abc\"?.charAt(1);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "b"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-optional-call",
+      "mode": "trusted-differential",
+      "source": "const result=\"abc\".charAt?.(1);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "b"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-computed-call",
+      "mode": "trusted-differential",
+      "source": "const result=\"abc\"[\"charAt\"](1);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "b"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-extracted-alias",
+      "mode": "trusted-differential",
+      "source": "const code=String.fromCharCode;const result=code(65);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "A"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-spread-argument",
+      "mode": "trusted-differential",
+      "source": "const result=String.fromCharCode(...[65]);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "A"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-regex-split",
+      "mode": "trusted-differential",
+      "source": "const result=\"a|b\".split(/\\|/)[0];",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "a"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-shadowed-string",
+      "mode": "trusted-differential",
+      "source": "const String={fromCharCode:function(){return \"shadow\"}};const result=String.fromCharCode(65);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "shadow"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-eval-reference",
+      "mode": "trusted-differential",
+      "source": "const inspect=eval;const result=\"abc\".charAt(0);",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "a"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-coercion-hook",
+      "mode": "trusted-differential",
+      "source": "let count=0;const object={valueOf(){count++;return 65;}};const result=[String.fromCharCode(object),count];",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "array",
+          2,
+          [
+            [
+              "0",
+              [
+                "string",
+                "A"
+              ]
+            ],
+            [
+              "1",
+              [
+                "number",
+                "3ff0000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-getter-receiver",
+      "mode": "trusted-differential",
+      "source": "let count=0;const object={get text(){count++;return \"ab\";}};const result=[object.text.charAt(0),count];",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "array",
+          2,
+          [
+            [
+              "0",
+              [
+                "string",
+                "a"
+              ]
+            ],
+            [
+              "1",
+              [
+                "number",
+                "3ff0000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-effectful-argument",
+      "mode": "trusted-differential",
+      "source": "let count=0;function effect(){count++;return 65;}const result=[String.fromCharCode(effect()),count];",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "array",
+          2,
+          [
+            [
+              "0",
+              [
+                "string",
+                "A"
+              ]
+            ],
+            [
+              "1",
+              [
+                "number",
+                "3ff0000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-effectful-receiver",
+      "mode": "trusted-differential",
+      "source": "let count=0;function receiver(){count++;return \"ab\";}const result=[receiver().charAt(0),count];",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "array",
+          2,
+          [
+            [
+              "0",
+              [
+                "string",
+                "a"
+              ]
+            ],
+            [
+              "1",
+              [
+                "number",
+                "3ff0000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-extra-effectful-argument",
+      "mode": "trusted-differential",
+      "source": "let count=0;function effect(){count++;return 2;}const result=[\"abc\".charAt(1,effect()),count];",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "array",
+          2,
+          [
+            [
+              "0",
+              [
+                "string",
+                "b"
+              ]
+            ],
+            [
+              "1",
+              [
+                "number",
+                "3ff0000000000000"
+              ]
+            ]
+          ]
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-prototype-delete",
+      "mode": "trusted-differential",
+      "source": "let completion=\"normal\",result;try{delete \"\".__proto__.charAt;result=\"ab\".charAt(0);}catch(error){completion=\"throw\";result=error.name;}",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "throw",
+        [
+          "string",
+          "TypeError"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-prototype-computed-update",
+      "mode": "trusted-differential",
+      "source": "let completion=\"normal\",result;try{\"\"[\"__proto__\"][\"charAt\"]++;result=\"ab\".charAt(0);}catch(error){completion=\"throw\";result=error.name;}",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "throw",
+        [
+          "string",
+          "TypeError"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    },
+    {
+      "id": "direct-refuse-prototype-reflect",
+      "mode": "trusted-differential",
+      "source": "let completion=\"normal\",result;try{Reflect.defineProperty(\"\".__proto__,\"charAt\",{value:function(){return \"changed\"}});result=\"ab\".charAt(0);}catch(error){completion=\"throw\";result=error.name;}",
+      "assume_intrinsics": true,
+      "expected_observation": [
+        "observation",
+        "normal",
+        [
+          "string",
+          "changed"
+        ],
+        [
+          "array",
+          0,
+          []
+        ]
+      ],
+      "required_transformations": [],
+      "forbidden_transformations": [
+        "intrinsic-call"
+      ]
+    }
+  ]
+}

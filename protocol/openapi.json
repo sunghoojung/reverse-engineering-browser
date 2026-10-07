@@ -3541,6 +3541,435 @@
           "$ref": "#/components/schemas/RebExecutionMetadata"
         }
       }
+    },
+    "/api/float32/compare": {
+      "post": {
+        "operationId": "compare_float32",
+        "summary": "Inspect or compare explicit binary32 buffers",
+        "description": "Version 1 read-only diagnostics. Inputs are exact hex word arrays, canonical base64 bytes, or ID-selected complete verified artifacts. Layout is explicitly interleaved float32-le or float32-be. Omitted/null reference inspects one input. Caller tolerances use absolute OR symmetric relative OR finite representable-step distance; they never establish behavioral equivalence. Full metrics cover all supplied samples; detail is a bounded window. NaN representations remain raw bits, signed zeros are numerically equal, and nonfinite values are excluded from deltas/ULP/tolerances. No native capture, browser/CPU attribution, arbitrary paths/URLs, network, helper, or persistence.",
+        "tags": [
+          "float32"
+        ],
+        "x-source": "apps/origin-trace-backend/src/float32.rs",
+        "x-max-body-bytes": 2097152,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Float32Request"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Complete bounded binary32 diagnostics. Inspect comparison status; empty or mismatched layouts do not yield full equality. Null finite metrics are unavailable, never nonfinite-to-JSON coercions.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Float32Result"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid framing, JSON, version, duplicate/unknown members, input encoding, complete layout, detail window or caller tolerance. No input values are echoed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The request-body, bounded I/O-admission or cooperative complete-manifest scan deadline expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Malformed retained manifest, local I/O failure, or internal diagnostic task failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The existing bounded diagnostic I/O admission pool is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Exact selected artifact or session unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Expected artifact identity no longer matches the retained manifest.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Input or manifest resource limit exceeded; no partial equality result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Complete artifact integrity check failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            },
+            {
+              "id": "explicit-float32-input",
+              "condition": "Complete caller-supplied buffers or exact local artifact session/ID/expected SHA-256/byte-length; at most 65536 samples per input, explicit endian and layout, caller tolerances."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads selected local artifact bytes only when requested. Never launches helpers, writes files/evidence, captures or evaluates targets, accesses external networks, or infers CPU/platform/browser identity. Content hashes establish byte identity, not authenticity. No automatic retries.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/float32.rs",
+              "symbol": "compare_bytes"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/evidence.rs",
+              "symbol": "find_artifact_bounded"
+            }
+          ]
+        }
+      }
+    },
+    "/api/evidence/packages/compare": {
+      "post": {
+        "operationId": "compare_evidence_packages",
+        "summary": "Compare two supplied evidence metadata packages",
+        "description": "Read-only bounded comparison after strict validation of both original package byte tokens. Rejects malformed, duplicate, unsupported, contradictory or oversized input; unsupported observer/profile data cannot be coerced into comparable evidence. Explicit facets and normalization are part of deterministic identity. Exact declared session/process keys may align metadata; coincident IDs across sessions remain unmatched or ambiguous. No raw artifact-byte verification, capture-completeness, behavioral, causal or timing-equivalence claim. Results page deterministic rows and preserve unknown capture settings. No evidence store reads, helpers, browser actions, persistence, automatic export or network access. A shared package permit is reserved with nonblocking admission before comparison-body ingestion and transferred through blocking work, limiting simultaneously retained comparison bodies/work to two. Busy requests receive 503/resource_limit before their bodies are read.",
+        "tags": [
+          "evidence"
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "One Content-Length, no Transfer-Encoding, at most 8392704 request bytes; each original nested package token at most 4194304 bytes. Required explicit profile and 1..7 unique facets; offset 0..2181 and limit 1..100.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvidenceComparisonRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "At most 524288 bytes; full bounded summary plus one deterministic page, at most 100 rows. Unknown observer regimes and missing records never establish unchanged capture or behavior.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvidenceComparisonResult"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid framing or comparison options, rejected original package (including duplicate keys, digest/reference/profile errors), or resource limits. No input or unrecognized fields are echoed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Body, admission or cooperative comparison deadline exceeded. No successful partial comparison is returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Local validation worker or contract initialization failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Comparison capacity is full (resource_limit) before request body ingestion, or package admission infrastructure is closed (dependency_unavailable). At most two package operations may reserve comparison bodies/work; rejection does not read/retain the large body and is not an automatic retry instruction. An HTTP client still uploading after early rejection may instead observe a transport error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/evidence_comparison.rs",
+        "x-max-body-bytes": 8392704,
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Inert bounded local analysis of two supplied untrusted metadata packages only. Reads no configured stores or artifact bytes, writes no files, controls no browser, starts no helper and accesses no external network. Identical profile labels do not establish equivalent observer regimes; matching declared hashes do not reverify absent artifact bytes.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/evidence_comparison.rs",
+              "symbol": "evidence_comparison::compare_bytes"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
     }
   },
   "components": {
@@ -3752,7 +4181,8 @@
                   "missing_event",
                   "no_predecessor",
                   "cycle",
-                  "step_limit"
+                  "step_limit",
+                  "capture_gap"
                 ]
               },
               "after_step": {
@@ -17281,6 +17711,1391 @@
         "additionalProperties": false,
         "required": [],
         "properties": {}
+      },
+      "Float32Source": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "words"
+            ],
+            "properties": {
+              "kind": {
+                "const": "bits",
+                "type": "string"
+              },
+              "words": {
+                "type": "array",
+                "maxItems": 65536,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}$"
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "base64"
+            ],
+            "properties": {
+              "kind": {
+                "const": "bytes",
+                "type": "string"
+              },
+              "base64": {
+                "type": "string",
+                "maxLength": 349528,
+                "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "session_id",
+              "artifact_id",
+              "sha256",
+              "byte_length"
+            ],
+            "properties": {
+              "kind": {
+                "const": "artifact",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "artifact_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "byte_length": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 262144
+              }
+            }
+          }
+        ]
+      },
+      "Float32Input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "representation",
+          "channels",
+          "frames",
+          "source"
+        ],
+        "properties": {
+          "representation": {
+            "type": "string",
+            "enum": [
+              "float32-le",
+              "float32-be"
+            ]
+          },
+          "channels": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64
+          },
+          "frames": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "source": {
+            "$ref": "#/components/schemas/Float32Source"
+          }
+        }
+      },
+      "Float32Tolerances": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "absolute",
+          "relative",
+          "ulps"
+        ],
+        "properties": {
+          "absolute": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1e+80
+          },
+          "relative": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "ulps": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          }
+        }
+      },
+      "Float32Request": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "protocol_version",
+          "input",
+          "tolerances",
+          "detail"
+        ],
+        "properties": {
+          "protocol_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "input": {
+            "$ref": "#/components/schemas/Float32Input"
+          },
+          "reference": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Float32Input"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tolerances": {
+            "$ref": "#/components/schemas/Float32Tolerances"
+          },
+          "detail": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "start",
+              "limit"
+            ],
+            "properties": {
+              "start": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65536
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 256
+              }
+            }
+          }
+        }
+      },
+      "Float32Identity": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "representation",
+          "channels",
+          "frames",
+          "origin",
+          "sha256",
+          "byte_length",
+          "sample_count",
+          "session_id",
+          "artifact_id",
+          "layout"
+        ],
+        "properties": {
+          "representation": {
+            "type": "string",
+            "enum": [
+              "float32-le",
+              "float32-be"
+            ]
+          },
+          "channels": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64
+          },
+          "frames": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "supplied_bits",
+              "supplied_bytes",
+              "verified_artifact"
+            ]
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "byte_length": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 262144
+          },
+          "sample_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "artifact_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "layout": {
+            "const": "interleaved",
+            "type": "string"
+          }
+        }
+      },
+      "Float32Summary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "positive_zero",
+          "negative_zero",
+          "subnormal",
+          "normal",
+          "positive_infinity",
+          "negative_infinity",
+          "nan",
+          "finite_count",
+          "finite_sum_absolute"
+        ],
+        "properties": {
+          "positive_zero": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "negative_zero": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "subnormal": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "normal": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "positive_infinity": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "negative_infinity": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "nan": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "finite_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "finite_sum_absolute": {
+            "type": "number",
+            "minimum": 0
+          }
+        }
+      },
+      "Float32Sample": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "bits",
+          "class",
+          "sign_bit",
+          "value"
+        ],
+        "properties": {
+          "bits": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}$"
+          },
+          "class": {
+            "type": "string",
+            "enum": [
+              "zero",
+              "subnormal",
+              "normal",
+              "infinity",
+              "nan"
+            ]
+          },
+          "sign_bit": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "Float32Difference": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "bit_equal",
+          "numeric_equal",
+          "absolute_delta",
+          "relative_delta",
+          "ulp_distance",
+          "within_tolerance"
+        ],
+        "properties": {
+          "bit_equal": {
+            "type": "boolean"
+          },
+          "numeric_equal": {
+            "type": "boolean"
+          },
+          "absolute_delta": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "relative_delta": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 2
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ulp_distance": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "within_tolerance": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "Float32Comparison": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "compared_pairs",
+          "input_tail",
+          "reference_tail",
+          "bit_equal_pairs",
+          "numeric_equal_pairs",
+          "finite_pairs",
+          "excluded_nonfinite_pairs",
+          "within_tolerance_pairs",
+          "raw_bytes_equal",
+          "representations_match",
+          "layouts_match",
+          "all_bits_equal",
+          "all_numeric_equal",
+          "all_within_tolerance",
+          "first_bit_mismatch",
+          "maximum_absolute_delta",
+          "maximum_relative_delta",
+          "rms_delta",
+          "maximum_ulp_distance",
+          "ulp_histogram"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "empty",
+              "unequal_length",
+              "layout_mismatch",
+              "complete"
+            ]
+          },
+          "compared_pairs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "input_tail": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "reference_tail": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "bit_equal_pairs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "numeric_equal_pairs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "finite_pairs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "excluded_nonfinite_pairs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "within_tolerance_pairs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "raw_bytes_equal": {
+            "type": "boolean"
+          },
+          "representations_match": {
+            "type": "boolean"
+          },
+          "layouts_match": {
+            "type": "boolean"
+          },
+          "all_bits_equal": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "all_numeric_equal": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "all_within_tolerance": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "first_bit_mismatch": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65536
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "maximum_absolute_delta": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "maximum_relative_delta": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rms_delta": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "maximum_ulp_distance": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ulp_histogram": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "zero",
+              "one",
+              "two_to_four",
+              "five_to_sixteen",
+              "over_sixteen"
+            ],
+            "properties": {
+              "zero": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65536
+              },
+              "one": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65536
+              },
+              "two_to_four": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65536
+              },
+              "five_to_sixteen": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65536
+              },
+              "over_sixteen": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65536
+              }
+            }
+          }
+        }
+      },
+      "Float32Result": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "protocol_version",
+          "profile",
+          "input",
+          "reference",
+          "input_summary",
+          "reference_summary",
+          "comparison",
+          "tolerances",
+          "policies",
+          "limits",
+          "detail",
+          "source_ids"
+        ],
+        "properties": {
+          "protocol_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "profile": {
+            "const": "binary32-finite-steps-v1",
+            "type": "string"
+          },
+          "input": {
+            "$ref": "#/components/schemas/Float32Identity"
+          },
+          "reference": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Float32Identity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "input_summary": {
+            "$ref": "#/components/schemas/Float32Summary"
+          },
+          "reference_summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Float32Summary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "comparison": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Float32Comparison"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tolerances": {
+            "$ref": "#/components/schemas/Float32Tolerances"
+          },
+          "policies": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "zero",
+              "nonfinite",
+              "nan",
+              "relative",
+              "tolerance",
+              "accumulation",
+              "coverage"
+            ],
+            "properties": {
+              "zero": {
+                "const": "numeric_equal_bits_distinct",
+                "type": "string"
+              },
+              "nonfinite": {
+                "const": "excluded_from_delta_ulp_tolerance",
+                "type": "string"
+              },
+              "nan": {
+                "const": "never_numeric_equal_payload_preserved",
+                "type": "string"
+              },
+              "relative": {
+                "const": "absolute_delta_over_maximum_magnitude_zero_is_zero",
+                "type": "string"
+              },
+              "tolerance": {
+                "const": "absolute_or_relative_or_ulp_finite_only",
+                "type": "string"
+              },
+              "accumulation": {
+                "const": "binary64_sequential_index_order",
+                "type": "string"
+              },
+              "coverage": {
+                "const": "complete_supplied_buffers_not_capture_completeness",
+                "type": "string"
+              }
+            }
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "samples_per_input",
+              "bytes_per_input",
+              "detail_rows",
+              "request_bytes",
+              "response_bytes",
+              "manifest_bytes",
+              "manifest_records"
+            ],
+            "properties": {
+              "samples_per_input": {
+                "const": 65536,
+                "type": "integer"
+              },
+              "bytes_per_input": {
+                "const": 262144,
+                "type": "integer"
+              },
+              "detail_rows": {
+                "const": 256,
+                "type": "integer"
+              },
+              "request_bytes": {
+                "const": 2097152,
+                "type": "integer"
+              },
+              "response_bytes": {
+                "const": 524288,
+                "type": "integer"
+              },
+              "manifest_bytes": {
+                "const": 8388608,
+                "type": "integer"
+              },
+              "manifest_records": {
+                "const": 8192,
+                "type": "integer"
+              }
+            }
+          },
+          "detail": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "start",
+              "limit",
+              "total",
+              "returned",
+              "next_start",
+              "rows"
+            ],
+            "properties": {
+              "start": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65536
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 256
+              },
+              "total": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65536
+              },
+              "returned": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 256
+              },
+              "next_start": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 65536
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "rows": {
+                "type": "array",
+                "maxItems": 256,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "index",
+                    "byte_offset",
+                    "input",
+                    "reference",
+                    "difference"
+                  ],
+                  "properties": {
+                    "index": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 65535
+                    },
+                    "byte_offset": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 262140
+                    },
+                    "input": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/components/schemas/Float32Sample"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reference": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/components/schemas/Float32Sample"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "difference": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/components/schemas/Float32Difference"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "source_ids": {
+            "type": "array",
+            "const": [
+              "rust-f32-representation",
+              "oracle-binary32-format"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "EvidenceComparisonRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "left",
+          "right",
+          "normalization_profile",
+          "facets"
+        ],
+        "properties": {
+          "left": {
+            "$ref": "#/components/schemas/EvidencePackage"
+          },
+          "right": {
+            "$ref": "#/components/schemas/EvidencePackage"
+          },
+          "normalization_profile": {
+            "type": "string",
+            "const": "reb-declared-metadata-v1"
+          },
+          "facets": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 7,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "artifacts",
+                "coverage",
+                "events",
+                "gaps",
+                "provenance",
+                "relationships",
+                "selection"
+              ]
+            }
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2181,
+            "default": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50
+          }
+        },
+        "description": "Original nested package JSON tokens, each at most 4194304 bytes, are independently duplicate-rejecting validated before canonicalization. Only exact declared metadata comparison is supported. Facets select full retained sections; no heuristic or URL matching. Outer keys must be unique and supported."
+      },
+      "EvidenceComparisonReference": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "package_id",
+          "facet",
+          "key"
+        ],
+        "properties": {
+          "package_id": {
+            "$ref": "#/components/schemas/EvidencePackageId"
+          },
+          "facet": {
+            "type": "string",
+            "enum": [
+              "artifacts",
+              "coverage",
+              "events",
+              "gaps",
+              "provenance",
+              "relationships",
+              "selection"
+            ]
+          },
+          "key": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvidencePackageEventKey"
+              },
+              {
+                "$ref": "#/components/schemas/EvidencePackageArtifactKey"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "EvidenceComparisonValueSummary": {
+        "anyOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "value"
+            ],
+            "properties": {
+              "kind": {
+                "const": "scalar",
+                "type": "string"
+              },
+              "value": {
+                "type": [
+                  "string",
+                  "integer",
+                  "boolean",
+                  "null"
+                ],
+                "maxLength": 4096
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "count"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "object",
+                  "array"
+                ]
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4096
+              }
+            }
+          }
+        ]
+      },
+      "EvidenceComparisonDifference": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "field",
+          "left",
+          "right"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "left": {
+            "$ref": "#/components/schemas/EvidenceComparisonValueSummary"
+          },
+          "right": {
+            "$ref": "#/components/schemas/EvidenceComparisonValueSummary"
+          }
+        }
+      },
+      "EvidenceComparisonRow": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "row_id",
+          "facet",
+          "status",
+          "alignment",
+          "left",
+          "right",
+          "cross_scope_candidates",
+          "differences",
+          "differences_omitted",
+          "declared_content_hash_match"
+        ],
+        "properties": {
+          "row_id": {
+            "type": "string",
+            "pattern": "^reb-comparison-row-v1:sha256:[0-9a-f]{64}$",
+            "minLength": 93,
+            "maxLength": 93
+          },
+          "facet": {
+            "type": "string",
+            "enum": [
+              "artifacts",
+              "coverage",
+              "events",
+              "gaps",
+              "provenance",
+              "relationships",
+              "selection"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "equal_declared_metadata",
+              "changed_declared_metadata",
+              "left_only",
+              "right_only"
+            ]
+          },
+          "alignment": {
+            "type": "string",
+            "enum": [
+              "declared_scoped_key",
+              "selected_facet",
+              "ambiguous_cross_scope",
+              "unmatched"
+            ]
+          },
+          "left": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvidenceComparisonReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "right": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvidenceComparisonReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cross_scope_candidates": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1024
+          },
+          "differences": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+              "$ref": "#/components/schemas/EvidenceComparisonDifference"
+            }
+          },
+          "differences_omitted": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 64
+          },
+          "declared_content_hash_match": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "EvidenceComparisonResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "protocol_version",
+          "comparison_id",
+          "normalization_profile",
+          "left_package_id",
+          "right_package_id",
+          "facets",
+          "package_metadata_equal",
+          "selected_metadata_equal",
+          "comparability",
+          "limitations",
+          "coverage",
+          "counts",
+          "page",
+          "rows"
+        ],
+        "properties": {
+          "protocol_version": {
+            "type": "integer",
+            "const": 1
+          },
+          "comparison_id": {
+            "type": "string",
+            "pattern": "^reb-comparison-v1:sha256:[0-9a-f]{64}$",
+            "minLength": 89,
+            "maxLength": 89
+          },
+          "normalization_profile": {
+            "type": "string",
+            "const": "reb-declared-metadata-v1"
+          },
+          "left_package_id": {
+            "$ref": "#/components/schemas/EvidencePackageId"
+          },
+          "right_package_id": {
+            "$ref": "#/components/schemas/EvidencePackageId"
+          },
+          "facets": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 7,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "artifacts",
+                "coverage",
+                "events",
+                "gaps",
+                "provenance",
+                "relationships",
+                "selection"
+              ]
+            }
+          },
+          "package_metadata_equal": {
+            "type": "boolean"
+          },
+          "selected_metadata_equal": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "comparability": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "observer_regime",
+              "capture_coverage",
+              "behavior",
+              "timing"
+            ],
+            "properties": {
+              "observer_regime": {
+                "type": "string",
+                "const": "unknown"
+              },
+              "capture_coverage": {
+                "type": "string",
+                "const": "unknown_or_partial"
+              },
+              "behavior": {
+                "type": "string",
+                "const": "not_established"
+              },
+              "timing": {
+                "type": "string",
+                "const": "not_established"
+              }
+            }
+          },
+          "limitations": {
+            "type": "array",
+            "minItems": 8,
+            "maxItems": 8,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "untrusted_input",
+                "authenticity_not_established",
+                "artifact_bytes_not_present_not_reverified",
+                "capture_configuration_unknown",
+                "observer_regime_unknown",
+                "historical_epochs_unknown",
+                "behavioral_equivalence_not_established",
+                "timing_equivalence_not_established"
+              ]
+            }
+          },
+          "coverage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "left",
+              "right"
+            ],
+            "properties": {
+              "left": {
+                "$ref": "#/components/schemas/EvidencePackageCoverage"
+              },
+              "right": {
+                "$ref": "#/components/schemas/EvidencePackageCoverage"
+              }
+            }
+          },
+          "counts": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "equal_declared_metadata",
+              "changed_declared_metadata",
+              "left_only",
+              "right_only",
+              "ambiguous_cross_scope"
+            ],
+            "properties": {
+              "equal_declared_metadata": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2181
+              },
+              "changed_declared_metadata": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2181
+              },
+              "left_only": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2181
+              },
+              "right_only": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2181
+              },
+              "ambiguous_cross_scope": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2181
+              }
+            }
+          },
+          "page": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "offset",
+              "limit",
+              "total",
+              "next_offset"
+            ],
+            "properties": {
+              "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2181
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100
+              },
+              "total": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2181
+              },
+              "next_offset": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 2181
+              }
+            }
+          },
+          "rows": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/EvidenceComparisonRow"
+            }
+          }
+        },
+        "description": "Equality is limited to declared selected metadata. A null selected_metadata_equal means no selected record rows were present. Full keys are exporter declarations, not independently authenticated capture ownership. Cross-scope candidates are counted but never paired. A declared hash/size match does not verify omitted raw bytes. Nested differences summarize type/count without claiming those summaries establish equality. Stable result identity excludes page offset/limit; row identity includes exact input package IDs and facet/key references."
       }
     }
   },

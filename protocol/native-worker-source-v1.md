@@ -27,6 +27,12 @@ used as research only. This work installs no Ghostwire code, injects no page
 script, starts no debugger endpoint, changes no JavaScript result, and makes no
 stealth or undetectability promise.
 
+The exported source hooks check a separate disabled `constinit` atomic gate
+before accessing process-lifetime queue storage. First-use disabled IsEnabled,
+Begin, Capture and Retire calls do not initialize the queue, acquire a static-init
+guard or allocate. A future control path must configure storage before publishing
+the gate; there is deliberately no activation API in this stage.
+
 ## Authority, identity, and ownership
 
 The queue starts disabled and allocates no payload pool until its control-path
@@ -132,8 +138,12 @@ acknowledgment. Popping this local queue alone is not downstream backpressure.
 
 ## Gaps and lifecycle
 
-`attempted`, `dropped`, `retired`, `stale`, and `contended` are saturating,
-process-lifetime counters. `queued` and `pending_gap` describe the current
+`attempted`, `dropped`, `retired`, and `stale` are exactly saturating,
+process-lifetime counters. `contended` uses a bounded atomic increment and an
+overflow latch: at the first uint64 wrap, a concurrent Stats snapshot can see the
+wrapped value before the latch is published; later snapshots remain UINT64_MAX.
+This is a theoretical 2^64-contention diagnostic limitation; no unbounded
+hot-path retry is used. `queued` and `pending_gap` describe the current
 policy. Successful records carry the local attempted sequence and the number
 of rejected source attempts since the previous accepted record. Queue-full,
 malformed source, and oversized source failures count as drops. Contention is

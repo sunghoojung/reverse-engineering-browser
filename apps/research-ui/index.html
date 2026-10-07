@@ -295,7 +295,7 @@
               <div class="debug-panes">
                 <details id="artifact-details" class="debug-pane" open><summary>Source details</summary><div id="artifact-facts" class="debug-pane-body">Select a source to inspect capture or runtime metadata.</div></details>
                 <details id="source-facts-details" class="debug-pane"><summary>JavaScript facts</summary><div id="source-facts-report" class="debug-pane-body source-facts-report" aria-live="polite"></div></details>
-                <details id="deobfuscation-details" class="debug-pane" open><summary>Deobfuscation</summary><label class="deobfuscation-assumption"><input id="deobfuscation-intrinsics" type="checkbox"> Assume standard JavaScript intrinsics</label><div id="deobfuscation-report" class="debug-pane-body">Select a JavaScript source to analyze.</div></details>
+                <details id="deobfuscation-details" class="debug-pane" open><summary>Deobfuscation</summary><label class="deobfuscation-assumption"><input id="deobfuscation-intrinsics" type="checkbox"> Assume standard JavaScript intrinsics</label><div id="deobfuscation-report" class="debug-pane-body" role="region" aria-label="Deobfuscation analysis" tabindex="-1">Select a JavaScript source to analyze.</div></details>
                 <details class="debug-pane" open><summary>Watch</summary><div class="debug-pane-body"><form id="watch-form" class="debug-form"><input id="watch-expression" type="text" placeholder="Add expression" aria-label="Watch expression" autocomplete="off" /><button type="submit" aria-label="Add watch expression">+</button></form><div id="watch-list"></div></div></details>
                 <details class="debug-pane" open><summary>Breakpoints</summary><div id="breakpoint-list" class="debug-pane-body">No breakpoints</div></details>
                 <details class="debug-pane" open><summary>Scope</summary><div id="scope-list" class="debug-pane-body">Not paused</div></details>
@@ -310,7 +310,7 @@
           <section id="screen-memory" class="screen" aria-label="Memory investigation" hidden>
             <header class="screen-head">
               <div><h1>Memory Explorer</h1><div class="screen-subtitle">Find objects, inspect what retains them, and compare memory over time.</div></div>
-              <div class="screen-head-actions"><span class="memory-readonly">Local analysis</span></div>
+              <div class="screen-head-actions"><span id="memory-target" class="memory-target">Target unavailable</span><span class="memory-readonly">Ephemeral · local</span></div>
             </header>
             <div id="memory-notice" class="memory-notice" data-kind="offline" role="status" aria-live="polite">Run a live session to attach an authorized browser target.</div>
                   <div class="memory-mode-switch" role="group" aria-label="Memory search mode">
@@ -322,6 +322,7 @@
             <div class="memory-grid">
               <aside class="memory-search-pane" aria-label="Memory search criteria">
                 <form id="memory-search-form" class="memory-form" data-mode="live">
+                  <div class="memory-stage"><span>1</span><div><strong>Choose criteria</strong><small id="memory-workflow">Find an object, then inspect its inert preview.</small></div></div>
 
                   <label class="memory-live-only">Property name<input id="memory-property-query" type="text" placeholder="token, config, fingerprint" maxlength="512" autocomplete="off" /></label>
                   <label class="memory-search-only memory-value-field"><span id="memory-value-caption">Value</span><input id="memory-value-query" type="text" placeholder="exact text or pattern" maxlength="512" autocomplete="off" /></label>
@@ -365,12 +366,18 @@
                   <details class="workspace-disclosure"><summary>Search behavior</summary><p id="memory-search-help" class="memory-search-help">Accessors are reported without invoking getters. Results are ephemeral and are never added to the evidence store.</p></details>
                 </form>
               </aside>
-              <div id="memory-results-pane" class="memory-results-pane">
+              <div class="memory-output">
+                <div class="memory-receipt">
+                  <div id="memory-submission" class="memory-submission">No submitted result.</div>
+                  <details class="memory-submitted"><summary>Submitted criteria</summary><pre id="memory-submitted-criteria">No submitted criteria</pre></details>
+                </div>
+                <div id="memory-results-pane" class="memory-results-pane">
                 <div class="memory-results-list">
                   <div class="memory-results-head"><span id="memory-result-label">Matches</span><span id="memory-result-count">0</span></div>
                   <div id="memory-results" role="listbox" aria-label="Live object matches"></div>
                 </div>
                 <div id="memory-detail" class="memory-detail" tabindex="0"><div class="memory-empty">Attach a live page, enter at least one criterion, then start a bounded search.</div></div>
+                </div>
               </div>
             </div>
           </section>
@@ -443,7 +450,7 @@
               </div>
             </div>
             <div id="evidence-package-mode" class="evidence-content" hidden>
-              <div class="evidence-package-heading"><button id="evidence-return" class="secondary-button" type="button">← Return to observations</button><span>Explicit metadata selection · nothing is saved automatically</span></div>
+              <div class="evidence-package-heading"><button id="evidence-return" class="secondary-button" type="button">← Return to observations</button><span>Explicit metadata selection · nothing is saved automatically</span><button id="evidence-compare-toggle" class="secondary-button" type="button" aria-expanded="false" aria-controls="evidence-comparison-section">Compare supplied packages</button></div>
               <section id="evidence-package-panel" class="evidence-package-panel" aria-label="Metadata package workflow">
                 <h2>Metadata packages</h2>
                 <p class="package-note">Metadata only; capture completeness is unknown. Export never stops writers.</p>
@@ -464,6 +471,12 @@
                 <div class="package-toolbar"><button data-package-cancel class="secondary-button" type="button" hidden>Cancel</button><button data-package-download class="secondary-button" type="button" aria-describedby="package-save-note" disabled>Download validated package</button><button data-package-copy class="secondary-button" type="button" disabled>Copy validated metadata</button></div>
                 <p id="package-save-note" data-package-save-note class="package-note"></p>
                 <div data-package-report class="package-report"></div>
+              </section>
+              <section id="evidence-comparison-section" class="evidence-package-panel" aria-label="Compare supplied metadata packages" hidden>
+                <div class="evidence-comparison-heading"><h2>Compare supplied packages</h2><button id="evidence-comparison-close" class="secondary-button" type="button">Close comparison</button></div>
+                <p class="package-note">These files are independent of the selected observation. Nothing is selected, captured, exported or saved automatically.</p>
+                <p id="evidence-comparison-unavailable" class="package-note" role="status" hidden></p>
+                <div id="evidence-comparison-panel"></div>
               </section>
             </div>
           </section>
@@ -1151,6 +1164,7 @@
               <div class="tools-tabs" role="tablist" aria-label="Local tools">
                 <button id="tools-tab-decoder" class="tools-tab" type="button" role="tab" data-tools-tab="decoder" aria-selected="true" aria-controls="tools-panel-decoder">Decoder chain</button>
                 <button id="tools-tab-jwt" class="tools-tab" type="button" role="tab" data-tools-tab="jwt" aria-selected="false" aria-controls="tools-panel-jwt" tabindex="-1">JWT inspector</button>
+                <button id="tools-tab-float32" class="tools-tab" type="button" role="tab" data-tools-tab="float32" aria-selected="false" aria-controls="tools-panel-float32" tabindex="-1">Float32 comparison</button>
               </div>
 
               <div id="tools-panel-decoder" class="tools-panel" role="tabpanel" aria-labelledby="tools-tab-decoder">
@@ -1201,6 +1215,29 @@
                 </div>
               </div>
 
+
+              <div id="tools-panel-float32" class="tools-panel" role="tabpanel" aria-labelledby="tools-tab-float32" hidden>
+                <div class="float32-workspace">
+                  <form class="float32-form" aria-label="Exact float32 inputs">
+                    <h2>Binary32 evidence</h2><p>Explicit buffers only. Interleaved layout; 65,536 samples per side. No capture or environment inference. Retained choices use the current catalog’s first 2,048 rows, up to 256 KiB per artifact.</p>
+                    <button id="float32-example" class="secondary-button" type="button">Load synthetic edge examples</button>
+                    <fieldset id="float32-input-fields"><legend>Input</legend>
+ <div class="float32-controls"><label>Source<select data-float32-kind="input"><option value="bits">Raw hex words</option><option value="bytes">Base64 bytes</option><option value="artifact">Retained artifact</option></select></label><label>Byte order<select data-float32-endian="input"><option value="float32-le">Float32 little-endian</option><option value="float32-be">Float32 big-endian</option></select></label></div>
+ <label>Exact input<textarea data-float32-input="input" aria-label="Input raw values" maxlength="720896" spellcheck="false" placeholder="Eight-digit lowercase hex words, separated by whitespace"></textarea></label>
+ <label hidden>Retained artifact<select data-float32-artifact="input"><option value="">Select retained artifact</option></select></label>
+ <div class="float32-controls"><label>Channels<input data-float32-channels="input" type="number" min="1" max="64" step="1" value="1" required /></label><label>Frames<input data-float32-frames="input" type="number" min="0" max="65536" step="1" value="0" required /></label></div></fieldset>
+                    <label class="float32-check"><input id="float32-reference-enabled" type="checkbox" /> Compare with a reference</label>
+                    <fieldset id="float32-reference-fields"><legend>Reference</legend>
+ <div class="float32-controls"><label>Source<select data-float32-kind="reference"><option value="bits">Raw hex words</option><option value="bytes">Base64 bytes</option><option value="artifact">Retained artifact</option></select></label><label>Byte order<select data-float32-endian="reference"><option value="float32-le">Float32 little-endian</option><option value="float32-be">Float32 big-endian</option></select></label></div>
+ <label>Exact input<textarea data-float32-input="reference" aria-label="Reference raw values" maxlength="720896" spellcheck="false" placeholder="Eight-digit lowercase hex words, separated by whitespace"></textarea></label>
+ <label hidden>Retained artifact<select data-float32-artifact="reference"><option value="">Select retained artifact</option></select></label>
+ <div class="float32-controls"><label>Channels<input data-float32-channels="reference" type="number" min="1" max="64" step="1" value="1" required /></label><label>Frames<input data-float32-frames="reference" type="number" min="0" max="65536" step="1" value="0" required /></label></div></fieldset>
+                    <fieldset><legend>Caller tolerances · finite pairs only</legend><div class="float32-controls"><label>Absolute ≤ 1e80<input id="float32-absolute" type="number" min="0" max="1e80" step="any" value="0" required /></label><label>Relative ≤ 2<input id="float32-relative" type="number" min="0" max="2" step="any" value="0" required /></label><label>ULP steps<input id="float32-ulps" type="number" min="0" max="4294967295" step="1" value="0" required /></label></div><p>Passes absolute OR relative OR ULP. Tolerance does not change equality.</p></fieldset>
+                    <div class="float32-actions"><button id="float32-run" class="secondary-button decoder-primary" type="submit">Inspect / compare</button><button id="float32-cancel" class="secondary-button" type="button" disabled>Cancel</button><button id="float32-clear" class="secondary-button" type="button">Clear result</button></div>
+                  </form>
+                  <section class="float32-output" aria-label="Float32 diagnostic report"><p id="float32-status" role="status" aria-live="polite"></p><div id="float32-result"></div></section>
+                </div>
+              </div>
               <div id="tools-panel-jwt" class="tools-panel" role="tabpanel" aria-labelledby="tools-tab-jwt" hidden>
                 <div class="jwt-grid">
                   <section class="jwt-column" aria-label="JWT input and creation">
@@ -1293,6 +1330,8 @@
     <script src="app_state.js"></script>
     <script src="evidence_models.js"></script>
     <script src="evidence_package.js"></script>
+    <script src="float32_inspector.js"></script>
+    <script src="evidence_comparison.js"></script>
     <script src="source_syntax.js"></script>
     <script src="source_facts.js"></script>
     <script src="traffic_view.js"></script>

@@ -374,11 +374,18 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
         if raw.len() as u64 > limit {
             return Err("Request body exceeds its byte limit".into());
         }
-        if matches!(
+        if definition["operationId"] == "compare_evidence_packages" {
+            origin_trace_backend::evidence_comparison::preflight(&raw)?;
+            request = request.header("content-type", "application/json").body(raw);
+        } else if matches!(
             definition["operationId"].as_str(),
-            Some("validate_evidence_package" | "export_evidence_package")
+            Some("validate_evidence_package" | "export_evidence_package" | "compare_float32")
         ) {
-            origin_trace_backend::evidence_package::parse_bytes(&raw)?;
+            if definition["operationId"] == "compare_float32" {
+                origin_trace_backend::float32::validate_request_bytes(&raw)?;
+            } else {
+                origin_trace_backend::evidence_package::parse_bytes(&raw)?;
+            }
             request = request.header("content-type", "application/json").body(raw);
         } else {
             let body: Value = serde_json::from_slice(&raw)?;
@@ -404,6 +411,8 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
     let mut bytes = Vec::new();
     let response_limit = if export_package && status.is_success() {
         origin_trace_backend::evidence_package::MAX_BYTES
+    } else if definition["operationId"] == "compare_evidence_packages" && status.is_success() {
+        origin_trace_backend::evidence_comparison::MAX_RESULT_BYTES
     } else {
         64 * 1024 * 1024
     };

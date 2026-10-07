@@ -535,7 +535,7 @@ function evidenceObservationModel(context) {
     linkedArtifacts: new Set(related.filter(row => row.artifact.status === 'ready').map(row => JSON.stringify(row.artifact.identity))).size};
 }
 
-function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, onSource, canOpenSource}) {
+function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, onSource, canOpenSource, comparisonApi = globalThis.RebEvidenceComparison, protocol = location.protocol}) {
   const find = id => document.querySelector(`#${id}`);
   const host = find('evidence-investigation'), list = find('evidence-rows'), inspector = find('evidence-inspector');
   const search = find('evidence-search'), scope = find('evidence-scope'), notice = find('evidence-workspace-notice');
@@ -546,6 +546,38 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
   let listSignature = '', detailSignature = '', filtered = [], pane = 'observations';
   let selectionNotice = '', refreshNotice = '', outsideFilterNotice = false;
   const coverageDetails = find('evidence-coverage-details');
+  const comparisonToggle = find('evidence-compare-toggle'), comparisonSection = find('evidence-comparison-section');
+  const comparisonHost = find('evidence-comparison-panel'), comparisonClose = find('evidence-comparison-close');
+  let comparison = null, comparing = false;
+  const comparisonUnavailable = !['http:', 'https:'].includes(protocol)
+    ? protocol === 'reb:' ? 'Package comparison is unavailable in stored-evidence native mode. Open a live workspace or the local browser development UI.' : 'Open the local browser development UI for package comparison.'
+    : !comparisonApi?.mount ? 'Package comparison is unavailable in this application build.' : '';
+  find('evidence-comparison-unavailable').textContent = comparisonUnavailable;
+  find('evidence-comparison-unavailable').hidden = !comparisonUnavailable;
+  function showComparison(value, focus = true) {
+    value = Boolean(value && visible && packages);
+    if (value && !comparison && !comparisonUnavailable) comparison = comparisonApi.mount(comparisonHost);
+    if (!value) comparison?.close();
+    comparing = value; comparisonSection.hidden = !value; find('evidence-package-panel').hidden = value;
+    comparisonToggle.setAttribute('aria-expanded', String(value));
+    packagePanel.setVisible(visible && packages && !value);
+    if (focus) {
+      packageHost.scrollTop = 0;
+      (value ? comparisonHost.querySelector('[data-comparison-side="0"]') ?? comparisonClose : comparisonToggle).focus({preventScroll: true});
+    }
+  }
+  function disposeComparison() {
+    showComparison(false, false); comparison?.dispose(); comparison = null;
+  }
+  comparisonToggle.addEventListener('click', () => showComparison(!comparing));
+  comparisonClose.addEventListener('click', () => showComparison(false));
+  comparisonSection.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault(); event.stopPropagation();
+    if (comparison?.controller.model.busy) {
+      comparison.close(); comparisonHost.querySelector('[data-comparison-action="compare"]').focus({preventScroll: true});
+    } else showComparison(false);
+  });
   const node = (tag, text = '', className = '') => {const result = document.createElement(tag); result.textContent = String(text); result.className = className; return result;};
   const button = (label, action, key) => {const result = node('button', label, 'secondary-button'); result.type = 'button'; if (key) result.dataset.evidenceAction = key; result.addEventListener('click', action); return result;};
   const renderNotice = () => {notice.textContent = [refreshNotice, selectionNotice].filter(Boolean).join(' '); notice.hidden = !notice.textContent;};
@@ -686,6 +718,7 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
     const context = getContext(); model = evidenceObservationModel(context);
     if (requestKey !== model.requestKey) {
       const changed = requestKey !== undefined;
+      if (changed && comparison?.controller.model.busy) comparison.close();
       requestKey = model.requestKey; selectedKey = null; page = 0; listSignature = ''; detailSignature = ''; search.value = ''; scope.value = model.request ? 'related' : 'all';
       setPane('observations'); if (changed) message(model.request ? 'Request context changed. Observation selection was reset.' : 'The selected request is no longer retained. Showing the retained window.');
     }
@@ -706,7 +739,8 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
   }
   function showPackages(value, focus = true) {
     packages = value; host.hidden = value; packageHost.hidden = !value; toggle.setAttribute('aria-expanded', String(value));
-    packagePanel.setVisible(visible && value);
+    if (!value) showComparison(false, false);
+    packagePanel.setVisible(visible && value && !comparing);
     if (focus) (value ? find('evidence-return') : toggle).focus({preventScroll: true});
     if (!value) sync();
   }
@@ -727,7 +761,11 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
   scope.addEventListener('change', () => {page = 0; rebuild(); renderList();});
   find('evidence-previous').addEventListener('click', () => {page -= 1; renderList(); list.scrollTop = 0;});
   find('evidence-next').addEventListener('click', () => {page += 1; renderList(); list.scrollTop = 0;});
-  return {sync, setVisible(value) {visible = value; packagePanel.setVisible(value && packages); sync();}, showPackages,
+  return {sync, setVisible(value) {
+      visible = value;
+      if (!value) showComparison(false, false);
+      packagePanel.setVisible(value && packages && !comparing); sync();
+    }, showPackages, showComparison, disposeComparison,
     // Bounded view state only. Shared navigation may restore this without
     // retaining payloads, source text, reports or package bytes in history.
     snapshot: () => ({requestKey, selectedKey, page, pane, packages}),

@@ -302,6 +302,10 @@ narrow windows. Both panes stay within the available workspace height; the
 request ledger and inspector body scroll independently. Captured-tab and domain
 filters share a compact row at narrow widths. REB's Signals and Evidence tools remain separate tabs. Missing
 headers, bodies, initiators, and timing phases stay explicitly unavailable.
+Request signal profiles are owned by the exact selected session, request and root
+event. Late responses cannot replace a newer selection or refresh. Malformed or
+failed refreshes preserve only the last validated profile for that same identity
+and require a full response on retry; changed or ambiguous owners clear it.
 No cache, recording, throttling, or invented waterfall controls are implied.
 The layout follows familiar [network inspection conventions](https://developer.chrome.com/docs/devtools/network/reference)
 while keeping Origin Trace's own controls and Rosé Pine Moon palette.
@@ -365,6 +369,45 @@ result statistics are likewise available in expanders beside their controls.
 Advanced workspaces keep the primary task visible and secondary information in
 expandable sections. Backtraces groups correlation identifiers separately from
 relationship facts. Memory places its four modes above the search and results.
+Each Memory mode keeps criteria, explicit action, and inspection separate. The
+result receipt records the submitted target, time, and criteria; diff receipts
+also retain the submitted baseline's native target/time/size metadata. Baselines
+are target-scoped; the native contract does not provide document identity. Draft
+scope changes do not rewrite an existing result. Captures can briefly pause the
+target, and origin tracing explicitly controls debugger stepping until stopped.
+Completed debugger polls are reconciled when actions settle, including after a
+lost acknowledgement; a matching terminal trace poll can retire an unread
+acknowledgement immediately. Memory HTTP waits have explicit headers-and-body
+deadlines: 30 seconds for live search, 90 for baseline capture, 120 for snapshot
+search, 150 for diff, and 15 for trace controls or baseline reset. These include
+margin beyond the existing native command/worker timeouts and do not limit or
+cancel an already-running native trace. Target/context/epoch expiry also retires
+the wait. Only that HTTP read is aborted; completion stays unconfirmed, no
+action is automatically retried, and a retired request cannot release a newer
+action's pending latch. Other debugger callers keep their existing request behavior;
+an older reply cannot overwrite a newer terminal trace or baseline.
+Trace-ID ordering is scoped to the observed native restart epoch.
+Acknowledgements require a valid generation before reporting reset or clear.
+No action is automatically retried. Lost, malformed, or stale replies report an
+unconfirmed outcome: discarding a reply does not stop native work. Target or
+observed execution-context changes expire previews without relabeling them as
+current. Only the current bounded result is retained, with no heap-file history.
+
+Memory result rows keep their identity during unchanged refreshes, preserving
+keyboard selection, focus, detail scroll, and incoming-reference disclosures.
+Snapshot paths and incoming references remain separate; heap diffs show retained
+owners even when no signature groups changed. Partial results qualify absence
+and dominator claims. Origin traces expose the recorded location as text, but do
+not open a live source using only a possibly reused script ID or URL: the trace
+contract lacks the execution-context/source-hash identity needed for that link.
+Request-field pivots only fill criteria and do not run captures; a pending action
+keeps its criteria and receipt when the workspace is reopened.
+
+The `--memory-ui-browser` mode of `tools/check-origin-trace-debugger.mjs` uses
+the existing installed-Chromium driver and synthetic native API fixtures. It
+covers four workflows, race/error/partial states, keyboard/refresh behavior,
+inert text, and wide/narrow geometry. It is separate from native macOS validation.
+
 Experiments separates setup, request, and response, with activity logs collapsed.
 Analyst prioritizes the editor and evidence permissions; folder settings, storage,
 variables, execution limits, and history can be expanded as needed. Tools keeps
@@ -535,10 +578,73 @@ does not present those pixels as native capture. A live readback lists up to 128
 supported Canvas operation names observed earlier in the same renderer stream.
 When the session explicitly enables Canvas image capture, the exact bounded
 `toDataURL` result is shown as captured output. The UI keeps the newest 24
-readbacks and loads at most 48 MiB of Canvas preview data. The native format
-still does not retain drawing arguments or a canvas object identifier, so local
-replay remains unavailable and the earlier-call relationship stays
-renderer-scoped.
+readbacks. Only the visible Rendering gallery loads previews, scoped to its
+current readbacks. Canvas owns a separate maximum of 24 previews and 8 MiB of
+UTF-16 text reservations/retained text; each descriptor reserves twice its
+encoded byte size before admission (at most 2 MiB encoded bytes per preview).
+Newest previews have priority, and budget omissions remain labeled without
+refetching on every refresh. At most two unfinished preview reads are allowed,
+including retired reads whose fetch or response-body/reader cancellation has
+not settled. Header/body errors remain visible immediately; explicit retries
+do not bypass cancellation credits. Their bounded streaming
+read buffers total at most 4 MiB; transient text, hashing and image decoding are
+separate from the retained-text budget. A ten-second deadline aborts a read;
+failed reads expose an explicit Retry preview action.
+
+Activity, leaving Signals, changing the visible readback scope, catalog
+replacement/emptying and catalog failures retire obsolete preview ownership,
+abort pending reads and remove image sources from the gallery DOM. Late
+responses cannot restore retired payloads. Artifact metadata and immutable
+files remain available; an empty live catalog still reflects its actual empty
+metadata window. Sources previews and verified analysis results keep their
+independent budgets and identity checks.
+
+Before assigning any captured image to `img.src`, the UI separately admits a
+narrow static PNG profile: non-interlaced 8-bit RGB/RGBA, at most 4096 pixels per
+axis and 4 Mi (4,194,304) declared pixels per image. At most 16 Mi (16,777,216)
+declared pixels are mounted across the current gallery, with newest captures
+first. The UI checks canonical base64, signature, chunk framing/CRC, a single
+first IHDR, consecutive nonempty-in-total IDAT data and a final empty IEND with
+no trailing bytes. At most 256 chunks are inspected. Only optional fixed-size
+sRGB, sBIT and pHYs metadata is admitted, once each and before IDAT. Other chunks,
+including animation, compressed profiles/text and unknown extensions, produce
+an explicit unsupported-preview reason; the original evidence is unchanged.
+
+The producer retains bounded `data:image/*` output, so this intentionally narrower
+preview policy can omit valid captured images, including JPEG, WebP, other PNG
+profiles and PNGs carrying embedded color profiles. Unsupported previews retain their exact text
+inside the existing text budget and do not cause automatic refetches. Scope
+changes release that text normally. A browser decode failure is labeled without
+changing stored evidence; errors from detached images or retired owners cannot
+poison the current preview. Image admission follows the exact current artifact
+owner, and old DOM sources are removed before new sources are assigned.
+
+These checks bound admitted declared dimensions and mounted pixel counts. They
+do not inflate IDAT, validate its compressed contents, measure decoder allocations,
+or bound JavaScript heap, native decoder caches or process RSS. Removing `src`
+does not prove immediate decoder-memory reclamation. Browser/native interaction
+and decoder behavior need separate rendered validation; giant-header fixtures
+must remain inert. The profile follows the [PNG specification's structure and
+chunk rules](https://www.w3.org/TR/png-3/). The native capture still does not retain
+drawing arguments or a canvas object identifier, so local replay remains
+unavailable and the earlier-call relationship stays renderer-scoped.
+
+Rendered Canvas regression coverage runs with
+`REB_UI_CHROMIUM=/path/to/chrome node tools/check-origin-trace-debugger.mjs --canvas-ui-browser`
+and in the installed-Chrome `canvas-ui` CI job. It serves authored artifact
+metadata and bytes through the real application routes, decodes a 16 × 16 PNG,
+and exercises refusal/error labels, explicit retry, gallery retirement and
+reopening, pending-body cancellation, keyboard controls and narrow/wide layouts.
+Screenshots, browser diagnostics and fixture receipts are written under
+`build/canvas-ui-qa/`. A fail-closed observer at the native image source setter
+records assignments and fails the test before any rejected giant-header fixture
+can enter decoding; accepted tiny images use Chrome's real decoder. No product
+admission or ownership function is replaced. A separate fresh document uses
+an authored `img-src 'none'` response policy to trigger real image load errors
+and verify the existing error label and cleanup. This is policy/load-error
+coverage, not evidence that Chrome rejects corrupt compressed PNG streams.
+These receipts do not establish native capture, macOS behavior, decoder-memory
+reclamation or process RSS bounds.
 
 The fingerprint workspace scopes Rendering and Activity to a captured browser
 tab, all tabs, or explicitly unattributed events. The selected tab is a stable
@@ -651,6 +757,37 @@ comparison, and advanced object search use native disclosures. Switching tools
 preserves form drafts and disclosure state. Scope is shown only for Interceptor
 and Automation, which support it.
 
+An action is acknowledged only after its `ok: true`, generation and required
+result groups validate for the submitted disposable lifetime. A transport success
+alone is insufficient. Missing, rejected, stale or malformed receipts leave the
+draft available and never trigger an automatic retry or a chained Repeater send.
+A newer validated poll is never replaced by an older receipt; changed newer
+groups also prevent that receipt from acknowledging the current draft; an already-running
+poll cannot undo an accepted receipt. Automation recipe/run aliases must match
+the validated records. Additive response fields are bounded to 64 levels, 65,536
+values and 4 Mi characters before retention or iterative comparison.
+
+Refreshes within the same lifetime preserve drafts and consent. A changed
+creation time, disposable target/session identity or observed generation reset
+erases disposable form values, confirmations, selections and hidden result DOM.
+Late replies cannot restore them, including an identity that leaves and returns.
+Expired in-flight reads release their UI busy controls even if transport stalls;
+this does not cancel native work or resend an action.
+Ownership is checked again after each awaited receipt, including the gap before
+its caller resumes. Repeater keeps the original complete request draft and
+selection/edit revision through Apply and Send; changed drafts require a fresh
+explicit Send. Collection keeps the original saved recipe and inherited variables,
+and rejects a changed lifetime, edited recipe or newer draft before sending.
+Changing the Collection selection alone never substitutes the newly selected
+recipe. Disposable run ownership is erased on lifetime replacement while saved
+Collection definitions and drafts remain intact.
+Saved automation definitions remain in authoritative backend state. Disposed
+Interceptor results may be inspected until creating another context; that new
+lifetime starts with an empty result, audit and rule even if creation fails.
+The browser-free production-function regressions run in the existing debugger
+checker under `make javascript-check`; they do not establish rendered/native QA.
+
+
 Repeater keeps method, URL, and Send in one command row above a persistent
 request-response split. Compare responses includes a Rust-generated body line diff
 with source line numbers, nearby context, newline markers, and explicit limits.
@@ -719,6 +856,31 @@ Failed analysis remains visible until **Retry analysis** is selected. A failed
 retry retains the last successful result. Source selection does not switch the
 Sources editor away from original evidence. The UI retains at most eight analysis
 documents and distinguishes source hashes and debugger targets in its cache.
+The report retains the last successful summary and snippets during a retry or
+failure. **Cancel analysis** retires the current request; a worker may still
+finish, but its late response cannot replace the report. Cancellation and errors
+require an explicit retry.
+
+The report's changed-span inspector shows one validated replacement at a time,
+with Previous/Next, exact half-open UTF-8 ranges, and original/derived snippets
+limited to 2,048 UTF-16 units each. Snippets scroll independently; truncation is
+visible and never splits a surrogate pair. In the HTTP live workspace or browser
+development UI, **Reveal original range** verifies captured original bytes
+through the existing Facts path. Stored-evidence native mode displays an explicit
+unavailable reason for that navigation. Live scripts require
+their currently owned complete source text and target identity. Neither path
+executes source. Pretty printing remains a separate display layer.
+
+Transformation families, heuristic classification signals, recovered table
+summaries, and assumptions/limits have explicit counts and four-row paging.
+Generic omissions do not hide recovered tables. Raw table entries are not shown;
+only bounded admitted summary fields and previews are displayed. Family totals
+are whole-report metadata, not invented explanations for a selected replacement.
+Classification is labelled as a heuristic, not a probability or equivalence proof.
+Missing legacy change metadata is shown as unavailable; code-point maps do not
+offer exact UTF-8 change inspection. Small selection/page/disclosure metadata
+lives with its bounded cached analysis and disappears on eviction. History does
+not restore intrinsic options or the selected change.
 The [versioned contract](../../protocol/deobfuscation-v1.md) defines source-map
 units and how native replacements map back to their original expressions.
 
@@ -928,8 +1090,12 @@ REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium)" \
 The existing browser CI job runs Requests, Sources and Evidence separately and
 uploads `build/evidence-ui-qa/`. Evidence includes genuine pointer/keyboard
 selection, real file input, explicit download byte comparison, failures,
-interruption, scrolling and narrow layouts. Its synthetic service tests the UI;
-the real native-writer/guarded-export/validator integration is a separate check.
+interruption, scrolling and narrow layouts. Download QA waits for the matching
+Chrome frame, filename and download GUID to report completion before checking
+exact bytes and the single output file. Cancellation, missing completion or
+corrupt completed bytes fail; filename existence alone is not completion.
+Its synthetic service tests the UI; the real native-writer/guarded-export/validator
+integration is a separate check.
 A validation receipt is written only after interactions and cleanup succeed.
 
 All native HTTP entry paths, including an explicit loopback `--ui-url` without a
@@ -1015,3 +1181,63 @@ plus catalog refresh, passive entry, wrong analyzer identity/preview bytes,
 explicit retries, stable Find/scroll, keyboard file tabs and close cleanup at
 1440×900, 760×560 and 360×740. Production-function and DOM fixtures run in
 `make lint`; they do not replace real browser screenshots or native acceptance.
+
+### Compare supplied packages
+
+Evidence still opens on recorded observations. Open **Metadata package**, then
+**Compare supplied packages**, to choose two local metadata JSON files and click
+**Compare metadata**. File selection alone makes no request. This secondary view
+uses the same reviewed local API and bounded reader; it does not export selected
+observations, capture more data or save files automatically. The two inputs are
+independent of the current observation selection.
+
+Comparison keeps declared metadata differences, scoped references and unknown
+capture/observer coverage distinct from raw-byte verification or equivalent
+behavior. Failed or malformed replies preserve the last accepted result. Close,
+Return to observations, leaving Evidence and a changed request retire pending
+ownership while preserving the local file drafts. Ordinary refresh does not
+remount the controls, change drafts or rerun a comparison. Starting from Compare
+or a paging control moves focus to enabled Cancel while that trigger is disabled.
+Completion restores the Compare control only if Cancel still owns focus; newer
+focus choices remain untouched. Escape cancels active work; a second Escape closes comparison and returns focus to its explicit entry.
+A departing document disposes the owned component; BFCache suspension cancels
+work without discarding drafts. Navigation history contains only view metadata,
+not file objects, exported keys, comparison buffers or approvals.
+
+Comparison works in browser HTTP and the native application's live HTTP
+workspace, including the native=1 entry marker. Stored `reb://` mode has an
+explicit unsupported explanation and mounts no comparison file inputs. This
+restriction does not apply to the whole native app. macOS runtime and packaged
+asset acceptance remain separate checks.
+
+`--evidence-comparison-ui-browser` in the shared debugger test now exercises the
+actual product host and scripts, rather than the earlier isolated component
+fixture. It covers real file inputs, backend-produced equal/changed synthetic
+results, error retention, pending ownership, late File reads, Close/Escape,
+Return/navigation, page disposal/remount, retained package export/validation,
+wide/narrow layouts and the live native HTTP marker. CI uploads
+`build/comparison-ui-qa/`. The mock service is UI evidence, not a replacement for
+the real API/CLI integrity/admission tests. Shared Source navigation uses the
+scoped receiving adapter and bounded Back trail. The strict Evidence browser
+mode also requires Source → Back restoration of filters, focus and scroll
+without automatic derived analysis. See [the comparison contract and bounds](../../protocol/evidence-comparison-v1.md).
+
+## Float32 comparison
+
+Open Tools → Float32 comparison to inspect exact hexadecimal binary32 words,
+base64 bytes, or a selected retained artifact. Declare byte order, channels and
+frames; optionally enable a reference. Inspect / compare is explicit. Raw bits,
+signed zero, NaN/Infinity counts, input digests, finite deltas/ULP and caller
+tolerances remain distinct. Sample pages do not narrow full-buffer metrics.
+Edits, cancellation and failures keep the last report visibly stale.
+
+This uses the local Rust backend, including live native sessions. Stored-evidence
+native mode displays its limitation. No sample capture, audio graph collection,
+platform identity, normalization, spoofing or target execution is added. See
+[the versioned contract](../../protocol/float32-comparison-v1.md).
+
+The existing driver owns the real browser lifecycle:
+`node tools/check-origin-trace-debugger.mjs --float32-ui-browser` with
+`REB_UI_CHROMIUM` set and the current backend built. Its domain fixture forwards
+requests to the actual backend; only held delivery and a labeled 503 are synthetic.
+`--float32-fixture-only` checks the real loopback boundary without rendered claims.

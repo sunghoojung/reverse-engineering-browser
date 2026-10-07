@@ -41,8 +41,22 @@ enum OriginTraceDocumentBuilder {
     }
 
     var eventsByReference: [String: [String: Any]] = [:]
+    var captureGapStreams: [String] = []
     for event in events {
       let reference = try eventReference(event)
+      // Queue-loss metadata shares its anchor's reference, but is not an
+      // addressable event and cannot satisfy a retained predecessor edge.
+      if event["type"] as? String == "gap" {
+        let marker = try eventStep(event, relation: "trace_target", confidence: "observed")
+        guard nonzeroUInt64(marker["value"]) != nil,
+          let truncated = event["payload_truncated"] as? NSNumber,
+          CFGetTypeID(truncated) == CFBooleanGetTypeID(), !truncated.boolValue
+        else {
+          throw traceError("Origin trace input contains a malformed gap")
+        }
+        captureGapStreams.append(streamReference(event))
+        continue
+      }
       guard eventsByReference[reference] == nil else {
         throw traceError("Origin trace input contains a duplicate event reference")
       }
@@ -58,7 +72,8 @@ enum OriginTraceDocumentBuilder {
     }
 
     let candidates = events.filter {
-      $0["category"] as? String == "network" && $0["request_id"] as? String == requestID
+      $0["type"] as? String != "gap"
+        && $0["category"] as? String == "network" && $0["request_id"] as? String == requestID
     }
     let root: [String: Any]?
     if let rootProcessID, let rootSequenceNumber {
@@ -150,6 +165,18 @@ enum OriginTraceDocumentBuilder {
         "reason": "step_limit",
         "after_step": steps.count - 1,
         "detail": "The bounded trace step limit was reached.",
+      ])
+    }
+    let streams = Set(steps.compactMap { step -> String? in
+      guard let event = step["event"] as? [String: Any] else { return nil }
+      return streamReference(event)
+    })
+    let markerCount = captureGapStreams.filter { streams.contains($0) }.count
+    if markerCount > 0 {
+      gaps.append([
+        "reason": "capture_gap",
+        "after_step": 0,
+        "detail": "The retained window contains \(markerCount) native queue-drop markers in this trace's session/process streams. Counts may overlap; these markers do not identify a missing predecessor or prove value flow.",
       ])
     }
 
@@ -251,6 +278,11 @@ enum OriginTraceDocumentBuilder {
       throw traceError("Origin trace input contains a malformed event")
     }
     return "\(sessionID):\(processID):\(sequence)"
+  }
+
+  private static func streamReference(_ event: [String: Any]) -> String {
+    // Called only after validating an event reference or projecting a step.
+    "\(event["session_id"] as! String):\(processID(event["process_id"])!)"
   }
 
   private static func edgeReference(_ edge: [String: Any], prefix: String) -> String? {

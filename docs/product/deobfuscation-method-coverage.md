@@ -95,10 +95,25 @@ represented exactly (including lone-surrogate strings) stay unresolved. The
 assumption is visible in the result and part of cache identity; defaults remain
 off. Prototype overrides are not modeled in this opt-in mode.
 
+The same bounded model applies to ordinary direct static-member expressions
+when that assumption remains effective. For example, `String.fromCharCode(65)`
+and `"abc".charAt(1)` can reduce to primitive strings, and
+`"2|0".split("|")[0]` can reduce through an internal array. Direct calls report
+the `intrinsic-call` family; a larger concatenation or index expression keeps
+its enclosing family. This does not infer a per-segment explanation in the UI.
+Unknown receivers or arguments, effectful inputs, optional calls/access, method
+aliases, computed call names, regex separators and unsupported arity remain
+unresolved. Lone surrogate strings are retained, while a surrogate code unit
+returned numerically by `charCodeAt` remains exactly representable.
+
 The intrinsic model is suppressed when the source declares intrinsic names,
 uses eval/with, writes object properties, or contains conflicting references to
 intrinsic objects. This conservative check rejects visible overrides and lexical
 shadowing; it cannot prove the absence of mutations in external runtime code.
+Member updates/deletion, exposed prototype or constructor paths, reflective
+facilities and unmodeled member calls also suppress the model. This deliberately
+refuses some benign programs rather than assuming those operations preserve
+intrinsics. Computed intrinsic calls remain outside the supported subset.
 
 ## JSFuck-style coercion
 
@@ -109,13 +124,21 @@ nested sparse-array comparison. Arrays themselves are never emitted as replaceme
 values or propagated as immutable constants; holes remain holes in retained code.
 Object identity comparisons stay unresolved. Known intrinsic conflicts suppress
 the model even when requested.
+Owned value copies reserve cached whole-tree costs before cloning, with a shared
+8 MiB modeled allocation-work allowance, 250,000 nodes and depth 64. String
+aliases and temporary coercions consume the same monotonic budget. Tiny nested
+array fixtures and symbolic cost tests cover exhaustion without executing an
+explosive growth program. This is a work budget, not a process RSS measurement.
 
 Primitive conversions follow the
 [ECMAScript abstract operations](https://tc39.es/ecma262/2024/multipage/abstract-operations.html).
 Number-to-string conversion is limited to finite values in the ordinary decimal
 range; large radix integers, lone surrogates, function-source strings and dynamic
-constructors remain unresolved. A trusted-fixture differential matrix compares
-1,810 arithmetic/equality/relational/coercion cases against Node. Array allocation,
+constructors remain unresolved. The checked-in
+[trusted fixture corpus](../../tools/fixtures/deobfuscation-benchmark/corpus-v2.json)
+compares typed observations against Node and includes wrong-output controls in
+its runner. The previously reported 1,810-case exploratory matrix is not a
+reproducible checked-in gate and is not claimed as current coverage. Array allocation,
 output size and recursive evaluation remain bounded by the existing limits.
 
 ## Bounded control-flow recovery

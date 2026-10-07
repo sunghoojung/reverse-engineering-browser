@@ -1,4 +1,6 @@
+import {canvasBrowserFixture,checkCanvasFixture,checkCanvasInteractions} from './check-canvas-ui.mjs';
 import {checkConsoleDOM, createConsoleFixture, checkConsoleInteractions} from './check-console-workspace.mjs';
+import {checkFloat32Model,float32BrowserFixture,checkFloat32Fixture,checkFloat32Interactions} from './check-float32-ui.mjs';
 import { spawn } from "node:child_process";
 import { runInNewContext } from "node:vm";
 import {
@@ -17,17 +19,47 @@ import { createServer } from "node:http";
 import assert from "node:assert/strict";
 import {checkCollectionController, collectionBrowserFixture, checkCollectionInteractions} from "./check-origin-trace-collection.mjs";
 import {checkInvestigationCore, investigationFixture, checkInvestigationInteractions} from "./check-investigation-navigation.mjs";
+const canvasBrowser = process.argv[2] === "--canvas-ui-browser";
 const investigationBrowser = process.argv[2] === "--investigation-ui-browser";
 const collectionBrowser = process.argv[2] === "--collection-ui-browser";
 const consoleBrowser = process.argv[2] === "--console-ui-browser";
+const float32Browser = process.argv[2] === "--float32-ui-browser";
+const float32FixtureOnly = process.argv[2] === "--float32-fixture-only";
 const trafficBrowser = process.argv[2] === "--traffic-ui-browser";
 const sourceFactsBrowser = process.argv[2] === "--source-facts-ui-browser";
+const memoryBrowser = process.argv[2] === "--memory-ui-browser";
 const evidenceBrowser = process.argv[2] === "--evidence-ui-browser";
+const comparisonBrowser = process.argv[2] === "--evidence-comparison-ui-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
-const root = process.argv[fieldsOnly || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser || collectionBrowser ? 3 : 2] || new URL("..", import.meta.url).pathname;
+const root = process.argv[fieldsOnly || canvasBrowser || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
 await checkConsoleDOM(root);
 await checkCollectionController(root);
 await checkInvestigationCore(root);
+await checkFloat32Model(root);
+// The fixture serves the same declared public leaves as the product. Inspect
+// raw origin-form paths before URL normalization, so encoded/traversing paths
+// cannot become an allowed asset accidentally.
+const fixturePublicAssets = new Set(['index.html', ...[...(await readFile(join(root,'apps/research-ui/index.html'),'utf8')).matchAll(/(?:src|href)="([^"/]+\.(?:js|css))"/g)].map(match=>match[1])]);
+function fixtureAssetName(raw) {
+  const path=raw.split('?')[0],name=path==='/'?'index.html':path.startsWith('/')?path.slice(1):'';
+  return /^[a-z][a-z0-9_]*\.(?:html|js|css)$/.test(name) && fixturePublicAssets.has(name) ? name : null;
+}
+async function serveFixtureAsset(request,response) {
+  const name=fixtureAssetName(request.url);
+  if (!name) {response.writeHead(404);response.end();return;}
+  try {
+    response.writeHead(200, {'Content-Type':name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html'});
+    response.end(await readFile(join(root,'apps/research-ui',name)));
+  } catch {response.writeHead(404);response.end();}
+}
+for (const path of ['/float32_inspector.js','/float32_inspector.js?cache=1','/']) {
+  let status,body;await serveFixtureAsset({url:path},{writeHead:value=>{status=value;},end:value=>{body=value;}});
+  assert.equal(status,200);assert.deepEqual(body,await readFile(join(root,'apps/research-ui',fixtureAssetName(path))));
+}
+for (const path of ['/../float32_inspector.js','/x/../float32_inspector.js','/%66loat32_inspector.js','/%2e%2e/float32_inspector.js','/x%2ffloat32_inspector.js','//float32_inspector.js','/float32_inspector.js/','/analyst_runner_core.js','/missing.js','/float32_inspector.js#fragment']) {
+  let status;await serveFixtureAsset({url:path},{writeHead:value=>{status=value;},end(){}});assert.equal(status,404,path);
+}
+console.log('PASS actual fixture public-asset handler: Float32 bytes, canonical paths, private/unknown/traversing/encoded negatives (not rendered QA)');
 // Facts are UI projections over the already validated Rust contract. These
 // fixtures exercise identity and stale/cancelled request ownership, not JS execution.
 const sourceFactsUI = runInNewContext(
@@ -710,6 +742,126 @@ for (const direction of [1, -1]) {
 }
 assert.equal(trafficUI.trafficSortedRequests([uiRequest("pending"), uiRequest("done", {time: 2})], "time", -1)[0].id, "done");
 assert.deepEqual(Array.from(trafficUI.trafficSortedRequests([uiRequest("native", {time: "12.300 ms"}), uiRequest("cdp", {time: 2})], "time"), request => request.id), ["cdp", "native"]);
+// Supplied-package comparison is secondary, explicit, bounded and read-only.
+const comparisonResult = JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/evidence-packages/comparison-equal-v1.json'),'utf8'));
+const comparisonChangedInput = new Uint8Array(await readFile(join(root,'apps/origin-trace-backend/assets/evidence-packages/comparison-changed-input-v1.json')));
+const comparisonChangedResult = JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/evidence-packages/comparison-changed-result-v1.json'),'utf8'));
+const comparisonSource = await readFile(join(root,'apps/research-ui/evidence_comparison.js'),'utf8');
+const comparisonUI = runInNewContext(packageSource+'\n'+comparisonSource+'\nRebEvidenceComparison', {TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,fetch});
+const comparisonFile = raw => { const bytes = new TextEncoder().encode(raw);return {size:bytes.length,arrayBuffer:async()=>bytes.buffer}; };
+const comparisonOriginal = JSON.stringify(packageGolden);
+let comparisonReply = () => Response.json(comparisonResult), comparisonCalls = [];
+const comparisonController = comparisonUI.createController({fetcher:async(url,options)=>{comparisonCalls.push({url,options});return comparisonReply();}});
+comparisonController.select(0,comparisonFile(comparisonOriginal)); comparisonController.select(1,comparisonFile(comparisonOriginal));
+assert.equal(comparisonCalls.length,0,'Choosing local files must not dispatch');
+assert(await comparisonController.compare()); assert.equal(comparisonCalls.length,1);
+assert.equal(comparisonCalls[0].url,'/api/evidence/packages/compare');assert.equal(comparisonController.model.result.selected_metadata_equal,true);
+const previousComparison=comparisonController.model.result;comparisonReply=()=>Response.json({error:'PRIVATE_CANARY'},{status:400});
+assert.equal(await comparisonController.compare(),false);assert.equal(comparisonController.model.result,previousComparison);assert(!comparisonController.model.message.includes('PRIVATE_CANARY'));
+comparisonReply=()=>Response.json({error:'PRIVATE_CANARY',code:'resource_limit'},{status:503});assert.equal(await comparisonController.compare(),false);assert.match(comparisonController.model.message,/busy or unavailable/);assert.equal(comparisonController.model.result,previousComparison);assert(!comparisonController.model.message.includes('PRIVATE_CANARY'));
+comparisonController.select(0,comparisonFile(comparisonOriginal.replace('"process_id":42','"process_id":42,"process_id":42')));
+await comparisonController.compare();assert.match(comparisonCalls.at(-1).options.body,/"process_id":42,"process_id":42/,'Original duplicate members reach strict service unchanged');
+comparisonController.select(0,{size:4194305,arrayBuffer(){throw new Error('Oversized file read');}});const noReadCalls=comparisonCalls.length;await comparisonController.compare();assert.equal(comparisonCalls.length,noReadCalls);
+comparisonController.select(0,{size:1,arrayBuffer:async()=>new Uint8Array([255]).buffer});await comparisonController.compare();assert.equal(comparisonCalls.length,noReadCalls,'Invalid UTF-8 never dispatches');
+let finishComparisonFile;comparisonController.select(0,{size:1,arrayBuffer:()=>new Promise(resolve=>{finishComparisonFile=resolve;})});
+const cancelledComparison=comparisonController.compare();comparisonController.close();assert.equal(await cancelledComparison,false);finishComparisonFile(new Uint8Array([123]).buffer);await Promise.resolve();assert.equal(comparisonCalls.length,noReadCalls,'Retired file read cannot dispatch');
+let finishComparisonReply;comparisonReply=()=>new Promise(resolve=>{finishComparisonReply=resolve;});comparisonController.select(0,comparisonFile(comparisonOriginal));
+const lateComparison=comparisonController.compare();while(!finishComparisonReply) await new Promise(resolve=>setTimeout(resolve,0));
+await comparisonController.compare();assert.equal(comparisonCalls.length,noReadCalls+1,'Repeated Compare does not replay');
+comparisonController.clear();assert.equal(await lateComparison,false);finishComparisonReply(Response.json(comparisonResult));await new Promise(resolve=>setTimeout(resolve,0));assert.equal(comparisonController.model.result,null);
+comparisonReply=()=>Response.json({...comparisonResult,right_package_id:'reb-package-v1:sha256:'+'0'.repeat(64)});
+comparisonController.select(0,comparisonFile(comparisonOriginal));comparisonController.select(1,comparisonFile(comparisonOriginal));assert.equal(await comparisonController.compare(),false);assert.equal(comparisonController.model.result,null,'Wrong input identity cannot populate results');
+comparisonReply=()=>new Response(new Uint8Array(524289));assert.equal(await comparisonController.compare(),false);assert.equal(comparisonController.model.result,null);
+comparisonController.dispose();
+let comparisonLateDeadline;
+const comparisonDeadline=comparisonUI.createController({deadline:10,fetcher:()=>new Promise(resolve=>{comparisonLateDeadline=resolve;})});
+comparisonDeadline.select(0,comparisonFile(comparisonOriginal));comparisonDeadline.select(1,comparisonFile(comparisonOriginal));
+let comparisonWatchdog;
+try {assert.equal(await Promise.race([comparisonDeadline.compare(),new Promise((_,reject)=>{comparisonWatchdog=setTimeout(()=>reject(new Error('Comparison deadline failed to settle')),2000);})]),false);}finally{clearTimeout(comparisonWatchdog);}
+assert.equal(comparisonDeadline.model.busy,false);assert.match(comparisonDeadline.model.message,/timed out/);assert.equal(comparisonDeadline.model.result,null);comparisonLateDeadline(Response.json(comparisonResult));await new Promise(resolve=>setTimeout(resolve,0));assert.equal(comparisonDeadline.model.result,null);comparisonDeadline.dispose();
+
+// Actual mount/event listeners use a small DOM. This is not rendered UI proof.
+class ComparisonNode extends TrafficFixtureNode {
+  async emit(type){await Promise.all((this.listeners.get(type)||[]).map(fn=>fn({target:this})));}
+  removeEventListener(type,fn){this.listeners.set(type,(this.listeners.get(type)||[]).filter(v=>v!==fn));}
+}
+const comparisonDocument={createElement:tag=>new ComparisonNode(tag)};const comparisonHost=new ComparisonNode('section');comparisonHost.ownerDocument=comparisonDocument;
+const comparisonMounted=comparisonUI.mount(comparisonHost,{fetcher:async()=>Response.json(comparisonResult)});
+assert.equal(comparisonUI.mount(comparisonHost),comparisonMounted,'Mount is idempotent');
+const comparisonInputs=comparisonHost.querySelectorAll('input');comparisonInputs.forEach(input=>{input.files=[comparisonFile(comparisonOriginal)];});for(const input of comparisonInputs) await input.emit('change');
+await comparisonHost.querySelectorAll('button')[0].emit('click');assert.match(comparisonHost.textContent,/11 equal/);assert.match(comparisonHost.textContent,/unknown or partial capture/i);assert.match(comparisonHost.textContent,/Raw bytes were not reverified/);
+assert.equal(comparisonHost.querySelectorAll('li').length,11);comparisonMounted.close();assert.equal(comparisonMounted.controller.model.result.comparison_id,comparisonResult.comparison_id);
+comparisonMounted.dispose();assert.equal(comparisonHost.children.length,0);assert.equal(comparisonHost.rebEvidenceComparison,undefined);
+console.log('PASS secondary comparison originals, UTF-8, size bounds, explicit dispatch, duplicate preservation, stable identities, retained failures, repeated clicks, cancellation, late replies and mount/dispose');
+
+// Review regressions: malformed successful replies must preserve the last result.
+const differentPackageId='reb-package-v1:sha256:'+'1'.repeat(64);
+const distinctComparison=structuredClone(comparisonResult);
+distinctComparison.right_package_id=differentPackageId;distinctComparison.package_metadata_equal=false;
+for(const row of distinctComparison.rows)if(row.right)row.right.package_id=differentPackageId;
+assert(comparisonUI.validResult(distinctComparison,0,comparisonResult.left_package_id,differentPackageId));
+const changedComparison=structuredClone(distinctComparison);
+changedComparison.rows[0].status='changed_declared_metadata';changedComparison.rows[0].differences=[{field:'kind',left:{kind:'scalar',value:'javascript'},right:{kind:'scalar',value:'wasm'}}];
+changedComparison.counts.equal_declared_metadata--;changedComparison.counts.changed_declared_metadata++;changedComparison.selected_metadata_equal=false;
+assert(comparisonUI.validResult(changedComparison,0,comparisonResult.left_package_id,differentPackageId),'Changed descriptors may retain matching declared hashes');
+const corruptComparisons=[];
+for(const wrap of [id=>[id],id=>({value:id}),()=>null,()=>17,()=>true,id=>id+'\n']){
+  const comparison=structuredClone(comparisonResult);comparison.comparison_id=wrap(comparison.comparison_id);corruptComparisons.push(comparison);
+  const row=structuredClone(comparisonResult);row.rows[0].row_id=wrap(row.rows[0].row_id);corruptComparisons.push(row);
+}
+const duplicateArrayIds=structuredClone(comparisonResult);duplicateArrayIds.comparison_id=[duplicateArrayIds.comparison_id];duplicateArrayIds.rows[0].row_id=[duplicateArrayIds.rows[0].row_id];duplicateArrayIds.rows[1]=structuredClone(duplicateArrayIds.rows[0]);corruptComparisons.push(duplicateArrayIds);
+const duplicateStringIds=structuredClone(comparisonResult);duplicateStringIds.rows[1].row_id=duplicateStringIds.rows[0].row_id;corruptComparisons.push(duplicateStringIds);
+const countsContradiction=structuredClone(comparisonResult);countsContradiction.rows[0].status='changed_declared_metadata';countsContradiction.rows[0].differences=[{field:'byte_size',left:{kind:'scalar',value:'0'},right:{kind:'scalar',value:'1'}}];countsContradiction.rows[0].declared_content_hash_match=false;corruptComparisons.push(countsContradiction);
+const equalityContradiction=structuredClone(comparisonResult);equalityContradiction.package_metadata_equal=false;corruptComparisons.push(equalityContradiction);
+const hashContradiction=structuredClone(comparisonResult);hashContradiction.rows[0].declared_content_hash_match=false;corruptComparisons.push(hashContradiction);
+let repairReply=comparisonResult;
+const repairController=comparisonUI.createController({fetcher:async()=>Response.json(repairReply)});
+repairController.select(0,comparisonFile(comparisonOriginal));repairController.select(1,comparisonFile(comparisonOriginal));assert(await repairController.compare());const retainedRepairResult=repairController.model.result;
+for(const malformed of corruptComparisons){assert.equal(comparisonUI.validResult(malformed,0,comparisonResult.left_package_id,comparisonResult.right_package_id),false);repairReply=malformed;assert.equal(await repairController.compare(),false);assert.equal(repairController.model.result,retainedRepairResult,'Malformed success must not replace retained evidence');}
+assert.equal(comparisonUI.validResult(comparisonResult,0,[comparisonResult.left_package_id],comparisonResult.right_package_id),false);
+repairController.dispose();
+// Counts are global; partial-page counts may be smaller, never greater.
+const partialComparison=structuredClone(changedComparison);partialComparison.page={offset:50,limit:50,total:61,next_offset:null};partialComparison.counts.equal_declared_metadata+=50;
+assert(comparisonUI.validResult(partialComparison,50,comparisonResult.left_package_id,differentPackageId));
+for(const full of [false,true]){
+ const mismatch=structuredClone(full?changedComparison:partialComparison);mismatch.counts.equal_declared_metadata++;mismatch.counts.changed_declared_metadata--;mismatch.selected_metadata_equal=true;
+ assert.equal(comparisonUI.validResult(mismatch,mismatch.page.offset,comparisonResult.left_package_id,differentPackageId),false,'Visible changed row cannot coexist with global zero changed rows');
+}
+// This mock supplies a backend-validated result for distinct package IDs; the
+// client must check reply consistency without implementing package validation.
+let countReply=distinctComparison;
+const countController=comparisonUI.createController({fetcher:async()=>Response.json(countReply)});
+countController.select(0,comparisonFile(comparisonOriginal));countController.select(1,comparisonFile(JSON.stringify({...packageGolden,package_id:differentPackageId})));
+assert(await countController.compare());const retainedCounts=countController.model.result;
+for(const full of [false,true]){
+ countReply=structuredClone(full?changedComparison:partialComparison);countReply.counts.equal_declared_metadata++;countReply.counts.changed_declared_metadata--;countReply.selected_metadata_equal=true;
+ assert.equal(await countController.compare(countReply.page.offset),false);assert.equal(countController.model.result,retainedCounts,'Page/count contradiction must preserve the previous page');
+}
+countController.dispose();
+const ambiguityComparison=structuredClone(distinctComparison);
+for(const index of [0,1]){const row=ambiguityComparison.rows[index];row.left=null;row.status='right_only';row.alignment=index===0?'ambiguous_cross_scope':'unmatched';row.cross_scope_candidates=index===0?1:0;row.declared_content_hash_match=null;}
+Object.assign(ambiguityComparison.counts,{equal_declared_metadata:9,right_only:2,ambiguous_cross_scope:1});ambiguityComparison.selected_metadata_equal=false;
+assert(comparisonUI.validResult(ambiguityComparison,0,comparisonResult.left_package_id,differentPackageId));
+ambiguityComparison.counts.ambiguous_cross_scope=2;assert.equal(comparisonUI.validResult(ambiguityComparison,0,comparisonResult.left_package_id,differentPackageId),false,'Full-page ambiguity count must be exact');
+const wrongHash=structuredClone(changedComparison);wrongHash.rows[0].differences[0]={field:'byte_size',left:{kind:'scalar',value:'0'},right:{kind:'scalar',value:'1'}};assert.equal(comparisonUI.validResult(wrongHash,0,comparisonResult.left_package_id,differentPackageId),false);
+wrongHash.rows[0].declared_content_hash_match=false;assert(comparisonUI.validResult(wrongHash,0,comparisonResult.left_package_id,differentPackageId));
+const fakeEqualScalars=structuredClone(changedComparison);fakeEqualScalars.rows[0].differences[0].right.value='javascript';assert.equal(comparisonUI.validResult(fakeEqualScalars,0,comparisonResult.left_package_id,differentPackageId),false);
+// A file that settles after its deadline cannot advance to more reads or fetch.
+for(const side of [0,1]){
+ let finishFile,requests=0,leftReads=0,rightReads=0;
+ const c=comparisonUI.createController({deadline:5,fetcher:async()=>{requests++;return Response.json(comparisonResult);}});
+ c.select(0,{size:packageGoldenBytes.length,arrayBuffer:()=>{leftReads++;return side===0?new Promise(resolve=>{finishFile=resolve;}):Promise.resolve(packageGoldenBytes.buffer);}});
+ c.select(1,{size:packageGoldenBytes.length,arrayBuffer:()=>{rightReads++;return side===1?new Promise(resolve=>{finishFile=resolve;}):Promise.resolve(packageGoldenBytes.buffer);}});
+ assert.equal(await c.compare(),false);assert.match(c.model.message,/timed out/);finishFile(packageGoldenBytes.buffer);await new Promise(resolve=>setTimeout(resolve,0));
+ assert.equal(requests,0);assert.equal(leftReads,1);assert.equal(rightReads,side===0?0:1);assert.equal(c.model.result,null);c.dispose();
+}
+// A previously disposed handle has no authority over a replacement mount.
+let finishRemount;const remounted=comparisonUI.mount(comparisonHost,{fetcher:()=>new Promise(resolve=>{finishRemount=resolve;})});
+remounted.controller.select(0,comparisonFile(comparisonOriginal));remounted.controller.select(1,comparisonFile(comparisonOriginal));const remountWork=remounted.controller.compare();while(!finishRemount)await new Promise(resolve=>setTimeout(resolve,0));
+const mountedChildren=[...comparisonHost.children];comparisonMounted.dispose();assert.equal(comparisonHost.rebEvidenceComparison,remounted);assert.deepEqual(comparisonHost.children,mountedChildren);assert.equal(remounted.controller.model.busy,true);
+finishRemount(Response.json(comparisonResult));assert(await remountWork);remounted.dispose();remounted.dispose();assert.equal(comparisonHost.children.length,0);
+console.log('PASS comparison review repairs: strict string/unique IDs, package/hash/page/count consistency, rejected-success retention, stale dispose ownership, and no post-timeout file/fetch work');
+
 const ledger = new TrafficFixtureNode();
 const rowOptions = {selectedId: "3", newIds: new Set(["3"]), onSelect() {}, onKey() {}};
 trafficUI.renderTrafficRows(ledger, retainedTraffic.slice(0, 500), rowOptions);
@@ -782,6 +934,155 @@ function appSection(start, end) {
   assert(offset >= 0 && boundary > offset, `Missing fixture boundary: ${start}`);
   return appSource.slice(offset, boundary);
 }
+
+// Request profiles belong to an exact retained request, even while headers or
+// JSON bodies are pending. Exercise production selection, validation and commit.
+const signalProfileSource = (await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8')) +
+  appSection('      function requestSignalRoot(', '      function signalEventKey(') +
+  appSection('      function requestSignalProfileSelection(', '      function renderFields(') +
+  ';({refresh:refreshRequestSignalProfile,selection:requestSignalProfileSelection,validate:isRequestSignalProfile})';
+function signalProfileFixture() {
+  const requests = [1, 2].map(id => ({id:`r${id}`, origin:'live', events:[{
+    session_id:'11', request_id:String(id), process_id:17, sequence_number:String(id), type:'request_started'
+  }]}));
+  const state = {requests, selectedRequestId:'r1', signalProfileGeneration:0, inspectorTab:'signals',
+    signalProfile:null, signalProfileKey:null, signalProfileEtag:null, signalProfileStatus:'idle', signalProfileError:null};
+  const calls = [], renders = [], location = {protocol:'http:'};
+  const fixture = {state, calls, renders, location, reply:() => signalProfileResponse(signalProfileBody(1))};
+  Object.assign(fixture, runInNewContext(signalProfileSource, {
+    state, location, URLSearchParams, TextDecoder,
+    document:{querySelector:() => ({hidden:false})},
+    renderInspector:() => renders.push('inspector'), renderFingerprintActivity:() => renders.push('fingerprinting'),
+    fetch:(url, options) => {calls.push({url, options}); return fixture.reply();}
+  }));
+  return fixture;
+}
+function signalProfileBody(id, category = id === 1 ? 'canvas' : 'webgl') {
+  return {protocol_version:1, document_kind:'request-signal-profile', session_id:'11', request_id:String(id),
+    root_event:{process_id:17, sequence_number:String(id)}, initiator_event:null, navigation_id:'1', frame_id:'1',
+    signals:[{category, relation:'parent_chain', confidence:'observed', event_count:'1',
+      first_event:{process_id:17, sequence_number:'7'}, last_event:{process_id:17, sequence_number:'7'}}],
+    coverage:{parent_depth:1, parent_depth_limit:32, copied_from_initiator:false, retention_truncated:false,
+      parent_depth_limited:false, count_saturated:false}};
+}
+function signalProfileResponse(body, status = 200, etag = 'profile-etag') {
+  return {status, ok:status === 200, headers:{get:() => etag}, json:async () => body};
+}
+function signalProfileDeferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => {resolve = yes; reject = no;});
+  return {promise, resolve, reject};
+}
+for (const sameRequest of [false, true]) {
+  for (const outcome of ['valid', 'malformed', 'rejected']) {
+    const fixture = signalProfileFixture(), held = signalProfileDeferred(), reading = signalProfileDeferred();
+    fixture.reply = () => ({...signalProfileResponse(null), json:() => {reading.resolve(); return held.promise;}});
+    const pending = fixture.refresh(); await reading.promise;
+    const next = signalProfileBody(sameRequest ? 1 : 2, 'webgl');
+    fixture.state.selectedRequestId = sameRequest ? 'r1' : 'r2';
+    fixture.reply = () => signalProfileResponse(next, 200, 'new-etag');
+    await fixture.refresh();
+    const renders = fixture.renders.length, key = fixture.state.signalProfileKey;
+    if (outcome === 'rejected') held.reject(new Error('Old JSON read failed'));
+    else held.resolve(outcome === 'valid' ? signalProfileBody(1) : {});
+    await pending;
+    assert.equal(fixture.state.signalProfile, next, 'A superseded JSON body cannot replace current request evidence');
+    assert.equal(fixture.state.signalProfileStatus, 'ready');
+    assert.equal(fixture.state.signalProfileError, null);
+    assert.equal(fixture.state.signalProfileEtag, 'new-etag');
+    assert.equal(fixture.state.signalProfileKey, key);
+    assert.equal(fixture.renders.length, renders, 'Superseded completion does not render');
+  }
+}
+for (const status of [200, 304, 404, 500, 'rejected']) {
+  const fixture = signalProfileFixture(), held = signalProfileDeferred();
+  fixture.reply = () => held.promise;
+  const pending = fixture.refresh(); fixture.state.selectedRequestId = 'r2';
+  const next = signalProfileBody(2); fixture.reply = () => signalProfileResponse(next);
+  await fixture.refresh(); const renders = fixture.renders.length;
+  if (status === 'rejected') held.reject(new Error('Old fetch failed'));
+  else held.resolve(signalProfileResponse(signalProfileBody(1), status));
+  await pending;
+  assert.equal(fixture.state.signalProfile, next); assert.equal(fixture.state.signalProfileStatus, 'ready');
+  assert.equal(fixture.renders.length, renders);
+}
+for (const phase of ['headers', 'body', 'failure']) {
+  for (const change of ['selection', 'session_id', 'request_id', 'process_id', 'sequence_number', 'evicted', 'ambiguous']) {
+    const fixture = signalProfileFixture(), held = signalProfileDeferred(), reading = signalProfileDeferred();
+    await fixture.refresh();
+    fixture.reply = () => phase === 'headers' ? held.promise
+      : {...signalProfileResponse(null), json:() => {reading.resolve(); return held.promise;}};
+    const pending = fixture.refresh(); if (phase !== 'headers') await reading.promise;
+    if (change === 'selection') fixture.state.selectedRequestId = 'r2';
+    else if (change === 'evicted') fixture.state.requests = [];
+    else if (change === 'ambiguous') fixture.state.requests.push(structuredClone(fixture.state.requests[0]));
+    else fixture.state.requests[0].events[0][change] = change === 'process_id' ? 18 : '99';
+    if (phase === 'failure') held.reject(new Error('Old body failed'));
+    else held.resolve(phase === 'headers' ? signalProfileResponse(signalProfileBody(1)) : signalProfileBody(1));
+    await pending;
+    assert.equal(fixture.state.signalProfile, null, `${phase}/${change} retires evidence owned by the prior tuple`);
+    assert.equal(fixture.state.signalProfileKey, null); assert.equal(fixture.state.signalProfileEtag, null);
+    assert.equal(fixture.state.signalProfileStatus, 'error');
+    assert.match(fixture.state.signalProfileError, /selected request.*changed/i);
+  }
+}
+for (const field of ['session_id', 'request_id', 'process_id', 'sequence_number']) {
+  const fixture = signalProfileFixture(); await fixture.refresh(); const previous = fixture.state.signalProfile;
+  const foreign = signalProfileBody(1); foreign.signals = [];
+  if (field === 'process_id' || field === 'sequence_number') foreign.root_event[field] = field === 'process_id' ? 18 : '99';
+  else foreign[field] = '99';
+  assert(fixture.validate(foreign), 'Foreign profile is structurally valid');
+  fixture.reply = () => signalProfileResponse(foreign); await fixture.refresh();
+  assert.equal(fixture.state.signalProfile, previous); assert.equal(fixture.state.signalProfileStatus, 'error');
+  assert.match(fixture.state.signalProfileError, /different.*request|different.*event/i);
+  assert.equal(fixture.state.signalProfileEtag, null);
+}
+for (const outcome of ['malformed', 'json', 'fetch', 'http']) {
+  const fixture = signalProfileFixture(); await fixture.refresh(); const previous = fixture.state.signalProfile;
+  fixture.reply = () => outcome === 'fetch' ? Promise.reject(new Error('Disconnected'))
+    : outcome === 'json' ? {...signalProfileResponse(null), json:async () => {throw new SyntaxError('Invalid JSON');}}
+      : signalProfileResponse({}, outcome === 'http' ? 500 : 200);
+  await fixture.refresh();
+  assert.equal(fixture.state.signalProfile, previous); assert.equal(fixture.state.signalProfileStatus, 'error');
+  assert.equal(fixture.state.signalProfileEtag, null, 'A failed refresh requires a full validated retry');
+  fixture.reply = () => signalProfileResponse(signalProfileBody(1)); await fixture.refresh();
+  assert.equal(fixture.calls.at(-1).options.headers['If-None-Match'], undefined);
+  assert.equal(fixture.state.signalProfileStatus, 'ready'); assert.equal(fixture.state.signalProfileError, null);
+}
+{
+  const fixture = signalProfileFixture(); await fixture.refresh(); const previous = fixture.state.signalProfile;
+  fixture.reply = () => signalProfileResponse(null, 304); await fixture.refresh();
+  assert.equal(fixture.state.signalProfile, previous); assert.equal(fixture.state.signalProfileStatus, 'ready');
+  assert.equal(fixture.calls.at(-1).options.headers['If-None-Match'], 'profile-etag');
+  fixture.state.selectedRequestId = 'r2'; fixture.reply = () => signalProfileResponse(null, 404); await fixture.refresh();
+  assert.equal(fixture.state.signalProfile, null); assert.equal(fixture.state.signalProfileStatus, 'empty');
+  assert.equal(fixture.calls.at(-1).options.headers['If-None-Match'], undefined);
+  fixture.reply = () => signalProfileResponse(null, 304); await fixture.refresh();
+  assert.equal(fixture.state.signalProfileStatus, 'empty');
+  fixture.state.selectedRequestId = 'r1'; await fixture.refresh();
+  assert.equal(fixture.state.signalProfile, null); assert.equal(fixture.state.signalProfileStatus, 'error');
+  assert.equal(fixture.state.signalProfileEtag, null, 'An unsolicited 304 cannot authenticate a cache entry');
+}
+for (const unavailable of ['missing', 'sample', 'file']) {
+  const fixture = signalProfileFixture(); await fixture.refresh(); const calls = fixture.calls.length;
+  if (unavailable === 'missing') fixture.state.selectedRequestId = null;
+  else if (unavailable === 'sample') fixture.state.requests[0].origin = 'sample';
+  else fixture.location.protocol = 'file:';
+  await fixture.refresh();
+  assert.equal(fixture.state.signalProfile, null); assert.equal(fixture.state.signalProfileStatus, 'empty');
+  assert.equal(fixture.state.signalProfileKey, null); assert.equal(fixture.state.signalProfileEtag, null);
+  assert.equal(fixture.calls.length, calls);
+}
+{
+  const fixture = signalProfileFixture(), held = signalProfileDeferred(), reading = signalProfileDeferred();
+  fixture.reply = () => ({...signalProfileResponse(null), json:() => {reading.resolve(); return held.promise;}});
+  const pending = fixture.refresh(); await reading.promise;
+  fixture.state.requests = structuredClone(fixture.state.requests);
+  held.resolve(signalProfileBody(1)); await pending;
+  assert.equal(fixture.state.signalProfileStatus, 'ready', 'Unchanged exact tuples survive catalog object replacement');
+}
+console.log('PASS request signal profile late headers/bodies/errors, exact owner and response identity, cache recovery and unavailable states (production functions; not rendered QA)');
+
 // Additive machine-readable failure reasons must not make the bundled UI
 // reject its existing application result envelope. Exercise the actual validators.
 const applicationResults = runInNewContext(
@@ -825,6 +1126,8 @@ console.log("PASS legacy and annotated Analyst/JWT failures, unchanged successes
 const packageRefreshState = {artifactRefreshing:false,artifactEtag:null,artifactCatalogSignature:null,artifacts:[],openArtifactIds:[],selectedArtifactId:null,sessionMode:'live'};
 let packageRefreshBody={artifacts:packageGolden.records.artifacts.map(row=>({...row,...row.key}))}, packageRefreshSyncs=0;
 const packageArtifactRefresh=runInNewContext(appSection('      function liveScriptIdentity(', '      function liveSources(') + appSection('      async function refreshArtifacts()', '      function showScreen(')+';refreshArtifacts',{
+  canvasGalleryVisible:()=>false, retireCanvasPreviews(){},
+  syncFloat32Panel(){}, // Actual Float32 host integration is exercised in check-float32-ui.mjs.
   sourceFactsFields:sourceFactsUI.sourceFactsFields, sourceFactsIdentity:sourceFactsUI.sourceFactsIdentity, state:packageRefreshState,location:{protocol:'http:'},fetch:async()=>Response.json(packageRefreshBody),isArtifactResponse:()=>true,
   renderShellStatus(){},renderSourceHealth(){},renderSources(){},renderFingerprintActivity(){},loadArtifactContent(){},loadWasmInspection(){},
   nativeCanvasCaptureDisplayLimit:10,document:{querySelector:()=>({hidden:true})},evidenceWorkspace:{sync(){}},evidencePackagePanel:{sync(){packageRefreshSyncs++;}}
@@ -940,6 +1243,7 @@ const sourceSandbox = {state: sourceState, location: {protocol: "http:"},
   document: {hidden: false, querySelector: selector => ({hidden: selector !== "#screen-sources" || !sourceVisible})},
   isPlainObject: value => value !== null && typeof value === "object" && !Array.isArray(value),
   isDebuggerResponse: value => value.valid !== false,
+  syncExperimentSession: (_, current) => current,
   selectedSource: () => sourceState.debuggerSession.scripts.find(script => script.script_id === sourceState.selectedScriptId),
   sourceDisplayName: script => script.script_id,
   fetch: async (url, options) => {
@@ -971,7 +1275,7 @@ const sourceSandbox = {state: sourceState, location: {protocol: "http:"},
     if (catalogFailure) throw new Error("Synthetic refresh disconnected");
     return {status: 200, ok: true, headers: {get: () => null}, json: async () => catalogReply};
   }};
-for (const name of ["renderSources", "rebuildTrafficRequests", "applyMemoryOriginTrace", "renderLiveBrowserTabCount",
+for (const name of ["renderSources", "rebuildTrafficRequests", "syncMemorySession", "applyMemoryOriginTrace", "renderLiveBrowserTabCount",
   "renderDebugger", "renderShellStatus", "renderNetworkNotice", "renderMemory", "renderFieldProvenance", "scheduleDebuggerRefresh",
   "renderSourceTree", "renderSourceTabs", "updateSourceDecorations"]) {
   sourceSandbox[name] = () => {};
@@ -1161,13 +1465,364 @@ function sourceProductionFunction(name) {
   assert(end, name);
   return appSource.slice(start, start + end.index + end[0].length);
 }
+// Experiment receipts run through the actual POST and debugger polling path.
+// Only transport and rendering are synthetic; nothing executes or leaves here.
+async function experimentReceiptFixture() {
+  const session = JSON.parse(await readFile(join(root, 'apps/origin-trace-backend/assets/debugger-empty.json'), 'utf8'));
+  const target = {id:'disposable-fixture',type:'page',title:'Authored experiment',url:'about:blank'};
+  Object.assign(session, {generation:10,state:'running',target,targets:[target]});
+  Object.assign(session.request_interception,{experiment_id:1,created_at_ms:100,state:'ready',isolated:true,target_id:target.id});
+  for (const group of ['object_experiment','runtime_hooks','automation_recipes','repeater']) {
+    Object.assign(session[group],{session_id:1,state:'ready'});
+    if (group !== 'repeater') Object.assign(session[group],{isolated:true,target_id:target.id});
+  }
+  const state = {debuggerSession:session,debuggerRefreshing:false,debuggerActionPending:false,debuggerEtag:null,
+    openScriptIds:[],requests:[],selectedScriptId:null,selectedRequestId:null,editingBreakpointId:null,
+    repeaterVariablesDirty:true,repeaterDraftDirty:true,experimentMode:'repeater'};
+  const elements = Object.fromEntries(['repeaterVariables','repeaterRequestMethod','repeaterRequestBody','repeaterRequestTimeout',
+    'repeaterRequestHeaders','repeaterRequestUrl','objectConfirm','hooksConfirm','hooksFieldConfirm','automationConfirm',
+    'repeaterResponse','automationResult','hooksHits','automationLabel','automationSource','automationTrigger','automationEnabled'].map(name=>
+      [name,{value:'',checked:false,textContent:'',title:'',dataset:{}}]));
+  Object.assign(elements.repeaterVariables,{value:'{"draft":"keep"}'});
+  elements.repeaterRequestMethod.value='GET';elements.repeaterRequestTimeout.value='15000';elements.repeaterRequestUrl.value='https://fixture.invalid/request';
+  const fixture = {state,elements,requests:[],poll:session,action:async()=>({ok:true,generation:11,repeater:structuredClone(session.repeater)}),resets:0};
+  const sandbox = {state,elements,TextEncoder,AbortController,setTimeout,clearTimeout,location:{protocol:'http:'},
+    document:{hidden:false,querySelector:()=>({hidden:true})},memoryOriginTraceActive:()=>false,
+    fetch:async(url,options)=>{
+      fixture.requests.push({url,method:options.method??'GET',signal:options.signal,...(options.body?{request:JSON.parse(options.body)}:{})});
+      if (options.method === 'POST') {
+        const action=fixture.action;
+        if(fixture.headers)await fixture.headers;
+        return {ok:true,json:()=>action(JSON.parse(options.body))};
+      }
+      if (fixture.poll === 304) return {status:304,ok:false};
+      const reply = await fixture.poll;
+      return {status:200,ok:true,headers:{get:()=>`"fixture-${reply.generation}"`},json:async()=>structuredClone(reply)};
+    },resetAutomationEditor:()=>{fixture.resets++;}};
+  for (const name of ['renderDebugger','renderExperiment','renderRepeaterVariableStatus','scheduleDebuggerRefresh','rebuildTrafficRequests',
+    'renderLiveBrowserTabCount','pruneLiveScriptContent','renderShellStatus','renderNetworkNotice','renderFieldProvenance',
+    'syncMemorySession','applyMemoryOriginTrace','renderMemory']) sandbox[name]=()=>{};
+  const names = ['experimentLifetimeKey','experimentContextKey','currentExperimentReceipt','experimentEditorKey','repeaterSubmissionKey','experimentActionGroups','experimentReceiptBounded','experimentRecordMatches','isExperimentReceipt',
+    'clearExperimentLifetime','syncExperimentSession','runExperimentAction','debuggerAction','debuggerScriptCatalogSignature','refreshDebugger',
+    'prefillRepeaterRequest','markRepeaterDraftChanged','parseRepeaterVariables','applyRepeaterVariables','repeaterState','runRepeaterRequest','parseExperimentHeaders','saveAutomationRecipe'];
+  const controller = runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+'\n'+
+    names.map(sourceProductionFunction).join('\n')+'\n({'+names.join(',')+',isDebuggerResponse})',sandbox);
+  assert(controller.isDebuggerResponse(session),'Authored active fixture must satisfy the production debugger validator');
+  return {...fixture,...controller,fixture,sandbox};
+}
+const experimentPostCount = c => c.requests.filter(request=>request.method==='POST').length;
+for (const patch of [{ok:false,error:'Authored rejection'}, {ok:true}, {ok:true,generation:11,missingGroup:true},
+  ...[undefined,null,'11',NaN,-1,1,Number.MAX_SAFE_INTEGER+1].map(generation=>({ok:true,generation}))]) {
+  const c=await experimentReceiptFixture();const original=c.state.debuggerSession.repeater;
+  c.fixture.action=async()=>({...patch,...(Object.hasOwn(patch,'generation')&&!patch.missingGroup?{repeater:structuredClone(original)}:{})});
+  await c.runRepeaterRequest();
+  assert.equal(experimentPostCount(c),1,'A failed variables receipt must never continue to Send');
+  assert.equal(c.state.repeaterVariablesDirty,true);assert.equal(c.state.repeaterDraftDirty,true);
+  assert.equal(c.state.debuggerSession.repeater,original);assert.equal(c.state.experimentPending,false);
+  assert.match(c.state.experimentError,/acknowledgement|rejected|rejection/);
+}
+{
+  const c=await experimentReceiptFixture();const original=c.state.debuggerSession.repeater;
+  c.fixture.action=async request=>request.action==='configure_repeater_variables'
+    ? {ok:true,generation:11,repeater:structuredClone(original)} : {ok:false,error:'Authored run failure'};
+  await c.runRepeaterRequest();assert.equal(experimentPostCount(c),2);assert.equal(c.state.repeaterDraftDirty,true);
+  assert.equal(c.state.repeaterExpectedHistoryId,undefined,'A rejected run cannot select a claimed result');
+}
+{
+  const c=await experimentReceiptFixture();const updated={...c.state.debuggerSession.repeater,message:'Acknowledged fixture'};
+  c.fixture.action=async()=>({ok:true,generation:11,repeater:updated,additive:{future:'allowed'}});
+  assert(await c.applyRepeaterVariables());assert.equal(c.state.repeaterVariablesDirty,false);
+  assert.equal(c.state.debuggerSession.repeater.message,'Acknowledged fixture');assert.equal(experimentPostCount(c),1);
+}
+for (const changed of ['generation','created_at_ms','target_id','session_id']) {
+  const c=await experimentReceiptFixture();const old=structuredClone(c.state.debuggerSession);
+  for(const name of ['objectConfirm','hooksConfirm','hooksFieldConfirm','automationConfirm'])c.elements[name].checked=true;
+  c.elements.repeaterResponse.textContent='Old disposable response';c.elements.automationResult.textContent='Old recipe result';
+  c.elements.hooksHits.textContent='Old hook values';
+  c.fixture.poll={...structuredClone(old),generation:11};await c.refreshDebugger();
+  assert.equal(c.state.debuggerRefreshFailed,false);assert.equal(c.elements.repeaterVariables.value,'{"draft":"keep"}');
+  assert.equal(c.elements.automationConfirm.checked,true,'Same-lifetime refresh preserves explicit consent and drafts');
+  const next=structuredClone(old);next.generation=12;
+  if(changed==='generation')next.generation=1;
+  if(changed==='created_at_ms')next.request_interception.created_at_ms++;
+  if(changed==='target_id')next.request_interception.target_id='new-disposable';
+  if(changed==='session_id')next.repeater.session_id++;
+  c.fixture.poll=next;await c.refreshDebugger();assert.equal(c.state.debuggerRefreshFailed,false);
+  assert.equal(c.elements.repeaterVariables.value,'');assert.equal(c.elements.automationConfirm.checked,false);
+  assert.equal(c.elements.repeaterResponse.textContent,'');assert.equal(c.elements.automationResult.textContent,'');assert.equal(c.elements.hooksHits.textContent,'');
+}
+{
+  const c=await experimentReceiptFixture();let resolve;const pendingBody=new Promise(done=>{resolve=done;});
+  const old=structuredClone(c.state.debuggerSession);c.fixture.action=()=>pendingBody;
+  const pending=c.applyRepeaterVariables();
+  c.fixture.poll={...structuredClone(old),generation:11,request_interception:{...old.request_interception,created_at_ms:200}};
+  await c.refreshDebugger();assert.match(c.state.experimentError,/session changed/);c.fixture.poll={...old,generation:12};await c.refreshDebugger();
+  c.elements.repeaterVariables.value='{"new":"draft"}';c.state.repeaterVariablesDirty=true;
+  resolve({ok:true,generation:13,repeater:old.repeater});assert.equal(await pending,null);
+  assert.equal(c.elements.repeaterVariables.value,'{"new":"draft"}');assert.equal(c.state.repeaterVariablesDirty,true);
+  assert.equal(c.state.experimentError,null,'Retired completion cannot reintroduce an old-lifetime error');assert.equal(experimentPostCount(c),1);
+}
+{
+  const c=await experimentReceiptFixture();let resolve;const old=structuredClone(c.state.debuggerSession);
+  c.fixture.action=()=>new Promise(done=>{resolve=done;});const pending=c.applyRepeaterVariables();
+  const newer={...structuredClone(old),generation:12};newer.repeater.message='Newer validated poll';
+  c.fixture.poll=newer;await c.refreshDebugger();resolve({ok:true,generation:11,repeater:old.repeater});
+  assert.equal(await pending,null);assert.equal(c.state.repeaterVariablesDirty,true);assert.equal(c.state.debuggerSession.repeater.message,'Newer validated poll');
+  c.fixture.poll=304;await c.refreshDebugger();assert.equal(c.state.debuggerSession.repeater.message,'Newer validated poll');
+}
+{
+  const c=await experimentReceiptFixture();const old=structuredClone(c.state.debuggerSession);let releasePoll;
+  c.fixture.poll=new Promise(resolve=>{releasePoll=resolve;});const poll=c.refreshDebugger();
+  c.fixture.action=async()=>({ok:true,generation:11,repeater:{...old.repeater,message:'New receipt'}});
+  assert(await c.applyRepeaterVariables());releasePoll(old);await poll;
+  assert.equal(c.state.debuggerSession.repeater.message,'New receipt','An already-started GET cannot roll back a receipt');
+  assert.equal(c.state.debuggerEtag,null,'A retained receipt requires a fresh full snapshot, not permanent 304s on an older poll');
+  const posts=experimentPostCount(c);assert.equal(await c.runExperimentAction({action:'run_repeater_request'}),null);
+  assert.equal(experimentPostCount(c),posts,'Ambiguous receipt/poll ordering waits for a fresh snapshot before any target action');
+  c.fixture.poll=304;await c.refreshDebugger();assert.equal(c.state.debuggerSession.repeater.message,'New receipt');
+  c.elements.automationConfirm.checked=true;c.fixture.poll={...old,generation:1};await c.refreshDebugger();
+  assert.equal(c.elements.automationConfirm.checked,false,'A post-receipt native reset expires consent');
+}
+{
+  const c=await experimentReceiptFixture();const recipe={id:1,label:'Authored',trigger:'manual',enabled:true,source:'void 0',source_bytes:6};
+  const automation={...c.state.debuggerSession.automation_recipes,recipes:[recipe],source_bytes:6};
+  c.elements.automationLabel.value='Keep this draft';c.elements.automationSource.value='void 0';c.elements.automationTrigger.value='manual';
+  c.state.automationEditingRecipeId=null;
+  for(const alias of [null,{...recipe,label:'Wrong'}, {...recipe,source:undefined}]){
+    c.fixture.action=async()=>({ok:true,generation:11,automation_recipes:automation,recipe:alias});
+    await c.saveAutomationRecipe();assert.equal(c.fixture.resets,0);assert.equal(c.elements.automationLabel.value,'Keep this draft');
+  }
+  let deep={};for(let i=0;i<12000;i++)deep={next:deep};
+  assert.equal(c.experimentRecordMatches({deep},{deep}),false,'Deep additive fields must fail closed without recursive overflow');
+  c.fixture.action=async()=>({ok:true,generation:11,automation_recipes:automation,recipe:{...recipe,deep}});
+  await c.saveAutomationRecipe();assert.equal(c.fixture.resets,0);assert.match(c.state.experimentError,/invalid acknowledgement/);
+  c.fixture.action=async()=>({ok:true,generation:11,automation_recipes:automation,recipe:{...recipe,future:'allowed'}});
+  await c.saveAutomationRecipe();assert.equal(c.fixture.resets,1,'Matching bounded additive aliases remain compatible');
+}
+for (const action of ['configure_request_interception','run_request_interception','clear_request_interception_result',
+  'set_action_scope','close_experiment_page','create_experiment_page','navigate_object_experiment','search_object_experiment','mutate_object_experiment',
+  'add_runtime_hook','remove_runtime_hook','arm_runtime_hooks','disarm_runtime_hooks','clear_runtime_hook_hits',
+  'configure_runtime_field_test','compare_runtime_field_test','add_automation_recipe','update_automation_recipe',
+  'remove_automation_recipe','arm_automation_recipes','disarm_automation_recipes','cancel_automation_recipe','clear_automation_runs',
+  'run_automation_recipe','configure_repeater_variables','run_repeater_request','cancel_repeater_request','compare_repeater_history',
+  'clear_repeater_history','create_request_interception_experiment','dispose_request_interception_experiment']) {
+  const c=await experimentReceiptFixture();c.fixture.action=async()=>({ok:true,generation:11});
+  assert.equal(await c.runExperimentAction({action}),null,`${action} must require its group`);
+  assert.equal(experimentPostCount(c),1);assert.match(c.state.experimentError,/invalid acknowledgement/);
+}
+for (const action of ['create_request_interception_experiment','dispose_request_interception_experiment']) {
+  for (const pollFirst of [false,true]) {
+    const c=await experimentReceiptFixture(),created=structuredClone(c.state.debuggerSession);
+    const initial=JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/debugger-empty.json'),'utf8'));
+    const disposed={...structuredClone(created),generation:12};
+    for(const group of ['request_interception','action_scope','object_experiment','runtime_hooks','automation_recipes','repeater']){
+      disposed[group]={...initial[group],state:'disposed'};
+      if(group==='request_interception')Object.assign(disposed[group],{experiment_id:1,created_at_ms:100,disposed_at_ms:200});
+      else if(group!=='action_scope')disposed[group].session_id=1;
+    }
+    if(action==='create_request_interception_experiment'){
+      c.state.debuggerSession={...initial,generation:10,state:'running',target:created.target,targets:created.targets};
+    }
+    const after=action==='create_request_interception_experiment'?{...created,generation:12}:disposed;
+    assert(c.isDebuggerResponse(after));
+    const body={ok:true,generation:12,...Object.fromEntries(c.experimentActionGroups(action).map(group=>[group,after[group==='experiment'?'request_interception':group]]))};
+    let release;c.fixture.action=()=>new Promise(resolve=>{release=resolve;});
+    const pending=c.runExperimentAction({action});for(let tick=0;tick<12;tick++)await Promise.resolve();
+    if(pollFirst){c.fixture.poll=after;await c.refreshDebugger();assert.equal(c.state.debuggerRefreshFailed,false);}
+    assert.equal(typeof release,'function',JSON.stringify({action,pollFirst,error:c.state.experimentError,debuggerError:c.state.debuggerError,requests:c.requests}));
+    release(body);assert(await pending,`${action} must acknowledge its own ${pollFirst?'polled':'unpolled'} transition`);
+    assert.equal(c.state.debuggerSession.request_interception.state,after.request_interception.state);
+    assert.equal(c.state.experimentPending,false);
+  }
+}
+{
+  const c=await experimentReceiptFixture();let release;c.fixture.action=()=>new Promise(resolve=>{release=resolve;});
+  const pending=c.applyRepeaterVariables();for(let tick=0;tick<12;tick++)await Promise.resolve();c.elements.repeaterVariables.value='{"new":"draft"}';
+  release({ok:true,generation:11,repeater:structuredClone(c.state.debuggerSession.repeater)});assert.equal(await pending,null);
+  assert.equal(c.state.repeaterVariablesDirty,true,'Receipt for the submitted variables never cleans a newer draft');
+}
+{
+  const c=await experimentReceiptFixture();const old=structuredClone(c.state.debuggerSession);let release;
+  c.fixture.action=request=>request.action==='run_repeater_request'?new Promise(resolve=>{release=resolve;}):
+    {ok:true,generation:12,repeater:{...old.repeater,message:'Explicit cancel acknowledged'}};
+  const pending=c.runExperimentAction({action:'run_repeater_request'});
+  assert.equal(await c.runExperimentAction({action:'run_repeater_request'}),null,'Double Send stays blocked');
+  assert(await c.runExperimentAction({action:'cancel_repeater_request'}));
+  release({ok:true,generation:11,repeater:old.repeater});assert.equal(await pending,null);
+  assert.equal(c.state.debuggerSession.repeater.message,'Explicit cancel acknowledged');assert.equal(experimentPostCount(c),2);
+}
+{
+  const c=await experimentReceiptFixture();const old=structuredClone(c.state.debuggerSession);let release;
+  c.fixture.action=()=>new Promise(resolve=>{release=resolve;});const pending=c.applyRepeaterVariables();
+  c.fixture.poll={...old,generation:12};await c.refreshDebugger();
+  release({ok:true,generation:11,repeater:old.repeater});assert(await pending,'An older receipt with unchanged authoritative groups remains valid');
+}
+{
+  const c=await experimentReceiptFixture();let release;c.fixture.action=()=>new Promise(resolve=>{release=resolve;});
+  const pending=c.runRepeaterRequest();for(let tick=0;tick<12;tick++)await Promise.resolve();
+  c.elements.repeaterVariables.value='{"new":"draft"}';
+  release({ok:true,generation:11,repeater:structuredClone(c.state.debuggerSession.repeater)});await pending;
+  assert.equal(experimentPostCount(c),1,'New variable edits during Apply cannot trigger Send with the previous variables');
+}
+for (const phase of ['headers','body']) {
+  const c=await experimentReceiptFixture(),old=structuredClone(c.state.debuggerSession);let release;
+  const held=new Promise(resolve=>{release=resolve;});
+  if(phase==='headers'){c.fixture.headers=held;c.fixture.action=async()=>({ok:true,generation:11,repeater:old.repeater});}
+  else c.fixture.action=()=>held;
+  const pending=c.applyRepeaterVariables();for(let tick=0;tick<12;tick++)await Promise.resolve();
+  c.fixture.poll={...old,generation:12,request_interception:{...old.request_interception,created_at_ms:200}};
+  await c.refreshDebugger();assert.equal(c.state.debuggerRefreshFailed,false);
+  let settled=false;pending.then(()=>{settled=true;});for(let tick=0;tick<30;tick++)await Promise.resolve();
+  assert(settled,`${phase}: retiring a lifetime must release a producer that ignores abort`);assert.equal(await pending,null);
+  assert.equal(c.state.experimentPending,false);assert.equal(c.state.debuggerActionPending,false);
+  assert.equal(c.requests[0].signal.aborted,true);assert.equal(experimentPostCount(c),1);
+  let releaseNew;c.fixture.headers=null;c.fixture.action=()=>new Promise(resolve=>{releaseNew=resolve;});
+  c.elements.repeaterVariables.value='{"new":"draft"}';c.state.repeaterVariablesDirty=true;
+  const newer=c.applyRepeaterVariables();for(let tick=0;tick<12;tick++)await Promise.resolve();
+  release({ok:true,generation:11,repeater:old.repeater});for(let tick=0;tick<12;tick++)await Promise.resolve();
+  assert.equal(c.state.debuggerActionPending,true);assert.equal(c.state.experimentPending,true,'Late old completion cannot clear newer latches');
+  releaseNew({ok:true,generation:13,repeater:{...old.repeater,message:'New lifetime receipt'}});assert(await newer);
+  assert.equal(c.state.debuggerSession.repeater.message,'New lifetime receipt');assert.equal(c.state.debuggerActionPending,false);
+  assert.equal(experimentPostCount(c),2,'Only a new explicit action may send after expiry');
+}
+// A receipt's transport owner can finish before its caller resumes. These
+// tests keep the outer intent alive through that separate continuation boundary.
+const experimentTicks=async()=>{for(let tick=0;tick<20;tick++)await Promise.resolve();};
+{
+  const c=await experimentReceiptFixture(),old=structuredClone(c.state.debuggerSession);let releaseApply,releasePoll;
+  c.elements.repeaterVariables.value='';c.state.requests=[{id:'selected',method:'GET',path:'https://fixture.invalid/prefilled'}];
+  c.state.selectedRequestId='selected';c.sandbox.URL=URL;c.sandbox.refreshRepeaterStructuredEditors=()=>{};
+  c.sandbox.renderExperiment=()=>c.prefillRepeaterRequest();
+  c.sandbox.document.querySelector=selector=>({hidden:selector!=='#screen-experiments'});
+  c.fixture.action=request=>request.action==='configure_repeater_variables'?new Promise(resolve=>{releaseApply=resolve;}):
+    {ok:true,generation:13,repeater:structuredClone(c.state.debuggerSession.repeater)};
+  const pending=c.runRepeaterRequest();await experimentTicks();
+  c.fixture.poll=new Promise(resolve=>{releasePoll=resolve;});const poll=c.refreshDebugger();
+  releaseApply({ok:true,generation:11,repeater:old.repeater});
+  releasePoll({...old,generation:12,request_interception:{...old.request_interception,created_at_ms:200}});
+  await poll;await pending;assert.equal(c.state.debuggerRefreshFailed,false);
+  assert.equal(experimentPostCount(c),1,'Receipt-to-caller gap must not Send into a replacement lifetime after real Traffic prefill');
+  assert.equal(c.state.debuggerSession.request_interception.created_at_ms,200);
+}
+for(const change of ['body','url','method','headers','timeout','variables','selection','edit-and-return']){
+  const c=await experimentReceiptFixture(),old=structuredClone(c.state.debuggerSession);let release;
+  c.fixture.action=()=>new Promise(resolve=>{release=resolve;});const pending=c.runRepeaterRequest();await experimentTicks();
+  if(change==='selection')c.state.selectedRequestId='new-selection';
+  else if(change==='edit-and-return')c.markRepeaterDraftChanged();
+  else {
+    const field={body:'repeaterRequestBody',url:'repeaterRequestUrl',method:'repeaterRequestMethod',headers:'repeaterRequestHeaders',
+      timeout:'repeaterRequestTimeout',variables:'repeaterVariables'}[change];
+    c.elements[field].value+='changed';
+  }
+  const draft=c.repeaterSubmissionKey();release({ok:true,generation:11,repeater:old.repeater});await pending;
+  assert.equal(experimentPostCount(c),1,`${change}: a different draft/selection needs a new explicit Send`);
+  assert.equal(c.repeaterSubmissionKey(),draft);assert.equal(c.state.repeaterDraftDirty,true);
+}
+{
+  const c=await experimentReceiptFixture(),old=structuredClone(c.state.debuggerSession);let releaseApply,releaseRun,releasePoll;
+  c.fixture.action=request=>new Promise(resolve=>{if(request.action==='configure_repeater_variables')releaseApply=resolve;else releaseRun=resolve;});
+  const pending=c.runRepeaterRequest();await experimentTicks();await c.runRepeaterRequest();assert.equal(experimentPostCount(c),1);
+  releaseApply({ok:true,generation:11,repeater:old.repeater});await experimentTicks();assert.equal(experimentPostCount(c),2);
+  c.fixture.poll=new Promise(resolve=>{releasePoll=resolve;});const poll=c.refreshDebugger();
+  releaseRun({ok:true,generation:12,repeater:old.repeater});
+  releasePoll({...old,generation:13,request_interception:{...old.request_interception,created_at_ms:200}});
+  await poll;c.elements.repeaterRequestBody.value='new lifetime draft';c.state.repeaterDraftDirty=true;await pending;
+  assert.equal(c.elements.repeaterRequestBody.value,'new lifetime draft');assert.equal(c.state.repeaterDraftDirty,true);
+  assert.equal(c.state.repeaterExpectedHistoryId,null,'A run receipt cannot select a result in its replacement lifetime');
+}
+{
+  const c=await experimentReceiptFixture(),old=structuredClone(c.state.debuggerSession);
+  const receipt=await c.runExperimentAction({action:'configure_repeater_variables',variables:{}});assert(c.currentExperimentReceipt(receipt));
+  c.fixture.poll={...old,generation:12,request_interception:{...old.request_interception,created_at_ms:200}};await c.refreshDebugger();
+  c.fixture.poll={...old,generation:13};await c.refreshDebugger();
+  assert.equal(c.currentExperimentReceipt(receipt),null,'A-to-B-to-A cannot revalidate a delivered receipt');
+}
+// Combine the real Collection chain with the real Experiment POST/poll/receipt
+// functions. Its saved-library reads and rendering remain inert fixture data.
+for(const change of ['lifetime','saved-request','folder-variable','new-draft']){
+  const c=await experimentReceiptFixture(),old=structuredClone(c.state.debuggerSession);let releaseApply,releasePoll;
+  const saved={id:1,created_at_ms:100,updated_at_ms:100,name:'Authored recipe',folder_id:1,url:'https://fixture.invalid/owned',
+    method:'GET',headers:[],body:'',timeout_ms:15000,variables:[]};
+  const folders=[{id:1,variables:[]}];
+  Object.assign(c.state,{collectionSelectionVersion:0,collectionHistorySelectionVersion:0,collectionSelectedRequestId:1,
+    collectionRunPending:false,collectionFolderDirty:false,collectionDraftDirty:false,apiCollectionNeedsReload:false});
+  const run=runInNewContext(sourceProductionFunction('runCollectionRequest')+'\nrunCollectionRequest',{
+    ...c.sandbox,...c,collectionRequest:()=>saved,collectionPendingRunForSelection:()=>false,
+    requestInterception:()=>c.state.debuggerSession.request_interception,collectionFolderLineage:()=>folders,
+    repeaterHeaderObject:headers=>Object.fromEntries(headers.map(header=>[header.name,header.value])),
+    renderCollectionExecution(){},renderApiCollection(){},setCollectionNotice(kind,message){c.fixture.notice={kind,message};},rememberCollectionRunOwner(){}});
+  c.fixture.action=()=>new Promise(resolve=>{releaseApply=resolve;});const pending=run();await experimentTicks();
+  if(change==='lifetime'){
+    c.fixture.poll=new Promise(resolve=>{releasePoll=resolve;});const poll=c.refreshDebugger();
+    releaseApply({ok:true,generation:11,repeater:old.repeater});
+    releasePoll({...old,generation:12,request_interception:{...old.request_interception,created_at_ms:200}});await poll;
+  } else {
+    if(change==='saved-request')saved.url='https://fixture.invalid/replaced';
+    if(change==='folder-variable')folders[0].variables.push({name:'new',value:'value'});
+    if(change==='new-draft'){c.state.collectionDraftDirty=true;c.state.collectionDraftRevision=1;}
+    releaseApply({ok:true,generation:11,repeater:old.repeater});
+  }
+  await pending;assert.equal(experimentPostCount(c),1,`Collection ${change}: no second target action`);
+  assert.equal(c.state.collectionRunPending,false);
+}
+const experimentActiveRepeater=(repeater,url='https://fixture.invalid/request')=>({...repeater,state:'running',active_execution:{execution_id:1,
+  started_at_ms:500,request:{url,method:'GET',headers:[],body:'',timeout_ms:15000},resolved_url:url,resolved_method:'GET',
+  variable_names:[],collection_request_id:null,cancel_requested:false}});
+{
+  const c=await experimentReceiptFixture(),old=structuredClone(c.state.debuggerSession);
+  c.fixture.action=async request=>({ok:true,generation:request.action==='configure_repeater_variables'?11:12,
+    repeater:request.action==='configure_repeater_variables'?old.repeater:experimentActiveRepeater(old.repeater)});
+  await c.runRepeaterRequest();assert.equal(experimentPostCount(c),2);assert.equal(c.state.repeaterExpectedHistoryId,1);
+  assert.equal(c.state.repeaterDraftDirty,false);assert.equal(c.state.repeaterSubmissionOwner,null);
+}
+{
+  const c=await experimentReceiptFixture(),old=structuredClone(c.state.debuggerSession);let releaseOld,releaseNew,newer,started=false;
+  c.sandbox.document.querySelector=selector=>({hidden:selector!=='#screen-experiments'});
+  c.sandbox.renderExperiment=()=>{
+    if(started||!c.state.experimentContextEpoch)return;
+    started=true;c.elements.repeaterRequestUrl.value='https://fixture.invalid/new-intent';c.elements.repeaterVariables.value='';
+    newer=c.runRepeaterRequest();
+  };
+  c.fixture.action=request=>{
+    if(request.action==='run_repeater_request')return {ok:true,generation:14,repeater:experimentActiveRepeater(old.repeater,request.url)};
+    return new Promise(resolve=>{if(started)releaseNew=resolve;else releaseOld=resolve;});
+  };
+  const older=c.runRepeaterRequest();await experimentTicks();
+  c.fixture.poll={...old,generation:12,request_interception:{...old.request_interception,created_at_ms:200}};
+  await c.refreshDebugger();await older;await experimentTicks();
+  assert(c.state.repeaterSubmissionOwner,'Expired outer finally must retain the newer complete Send intent');
+  assert.equal(c.state.experimentPending,true);assert.equal(c.state.debuggerActionPending,true);
+  releaseOld({ok:true,generation:11,repeater:old.repeater});await experimentTicks();assert(c.state.repeaterSubmissionOwner);
+  releaseNew({ok:true,generation:13,repeater:old.repeater});await newer;
+  assert.equal(experimentPostCount(c),3);assert.equal(c.requests.filter(request=>request.method==='POST').at(-1).request.url,'https://fixture.invalid/new-intent');
+  assert.equal(c.state.repeaterSubmissionOwner,null);assert.equal(c.state.repeaterExpectedHistoryId,1);
+}
+{
+  const c=await experimentReceiptFixture(),old=structuredClone(c.state.debuggerSession);
+  c.state.collectionRunOwners=new Map([['old',{requestId:1}]]);c.state.collectionSubmittedOwners=[{requestId:1}];
+  c.state.collectionPendingRunSelection={executionId:1};c.state.collectionSelectedHistoryId=1;
+  c.state.collectionDraftDirty=true;c.elements.collectionRequestBody={value:'durable draft'};
+  c.fixture.poll={...old,generation:12,request_interception:{...old.request_interception,created_at_ms:200}};await c.refreshDebugger();
+  assert.equal(c.state.collectionRunOwners.size,0);assert.equal(c.state.collectionSubmittedOwners.length,0);
+  assert.equal(c.state.collectionPendingRunSelection,null);assert.equal(c.state.collectionSelectedHistoryId,null);
+  assert.equal(c.state.collectionDraftDirty,true);assert.equal(c.elements.collectionRequestBody.value,'durable draft');
+}
+console.log('PASS Experiments receipt-to-caller continuation ownership: exact reviewed prefill race, Repeater draft/selection changes, A-B-A delivered receipts, result consumer gap, and real Collection chain lifetime/request/variable guards (not rendered QA)');
+
+console.log('PASS Experiments production POST/poll receipts: HTTP-200 refusal, required groups/generations, no chained Send or automatic retries, valid success, stale poll/304 ordering, reused lifetime consent/result erasure, A-B-A ownership and bounded additive aliases (not rendered QA)');
+
 const ownershipFunctionNames = ['liveScriptIdentity', 'sourceIdentity', 'sourceIsCurrent', 'sourceReference', 'setSourceCursor', 'sourceCursorFor',
-  'retireSourceAnalysis', 'releaseSourcePreview', 'boundSourcePreviews', 'boundSourceAnalysis',
+  'retireSourceAnalysis', 'releaseSourcePreview', 'canvasGalleryVisible', 'releaseCanvasPreview', 'retireCanvasPreviews', 'syncCanvasPreviews', 'pumpCanvasPreviews', 'retryCanvasPreview', 'boundSourcePreviews', 'boundSourceAnalysis',
   'liveSources', 'capturedSources', 'selectedSource', 'deobfuscationKey', 'sourceOwnedLiveText', 'validateSourceAnalysis', 'loadDeobfuscation',
   'sourceDisplayView', 'sourceViewLabel', 'sourceDerivedView', 'loadArtifactContent', 'refreshArtifacts',
   'closeSource', 'loadScriptContent', 'sourceRuntimeLine', 'sourceRuntimeColumn', 'prefillHookFromSource',
   'sourceDisplayName', 'sourceIcon', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent', 'updateSourceDecorations', 'breakpointLinesForSource',
-  'revealRuntimeHookHit', 'sourceArtifactIdentityMatches', 'selectArtifact', 'selectScript', 'sourceFormattedView'];
+  'revealRuntimeHookHit', 'sourceArtifactIdentityMatches', 'selectArtifact', 'selectScript', 'sourceFormattedView', 'syncFloat32Panel', 'textElement', 'deobfuscationRow', 'deobfuscationOwner', 'cancelDeobfuscation', 'retryDeobfuscation', 'retireDeobfuscationReveal',
+  'updateDeobfuscationView', 'setDeobfuscationDisclosure', 'revealDeobfuscationChange', 'deobfuscationButton', 'deobfuscationDisclosure', 'renderDeobfuscationReport'];
+const canvasProductionRules=runInNewContext(
+  appSection('      const nativeCanvasCaptureDisplayLimit =','      const nativeCanvasDrawingMethods')+
+  appSection('      const canvasDataUrlPattern =','      function canvasReadbackName(')+
+  ';({nativeCanvasCaptureDisplayLimit,canvasPreviewByteLimit,canvasPreviewReadLimit,canvasDataUrlPattern,canvasPreviewAxisLimit,canvasPreviewPixelLimit,canvasGalleryPixelLimit,inspectCanvasPng})', {atob});
 const ownershipModels = await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8');
 const ownershipSyntax = await readFile(join(root, 'apps/research-ui/source_syntax.js'), 'utf8');
 const ownershipProvenance = await readFile(join(root, 'apps/research-ui/field_provenance.js'), 'utf8');
@@ -1188,14 +1843,16 @@ function ownedContext(patch = {}) {
     sourceFormatCache:new Map(), wasmRequests:new Map(), wasmCache:new Map(),
     sourceDeobfuscated:false, sourceFormatted:false, sourceWasm:false, sessionMode:'live', ...patch.state};
   const sandbox = {console, state, TextEncoder, TextDecoder, Uint8Array, crypto, AbortController, setTimeout, clearTimeout,
-    sourceFactsFields:sourceFactsUI.sourceFactsFields, sourceFactsIdentity:sourceFactsUI.sourceFactsIdentity, sourceFactsReadBytes:sourceFactsUI.sourceFactsReadBytes,
+    sourceFactsFields:sourceFactsUI.sourceFactsFields, sourceFactsIdentity:sourceFactsUI.sourceFactsIdentity, sourceFactsUnavailable:sourceFactsUI.sourceFactsUnavailable, sourceFactsReadBytes:sourceFactsUI.sourceFactsReadBytes,
     sourceFactsPanel:{original:()=>undefined,cancel(){}}, investigationBeforeSelection(){}, location:{protocol:'http:'}, document:{querySelector:()=>({hidden:true})},
     renderSources(){}, renderSourceHealth(){}, renderShellStatus(){}, renderFingerprintActivity(){},
     runtimeHooksState:()=>({workers:[], isolated:true, target_id:state.debuggerSession?.target?.id}),
-    sourceName:source=>source.url, nativeCanvasCaptureDisplayLimit:4, evidencePackagePanel:{sync(){}}, evidenceWorkspace:{sync(){}},
+    elements:{signalRenderList:new TrafficFixtureNode()}, ...canvasProductionRules,
+    sourceName:source=>source.url, evidencePackagePanel:{sync(){}}, evidenceWorkspace:{sync(){}},
     ...patch, state};
-  return {state, sandbox, api:runInNewContext(ownershipModels + ownershipSyntax + ownershipProvenanceSite + ownershipFunctionNames.map(sourceProductionFunction).join('\n') +
-    `;({${ownershipFunctionNames.join(',')},revealProvenanceSite})`, sandbox)};
+  const functions=[...ownershipFunctionNames,...(patch.functions??[])];
+  return {state, sandbox, api:runInNewContext(ownershipModels + ownershipSyntax + ownershipProvenanceSite + functions.map(sourceProductionFunction).join('\n') +
+    `;({${functions.join(',')},revealProvenanceSite})`, sandbox)};
 }
 const sourceOwnershipReceipt = [];
 const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{resolve=done;}); return {promise,resolve};};
@@ -1433,19 +2090,185 @@ class SourceReviewNode {
   set className(value){this.classes=new Set(value.split(' '));}get className(){return [...this.classes].join(' ');}
   get textContent(){return this._text+this.children.map(node=>node.textContent??'').join('');}set textContent(value){this._text=value;this.children=[];}
   setAttribute(key,value){this.attributes[key]=value;}getAttribute(key){return this.attributes[key];}
-  append(...nodes){for(const node of nodes){node.parent=this;this.children.push(node);}}replaceChildren(...nodes){this._text='';this.children=[];this.append(...nodes);}
+  append(...nodes){for(let node of nodes){if(typeof node==='string')node=this.doc.createTextNode(node);node.parent=this;this.children.push(node);}}replaceChildren(...nodes){this._text='';this.children=[];this.append(...nodes);}
   contains(node){return this===node||this.children.some(child=>child.contains?.(node));}addEventListener(key,callback){(this.listeners[key]??=[]).push(callback);}
   getBoundingClientRect(){return {left:0,right:500};}focus(){this.doc.activeElement=this;}scrollIntoView(){}
-  matches(selector){if(selector==='[aria-selected="true"]')return this.attributes['aria-selected']==='true';if(selector==='.source-line[data-line]')return this.classes.has('source-line')&&this.dataset.line!==undefined;if(selector==='.source-line.current')return this.classes.has('source-line')&&this.classes.has('current');if(selector.startsWith('.'))return this.classes.has(selector.slice(1));return this.tagName===selector;}
+  matches(selector){if(selector==='[data-deob-control]')return this.dataset.deobControl!==undefined;if(selector==='[aria-selected="true"]')return this.attributes['aria-selected']==='true';if(selector==='.source-line[data-line]')return this.classes.has('source-line')&&this.dataset.line!==undefined;if(selector==='.source-line.current')return this.classes.has('source-line')&&this.classes.has('current');if(selector.startsWith('.'))return this.classes.has(selector.slice(1));return this.tagName===selector;}
   querySelectorAll(selector){return this.children.flatMap(node=>[...(node.matches?.(selector)?[node]:[]),...(node.querySelectorAll?.(selector)??[])]);}querySelector(selector){return this.querySelectorAll(selector)[0]??null;}closest(selector){return this.matches(selector)?this:this.parent?.closest(selector);}
 }
 function sourceReviewDOM() {
   const document={activeElement:null,querySelector:()=>({hidden:false})};
   document.createElement=tag=>new SourceReviewNode(tag,document);
   document.createTextNode=text=>{const node=new SourceReviewNode('text',document);node.textContent=text;return node;};
-  const elements=Object.fromEntries(['sourceLanguage','sourceCode','sourceCodeEmpty','sourceCodeWrap','sourceEditorTabs','sourceTree'].map(key=>[key,new SourceReviewNode('div',document)]));
+  const elements=Object.fromEntries(['sourceLanguage','sourceCode','sourceCodeEmpty','sourceCodeWrap','sourceEditorTabs','sourceTree','sourcePosition','deobfuscationReport','deobfuscationIntrinsics'].map(key=>[key,new SourceReviewNode('div',document)]));
   return {document,elements};
 }
+{
+  const original='const a=1; const b=2;',artifact=await ownedArtifact('map-complete',original);
+  const {api}=ownedContext();
+  for(const [text,segments] of [
+    ['const b=2;',[{kind:'verbatim',original_start:11,original_end:21,derived_start:0,derived_end:10}]],
+    ['const a=1;',[{kind:'verbatim',original_start:0,original_end:10,derived_start:0,derived_end:10}]],
+    ['(3)',[{kind:'replacement',original_start:0,original_end:0,derived_start:0,derived_end:3}]],
+  ]) {
+    const payload=ownedPayload(artifact,original);payload.representation.text=text;payload.representation.segments=segments;
+    await assert.rejects(api.validateSourceAnalysis(payload,{...artifact,source_type:'artifact'},false),/source map/);
+  }
+  sourceOwnershipReceipt.push({test:'deob_complete_original_map_no_implicit_deletion_or_zero_width_replacement',status:'passed'});
+}
+// Changed-span inspection uses production admission, controller and DOM code.
+// These fixtures never execute analyzed JavaScript and are not rendered QA.
+function ownedDerivedPayload(source, original, replacements) {
+  const payload=ownedPayload(source,original), segments=[];let cursor=0,derived='';
+  const append=(kind,start,end,text)=>{const begin=Buffer.byteLength(derived);derived+=text;segments.push({kind,original_start:Buffer.byteLength(original.slice(0,start)),original_end:Buffer.byteLength(original.slice(0,end)),derived_start:begin,derived_end:Buffer.byteLength(derived)});};
+  for(const [before,after] of replacements){const start=original.indexOf(before,cursor);assert(start>=cursor);if(start>cursor)append('verbatim',cursor,start,original.slice(cursor,start));append('replacement',start,start+before.length,after);cursor=start+before.length;}
+  if(cursor<original.length)append('verbatim',cursor,original.length,original.slice(cursor));
+  payload.representation={text:derived,offset_unit:'utf-8-byte',segments,truncated:false};
+  payload.analysis.representation={status:'derived',derived_bytes:Buffer.byteLength(derived),segment_count:segments.length,truncated:false,transformations:replacements.map((_,index)=>({id:`fixture-family-${index}`,kind:'rewrite',count:1,detail:'Authored aggregate fixture; no per-change rule.'}))};
+  return payload;
+}
+{
+  const original='\ufeffconst 雪="😀";'+Array.from({length:7},(_,i)=>`const v${i}=1+${i};`).join('');
+  const artifact=await ownedArtifact('inspector',original);artifact.content=original;
+  let payload=ownedDerivedPayload(artifact,original,Array.from({length:7},(_,i)=>[`1+${i}`,`(${i+1})`]));
+  payload.analysis.omissions=['Generic unsupported operations remain unresolved.'];
+  payload.analysis.limits={max_source_bytes:4194304,max_transformations:4096};
+  payload.analysis.classification={label:'minified',confidence:95,evidence:[{id:'fixture-signal',detail:'Heuristic fixture signal'}]};
+  payload.analysis.string_tables=Array.from({length:5},(_,i)=>({kind:`table-${i+1}`,offset:0,entry_count:8,encodings:['literal'],decoded_preview:'<script>inert</script>'}));
+  const {document,elements}=sourceReviewDOM();let api;
+  const ctx=ownedContext({state:{artifacts:[artifact],selectedArtifactId:artifact.artifact_id,sourceDeobfuscated:true},document,elements,
+    formatByteSize:value=>`${value} bytes`,renderSources(){api?.renderDeobfuscationReport(api.selectedSource());},fetch:async()=>Response.json(payload)});api=ctx.api;
+  await api.loadDeobfuscation(api.selectedSource());const source=api.selectedSource(),key=api.deobfuscationKey(source),good=ctx.state.deobfuscationCache.get(key),report=elements.deobfuscationReport;
+  assert.equal(ctx.state.deobfuscationRequests.get(key).status,'ready');
+  assert.equal(good.sourceInspection.changes.length,7);assert.equal(good.sourceInspection.changes[0].original_start,original.indexOf('1+0'));
+  assert.match(report.textContent,/7 changed spans/);assert.match(report.textContent,/7 reported rewrites/);assert(!report.textContent.includes('confidence 95'));
+  assert.match(report.textContent,/Recovered tables \(5\)/);assert(report.textContent.includes('table-4'));assert(!report.textContent.includes('table-5'));
+  assert.equal(report.querySelectorAll('script').length,0);assert(report.textContent.includes('<script>inert</script>'));
+  const control=key=>report.querySelectorAll('[data-deob-control]').find(node=>node.dataset.deobControl===key);
+  const click=async key=>{const node=control(key);assert(node && !node.disabled,key);node.focus();await node.listeners.click[0]();};
+  const originalNode=report.querySelectorAll('pre')[0];originalNode.scrollLeft=77;report.scrollTop=43;originalNode.focus();
+  api.renderDeobfuscationReport(api.selectedSource());assert.equal(report.querySelectorAll('pre')[0],originalNode);assert.equal(originalNode.scrollLeft,77);assert.equal(document.activeElement,originalNode);
+  const tables=report.querySelectorAll('details').find(node=>node.querySelector('summary').textContent.startsWith('Recovered tables'));
+  tables.open=true;await click('tables-next'); // Native toggle delivery may still be queued.
+  assert(report.textContent.includes('table-5'));assert(!report.textContent.includes('table-1'));
+  assert.equal(report.querySelectorAll('details').find(node=>node.querySelector('summary').textContent.startsWith('Recovered tables')).open,true);
+  tables.open=false;tables.listeners.toggle[0]({currentTarget:tables});assert.equal(good.inspectorView.open.tables,true,'Detached queued toggle must not overwrite the current disclosure');
+  await click('transformations-next');assert(report.textContent.includes('fixture-family-6'));assert(!report.textContent.includes('fixture-family-0'));
+  await click('change-next');assert.match(report.textContent,/Change 2 of 7/);assert.equal(document.activeElement.dataset.deobControl,'change-next');assert.equal(report.scrollTop,43);
+  for(let i=0;i<5;i++)await click('change-next');assert.equal(document.activeElement.dataset.deobControl,'change-previous');
+  ctx.state.deobfuscationRequests.set(key,{status:'error',error:'Authored retry failure'});api.renderDeobfuscationReport(api.selectedSource());
+  assert.match(report.textContent,/Authored retry failure/);assert.match(report.textContent,/Last successful report remains below/);assert.equal(report.querySelectorAll('pre').length,2);
+  assert.equal(api.sourceDisplayView(api.selectedSource()).content,good.representation.text);
+  const corruptions=[
+    value=>{value.representation.segments.shift();value.representation.text=value.representation.text.slice(good.sourceInspection.changes[0].derived_start);},
+    value=>{const last=value.representation.segments.pop();value.representation.text=value.representation.text.slice(0,last.derived_start);},
+    value=>{value.representation.segments[1].original_end=value.representation.segments[1].original_start;},
+    value=>{value.analysis.representation.transformations[0].count++;},
+    value=>{value.representation.transformations=[{id:'claimed',count:9999,detail:'Untrusted claim'}];},
+    value=>{value.analysis.limits={max_source_bytes:'unbounded'};},
+    value=>{value.engine='unknown-engine';},
+    value=>{value.representation.segments[0].original_end=1;},
+  ];
+  for(const corrupt of corruptions){payload=structuredClone(good);corrupt(payload);await api.loadDeobfuscation(api.selectedSource(),{retry:true});assert.equal(ctx.state.deobfuscationRequests.get(key).status,'error');assert.equal(ctx.state.deobfuscationCache.get(key),good);}
+  // A stale control must not affect a fresh owner with different assumption mode.
+  const stale=control('retry');ctx.state.deobfuscationAssumeIntrinsics=true;const before=ctx.state.deobfuscationRequests.size;await stale.listeners.click[0]();assert.equal(ctx.state.deobfuscationRequests.size,before);
+  api.releaseSourcePreview(source);ctx.state.selectedArtifactId=null;api.renderDeobfuscationReport(null);assert.equal(report.deobfuscationRender,null);assert.equal(report.querySelectorAll('pre').length,0);
+  sourceOwnershipReceipt.push({test:'deob_changed_spans_unicode_paging_inert_reports_focus_retry_and_admission',status:'passed',changes:7,tables:5,corruptions:corruptions.length});
+}
+{
+  const original='const result=1+2;',artifact=await ownedArtifact('deob-cancel',original);artifact.content=original;
+  const gate=ownedDeferred();let calls=0;
+  const {api,state}=ownedContext({state:{artifacts:[artifact],selectedArtifactId:artifact.artifact_id},fetch:async()=>{calls++;await gate.promise;return Response.json(ownedDerivedPayload(artifact,original,[['1+2','(3)']]));}});
+  const source=api.selectedSource(),key=api.deobfuscationKey(source),pending=api.loadDeobfuscation(source),request=state.deobfuscationRequests.get(key);
+  api.cancelDeobfuscation(source,request);assert.equal(request.status,'cancelled');await api.loadDeobfuscation(source);assert.equal(calls,1);
+  const newer=api.loadDeobfuscation(source,{retry:true}),newRequest=state.deobfuscationRequests.get(key);api.cancelDeobfuscation(source,request);assert.equal(newRequest.status,'loading');api.cancelDeobfuscation(source,newRequest);
+  gate.resolve();await Promise.all([pending,newer]);assert.equal(state.deobfuscationCache.size,0);assert.equal(request.status,'cancelled');
+  const second=ownedDeferred();const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(original));let hashing=false;
+  const hashCtx=ownedContext({state:{artifacts:[artifact],selectedArtifactId:artifact.artifact_id},crypto:{subtle:{digest(){hashing=true;return second.promise;}}},fetch:async()=>Response.json(ownedDerivedPayload(artifact,original,[['1+2','(3)']]))});
+  const hashPending=hashCtx.api.loadDeobfuscation(hashCtx.api.selectedSource());for(let i=0;i<20&&!hashing;i++)await new Promise(resolve=>setTimeout(resolve,1));assert(hashing);
+  hashCtx.api.cancelDeobfuscation(hashCtx.api.selectedSource());second.resolve(hash);await hashPending;assert.equal(hashCtx.state.deobfuscationCache.size,0);
+  sourceOwnershipReceipt.push({test:'deob_explicit_cancel_late_body_and_digest_no_implicit_retry',status:'passed'});
+}
+{
+  const original='const result="'+('x'.repeat(2047))+'😀'+('y'.repeat(64))+'";',artifact=await ownedArtifact('101',original);artifact.content=original;
+  const before=original.slice(13,-1),payload=ownedDerivedPayload(artifact,original,[[before,'("short")']]);
+  const {document,elements}=sourceReviewDOM();const navigated=[];
+  const context=ownedContext({state:{artifacts:[artifact],selectedArtifactId:artifact.artifact_id},document,elements,formatByteSize:String,
+    sourceFactsPanel:{original:()=>undefined,cancel(){},model:{status:'ready',error:''},navigate:async range=>navigated.push(range)},fetch:async()=>Response.json(payload)});
+  await context.api.loadDeobfuscation(context.api.selectedSource());context.api.renderDeobfuscationReport(context.api.selectedSource());
+  const report=elements.deobfuscationReport,pre=report.querySelectorAll('pre')[0];assert(pre.textContent.length<=2048);assert(!/[\uD800-\uDBFF]$/.test(pre.textContent));assert.match(report.textContent,/Snippet shows/);
+  const good=context.api.selectedSource().deobfuscation;await context.api.revealDeobfuscationChange(context.api.selectedSource(),good.inspectorView);
+  assert.equal(navigated.length,1);assert.equal(navigated[0].start,payload.representation.segments[1].original_start);assert.equal(navigated[0].end,payload.representation.segments[1].original_end);
+  sourceOwnershipReceipt.push({test:'deob_bounded_snippet_and_verified_original_range_handoff',status:'passed'});
+}
+
+{
+  for (const action of ['option','replacement','selection','eviction']) {
+    const original='const result=1+2;',artifact=await ownedArtifact('102',original);artifact.content=original;
+    const payload=ownedDerivedPayload(artifact,original,[['1+2','(3)']]),gate=ownedDeferred();let navigations=0;
+    const {document,elements}=sourceReviewDOM();
+    const ctx=ownedContext({state:{artifacts:[artifact],selectedArtifactId:artifact.artifact_id},document,elements,formatByteSize:String,fetch:async()=>Response.json(payload)});
+    await ctx.api.loadDeobfuscation(ctx.api.selectedSource());const source=ctx.api.selectedSource(),good=source.deobfuscation,view=good.inspectorView,key=ctx.api.deobfuscationKey(source);
+    const facts=sourceFactsUI.createSourceFactsController({getSource:ctx.api.selectedSource,protocol:'http:',onChange(){},onNavigate(){navigations++;},cryptoApi:crypto,
+      fetcher:async()=>{await gate.promise;return new Response(original,{headers:{'X-Artifact-Total-Bytes':String(Buffer.byteLength(original)),'X-Artifact-Offset':'0','X-Artifact-Truncated':'false'}});}});
+    ctx.sandbox.sourceFactsPanel=facts;
+    const pending=ctx.api.revealDeobfuscationChange({...source,deobfuscationAssumption:false},view);assert(view.revealing);
+    if(action==='option')ctx.state.deobfuscationAssumeIntrinsics=true;
+    if(action==='replacement')ctx.state.deobfuscationCache.set(key,{...good,inspectorView:{change:0,pages:{},open:{},notice:''}});
+    if(action==='selection')ctx.api.updateDeobfuscationView(source,view,'changes',1);
+    if(action==='eviction')ctx.api.releaseSourcePreview(source);
+    gate.resolve();await pending;assert.equal(navigations,0,action);assert.equal(view.revealing,false,action);assert.notEqual(facts.model.status,'loading-source',action);
+  }
+  sourceOwnershipReceipt.push({test:'deob_reveal_guard_before_real_facts_navigation_option_report_selection_eviction',status:'passed'});
+}
+{
+  const original='const result=1+2;',artifact=await ownedArtifact('103',original);artifact.content=original;
+  const payload=ownedDerivedPayload(artifact,original,[['1+2','(3)']]),oldGate=ownedDeferred(),factsGate=ownedDeferred();let factsSignal;
+  const dom=sourceReviewDOM();
+  const ctx=ownedContext({...dom,formatByteSize:String,state:{artifacts:[artifact],selectedArtifactId:artifact.artifact_id},fetch:async()=>Response.json(payload)});
+  await ctx.api.loadDeobfuscation(ctx.api.selectedSource());const source=ctx.api.selectedSource(),view=source.deobfuscation.inspectorView;
+  const facts=sourceFactsUI.createSourceFactsController({getSource:ctx.api.selectedSource,protocol:'http:',onChange(){},onNavigate(){throw Error('Retired reveal navigated');},cryptoApi:crypto,
+    fetcher:async(url,options)=>{if(url.startsWith('/api/source-facts')){factsSignal=options.signal;await factsGate.promise;return Response.json({});}await oldGate.promise;return new Response(original);}});
+  ctx.sandbox.sourceFactsPanel=facts;const old=ctx.api.revealDeobfuscationChange(source,view);facts.cancel();const unrelated=facts.load();assert(factsSignal&&!factsSignal.aborted);
+  ctx.api.retireDeobfuscationReveal(view);assert.equal(factsSignal.aborted,false,'Retiring an old reveal must not cancel newer unrelated Facts work');
+  facts.cancel();oldGate.resolve();factsGate.resolve();await Promise.all([old,unrelated]);
+  sourceOwnershipReceipt.push({test:'deob_owned_reveal_cancellation_preserves_unrelated_facts',status:'passed'});
+}
+
+{
+  for(const original of ['const value=1+2;','const 雪="😀";\nconst value=1+2;','\n'.repeat(20000)+'const value=1+2;']) {
+    const script={script_id:'deob-live',target_id:'owned-page',hash:'opaque-token',language:'JavaScript',length:original.length,source_type:'script',kind:'javascript',start_line:4,start_column:2};
+    const payload=ownedDerivedPayload(script,original,[['1+2','(3)']]);payload.analysis.source.sha256=await ownershipHash(original);
+    const {document,elements}=sourceReviewDOM();elements.sourceSidebar=document.createElement('aside');elements.sourcePosition.textContent='Existing source position';
+    const line=original.split('\n').length-1,row=document.createElement('span');row.className='source-line';row.dataset.line=String(5+line);elements.sourceCode.append(row);
+    const ctx=ownedContext({state:{debuggerSession:{target:{id:'owned-page'},scripts:[script]},selectedScriptId:script.script_id,sourceDeobfuscated:true,sourceSidebarOpen:true},document,elements,formatByteSize:String,
+      getComputedStyle:()=>({position:'absolute'}),renderSourceSidebar(){elements.sourceSidebar.hidden=!ctx.state.sourceSidebarOpen;},
+      sourceFactsPanel:{original:()=>undefined,cancel(){},navigate(){throw Error('Live text must not use captured Facts');}},
+      fetch:async url=>url.startsWith('/api/debugger/source')?Response.json({protocol_version:1,script_id:script.script_id,source:original,truncated:false}):Response.json(payload)});
+    runInNewContext(sourceProductionFunction('revealOriginalLine'),ctx.sandbox);
+    await ctx.api.loadScriptContent(script);await ctx.api.loadDeobfuscation(ctx.api.selectedSource());const good=ctx.api.selectedSource().deobfuscation;
+    await ctx.api.revealDeobfuscationChange(ctx.api.selectedSource(),good.inspectorView);
+    if(line>=20000){assert.match(good.inspectorView.notice,/20,000/);assert.equal(ctx.state.sourceDeobfuscated,true);assert.equal(elements.sourcePosition.textContent,'Existing source position');}
+    else {assert.equal(document.activeElement,row);assert.equal(elements.sourceSidebar.hidden,true);assert.match(elements.sourcePosition.textContent,new RegExp(`Line ${5+line}, Column ${13+(line===0?2:0)}`));}
+    ctx.state.debuggerSession.scripts=[{...script,target_id:'replacement-page'}];const before=document.activeElement;await ctx.api.revealDeobfuscationChange(script,good.inspectorView);assert.equal(document.activeElement,before);
+  }
+  const legacyOriginal='const x=1+2;',artifact=await ownedArtifact('deob-legacy',legacyOriginal);artifact.content=legacyOriginal;
+  const legacy=ownedDerivedPayload(artifact,legacyOriginal,[['1+2','(3)']]);legacy.engine='python-lexical';legacy.representation.offset_unit='unicode-code-point';
+  const {document,elements}=sourceReviewDOM();const legacyContext=ownedContext({state:{artifacts:[artifact],selectedArtifactId:artifact.artifact_id},document,elements,formatByteSize:String,fetch:async()=>Response.json(legacy)});
+  await legacyContext.api.loadDeobfuscation(legacyContext.api.selectedSource());legacyContext.api.renderDeobfuscationReport(legacyContext.api.selectedSource());
+  assert.match(elements.deobfuscationReport.textContent,/Legacy code-point map/);assert.equal(elements.deobfuscationReport.querySelectorAll('pre').length,0);
+  assert.equal(legacyContext.api.selectedSource().deobfuscation.sourceInspection.byteRanges,false);
+  const nativeArtifact=await ownedArtifact('104',legacyOriginal);nativeArtifact.content=legacyOriginal;const nativePayload=ownedDerivedPayload(nativeArtifact,legacyOriginal,[['1+2','(3)']]);
+  const nativeDOM=sourceReviewDOM(),native=ownedContext({state:{artifacts:[nativeArtifact],selectedArtifactId:'104'},...nativeDOM,location:{protocol:'reb:'},formatByteSize:String,fetch:async()=>Response.json(nativePayload)});
+  await native.api.loadDeobfuscation(native.api.selectedSource());native.api.renderDeobfuscationReport(native.api.selectedSource());
+  assert.match(nativeDOM.elements.deobfuscationReport.textContent,/Unavailable in stored-evidence native mode/);assert.equal(nativeDOM.elements.deobfuscationReport.querySelectorAll('[data-deob-control]').find(node=>node.dataset.deobControl==='reveal').disabled,true);
+  const empty=ownedPayload(nativeArtifact,legacyOriginal);empty.analysis.representation={transformations:[]};
+  const emptyDOM=sourceReviewDOM(),emptyCtx=ownedContext({state:{artifacts:[nativeArtifact],selectedArtifactId:'104'},...emptyDOM,formatByteSize:String,fetch:async()=>Response.json(empty)});
+  await emptyCtx.api.loadDeobfuscation(emptyCtx.api.selectedSource());emptyCtx.api.renderDeobfuscationReport(emptyCtx.api.selectedSource());assert.match(emptyDOM.elements.deobfuscationReport.textContent,/0 reported rewrites/);
+
+  sourceOwnershipReceipt.push({test:'deob_owned_live_range_target_refusal_and_qualified_legacy_map',status:'passed'});
+}
+
 {
   const text='const a = 1;', script={script_id:'mapped',target_id:'page-1',hash:'opaque-mapped-version',language:'JavaScript',length:text.length,source_type:'script',kind:'javascript',start_line:0,start_column:0,content:text};
   for(const mode of ['pretty','derived']) {
@@ -1542,6 +2365,389 @@ if (process.env.REB_SOURCE_OWNERSHIP_BACKEND_URL) {
   sourceOwnershipReceipt.push({test:'real_rust_worker_http_to_sources_admission',status:'passed',artifacts:javascript.length,intrinsicModes:2});
 }
 console.log('PASS Sources pending refresh owners, analyzer identity/hash/maps, worker targets, cursor scope, explicit retry, close/eviction byte bounds, bounded hex, stable editor and keyboard tab handlers (not rendered QA)');
+// Canvas ownership uses the real catalog, reader, renderer and screen transition.
+// Data URLs are inert authored text; no image is decoded by this fixture.
+const canvasOwnershipReceipt=[];
+const canvasText='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAARzQklUCAgICHwIZIgAAAANSURBVHicY/jPwPAfAAUAAf+JmT0dAAAAAElFTkSuQmCC';
+async function canvasArtifact(id,text=canvasText,session='1') {
+  return {...await ownedArtifact(id,text,session),kind:'canvas_data_url',mime_type:'text/plain',
+    capture_origin:'canvas_to_data_url',execution_context_id:'0',creator_event_id:id,sensitive:true};
+}
+function canvasContext(patch={}) {
+  const sourceAssignments=[];
+  class CanvasNode extends TrafficFixtureNode {
+    set src(value){sourceAssignments.push(this);this.setAttribute('src',value);}get src(){return this.getAttribute('src')??'';}
+  }
+  const screen=new TrafficFixtureNode();screen.id='screen-signals';screen.hidden=patch.hidden??false;
+  const navigation=new TrafficFixtureNode();
+  const document={activeElement:null,createElement:tag=>new CanvasNode(tag),
+    querySelector:selector=>selector==='#screen-signals'?screen:navigation,
+    querySelectorAll:selector=>selector==='.screen'?[screen]:[]};
+  const elements=Object.fromEntries(['signalRenderList','signalRenderCount','signalRenderSummary'].map(key=>[key,new TrafficFixtureNode()]));
+  let context, events=[];
+  const canvasEvents=artifacts=>artifacts.map(artifact=>({category:'canvas',type:'api_call',operation:'canvas.toDataURL',payload:Buffer.from('canvas.toDataURL').toString('hex'),
+    session_id:artifact.session_id,process_id:1,frame_id:'1',sequence_number:artifact.creator_event_id,monotonic_time_ns:artifact.creator_event_id}));
+  context=ownedContext({functions:['canvasReadbackName','canvasRenderCaptures','canvasPreview','renderCanvasCapture','renderFingerprintRendering','showScreen'],
+    document,elements,nativeCanvasDrawingMethods:new Set(),nativeCanvasCallLimit:128,
+    integerValue:(event,key)=>BigInt(event[key]),integerText:(event,key)=>String(event[key]),decodePayload:event=>event.operation,
+    textElement:(tag,className,text)=>{const node=new TrafficFixtureNode(tag);node.className=className;node.textContent=text;return node;},
+    signalEventKey:event=>`${event.session_id}:${event.sequence_number}`,matchingSignalProfileFamily:()=>null,
+    renderSignalSurfaceOverview(){},renderFingerprintActivity(){context.api.renderFingerprintRendering(events);},
+    investigationBeforeScreen(){},float32Panel:{cancel(){}},evidenceWorkspace:{sync(){},setVisible(){}},
+    ...patch,state:{signalView:'rendering',canvasImageCaptureEnabled:true,canvasRenderCaptures:[],...patch.state}});
+  return {...context,screen,elements,sourceAssignments,events(artifacts){events=canvasEvents(artifacts);},render(){context.api.renderFingerprintRendering(events);}};
+}
+async function canvasSettled(context) {
+  for(let attempt=0;attempt<1000;attempt++) {
+    if(!(context.state.canvasPreviewReads?.size)) return;
+    await new Promise(resolve=>setTimeout(resolve,1));
+  }
+  assert.fail('Canvas fixture did not settle');
+}
+function canvasAccounting(context) {
+  const loaded=context.state.artifacts.filter(value=>value.kind==='canvas_data_url'&&value.content!==undefined);
+  const reserved=[...(context.state.canvasPreviewOwners?.values()??[])].reduce((sum,owner)=>sum+owner.artifact.byte_size*2,0);
+  const textBytes=loaded.reduce((sum,artifact)=>sum+artifact.content.length*2,0);
+  assert(loaded.length<=24);assert(reserved<=8*1024*1024);assert(textBytes<=reserved);
+  assert((context.state.canvasPreviewOwners?.size??0)<=24);assert((context.state.canvasPreviewReads?.size??0)<=2);
+  return {loaded:loaded.length,reservedUTF16Bytes:reserved,retainedUTF16Bytes:textBytes};
+}
+{
+  const original=await canvasArtifact('1');let catalog=[],reads=0;
+  const context=canvasContext({hidden:true,fetch:async url=>url.startsWith('/api/artifacts?')
+    ? Response.json({count:catalog.length,artifacts:catalog}) : (reads++,new Response(canvasText))});
+  for(let total=24;total<=480;total+=24) {
+    catalog=Array.from({length:total},(_,index)=>({...original,artifact_id:String(index+1),creator_event_id:String(index+1)}));
+    await context.api.refreshArtifacts();assert.equal(context.state.artifactReceiverError,null);canvasAccounting(context);
+  }
+  assert.equal(reads,0);assert.equal(context.state.artifacts.length,480);
+  await context.api.loadArtifactContent(context.state.artifacts[0]);assert.equal(reads,0,'Generic selected-source loads cannot bypass Canvas ownership');
+  canvasOwnershipReceipt.push({test:'20_hidden_catalogs_480_descriptors',status:'passed',contentReads:reads,...canvasAccounting(context)});
+}
+{
+  const original=await canvasArtifact('1');let catalog=[],reads=0,maxReads=0,maxLoaded=0,rawReservations=0,maxRawReservations=0;
+  const context=canvasContext({fetch:async url=>url.startsWith('/api/artifacts?')
+    ? Response.json({count:catalog.length,artifacts:catalog}) : (reads++,new Response(canvasText))});
+  context.sandbox.sourceFactsReadBytes=async(...args)=>{
+    maxReads=Math.max(maxReads,context.state.canvasPreviewReads.size);canvasAccounting(context);
+    rawReservations+=args[1];maxRawReservations=Math.max(maxRawReservations,rawReservations);assert(rawReservations<=4*1024*1024);
+    try{return await sourceFactsUI.sourceFactsReadBytes(...args);}finally{rawReservations-=args[1];}
+  };
+  for(let total=24;total<=480;total+=24) {
+    catalog=Array.from({length:total},(_,index)=>({...original,artifact_id:String(index+1),creator_event_id:String(index+1)}));
+    context.events(catalog);await context.api.refreshArtifacts();await canvasSettled(context);
+    assert.equal(context.state.artifactReceiverError,null);maxLoaded=Math.max(maxLoaded,canvasAccounting(context).loaded);
+  }
+  assert.equal(reads,480);assert.equal(maxReads,2);assert.equal(maxLoaded,24);
+  const retained=context.state.artifacts.filter(artifact=>artifact.content!==undefined);
+  assert.equal(retained[0].artifact_id,'457');assert.equal(context.elements.signalRenderList.querySelectorAll('img').length,24);
+  for(let refresh=0;refresh<20;refresh++)context.render();await canvasSettled(context);assert.equal(reads,480,'Stable gallery must not churn');
+  const detached=[...context.elements.signalRenderList.querySelectorAll('img')];assert(detached.every(image=>image.src===canvasText));
+  context.state.signalView='activity';context.render();assert.equal(context.elements.signalRenderList.children.length,0);
+  assert(detached.every(image=>!image.getAttribute('src')));assert.equal(canvasAccounting(context).loaded,0);
+  context.state.signalView='rendering';context.events(context.state.artifacts.slice(0,3));context.render();await canvasSettled(context);
+  assert.equal(canvasAccounting(context).loaded,3);assert(context.state.artifacts.slice(0,3).every(artifact=>artifact.content===canvasText));
+  context.api.showScreen('other',{classList:{contains:()=>true}});assert.equal(canvasAccounting(context).loaded,0);
+  assert.equal(context.elements.signalRenderList.children.length,0);assert.equal(context.state.artifacts.length,480);
+  canvasOwnershipReceipt.push({test:'visible_growth_rollover_stable_scope_activity_navigation',status:'passed',maxReads,maxRawReadBufferReservations:maxRawReservations,maxRetained:maxLoaded,retainedDescriptors:480,afterNavigation:canvasAccounting(context)});
+}
+{
+  const large='data:image/png;base64,'+'A'.repeat(2097152-'data:image/png;base64,'.length),original=await canvasArtifact('1',large);let reads=0;
+  const artifacts=Array.from({length:24},(_,index)=>({...original,artifact_id:String(index+1),creator_event_id:String(index+1)}));
+  const context=canvasContext({state:{artifacts},fetch:async()=>{reads++;return new Response(large);}});
+  context.events(artifacts);context.render();await canvasSettled(context);
+  assert.equal(reads,2);assert.equal(canvasAccounting(context).loaded,2);
+  assert.equal(context.state.canvasPreviewOwners.size,2);assert.equal(artifacts.filter(value=>/8 MiB/.test(value.canvasPreviewNotice)).length,22);
+  for(let refresh=0;refresh<30;refresh++)context.render();await canvasSettled(context);assert.equal(reads,2);
+  canvasOwnershipReceipt.push({test:'aggregate_reservations_stop_byte_budget_reload_churn',status:'passed',contentReads:reads,...canvasAccounting(context)});
+}
+{
+  const old=await canvasArtifact('1'),other=await canvasArtifact('2'),replacement=await canvasArtifact('1',canvasText,'2');
+  const held=[],signals=[];let catalog=[old,other],reads=0,cancelled=0,lateBodyReads=0;
+  const context=canvasContext({fetch:async(url,options)=>{
+    if(url.startsWith('/api/artifacts?'))return Response.json({count:catalog.length,artifacts:catalog});
+    reads++;signals.push(options.signal);const pending=ownedDeferred();held.push(pending);return pending.promise;
+  }});
+  context.events(catalog);await context.api.refreshArtifacts();assert.equal(reads,2);const stale=[...context.state.artifacts];
+  context.events([replacement]);catalog=[replacement];await context.api.refreshArtifacts();
+  assert(signals.every(signal=>signal.aborted));assert.equal(reads,2,'Retired noncooperative reads still occupy the two slots');
+  assert.equal(context.elements.signalRenderList.querySelectorAll('img').length,0);
+  held[0].resolve({ok:true,body:{cancel:async()=>{cancelled++;},getReader(){lateBodyReads++;throw Error('Stale body read');}}});
+  held[1].resolve({ok:true,body:{cancel:async()=>{cancelled++;},getReader(){lateBodyReads++;throw Error('Stale body read');}}});
+  for(let attempt=0;attempt<100&&reads<3;attempt++)await new Promise(resolve=>setTimeout(resolve,1));
+  assert.equal(reads,3);assert.equal(cancelled,2);assert.equal(lateBodyReads,0);assert(stale.every(artifact=>artifact.content===undefined));
+  held[2].resolve(new Response(canvasText));await canvasSettled(context);assert.equal(context.state.artifacts[0].session_id,'2');
+  assert.equal(context.state.artifacts[0].content,canvasText);
+  canvasOwnershipReceipt.push({test:'catalog_session_replacement_late_headers_keep_read_credit',status:'passed',staleBodyReads:lateBodyReads,cancelledResponses:cancelled,...canvasAccounting(context)});
+}
+{
+  const artifact=await canvasArtifact('1');let status=200,reads=0,failContent=true;
+  const context=canvasContext({fetch:async url=>url.startsWith('/api/artifacts?')
+    ? new Response(JSON.stringify({count:1,artifacts:[artifact]}),{status,headers:{ETag:'"canvas"'}})
+    : (reads++,new Response(failContent?'wrong bytes':canvasText))});
+  context.events([artifact]);await context.api.refreshArtifacts();await canvasSettled(context);
+  assert.equal(reads,1);assert.match(context.state.artifacts[0].loadError,/byte size/);
+  for(let repeat=0;repeat<3;repeat++)await context.api.refreshArtifacts();await canvasSettled(context);assert.equal(reads,1);
+  failContent=false;context.elements.signalRenderList.querySelector('button').click();await canvasSettled(context);assert.equal(reads,2);
+  const image=context.elements.signalRenderList.querySelector('img');assert(image);
+  status=503;await context.api.refreshArtifacts();assert.equal(context.state.artifactEtag,null);assert.equal(canvasAccounting(context).loaded,0);
+  assert.equal(context.state.artifacts.length,1);assert(!image.getAttribute('src'));assert.match(context.elements.signalRenderList.textContent,/catalog is unavailable/);
+  status=200;await context.api.refreshArtifacts();await canvasSettled(context);assert.equal(reads,3,'An unchanged recovered catalog restores the visible gallery');
+  assert.equal(context.state.artifacts[0].content,canvasText);
+  canvasOwnershipReceipt.push({test:'explicit_retry_catalog_error_cleanup_same_catalog_recovery',status:'passed',contentReads:reads,...canvasAccounting(context)});
+}
+{
+  const source=await ownedArtifact('50');source.content='const a = 1;';
+  const one=await canvasArtifact('1'),two=await canvasArtifact('2');const held=[],signals=[];let reads=0;
+  const context=canvasContext({state:{artifacts:[source,one,two]},fetch:async(url,options)=>{
+    reads++;signals.push(options.signal);
+    if(reads>2)return new Response(canvasText);
+    return new Response(new ReadableStream({start(controller){held.push(controller);},cancel(){}}));
+  }});
+  const sourceKey=context.api.sourceIdentity(source)+'|verified';const result={original_source:'const a = 1;'};
+  context.state.deobfuscationCache.set(sourceKey,result);
+  context.events([one,two]);context.render();await new Promise(resolve=>setImmediate(resolve));assert.equal(reads,2);
+  context.api.showScreen('other',{classList:{contains:()=>true}});await canvasSettled(context);
+  assert(signals.every(signal=>signal.aborted));assert.equal(canvasAccounting(context).loaded,0);
+  assert.equal(source.content,'const a = 1;');assert.equal(context.state.deobfuscationCache.get(sourceKey),result);
+  context.screen.hidden=false;context.render();await canvasSettled(context);assert.equal(reads,4);
+  const detached=[...context.elements.signalRenderList.querySelectorAll('img')];assert.equal(detached.length,2);
+  context.events([]);context.render();assert.equal(canvasAccounting(context).loaded,0);assert(detached.every(image=>!image.src));
+  assert.match(context.elements.signalRenderList.textContent,/No Canvas readback/);
+  canvasOwnershipReceipt.push({test:'body_abort_reopen_empty_scope_preserves_source_analysis',status:'passed',abortedReads:2,contentReads:reads,...canvasAccounting(context)});
+}
+{
+  const artifacts=await Promise.all(['1','2','3'].map(id=>canvasArtifact(id)));const held=[],timers=new Map();let sequence=0,reads=0,cancelled=0;
+  const context=canvasContext({state:{artifacts},
+    setTimeout(callback,delay){const id=++sequence;timers.set(id,{callback,delay});return id;},clearTimeout(id){timers.delete(id);},
+    fetch:async()=>{reads++;if(reads>2)return new Response(canvasText);const pending=ownedDeferred();held.push(pending);return pending.promise;}});
+  context.events(artifacts);context.render();assert.equal(reads,2);assert.equal(timers.size,2);
+  for(const timer of [...timers.values()]){assert.equal(timer.delay,10000);timer.callback();}
+  assert.equal(reads,2);assert.equal(context.state.canvasPreviewReads.size,2);
+  assert.equal(artifacts.filter(artifact=>/timed out/.test(artifact.loadError)).length,2);
+  for(const pending of held)pending.resolve({body:{cancel:async()=>{cancelled++;}},ok:true});
+  await canvasSettled(context);assert.equal(cancelled,2);assert.equal(reads,3);assert.equal(canvasAccounting(context).loaded,1);
+  context.render();await canvasSettled(context);assert.equal(reads,3,'Timed-out previews require explicit retry');
+  assert.equal(timers.size,0);
+  canvasOwnershipReceipt.push({test:'deadline_keeps_noncooperative_fetch_credit_and_failed_reason',status:'passed',lateHeadersCancelled:cancelled,contentReads:reads,...canvasAccounting(context)});
+}
+{
+  const oversized={...await canvasArtifact('1'),byte_size:2097153},invalid=await canvasArtifact('2','invalid image'),wrongHash={...await canvasArtifact('3'),sha256:'b'.repeat(64)};
+  const artifacts=[oversized,invalid,wrongHash];let reads=0;
+  const context=canvasContext({state:{artifacts},fetch:async url=>{reads++;return new Response(url.includes('/2/')?'invalid image':canvasText);}});
+  context.events(artifacts);context.render();await canvasSettled(context);assert.equal(reads,2);assert.equal(canvasAccounting(context).loaded,0);
+  assert.match(oversized.canvasPreviewNotice,/2 MiB/);assert.match(invalid.loadError,/image data URL validator/);assert.match(wrongHash.loadError,/SHA-256/);
+  for(let repeat=0;repeat<5;repeat++)context.render();await canvasSettled(context);assert.equal(reads,2);
+  context.sandbox.fetch=async()=>Response.json({count:0,artifacts:[]});await context.api.refreshArtifacts();
+  assert.equal(context.state.artifacts.length,0);assert.equal(context.state.canvasPreviewOwners.size,0);assert.equal(context.elements.signalRenderList.children.length,0);
+  canvasOwnershipReceipt.push({test:'oversize_invalid_hash_admission_and_empty_live_catalog',status:'passed',contentReads:reads,...canvasAccounting(context)});
+}
+// Cancellation itself is an owned operation. A producer may settle a read or
+// return error/stale headers while keeping body/reader cancellation pending.
+for(const boundary of ['error-headers','reader-error']) {
+  const original=await canvasArtifact('1'),artifacts=Array.from({length:24},(_,index)=>({...original,artifact_id:String(index+1),creator_event_id:String(index+1)}));
+  const pending=[];let reads=0,active=0,maximum=0;
+  const context=canvasContext({state:{artifacts},fetch:async()=>{
+    reads++;
+    const cancel=()=>{const held=ownedDeferred();pending.push(held);active++;maximum=Math.max(maximum,active);return held.promise.finally(()=>{active--;});};
+    return boundary==='error-headers'?{ok:false,status:503,body:{cancel}}
+      :{ok:true,headers:new Headers(),body:{getReader:()=>({read:async()=>({done:false,value:'not a byte chunk'}),cancel,releaseLock(){}})}};
+  }});
+  context.events(artifacts);context.render();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(reads,2);assert.equal(active,2);assert.equal(context.state.canvasPreviewReads.size,2);
+  assert.equal(artifacts.filter(artifact=>artifact.loadError).length,2,'Failure is visible without waiting for cancellation');
+  assert.equal(context.elements.signalRenderList.querySelectorAll('button').length,2);
+  for(let repeat=0;repeat<10;repeat++)context.render();await new Promise(resolve=>setImmediate(resolve));assert.equal(reads,2);
+  for(let wave=0;wave<24;wave++) {
+    pending.splice(0).forEach((held,index)=>held.resolve(index%2?Promise.reject(new Error('Cancellation rejected')):undefined));
+    await new Promise(resolve=>setImmediate(resolve));assert(active<=2);canvasAccounting(context);
+    if(reads===24&&active===0&&context.state.canvasPreviewReads.size===0)break;
+  }
+  assert.equal(reads,24);assert.equal(active,0);assert.equal(context.state.canvasPreviewReads.size,0);assert.equal(maximum,2);
+  context.render();await canvasSettled(context);assert.equal(reads,24,'Failed owners cannot cause cancellation/retry churn');
+  canvasOwnershipReceipt.push({test:`${boundary}_credit_includes_pending_and_rejected_cancellation`,status:'passed',fetchesBeforeCancellationSettlement:2,maxPendingCancellations:maximum,contentReads:reads});
+}
+for(const boundary of ['stale-headers','reader-abort']) {
+  const old=await Promise.all(['1','2'].map(id=>canvasArtifact(id))),newer=await Promise.all(['1','2'].map(id=>canvasArtifact(id,canvasText,'2')));
+  const headers=[],bodyReads=[],cancellations=[];let reads=0,cancelled=0;
+  const context=canvasContext({state:{artifacts:old},fetch:async()=>{
+    reads++;if(reads>2)return new Response(canvasText);
+    const cancel=()=>{cancelled++;const held=ownedDeferred();cancellations.push(held);return held.promise;};
+    if(boundary==='stale-headers'){const held=ownedDeferred();headers.push({held,response:{ok:true,body:{cancel}}});return held.promise;}
+    const held=ownedDeferred();bodyReads.push(held);
+    return {ok:true,headers:new Headers(),body:{getReader:()=>({read:()=>held.promise,cancel,releaseLock(){}})}};
+  }});
+  context.events(old);context.render();await new Promise(resolve=>setImmediate(resolve));assert.equal(reads,2);
+  context.api.showScreen('other',{classList:{contains:()=>true}});
+  context.state.artifacts=newer;context.events(newer);context.screen.hidden=false;context.render();
+  for(const {held,response} of headers)held.resolve(response);
+  for(const held of bodyReads)held.resolve({done:true});
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(cancelled,2);assert.equal(reads,2);assert.equal(context.state.canvasPreviewReads.size,2);
+  for(let repeat=0;repeat<10;repeat++){context.api.showScreen('other',{classList:{contains:()=>true}});context.screen.hidden=false;context.render();}
+  assert.equal(reads,2);assert(old.every(artifact=>artifact.content===undefined));assert(newer.every(artifact=>artifact.content===undefined));
+  cancellations.forEach(held=>held.resolve());await canvasSettled(context);assert.equal(reads,4);
+  assert(newer.every(artifact=>artifact.content===canvasText));assert(old.every(artifact=>artifact.content===undefined));
+  canvasOwnershipReceipt.push({test:`${boundary}_holds_cancellation_credit_across_replacement_and_reopen`,status:'passed',fetchesBeforeCancellationSettlement:2,retiredOwners:2,contentReads:reads,...canvasAccounting(context)});
+}
+{
+  const artifact=await canvasArtifact('1'),held=ownedDeferred();let reads=0;
+  const context=canvasContext({state:{artifacts:[artifact]},fetch:async()=>++reads===1?{ok:false,status:503,body:{cancel:()=>held.promise}}:new Response(canvasText)});
+  context.events([artifact]);context.render();await new Promise(resolve=>setImmediate(resolve));assert.match(artifact.loadError,/503/);
+  context.elements.signalRenderList.querySelector('button').click();await new Promise(resolve=>setImmediate(resolve));assert.equal(reads,1);
+  assert.equal(context.state.canvasPreviewReads.size,1);held.resolve();await canvasSettled(context);
+  assert.equal(reads,2);assert.equal(artifact.content,canvasText);assert.equal(artifact.loadError,null);
+  canvasOwnershipReceipt.push({test:'explicit_retry_waits_for_prior_cancellation_credit',status:'passed',contentReads:reads,...canvasAccounting(context)});
+}
+{
+  const artifact=await ownedArtifact('1'),held=ownedDeferred();let cancelled=0;
+  const context=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'1'},fetch:async()=>({ok:false,status:503,body:{cancel(){cancelled++;return held.promise;}}})});
+  await context.api.loadArtifactContent(artifact);assert.equal(cancelled,1);assert.match(artifact.loadError,/503/);
+  assert.equal(artifact.loading,false);assert.equal(context.state.canvasPreviewReads,undefined);held.resolve();
+  canvasOwnershipReceipt.push({test:'non_canvas_sources_keep_nonblocking_cancellation_behavior',status:'passed'});
+}
+{
+  const artifact=await canvasArtifact('1'),cleanup=ownedDeferred(),newHeaders=ownedDeferred();let reads=0;
+  const context=canvasContext({state:{artifacts:[artifact]},fetch:async()=>++reads===1?{ok:false,status:503,body:{cancel:()=>cleanup.promise}}:newHeaders.promise});
+  context.events([artifact]);context.render();await new Promise(resolve=>setImmediate(resolve));
+  context.api.showScreen('other',{classList:{contains:()=>true}});context.screen.hidden=false;context.render();
+  context.elements.signalRenderList.querySelector('button').click();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(reads,2);assert.equal(context.state.canvasPreviewReads.size,2);const controller=artifact.controller;
+  assert(controller&&!controller.signal.aborted);cleanup.resolve();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(artifact.controller,controller);assert.equal(artifact.loading,true);assert.equal(artifact.loadError,null);
+  newHeaders.resolve(new Response(canvasText));await canvasSettled(context);assert.equal(artifact.content,canvasText);assert.equal(artifact.loadError,null);
+  canvasOwnershipReceipt.push({test:'retired_cancellation_cannot_clear_reopened_same_artifact_owner',status:'passed',contentReads:reads,...canvasAccounting(context)});
+}
+{
+  const artifact=await canvasArtifact('1'),cleanup=ownedDeferred();let renders=0,settled=false;
+  const context=canvasContext({state:{artifacts:[artifact]},renderFingerprintActivity(){renders++;throw new Error('Fixture render failed');},
+    fetch:async()=>({ok:false,status:503,body:{cancel:()=>cleanup.promise}})});
+  const owner={artifact,identity:context.api.sourceIdentity(artifact)};context.state.canvasPreviewOwners=new Map([[owner.identity,owner]]);
+  const result=context.api.loadArtifactContent(artifact,{canvasOwner:owner}).then(()=>{settled=true;return null;},error=>{settled=true;return error;});
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(renders,1);assert.equal(settled,false,'A render exception cannot skip owned cancellation settlement');
+  cleanup.resolve();assert.match((await result).message,/Fixture render failed/);assert.equal(settled,true);assert.match(artifact.loadError,/503/);
+  canvasOwnershipReceipt.push({test:'render_exception_cannot_release_pending_cancellation',status:'passed'});
+}
+// Fixtures only rewrite headers/chunks around a one-pixel PNG. They never
+// inflate data or ask a browser to decode the oversized declared dimensions.
+function canvasPngChunk(type,data=Buffer.alloc(0)) {
+  const bytes=Buffer.concat([Buffer.from(type),data]);let crc=0xffffffff;
+  for(const byte of bytes){crc^=byte;for(let bit=0;bit<8;bit++)crc=(crc>>>1)^((crc&1)?0xedb88320:0);}
+  const chunk=Buffer.alloc(data.length+12);chunk.writeUInt32BE(data.length);bytes.copy(chunk,4);chunk.writeUInt32BE((crc^0xffffffff)>>>0,data.length+8);return chunk;
+}
+function canvasPngFixture({width=1,height=1,depth=8,color=6,compression=0,filter=0,interlace=0,before=[],after=[],idat,tail=Buffer.alloc(0)}={}) {
+  const original=Buffer.from(canvasText.split(',')[1],'base64'),header=Buffer.alloc(13),idatOffset=original.indexOf(Buffer.from('IDAT'));
+  header.writeUInt32BE(width);header.writeUInt32BE(height,4);header.set([depth,color,compression,filter,interlace],8);
+  return Buffer.concat([original.subarray(0,8),canvasPngChunk('IHDR',header),...before,
+    ...(idat??[canvasPngChunk('IDAT',original.subarray(idatOffset+4,idatOffset+4+original.readUInt32BE(idatOffset-4)))]),...after,canvasPngChunk('IEND'),tail]);
+}
+const canvasPngUrl=bytes=>'data:image/png;base64,'+bytes.toString('base64');
+{
+  const inspect=canvasProductionRules.inspectCanvasPng,valid=canvasPngFixture();
+  assert.deepEqual({...inspect(canvasText)},{width:1,height:1,pixels:1});
+  for(const options of [{width:4096,height:1024},{width:1024,height:4096},{width:2048,height:2048},{color:2}]) {
+    const admitted=inspect(canvasPngUrl(canvasPngFixture(options)));assert.equal(admitted.reason,undefined,JSON.stringify(options));
+    assert.equal(admitted.pixels,(options.width??1)*(options.height??1));
+  }
+  const sRGB=canvasPngChunk('sRGB',Buffer.from([0])),sBIT=canvasPngChunk('sBIT',Buffer.from([8,8,8,8])),pHYs=canvasPngChunk('pHYs',Buffer.from([0,0,14,196,0,0,14,196,1]));
+  assert.equal(inspect(canvasPngUrl(canvasPngFixture({before:[sRGB,sBIT,pHYs]}))).reason,undefined);
+  assert.equal(inspect(canvasPngUrl(canvasPngFixture({color:2,before:[canvasPngChunk('sBIT',Buffer.from([8,8,8]))]}))).reason,undefined);
+  const negatives=[
+    ['zero-width',{width:0},/axis/],['zero-height',{height:0},/axis/],['wide',{width:4097},/axis/],['tall',{height:4097},/axis/],
+    ['huge',{width:0xffffffff,height:0xffffffff},/axis/],['pixel-product',{width:2049,height:2048},/4 Mi-pixel/],
+    ['16-bit',{depth:16},/8-bit/],['palette',{color:3},/RGB/],['greyscale',{color:0},/RGB/],
+    ['interlaced',{interlace:1},/non-interlaced/],['compression',{compression:1},/compression/],['filter',{filter:1},/filtering/],
+    ['animation-control',{before:[canvasPngChunk('acTL',Buffer.alloc(8))]},/Animated/],
+    ['animation-frame',{after:[canvasPngChunk('fcTL',Buffer.alloc(26))]},/Animated/],
+    ['animation-data',{after:[canvasPngChunk('fdAT',Buffer.alloc(4))]},/Animated/],
+    ['embedded-profile',{before:[canvasPngChunk('iCCP',Buffer.from('x\0\0'))]},/unsupported/],
+    ['compressed-text',{before:[canvasPngChunk('zTXt')]},/unsupported/],['unknown-critical',{before:[canvasPngChunk('ABCD')]},/unsupported/],
+    ['palette-chunk',{before:[canvasPngChunk('PLTE',Buffer.alloc(3))]},/unsupported/],
+    ['duplicate-header',{before:[valid.subarray(8,33)]},/duplicate/],['empty-idat',{idat:[canvasPngChunk('IDAT')]},/incomplete/],
+    ['missing-idat',{idat:[]},/incomplete/],['trailing-byte',{tail:Buffer.from([0])},/trailing/],
+    ['duplicate-end',{tail:canvasPngChunk('IEND')},/trailing/],['early-end',{before:[canvasPngChunk('IEND')]},/incomplete/],
+    ['sbit-length',{before:[canvasPngChunk('sBIT',Buffer.from([8,8,8]))]},/metadata/],['sbit-zero',{before:[canvasPngChunk('sBIT',Buffer.from([0,8,8,8]))]},/metadata/],
+    ['sbit-large',{before:[canvasPngChunk('sBIT',Buffer.from([9,8,8,8]))]},/metadata/],['sbit-duplicate',{before:[sBIT,sBIT]},/duplicated/],
+    ['srgb-length',{before:[canvasPngChunk('sRGB')]},/metadata/],['srgb-value',{before:[canvasPngChunk('sRGB',Buffer.from([4]))]},/metadata/],
+    ['phys-length',{before:[canvasPngChunk('pHYs')]},/metadata/],['phys-unit',{before:[canvasPngChunk('pHYs',Buffer.from([0,0,0,0,0,0,0,0,2]))]},/metadata/],
+    ['duplicate-metadata',{before:[sRGB,sRGB]},/duplicated/],['nonconsecutive-idat',{idat:[canvasPngChunk('IDAT',Buffer.from([1])),sRGB,canvasPngChunk('IDAT',Buffer.from([2]))]},/follows/],
+    ['reserved-bit',{before:[canvasPngChunk('abca')]},/type/],['nonletter',{before:[canvasPngChunk('ab1D')]},/type/],
+    ['chunk-count',{idat:Array.from({length:255},()=>canvasPngChunk('IDAT',Buffer.from([1])))},/256-chunk/],
+  ];
+  for(const [name,options,reason] of negatives)assert.match(inspect(canvasPngUrl(canvasPngFixture(options))).reason,reason,name);
+  for(const index of [12,20,32,45,57,69]){const broken=Buffer.from(valid);broken[index]^=1;assert(inspect(canvasPngUrl(broken)).reason,`CRC/type mutation ${index}`);}
+  for(let length=0;length<valid.length;length++)assert(inspect(canvasPngUrl(valid.subarray(0,length))).reason,`truncated ${length}`);
+  const hugeLength=Buffer.from(valid);hugeLength.writeUInt32BE(0xffffffff,8);assert.match(inspect(canvasPngUrl(hugeLength)).reason,/length/);
+  const nonHeader=Buffer.concat([valid.subarray(0,8),canvasPngChunk('IDAT',Buffer.from([1]))]);assert.match(inspect(canvasPngUrl(nonHeader)).reason,/IHDR/);
+  const canonical=canvasPngUrl(valid);
+  for(const text of [canonical+'\n',canonical.replace('base64,','base64, '),canonical.replace(/==$/,'='),canonical.replace(/==$/,'A==='),canonical.replace('ggg==','ggh==')])assert(inspect(text).reason,'Malformed/noncanonical base64');
+  for(const mime of ['jpeg','webp','gif','svg+xml','avif','apng'])assert.match(inspect(canvasText.replace('image/png',`image/${mime}`)).reason,/only static PNG/);
+  canvasOwnershipReceipt.push({test:'bounded_png_header_crc_chunk_profile_and_base64_negatives',status:'passed',negativeProfiles:negatives.length,truncatedBoundaries:valid.length,noInflation:true});
+}
+{
+  const fixtures=[
+    ['oversized',canvasPngUrl(canvasPngFixture({width:100000,height:100000})),/4096-pixel/],
+    ['pixels',canvasPngUrl(canvasPngFixture({width:4096,height:4096})),/4 Mi-pixel/],
+    ['animated',canvasPngUrl(canvasPngFixture({after:[canvasPngChunk('acTL',Buffer.alloc(8))]})),/Animated/],
+    ['profile',canvasPngUrl(canvasPngFixture({before:[canvasPngChunk('iCCP')]})),/unsupported/],
+    ...['jpeg','webp','gif','svg+xml','avif','apng'].map(mime=>[mime,canvasText.replace('image/png',`image/${mime}`),/only static PNG/]),
+  ];
+  for(const [name,text,reason] of fixtures) {
+    const artifact=await canvasArtifact('1',text);let reads=0;
+    const c=canvasContext({state:{artifacts:[artifact]},fetch:async()=>{reads++;return new Response(text);}});
+    c.events([artifact]);c.render();await canvasSettled(c);
+    assert.equal(c.elements.signalRenderList.querySelectorAll('img').length,0,name);assert.equal(c.sourceAssignments.length,0,name);
+    assert.match(c.elements.signalRenderList.textContent,reason,name);assert.equal(artifact.content,text,'Retained exact bytes are unchanged');
+    assert.match(c.elements.signalRenderList.textContent,/Sensitive Canvas output was captured locally/,'Unsupported preview does not erase capture provenance');
+    for(let refresh=0;refresh<20;refresh++)c.render();await canvasSettled(c);assert.equal(reads,1,'No refusal/refetch churn');
+    c.api.showScreen('other',{classList:{contains:()=>true}});assert.equal(artifact.content,undefined);
+  }
+  canvasOwnershipReceipt.push({test:'unsupported_and_oversized_never_assign_src_original_bytes_preserved',status:'passed',cases:fixtures.length});
+}
+{
+  const text=canvasPngUrl(canvasPngFixture({width:2048,height:2048}));
+  const artifacts=await Promise.all(Array.from({length:6},(_,i)=>canvasArtifact(String(i+1),text)));
+  const c=canvasContext({state:{artifacts},fetch:async()=>new Response(text)});let maxPixels=0;
+  c.sandbox.document.createElement=(original=>tag=>{
+    const node=original(tag);if(tag==='img')Object.defineProperty(node,'src',{set(value){
+      const owner=[...c.state.canvasPreviewOwners.values()].find(owner=>owner.image===node);assert(owner?.mounted&&owner.imageInfo);
+      const active=c.sourceAssignments.filter(image=>image.getAttribute('src')).length;maxPixels=Math.max(maxPixels,(active+1)*4*1024*1024);assert(maxPixels<=16*1024*1024);
+      c.sourceAssignments.push(node);node.setAttribute('src',value);
+    },get(){return node.getAttribute('src')??'';}});return node;
+  })(c.sandbox.document.createElement);
+  c.events(artifacts);c.render();await canvasSettled(c);
+  assert.equal(c.elements.signalRenderList.querySelectorAll('img').length,4);assert.equal(maxPixels,16*1024*1024);
+  assert.deepEqual([...c.state.canvasPreviewOwners.values()].filter(owner=>owner.mounted).map(owner=>owner.artifact.artifact_id),['6','5','4','3']);
+  assert.match(c.elements.signalRenderList.textContent,/16 Mi-pixel/);
+  const oldImages=[...c.elements.signalRenderList.querySelectorAll('img')];
+  for(let i=0;i<10;i++)c.render();assert(oldImages.every(image=>!image.src));assert.equal(c.elements.signalRenderList.querySelectorAll('img').length,4);
+  c.events(artifacts.slice(0,2));c.render();assert.equal(c.elements.signalRenderList.querySelectorAll('img').length,2);
+  assert(artifacts.slice(2).every(artifact=>artifact.content===undefined));
+  c.state.signalView='activity';c.render();assert(c.sourceAssignments.every(image=>!image.src));
+  canvasOwnershipReceipt.push({test:'aggregate_newest_priority_never_overlaps_old_and_new_sources',status:'passed',maxMountedDeclaredPixels:maxPixels});
+}
+{
+  const artifact=await canvasArtifact('1'),c=canvasContext({state:{artifacts:[artifact]},fetch:async()=>new Response(canvasText)});
+  c.events([artifact]);c.render();await canvasSettled(c);
+  assert.match(c.elements.signalRenderList.textContent,/Sensitive Canvas output was captured locally/);
+  const oldImage=c.elements.signalRenderList.querySelector('img'),owner=c.state.canvasPreviewOwners.values().next().value;
+  c.render();const currentImage=c.elements.signalRenderList.querySelector('img');
+  for(const fail of oldImage.listeners.get('error'))fail();assert.equal(owner.imageError,undefined,'Detached error cannot poison current render');
+  for(const fail of currentImage.listeners.get('error'))fail();assert.match(owner.imageError,/could not decode/);
+  assert.equal(c.elements.signalRenderList.querySelectorAll('img').length,0);assert.equal(artifact.content,canvasText);
+  for(let i=0;i<5;i++)c.render();assert.equal(c.elements.signalRenderList.querySelectorAll('img').length,0);
+  c.api.showScreen('other',{classList:{contains:()=>true}});c.screen.hidden=false;c.render();await canvasSettled(c);
+  const replacement=c.state.canvasPreviewOwners.values().next().value;assert.notEqual(replacement,owner);assert(replacement.image);
+  for(const fail of currentImage.listeners.get('error'))fail();assert.equal(replacement.imageError,undefined,'Old owner error cannot poison reopened owner');
+  const forged=c.api.canvasPreview({artifact:{...artifact},dataUrl:canvasText,calls:[],demo:false},'forged','forged',true);
+  assert.equal(forged.querySelectorAll('img').length,0,'Copied descriptors cannot reuse owner admission');
+  const absent=canvasContext();absent.events([artifact]);absent.render();assert.match(absent.elements.signalRenderList.textContent,/Operation metadata remains available/);
+  canvasOwnershipReceipt.push({test:'decoder_error_visible_retained_bytes_stale_dom_and_owner_events_ignored',status:'passed'});
+}
+console.log('PASS Canvas PNG admission before img.src: declared axes/per-image/gallery pixels, narrow static RGB/RGBA8 profile, CRC/chunk/base64 validation, no inflation, exact owners and stale decoder-error protection (not decoder-memory or rendered QA)');
+
+console.log('PASS Canvas gallery ownership: hidden/visible 480-entry growth, 24 owners / 8 MiB UTF-16 reservations, two unsettled reads, no churn, scope/navigation/DOM cleanup, session replacement, stale headers and explicit retry (no image decoding or RSS claim)');
+if(process.env.REB_CANVAS_OWNERSHIP_RECEIPT)await writeFile(process.env.REB_CANVAS_OWNERSHIP_RECEIPT,JSON.stringify({scope:'Production-function and DOM ownership accounting, not image decoding or process RSS',results:canvasOwnershipReceipt},null,2));
+
 if (process.env.REB_SOURCE_OWNERSHIP_RECEIPT) await writeFile(process.env.REB_SOURCE_OWNERSHIP_RECEIPT, JSON.stringify({scope:'Production-function and DOM fixtures; not rendered acceptance',results:sourceOwnershipReceipt},null,2));
 
 // The decoded-field handoff must never silently rebind a chain to edited input
@@ -1663,6 +2869,149 @@ function trafficDevtoolsAddress(text) {
   if (!match || Number(match[1]) > 65535) return null;
   return `ws://127.0.0.1:${match[1]}${match[2]}`;
 }
+
+// Browser.downloadProgress is the completion boundary. A final filename can be
+// reserved before bytes are written, without any visible .crdownload sibling.
+// One explicit download is allowed per QA run; late events can never own a retry.
+function trafficBrowserDownloadObserver({timeoutMs=5000,setTimer=setTimeout,clearTimer=clearTimeout}={}) {
+  let active=null,used=false,closed=false;
+  const events=[];
+  const finish=(error,value)=>{
+    if(!active)return;
+    const owner=active;active=null;clearTimer(owner.timer);
+    if(error)owner.reject(error);else owner.resolve(value);
+  };
+  return {
+    arm(frameId,filename) {
+      assert(!closed&&!used,'Browser download observer is closed or already used');
+      assert(typeof frameId==='string'&&frameId.length>0&&frameId.length<=256,'A verified download frame is required');
+      assert(typeof filename==='string'&&filename.length>0&&filename.length<=256,'A bounded expected download filename is required');
+      used=true;
+      const completion=new Promise((resolve,reject)=>{active={frameId,filename,guid:null,resolve,reject,timer:null};});
+      // Events, timeout, or socket failure can precede the caller awaiting it.
+      completion.catch(()=>{});
+      active.timer=setTimer(()=>finish(new Error('Browser download did not complete before its deadline')),timeoutMs);
+      return {completion,cancel:()=>finish(new Error('Browser download observation cancelled'))};
+    },
+    observe(message) {
+      if(!active||!['Browser.downloadWillBegin','Browser.downloadProgress'].includes(message.method))return;
+      const p=message.params??{};
+      if(typeof p.guid!=='string'||!p.guid.length||p.guid.length>128){finish(new Error('Invalid browser download GUID'));return;}
+      const event={method:message.method,guid:p.guid,state:typeof p.state==='string'?p.state.slice(0,32):null,
+        frameId:typeof p.frameId==='string'?p.frameId.slice(0,256):null,filename:typeof p.suggestedFilename==='string'?p.suggestedFilename.slice(0,256):null,
+        receivedBytes:Number.isFinite(p.receivedBytes)?p.receivedBytes:null,totalBytes:Number.isFinite(p.totalBytes)?p.totalBytes:null};
+      events.push(event);if(events.length>32)events.shift();
+      if(message.method==='Browser.downloadWillBegin') {
+        if(p.frameId!==active.frameId||p.suggestedFilename!==active.filename){finish(new Error('Unexpected browser download frame or filename'));return;}
+        if(active.guid!==null){finish(new Error('More than one browser download began'));return;}
+        active.guid=p.guid;return;
+      }
+      // An unrelated or pre-begin progress event cannot complete this download.
+      if(p.guid!==active.guid)return;
+      if(p.state==='canceled'){finish(new Error('Browser download was canceled'));return;}
+      if(!['inProgress','completed'].includes(p.state)){finish(new Error('Invalid browser download state'));return;}
+      if(p.state==='completed')finish(null,{guid:active.guid,frameId:active.frameId,filename:active.filename,state:p.state});
+    },
+    close(reason='Browser QA cleanup') {closed=true;finish(new Error(reason));},
+    receipts:()=>events.map(event=>({...event}))
+  };
+}
+
+async function verifyTrafficBrowserDownload({observer,frameId,directory,expectedBytes,trigger}) {
+  const filename='selected.reb-evidence.json';
+  assert.deepEqual(await readdir(directory),[],'Validation must not automatically save a file');
+  const receipt=observer.arm(frameId,filename);
+  try {
+    const [,completed]=await Promise.all([Promise.resolve().then(trigger),receipt.completion]);
+    // Never poll for matching bytes: completed-but-empty, partial or corrupt
+    // output must fail the same exact-byte assertion as any other bad download.
+    const saved=await readFile(join(directory,filename));
+    assert.deepEqual(new Uint8Array(saved),expectedBytes,'Browser download must preserve exact validated bytes');
+    assert.deepEqual(await readdir(directory),[filename]);
+    return completed;
+  } finally {receipt.cancel();}
+}
+
+// Synthetic CDP events and real temporary files exercise the exact verifier.
+// They are not a rendered-browser or native-download acceptance result.
+const downloadTestRoot=await mkdtemp(join(tmpdir(),'reb-download-check-'));
+try {
+  const bytes=new Uint8Array([123,34,111,107,34,58,116,114,117,101,125]);
+  const filename='selected.reb-evidence.json',frameId='download-frame';
+  const begin=(guid='owned',frame=frameId,name=filename)=>({method:'Browser.downloadWillBegin',params:{guid,frameId:frame,suggestedFilename:name}});
+  const progress=(state,guid='owned')=>({method:'Browser.downloadProgress',params:{guid,state,receivedBytes:bytes.length,totalBytes:bytes.length}});
+  const setup=async label=>{
+    const directory=join(downloadTestRoot,label);await mkdir(directory);
+    const timers=new Map();let nextTimer=0;
+    const observer=trafficBrowserDownloadObserver({setTimer:(callback,delay)=>{assert.equal(delay,5000);timers.set(++nextTimer,callback);return nextTimer;},clearTimer:id=>timers.delete(id)});
+    return {directory,observer,timers,path:join(directory,filename),timeout(){for(const callback of [...timers.values()])callback();}};
+  };
+  {
+    const t=await setup('reserved-final');let entered;
+    const ready=new Promise(resolve=>{entered=resolve;});let settled=false;
+    const pending=verifyTrafficBrowserDownload({...t,frameId,expectedBytes:bytes,trigger:async()=>{
+      t.observer.observe(begin());await writeFile(t.path,new Uint8Array());entered();
+    }});
+    pending.then(()=>{settled=true;},()=>{settled=true;});await ready;await new Promise(resolve=>setImmediate(resolve));
+    const premature=await readFile(t.path);
+    assert.equal((await readdir(t.directory)).every(name=>!name.endsWith('.crdownload')),true,'The old readiness heuristic accepts the reserved final name');
+    assert.equal(premature.length,0);assert.notDeepEqual(new Uint8Array(premature),bytes,'The old read reproduces a false corrupt-download failure');
+    assert.equal(settled,false,'File existence must not finish the actual verifier');
+    t.observer.observe(progress('completed','foreign'));await Promise.resolve();assert.equal(settled,false,'A foreign GUID cannot release file verification');
+    await writeFile(t.path,bytes);t.observer.observe(progress('completed'));
+    assert.equal((await pending).guid,'owned');assert.equal(t.timers.size,0);
+  }
+  {
+    const t=await setup('early-terminal');
+    const completed=await verifyTrafficBrowserDownload({...t,frameId,expectedBytes:bytes,trigger:async()=>{
+      await writeFile(t.path,bytes);t.observer.observe(begin());t.observer.observe(progress('completed'));
+      await Promise.resolve(); // Terminal event arrives before trigger acknowledgement.
+    }});
+    assert.equal(completed.state,'completed');assert.equal(t.timers.size,0);
+  }
+  for(const mode of ['canceled','wrong-guid','wrong-frame','wrong-name','duplicate-begin','timeout','close','trigger-error','corrupt','partial','empty','extra-file','missing-file']) {
+    const t=await setup(mode);
+    const pending=verifyTrafficBrowserDownload({...t,frameId,expectedBytes:bytes,trigger:async()=>{
+      if(mode==='trigger-error')throw new Error('Synthetic click failure');
+      if(mode!=='missing-file')await writeFile(t.path,mode==='empty'?new Uint8Array():mode==='corrupt'?new Uint8Array(bytes.length):mode==='partial'?bytes.slice(0,3):bytes);
+      if(mode==='extra-file')await writeFile(join(t.directory,'unexpected.json'),bytes);
+      t.observer.observe(begin('owned',mode==='wrong-frame'?'foreign-frame':frameId,mode==='wrong-name'?'other.json':filename));
+      if(mode==='duplicate-begin')t.observer.observe(begin('other'));
+      else if(mode==='canceled')t.observer.observe(progress('canceled'));
+      else if(mode==='close')t.observer.close('Synthetic socket closed');
+      else if(mode==='timeout'||mode==='wrong-guid'){
+        if(mode==='wrong-guid')t.observer.observe(progress('completed','foreign'));
+        t.timeout();t.observer.observe(progress('completed')); // Late success cannot undo failure.
+      } else t.observer.observe(progress('completed'));
+    }});
+    await assert.rejects(pending,error=>{
+      const expected=mode==='canceled'?/was canceled/:mode==='timeout'||mode==='wrong-guid'?/deadline/:mode==='close'?/socket closed/:mode==='trigger-error'?/click failure/:mode==='wrong-frame'||mode==='wrong-name'?/frame or filename/:mode==='duplicate-begin'?/More than one/:mode==='missing-file'?/ENOENT/:mode==='extra-file'?/Expected values/:/exact validated bytes/;
+      assert.match(error.message,expected,mode);return true;
+    });
+    assert.equal(t.timers.size,0,mode+': completion observer must release its timer');
+    assert.throws(()=>t.observer.arm(frameId,filename),/closed or already used/,'Late events cannot be assigned to a retried owner');
+    t.observer.close();
+  }
+  {
+    const t=await setup('unsolicited-file');let triggered=false;
+    await writeFile(t.path,bytes);
+    await assert.rejects(verifyTrafficBrowserDownload({...t,frameId,expectedBytes:bytes,trigger:()=>{triggered=true;}}),/must not automatically save/);
+    assert.equal(triggered,false);assert.equal(t.timers.size,0);t.observer.close();
+  }
+  {
+    const t=await setup('before-wait-registration'),receipt=t.observer.arm(frameId,filename);
+    t.observer.observe(begin());t.observer.observe(progress('completed'));
+    assert.equal((await receipt.completion).guid,'owned','A terminal event before awaiting must remain available');
+    assert.equal(t.timers.size,0);t.observer.close();
+  }
+  {
+    const t=await setup('bounded-events'),receipt=t.observer.arm(frameId,filename);
+    t.observer.observe(begin());
+    for(let n=0;n<1000;n++)t.observer.observe(progress('inProgress','other-'+n));
+    assert.equal(t.observer.receipts().length,32);t.timeout();await assert.rejects(receipt.completion,/deadline/);assert.equal(t.timers.size,0);
+  }
+  console.log('PASS exact browser-download completion receipt: reserved-file race, early terminal events, matched GUID, cancellation, timeout/late/foreign events, cleanup/bounds, corrupt/empty/missing/extra output (synthetic CDP and filesystem, not rendered QA)');
+} finally {await rm(downloadTestRoot,{recursive:true,force:true});}
 
 function trafficBrowserProcess(executable, args) {
   const grouped = process.platform !== "win32";
@@ -1874,7 +3223,13 @@ async function sourceFactsBrowserFixture() {
       const source=live?{...live.source,source_type:'script'}:artifacts.find(value=>value.artifact_id===url.searchParams.get('artifact_id'));
       if(!source){json(404,{error:'Synthetic source unavailable'});return true;}
       const text=live?live.text:documents.get(source.artifact_id).toString('utf8');
-      const payload=ownedPayload(source,text);payload.analysis.source.sha256=await ownershipHash(text);
+      if(fixture.deobMode==='error'){json(503,{error:'Authored analyzer retry failure'});return true;}
+      const payload=fixture.changedSource&&source.artifact_id===fixture.changedSource?ownedDerivedPayload(source,text,Array.from({length:7},(_,i)=>[`1+${i}`,`(${i+1})`])):ownedPayload(source,text);
+      if(fixture.changedSource&&source.artifact_id===fixture.changedSource){
+        payload.analysis.omissions=['Unsupported runtime behavior remains unresolved.'];
+        payload.analysis.string_tables=Array.from({length:5},(_,i)=>({kind:`table-${i+1}`,offset:0,entry_count:8,encodings:['literal'],decoded_preview:'<script>inert fixture</script>'}));
+      }
+      payload.analysis.source.sha256=await ownershipHash(text);
       payload.analysis.source.lines=text.split('\n').length;
       payload.analysis.assumptions=url.searchParams.get('assume_intrinsics')==='1'?['standard-intrinsics']:[];
       if(fixture.deobMode==='wrong-id')payload.artifact_id='999';
@@ -2003,6 +3358,18 @@ await assert.rejects(waitForSourceOwnershipSettlement(settlementObserver.read,se
 await assert.rejects(waitForSourceOwnershipSettlement(settlementObserver.read,{...observedPending[0],identity:'other-owner'}),/exact receipt/);
 console.log('PASS Sources held-operation terminal receipts: same promise/arguments/receiver, delayed stale-commit refusal, rejection, exact identity and bounded nonsettlement (not rendered QA)');
 
+// macOS uses a native popup for clicked selects; CDP arrow keys do not drive
+// that popup. Use the focused HTML select's keyboard type-ahead instead.
+// Keep real input events and the caller's selected-value assertion on all OSes.
+async function selectOptionByKeyboard(key, label) {
+  for (const letter of label) await key(letter, letter === ' ' ? 'Space' : `Key${letter.toUpperCase()}`, {
+    windowsVirtualKeyCode:letter.toUpperCase().charCodeAt(0), text:letter, unmodifiedText:letter,
+  });
+  // Linux/Windows render the popup in Chromium and commit its highlighted
+  // option with Enter. macOS type-ahead already commits the closed select.
+  if (process.platform !== 'darwin') await key('Enter', 'Enter', {windowsVirtualKeyCode:13, text:'\r', unmodifiedText:'\r'});
+}
+
 async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture,recordSourceCheck=()=>{}}) {
   const ownershipReceipts=[];
   const receipt=(label,detail)=>{const entry={label,...detail};ownershipReceipts.push(entry);recordSourceCheck(entry);};
@@ -2046,7 +3413,7 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
   await sourceClick('[data-facts-action="previous"]');
   await sourceClick('[data-facts-action="previous"]');
   await sourceClick('#source-facts-report select');
-  await press('Home');await press('ArrowDown');await press('Enter');
+  await selectOptionByKeyboard(key, 'b');
   await until("document.querySelector('#source-facts-report select').value==='bindings'",'Keyboard category selection failed');
   assert.equal(await evaluate("document.querySelectorAll('#source-facts-report .source-fact').length"),1);
   await sourceClick('.source-fact > button');
@@ -2059,7 +3426,7 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
   await until("document.querySelector('.source-facts-coverage').textContent.includes('Complete within lexical-effects-v1 only')",'Complete coverage must remain profile-relative');
   fixture.mode='truncated';await sourceClick('[data-facts-action="retry-facts"]');
   await until("document.querySelector('.source-facts-coverage').textContent.includes('TRUNCATED')",'Truncated coverage was hidden');
-  await sourceClick('#source-facts-report select');await press('End');await press('Enter');
+  await sourceClick('#source-facts-report select');await selectOptionByKeyboard(key, 'u');
   await until("document.querySelector('#source-facts-report select').value==='frontiers'",'Unknown-frontier category did not open');
   assert.match(await evaluate("document.querySelector('.source-fact').textContent"),/abrupt-completion/);
   fixture.mode='error';await sourceClick('[data-facts-action="retry-facts"]');
@@ -2089,7 +3456,7 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
   await press('Enter');await until("document.querySelector('#source-facts-details').open",'Keyboard reopen failed');
   await press('Escape');assert.equal(await evaluate("document.querySelector('#source-facts-details').open"),false);
   await viewport(760,560);await click('#source-facts-toggle');
-  await sourceClick('#source-facts-report select');await press('Home');await press('ArrowDown');await press('Enter');
+  await sourceClick('#source-facts-report select');await selectOptionByKeyboard(key, 'b');
   await until("document.querySelector('#source-facts-report select').value==='bindings'",'Narrow category failed');
   await screenshot('source-facts-narrow-details');
   await sourceClick('.source-fact > button');
@@ -2153,9 +3520,9 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
   };
   // Real browser interaction over validated synthetic debugger replies. The
   // fixture's JavaScript is rendered as text, never loaded into a target page.
-  await click('#source-search');await key('a','KeyA',{modifiers:2,windowsVirtualKeyCode:65});
+  await click('#source-search');await key('a','KeyA',{modifiers:process.platform==='darwin'?4:2,windowsVirtualKeyCode:65,...(process.platform==='darwin'?{commands:['selectAll']}:{})});
   const selectedQuery=await evaluate('({focused:document.activeElement===elements.sourceSearch,value:elements.sourceSearch.value,start:elements.sourceSearch.selectionStart,end:elements.sourceSearch.selectionEnd})');
-  assert.deepEqual(selectedQuery,{focused:true,value:'row',start:0,end:3},'Ctrl+A must select the complete prior source query before clearing it');
+  assert.deepEqual(selectedQuery,{focused:true,value:'row',start:0,end:3},'The platform select-all shortcut must select the complete prior source query before clearing it');
   await key('Backspace','Backspace',{windowsVirtualKeyCode:8});
   assert.equal(await evaluate('elements.sourceSearch.value'),'');
   const liveText="const owner = 'one';\n"+Array.from({length:180},(_,index)=>`const liveRow${index}={value:${index}};`).join('\n');
@@ -2256,7 +3623,49 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
     const failures=await evaluate('(()=>{const observer=globalThis.__sourceOwnershipQA;if(!observer)return null;const failures=observer.failures();observer.restore();return failures;})()');
     assert(failures&&failures.count===0&&failures.pending===0,`Observed Sources loader errors or unfinished work: ${JSON.stringify(failures)}`);
   }
-  return {status:'passed',ownership_receipts:ownershipReceipts,path:'browser development Sources UI',source:'synthetic captured artifacts and validated debugger replies; no analyzed JavaScript executed',viewports:[[1440,900],[760,560],[360,740]],checks:['live pretty/derived mapped gutters survive background refresh and navigate by real click','editor scroll and keyboard focus retained at wide/narrow widths','mixed-tab Home/End and selected focus','close pending live body and analyzer responses','same script ID/opaque token on replacement target rejects old body','no debugger mutation from mapped links','pending preview body plus catalog refresh','no automatic Deob on source entry','mismatched analyzer and preview hash refusal','explicit analysis and preview retry','unchanged editor scroll and Find occurrence','keyboard file tabs and Delete cleanup','real hit-tested Facts controls','offline HTTP artifact availability','100-row paging','keyboard categories and disclosure','UTF-8/BOM original-byte navigation','profile-complete/partial/truncated/unknown/unavailable/error states','identity rejection and prior-report retention','Cancel and explicit retry','stale selection','Close/Escape/reopen focus','narrow overlay dismissal','workspace return']};
+  // Real controls for the exact-span inspector over inert authored replies.
+  const changedText='\ufeffconst 雪="😀";'+Array.from({length:7},(_,i)=>`const v${i}=1+${i};`).join('\n');
+  fixture.changedSource='11';await fixture.addSource('11',changedText);await evaluate('refreshArtifacts()');
+  await click('[data-source-collection="captured"]');await click('[data-artifact-id="11"]');
+  await until("selectedSource()?.content?.includes('const v6')",'Changed-span fixture did not load');
+  if(!await evaluate('state.sourceDeobfuscated'))await click('#source-deob');
+  await until("selectedSource()?.deobfuscation?.sourceInspection?.changes.length===7",'Validated changed spans did not arrive');
+  if(await evaluate("document.querySelector('#source-sidebar').hidden"))await click('#source-sidebar-toggle');
+  if(!await evaluate("document.querySelector('#deobfuscation-details').open"))await sourceClick('#deobfuscation-details > summary');
+  await sourceClick('[data-deob-control="change-next"]');await press('Enter');
+  assert.match(await evaluate("elements.deobfuscationReport.textContent"),/Change 3 of 7/);
+  assert.equal(await evaluate('document.activeElement.dataset.deobControl'),'change-next');
+  await sourceClick('[data-deob-control="disclosure-tables"]');await sourceClick('[data-deob-control="tables-next"]');
+  assert(await evaluate("elements.deobfuscationReport.textContent.includes('table-5')"),'Generic omissions hid recovered tables');
+  await sourceClick('[data-deob-control="disclosure-transformations"]');await sourceClick('[data-deob-control="transformations-next"]');
+  assert(await evaluate("elements.deobfuscationReport.textContent.includes('fixture-family-6')"),'Transformation summaries were silently truncated');
+  await sourceClick('[data-deob-control="change-previous"]');await screenshot('deobfuscation-inspector-wide');
+  fixture.deobMode='error';await sourceClick('[data-deob-control="reanalyze"]');
+  await until("elements.deobfuscationReport.textContent.includes('Authored analyzer retry failure')",'Retry error did not remain visible');
+  assert.equal(await evaluate("elements.deobfuscationReport.querySelectorAll('pre').length"),2,'Retry failure hid the previous snippets');
+  await evaluate(`(()=>{const original={analysis:loadDeobfuscation};const observer=(${sourceOwnershipOperationObserver.toString()})(original,sourceIdentity);globalThis.__sourceOwnershipQA={...observer,restore(){loadDeobfuscation=original.analysis;delete globalThis.__sourceOwnershipQA;}};loadDeobfuscation=observer.wrappers.analysis;})()`);
+  try {
+    fixture.deobMode='pending';await sourceClick('[data-deob-control="retry"]');
+    const deobDeadline=Date.now()+5000;while(!fixture.deobPending.length&&Date.now()<deobDeadline)await new Promise(resolve=>setTimeout(resolve,25));assert(fixture.deobPending.length);
+    const cancelledOperation=await heldOperation('analysis');
+    await sourceClick('[data-deob-control="cancel"]');fixture.deobMode='ready';
+    const cancelledSettlement=await releaseAndSettle(cancelledOperation,fixture.release);
+    assert.equal(await evaluate("state.deobfuscationRequests.get(deobfuscationKey(selectedSource()))?.status"),'cancelled');
+    receipt('deobfuscation-cancelled-late-reply',{...cancelledSettlement,reportRetained:await evaluate("elements.deobfuscationReport.querySelectorAll('pre').length===2")});
+  } finally {
+    const failures=await evaluate('(()=>{const observer=globalThis.__sourceOwnershipQA;const failures=observer.failures();observer.restore();return failures;})()');
+    assert.equal(failures.count,0);assert.equal(failures.pending,0);
+  }
+  await viewport(360,740);await screenshot('deobfuscation-inspector-narrow-cancelled');
+  assert(await evaluate('document.documentElement.scrollWidth<=innerWidth'),'Inspector overflows the narrow viewport');
+  await sourceClick('[data-deob-control="reveal"]');
+  await until("!state.sourceDeobfuscated&&!state.sourceFormatted&&document.activeElement.classList.contains('source-line')",'Original range did not navigate with keyboard focus');
+  assert.match(await evaluate('elements.sourcePosition.textContent'),/Original UTF-8 bytes/);
+  assert.equal(fixture.documents.get('11').toString('utf8'),changedText,'Inspector modified original fixture bytes');
+  assert.equal(fixture.rejectedWrites.length,0,'Inspector executed a debugger mutation');
+  await screenshot('deobfuscation-inspector-narrow-original');await viewport(1440,900);
+  receipt('deobfuscation-inspector-controls',{changedSpans:7,recoveredTables:5,viewports:[1440,360],retryPreservesReport:true,cancelRetiresRequest:true,originalBytesPreserved:true});
+  return {status:'passed',ownership_receipts:ownershipReceipts,path:'browser development Sources UI',source:'synthetic captured artifacts and validated debugger replies; no analyzed JavaScript executed',viewports:[[1440,900],[760,560],[360,740]],checks:['exact changed-span snippets, keyboard navigation, paging, retry preservation, cancel terminal receipt and original reveal at wide/360px widths','live pretty/derived mapped gutters survive background refresh and navigate by real click','editor scroll and keyboard focus retained at wide/narrow widths','mixed-tab Home/End and selected focus','close pending live body and analyzer responses','same script ID/opaque token on replacement target rejects old body','no debugger mutation from mapped links','pending preview body plus catalog refresh','no automatic Deob on source entry','mismatched analyzer and preview hash refusal','explicit analysis and preview retry','unchanged editor scroll and Find occurrence','keyboard file tabs and Delete cleanup','real hit-tested Facts controls','offline HTTP artifact availability','100-row paging','keyboard categories and disclosure','UTF-8/BOM original-byte navigation','profile-complete/partial/truncated/unknown/unavailable/error states','identity rejection and prior-report retention','Cancel and explicit retry','stale selection','Close/Escape/reopen focus','narrow overlay dismissal','workspace return']};
 }
 
 // Contract-valid synthetic investigation records, shared by the production-model
@@ -2328,7 +3737,7 @@ const observationBinary=structuredClone(observationContext);observationBinary.ev
 assert.equal(observationUI.evidenceObservationModel(observationBinary).rows[0].payload.encoding,'hex');
 console.log('PASS Evidence observation model: contract-valid records, scoped parents, nonzero context, CDP qualification, unknown outcomes, exact artifact identity, ambiguity, eviction and bounds');
 
-function observationPanelFixture(narrow = false) {
+function observationPanelFixture(narrow = false, options = {}) {
   const document={activeElement:null};
   class ObservationNode extends TrafficFixtureNode {
     matches(selector) {
@@ -2336,13 +3745,17 @@ function observationPanelFixture(narrow = false) {
       if(match){const [,tag,name,value]=match; const actual=name.startsWith('data-')?this.dataset[name.slice(5).replace(/-([a-z])/g,(_,letter)=>letter.toUpperCase())]:this.getAttribute(name);return (!tag||this.tagName.toLowerCase()===tag)&&actual!==null&&actual!==undefined&&(value===undefined||actual===value);}
       return super.matches(selector);
     }
-    focus(){document.activeElement=this;}
+    // Model the browser's disabled-focus fixup only for the native-key regression.
+    set disabled(value){this._disabled=Boolean(value);if(options.nativeFocus&&this._disabled&&document.activeElement===this)document.activeElement=document.body;}
+    get disabled(){return Boolean(this._disabled);}
+    focus(){if(!options.nativeFocus||!this.disabled)document.activeElement=this;}
     scrollIntoView(){}
+    removeEventListener(type,fn){this.listeners.set(type,(this.listeners.get(type)||[]).filter(listener=>listener!==fn));}
     replaceChildren(...nodes){if(this.contains(document.activeElement))document.activeElement=null;super.replaceChildren(...nodes);}
-    emit(type,fields={}){for(const callback of this.listeners.get(type)??[])callback({target:this,currentTarget:this,preventDefault(){},...fields});}
+    emit(type,fields={}){for(const callback of this.listeners.get(type)??[])callback({target:this,currentTarget:this,preventDefault(){},stopPropagation(){},...fields});}
   }
-  document.createElement=tag=>new ObservationNode(tag);
-  const ids=['evidence-investigation','evidence-rows','evidence-inspector','evidence-search','evidence-scope','evidence-workspace-notice','evidence-package-toggle','evidence-package-mode','evidence-return','evidence-trace','evidence-window-count','evidence-previous','evidence-next','evidence-context-kind','evidence-context-title','evidence-context-note','evidence-count','evidence-coverage-summary','evidence-gap-details','evidence-coverage-details','evidence-coverage-popover'];
+  document.createElement=tag=>new ObservationNode(tag);document.body=new ObservationNode('body');document.documentElement=new ObservationNode('html');if(options.native)document.documentElement.classList.add('native-shell');
+  const ids=['evidence-investigation','evidence-rows','evidence-inspector','evidence-search','evidence-scope','evidence-workspace-notice','evidence-package-toggle','evidence-package-mode','evidence-return','evidence-trace','evidence-window-count','evidence-previous','evidence-next','evidence-context-kind','evidence-context-title','evidence-context-note','evidence-count','evidence-coverage-summary','evidence-gap-details','evidence-coverage-details','evidence-coverage-popover','evidence-compare-toggle','evidence-comparison-section','evidence-comparison-panel','evidence-comparison-close','evidence-comparison-unavailable','evidence-package-panel'];
   const nodes=Object.fromEntries(ids.map(id=>[id,new ObservationNode()]));
   document.querySelector=selector=>nodes[selector.slice(1)]??null;
   const layout=new ObservationNode();layout.className='evidence-investigation-layout';
@@ -2350,7 +3763,10 @@ function observationPanelFixture(narrow = false) {
   nodes['evidence-coverage-details'].append(new ObservationNode('summary'),nodes['evidence-coverage-popover']);
   nodes['evidence-investigation'].append(nodes['evidence-coverage-details'],layout,...tabs);layout.append(nodes['evidence-rows'],nodes['evidence-inspector']);
   let context=observationFixtureContext(),packageVisible=false,packageCancels=0,sourceCalls=0;
-  const create=runInNewContext(observationCode+';createEvidenceWorkspace',{document,TextDecoder,Uint8Array,window:{matchMedia:()=>({matches:narrow})}});
+  let comparisonFetch=options.fetcher || (async()=>Response.json(comparisonResult));
+  nodes['evidence-package-mode'].append(nodes['evidence-package-panel'],nodes['evidence-comparison-section']);
+  nodes['evidence-comparison-section'].append(nodes['evidence-comparison-close'],nodes['evidence-comparison-unavailable'],nodes['evidence-comparison-panel']);
+  const create=runInNewContext(observationCode+'\n'+comparisonSource+';createEvidenceWorkspace',{document,TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,fetch:(...args)=>comparisonFetch(...args),location:{protocol:options.protocol||'http:'},window:{matchMedia:()=>({matches:narrow})}});
   const panel=create({getContext:()=>context,packagePanel:{sync(){},setVisible(value){packageVisible=value;if(!value)packageCancels++;}},onTrace(){},onRequest(){},onSource(){sourceCalls++;return true;},canOpenSource:()=>true});
   panel.setVisible(true);
   return {panel,nodes,tabs,document,get context(){return context;},set context(value){context=value;},get packageVisible(){return packageVisible;},get packageCancels(){return packageCancels;},get sourceCalls(){return sourceCalls;}};
@@ -2430,6 +3846,96 @@ const coveragePanel=observationPanelFixture();coveragePanel.nodes['evidence-cove
 coveragePanel.nodes['evidence-coverage-details'].emit('keydown',{key:'Escape',stopPropagation(){}});
 assert.equal(coveragePanel.nodes['evidence-coverage-details'].open,false);assert.equal(coveragePanel.document.activeElement,coveragePanel.nodes['evidence-coverage-details'].querySelector('summary'));
 console.log('PASS Evidence review regressions: arrival versus retained holes, scope separation, parent draft preservation, narrow visible-pane focus target, independent selection/error notices and stale duplicate source refusal');
+// Execute the real Evidence workspace lifecycle with the immutable comparator.
+let hostCalls=[],hostReply=null;
+const comparisonHostFixture=observationPanelFixture(false,{fetcher:async(url,options)=>{hostCalls.push({url,options});return hostReply?hostReply():Response.json(comparisonResult);}});
+const hc=comparisonHostFixture,n=hc.nodes;
+const hostHandle=()=>n['evidence-comparison-panel'].rebEvidenceComparison;
+assert.equal(hostHandle(),undefined,'Observation landing must not mount file tools');
+n['evidence-package-toggle'].click();assert.equal(hostHandle(),undefined,'Opening package tools must not start comparison');
+n['evidence-compare-toggle'].click();const originalHostHandle=hostHandle();assert(originalHostHandle);assert.equal(n['evidence-package-panel'].hidden,true);assert.equal(hc.packageVisible,false);assert.equal(hostCalls.length,0);
+assert.equal(hc.document.activeElement,n['evidence-comparison-panel'].querySelector('[data-comparison-side="0"]'));
+const hostInputs=n['evidence-comparison-panel'].querySelectorAll('input');for(const input of hostInputs){input.files=[comparisonFile(comparisonOriginal)];input.emit('change');}
+const initialFile=hostHandle().controller.model.files[0];hostInputs[0].focus();const firstControl=n['evidence-comparison-panel'].children[1];
+hc.panel.sync();assert.equal(hostHandle(),originalHostHandle);assert.equal(hostHandle().controller.model.files[0],initialFile);assert.equal(hc.document.activeElement,hostInputs[0]);assert.equal(n['evidence-comparison-panel'].children[1],firstControl);assert.equal(hostCalls.length,0);
+assert(await hostHandle().controller.compare());const acceptedHostResult=hostHandle().controller.model.result;
+let releaseHostResponse;hostReply=()=>new Promise(resolve=>{releaseHostResponse=resolve;});const hostPending=hostHandle().controller.compare();while(!releaseHostResponse)await new Promise(resolve=>setTimeout(resolve,0));
+n['evidence-comparison-section'].emit('keydown',{key:'Escape'});assert.equal(await hostPending,false);assert.equal(n['evidence-comparison-section'].hidden,false);assert.equal(hc.document.activeElement,n['evidence-comparison-panel'].querySelector('[data-comparison-action="compare"]'));
+releaseHostResponse(Response.json(comparisonResult));await new Promise(resolve=>setTimeout(resolve,0));assert.equal(hostHandle().controller.model.result,acceptedHostResult);
+n['evidence-comparison-section'].emit('keydown',{key:'Escape'});assert.equal(n['evidence-comparison-section'].hidden,true);assert.equal(hc.document.activeElement,n['evidence-compare-toggle']);assert.equal(hc.packageVisible,true);
+n['evidence-compare-toggle'].click();assert.equal(hostHandle(),originalHostHandle);assert.equal(hostHandle().controller.model.files[0],initialFile);assert.equal(hostHandle().controller.model.result,acceptedHostResult);
+let releaseHostFile;hostHandle().controller.select(0,{size:packageGoldenBytes.length,arrayBuffer:()=>new Promise(resolve=>{releaseHostFile=resolve;})});const beforeHostFile=hostCalls.length;const lateHostFile=hostHandle().controller.compare();n['evidence-return'].click();assert.equal(await lateHostFile,false);releaseHostFile(packageGoldenBytes.buffer);await new Promise(resolve=>setTimeout(resolve,0));assert.equal(hostCalls.length,beforeHostFile);assert.equal(n['evidence-investigation'].hidden,false);assert.equal(hc.document.activeElement,n['evidence-package-toggle']);
+n['evidence-package-toggle'].click();n['evidence-compare-toggle'].click();hostReply=null;hostHandle().controller.select(0,comparisonFile(comparisonOriginal));
+let hideResponse;hostReply=()=>new Promise(resolve=>{hideResponse=resolve;});const hidePending=hostHandle().controller.compare();while(!hideResponse)await new Promise(resolve=>setTimeout(resolve,0));hc.panel.setVisible(false);assert.equal(await hidePending,false);hideResponse(Response.json(comparisonResult));await new Promise(resolve=>setTimeout(resolve,0));hc.panel.setVisible(true);assert.equal(n['evidence-comparison-section'].hidden,true);assert.equal(hostHandle().controller.model.files[1],hostInputs[1].files[0]);assert.equal(hostCalls.length,beforeHostFile+1);
+assert.deepEqual(Object.keys(hc.panel.snapshot()).sort(),['packages','page','pane','requestKey','selectedKey'],'Navigation stores bounded view metadata, never comparison files or result objects');
+n['evidence-compare-toggle'].click();const disposedHost=hostHandle();hc.panel.disposeComparison();assert.equal(hostHandle(),undefined);n['evidence-compare-toggle'].click();const replacementHost=hostHandle();assert.notEqual(replacementHost,disposedHost);assert.equal(replacementHost.controller.model.files[0],null);disposedHost.dispose();assert.equal(hostHandle(),replacementHost);assert(n['evidence-comparison-panel'].children.length>0);hc.panel.disposeComparison();
+const storedComparison=observationPanelFixture(false,{protocol:'reb:',fetcher:()=>{throw new Error('Stored-native comparison must not dispatch');}});storedComparison.nodes['evidence-package-toggle'].click();storedComparison.nodes['evidence-compare-toggle'].click();assert.equal(storedComparison.nodes['evidence-comparison-panel'].rebEvidenceComparison,undefined);assert.match(storedComparison.nodes['evidence-comparison-unavailable'].textContent,/unavailable in stored-evidence native mode/);
+// Unlike directly emitting on the section, a physical key begins at the current
+// focus owner. Native disabled buttons lose focus before Escape can bubble.
+for(const action of ['compare','previous','next']) {
+  let release,requests=0;
+  const fixture=observationPanelFixture(false,{nativeFocus:true,fetcher:()=>{requests++;return new Promise(resolve=>{release=resolve;});}});
+  const {nodes,document:doc}=fixture;
+  nodes['evidence-package-toggle'].click();nodes['evidence-compare-toggle'].click();
+  const host=nodes['evidence-comparison-panel'],handle=host.rebEvidenceComparison;
+  for(const input of host.querySelectorAll('input')){input.files=[comparisonFile(comparisonOriginal)];input.emit('change');}
+  if(action!=='compare')handle.controller.model.result={...comparisonResult,page:{offset:50,next_offset:100}};
+  const trigger=host.querySelector(`[data-comparison-action="${action}"]`);
+  trigger.disabled=false;trigger.focus();trigger.click();
+  assert.equal(handle.controller.model.busy,true);
+  assert.equal(doc.activeElement,host.querySelector('[data-comparison-action="cancel"]'),`${action}: disabling the active trigger must hand keyboard ownership to Cancel`);
+  for(let turn=0;turn<100&&!release;turn++)await new Promise(resolve=>setTimeout(resolve,0));
+  assert(release,'Held comparison must reach the service');
+  let stopped=false;
+  for(let target=doc.activeElement;target&&!stopped;target=target.parentNode)target.emit('keydown',{key:'Escape',stopPropagation(){stopped=true;}});
+  assert.equal(handle.controller.model.busy,false,'Escape from the actual focus owner must cancel');
+  assert.equal(nodes['evidence-comparison-section'].hidden,false);
+  assert.equal(doc.activeElement,host.querySelector('[data-comparison-action="compare"]'));
+  release(Response.json(comparisonResult));await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(requests,1,'Cancellation must not retry');
+  fixture.panel.disposeComparison();
+}
+// Completion may replace only its own disabled focus owner. A newer focus
+// selection, including a file input or control outside comparison, wins.
+for(const result of ['success','error']) for(const move of [null,'input','outside']) {
+  let release;
+  const fixture=observationPanelFixture(false,{nativeFocus:true,fetcher:()=>new Promise(resolve=>{release=resolve;})});
+  const {nodes,document:doc}=fixture;
+  fixture.panel.showPackages(true);fixture.panel.showComparison(true);
+  const host=nodes['evidence-comparison-panel'],handle=host.rebEvidenceComparison,inputs=host.querySelectorAll('input');
+  for(const input of inputs){input.files=[comparisonFile(comparisonOriginal)];input.emit('change');}
+  const compare=host.querySelector('[data-comparison-action="compare"]');compare.focus();compare.click();
+  for(let turn=0;turn<100&&!release;turn++)await new Promise(resolve=>setTimeout(resolve,0));
+  assert(release);
+  const expected=move==='input'?inputs[1]:move==='outside'?nodes['evidence-search']:compare;
+  if(move)expected.focus();
+  release(result==='success'?Response.json(comparisonResult):new Response('unavailable',{status:503}));
+  for(let turn=0;turn<100&&handle.controller.model.busy;turn++)await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(handle.controller.model.busy,false);
+  assert.equal(doc.activeElement,expected,`${result}: settlement must preserve ${move||'owned'} focus`);
+  assert.equal(Boolean(handle.controller.model.result),result==='success');
+  fixture.panel.disposeComparison();
+}
+console.log('PASS mounted comparison native-disabled focus ownership and focus-routed Escape for Compare/Previous/Next (DOM model, not rendered QA)');
+console.log('PASS mounted Evidence comparison host: observation-first lazy entry, draft/focus/DOM retention on refresh, Escape/Close/Return/navigation ownership, late file suppression, metadata-only history, owned disposal/remount and stored-native unavailability');
+// Invoke the actual application's page lifecycle handlers, not a replacement.
+const comparisonLifecycleApp=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
+const comparisonLifecycleSource=comparisonLifecycleApp.slice(comparisonLifecycleApp.indexOf('      // Ordinary refresh/navigation keeps file drafts'),comparisonLifecycleApp.indexOf('      const sourceFactsPanel'));
+assert(comparisonLifecycleSource.includes("window.addEventListener('pagehide'"));
+let lifecycleReply=null,lifecycleCalls=0;
+const lifecycleHost=observationPanelFixture(false,{fetcher:async()=>{lifecycleCalls++;return lifecycleReply?lifecycleReply():Response.json(comparisonResult);}}),lifecycleHooks={};
+runInNewContext(comparisonLifecycleSource,{window:{addEventListener:(name,fn)=>{lifecycleHooks[name]=fn;}},document:{querySelector:()=>({hidden:false})},evidenceWorkspace:lifecycleHost.panel});
+lifecycleHost.panel.showPackages(true);lifecycleHost.panel.showComparison(true);const lifecyclePanel=()=>lifecycleHost.nodes['evidence-comparison-panel'].rebEvidenceComparison;
+for(const input of lifecycleHost.nodes['evidence-comparison-panel'].querySelectorAll('input')){input.files=[comparisonFile(comparisonOriginal)];input.emit('change');}
+const lifecycleOriginal=lifecyclePanel(),lifecycleFiles=[...lifecycleOriginal.controller.model.files];
+let releaseLifecycle;lifecycleReply=()=>new Promise(resolve=>{releaseLifecycle=resolve;});const lifecyclePending=lifecycleOriginal.controller.compare();while(!releaseLifecycle)await new Promise(resolve=>setTimeout(resolve,0));
+lifecycleHooks.pagehide({persisted:true});assert.equal(await lifecyclePending,false);releaseLifecycle(Response.json(comparisonResult));lifecycleHooks.pageshow();assert.equal(lifecyclePanel(),lifecycleOriginal);assert(lifecyclePanel().controller.model.files.every((file,index)=>file===lifecycleFiles[index]));assert.equal(lifecycleHost.nodes['evidence-comparison-section'].hidden,true);assert.equal(lifecycleCalls,1);
+lifecycleHost.panel.showComparison(true);lifecycleHooks.pagehide({persisted:false});assert.equal(lifecyclePanel(),undefined);lifecycleHooks.pageshow();assert.equal(lifecyclePanel(),undefined,'Page re-entry must not remount or request implicitly');lifecycleHost.panel.showComparison(true);assert.notEqual(lifecyclePanel(),lifecycleOriginal);assert.equal(lifecyclePanel().controller.model.files[0],null);assert.equal(lifecycleCalls,1);lifecycleHost.panel.disposeComparison();
+// An HTTP workspace remains supported when the native application marker is set.
+const liveNative=observationPanelFixture(false,{protocol:'http:',native:true});liveNative.panel.showPackages(true);liveNative.panel.showComparison(true);assert(liveNative.nodes['evidence-comparison-panel'].rebEvidenceComparison);assert.equal(liveNative.nodes['evidence-comparison-unavailable'].hidden,true);liveNative.panel.disposeComparison();
+console.log('PASS actual pagehide/pageshow handlers: BFCache keeps drafts but cancels work, departing document disposes, re-entry is explicit, and native live HTTP stays supported');
+
+
 
 
 
@@ -2472,6 +3978,71 @@ for (const scenario of ['return','evicted','duplicate','changed-session','interr
   else {assert.equal(nodes['evidence-rows'].scrollTop,55);assert.equal(nodes['evidence-inspector'].scrollTop,81);assert.equal(owner.activeElement.id,'evidence-open-source');assert.match(nodes['evidence-workspace-notice'].textContent,/outside the current filter/);}
 }
 console.log('PASS shared Evidence return with original request preflight, selected-key/pane ownership, independent scroll, exact focus, preserved current filters, evicted/duplicate/session refusal and interrupted focus (not rendered QA)');
+// Final composition: actual shared snapshot/restore owns the Evidence return,
+// while independent supplied-file drafts stay outside navigation history.
+for(const phase of ['service','file']){
+  let release,requests=0,hold=false;
+  const fixture=observationPanelFixture(true,{fetcher:async()=>{requests++;return hold&&phase==='service'?new Promise(resolve=>{release=resolve;}):Response.json(comparisonResult);}}),{nodes,document:owner}=fixture;
+  const request=fixture.context.request,other={...request,id:'other',events:request.events.map(e=>({...e,session_id:'8'}))};
+  const state={requests:[request,other],events:fixture.context.events,artifacts:fixture.context.artifacts,selectedRequestId:request.id,decoderSteps:[],inspectorTab:'evidence'};
+  for(const[id,node]of Object.entries(nodes))node.id=id;
+  nodes['evidence-rows'].querySelector('[data-evidence-key="7:42:102"]').click();fixture.panel.showPackages(true);fixture.panel.showComparison(true);
+  const handle=nodes['evidence-comparison-panel'].rebEvidenceComparison;
+  for(const input of nodes['evidence-comparison-panel'].querySelectorAll('input')){input.files=[comparisonFile(comparisonOriginal)];input.emit('change');}
+  assert(await handle.controller.compare());const previous=handle.controller.model.result;hold=true;
+  if(phase==='file')handle.controller.select(0,{size:packageGoldenBytes.length,arrayBuffer:()=>new Promise(resolve=>{release=resolve;})});
+  const files=[...handle.controller.model.files],pending=handle.controller.compare();while(!release)await new Promise(resolve=>setTimeout(resolve,0));
+  nodes['evidence-compare-toggle'].focus();nodes['evidence-rows'].scrollTop=55;nodes['evidence-inspector'].scrollTop=81;nodes['evidence-package-mode'].scrollTop=27;
+  const panes=[nodes['evidence-rows'],nodes['evidence-inspector'],nodes['evidence-package-mode']];const evidenceRoot={id:'screen-evidence',scrollTop:0,scrollLeft:0,contains:()=>true,matches:s=>s==='#screen-evidence',querySelectorAll:()=>panes,querySelector:s=>nodes[s.slice(1)]};
+  let screen='evidence',notice='';const raf=[],back={focus(){owner.activeElement=back;}};
+  const document={get activeElement(){return owner.activeElement;},querySelector:s=>s==='.screen:not([hidden])'?{id:`screen-${screen}`}:s==='#screen-evidence'?evidenceRoot:s==='#investigation-notice'?{textContent:notice}:s==='#investigation-back'?back:null};
+  const sandbox={state,document,CSS:{escape:s=>s},evidenceWorkspace:fixture.panel,sourceFactsPanel:{},selectedSource:()=>null,integerText:(e,k)=>String(e[k]),requestAnimationFrame:fn=>raf.push(fn),selectRequest:id=>{state.selectedRequestId=id;fixture.context={...fixture.context,request:state.requests.find(r=>r.id===id)};fixture.panel.sync();},showScreen:name=>{screen=name;fixture.panel.setVisible(name==='evidence');},noticeWriter:s=>{notice=s;}};
+  const navCode=await readFile(join(root,'apps/research-ui/investigation_navigation.js'),'utf8');const nav=runInNewContext(appSection('      function requestTraceRoot(','      function requestSignalProfileSelection(')+navCode+';investigationNotice=noticeWriter;({snapshot:investigationSnapshot,restore:restoreInvestigation,history:createInvestigationHistory})',sandbox);
+  const saved=nav.snapshot();assert.equal(saved.focus,'#evidence-compare-toggle');assert.equal(saved.evidence.packages,true);assert(!JSON.stringify(saved).includes('reb-package-v1:sha256:'),'Comparison bytes/IDs are not stored in shared navigation');
+  screen='sources';fixture.panel.setVisible(false);state.selectedRequestId='other';fixture.context={...fixture.context,request:other};fixture.panel.sync();assert.equal(await pending,false);
+  nodes['evidence-search'].value='newer filter';nodes['evidence-scope'].value='all';assert(nav.restore(saved));await Promise.resolve();for(const callback of raf.splice(0))callback();
+  release(phase==='file'?packageGoldenBytes.buffer:Response.json(comparisonResult));await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(screen,'evidence');assert.equal(state.selectedRequestId,request.id);assert.equal(fixture.panel.snapshot().selectedKey,'7:42:102');assert.equal(nodes['evidence-search'].value,'newer filter');assert.equal(nodes['evidence-scope'].value,'all');assert.equal(owner.activeElement,nodes['evidence-compare-toggle']);assert.equal(nodes['evidence-rows'].scrollTop,55);assert.equal(nodes['evidence-inspector'].scrollTop,81);assert.equal(nodes['evidence-package-mode'].scrollTop,27);
+  assert.equal(nodes['evidence-comparison-section'].hidden,true);assert(handle.controller.model.files.every((f,i)=>f===files[i]));assert.equal(handle.controller.model.result,phase==='file'?null:previous);assert.equal(requests,phase==='file'?1:2);
+  const calls=requests;fixture.panel.showComparison(true);assert.equal(requests,calls);assert.equal(nodes['evidence-comparison-panel'].rebEvidenceComparison,handle);fixture.panel.showComparison(false);fixture.panel.showPackages(false);assert.equal(fixture.panel.snapshot().selectedKey,'7:42:102');assert.equal(nodes['evidence-search'].value,'newer filter');assert.equal(nodes['evidence-rows'].scrollTop,55);
+  // The actual workspace arrow consumes shared Back; returning to that saved
+  // Evidence stop must use Forward, not a second Back on an empty back stack.
+  const trafficRoot={id:'screen-traffic',dataset:{},contains:()=>false,querySelectorAll:()=>[],querySelector:()=>null};
+  const sourceRoot={...trafficRoot,id:'screen-sources'},originalQuery=document.querySelector;
+  document.querySelector=selector=>selector==='#screen-traffic'?trafficRoot:selector==='#screen-sources'?sourceRoot:selector==='#console-experiment-traffic'?{dataset:{}}:originalQuery(selector);
+  sandbox.fieldSets={body:[]};sandbox.renderInspector=()=>{};state.fieldTab='body';
+  let historyState,workspaceClick,fallbacks=0;
+  const history=nav.history({snapshot:nav.snapshot,restore:nav.restore,changed:value=>{historyState=value;}});
+  const flush=async()=>{await Promise.resolve();for(const callback of raf.splice(0))callback();};
+  screen='traffic';fixture.panel.setVisible(false);history.record();
+  screen='evidence';fixture.panel.setVisible(true);history.record();
+  screen='sources';fixture.panel.setVisible(false);assert(history.back());await flush();
+  assert.equal(screen,'evidence');assert.equal(historyState.back.screen,'traffic');
+  fixture.panel.showPackages(true);fixture.panel.showComparison(true);release=null;
+  const leaving=handle.controller.compare();while(!release)await new Promise(resolve=>setTimeout(resolve,0));
+  const ownedFiles=[...handle.controller.model.files],beforeLeave=requests;
+  const arrow={dataset:{screen:'traffic'},classList:{contains:name=>name==='back-button'},addEventListener:(name,callback)=>{assert.equal(name,'click');workspaceClick=callback;}};
+  const workspaceHandler=appSection("      document.querySelectorAll('[data-screen]').forEach(",'      elements.signalFilters.forEach(');
+  runInNewContext(workspaceHandler,{document:{querySelectorAll:()=>[arrow]},investigationNavigation:history,showScreen:()=>{fallbacks++;}});
+  owner.activeElement=arrow;await workspaceClick();await flush();
+  assert.equal(await leaving,false);assert.equal(screen,'traffic');assert.equal(fallbacks,0,'The arrow must use shared history rather than create a new navigation branch');
+  assert.equal(historyState.back,null);assert.equal(historyState.forward.screen,'evidence');
+  assert.equal(history.back(),false,'The old second-Back driver action cannot return to Evidence');assert.equal(screen,'traffic');
+  release(phase==='file'?packageGoldenBytes.buffer:Response.json(comparisonResult));await new Promise(resolve=>setTimeout(resolve,0));
+  assert(history.forward());await flush();
+  assert.equal(screen,'evidence');assert.equal(state.selectedRequestId,request.id);
+  assert.equal(fixture.panel.snapshot().selectedKey,'7:42:102');assert.equal(fixture.panel.snapshot().packages,true);
+  assert.equal(nodes['evidence-comparison-panel'].rebEvidenceComparison,handle);
+  assert(handle.controller.model.files.every((file,index)=>file===ownedFiles[index]));
+  assert.equal(handle.controller.model.busy,false);assert.equal(nodes['evidence-comparison-section'].hidden,true);assert.equal(requests,beforeLeave,'Forward must not replay the cancelled comparison');
+  assert.equal(nodes['evidence-search'].value,'newer filter');assert.equal(nodes['evidence-scope'].value,'all');
+  assert.equal(owner.activeElement,back,'The workspace arrow has no stable selector; its return must retain the guarded shared fallback focus');
+  assert.equal(nodes['evidence-rows'].scrollTop,55);assert.equal(nodes['evidence-inspector'].scrollTop,81);
+  fixture.panel.showComparison(true);assert.equal(owner.activeElement,nodes['evidence-comparison-panel'].querySelector('[data-comparison-side="0"]'));assert.equal(requests,beforeLeave);
+  fixture.panel.disposeComparison();
+}
+console.log('PASS final linked Evidence comparison: actual shared snapshot/restore preserves newer filters, selected record, stable entry focus, independent scroll and file drafts, while cancelling late service/file work without replay or history payloads');
+
 
 // The rendered fixture tests presentation and user actions. The separate real
 // native-writer/HTTP probe establishes authoritative export and validation.
@@ -2495,21 +4066,29 @@ function evidenceBrowserFixture() {
         response.writeHead(200,{'Content-Type':'application/octet-stream','X-Artifact-Total-Bytes':String(observationSourceBytes.length),'X-Artifact-Offset':String(offset),'X-Artifact-Truncated':String(offset+bytes.length<observationSourceBytes.length)});response.end(bytes);return true;
       }
     }
-    if(!['/api/evidence/packages/export','/api/evidence/packages/validate'].includes(path)) return false;
+    if(!['/api/evidence/packages/export','/api/evidence/packages/validate','/api/evidence/packages/compare'].includes(path)) return false;
     let body=Buffer.alloc(0);
     for await(const chunk of request) {
-      if(body.length+chunk.length>4194304){response.writeHead(413);response.end();return true;}
+      if(body.length+chunk.length>(path.endsWith('/compare')?8392704:4194304)){response.writeHead(413);response.end();return true;}
       body=Buffer.concat([body,chunk]);
     }
     fixture.requests.push({path,bytes:body.length});
     if(path.endsWith('/validate'))fixture.lastValidation=body;
     const mode=fixture.mode;
-    if(mode==='pending_export'&&path.endsWith('/export')||mode==='pending_validate'&&path.endsWith('/validate')) await new Promise(resolve=>fixture.pending.push(resolve));
+    if(mode==='pending_export'&&path.endsWith('/export')||mode==='pending_validate'&&path.endsWith('/validate')||mode==='pending_compare'&&path.endsWith('/compare')) await new Promise(resolve=>fixture.pending.push(resolve));
     if(response.destroyed)return true;
     const send=(status,value)=>{response.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});response.end(value);};
     if(mode==='writer_busy'){send(409,'{"error":"Synthetic held writer lease"}');return true;}
     if(mode==='unavailable'){send(503,'{"error":"Synthetic unavailable guarded store"}');return true;}
     if(path.endsWith('/export')){send(200,bytes);return true;}
+    if(path.endsWith('/compare')){
+      let supplied;try{supplied=JSON.parse(body);}catch{send(400,'{}');return true;}
+      if(mode==='invalid'||body.includes(Buffer.from('"protocol_version": 1, "protocol_version": 1'))){send(400,'{}');return true;}
+      const value=supplied.right?.package_id===comparisonChangedResult.right_package_id?structuredClone(comparisonChangedResult):structuredClone(comparisonResult);
+      if(mode==='comparison_inconsistent')value.counts.equal_declared_metadata++;
+      if(mode==='comparison_wrong_id')value.right_package_id='reb-package-v1:sha256:'+'0'.repeat(64);
+      send(200,JSON.stringify(value));return true;
+    }
     const invalid=mode==='invalid'||body.includes(Buffer.from('"protocol_version": 1, "protocol_version": 1'));
     const value=mode==='unsupported'?{...packageInvalid,status:'unsupported'}:invalid?packageInvalid:packageValid;
     send(200,JSON.stringify(value));return true;
@@ -2529,7 +4108,10 @@ assert.deepEqual((await evidenceFixtureResponse('/api/evidence/packages/export',
 assert.equal(JSON.parse((await evidenceFixtureResponse('/api/evidence/packages/validate',packageGoldenBytes)).body).status,'valid');
 for(const [mode,status] of [['writer_busy',409],['unavailable',503]])assert.equal((await evidenceFixtureResponse('/api/evidence/packages/export',Buffer.from('{}'),mode)).status,status);
 for(const status of ['invalid','unsupported'])assert.equal(JSON.parse((await evidenceFixtureResponse('/api/evidence/packages/validate',packageGoldenBytes,status)).body).status,status);
-console.log('PASS Evidence browser fixture raw bytes, valid/invalid/unsupported and guarded-export errors (not rendered QA)');
+assert.equal(JSON.parse((await evidenceFixtureResponse('/api/evidence/packages/compare',Buffer.from('{}'))).body).comparison_id,comparisonResult.comparison_id);
+assert.equal(JSON.parse((await evidenceFixtureResponse('/api/evidence/packages/compare',Buffer.from(JSON.stringify({right:{package_id:comparisonChangedResult.right_package_id}})))).body).counts.changed_declared_metadata,1);
+assert(comparisonUI.validResult(comparisonChangedResult,0,packageGolden.package_id,JSON.parse(new TextDecoder().decode(comparisonChangedInput)).package_id),'Changed product fixture must pass the actual UI response contract');
+console.log('PASS Evidence browser fixture raw bytes, valid/invalid/unsupported, comparison and guarded-export errors (not rendered QA)');
 
 async function checkEvidenceObservationInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture}) {
   const readingPanes=[];
@@ -2776,43 +4358,981 @@ async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,scre
   return {status:'passed',path:'browser development Evidence UI',observations,packageGeometry,source:'synthetic closed metadata fixture; authoritative native-writer HTTP checks are separate',viewports:[[1440,900],[760,560],[360,740]],checks:['Requests and narrow Backtraces pointer entry','exact scoped selection','explicit guarded export and retry','explicit browser download exact bytes; no automatic save','real file input exact-byte validation','invalid and unsupported states','writer refusal and unavailable store','Cancel and Escape focus','stale selection and Back/reopen','50-row paging','keyed refresh focus','Space/Tab keyboard selection','independent candidate/panel scrolling','narrow geometry and screenshots']};
 }
 
+// Synthetic Memory data travels through the existing debugger transport fixture.
+// It contains no page captures and does not execute getters or instrumentation.
+async function memoryBrowserFixture() {
+  const initial = JSON.parse(await readFile(join(root, 'apps/origin-trace-backend/assets/debugger-empty.json'), 'utf8'));
+  const target = {id:'memory-target-A',type:'page',title:'Memory fixture',url:'https://fixture.invalid/memory'};
+  const fixture = {session:{...initial,state:'running',target,targets:[target],generation:10},requests:[],pending:[],mode:'ready',
+    traceId:7,nextTraceId:7,stopState:'aborted',notModifiedCount:0,debuggerRequests:0};
+  fixture.idleTrace=()=>structuredClone(initial.memory_origin_trace);
+  const baseline = () => ({target_id:fixture.session.target.id,file_bytes:4096,captured_at_ms:1700000000000+fixture.session.generation});
+  const live = () => ({protocol_version:2,analyzed:150,total_objects:200,result_limit:50,duration_ms:5,
+    result_limit_reached:false,scan_limit_reached:false,property_limit_reached:false,timed_out:fixture.mode==='partial',
+    results:fixture.mode==='empty'?[]:Array.from({length:50},(_,i)=>({id:`preview-${i}`,class_name:`RetainedFixture${i}`,property_count:16,
+      properties_truncated:false,similarity:null,preview:Array.from({length:16},(_,j)=>({name:`property-${j}`,type:'string',value:j===0?'<img src=x onerror=alert(1)>':'synthetic inert value '.repeat(8)}))}))});
+  const snapshot = () => ({protocol_version:2,file_bytes:4096,total_nodes:100,analyzed_nodes:100,matched_nodes:fixture.mode==='empty'?0:50,reachable_nodes:90,
+    total_edges:120,indexed_edges:120,total_strings:30,duration_ms:4,result_limit:50,reference_limit:12,scope:'all',result_limit_reached:false,
+    node_limit_reached:fixture.mode==='partial',edge_limit_reached:false,string_limit_reached:false,retaining_paths_partial:false,
+    results:fixture.mode==='empty'?[]:Array.from({length:50},(_,i)=>({id:String(i+1),type:'object',name:`Snapshot node ${i+1}`,self_size:64,reachable:true,
+      incoming_reference_count:12,incoming_reference_limit_reached:false,retaining_path_complete:true,
+      retaining_path:[{edge_type:'property',edge:'retained',type:'object',name:'root fixture'}],
+      incoming_references:Array.from({length:12},(_,j)=>({source_id:String(j+100),edge_type:j===0?'internal':'property',edge:`edge-${j}`,source_type:'object',source_name:`referrer ${j}`}))}))});
+  const diff = () => ({protocol_version:1,baseline_file_bytes:4096,current_file_bytes:4096,baseline_nodes:100,current_nodes:101,
+    baseline_edges:120,current_edges:121,baseline_reachable_nodes:90,current_reachable_nodes:91,baseline_self_size:6400,current_self_size:6464,self_size_delta:64,
+    duration_ms:8,result_limit:50,group_result_limit_reached:false,dominator_result_limit_reached:false,aggregation_limit_reached:false,
+    baseline_node_limit_reached:false,baseline_edge_limit_reached:false,baseline_string_limit_reached:false,current_node_limit_reached:fixture.mode==='partial',
+    current_edge_limit_reached:false,current_string_limit_reached:false,retained_size_saturated:false,
+    groups:fixture.mode==='dominators'?[]:[{type:'object',name:'RetainedFixture',baseline_count:10,current_count:11,count_delta:1,baseline_self_size:640,current_self_size:704,self_size_delta:64}],
+    dominators:[{id:'7',type:'object',name:'Retained owner',baseline_retained_size:640,current_retained_size:704,retained_size_delta:64}]});
+  fixture.trace = state => ({...initial.memory_origin_trace,trace_id:fixture.traceId,state,target_id:fixture.session.target.id,query:'fixture',scope:'all',
+    before_steps:3,after_steps:8,started_at_ms:1700000000000+fixture.traceId,message:state==='armed'?'Trace armed. Trigger a page click.':'Stopped with bounded samples.',
+    step_count:state==='armed'?0:2,first_match_step:state==='armed'?null:2,partial:state!=='armed',limit_reason:null,
+    steps:state==='armed'?[]:[1,2].map(step=>({id:`trace-${fixture.traceId}-${step}`,step,captured_at_ms:1700000000000+step,capture_bytes:4096,duration_ms:2,
+      analyzed_nodes:80,total_nodes:100,indexed_edges:90,total_edges:120,matched:step===2,coverage_partial:true,is_first_match:step===2,
+      location:{script_id:'reused-script',url:'https://fixture.invalid/memory.js',function_name:`fixtureStep${step}`,line:3,column:0,framework_filtered:false},
+      match:step===2?{id:'7',type:'string',name:'fixture',self_size:16}:null}))});
+  fixture.action = async request => {
+    fixture.requests.push(structuredClone(request));
+    const generation = ++fixture.session.generation;
+    let body;
+    if(request.action==='search_live_objects') body={ok:true,generation,search:live()};
+    if(request.action==='search_heap_snapshot') body={ok:true,generation,snapshot:{...snapshot(),scope:request.scope??'all'}};
+    if(request.action==='capture_heap_diff_baseline') {fixture.session.heap_diff_baseline=baseline();body={ok:true,generation,baseline:structuredClone(fixture.session.heap_diff_baseline)};}
+    if(request.action==='clear_heap_diff_baseline') {fixture.session.heap_diff_baseline=null;body={ok:true,generation};}
+    if(request.action==='compare_heap_diff') body={ok:true,generation,diff:diff()};
+    if(request.action==='start_memory_origin_trace') {fixture.traceId=fixture.nextTraceId++;fixture.session.memory_origin_trace=fixture.trace('armed');body={ok:true,generation,trace:structuredClone(fixture.session.memory_origin_trace)};}
+    if(request.action==='stop_memory_origin_trace') {fixture.session.memory_origin_trace=fixture.trace(fixture.stopState);body={ok:true,generation,trace:structuredClone(fixture.session.memory_origin_trace)};}
+    if(request.action==='clear_memory_origin_trace') {fixture.session.memory_origin_trace=structuredClone(initial.memory_origin_trace);body={ok:true,generation};}
+    if(fixture.mode==='pending') await new Promise(resolve=>fixture.pending.push(resolve));
+    if(fixture.mode==='error') return null;
+    if(fixture.mode==='malformed') return {ok:true,generation,malformed:true};
+    return body;
+  };
+  fixture.release=()=>fixture.pending.splice(0).forEach(resolve=>resolve());
+  fixture.handle=async(request,response)=>{
+    const path=new URL(request.url,'http://127.0.0.1').pathname;
+    const json=(status,body,headers={})=>{if(!response.destroyed){response.writeHead(status,{'Content-Type':'application/json',...headers});response.end(JSON.stringify(body));}};
+    if(path==='/api/debugger'){
+      fixture.debuggerRequests++;const etag=`"memory-${fixture.session.generation}"`;
+      if(request.headers?.['if-none-match']===etag){fixture.notModifiedCount++;response.writeHead(304,{ETag:etag});response.end();}
+      else json(200,fixture.session,{ETag:etag});return true;
+    }
+    if(path==='/api/debugger/actions'){
+      let bytes='';for await(const chunk of request){bytes+=chunk;if(bytes.length>16384)throw Error('Fixture request limit');}
+      const body=await fixture.action(JSON.parse(bytes));json(body?200:503,body??{error:'Synthetic unavailable native action'});return true;
+    }
+    if(path==='/api/events'){json(200,{count:0,events:[],capture_mode:'demo',broker_connected:false,capture_controls_available:false});return true;}
+    if(path==='/api/artifacts'){json(200,{count:0,artifacts:[]});return true;}
+    return false;
+  };
+  return fixture;
+}
+
+const memoryAppSource=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
+const memoryControllerSource=memoryAppSource.slice(memoryAppSource.indexOf('      function memoryAttached()'),memoryAppSource.indexOf('      function debuggerValueText('));
+assert(memoryControllerSource.includes('finishMemoryOperation'));
+async function memoryControllerFixture() {
+  const fixture=await memoryBrowserFixture();
+  const state={memoryMode:'live',memoryResults:[],memorySearchPending:false,memorySearchStatus:'idle',memorySearchMeta:null,memoryTargetId:null,
+    memoryDiffBaseline:null,memoryScopeVersion:0,debuggerSession:structuredClone(fixture.session)};
+  const elements=Object.fromEntries(['memoryPropertyQuery','memoryValueQuery','memoryClassQuery','memoryShapeQuery','memorySimilarityThreshold','memoryRegex','memoryCaseSensitive','memoryShapeValues','memoryReferenceScope','memoryOriginBefore','memoryOriginAfter','memoryCaptureBaseline'].map(name=>[name,{value:'',checked:false,focus(){}}]));
+  elements.memoryPropertyQuery.value='fixture';elements.memoryValueQuery.value='fixture';elements.memorySimilarityThreshold.value='0.75';
+  elements.memoryReferenceScope.value='all';elements.memoryOriginBefore.value='3';elements.memoryOriginAfter.value='8';
+  const controller=runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+'\n'+memoryControllerSource+
+    ';renderMemory=()=>{};({runLiveObjectSearch,runHeapSnapshotSearch,captureHeapDiffBaseline,clearHeapDiffBaseline,runHeapSnapshotDiff,runMemoryOriginTrace,stopMemoryOriginTrace,clearMemoryOriginTrace,applyMemoryOriginTrace,syncMemorySession,memoryOwnerCurrent,setMemoryMode,isDebuggerResponse,isLiveObjectSearchResponse,isHeapSnapshotSearchResponse,isHeapSnapshotDiffResponse,isMemoryOriginTrace})',
+    {state,elements,Date,TextEncoder,formatByteSize:value=>`${value} bytes`,debuggerAction:request=>fixture.action(request),memoryOriginTraceActive:()=>['armed','capturing','stepping','stopping'].includes(state.debuggerSession.memory_origin_trace.state)});
+  assert(controller.isDebuggerResponse(fixture.session),'Memory fixture must enter through the genuine debugger validator');
+  return {fixture,state,elements,...controller};
+}
+for(const [mode,method] of [['live','runLiveObjectSearch'],['snapshot','runHeapSnapshotSearch'],['diff','captureHeapDiffBaseline'],['diff','runHeapSnapshotDiff'],['diff','clearHeapDiffBaseline'],['origin','runMemoryOriginTrace'],['origin','clearMemoryOriginTrace']]) {
+  const c=await memoryControllerFixture();c.state.memoryMode=mode;
+  if(method==='runHeapSnapshotDiff'||method==='clearHeapDiffBaseline') c.state.memoryDiffBaseline={target_id:'memory-target-A',captured_at_ms:1,file_bytes:4096};
+  c.fixture.mode='pending';const pending=c[method]();assert(c.state.memorySearchPending,method);
+  c.state.debuggerSession={...c.state.debuggerSession,target:{...c.state.debuggerSession.target,id:'memory-target-B'}};
+  c.fixture.release();await pending;
+  assert.equal(c.state.memoryTargetId,null,method+' must not relabel A as B');assert.equal(c.state.memoryResults.length,0);
+  assert.equal(c.state.memorySearchStatus,'unavailable');assert.equal(c.state.memorySearchPending,false);
+}
+for(const method of ['runLiveObjectSearch','runHeapSnapshotSearch']) {
+  const c=await memoryControllerFixture();c.state.memoryMode=method==='runLiveObjectSearch'?'live':'snapshot';
+  c.fixture.mode='pending';const pending=c[method]();await c[method]();assert.equal(c.fixture.requests.length,1,'Enter/repeated click cannot double submit');
+  const old=c.state.debuggerSession;const next={...old,scripts:[],target:{...old.target,id:'B'}};
+  c.syncMemorySession(old,next);c.syncMemorySession(next,old);c.fixture.release();await pending;
+  assert.equal(c.state.memorySearchStatus,'unavailable','A to B to A cannot revive operation');
+  c.fixture.mode='ready';await c[method]();const rows=c.state.memoryResults;const owner=c.state.memoryResultOwner;
+  c.fixture.mode='error';await c[method]();assert.equal(c.state.memoryResults,rows);assert.equal(c.state.memoryResultOwner,owner);
+  assert.match(c.state.memorySearchMessage,/unconfirmed/);
+}
+{
+  const c=await memoryControllerFixture();c.state.memoryMode='diff';await c.captureHeapDiffBaseline();
+  const original=c.state.memoryDiffBaseline;c.fixture.mode='pending';const pending=c.runHeapSnapshotDiff();
+  c.state.memoryDiffBaseline={...original,captured_at_ms:original.captured_at_ms+1};c.fixture.release();await pending;
+  assert.equal(c.state.memorySearchStatus,'unavailable');assert.equal(c.state.memorySearchMeta,null);
+  c.fixture.mode='ready';await c.runHeapSnapshotDiff();assert.equal(c.state.memoryResultOwner.baseline.captured_at_ms,c.state.memoryDiffBaseline.captured_at_ms);
+  const accepted=c.state.memoryDiffBaseline;c.syncMemorySession(c.state.debuggerSession,{...c.state.debuggerSession,generation:c.state.debuggerSession.generation,heap_diff_baseline:null});
+  assert.equal(c.state.memoryDiffBaseline,accepted,'older poll cannot erase accepted baseline receipt');
+  c.syncMemorySession(c.state.debuggerSession,{...c.state.debuggerSession,generation:0,heap_diff_baseline:null});
+  assert.equal(c.state.memoryDiffBaseline,null,'native generation reset retires a pre-restart baseline');
+}
+{
+  const c=await memoryControllerFixture();c.state.memoryMode='origin';
+  assert.equal(c.applyMemoryOriginTrace({...c.fixture.trace('armed'),target_id:'other'}),false);assert.equal(c.state.memorySearchPending,false);
+  assert.equal(c.applyMemoryOriginTrace(c.fixture.trace('aborted')),true);assert.equal(c.state.memorySearchPending,false);
+  assert.equal(c.applyMemoryOriginTrace(c.fixture.trace('armed')),false,'late armed response cannot regress a stopped trace');
+  c.state.memoryScopeVersion++;assert.equal(c.applyMemoryOriginTrace(c.fixture.trace('aborted')),false,'expired source identity never revives');
+}
+{
+  const c=await memoryControllerFixture();const prior={...c.state.debuggerSession,scripts:[{execution_context_id:1}]};
+  c.syncMemorySession(prior,{...prior,scripts:[{execution_context_id:2}]});assert.equal(c.state.memoryScopeVersion,1,'same-target context destruction expires preview');
+  const live=await c.fixture.action({action:'search_live_objects'});assert(c.isLiveObjectSearchResponse(live));
+  live.search.results.push(live.search.results[0]);assert.equal(c.isLiveObjectSearchResponse(live),false);
+  const snapshot=await c.fixture.action({action:'search_heap_snapshot'});assert(c.isHeapSnapshotSearchResponse(snapshot));
+  snapshot.snapshot.results[0].incoming_references.push(snapshot.snapshot.results[0].incoming_references[0]);assert.equal(c.isHeapSnapshotSearchResponse(snapshot),false);
+  assert(c.isHeapSnapshotDiffResponse(await c.fixture.action({action:'compare_heap_diff'})));
+  assert(c.isMemoryOriginTrace(c.fixture.trace('aborted')));
+}
+console.log('PASS Memory production controllers: target/context/mode/baseline ownership, A-B-A race, double submission, failure retention, monotonic trace, baseline poll ordering and 50-row/12-reference bounds (not rendered QA)');
+
+// Action replies and debugger long-polls share a native lifecycle. Exercise the
+// production transport + refresh functions, including the following 304, rather
+// than replacing that race with a UI-only action stub.
+for (const outcome of ['success', 'lost', 'malformed', 'old-generation', 'restart']) {
+  const fixture=await memoryBrowserFixture();
+  const state={memoryMode:'origin',memoryResults:[],memorySearchPending:false,memorySearchStatus:'idle',memorySearchMeta:null,memoryTargetId:null,
+    memoryDiffBaseline:null,memoryScopeVersion:0,debuggerSession:structuredClone(fixture.session),debuggerRefreshing:false,debuggerActionPending:false,
+    debuggerEtag:null,openScriptIds:[],requests:[],selectedScriptId:null,selectedRequestId:null,editingBreakpointId:null};
+  const elements={memoryValueQuery:{value:'fixture'},memoryOriginBefore:{value:'3'},memoryOriginAfter:{value:'8'},memoryReferenceScope:{value:'all'}};
+  let release;const response=new Promise(resolve=>{release=resolve;});let gets=0;const requests=[];
+  const terminal={...fixture.trace('found'),...(outcome==='restart'?{trace_id:1,started_at_ms:1700000010000}:{})};
+  const generation=outcome==='restart'?0:12;
+  const sandbox={state,elements,Date,TextEncoder,AbortController,setTimeout,clearTimeout,location:{protocol:'http:'},document:{hidden:false,querySelector:()=>({hidden:true})},
+    fetch:async(url,options)=>{requests.push({url,method:options.method??'GET',headers:options.headers});
+      if(options.method==='POST')return {ok:true,json:async()=>{const body=await response;if(body instanceof Error)throw body;return body;}};
+      if(++gets>1)return {status:304,ok:false};
+      return {status:200,ok:true,headers:{get:()=>`"${generation}"`},json:async()=>({...structuredClone(fixture.session),generation,memory_origin_trace:terminal})};},
+    memoryOriginTraceActive:()=>['armed','capturing','stepping','stopping'].includes(state.debuggerSession.memory_origin_trace.state)};
+  sandbox.syncExperimentSession = (_, current) => current;
+  for(const name of ['renderDebugger','scheduleDebuggerRefresh','rebuildTrafficRequests','renderLiveBrowserTabCount','pruneLiveScriptContent','renderShellStatus','renderNetworkNotice','renderFieldProvenance'])sandbox[name]=()=>{};
+  const slice=(start,end)=>memoryAppSource.slice(memoryAppSource.indexOf(start),memoryAppSource.indexOf(end,memoryAppSource.indexOf(start)));
+  const controller=runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+'\n'+memoryControllerSource+'\n'+
+    slice('      async function debuggerAction(', '      function scheduleDebuggerRefresh(')+'\n'+
+    slice('      async function refreshDebugger(', '      async function refreshArtifacts(')+'\nrenderMemory=()=>{};({runMemoryOriginTrace,refreshDebugger})',sandbox);
+  const pending=controller.runMemoryOriginTrace();await controller.refreshDebugger();
+  assert.equal(state.debuggerRefreshFailed,false,outcome);assert.equal(state.debuggerSession.memory_origin_trace.state,'found');
+  release(outcome==='lost'?new Error('Synthetic lost action reply'):{ok:true,generation:outcome==='malformed'?'invalid':outcome==='old-generation'?9:11,trace:fixture.trace('armed')});
+  await pending;await controller.refreshDebugger();
+  assert.equal(state.memorySearchMeta.state,'found',outcome);assert.equal(state.memorySearchPending,false,outcome);
+  assert.equal(state.debuggerActionPending,false);assert.equal(requests[2].headers['If-None-Match'],`"${generation}"`);
+  assert.equal(state.memorySearchStatus,'unavailable',outcome+' retains an unobserved action acknowledgement separately from known native terminal state');
+}
+const memoryFixturePoll=(c,patch)=>{
+  const previous=c.state.debuggerSession,current={...structuredClone(c.fixture.session),...patch};
+  assert(c.isDebuggerResponse(current));c.state.debuggerSession=current;c.syncMemorySession(previous,current);
+  return c.applyMemoryOriginTrace(current.memory_origin_trace);
+};
+for(const newId of [1,7]) {
+  const c=await memoryControllerFixture();c.state.memoryMode='origin';assert(c.applyMemoryOriginTrace(c.fixture.trace('aborted')));
+  const oldOwner=c.state.memoryResultOwner;
+  memoryFixturePoll(c,{generation:0,memory_origin_trace:structuredClone(c.state.debuggerSession.memory_origin_trace)});
+  assert.equal(oldOwner.expired,true);
+  c.fixture.action=async()=>({ok:true,generation:1,trace:{...c.fixture.trace('armed'),trace_id:newId,started_at_ms:1700000010000}});
+  await c.runMemoryOriginTrace();assert.equal(c.state.memorySearchMeta.trace_id,newId);assert.equal(c.state.memorySearchStatus,'searching');
+  assert.notEqual(c.state.memoryResultOwner,oldOwner);assert.equal(c.state.memoryResultOwner.nativeEpoch,1);
+}
+for(const action of ['captureHeapDiffBaseline','clearHeapDiffBaseline']) {
+  const c=await memoryControllerFixture();c.state.memoryMode='diff';
+  if(action==='clearHeapDiffBaseline')await c.captureHeapDiffBaseline();
+  c.fixture.mode='pending';const pending=c[action]();const generation=c.fixture.session.generation+1;
+  const baseline={target_id:'memory-target-A',file_bytes:8192,captured_at_ms:1700000020000};
+  memoryFixturePoll(c,{generation,heap_diff_baseline:baseline});c.fixture.release();await pending;
+  assert.equal(c.state.memoryDiffBaseline,baseline);assert.equal(c.state.memoryBaselineGeneration,generation);
+  assert.match(c.state.memorySearchMessage,/acknowledged/);assert.match(c.state.memorySearchMessage,/Newer native baseline/);
+}
+for(const generation of [undefined,null,'not-a-number',-1,0.5,Number.MAX_SAFE_INTEGER+1,Infinity,NaN]) {
+  const acknowledgement=extra=>({ok:true,...(generation===undefined?{}:{generation}),...extra});
+  const reset=await memoryControllerFixture();reset.state.memoryMode='diff';await reset.captureHeapDiffBaseline();
+  const original=reset.state.memoryDiffBaseline,originalGeneration=reset.state.memoryBaselineGeneration;
+  reset.fixture.action=async()=>acknowledgement({});await reset.clearHeapDiffBaseline();
+  assert.equal(reset.state.memorySearchStatus,'unavailable');assert.equal(reset.state.memoryDiffBaseline,original);
+  assert.equal(reset.state.memoryBaselineGeneration,originalGeneration);assert.doesNotMatch(reset.state.memorySearchMessage,/file was deleted/);
+  memoryFixturePoll(reset,{generation:13,heap_diff_baseline:{target_id:'memory-target-A',file_bytes:8192,captured_at_ms:1700000030000}});
+  assert.equal(reset.state.memoryDiffBaseline.file_bytes,8192);assert.equal(reset.state.memoryBaselineGeneration,13);
+  const clear=await memoryControllerFixture();clear.state.memoryMode='origin';clear.applyMemoryOriginTrace(clear.fixture.trace('aborted'));
+  const rows=clear.state.memoryResults;clear.fixture.action=async()=>acknowledgement({});await clear.clearMemoryOriginTrace();
+  assert.equal(clear.state.memorySearchStatus,'unavailable');assert.equal(clear.state.memoryResults,rows);
+  const start=await memoryControllerFixture();start.state.memoryMode='origin';start.fixture.action=async()=>acknowledgement({trace:start.fixture.trace('armed')});
+  await start.runMemoryOriginTrace();assert.equal(start.state.memorySearchStatus,'unavailable');assert.equal(start.state.memorySearchMeta,null);
+  const stop=await memoryControllerFixture();stop.state.memoryMode='origin';stop.state.debuggerSession.memory_origin_trace=stop.fixture.trace('armed');
+  stop.applyMemoryOriginTrace(stop.state.debuggerSession.memory_origin_trace);stop.fixture.action=async()=>acknowledgement({trace:stop.fixture.trace('aborted')});
+  await stop.stopMemoryOriginTrace();assert.equal(stop.state.memorySearchStatus,'unavailable');assert.equal(stop.state.memorySearchMeta.state,'armed');
+}
+{
+  const c=await memoryControllerFixture();c.state.memoryMode='origin';c.applyMemoryOriginTrace(c.fixture.trace('aborted'));
+  c.fixture.mode='pending';const pending=c.clearMemoryOriginTrace();
+  const newer={...c.fixture.trace('armed'),trace_id:8,started_at_ms:1700000020000};
+  memoryFixturePoll(c,{generation:12,memory_origin_trace:newer});c.fixture.release();await pending;
+  assert.equal(c.state.memorySearchMeta.trace_id,8);assert.equal(c.state.memorySearchPending,true);
+  assert.match(c.state.memorySearchMessage,/newer validated native trace/);
+  const stop=await memoryControllerFixture();stop.state.memoryMode='origin';stop.state.debuggerSession.memory_origin_trace=stop.fixture.trace('armed');
+  stop.applyMemoryOriginTrace(stop.state.debuggerSession.memory_origin_trace);
+  stop.fixture.action=async()=>({ok:true,generation:9,trace:stop.fixture.trace('aborted')});
+  await stop.stopMemoryOriginTrace();assert.equal(stop.state.memorySearchStatus,'unavailable');assert.equal(stop.state.memorySearchMeta.state,'armed');
+  assert.equal(stop.state.memoryLastOperation.action,'stop_memory_origin_trace');
+}
+console.log('PASS Memory production action/poll/ETag304 reconciliation (success/lost/malformed/old generation/restart), lower/reused epoch trace IDs, stale capture/reset acknowledgements, malformed generation matrix and newer trace preservation on clear');
+
+// Deterministic browser-clock fixture over the production Memory + debugger
+// transport/refresh functions. The synthetic fetch deliberately ignores abort
+// to prove that request/body ownership is bounded independently of its producer.
+async function memoryRequestFixture(phase = 'body', rendered = false) {
+  const c=rendered ? await memoryRenderFixture() : await memoryControllerFixture();
+  if (rendered) Object.assign(c.document,{hidden:false,querySelector:()=>({hidden:true})});
+  Object.assign(c.state,{memoryOperation:null,debuggerActionOwner:null,debuggerRefreshing:false,debuggerActionPending:false,debuggerEtag:null,openScriptIds:[],requests:[],selectedScriptId:null,selectedRequestId:null,editingBreakpointId:null});
+  const timers=new Map(),transports=[],requests=[];let timerId=0,native=null,memoryRenders=0;
+  const flush=async()=>{for(let i=0;i<12;i++)await Promise.resolve();};
+  const sandbox={state:c.state,elements:c.elements,Date,TextEncoder,AbortController,
+    setTimeout:(callback,delay)=>{const id=++timerId;timers.set(id,{callback,delay});return id;},clearTimeout:id=>timers.delete(id),
+    formatByteSize:value=>`${value} bytes`,location:{protocol:'http:'},document:c.document??{hidden:false,querySelector:()=>({hidden:true})},
+    textElement:c.textElement,onMemoryRender:()=>{memoryRenders++;},
+    fetch:async(url,options)=>{
+      requests.push({url,method:options.method??'GET',headers:options.headers});
+      if(options.method!=='POST'){
+        const session=native??c.fixture.session,etag=`"${session.generation}"`;
+        if(options.headers?.['If-None-Match']===etag)return {status:304,ok:false};
+        return {status:200,ok:true,headers:{get:()=>etag},json:async()=>structuredClone(session)};
+      }
+      const request=JSON.parse(options.body),reply=await c.fixture.action(request);
+      let headersReady,bodyReady,bodyReads=0,statusReads=0;
+      const body=new Promise(resolve=>{bodyReady=resolve;});
+      const headers=new Promise(resolve=>{headersReady=()=>resolve({get ok(){statusReads++;return transport.ok;},json:()=>{bodyReads++;return body;}});});
+      const transport={request,reply,signal:options.signal,headersReady,ok:true,get bodyReads(){return bodyReads;},get statusReads(){return statusReads;},resolve:value=>{headersReady();bodyReady(value);}};
+      transports.push(transport);if(phase==='body')headersReady();return headers;
+    },memoryOriginTraceActive:()=>['armed','capturing','stepping','stopping'].includes(c.state.debuggerSession.memory_origin_trace.state)};
+  sandbox.syncExperimentSession = (_, current) => current;
+  for(const name of ['renderDebugger','scheduleDebuggerRefresh','rebuildTrafficRequests','renderLiveBrowserTabCount','pruneLiveScriptContent','renderShellStatus','renderNetworkNotice','renderFieldProvenance'])sandbox[name]=()=>{};
+  const slice=(start,end)=>memoryAppSource.slice(memoryAppSource.indexOf(start),memoryAppSource.indexOf(end,memoryAppSource.indexOf(start)));
+  const api=runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+'\n'+memoryControllerSource+'\n'+
+    slice('      async function debuggerAction(', '      function scheduleDebuggerRefresh(')+'\n'+
+    slice('      async function refreshDebugger(', '      async function refreshArtifacts(')+'\n'+
+    (rendered?'const memoryRenderImplementation=renderMemory;renderMemory=()=>{onMemoryRender();memoryRenderImplementation();};':'renderMemory=()=>{};')+
+    '({renderMemory,debuggerAction,refreshDebugger,runLiveObjectSearch,runHeapSnapshotSearch,captureHeapDiffBaseline,clearHeapDiffBaseline,runHeapSnapshotDiff,runMemoryOriginTrace,stopMemoryOriginTrace,clearMemoryOriginTrace,applyMemoryOriginTrace,setMemoryMode})',sandbox);
+  return {...c,...api,timers,transports,requests,flush,get memoryRenderCount(){return memoryRenders;},
+    poll:async patch=>{native={...structuredClone(c.fixture.session),...patch};await api.refreshDebugger();await flush();},
+    fire:async()=>{const callbacks=[...timers.values()];timers.clear();for(const timer of callbacks)timer.callback();await flush();}};
+}
+const settleMemoryRequest=async pending=>{
+  let timeout;try {await Promise.race([pending,new Promise((_,reject)=>{timeout=setTimeout(()=>reject(new Error('Memory request did not settle after retirement')),1000);})]);}
+  finally {clearTimeout(timeout);}
+};
+for(const phase of ['headers','body']) {
+  const c=await memoryRequestFixture(phase);c.state.memoryMode='origin';
+  const pending=c.runMemoryOriginTrace();await c.flush();
+  const old=c.transports[0];assert.equal(c.timers.size,1);
+  await c.poll({generation:12,memory_origin_trace:c.fixture.trace('found')});await settleMemoryRequest(pending);await c.refreshDebugger();
+  assert.equal(c.state.memorySearchMeta.state,'found');assert.equal(c.state.memoryOperation,null);
+  assert.equal(c.state.memorySearchPending,false);assert.equal(c.state.debuggerActionPending,false);assert.equal(c.timers.size,0);
+  assert(old.signal.aborted);assert.equal(c.requests.filter(request=>request.method==='POST').length,1);
+  assert.match(c.state.memorySearchMessage,/acknowledgement remains unavailable/);
+  // A generic newer action keeps its original transport semantics and latch.
+  const newer=c.debuggerAction({action:'pause'});await c.flush();const newOwner=c.state.debuggerActionOwner;
+  assert.equal(c.timers.size,0,'Non-Memory callers do not inherit a deadline or abort signal');assert.equal(c.transports[1].signal,undefined);
+  old.resolve(old.reply);await c.flush();
+  assert.equal(old.bodyReads,phase==='headers'?0:1,'Retired late headers must not start body parsing');
+  assert.equal(old.statusReads,0,'Retired late body must not continue response processing');
+  assert.equal(c.state.debuggerActionOwner,newOwner);assert.equal(c.state.debuggerActionPending,true);assert.equal(c.state.debuggerError,null);
+  assert.equal(c.state.memorySearchMeta.state,'found','Late armed result cannot overwrite terminal native state');
+  c.transports[1].resolve({ok:true,generation:13});await settleMemoryRequest(newer);assert.equal(c.state.debuggerActionPending,false);
+}
+const memoryDeadlines=[['live','runLiveObjectSearch',30000],['snapshot','runHeapSnapshotSearch',120000],
+  ['diff','captureHeapDiffBaseline',90000],['diff','clearHeapDiffBaseline',15000],['diff','runHeapSnapshotDiff',150000],
+  ['origin','runMemoryOriginTrace',15000],['origin','stopMemoryOriginTrace',15000],['origin','clearMemoryOriginTrace',15000]];
+for(const phase of ['headers','body'])for(const [mode,method,deadline] of memoryDeadlines) {
+  const c=await memoryRequestFixture(phase);c.state.memoryMode=mode;
+  if(method==='clearHeapDiffBaseline'||method==='runHeapSnapshotDiff')c.state.memoryDiffBaseline={target_id:'memory-target-A',captured_at_ms:1,file_bytes:4096};
+  if(method==='stopMemoryOriginTrace'){
+    c.state.debuggerSession.memory_origin_trace=c.fixture.trace('armed');c.applyMemoryOriginTrace(c.state.debuggerSession.memory_origin_trace);
+  }
+  if(method==='clearMemoryOriginTrace')c.applyMemoryOriginTrace(c.fixture.trace('aborted'));
+  const pending=c[method]();await c.flush();assert.equal(c.timers.size,1,method);
+  assert.equal([...c.timers.values()][0].delay,deadline,method);await c.fire();await settleMemoryRequest(pending);
+  assert.equal(c.state.debuggerActionPending,false,method);assert.equal(c.state.debuggerActionOwner,null);assert.equal(c.timers.size,0);
+  assert.equal(c.state.memoryOperation,null);assert.equal(c.state.memorySearchPending,method==='stopMemoryOriginTrace');
+  assert.equal(c.state.memorySearchStatus,'unavailable');assert.match(c.state.memorySearchMessage,/Native completion is unknown/);
+  assert(c.transports[0].signal.aborted);assert.equal(c.requests.filter(request=>request.method==='POST').length,1,'Never retry a native action');
+  c.transports[0].resolve(c.transports[0].reply);await c.flush();
+  assert.equal(c.transports[0].bodyReads,phase==='headers'?0:1,method+' late headers');assert.equal(c.transports[0].statusReads,0,method+' late body continuation');
+  if(method==='stopMemoryOriginTrace'){await c.poll({generation:12,memory_origin_trace:c.fixture.trace('aborted')});assert.equal(c.state.memorySearchPending,false);}
+}
+for(const change of ['target','restart','context'])for(const phase of ['headers','body']) {
+  const c=await memoryRequestFixture(phase);c.state.memoryMode='live';
+  if(change==='context')c.state.debuggerSession.scripts=[{execution_context_id:1}];
+  const pending=c.runLiveObjectSearch();await c.flush();
+  await c.poll(change==='target'?{generation:12,target:{...c.fixture.session.target,id:'target-B'}}:change==='restart'?{generation:0}:{generation:12,scripts:[]});
+  await settleMemoryRequest(pending);assert.equal(c.state.memoryOperation,null);assert.equal(c.state.debuggerActionPending,false);assert.equal(c.state.memorySearchPending,false);
+  assert.equal(c.state.memoryResults.length,0);assert(c.transports[0].signal.aborted);assert.equal(c.timers.size,0);
+}
+{
+  const c=await memoryRequestFixture();const first=c.runLiveObjectSearch();await c.flush();const old=c.transports[0];
+  await c.fire();await settleMemoryRequest(first);
+  c.elements.memoryValueQuery.value='newer criteria';const second=c.runLiveObjectSearch();await c.flush();
+  const operation=c.state.memoryOperation,owner=c.state.debuggerActionOwner;
+  old.resolve(old.reply);await c.flush();assert.equal(c.state.memoryOperation,operation);assert.equal(c.state.debuggerActionOwner,owner);assert.equal(c.state.debuggerActionPending,true);
+  c.transports[1].resolve(c.transports[1].reply);await settleMemoryRequest(second);assert.equal(c.state.memoryResults.length,50);
+  assert.match(c.state.memoryResultOwner.criteria,/newer criteria/);assert.equal(c.timers.size,0);
+}
+{
+  const c=await memoryRequestFixture();c.state.memoryMode='origin';
+  const old=c.fixture.trace('found');c.state.debuggerSession.memory_origin_trace=old;c.applyMemoryOriginTrace(old);
+  const pending=c.runMemoryOriginTrace();await c.flush();
+  await c.poll({generation:12,memory_origin_trace:old});
+  assert(c.state.memoryOperation,'Unchanged old terminal trace cannot prove a new Start completed');assert.equal(c.timers.size,1);
+  await c.fire();await settleMemoryRequest(pending);assert.equal(c.state.debuggerActionPending,false);
+}
+{
+  const c=await memoryRequestFixture();
+  assert.equal(await c.debuggerAction({action:'pause'},{action:'pause'}),null,'Optional Memory scope cannot change a generic action contract');
+  assert.equal(c.transports.length,0);
+  const old=c.runLiveObjectSearch();await c.flush();
+  // Stress an owner handoff before the old finally runs. The replaced request
+  // must still terminate at its own deadline without unlocking the new owner.
+  c.state.debuggerActionPending=false;
+  const newer=c.debuggerAction({action:'pause'});await c.flush();const owner=c.state.debuggerActionOwner;
+  await c.fire();await settleMemoryRequest(old);
+  assert.equal(c.state.debuggerActionOwner,owner);assert.equal(c.state.debuggerActionPending,true);assert.equal(c.state.debuggerError,null);
+  c.transports[1].resolve({ok:true,generation:13});await settleMemoryRequest(newer);assert.equal(c.state.debuggerActionPending,false);
+}
+for(const phase of ['headers','body']) {
+  const c=await memoryRequestFixture(phase);const memory=c.runLiveObjectSearch();await c.flush();
+  const owner=c.state.debuggerActionOwner,parallel=c.debuggerAction({action:'cancel_repeater_request'});await c.flush();
+  assert.equal(c.transports[1].signal,undefined);assert.equal(c.timers.size,1);
+  c.transports[1].resolve({ok:true,generation:12});await settleMemoryRequest(parallel);
+  assert.equal(c.state.debuggerActionOwner,owner);assert.equal(c.state.debuggerActionPending,true,'Parallel controls cannot unlock the pending action');
+  c.transports[0].resolve(c.transports[0].reply);await settleMemoryRequest(memory);assert.equal(c.state.debuggerActionPending,false);
+  assert.equal(c.transports[0].bodyReads,1);assert.equal(c.transports[0].statusReads,1);assert.equal(c.timers.size,0);
+  const generic=c.debuggerAction({action:'pause'});await c.flush();const failed=c.transports[2];failed.ok=false;
+  failed.resolve({error:'Synthetic generic action rejected'});assert.equal(await generic,null);
+  assert.equal(c.state.debuggerError,'Synthetic generic action rejected');assert.equal(c.state.debuggerActionPending,false);
+  assert.equal(failed.bodyReads,1);assert.equal(failed.statusReads,1);assert.equal(c.timers.size,0);
+}
+for(const expiry of ['target','restart','context'])for(const phase of ['headers','body']) {
+  const c=await memoryRequestFixture(phase,true);c.state.memoryMode='origin';
+  const idle=structuredClone(c.fixture.session.memory_origin_trace);
+  c.state.debuggerSession.memory_origin_trace=c.fixture.trace('armed');c.applyMemoryOriginTrace(c.state.debuggerSession.memory_origin_trace);c.renderMemory();
+  if(expiry==='context')c.state.debuggerSession.scripts=[{execution_context_id:1}];
+  const pending=c.stopMemoryOriginTrace();await c.flush();
+  const patch=expiry==='target'?{generation:12,target:{...c.fixture.session.target,id:'target-B'}}:expiry==='restart'?{generation:0}:{generation:12,scripts:[]};
+  await c.poll({...patch,memory_origin_trace:idle});
+  await settleMemoryRequest(pending);await c.refreshDebugger();
+  assert.equal(c.state.debuggerActionPending,false);assert.equal(c.state.memorySearchPending,false);
+  assert.equal(c.elements.memorySearchButton.disabled,false,expiry+' '+phase+' search control recovers after 304');
+  assert(c.elements.memoryModeButtons.every(button=>button.disabled===false),expiry+' '+phase+' mode controls recover');
+  assert.equal(c.elements.memoryCaptureBaseline.disabled,false,expiry+' '+phase+' baseline control recovers');
+  assert(c.requests.at(-1).headers['If-None-Match'],'The unchanged poll must use the terminal ETag');
+  const renders=c.memoryRenderCount;c.transports[0].resolve(c.transports[0].reply);await c.flush();
+  assert.equal(c.memoryRenderCount,renders,'Late retired Stop does not redraw current controls');
+}
+{
+  const c=await memoryRequestFixture('body',true);c.renderMemory();
+  const owner={action:'search_live_objects',mode:'live',targetId:'memory-target-A',scopeVersion:0,nativeEpoch:0,pollSequence:0,submittedGeneration:10};
+  const old=c.debuggerAction({action:'search_live_objects'},owner);await c.flush();
+  c.state.debuggerActionPending=false;const newer=c.debuggerAction({action:'pause'});await c.flush();
+  const renders=c.memoryRenderCount,newOwner=c.state.debuggerActionOwner;
+  await c.fire();await settleMemoryRequest(old);
+  assert.equal(c.memoryRenderCount,renders,'Replaced Memory cleanup cannot redraw newer UI');
+  assert.equal(c.state.debuggerActionOwner,newOwner);assert.equal(c.state.debuggerActionPending,true);
+  c.transports[1].resolve({ok:true,generation:13});await settleMemoryRequest(newer);
+  assert.equal(c.memoryRenderCount,renders,'Generic cleanup does not broadly rerender Memory');
+}
+console.log('PASS Memory rendered Stop controls recover after target/restart/context expiry and 304 for headers/body; replaced-owner and generic cleanup do not rerender Memory');
+console.log('PASS Memory non-settling headers/body: terminal-poll retirement before 304, all eight native-compatible deadlines, target/restart/context expiry, abort cleanup, no retries, unchanged generic callers and late-old-response isolation of newer Memory/global latches');
+
+async function memoryRenderFixture() {
+  const c=await memoryControllerFixture();
+  const document={activeElement:null};
+  class MemoryNode extends TrafficFixtureNode {
+    get parentElement(){return this.parentNode;}
+    get firstChild(){return this.children[0]??null;}
+    matches(selector){return selector.split(',').some(value=>super.matches(value.trim()));}
+    focus(){document.activeElement=this;}
+    remove(){if(this.parentNode){if(this.contains(document.activeElement))document.activeElement=null;this.parentNode.children.splice(this.parentNode.children.indexOf(this),1);this.parentNode=null;}}
+    replaceChildren(...nodes){if(this.contains(document.activeElement))document.activeElement=null;super.replaceChildren(...nodes);}
+  }
+  document.createElement=tag=>new MemoryNode(tag);
+  const bindings=await readFile(join(root,'apps/research-ui/app_state.js'),'utf8');
+  const elements=Object.fromEntries([...bindings.matchAll(/        (memory\w+): document.querySelector/g)].map(match=>[match[1],new MemoryNode()]));
+  for(const [key,value] of Object.entries(c.elements))Object.assign(elements[key],value);
+  elements.memoryModeButtons=['live','snapshot','diff','origin'].map(mode=>{const node=new MemoryNode('button');node.dataset.memoryMode=mode;return node;});
+  const list=new MemoryNode();list.append(elements.memoryResults);
+  const pane=new MemoryNode();pane.append(list,elements.memoryDetail);
+  const textElement=(tag,className,text)=>{const node=new MemoryNode(tag);node.className=className;node.textContent=text;return node;};
+  const renderer=runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+'\n'+memoryControllerSource+
+    ';({renderMemory,selectMemoryResult,runLiveObjectSearch,runHeapSnapshotSearch,runHeapSnapshotDiff,setMemoryMode})',
+    {state:c.state,elements,document,textElement,Date,TextEncoder,formatByteSize:value=>`${value} bytes`,debuggerAction:request=>c.fixture.action(request)});
+  return {...c,...renderer,elements,document,list,textElement};
+}
+{
+  const c=await memoryRenderFixture();await c.runLiveObjectSearch();
+  assert.equal(c.elements.memoryResults.children.length,50);
+  c.selectMemoryResult('preview-10',true);const row=c.document.activeElement,detail=c.elements.memoryDetail.firstChild;
+  c.list.scrollTop=200;c.elements.memoryDetail.scrollTop=80;
+  for(let i=0;i<200;i++)c.renderMemory();
+  assert.equal(c.document.activeElement,row);assert.equal(c.elements.memoryDetail.firstChild,detail);
+  assert.equal(c.list.scrollTop,200);assert.equal(c.elements.memoryDetail.scrollTop,80);
+  assert.equal(c.elements.memoryResults.querySelectorAll('.memory-result-row').length,50);
+  const count=node=>1+node.children.reduce((sum,child)=>sum+count(child),0);
+  assert(count(c.elements.memoryDetail)<100,'Only selected live preview renders, never all 50 previews');
+  c.elements.memoryValueQuery.value='new failed criteria';c.fixture.mode='error';await c.runLiveObjectSearch();
+  assert.match(c.elements.memoryNotice.textContent,/Submitted to memory-target-A/);
+  assert.match(c.elements.memorySubmittedCriteria.textContent,/Retained result/);assert.match(c.elements.memorySubmittedCriteria.textContent,/Latest attempt/);assert.match(c.elements.memorySubmittedCriteria.textContent,/new failed criteria/);
+  c.fixture.mode='ready';
+  c.state.memoryScopeVersion++;c.renderMemory();assert.match(c.elements.memorySubmission.textContent,/Expired context/);assert.match(c.elements.memoryDetail.textContent,/Expired preview/);
+  c.setMemoryMode('snapshot');await c.runHeapSnapshotSearch();
+  const disclosure=c.elements.memoryDetail.querySelector('details');disclosure.open=false;disclosure.querySelector('summary').focus();
+  c.renderMemory();assert.equal(c.elements.memoryDetail.querySelector('details'),disclosure);assert.equal(disclosure.open,false);assert.equal(c.document.activeElement,disclosure.querySelector('summary'));
+  c.setMemoryMode('diff');c.state.memoryDiffBaseline={target_id:c.state.debuggerSession.target.id,captured_at_ms:1,file_bytes:4096};
+  c.fixture.mode='dominators';await c.runHeapSnapshotDiff();assert.equal(c.elements.memoryDetail.hidden,false);assert.match(c.elements.memoryDetail.textContent,/Retained owner/);
+  c.setMemoryMode('live');c.fixture.mode='malformed';await c.runLiveObjectSearch();assert.match(c.elements.memoryResults.textContent,/Results unavailable/);
+}
+{
+  const c=await memoryControllerFixture();c.fixture.mode='pending';const pending=c.runLiveObjectSearch();c.state.memoryMode='snapshot';c.fixture.release();await pending;assert.equal(c.state.memorySearchStatus,'unavailable');
+  const baseline=await memoryControllerFixture();baseline.state.memoryMode='diff';baseline.fixture.mode='error';await baseline.captureHeapDiffBaseline();
+  assert.equal(baseline.state.memoryDiffBaseline,null,'lost reply cannot claim captured baseline');
+  baseline.syncMemorySession(baseline.state.debuggerSession,baseline.fixture.session);
+  assert.equal(baseline.state.memoryDiffBaseline.target_id,'memory-target-A','validated native refresh can establish baseline after unknown outcome');
+}
+{
+  const c=await memoryControllerFixture();let pivot;
+  c.state.memorySearchPending=true;c.state.selectedField={value:'new criteria'};
+  c.elements.requestMemoryPivot={addEventListener:(_,callback)=>{pivot=callback;}};
+  const start=memoryAppSource.indexOf("      elements.requestMemoryPivot.addEventListener('click', () => {");
+  const end=memoryAppSource.indexOf('\n      });',start)+10;
+  runInNewContext(memoryAppSource.slice(start,end),{state:c.state,elements:c.elements,showScreen:()=>{}});
+  pivot();assert.equal(c.elements.memoryValueQuery.value,'fixture');assert.equal(c.state.memorySearchPending,true);
+}
+console.log('PASS Memory real render functions: 200 unchanged refreshes retain row/detail/focus/scroll, at most 50 rows and one detail, expired labels, disclosure, dominator-only diff, malformed versus empty and lost-baseline reconciliation (DOM fixture; not visual QA)');
+
+// Admit the exact Memory session through the existing validator and exercise
+// real conditional HTTP semantics before attempting a browser launch.
+{
+  const fixture=await memoryBrowserFixture();
+  const response=()=>({destroyed:false,writeHead(status,headers){this.status=status;this.headers=headers;},end(body){this.body=body;}});
+  const first=response();assert(await fixture.handle({url:'/api/debugger',headers:{}},first));
+  assert.equal(first.status,200);assert(ui.isDebuggerResponse(JSON.parse(first.body)));
+  const unchanged=response();assert(await fixture.handle({url:'/api/debugger',headers:{'if-none-match':first.headers.ETag}},unchanged));
+  assert.equal(unchanged.status,304);assert.equal(unchanged.body,undefined);assert.equal(fixture.notModifiedCount,1);assert.equal(fixture.requests.length,0);
+}
+console.log('PASS Memory browser fixture validated debugger state, ETag200/304 and zero implicit actions (not rendered QA)');
+
+// Model the production divider placement, including ordinary and overlay
+// scrollbars. This reproduces a real competing resize strip at a flush row
+// edge; it is not a rendered-browser or native hit-testing substitute.
+async function checkMemoryRowGutters() {
+  const layoutSource=await readFile(join(root,'apps/research-ui/pane_layout.js'),'utf8');
+  const css=await readFile(join(root,'apps/research-ui/app.css'),'utf8');
+  const padding=Number(css.match(/#memory-results\s*\{\s*padding-inline:\s*(\d+)px;\s*\}/)?.[1]??0);
+  const receipts=[];
+  for(const width of [1440,760,360])for(const scrollbar of [16,0])for(const resized of [false,true]){
+    const outerLeft=width>650?1:0,total=width-outerLeft*2,criteria=width>950?(resized?420:292):245;
+    const outputWidth=total-criteria,listWidth=width>950?(resized?330:outputWidth*.38):width>650?outputWidth:total;
+    const box=(left,top,w,h)=>({left,right:left+w,top,bottom:top+h,width:w,height:h});
+    const node=(rect=null)=>({id:'',hidden:false,dataset:{},style:{removeProperty(){},setProperty(){}},parentElement:null,attributes:{},classList:{add(){},remove(){}},listeners:{},
+      setAttribute(k,v){this.attributes[k]=v;},addEventListener(k,v){this.listeners[k]=v;},getClientRects(){return rect?[rect]:[];},getBoundingClientRect(){return rect??box(0,0,0,0);},querySelector(){return node();}});
+    const body=node(box(0,0,width,900));body.children=[];body.append=n=>body.children.push(n);
+    const grid=node(box(outerLeft,237,total,638)),search=node(box(outerLeft,237,criteria,638)),output=node(box(outerLeft+criteria,237,outputWidth,638));
+    grid.parentElement=body;search.parentElement=output.parentElement=grid;grid.querySelector=s=>s==='.memory-search-pane'?search:output;
+    const listLeft=width>650?outerLeft+criteria:0;
+    const results=node(box(listLeft,295,width>650?outputWidth:total,580)),list=node(box(listLeft,295,listWidth,580)),detail=node(box(listLeft+listWidth,295,outputWidth-listWidth,580));
+    results.parentElement=output;list.parentElement=detail.parentElement=results;results.querySelector=s=>s==='.memory-results-list'?list:detail;
+    const parents=new Map([['.memory-grid',grid],['.memory-results-pane',results]]),queue=new Map();let serial=0;
+    const enqueue=fn=>{queue.set(++serial,fn);return serial;},cancel=id=>queue.delete(id);
+    const context={document:{body,querySelector:s=>{if(!parents.has(s))parents.set(s,node());return parents.get(s);},createElement:()=>node(),addEventListener(){}},window:{addEventListener(){}},innerWidth:width,innerHeight:900,
+      localStorage:{getItem:()=>null,setItem(){}},isPlainObject:v=>!!v&&typeof v==='object',requestAnimationFrame:enqueue,cancelAnimationFrame:cancel,setTimeout:enqueue,clearTimeout:cancel,
+      ResizeObserver:class{observe(){}},MutationObserver:class{observe(){}},getComputedStyle:n=>({display:n===grid?(width>650?'grid':'block'):n===results?'grid':'block',overflowX:'visible',overflowY:'visible',
+        getPropertyValue:()=>n===grid?`${criteria}px ${outputWidth}px`:n===results&&width>950?`${listWidth}px ${outputWidth-listWidth}px`:`${listWidth}px`})};
+    runInNewContext(layoutSource+';initializePaneLayout();',context);
+    while(queue.size){const [id,fn]=queue.entries().next().value;queue.delete(id);fn();}
+    const dividers=body.children.filter(n=>!n.hidden&&['pane-divider-memory','pane-divider-memory-detail'].includes(n.id)).map(n=>({id:n.id,...box(parseFloat(n.style.left),parseFloat(n.style.top),parseFloat(n.style.width),parseFloat(n.style.height))}));
+    assert.equal(dividers.length,width>950?2:width>650?1:0);assert(dividers.every(d=>d.width===8));
+    const target=gutter=>box(listLeft+gutter,331,listWidth-scrollbar-1-gutter*2,54);
+    const points=r=>[[r.left+r.width/2,r.top+r.height/2],[r.left+3,r.top+3],[r.right-3,r.bottom-3]];
+    const hits=r=>points(r).map(([x,y])=>({x,y,hit:dividers.find(d=>x>=d.left&&x<d.right&&y>=d.top&&y<d.bottom)?.id??'memory-result-row'}));
+    const baseline=hits(target(0));
+    if(width>650)assert(baseline.some(p=>p.hit==='pane-divider-memory'),'Flush baseline must reproduce the intercepted three-pixel row corner');
+    const row=target(padding),after=hits(row);
+    assert(after.every(p=>p.hit==='memory-result-row'),'Memory content corners must remain owned by the row');
+    assert(dividers.every(d=>Math.min(row.right,d.right)<=Math.max(row.left,d.left)||Math.min(row.bottom,d.bottom)<=Math.max(row.top,d.top)),'The entire row target must be outside the resize hit strips');
+    receipts.push({width,scrollbar,resized,baseline,after,row,dividers});
+  }
+  assert.equal(receipts.length,12);
+  console.log('PASS Memory flush-row resize interception counterexample and separated row targets across 12 viewport/scrollbar/split geometries (production pane layout; not rendered QA)');
+  return receipts;
+}
+await checkMemoryRowGutters();
+
+// The browser receipt at 760x560 had 223px for 150px + 170px tracks.
+// Run the exact QA reveal/ownership code against those nested geometry rules;
+// the old non-scrollable parent must fail rather than moving a hidden screen.
+async function checkMemoryResponsiveOwners() {
+  const css=await readFile(join(root,'apps/research-ui/app.css'),'utf8');
+  const narrow=css.slice(css.indexOf('      @media (max-width: 950px) {'));
+  assert.match(narrow,/\.memory-results-pane \{ overflow: auto; grid-template-columns: 1fr; grid-template-rows: minmax\(150px, \.7fr\) minmax\(170px, 1fr\); \}/);
+  const source=await readFile(join(root,'tools/check-origin-trace-debugger.mjs'),'utf8');
+  const from=source.indexOf('  const wheelReceipts=',source.indexOf('\nasync function checkMemoryInteractions('));
+  const to=source.indexOf('  await viewport(1440,900);',from);
+  const helpers=source.slice(from,to)+';({reveal,checkReadingScroll,scrollState,wheelReceipts})';
+  const results=[];
+  for(const width of [760,600,360])for(const prior of [false,true])for(const bounded of width===760&&!prior?[false,true]:[true]){
+    const height=width===360?740:560,phone=width<=650,gridTop=phone?(width===360?340:320):254,gridHeight=height-24-gridTop;
+    const nodes=[],bySelector=new Map();
+    const make=(selector,parent,x,y,w,h,content=h,overflow='visible')=>{
+      let top=0;const n={selector,id:selector.startsWith('#')?selector.slice(1):'',tagName:'DIV',className:selector.startsWith('.')?selector.slice(1):'',parentElement:parent,hidden:false,clientTop:0,clientLeft:0,scrollLeft:0,overflow,
+        get clientHeight(){return h;},get clientWidth(){return (typeof w==='function'?w():w)-(overflow==='auto'&&content>h?16:0);},get scrollHeight(){return content;},get scrollTop(){return top;},set scrollTop(value){top=Math.max(0,Math.min(content-h,value));},
+        getBoundingClientRect(){const p=parent?.getBoundingClientRect()??{left:0,top:0};const left=p.left+x,top=p.top+y-(parent?.scrollTop??0),width=typeof w==='function'?w():w;return {left,right:left+width,top,bottom:top+h,width,height:h};},
+        getClientRects(){return [this.getBoundingClientRect()];},getAttribute(){return null;},matches:s=>s===selector,contains(other){for(let p=other;p;p=p.parentElement)if(p===n)return true;return false;},querySelector:s=>bySelector.get(s)};
+      nodes.push(n);bySelector.set(selector,n);return n;
+    };
+    const html=make('html',null,0,0,width,height,height,'hidden'),body=make('body',html,0,0,width,height,height,'hidden'),workspace=make('#workspace',body,0,62,width,height-86,height-86,'hidden'),main=make('.main',workspace,0,0,width,height-86,height-86,'hidden'),screen=make('#screen-memory',main,0,37,width,height-123,height-123,'hidden');
+    const grid=make('.memory-grid',screen,0,gridTop-99,width,gridHeight,phone?940:gridHeight,phone?'auto':'visible');
+    const search=make('.memory-search-pane',grid,0,0,phone?()=>grid.clientWidth:245,phone?420:gridHeight,phone?420:381,phone?'visible':'auto');
+    const output=make('.memory-output',grid,phone?0:245,phone?420:0,()=>grid.clientWidth-(phone?0:245),phone?520:gridHeight);
+    const pane=make('#memory-results-pane',output,0,phone?60:59,()=>output.clientWidth,phone?460:223,phone?640:320,bounded?'auto':'visible');
+    const list=make('.memory-results-list',pane,0,0,()=>pane.clientWidth,phone?220:150,2736,'auto');make('.memory-results-head',list,0,0,()=>list.clientWidth,36);
+    const detail=make('#memory-detail',pane,0,phone?220:150,()=>pane.clientWidth,phone?420:170,1200,'auto');
+    const control=make('.memory-detail-disclosure summary',detail,12,350,()=>detail.clientWidth-24,38);
+    if(prior){list.scrollTop=108;detail.scrollTop=47;if(phone)grid.scrollTop=90;else search.scrollTop=23;}
+    const visible=n=>{let top=0,bottom=height,left=0,right=width;for(let p=n.parentElement;p;p=p.parentElement)if(p.overflow!=='visible'){const r=p.getBoundingClientRect();top=Math.max(top,r.top);bottom=Math.min(bottom,r.top+p.clientHeight);left=Math.max(left,r.left);right=Math.min(right,r.left+p.clientWidth);}return {top,bottom,left,right};};
+    const document={querySelector:s=>bySelector.get(s),querySelectorAll:()=>[],elementFromPoint:(x,y)=>{const r=control.getBoundingClientRect(),clip=visible(control);return x>=r.left&&x<=r.right&&y>=r.top&&y<=r.bottom&&x>=clip.left&&x<=clip.right&&y>=clip.top&&y<=clip.bottom?control:null;}};
+    const evaluate=async code=>JSON.parse(JSON.stringify(runInNewContext(code,{document,innerWidth:width,innerHeight:height,getComputedStyle:n=>({overflowX:n.overflow,overflowY:n.overflow})})));
+    const wheel=async(selector,delta,mode)=>{assert.equal(mode,'scrollbar');const n=bySelector.get(selector),r=n.getBoundingClientRect(),clip=visible(n),y=(r.top+r.bottom)/2;assert(y>=clip.top&&y<clip.bottom,'Native wheel point is clipped by a non-scrollable ancestor');const before=n.scrollTop;n.scrollTop+=delta;return {point:{scrollTop:before},result:{scrollTop:n.scrollTop}};};
+    const api=runInNewContext(helpers,{evaluate,wheel,assert:Object.assign((...args)=>assert(...args),assert,{deepEqual:(a,b,m)=>assert.deepEqual(JSON.parse(JSON.stringify(a)),JSON.parse(JSON.stringify(b)),m)}),recordMemoryCheck(){}});
+    let error=null;try{await api.reveal('.memory-detail-disclosure summary');await api.checkReadingScroll(width);}catch(e){error=String(e.message);}
+    if(!bounded)assert.match(error,/Native wheel point is clipped/,'The baseline must retain its unreachable-detail failure');else{assert.equal(error,null);assert(api.wheelReceipts.length>0);assert.equal(screen.scrollTop,0);if(width===760)assert(api.wheelReceipts.some(r=>r.owner==='#memory-results-pane'),'760px detail requires the newly bounded parent');}
+    results.push({width,prior,bounded,error,wheels:JSON.parse(JSON.stringify(api.wheelReceipts))});
+  }
+  console.log('PASS Memory 760px clipped-parent counterexample, 760/600/360 nested owner reachability, independent/restored detail scroll and inert reveals (exact QA planner and geometry model; not rendered QA)');
+  return results;
+}
+await checkMemoryResponsiveOwners();
+
+// Run the actual screen transition, pane scheduler and entry assertions with
+// rendering deferred. This models event ordering, not Chromium layout or paint.
+async function checkMemoryEntryReadiness() {
+  const driver=await readFile(join(root,'tools/check-origin-trace-debugger.mjs'),'utf8');
+  const start=driver.indexOf('  const wheelReceipts=',driver.indexOf('\nasync function checkMemoryInteractions('));
+  const helpers=driver.slice(start,driver.indexOf('  await viewport(1440,900);',start))+';({enter,geometry})';
+  const layoutSource=await readFile(join(root,'apps/research-ui/pane_layout.js'),'utf8');
+  const appSource=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
+  const showScreen=appSource.slice(appSource.indexOf('      function showScreen('),appSource.indexOf('\n      async function refresh()',appSource.indexOf('      function showScreen(')));
+  const box=(left,top,width,height)=>({x:left,y:top,left,top,right:left+width,bottom:top+height,width,height});
+  for(const ordering of ['before-frame','frame-before-entry','timeout-before-entry']) {
+    const frames=new Map(),timers=new Map(),mutations=[],nodes=new Map(),checks=[];let serial=0,painted=0,focusWrites=0;
+    const node=(selector,rect=null,parent=null)=>{
+      const n={id:selector.startsWith('#')?selector.slice(1):'',tagName:'DIV',className:'',dataset:{},hidden:false,parentElement:parent,style:{setProperty(){},removeProperty(){}},attributes:{},listeners:{},clientTop:0,clientLeft:0,scrollTop:0,scrollLeft:0,
+        classList:{add(){},remove(){},contains:()=>false},getAttribute(k){return this.attributes[k]??null;},setAttribute(k,v){this.attributes[k]=v;},removeAttribute(k){delete this.attributes[k];},addEventListener(k,v){this.listeners[k]=v;},
+        getBoundingClientRect(){return n.className==='pane-divider'?box(parseFloat(n.style.left)||0,parseFloat(n.style.top)||0,parseFloat(n.style.width)||0,parseFloat(n.style.height)||0):rect??box(0,0,0,0);},getClientRects(){for(let p=n;p;p=p.parentElement)if(p.hidden)return [];const r=n.getBoundingClientRect();return r.width&&r.height?[r]:[];},
+        get clientHeight(){return rect?.height??0;},get clientWidth(){return rect?.width??0;},get scrollHeight(){return this.clientHeight;},
+        matches:s=>s===selector,closest:()=>null,contains(other){for(let p=other;p;p=p.parentElement)if(p===n)return true;return false;},querySelector:s=>nodes.get(s)??node(s),focus(){focusWrites++;document.activeElement=n;}};
+      nodes.set(selector,n);return n;
+    };
+    const body=node('body',box(0,0,760,560));body.children=[];body.append=n=>body.children.push(n);
+    const main=node('main',box(0,62,760,474),body),sources=node('#screen-sources',box(0,99,760,437),main),memory=node('#screen-memory',box(0,99,760,437),main);memory.hidden=true;
+    // An admissible Sources split crossing the CI snapshot-button center.
+    // The real receipt identifies the hit owner, but did not record its bounds.
+    const split=175.53125;
+    const navigator=node('.sources-navigator',box(0,99,split,437),sources),editor=node('.sources-editor',box(split,99,760-split,437),sources);
+    sources.querySelector=s=>s==='.sources-navigator'?navigator:s==='.sources-editor'?editor:node('.source-editor-toolbar');
+    const summary=node('#advanced-navigation > summary',box(365,31,76,30),body),navigation=node('#advanced-navigation',null,body);navigation.open=false;navigation.querySelector=()=>summary;
+    const trigger=node('#advanced-navigation .nav-button[data-screen="memory"]',null,navigation);trigger.classList.contains=s=>s==='nav-button';
+    const control=(selector,rect)=>{const n=node(selector,rect,memory);n.tagName=selector.includes('mode=')?'BUTTON':'DIV';return n;};
+    control('#screen-memory h1',box(17,109,388,15));control('#screen-memory .screen-subtitle',box(17,129,388,33));control('#memory-notice',box(0,173,760,34));
+    control('[data-memory-mode="live"]',box(14,215,97.5625,30));const snapshot=control('[data-memory-mode="snapshot"]',box(117.5625,215,115.9375,30));
+    control('[data-memory-mode="diff"]',box(239.5,215,86,30));control('[data-memory-mode="origin"]',box(331.5,215,97,30));
+    const intersects=(r,x,y)=>x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom;
+    const document={body,activeElement:summary,createElement:()=>node(''),addEventListener(){},
+      querySelector:s=>nodes.get(s)??node(s),querySelectorAll:s=>s==='.screen'?[sources,memory]:s==='.nav-button'?[]:s.includes('.pane-divider')?body.children:s.startsWith('#pane-divider-memory')?[]:[],
+      elementFromPoint(x,y){const handle=body.children.find(n=>!n.hidden&&intersects(box(parseFloat(n.style.left),parseFloat(n.style.top),parseFloat(n.style.width),parseFloat(n.style.height)),x,y));if(handle)return handle;return [...nodes.values()].reverse().find(n=>n.getClientRects().length&&intersects(n.getBoundingClientRect(),x,y));}};
+    const enqueue=(queue,fn)=>{queue.set(++serial,fn);return serial;};
+    const context={document,window:{addEventListener(){}},innerWidth:760,innerHeight:560,
+      localStorage:{getItem:()=>null,setItem(){throw Error('Entry must not persist a split');}},isPlainObject:v=>!!v&&typeof v==='object',
+      requestAnimationFrame:fn=>enqueue(frames,fn),cancelAnimationFrame:id=>frames.delete(id),setTimeout:fn=>enqueue(timers,fn),clearTimeout:id=>timers.delete(id),
+      MutationObserver:class{constructor(fn){mutations.push(fn);}observe(){}},ResizeObserver:class{observe(){}},
+      getComputedStyle:n=>({display:n===sources?'grid':'block',visibility:'visible',pointerEvents:'auto',overflowX:'hidden',overflowY:'hidden',getPropertyValue:()=>`${split}px ${760-split}px`})};
+    const flush=queue=>{const pending=[...queue];for(const [id,fn]of pending)if(queue.delete(id))fn();};
+    const frame=()=>{flush(frames);painted++;};
+    runInNewContext(layoutSource+';initializePaneLayout();',context);frame();
+    const divider=body.children.find(n=>n.id==='pane-divider-sources');assert.equal(divider.hidden,false);
+    const state={originTraceStatus:'idle',sourceHooksOpen:false};
+    const transition=runInNewContext(showScreen+';showScreen',{...context,state,retireCanvasPreviews(){},investigationBeforeScreen(){},evidenceWorkspace:{setVisible(){}},sourceFactsPanel:{cancel(){}},float32Panel:{cancel(){}},renderMemory(){},renderDebugger(){},renderSources(){},selectedSource:()=>null});
+    const fixture={requests:[]};let readyExpressions=0;
+    const evaluate=async code=>{
+      const result=runInNewContext(code,context);
+      if(result&&typeof result.then==='function'){
+        readyExpressions++;const before=frames.size;
+        assert(before>0,'Readiness must queue a native render observation');
+        for(let n=0;n<4&&frames.size;n++)frame();
+      }
+      const serialized=JSON.stringify(await result);return serialized===undefined?undefined:JSON.parse(serialized);
+    };
+    const click=async selector=>{
+      if(selector==='#advanced-navigation > summary'){navigation.open=true;document.activeElement=trigger;return;}
+      assert.equal(selector,'#advanced-navigation .nav-button[data-screen="memory"]');
+      transition('memory',trigger);mutations[0]([{attributeName:'hidden'}]);
+      if(ordering==='frame-before-entry')frame();else if(ordering==='timeout-before-entry')flush(timers);
+    };
+    const api=runInNewContext(helpers,{evaluate,click,fixture,assert:Object.assign((...args)=>assert(...args),assert,{deepEqual:(a,b,m)=>assert.deepEqual(JSON.parse(JSON.stringify(a)),JSON.parse(JSON.stringify(b)),m)}),recordMemoryCheck:r=>checks.push(r)});
+    if(ordering==='before-frame'){
+      await click('#advanced-navigation > summary');await click('#advanced-navigation .nav-button[data-screen="memory"]');
+      assert.equal(sources.hidden,true);assert.equal(divider.hidden,false,'Hidden source keeps its body-level handle until scheduled layout');
+      await assert.rejects(api.geometry('Pre-paint counterexample'),/must be unobscured at center and corners/);
+      const receipt=checks.at(-1);assert.equal(receipt.selector,'[data-memory-mode="snapshot"]');assert.equal(receipt.covered,1);assert.equal(receipt.points[0].hit.id,divider.id);assert(receipt.points.slice(1).every(p=>p.owned));
+      assert.equal(receipt.allDividers.length,8);const sourceDivider=receipt.allDividers.find(d=>d.node.id===divider.id);
+      assert.equal(sourceDivider.hidden,false);assert.equal(sourceDivider.rendered,true);assert.equal(sourceDivider.pointerEvents,'auto');assert(intersects(sourceDivider.rect,receipt.points[0].x,receipt.points[0].y));
+      transition('sources',trigger);mutations[0]([{attributeName:'hidden'}]);frame();
+    }
+    const before=painted,previousFocus=focusWrites;
+    await api.enter('Painted Memory entry '+ordering);
+    assert.equal(divider.hidden,true);assert.equal(readyExpressions,1);assert(painted>=before+2,'Entry waits across two native frame boundaries');
+    assert.equal(fixture.requests.length,0);assert.equal(focusWrites,previousFocus+1,'Only production chooser dismissal restores focus');
+    assert.equal(snapshot.scrollTop,0);assert(checks.at(-1).covered===0);
+    // Readiness observes completion once; a persistent foreign overlay must
+    // still fail the original strict guard, rather than being waited away.
+    Object.defineProperty(divider,'hidden',{get:()=>false,set(){}});
+    await assert.rejects(api.enter('Persistent foreign divider'),/must be unobscured at center and corners/);
+    assert.equal(checks.at(-1).covered,1);
+  }
+  console.log('PASS Memory pre-paint Sources divider counterexample, native-frame entry readiness, frame/timer ordering and persistent-overlay rejection (production functions; not rendered QA)');
+}
+await checkMemoryEntryReadiness();
+
+async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeText,screenshot,fixture,recordMemoryCheck=()=>{}}) {
+  const ready=async()=>{for(let n=0;n<150;n++){if(await evaluate('!state.memorySearchPending && !state.debuggerActionPending'))return;await new Promise(resolve=>setTimeout(resolve,20));}throw Error('Memory action did not settle');};
+  const wheelReceipts=[],containmentReceipts=[];
+  const scrollState=async owner=>evaluate(`(()=>{
+    const selected=document.querySelector(${JSON.stringify(owner)});
+    return ['.memory-grid','.memory-search-pane','.memory-output','#memory-results-pane','.memory-results-list','#memory-detail','#screen-memory','.main','#workspace','body','html'].map(selector=>{const n=document.querySelector(selector),r=n.getBoundingClientRect(),s=getComputedStyle(n);let top=0,bottom=innerHeight;for(let p=n.parentElement;p;p=p.parentElement){if(getComputedStyle(p).overflowY!=='visible'){const b=p.getBoundingClientRect();top=Math.max(top,b.top+p.clientTop);bottom=Math.min(bottom,b.top+p.clientTop+p.clientHeight);}}return {selector,selected:n===selected,top:r.top,bottom:r.bottom,visibleHeight:Math.max(0,Math.min(r.bottom,bottom)-Math.max(r.top,top)),clip:{top,bottom},clientHeight:n.clientHeight,scrollHeight:n.scrollHeight,scrollTop:n.scrollTop,overflowY:s.overflowY};});
+  })()`);
+  const ownedWheel=async(owner,delta,control)=>{
+    const before=await scrollState(owner);recordMemoryCheck({kind:'scroll-plan',selector:control,label:'Before native owner wheel',owner,delta,before});
+    const receipt=await wheel(owner,delta,'scrollbar');
+    assert((receipt.result.scrollTop-receipt.point.scrollTop)*delta>0,`Native wheel must move intended Memory owner ${owner}`);
+    const after=await scrollState(owner);
+    for(let i=0;i<before.length;i++)if(!before[i].selected)assert.equal(after[i].scrollTop,before[i].scrollTop,`${control}: scrolling ${owner} must not move ${before[i].selector}`);
+    wheelReceipts.push({control,owner,delta,before:receipt.point.scrollTop,after:receipt.result.scrollTop});
+    recordMemoryCheck({kind:'scroll-result',selector:control,label:'After native owner wheel',owner,delta,after});
+    return receipt;
+  };
+  const closed=async label=>{
+    assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),false,label+': Advanced must be closed');
+    assert.equal(await evaluate("Boolean(document.activeElement?.closest('#advanced-navigation .advanced-items'))"),false,label+': focus must not remain in the hidden chooser');
+  };
+  const unobscured=async(selector,label)=>{
+    const result=await evaluate(`(()=>{
+      const n=document.querySelector(${JSON.stringify(selector)});if(!n)return {missing:true};
+      const rect=node=>{const r=node.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};};
+      const identify=node=>node?{id:node.id,tag:node.tagName,classes:node.className,role:node.getAttribute('role')}:null;
+      const r=rect(n),owners=[];let top=0,bottom=innerHeight,left=0,right=innerWidth;
+      for(let p=n.parentElement;p;p=p.parentElement){const b=p.getBoundingClientRect(),s=getComputedStyle(p);if(s.overflowY!=='visible'){top=Math.max(top,b.top+p.clientTop);bottom=Math.min(bottom,b.top+p.clientTop+p.clientHeight);}if(s.overflowX!=='visible'){left=Math.max(left,b.left+p.clientLeft);right=Math.min(right,b.left+p.clientLeft+p.clientWidth);}if(owners.length<8&&['auto','scroll','overlay','hidden','clip'].some(value=>s.overflowX===value||s.overflowY===value))owners.push({node:identify(p),rect:rect(p),overflowX:s.overflowX,overflowY:s.overflowY,scrollTop:p.scrollTop,clientHeight:p.clientHeight,scrollHeight:p.scrollHeight});}
+      const points=[[r.left+r.width/2,r.top+r.height/2],[r.left+3,r.top+3],[r.right-3,r.bottom-3]].map(([x,y])=>{const hit=document.elementFromPoint(x,y);return {x,y,owned:!!hit&&n.contains(hit),hit:identify(hit)};});
+      const allDividers=[...document.querySelectorAll('.pane-divider')].map(node=>{const style=getComputedStyle(node);return {node:identify(node),rect:rect(node),hidden:node.hidden,rendered:!!node.getClientRects().length,display:style.display,visibility:style.visibility,pointerEvents:style.pointerEvents,controls:node.getAttribute('aria-controls'),orientation:node.getAttribute('aria-orientation')};});
+      const dividers=allDividers.filter(d=>!d.hidden&&d.rendered&&['pane-divider-memory','pane-divider-memory-detail'].includes(d.node.id));
+      const resizeOverlaps=n.matches('.memory-result-row')?dividers.filter(d=>Math.min(r.right,d.rect.right)>Math.max(r.left,d.rect.left)&&Math.min(r.bottom,d.rect.bottom)>Math.max(r.top,d.rect.top)).map(d=>d.node.id):[];
+      return {node:identify(n),rect:r,clip:{top,bottom,left,right},owners,points,dividers,allDividers,resizeOverlaps,
+        visible:r.width>0&&r.height>0&&r.left>=left-1&&r.right<=right+1&&r.top>=top-1&&r.bottom<=bottom+1,
+        covered:points.filter(point=>!point.owned).length};
+    })()`);
+    recordMemoryCheck({selector,label,...result});
+    const receipt=JSON.stringify(result);
+    assert.equal(result.visible,true,`${label}: ${selector} must fit its visible pane: ${receipt}`);
+    assert.deepEqual(result.resizeOverlaps,[],`${label}: result hit target must not overlap a resize handle: ${receipt}`);
+    assert.equal(result.covered,0,`${label}: ${selector} must be unobscured at center and corners: ${receipt}`);
+  };
+  // Only dispatch native wheels through the existing settled, hit-tested helper.
+  // Resolve nested owner clipping before scrolling it; never assign scrollTop,
+  // call scrollIntoView, or let the pointer silently route into a child pane.
+  const reveal=async selector=>{
+    for(let attempt=0;attempt<32;attempt++){
+      const action=await evaluate(`(()=>{
+        const n=document.querySelector(${JSON.stringify(selector)});if(!n)throw Error('Missing Memory control');
+        const owners=[];for(let p=n.parentElement;p&&p.id!=='screen-memory';p=p.parentElement){if(['auto','scroll','overlay'].includes(getComputedStyle(p).overflowY)&&p.scrollHeight>p.clientHeight+1)owners.push(p);}
+        const box=p=>{const r=p.getBoundingClientRect();const inset=p.matches('.memory-results-list')?p.querySelector('.memory-results-head').getBoundingClientRect().height:0;return {top:r.top+p.clientTop+inset,bottom:r.top+p.clientTop+p.clientHeight};};
+        const r=n.getBoundingClientRect();let index=-1,delta=0;
+        for(let i=0;i<owners.length;i++){const b=box(owners[i]);delta=r.top<b.top?r.top-b.top:r.bottom>b.bottom?r.bottom-b.bottom:0;if(Math.abs(delta)>1){index=i;break;}}
+        if(index<0)return null;
+        // An inner scrollbar can itself be below the narrow outer viewport.
+        // First expose its actual wheel point via the next enclosing owner.
+        for(let i=index+1;i<owners.length;i++){const r=owners[index].getBoundingClientRect(),y=r.top+r.height/2,b=box(owners[i]);if(y<b.top+8||y>b.bottom-8){delta=y<b.top+8?y-b.top-8:y-b.bottom+8;index=i;}}
+        const owner=owners[index],name=owner.id?'#'+owner.id:owner.matches('.memory-grid')?'.memory-grid':owner.matches('.memory-search-pane')?'.memory-search-pane':owner.matches('.memory-receipt')?'.memory-receipt':owner.matches('.memory-results-list')?'.memory-results-list':null;
+        if(!name)throw Error('Unexpected Memory scroll owner');
+        const limit=Math.max(24,owner.clientHeight*.75);return {owner:name,delta:Math.sign(delta)*Math.min(Math.abs(delta),limit)};
+      })()`);
+      if(!action){await unobscured(selector,'Revealed Memory control');return;}
+      await ownedWheel(action.owner,action.delta,selector);
+    }
+    throw Error('Memory control could not be reached by native wheel: '+selector);
+  };
+  const press=async selector=>{await closed('Before '+selector);await reveal(selector);await click(selector);await closed('After '+selector);};
+  const geometry=async label=>{
+    await closed(label);
+    const bad=await evaluate(`Array.from(document.querySelectorAll('#screen-memory button, #screen-memory input, #screen-memory select, #screen-memory summary')).filter(node=>node.getClientRects().length).filter(node=>{const r=node.getBoundingClientRect();return r.width<1||r.right>innerWidth+1||r.left<0}).map(node=>node.id||node.textContent)`);assert.deepEqual(bad,[],label);
+    for(const selector of ['#screen-memory h1','#screen-memory .screen-subtitle','#memory-notice',...['live','snapshot','diff','origin'].map(mode=>'[data-memory-mode="'+mode+'"]')])await unobscured(selector,label);
+  };
+  const checkReadingScroll=async width=>{
+    const before=await scrollState('#memory-detail');
+    const detail=before.find(p=>p.selector==='#memory-detail'),results=before.find(p=>p.selector==='#memory-results-pane');
+    assert(detail.visibleHeight>=Math.min(120,detail.clientHeight),'A reached Memory detail must expose useful reading space');
+    if(width<=950)assert.equal(results.overflowY,'auto','Stacked Memory results need their own scroll container');
+    for(const pane of before.filter(p=>['#screen-memory','.main','#workspace','body','html'].includes(p.selector)))assert.equal(pane.scrollTop,0,`${pane.selector} must not be programmatically scrolled to expose clipped Memory content`);
+    const available=detail.scrollHeight-detail.clientHeight-detail.scrollTop;
+    const delta=available>=24?Math.min(56,available):detail.scrollTop>=24?-Math.min(56,detail.scrollTop):0;
+    assert.notEqual(delta,0,'Snapshot fixture must exercise a genuinely scrollable detail');
+    const moved=await ownedWheel('#memory-detail',delta,'retaining-reference reading');
+    const restored=await ownedWheel('#memory-detail',moved.point.scrollTop-moved.result.scrollTop,'restore retaining-reference reading');
+    assert.equal(restored.result.scrollTop,moved.point.scrollTop,'Inverse native wheel must restore the original detail offset before reveal');
+    await reveal('.memory-detail-disclosure summary');
+    const inertBefore=await scrollState('#memory-detail'),count=wheelReceipts.length;
+    await reveal('.memory-detail-disclosure summary');
+    assert.equal(wheelReceipts.length,count,'Revealing an already visible control must issue no wheel');
+    assert.deepEqual(await scrollState('#memory-detail'),inertBefore,'An inert reveal must preserve every reading position');
+    const receipt={width,panes:await scrollState('#memory-detail')};containmentReceipts.push(receipt);recordMemoryCheck({kind:'containment',selector:'#memory-detail',label:`Reading geometry ${width}`,...receipt});
+  };
+  const enter=async label=>{
+    await closed(label+' before opening');const posts=fixture.requests.length;
+    await click('#advanced-navigation > summary');
+    assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),true,label+': real pointer opens Advanced');
+    await click('#advanced-navigation .nav-button[data-screen="memory"]');
+    assert.equal(await evaluate("document.querySelector('#screen-memory').hidden"),false,label+': Memory workspace opens');
+    // showScreen changes visibility before the shared pane scheduler retires
+    // Sources' body-level resize handle. Observe the painted entry boundary
+    // before strict geometry, just as Console does; never retry a failed hit.
+    await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+    await closed(label);await geometry(label);
+    assert.equal(await evaluate("document.activeElement===document.querySelector('#advanced-navigation > summary')"),true,label+': focus returns to summary');
+    assert.equal(fixture.requests.length,posts,label+': navigation must not submit an action');
+  };
+  await viewport(1440,900);await enter('Initial wide pointer entry');
+  for(let n=0;n<100 && !(await evaluate("state.debuggerSession?.target?.id==='memory-target-A'"));n++) await new Promise(resolve=>setTimeout(resolve,25));
+  await press('#memory-property-query');await typeText('fixture');await press('#memory-value-query');await typeText('fixture');
+  await press('#memory-search-button');await ready();assert.equal(await evaluate('state.memoryResults.length'),50);
+  assert.match(await evaluate("elements.memorySubmission.textContent"),/memory-target-A/);
+  await press('.memory-result-row');await key('ArrowDown');assert.equal(await evaluate('state.selectedMemoryResultId'),'preview-1');
+  await evaluate("window.memoryFocused=document.activeElement;window.memoryDetailNode=elements.memoryDetail.firstChild;renderMemory();renderMemory()");
+  assert(await evaluate('document.activeElement===memoryFocused && elements.memoryDetail.firstChild===memoryDetailNode'));
+  assert.equal(await evaluate("elements.memoryDetail.querySelectorAll('img').length"),0,'captured-looking strings stay inert');
+  await geometry('wide live');await screenshot('memory-live-wide');
+  fixture.mode='error';await press('#memory-search-button');await ready();assert.equal(await evaluate('state.memoryResults.length'),50);assert.match(await evaluate('elements.memoryNotice.textContent'),/unconfirmed/);
+  fixture.mode='empty';await press('#memory-search-button');await ready();assert.equal(await evaluate('state.memorySearchStatus'),'empty');
+  fixture.mode='partial';await press('[data-memory-mode="snapshot"]');await press('#memory-search-button');await ready();
+  assert.equal(await evaluate('state.memorySearchStatus'),'partial');await press('.memory-detail-disclosure summary');
+  await evaluate('renderMemory()');assert.equal(await evaluate("elements.memoryDetail.querySelector('details').open"),false);
+  await screenshot('memory-snapshot-partial');
+  fixture.mode='ready';await press('[data-memory-mode="diff"]');await press('#memory-capture-baseline');await ready();
+  assert.match(await evaluate('elements.memoryBaselineMeta.textContent'),/memory-target-A/);
+  fixture.mode='dominators';await press('#memory-compare-snapshot');await ready();assert.equal(await evaluate('elements.memoryDetail.hidden'),false);
+  assert.match(await evaluate('elements.memoryDetail.textContent'),/Retained owner/);await screenshot('memory-diff-dominators');
+  fixture.mode='ready';await press('[data-memory-mode="origin"]');await press('#memory-search-button');
+  for(let n=0;n<100 && !(await evaluate("state.debuggerSession?.memory_origin_trace?.state==='armed'"));n++)await new Promise(resolve=>setTimeout(resolve,25));
+  await press('#memory-origin-stop');await ready();assert.match(await evaluate('elements.memoryDetail.textContent'),/Source link unavailable/);
+  assert.equal(await evaluate("elements.memoryDetail.querySelectorAll('button').length"),0);
+  await screenshot('memory-origin-stopped');
+  // Exercise the reviewed Stop-expiry control lifecycle through real pointer
+  // dispatch, native fixture polling and a following HTTP 304. Do not manually
+  // call renderMemory to recover the controls under test.
+  const waitFor=async(expression,label)=>{for(let n=0;n<150;n++){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,20));}throw Error(label);};
+  for(const expiry of ['target','restart','context']) {
+    fixture.mode='ready';await waitFor("!state.debuggerActionPending && !memoryOriginTraceActive()",'Prior trace did not reach native terminal state');
+    await press('#memory-search-button');
+    await waitFor("state.debuggerSession?.memory_origin_trace?.state==='armed' && !state.debuggerActionPending",'Origin did not arm for '+expiry);
+    if(expiry==='context'){
+      fixture.session.scripts=[{script_id:'memory-context',url:'https://fixture.invalid/memory.js',hash:'a'.repeat(64),source_map_url:'',language:'JavaScript',start_line:0,start_column:0,end_line:1,end_column:0,execution_context_id:9,length:32,has_source_url:false,is_module:false}];
+      fixture.session.generation++;await waitFor("state.debuggerSession.scripts.some(script=>script.execution_context_id===9)",'Context setup was not observed');
+    }
+    fixture.stopState='stopping';fixture.mode='pending';const posts=fixture.requests.length;
+    await press('#memory-origin-stop');
+    await waitFor("state.debuggerActionPending && state.memorySearchPending",'Stop request did not own its wait');
+    for(let n=0;n<150&&fixture.pending.length===0;n++)await new Promise(resolve=>setTimeout(resolve,20));
+    assert(fixture.pending.length>0,'Native Stop acknowledgement must remain held during expiry');
+    assert.equal(fixture.requests.length,posts+1);assert.equal(fixture.requests.at(-1).action,'stop_memory_origin_trace');
+    fixture.session.memory_origin_trace=fixture.idleTrace();
+    if(expiry==='target'){
+      fixture.session.target={...fixture.session.target,id:'memory-target-expiry'};
+      fixture.session.targets=[fixture.session.target];fixture.session.generation++;
+    }else if(expiry==='restart'){
+      fixture.session.generation=0;fixture.nextTraceId=1;
+    }else{fixture.session.scripts=[];fixture.session.generation++;}
+    await ready();
+    const previous304=fixture.notModifiedCount;
+    for(let n=0;n<150&&fixture.notModifiedCount===previous304;n++)await new Promise(resolve=>setTimeout(resolve,20));
+    assert(fixture.notModifiedCount>previous304,'Stop expiry must be followed by an unchanged native poll');
+    assert(await evaluate("!elements.memorySearchButton.disabled && elements.memoryModeButtons.every(button=>!button.disabled) && !elements.memoryCaptureBaseline.disabled"),expiry+' controls remain disabled after 304');
+    await geometry('Stop expiry '+expiry);await screenshot('memory-stop-expiry-'+expiry);
+    await press('[data-memory-mode="live"]');assert.equal(await evaluate('state.memoryMode'),'live');
+    await press('[data-memory-mode="origin"]');assert.equal(fixture.requests.length,posts+1,'Mode recovery must not resubmit Stop or start a capture');
+    fixture.mode='ready';fixture.stopState='aborted';fixture.release();await ready();
+  }
+  await press('[data-memory-mode="live"]');fixture.mode='pending';await press('#memory-search-button');
+  fixture.session={...fixture.session,target:{...fixture.session.target,id:'memory-target-B'},generation:fixture.session.generation+1};
+  for(let n=0;n<100 && !(await evaluate("state.debuggerSession?.target?.id==='memory-target-B'"));n++)await new Promise(resolve=>setTimeout(resolve,25));
+  fixture.release();await ready();assert.equal(await evaluate('state.memorySearchStatus'),'unavailable');assert.equal(await evaluate('state.memoryResults.length'),0);
+  fixture.mode='ready';await press('#memory-search-button');await ready();
+  for(const [width,height] of [[1440,900],[760,560],[600,560],[360,740]]){
+    await viewport(width,height);
+    await press('[data-memory-mode="live"]');fixture.mode='pending';await press('#memory-search-button');
+    await waitFor('state.memorySearchPending && state.debuggerActionPending','Held live action did not start');
+    for(let n=0;n<150&&fixture.pending.length===0;n++)await new Promise(resolve=>setTimeout(resolve,20));
+    assert(fixture.pending.length>0,'Entry-preservation check requires a held native acknowledgement');
+    const draft=await evaluate("JSON.stringify({property:elements.memoryPropertyQuery.value,value:elements.memoryValueQuery.value,mode:state.memoryMode,operation:state.memoryOperation,receipt:elements.memorySubmission.textContent,criteria:elements.memorySubmittedCriteria.textContent})");
+    await click('.nav-button[data-screen="sources"]');await closed('Leave Memory with pending action');
+    await enter(`Pending Memory pointer re-entry ${width}`);
+    assert.equal(await evaluate('state.memorySearchPending && state.debuggerActionPending'),true,'Workspace navigation must retain the pending latch');
+    assert.equal(await evaluate("JSON.stringify({property:elements.memoryPropertyQuery.value,value:elements.memoryValueQuery.value,mode:state.memoryMode,operation:state.memoryOperation,receipt:elements.memorySubmission.textContent,criteria:elements.memorySubmittedCriteria.textContent})"),draft,'Workspace navigation must retain pending draft, owner and submitted receipt');
+    fixture.mode='ready';fixture.release();await ready();
+    await press('.memory-result-row');await geometry(`result ${width}`);await screenshot(`memory-${width}-result`);
+    await press('[data-memory-mode="snapshot"]');await press('#memory-search-button');await ready();await reveal('.memory-detail-disclosure summary');if(width<=950)await checkReadingScroll(width);await geometry(`snapshot ${width}`);await screenshot(`memory-${width}-retainers`);
+    const inspectionPosts=fixture.requests.length;
+    await press('[data-memory-mode="diff"]');
+    for(const selector of ['#memory-capture-baseline','#memory-clear-baseline','#memory-compare-snapshot'])await reveal(selector);
+    await geometry(`diff controls ${width}`);await screenshot(`memory-${width}-diff-controls`);
+    await press('[data-memory-mode="origin"]');
+    for(const selector of ['#memory-search-button','#memory-origin-before','#memory-origin-after','#memory-origin-stop','#memory-origin-reset'])await reveal(selector);
+    await geometry(`origin controls ${width}`);await screenshot(`memory-${width}-origin-controls`);
+    assert.equal(fixture.requests.length,inspectionPosts,'Inspecting controls and switching modes must not start, stop or reset native work');
+  }
+  return {status:'passed',path:'real browser UI with synthetic native API fixture',viewports:[[1440,900],[760,560],[600,560],[360,740]],wheel_receipts:wheelReceipts,containment_receipts:containmentReceipts,checks:['independent bounded result/detail scrolling with unchanged siblings and hidden ancestors','inert repeated reveal preserves reading offsets at 760/600/360','real Advanced entry and pending re-entry at all widths','closed chooser and unobscured headers, modes and acted-on controls','native settled wheel reaches intended panes without forced DOM scroll','navigation preserves pending draft, owner and submitted receipt with no implicit action','four mode actions','submitted target and baseline receipts','50 rows','keyboard selection and refresh node identity','inert preview','empty vs unavailable','partial snapshot and disclosure','dominator-only diff','stop outcome and unproven source links','delayed target race','target/restart/context Stop retirement with automatic control recovery and following304','pointer mode recovery without implicit actions','responsive controls']};
+}
+
+async function checkEvidenceComparisonInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture,setFile,navigateNative}) {
+  const selector='#evidence-comparison-panel';
+  const state=`document.querySelector('${selector}').rebEvidenceComparison`;
+  const until=async(expression,message)=>{const end=Date.now()+5000;while(Date.now()<end){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,25));}assert.fail(message||expression);};
+  const press=(value,code=value)=>key(value,code,{windowsVirtualKeyCode:({Enter:13,Escape:27,Tab:9,' ':32})[value],...(value==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});
+  const reveal=async selector=>{for(let i=0;i<6;i++){const delta=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});if(!n)throw new Error('Missing product comparison control');const p=n.closest('#evidence-package-mode');if(!p)return 0;const r=n.getBoundingClientRect(),b=p.getBoundingClientRect();return r.top<b.top+8?r.top-b.top-8:r.bottom>b.bottom-8?r.bottom-b.bottom+8:0;})()`);if(Math.abs(delta)<=1)return;await wheel('#evidence-package-mode',delta,true);}};
+  const hit=async selector=>{await reveal(selector);await click(selector);};
+  const compare=async()=>{await hit('[data-comparison-action="compare"]');await until(`${state}.controller.model.result!==null&&!${state}.controller.model.busy`,'Product comparison did not become ready');};
+  const calls=()=>fixture.requests.filter(r=>r.path.endsWith('/compare')).length;
+  const pending=async()=>{const end=Date.now()+5000;while(Date.now()<end){if(fixture.pending.length)return;await new Promise(resolve=>setTimeout(resolve,25));}assert.fail('Comparison request did not reach delayed service');};
+  const enter=async()=>{
+    fixture.observationActive=true;fixture.observationFrozen=false;
+    await evaluate('state.eventEtag=null;state.artifactEtag=null;refresh()');await until("state.events.some(e=>e.sequence_number==='102')&&state.artifacts.some(a=>a.artifact_id==='9')",'Observation fixture did not load through actual routes');fixture.observationFrozen=true;
+    await click('[data-request-id]');await click('#inspector-tab-evidence');await click('#request-package-entry [data-screen="evidence"]');
+    assert.equal(await evaluate("document.querySelector('#evidence-package-mode').hidden"),true,'Observations must remain the landing');
+    assert.equal(await evaluate(`${state}===undefined`),true,'File controls may not mount before explicit comparison entry');
+    await click('[data-evidence-key="7:42:102"]');
+  };
+  const geometry=async label=>{const g=await evaluate(`(()=>{const p=document.querySelector('#evidence-package-mode'),h=document.querySelector('${selector}'),r=p.getBoundingClientRect();return {width:innerWidth,height:innerHeight,page:document.documentElement.scrollWidth,left:r.left,right:r.right,bottom:r.bottom,client:p.clientHeight,host:h.clientWidth,scroll:h.scrollWidth};})()`);assert(g.page<=g.width+1&&g.left>=0&&g.right<=g.width+1&&g.bottom<=g.height+1&&g.client>=120&&g.scroll<=g.host+1,`${label}: actual mounted comparison must fit the workspace`);};
+  await enter();const initialCalls=calls();await screenshot('comparison-observation-landing');
+  const sourceSupported=await evaluate("!document.querySelector('[data-evidence-action=source]').disabled");
+  assert(sourceSupported,'Final comparison composition requires the approved shared Source adapter');
+  await click('#evidence-package-toggle');assert.equal(await evaluate(`${state}===undefined`),true);
+  await hit('#evidence-compare-toggle');assert.equal(await evaluate("document.activeElement.dataset.comparisonSide"),'0');
+  await setFile(0,'golden');await setFile(1,'golden');assert.equal(calls(),initialCalls,'File choices alone cannot contact comparator');
+  await evaluate(`window.productComparisonFiles=[...${state}.controller.model.files];window.productComparisonHandle=${state};window.productComparisonInput=document.querySelector('[data-comparison-side="0"]');evidenceWorkspace.sync()`);
+  assert(await evaluate(`${state}===productComparisonHandle&&${state}.controller.model.files.every((f,i)=>f===productComparisonFiles[i])&&document.querySelector('[data-comparison-side="0"]')===productComparisonInput`),'Ordinary refresh must preserve mounted input drafts');
+  await compare();assert.equal(calls(),initialCalls+1);assert.match(await evaluate(`document.querySelector('${selector}').textContent`),/11 equal/);await geometry('wide');await screenshot('comparison-product-wide');
+  await setFile(1,'changed');assert.equal(await evaluate(`${state}.controller.model.result`),null,'Replacing a file retires the old result');await compare();assert.match(await evaluate(`document.querySelector('${selector}').textContent`),/10 equal, 1 changed/);
+  await evaluate(`window.productAcceptedResult=${state}.controller.model.result`);
+  await hit(`${selector} .package-report-rows li:nth-child(4) summary`);assert.match(await evaluate(`document.querySelector('${selector}').textContent`),/monotonic_time_ns.*10.*11/);await screenshot('comparison-product-changed');
+  for(const mode of ['unavailable','comparison_wrong_id','comparison_inconsistent','invalid']){
+    fixture.mode=mode;await hit('[data-comparison-action="compare"]');await until(`!${state}.controller.model.busy`);assert(await evaluate(`${state}.controller.model.result===productAcceptedResult`),'A rejected or inconsistent service reply must retain prior evidence');
+  }
+  assert.match(await evaluate(`document.querySelector('${selector} [role=status]').textContent`),/rejected/);await screenshot('comparison-product-error-retained');fixture.mode='valid';
+  for(const [width,height] of [[760,560],[360,740]]){
+    await viewport(width,height);await reveal('[data-comparison-action="compare"]');await geometry(`${width} controls`);await screenshot(`comparison-product-${width}-controls`);
+    await reveal(`${selector} .package-report-rows li:nth-child(4)`);await geometry(`${width} record`);await screenshot(`comparison-product-${width}-record`);
+    await hit('#evidence-comparison-close');assert.equal(await evaluate("document.activeElement.id"),'evidence-compare-toggle');await press('Enter');assert.equal(await evaluate("document.activeElement.dataset.comparisonSide"),'0');assert(await evaluate(`${state}.controller.model.files.every((f,i)=>f===productComparisonFiles[i]||i===1&&f.name==='changed.json')`));
+  }
+  await viewport(1440,900);fixture.mode='pending_compare';await hit('[data-comparison-action="compare"]');await until(`${state}.controller.model.busy`);await pending();assert.equal(await evaluate("document.activeElement.dataset.comparisonAction"),'cancel','Pending comparison must keep keyboard ownership in its enabled Cancel control');await press('Escape');assert.equal(await evaluate(`${state}.controller.model.busy`),false);assert.equal(await evaluate("document.activeElement.dataset.comparisonAction"),'compare');fixture.release();fixture.mode='valid';
+  await press('Escape');assert.equal(await evaluate("document.querySelector('#evidence-comparison-section').hidden"),true);assert.equal(await evaluate("document.activeElement.id"),'evidence-compare-toggle');const reopenCalls=calls();await press('Enter');assert.equal(calls(),reopenCalls,'Keyboard reopen must not replay');
+  // Delay a real File.arrayBuffer, preserving the actual input/change workflow.
+  await evaluate("window.comparisonOriginalFileRead=File.prototype.arrayBuffer;window.comparisonHoldFile=true;File.prototype.arrayBuffer=function(){if(window.comparisonHoldFile){window.comparisonHoldFile=false;const file=this;return new Promise((resolve,reject)=>{window.releaseProductFile=()=>comparisonOriginalFileRead.call(file).then(resolve,reject);});}return comparisonOriginalFileRead.call(this);}");
+  const beforeLateFile=calls();await hit('[data-comparison-action="compare"]');await until('typeof releaseProductFile===\'function\'');await hit('#evidence-return');assert.equal(await evaluate(`${state}.controller.model.busy`),false);
+  await evaluate('releaseProductFile();File.prototype.arrayBuffer=comparisonOriginalFileRead');await evaluate('new Promise(resolve=>setTimeout(resolve,30))');assert.equal(calls(),beforeLateFile,'Returning to observations must suppress delayed-file dispatch');assert.equal(await evaluate("document.activeElement.id"),'evidence-package-toggle');assert.equal(await evaluate('evidenceWorkspace.snapshot().selectedKey'),'7:42:102');
+  // Drafts survive a genuine exact-source pivot and shared Back without any
+  // automatic comparison, export, transform or changed filter/scroll owner.
+  const sourceDelta=await evaluate("(()=>{const n=document.querySelector('[data-evidence-action=source]'),r=n.getBoundingClientRect(),p=document.querySelector('#evidence-inspector').getBoundingClientRect();return r.top<p.top+8?r.top-p.top-8:r.bottom>p.bottom-8?r.bottom-p.bottom+8:0;})()");
+  if(sourceDelta)await wheel('#evidence-inspector',sourceDelta);
+  await evaluate(`window.comparisonEvidenceReturn={search:document.querySelector('#evidence-search').value,scope:document.querySelector('#evidence-scope').value,list:document.querySelector('#evidence-rows').scrollTop,detail:document.querySelector('#evidence-inspector').scrollTop,key:evidenceWorkspace.snapshot().selectedKey,files:[...${state}.controller.model.files]}`);
+  const beforeSource=calls();await click('[data-evidence-action="source"]');await until("!document.querySelector('#screen-sources').hidden&&selectedSource()?.artifact_id==='9'");await click('#investigation-back');await until("!document.querySelector('#screen-evidence').hidden&&document.activeElement.id==='evidence-open-source'");
+  assert(await evaluate(`${state}.controller.model.files.every((f,i)=>f===comparisonEvidenceReturn.files[i])&&document.querySelector('#evidence-search').value===comparisonEvidenceReturn.search&&document.querySelector('#evidence-scope').value===comparisonEvidenceReturn.scope&&document.querySelector('#evidence-rows').scrollTop===comparisonEvidenceReturn.list&&document.querySelector('#evidence-inspector').scrollTop===comparisonEvidenceReturn.detail&&evidenceWorkspace.snapshot().selectedKey===comparisonEvidenceReturn.key`),'Shared Source Back must preserve comparison drafts and Evidence ownership');
+  assert.equal(calls(),beforeSource);assert.equal(fixture.derivedRequests,0);await screenshot('comparison-linked-source-back');
+  await click('#evidence-package-toggle');await hit('#evidence-compare-toggle');fixture.mode='pending_compare';await hit('[data-comparison-action="compare"]');await until(`${state}.controller.model.busy`);await pending();await click('#screen-evidence .back-button');fixture.release();fixture.mode='valid';assert.equal(await evaluate(`${state}.controller.model.busy`),false);
+  // The workspace arrow above already traversed shared Back; Evidence is now the Forward destination.
+  assert.equal(await evaluate("document.querySelector('#investigation-forward').textContent"),'Forward to Evidence');
+  await click('#investigation-forward');await until("!document.querySelector('#screen-evidence').hidden");if(await evaluate("document.querySelector('#evidence-package-mode').hidden"))await click('#evidence-package-toggle');assert.equal(await evaluate("document.querySelector('#evidence-comparison-section').hidden"),true);await hit('#evidence-compare-toggle');assert.equal(await evaluate(`${state}.controller.model.files[1].name`),'changed.json');
+  // Use production page lifecycle handlers while an actual service call waits.
+  fixture.mode='pending_compare';await hit('[data-comparison-action="compare"]');await pending();
+  await evaluate(`window.retiredProductComparison=${state};window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:false}));window.dispatchEvent(new PageTransitionEvent('pageshow',{persisted:false}))`);assert.equal(await evaluate(`${state}===undefined`),true);fixture.release();
+  const beforeRemount=calls();await hit('#evidence-compare-toggle');assert.equal(calls(),beforeRemount);assert.equal(await evaluate(`${state}.controller.model.files[0]`),null);
+  await setFile(0,'golden');await setFile(1,'golden');await hit('[data-comparison-action="compare"]');await pending();
+  await evaluate(`window.replacementProductComparison=${state};retiredProductComparison.dispose()`);assert(await evaluate(`${state}===replacementProductComparison&&${state}.controller.model.busy&&document.querySelectorAll('${selector} input[type=file]').length===2`),'A stale teardown must not wipe the pending product remount');fixture.release();fixture.mode='valid';await until(`${state}.controller.model.result!==null&&!${state}.controller.model.busy`);
+  // Use the exact synthetic source selection matching the existing exporter
+  // response; comparison must not silently select any of these six keys.
+  await hit('#evidence-comparison-close');
+  await evaluate(`state.events=${JSON.stringify(fixture.events)};state.artifacts=${JSON.stringify(fixture.artifacts)};state.sessionMode='demo';state.requests=[{id:'comparison-package-request',path:'https://fixture.invalid/comparison-package',method:'GET',status:200,time:1,type:'xhr',origin:'demo',tabId:'qa-tab',operation:'synthetic_qa',events:state.events,exchange:{request:{state:'empty',headers:[]},response:{state:'empty',headers:[]}}}];state.selectedRequestId='comparison-package-request';renderRequests();evidenceWorkspace.sync();window.packageReturnKey=evidenceWorkspace.snapshot().selectedKey`);
+  assert.equal(await evaluate("document.querySelectorAll('[data-package-candidates] input:checked').length"),0);
+  for(let i=1;i<=4;i++)await hit(`[data-package-candidates] label:nth-child(${i}) input`);
+  await hit('[data-package-scope]');await selectOptionByKeyboard(key, 'retained a');await until("document.querySelector('[data-package-scope]').value==='artifacts'");
+  for(let i=1;i<=2;i++)await hit(`[data-package-candidates] label:nth-child(${i}) input`);
+  await hit('[data-package-export]');await until("evidencePackagePanel.controller.model.status==='ready'");assert.deepEqual(new Uint8Array(fixture.lastValidation),packageGoldenBytes);
+  await hit('[data-package-upload] > summary');await setFile('package','golden');await hit('[data-package-validate]');await until("evidencePackagePanel.controller.model.status==='ready'");assert.deepEqual(new Uint8Array(fixture.lastValidation),packageGoldenBytes);await screenshot('comparison-existing-package-tools');
+  await hit('#evidence-return');assert.equal(await evaluate("document.querySelector('#evidence-investigation').hidden"),false);assert.equal(await evaluate('evidenceWorkspace.snapshot().selectedKey===packageReturnKey'),true);
+  await navigateNative();await enter();assert(await evaluate("document.documentElement.classList.contains('native-shell')&&location.protocol==='http:'"));await click('#evidence-package-toggle');await hit('#evidence-compare-toggle');await setFile(0,'golden');await setFile(1,'golden');await compare();await screenshot('comparison-native-live-http');
+  return {status:'passed',path:'actual observation-first Evidence product host',viewports:[[1440,900],[760,560],[360,740]],entryModes:['browser HTTP','native=1 live HTTP marker in Chromium; not macOS runtime'],sourcePivot:sourceSupported?'shared adapter present':'explicitly unavailable in standalone preview',checks:['real scripts and lazy secondary package action','two real File inputs','backend-produced equal and changed fixtures','ordinary refresh preserves files/DOM','strict rejected-success retention','wide/narrow product geometry','keyboard Close/Escape/reopen focus','late real File read after Return','shared Back cancels service ownership','exact Source Back preserves filters focus scroll and file drafts','actual page disposal/remount and stale handle','existing export and original-byte validation retained','observations selection retained','native live HTTP stays supported'],limitations:['Synthetic HTTP fixture is not new backend semantic or lease evidence.','Stored reb:// unavailability is covered by host/static tests, not native runtime.','No macOS or shared-navigation acceptance is implied.']};
+}
+
+const canvasFixtureOptions={artifact:canvasArtifact,png:canvasPngFixture,pngUrl:canvasPngUrl,chunk:canvasPngChunk};
+await checkCanvasFixture(await canvasBrowserFixture(root,canvasFixtureOptions),sourcesFixtureModels,canvasProductionRules.inspectCanvasPng);
+
 async function checkTrafficBrowser() {
   const executable = process.env.REB_UI_CHROMIUM;
-  assert(executable, "Set REB_UI_CHROMIUM to the installed Chrome/Chromium executable. Sandbox flags are not overridden.");
-  const directory = await mkdtemp(join(tmpdir(), investigationBrowser ? "reb-investigation-ui-" : collectionBrowser ? "reb-collection-ui-" : consoleBrowser ? "reb-console-ui-" : evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
-  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", investigationBrowser ? "investigation-ui-qa" : collectionBrowser ? "collection-ui-qa" : consoleBrowser ? "console-ui-qa" : evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
+  assert(float32FixtureOnly || executable, "Set REB_UI_CHROMIUM to the installed Chrome/Chromium executable. Sandbox flags are not overridden.");
+  const directory = await mkdtemp(join(tmpdir(), canvasBrowser ? "reb-canvas-ui-" : memoryBrowser ? "reb-memory-ui-" : investigationBrowser ? "reb-investigation-ui-" : float32Browser || float32FixtureOnly ? "reb-float32-ui-" : collectionBrowser ? "reb-collection-ui-" : consoleBrowser ? "reb-console-ui-" : comparisonBrowser ? "reb-comparison-ui-" : evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
+  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", canvasBrowser ? "canvas-ui-qa" : memoryBrowser ? "memory-ui-qa" : investigationBrowser ? "investigation-ui-qa" : float32Browser || float32FixtureOnly ? "float32-ui-qa" : collectionBrowser ? "collection-ui-qa" : consoleBrowser ? "console-ui-qa" : comparisonBrowser ? "comparison-ui-qa" : evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
   await mkdir(output, {recursive: true});
   let trafficApiMode = "offline";
-  const collectionFixture = collectionBrowser ? collectionBrowserFixture() : null;
+  const canvasFixture = canvasBrowser ? await canvasBrowserFixture(root,canvasFixtureOptions) : null;
+  const canvasReceipts = [];
+  const memoryFixture = memoryBrowser ? await memoryBrowserFixture() : null;
+  const collectionFixture = collectionBrowser ? await collectionBrowserFixture(root) : null;
+  let floatFixture;
   const factsFixture = investigationBrowser ? investigationFixture(await sourceFactsBrowserFixture()) : sourceFactsBrowser ? await sourceFactsBrowserFixture() : null;
   const consoleFixture = consoleBrowser ? createConsoleFixture() : null;
-  const evidenceFixture = evidenceBrowser ? evidenceBrowserFixture() : null;
+  const evidenceFixture = evidenceBrowser || comparisonBrowser ? evidenceBrowserFixture() : null;
   if(evidenceFixture){
     await writeFile(join(directory,'golden.json'),packageGoldenBytes);
+    await writeFile(join(directory,'changed.json'),comparisonChangedInput);
     await writeFile(join(directory,'duplicate.json'),new TextDecoder().decode(packageGoldenBytes).replace('"protocol_version": 1','"protocol_version": 1, "protocol_version": 1'));
   }
   const server = createServer(async (request, response) => {
     const path = new URL(request.url, "http://127.0.0.1").pathname;
+    for (const [name,value] of Object.entries(canvasFixture?.documentHeaders(request.url)??{})) response.setHeader(name,value);
+    if (canvasFixture && await canvasFixture.handle(request, response)) return;
     if (collectionFixture && await collectionFixture.handle(request, response)) return;
+    if (memoryFixture && await memoryFixture.handle(request, response)) return;
+    if (floatFixture?.handle && await floatFixture.handle(request, response)) return;
     if (factsFixture && await factsFixture.handle(request, response)) return;
     if (consoleFixture && await consoleFixture.handle(request, response)) return;
     if (evidenceFixture && await evidenceFixture.handle(request, response)) return;
     if (path === "/api/events" && trafficApiMode === "malformed") {response.writeHead(200, {"Content-Type": "application/json"}); response.end('{"malformed":true}'); return;}
     if (path.startsWith("/api/")) {response.writeHead(503, {"Content-Type": "application/json"}); response.end('{"error":"Synthetic offline QA fixture"}'); return;}
-    const name = path === "/" ? "index.html" : path.slice(1);
-    if (!/^[a-z_]+\.(?:html|js|css)$/.test(name)) {response.writeHead(404); response.end(); return;}
-    try {
-      response.writeHead(200, {"Content-Type": name.endsWith(".js") ? "text/javascript" : name.endsWith(".css") ? "text/css" : "text/html"});
-      response.end(await readFile(join(root, "apps/research-ui", name)));
-    } catch {response.writeHead(404); response.end();}
+    await serveFixtureAsset(request, response);
   });
   const args = ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${directory}`,
     "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "about:blank"];
-  let lifecycle, socket, validation, failure, captureFailure;
+  let lifecycle, socket, validation, failure, captureFailure, captureCanvasReceipt;
   let diagnostics = {executable, args, phase: "fixture server"};
   const commands = new Map();
+  const downloads = trafficBrowserDownloadObserver();
   await rm(join(output, "validation.json"), {force: true});
   try {
+    if (float32Browser || float32FixtureOnly) {
+      floatFixture = await float32BrowserFixture(root, directory);
+      diagnostics.float32_backend = floatFixture.diagnostics;
+      await floatFixture.ready();
+      await checkFloat32Fixture(floatFixture, root);
+      if (float32FixtureOnly) validation = {status:'passed', path:'real backend fixture only', rendered:false};
+    }
+    if (!float32FixtureOnly) {
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => {cleanup(); reject(new Error("Loopback fixture server timed out"));}, 5000);
       const failed = error => {cleanup(); reject(error);};
@@ -2822,6 +5342,7 @@ async function checkTrafficBrowser() {
     });
     lifecycle = trafficBrowserProcess(executable, args);
     diagnostics = lifecycle.diagnostics;
+    if (floatFixture) diagnostics.float32_backend = floatFixture.diagnostics;
     const address = await lifecycle.ready(directory);
     diagnostics.phase = "CDP socket";
     socket = await trafficBrowserSocket(address);
@@ -2830,6 +5351,7 @@ async function checkTrafficBrowser() {
     const browserDialogs = [];
     socket.addEventListener("message", event => {
       const message = JSON.parse(event.data);
+      downloads.observe(message);
       if (message.method === "Page.javascriptDialogOpening") browserDialogs.push(message.params);
       if (message.method === "Runtime.exceptionThrown") runtimeErrors.push(message.params.exceptionDetails.exception?.description || message.params.exceptionDetails.text);
       const pending = commands.get(message.id);
@@ -2838,6 +5360,7 @@ async function checkTrafficBrowser() {
       if (message.error) pending.reject(new Error(JSON.stringify(message.error))); else pending.resolve(message.result);
     });
     const rejectCommands = reason => {
+      downloads.close(reason);
       for (const pending of commands.values()) {clearTimeout(pending.timer); pending.reject(new Error(reason));}
       commands.clear();
     };
@@ -2861,6 +5384,7 @@ async function checkTrafficBrowser() {
       if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
       return result.result.value;
     };
+    if (canvasFixture) captureCanvasReceipt = async () => canvasReceipts.push({label:"terminal native image sink",...await evaluate("window.canvasBrowserReceipt")});
     const viewport = async (width, height) => {
       await command("Emulation.setDeviceMetricsOverride", {width, height, deviceScaleFactor: 1, mobile: false});
       await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
@@ -2928,7 +5452,7 @@ async function checkTrafficBrowser() {
       })()`);
     };
     const key = async (value, code = value, native = {}) => {
-      await command("Input.dispatchKeyEvent", {type: "keyDown", key: value, code, ...native});
+      await command("Input.dispatchKeyEvent", {type: native.text ? "keyDown" : "rawKeyDown", key: value, code, ...native});
       await command("Input.dispatchKeyEvent", {type: "keyUp", key: value, code, windowsVirtualKeyCode:native.windowsVirtualKeyCode});
     };
     const dialog = async accept => {
@@ -3020,25 +5544,41 @@ async function checkTrafficBrowser() {
     };
     captureFailure = async () => {
       const result = await command("Page.captureScreenshot", {format: "png"});
-      await writeFile(join(output, investigationBrowser ? "investigation-failure.png" : collectionBrowser ? "collection-failure.png" : consoleBrowser ? "console-failure.png" : evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
+      await writeFile(join(output, canvasBrowser ? "canvas-failure.png" : memoryBrowser ? "memory-failure.png" : investigationBrowser ? "investigation-failure.png" : float32Browser ? "float32-failure.png" : collectionBrowser ? "collection-failure.png" : consoleBrowser ? "console-failure.png" : comparisonBrowser ? "comparison-failure.png" : evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
     };
     await viewport(1440, 900);
-    await command("Page.navigate", {url: `http://127.0.0.1:${server.address().port}/`});
+    if (canvasFixture) await command("Page.addScriptToEvaluateOnNewDocument", {source:canvasFixture.installObserver});
+    await command("Page.navigate", {url: `http://127.0.0.1:${server.address().port}/${canvasBrowser ? "?canvas_images=1" : ""}`});
     for (let attempt = 0; attempt < 100; attempt += 1) {
       if (await evaluate("typeof renderRequests === 'function' && typeof state !== 'undefined'")) break;
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     assert(await evaluate("typeof renderRequests === 'function'"), "Application did not initialize");
     diagnostics.phase = "interactive validation";
-    if (investigationBrowser) {
+    if (canvasBrowser) {
+      const navigatePolicy=()=>command("Page.navigate",{url:`http://127.0.0.1:${server.address().port}/?canvas_images=1&canvas_policy=blocked`});
+      validation = await checkCanvasInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:canvasFixture,record:value=>canvasReceipts.push(value),navigatePolicy});
+      assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Canvas QA");
+    } else if (investigationBrowser) {
       validation = await checkInvestigationInteractions({evaluate,viewport,click,key,wheel,screenshot,dialog,typeText,fixture:factsFixture});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during investigation QA");
+    } else if (memoryBrowser) {
+      validation = await checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeText,screenshot,fixture:memoryFixture,recordMemoryCheck:value=>{diagnostics.memory_control_checks=[...(diagnostics.memory_control_checks??[]).slice(-63),value];}});
+      assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Memory QA");
     } else if (collectionBrowser) {
       validation = await checkCollectionInteractions({evaluate,viewport,click,key,wheel,type:text=>command("Input.insertText",{text}),screenshot,fixture:collectionFixture});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Collection QA");
     } else if (consoleBrowser) {
       validation = await checkConsoleInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:consoleFixture,type:text=>command("Input.insertText",{text}),recordGeometry:value=>{diagnostics.console_upper_panes=[...(diagnostics.console_upper_panes??[]).slice(-31),value];}});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Console QA");
+    } else if (float32Browser) {
+      validation = await checkFloat32Interactions({evaluate,viewport,click,key,command,wheel,screenshot,fixture:floatFixture});
+      assert.deepEqual(runtimeErrors,[],"Application raised uncaught errors during Float32 QA");
+    } else if (comparisonBrowser) {
+      const setFile=async(side,name)=>{const doc=await command('DOM.getDocument');const selector=side==='package'?'[data-package-file]':`[data-comparison-side="${side}"]`;const input=await command('DOM.querySelector',{nodeId:doc.root.nodeId,selector});await command('DOM.setFileInputFiles',{nodeId:input.nodeId,files:[join(directory,name+'.json')]});};
+      const navigateNative=async()=>{evidenceFixture.observationFrozen=false;await command('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/?native=1`});const end=Date.now()+5000;while(Date.now()<end){if(await evaluate("typeof evidenceWorkspace!=='undefined'&&document.documentElement.classList.contains('native-shell')"))return;await new Promise(resolve=>setTimeout(resolve,25));}assert.fail('Native live HTTP marker entry did not initialize');};
+      validation=await checkEvidenceComparisonInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:evidenceFixture,setFile,navigateNative});
+      assert.deepEqual(runtimeErrors,[],"Product comparison raised an uncaught error");
     } else if (evidenceBrowser) {
       const setFile=async name=>{
         const doc=await command('DOM.getDocument');
@@ -3046,15 +5586,10 @@ async function checkTrafficBrowser() {
         await command('DOM.setFileInputFiles',{nodeId:input.nodeId,files:[join(directory,name+'.json')]});
       };
       const downloadDirectory=join(directory,'downloads');await mkdir(downloadDirectory);
-      await command('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:downloadDirectory},false);
+      await command('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:downloadDirectory,eventsEnabled:true},false);
+      const frameId=(await command('Page.getFrameTree')).frameTree.frame.id;
       const verifyDownload=async trigger=>{
-        assert.deepEqual(await readdir(downloadDirectory),[],'Validation must not automatically save a file');
-        await trigger();
-        const deadline=Date.now()+5000;let saved;
-        while(Date.now()<deadline){try{saved=await readFile(join(downloadDirectory,'selected.reb-evidence.json'));if((await readdir(downloadDirectory)).every(name=>!name.endsWith('.crdownload')))break;}catch{}await new Promise(resolve=>setTimeout(resolve,25));}
-        assert(saved,'Explicit Download did not produce a completed file');
-        assert.deepEqual(new Uint8Array(saved),packageGoldenBytes,'Browser download must preserve exact validated bytes');
-        assert.deepEqual(await readdir(downloadDirectory),['selected.reb-evidence.json']);
+        diagnostics.download=await verifyTrafficBrowserDownload({observer:downloads,frameId,directory:downloadDirectory,expectedBytes:packageGoldenBytes,trigger});
       };
       validation=await checkEvidenceInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:evidenceFixture,setFile,verifyDownload});
       assert.deepEqual(runtimeErrors,[],"Application raised uncaught errors during Evidence QA");
@@ -3155,6 +5690,7 @@ async function checkTrafficBrowser() {
     validation = {status: "passed", path: "browser development UI", source: "synthetic fixture", viewports: [[1440,900],[600,800],[360,740]], checks: ["500-row bound and paging", "synchronized selected summary", "visible bounded narrow split", "independent ledger and body scrolling", "hit-tested pointer controls", "pending to response to failed", "equal-length updates", "stable focus and scroll", "sort/filter selection", "dismissal and Escape", "eviction", "arrow-key rows and tabs", "malformed JSON", "sandboxed HTML", "reduced motion", "Back to traffic", "new capture", "empty/malformed/offline"]};
     }
     diagnostics.phase = "validated";
+    }
   } catch (error) {
     failure = error;
     diagnostics.failure = String(error.stack ?? error).slice(0, 65536);
@@ -3163,13 +5699,26 @@ async function checkTrafficBrowser() {
       catch (screenshotError) {diagnostics.failure_screenshot_error = String(screenshotError.message).slice(0, 2048);}
     }
   } finally {
+    if (captureCanvasReceipt && socket?.readyState === 1) {
+      try {await captureCanvasReceipt();}
+      catch (error) {failure ??= error; diagnostics.canvas_sink_receipt_error = String(error.message);}
+    }
+    downloads.close();
+    diagnostics.download_events=downloads.receipts();
     socket?.close();
     for (const pending of commands.values()) {clearTimeout(pending.timer); pending.reject(new Error("Browser QA cleanup"));}
     commands.clear();
     try {await lifecycle?.stop();}
     catch (error) {failure ??= error; diagnostics.cleanup_error = String(error.message).slice(0, 2048);}
+    try { await floatFixture?.stop(); } catch (error) {failure ??= error; diagnostics.float32_cleanup_error = String(error.message);}
+    canvasFixture?.release();
+    if (canvasFixture) {
+      try {await writeFile(join(output,"canvas-fixture-receipts.json"),JSON.stringify({schema:"reb-canvas-ui-qa-v1",receipts:canvasReceipts,requests:canvasFixture.requests},null,2));}
+      catch (error) {failure ??= error; diagnostics.canvas_receipt_error = String(error.message);}
+    }
     factsFixture?.release(); consoleFixture?.release();
     collectionFixture?.release();
+    memoryFixture?.release();
     if (consoleFixture) {
       diagnostics.fixture_errors = consoleFixture.errors;
       try {await writeFile(join(output, 'console-fixture-receipts.json'), JSON.stringify({schema:'reb-console-ui-qa-v1',receipts:consoleFixture.receipts,errors:consoleFixture.errors}, null, 2));}
@@ -3179,17 +5728,17 @@ async function checkTrafficBrowser() {
     server.closeAllConnections();
     if (server.listening) await new Promise(resolve => server.close(resolve));
     // Keep a profile only when its owned process could not be stopped.
-    if (!lifecycle || lifecycle.diagnostics.cleanup?.exited) {
+    if ((!lifecycle || lifecycle.diagnostics.cleanup?.exited) && (!floatFixture || floatFixture.diagnostics.cleanup?.exited)) {
       try {await rm(directory, {recursive: true, force: true, maxRetries: 3, retryDelay: 100});}
       catch (error) {failure ??= error; diagnostics.profile_cleanup_error = String(error.message).slice(0, 2048);}
     }
     await writeFile(join(output, "browser-startup.json"), JSON.stringify(diagnostics, null, 2));
   }
   if (failure) throw failure;
-  await writeFile(join(output, "validation.json"), JSON.stringify(validation, null, 2));
-  console.log(`PASS real Chromium ${collectionBrowser ? 'Collection' : consoleBrowser ? 'Console' : evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
+  await writeFile(join(output, float32FixtureOnly ? "fixture-validation.json" : "validation.json"), JSON.stringify(validation, null, 2));
+  console.log(`PASS ${float32FixtureOnly ? "real loopback fixture (not rendered QA)" : "real Chromium"} ${canvasBrowser ? 'Canvas' : memoryBrowser ? 'Memory workflow' : float32Browser || float32FixtureOnly ? 'Float32 diagnostics' : collectionBrowser ? 'Collection' : consoleBrowser ? 'Console' : comparisonBrowser ? 'Evidence supplied-package comparison' : evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
 }
-if (investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser || collectionBrowser) {await checkTrafficBrowser(); process.exit(0);}
+if (canvasBrowser || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly) {await checkTrafficBrowser(); process.exit(0);}
 
 if (fieldsOnly) process.exit(0);
 const temporary = await mkdtemp(join(tmpdir(), "origin-trace-debugger-"));

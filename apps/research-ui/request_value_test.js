@@ -81,10 +81,10 @@
         });
         elements.hooksFieldForm.addEventListener('submit', async event => {
           event.preventDefault();
-          const response = await runExperimentAction({action: 'configure_runtime_field_test', enabled: true,
+          const response = currentExperimentReceipt(await runExperimentAction({action: 'configure_runtime_field_test', enabled: true,
             url: elements.hooksFieldUrl.value.trim(), method: elements.hooksFieldMethod.value.trim().toUpperCase(),
             kind: elements.hooksFieldKind.value, pointer: elements.hooksFieldKind.value === 'body' ? '' : elements.hooksFieldPointer.value,
-            confirmed: elements.hooksFieldConfirm.checked});
+            confirmed: elements.hooksFieldConfirm.checked}));
           if (response) {
             elements.hooksFieldConfirm.checked = false;
             renderRuntimeHooks();

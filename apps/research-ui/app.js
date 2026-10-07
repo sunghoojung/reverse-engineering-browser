@@ -22,6 +22,16 @@
         canOpenSource: () => typeof openInvestigation === 'function'
       });
 
+      // Ordinary refresh/navigation keeps file drafts in the owned component.
+      // A departing document disposes it; BFCache suspension only retires work.
+      window.addEventListener('pagehide', event => {
+        evidenceWorkspace.setVisible(false);
+        if (!event.persisted) evidenceWorkspace.disposeComparison();
+      });
+      window.addEventListener('pageshow', () => {
+        evidenceWorkspace.setVisible(!document.querySelector('#screen-evidence').hidden);
+      });
+
       const sourceFactsPanel = createSourceFactsPanel({
         getSource: selectedSource,
         onNavigate: revealSourceFactRange,
@@ -162,6 +172,11 @@
       ]);
       const signalEventDisplayLimit = 500;
       const nativeCanvasCaptureDisplayLimit = 24;
+      const canvasPreviewByteLimit = 8 * 1024 * 1024; // Reserved/retained UTF-16 text bytes, not decoded pixels.
+      const canvasPreviewReadLimit = 2;
+      const canvasPreviewAxisLimit = 4096;
+      const canvasPreviewPixelLimit = 4 * 1024 * 1024;
+      const canvasGalleryPixelLimit = 16 * 1024 * 1024; // Mounted declared pixels, not decoder/RSS memory.
       const nativeCanvasDrawingMethods = new Set([
         'save', 'restore', 'scale', 'rotate', 'translate', 'transform',
         'setTransform', 'resetTransform', 'beginPath', 'closePath', 'moveTo',
@@ -173,7 +188,78 @@
         'addColorStop', 'setLineDash', 'getContext'
       ]);
       const nativeCanvasCallLimit = 128;
-      const canvasDataUrlPattern = /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
+      const canvasDataUrlPattern = /^data:image\/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/]+={0,2}$/;
+      const canvasPngCrcTable = Uint32Array.from({length: 256}, (_, value) => {
+        for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ ((value & 1) ? 0xedb88320 : 0);
+        return value >>> 0;
+      });
+
+      // Deliberately narrow PNG admission, not a decoder or a general PNG validator.
+      // https://www.w3.org/TR/png-3/ sections 5 and 11. No compressed data is inflated.
+      function inspectCanvasPng(content) {
+        const reject = reason => ({reason: `${reason} Original evidence is unchanged.`});
+        if (typeof content !== 'string' || content.length > 2097152 || !canvasDataUrlPattern.test(content)) {
+          return reject('The retained bytes do not pass the bounded image data URL validator.');
+        }
+        if (!content.startsWith('data:image/png;base64,')) return reject('Preview format is unsupported: only static PNG is admitted.');
+        const encoded = content.slice('data:image/png;base64,'.length);
+        const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+        if (encoded.length % 4 || (encoded.endsWith('==') && (alphabet.indexOf(encoded.at(-3)) & 15)) ||
+            (encoded.endsWith('=') && !encoded.endsWith('==') && (alphabet.indexOf(encoded.at(-2)) & 3))) {
+          return reject('PNG base64 encoding is not canonical.');
+        }
+        let bytes;
+        try { bytes = atob(encoded); } catch { return reject('PNG base64 encoding is malformed.'); }
+        const byte = offset => bytes.charCodeAt(offset);
+        const uint32 = offset => ((byte(offset) * 0x1000000) + (byte(offset + 1) << 16) +
+          (byte(offset + 2) << 8) + byte(offset + 3));
+        if (bytes.slice(0, 8) !== '\x89PNG\r\n\x1a\n') return reject('PNG signature is invalid.');
+        let offset = 8, chunks = 0, width = 0, height = 0, colorType = 0, idatBytes = 0, hasIdat = false;
+        const ancillary = new Set();
+        while (offset < bytes.length) {
+          if (++chunks > 256) return reject('PNG exceeds the 256-chunk preview limit.');
+          if (bytes.length - offset < 12) return reject('PNG chunk is truncated.');
+          const length = uint32(offset), type = bytes.slice(offset + 4, offset + 8), data = offset + 8;
+          if (length > bytes.length - offset - 12) return reject('PNG chunk length is invalid or truncated.');
+          if (!/^[A-Za-z]{2}[A-Z][A-Za-z]$/.test(type)) return reject('PNG chunk type is invalid.');
+          let crc = 0xffffffff;
+          for (let index = offset + 4; index < data + length; index++) crc = (crc >>> 8) ^ canvasPngCrcTable[(crc ^ byte(index)) & 255];
+          if (((crc ^ 0xffffffff) >>> 0) !== uint32(data + length)) return reject('PNG chunk CRC does not match.');
+          if (chunks === 1 && type !== 'IHDR') return reject('PNG must begin with IHDR.');
+          if (type === 'IHDR') {
+            if (chunks !== 1 || length !== 13) return reject('PNG has a duplicate or malformed IHDR.');
+            width = uint32(data); height = uint32(data + 4); colorType = byte(data + 9);
+            if (!width || !height || width > canvasPreviewAxisLimit || height > canvasPreviewAxisLimit) {
+              return reject('PNG dimensions exceed the 4096-pixel axis limit or are zero.');
+            }
+            if (width * height > canvasPreviewPixelLimit) return reject('PNG exceeds the 4 Mi-pixel preview limit.');
+            if (byte(data + 8) !== 8 || ![2, 6].includes(colorType) || byte(data + 10) !== 0 ||
+                byte(data + 11) !== 0 || byte(data + 12) !== 0) {
+              return reject('PNG preview supports only non-interlaced 8-bit RGB or RGBA with standard compression and filtering.');
+            }
+          } else if (type === 'IDAT') {
+            hasIdat = true; idatBytes += length;
+          } else if (type === 'IEND') {
+            if (length || !hasIdat || !idatBytes || data + 4 !== bytes.length) return reject('PNG is incomplete or has trailing data.');
+            return {width, height, pixels: width * height};
+          } else if (['acTL', 'fcTL', 'fdAT'].includes(type)) {
+            return reject('Animated PNG previews are unsupported.');
+          } else {
+            // Only fixed-size sRGB, sBIT and pHYs metadata is admitted. Refusing other
+            // chunks also excludes embedded compressed profiles/text and extensions.
+            if (!['sRGB', 'sBIT', 'pHYs'].includes(type)) return reject(`PNG chunk ${type} is unsupported for previews.`);
+            if (hasIdat || ancillary.has(type)) return reject('PNG metadata is duplicated or follows image data.');
+            ancillary.add(type);
+            if ((type === 'sRGB' && (length !== 1 || byte(data) > 3)) ||
+                (type === 'sBIT' && (length !== (colorType === 2 ? 3 : 4) ||
+                  [...bytes.slice(data, data + length)].some(value => value.charCodeAt(0) < 1 || value.charCodeAt(0) > 8))) ||
+                (type === 'pHYs' && (length !== 9 || uint32(data) > 0x7fffffff ||
+                  uint32(data + 4) > 0x7fffffff || byte(data + 8) > 1))) return reject('PNG metadata is malformed.');
+          }
+          offset = data + length + 4;
+        }
+        return reject('PNG is missing IEND.');
+      }
 
       function canvasReadbackName(operation) {
         const match = /^(toDataURL|toBlob|getImageData)$/.exec(operation) ??
@@ -303,10 +389,6 @@
           if (index === -1) return;
           claimed.add(index);
           capture.artifact = artifacts[index];
-          if (!capture.artifact.contentTruncated &&
-              canvasDataUrlPattern.test(capture.artifact.content ?? '')) {
-            capture.dataUrl = capture.artifact.content;
-          }
         });
         return captures.sort((left, right) => {
           const delta = integerValue(left.evidenceEvent, 'monotonic_time_ns') -
@@ -315,24 +397,135 @@
         }).slice(-nativeCanvasCaptureDisplayLimit).reverse();
       }
 
+      function canvasGalleryVisible() {
+        return !document.querySelector('#screen-signals').hidden && state.signalView === 'rendering';
+      }
+
+      function releaseCanvasPreview(artifact, reason) {
+        const error = artifact.loadError;
+        const owner = state.canvasPreviewOwners?.get(sourceIdentity(artifact));
+        if (owner?.artifact === artifact) {
+          owner.image?.removeAttribute('src');
+          delete owner.image; delete owner.imageInfo; delete owner.imageError; delete owner.mounted;
+        }
+        releaseSourcePreview(artifact);
+        if (error) artifact.loadError = error;
+        // A removed catalog object may no longer be found by releaseSourcePreview.
+        artifact.controller?.abort();
+        for (const field of ['content', 'contentTruncated', 'loading', 'controller', 'previewUsed', 'contentVerified', 'contentLossy']) delete artifact[field];
+        artifact.canvasPreviewNotice = reason;
+      }
+
+      function retireCanvasPreviews(reason = 'Preview released while the Rendering gallery is closed.') {
+        for (const owner of state.canvasPreviewOwners?.values() ?? []) releaseCanvasPreview(owner.artifact, reason);
+        state.canvasPreviewOwners?.clear();
+        for (const artifact of state.artifacts) {
+          if (artifact.kind === 'canvas_data_url') releaseCanvasPreview(artifact, reason);
+        }
+        // Remove src before detaching: hidden/detached gallery nodes must not own image data.
+        elements.signalRenderList.querySelectorAll('img').forEach(image => image.removeAttribute('src'));
+        elements.signalRenderList.replaceChildren();
+      }
+
+      function syncCanvasPreviews(captures) {
+        if (!canvasGalleryVisible() || state.artifactReceiverError) {
+          retireCanvasPreviews(state.artifactReceiverError
+            ? 'Canvas previews released because the artifact catalog is unavailable.' : undefined);
+          return;
+        }
+        const previous = state.canvasPreviewOwners ?? new Map();
+        const owners = new Map();
+        let reservedBytes = 0;
+        for (const capture of captures.slice(0, nativeCanvasCaptureDisplayLimit)) {
+          const artifact = capture.artifact;
+          if (!artifact || artifact.kind !== 'canvas_data_url') continue;
+          const identity = sourceIdentity(artifact);
+          if (owners.has(identity)) continue;
+          let reason = '';
+          if (!sourceIsCurrent(artifact)) reason = 'The exact Canvas artifact identity is unavailable or ambiguous.';
+          else if (!Number.isSafeInteger(artifact.byte_size) || artifact.byte_size <= 0 || artifact.byte_size > 2097152) {
+            reason = 'Canvas preview exceeds the 2 MiB encoded-byte limit or has an invalid size.';
+          } else if (reservedBytes + artifact.byte_size * 2 > canvasPreviewByteLimit) {
+            reason = 'Canvas preview evicted by the 8 MiB gallery text budget. Original evidence is unchanged.';
+          }
+          if (reason) { releaseCanvasPreview(artifact, reason); continue; }
+          // Reserve the maximum UTF-16 cost before reading, so completion order
+          // cannot overcommit the cache or evict/reload the same 24 cards forever.
+          reservedBytes += artifact.byte_size * 2;
+          const prior = previous.get(identity);
+          owners.set(identity, prior?.artifact === artifact ? prior : {artifact, identity});
+          delete artifact.canvasPreviewNotice;
+        }
+        for (const [identity, owner] of previous) {
+          if (owners.get(identity) !== owner) releaseCanvasPreview(owner.artifact,
+            'Canvas preview evicted from the visible gallery. Original evidence is unchanged.');
+        }
+        state.canvasPreviewOwners = owners;
+        for (const artifact of state.artifacts) {
+          if (artifact.kind === 'canvas_data_url' && !owners.has(sourceIdentity(artifact)) &&
+              (artifact.content !== undefined || artifact.loading)) releaseCanvasPreview(artifact,
+            'Canvas preview evicted from the visible gallery. Original evidence is unchanged.');
+        }
+        pumpCanvasPreviews();
+      }
+
+      function pumpCanvasPreviews() {
+        if (!canvasGalleryVisible() || state.artifactReceiverError) return;
+        const reads = state.canvasPreviewReads ??= new Set();
+        for (const owner of state.canvasPreviewOwners?.values() ?? []) {
+          if (reads.size >= canvasPreviewReadLimit) break;
+          const artifact = owner.artifact;
+          if (reads.has(owner) || artifact.content !== undefined || artifact.loading || artifact.loadError) continue;
+          reads.add(owner);
+          // Keep the slot until the actual operation settles, even when an
+          // aborted fetch ignores cancellation. Late headers are never read.
+          void loadArtifactContent(artifact, {canvasOwner: owner}).finally(() => {
+            reads.delete(owner);
+            if (canvasGalleryVisible()) renderFingerprintActivity();
+          });
+        }
+      }
+
+      function retryCanvasPreview(identity) {
+        const owner = state.canvasPreviewOwners?.get(identity);
+        if (!owner || !canvasGalleryVisible() || state.artifactReceiverError) return;
+        delete owner.artifact.loadError;
+        renderFingerprintActivity();
+      }
+
       function canvasPreview(capture, label, replayLabel, capturedOutput = false) {
         const preview = document.createElement('figure');
         preview.className = 'signal-canvas-preview';
         preview.append(textElement('figcaption', '', label));
         const frame = document.createElement('div');
         frame.className = 'signal-canvas-frame';
-        if (capturedOutput && capture.dataUrl) {
+        const artifact = capture.artifact;
+        const owner = artifact && state.canvasPreviewOwners?.get(sourceIdentity(artifact));
+        if (capturedOutput && owner && owner.artifact === artifact && owner.mounted && owner.imageInfo &&
+            !owner.imageError && artifact.content !== undefined && !artifact.contentTruncated &&
+            sourceIsCurrent(artifact) && canvasGalleryVisible() && !state.artifactReceiverError) {
           const image = document.createElement('img');
-          image.src = capture.dataUrl;
+          owner.image = image;
           image.alt = replayLabel;
           image.decoding = 'async';
+          image.addEventListener('error', () => {
+            if (state.canvasPreviewOwners?.get(owner.identity) !== owner || owner.image !== image ||
+                !canvasGalleryVisible() || !sourceIsCurrent(artifact)) return;
+            image.removeAttribute('src');
+            owner.imageError = 'The browser could not decode this PNG preview. Original evidence is unchanged.';
+            delete owner.imageInfo; delete owner.mounted;
+            renderFingerprintActivity();
+          });
+          // Header/structure and aggregate admission both precede the first src assignment.
+          image.src = artifact.content;
           frame.append(image);
         } else if (capture.calls.length === 0 || !capture.width || !capture.height || !capture.demo) {
           frame.classList.add('unavailable');
           const explanation = capturedOutput && !state.canvasImageCaptureEnabled
             ? 'Image capture is off for this session. Restart with REB_CAPTURE_CANVAS_IMAGES=1 to retain sensitive Canvas output.'
             : capturedOutput && capture.artifact
-              ? 'The Canvas artifact was retained but did not pass the bounded image data URL validator.'
+              ? capture.artifact.canvasPreviewNotice || owner?.imageError || capture.previewReason || capture.artifact.loadError || (capture.artifact.loading
+                ? 'Loading the retained Canvas preview…' : 'Canvas preview is waiting for a bounded read slot.')
               : capture.calls.length
                 ? 'Operation names were retained, but arguments were not, so a faithful local replay cannot be generated.'
                 : 'This capture retained the readback call, but no supported earlier drawing operations.';
@@ -340,6 +533,12 @@
             textElement('strong', '', 'Preview unavailable'),
             textElement('span', '', explanation)
           );
+          if (capturedOutput && capture.artifact?.loadError && !capture.artifact.canvasPreviewNotice) {
+            const retry = textElement('button', 'secondary-button', 'Retry preview');
+            retry.type = 'button';
+            retry.addEventListener('click', retryCanvasPreview.bind(null, sourceIdentity(capture.artifact)));
+            frame.append(retry);
+          }
         } else {
           const canvas = document.createElement('canvas');
           canvas.width = capture.width;
@@ -428,7 +627,7 @@
         evidence.append(textElement(
           'p', '', capture.demo
             ? 'This demo image is generated locally from visible calls and is not production evidence.'
-            : capture.dataUrl
+            : capture.artifact && sourceIsCurrent(capture.artifact)
               ? 'Sensitive Canvas output was captured locally for this session and linked to the native readback event.'
               : 'Operation metadata remains available even when sensitive Canvas image capture is off.'
         ));
@@ -442,8 +641,27 @@
       }
 
       function renderFingerprintRendering(signalEvents) {
-        renderSignalSurfaceOverview(signalEvents);
         const captures = canvasRenderCaptures(signalEvents);
+        syncCanvasPreviews(captures);
+        if (!canvasGalleryVisible()) return;
+        renderSignalSurfaceOverview(signalEvents);
+        // Count only the exact current owners and prioritize newest captures.
+        // Old DOM sources are removed below before any new source is assigned.
+        for (const owner of state.canvasPreviewOwners?.values() ?? []) {
+          delete owner.mounted; delete owner.image;
+        }
+        let pixels = 0;
+        for (const capture of captures) {
+          const owner = capture.artifact && state.canvasPreviewOwners?.get(sourceIdentity(capture.artifact));
+          if (!owner || owner.artifact !== capture.artifact || !owner.imageInfo || owner.imageError) continue;
+          if (pixels + owner.imageInfo.pixels > canvasGalleryPixelLimit) {
+            capture.previewReason = 'Preview omitted by the 16 Mi-pixel gallery budget. Original evidence is unchanged.';
+            continue;
+          }
+          pixels += owner.imageInfo.pixels;
+          owner.mounted = true;
+          capture.width = owner.imageInfo.width; capture.height = owner.imageInfo.height;
+        }
         const readbackCount = signalEvents.filter(event => event.category === 'canvas' &&
           canvasReadbackName(decodePayload(event))).length;
         elements.signalRenderCount.textContent = String(captures.length);
@@ -453,6 +671,7 @@
             : `${captures.length} canvas ${captures.length === 1 ? 'readback' : 'readbacks'}`
           : 'No canvas readbacks';
         if (!captures.length) {
+          elements.signalRenderList.querySelectorAll('img').forEach(image => image.removeAttribute('src'));
           elements.signalRenderList.replaceChildren(textElement(
             'div', 'signal-render-empty',
             'No Canvas readback has been captured. Activity from other fingerprint-relevant surfaces remains available.'
@@ -464,6 +683,7 @@
           .map(detail => detail.dataset.captureKey));
         const focused = document.activeElement?.matches('summary')
           ? document.activeElement.parentElement.dataset.captureKey : null;
+        elements.signalRenderList.querySelectorAll('img').forEach(image => image.removeAttribute('src'));
         elements.signalRenderList.replaceChildren(...captures.map(renderCanvasCapture));
         elements.signalRenderList.querySelectorAll('details').forEach(detail => {
           detail.open = expanded.has(detail.dataset.captureKey);
@@ -1417,6 +1637,7 @@
         if (match?.side) state.inspectorTab = match.mode === 'headers' ? 'headers' : match.side === 'Request' ? 'payload' : 'response';
         const request = state.requests.find(candidate => candidate.id === id);
         if (!request) return;
+        if (state.selectedRequestId !== id) state.repeaterDraftRevision = (state.repeaterDraftRevision ?? 0) + 1;
         state.selectedRequestId = id;
         state.trafficDetailOpen = true;
         state.trafficSelectionNotice = null;
@@ -1483,33 +1704,54 @@
       }
 
       function requestSignalProfileSelection() {
-        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        const candidates = state.requests.filter(candidate => candidate.id === state.selectedRequestId);
+        const request = candidates.length === 1 ? candidates[0] : null;
         const root = requestSignalRoot(request);
         if (!request || !root) return null;
+        const requestID = integerText(root, 'request_id');
+        const sessionID = integerText(root, 'session_id');
+        const rootProcessID = root.process_id;
+        const rootSequenceNumber = integerText(root, 'sequence_number');
         return {
-          request,
-          root,
-          requestID: integerText(root, 'request_id'),
-          sessionID: integerText(root, 'session_id'),
-          key: `${request.id}:${integerText(root, 'session_id')}:${root.process_id}:${integerText(root, 'sequence_number')}`
+          requestID, sessionID, rootProcessID, rootSequenceNumber,
+          key: JSON.stringify([request.id, sessionID, requestID, rootProcessID, rootSequenceNumber])
         };
       }
 
       async function refreshRequestSignalProfile() {
         const generation = ++state.signalProfileGeneration;
         const selection = requestSignalProfileSelection();
+        const render = () => {
+          if (state.inspectorTab === 'signals') renderInspector();
+          if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
+        };
+        if (state.signalProfileKey !== selection?.key || location.protocol === 'file:') {
+          state.signalProfile = null;
+          state.signalProfileKey = null;
+          state.signalProfileEtag = null;
+        }
         if (!selection || location.protocol === 'file:') {
           state.signalProfile = null;
           state.signalProfileStatus = 'empty';
           state.signalProfileError = null;
-          if (state.inspectorTab === 'signals') renderInspector();
-          if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
+          render();
           return;
         }
+        const ownsSelection = () => {
+          if (generation !== state.signalProfileGeneration) return false;
+          if (requestSignalProfileSelection()?.key === selection.key) return true;
+          state.signalProfileGeneration += 1;
+          state.signalProfile = null;
+          state.signalProfileKey = null;
+          state.signalProfileEtag = null;
+          state.signalProfileStatus = 'error';
+          state.signalProfileError = 'The selected request event changed while reading its signal profile. Select the request again.';
+          render();
+          return false;
+        };
         state.signalProfileStatus = 'loading';
         state.signalProfileError = null;
-        if (state.inspectorTab === 'signals') renderInspector();
-        if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
+        render();
         try {
           const headers = state.signalProfileKey === selection.key && state.signalProfileEtag
             ? { 'If-None-Match': state.signalProfileEtag }
@@ -1517,12 +1759,15 @@
           const parameters = new URLSearchParams({
             session_id: selection.sessionID,
             request_id: selection.requestID,
-            root_process_id: String(selection.root.process_id),
-            root_sequence_number: integerText(selection.root, 'sequence_number')
+            root_process_id: String(selection.rootProcessID),
+            root_sequence_number: selection.rootSequenceNumber
           });
           const response = await fetch(`/api/request-signal-profile?${parameters}`, { cache: 'no-store', headers });
-          if (generation !== state.signalProfileGeneration) return;
+          if (!ownsSelection()) return;
           if (response.status === 304) {
+            if (!headers['If-None-Match'] || state.signalProfileKey !== selection.key) {
+              throw new TypeError('Request signal profile returned an unowned cached response');
+            }
             state.signalProfileStatus = state.signalProfile ? 'ready' : 'empty';
           } else if (response.status === 404) {
             state.signalProfile = null;
@@ -1532,19 +1777,24 @@
           } else {
             if (!response.ok) throw new Error(`Request signal profile store returned ${response.status}`);
             const body = await response.json();
+            if (!ownsSelection()) return;
             if (!isRequestSignalProfile(body)) throw new TypeError('Malformed request signal profile');
+            if (body.session_id !== selection.sessionID || body.request_id !== selection.requestID ||
+                body.root_event.process_id !== selection.rootProcessID || body.root_event.sequence_number !== selection.rootSequenceNumber) {
+              throw new TypeError('Signal profile belongs to a different captured request or event. Exact linkage is unavailable.');
+            }
             state.signalProfile = body;
             state.signalProfileStatus = 'ready';
             state.signalProfileKey = selection.key;
             state.signalProfileEtag = response.headers.get('ETag');
           }
         } catch (error) {
-          if (generation !== state.signalProfileGeneration) return;
+          if (!ownsSelection()) return;
+          state.signalProfileEtag = null;
           state.signalProfileStatus = 'error';
           state.signalProfileError = error.message;
         }
-        if (state.inspectorTab === 'signals') renderInspector();
-        if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
+        render();
       }
 
       function renderFields() {
@@ -2006,7 +2256,8 @@
           missing_event: 'Missing event · predecessor not retained',
           no_predecessor: 'Missing predecessor · no recorded link',
           cycle: 'Trace stopped · correlation cycle',
-          step_limit: 'Trace stopped · step limit reached'
+          step_limit: 'Trace stopped · step limit reached',
+          capture_gap: 'Capture incomplete · native queue drops'
         };
         (trace?.steps ?? []).forEach((step, index) => {
           models.push({key: `${step.event.process_id}:${step.event.sequence_number}`, index: String(index + 1),
@@ -2030,11 +2281,10 @@
         if (active) traceStepDetails(active); else elements.traceStepDetails.replaceChildren();
         if (hasSteps) {
           const {linked_steps: linked, gap_count: gaps} = trace.coverage;
-          const possible = linked + gaps;
-          const links = possible ? `${linked} of ${possible} predecessor links recorded` : 'No predecessor links were needed';
-          const gapsText = gaps ? `${gaps} missing predecessor${gaps === 1 ? '' : 's'}` : 'no missing predecessors';
-          elements.coverageValue.textContent = `${trace.coverage.percent}% predecessor coverage · ${links} · ${gapsText}`;
-          elements.coverageValue.title = 'Coverage counts recorded predecessor links against explicit missing-predecessor gaps.';
+          const links = `${linked} recorded predecessor link${linked === 1 ? '' : 's'}`;
+          const gapsText = `${gaps} reported gap${gaps === 1 ? '' : 's'}`;
+          elements.coverageValue.textContent = `${trace.coverage.percent}% trace coverage · ${links} · ${gapsText}`;
+          elements.coverageValue.title = 'Coverage counts recorded predecessor links against named gaps. Queue-drop markers describe retained streams and do not identify missing links or prove value flow.';
         } else {
           elements.coverageValue.textContent = '';
           elements.coverageValue.removeAttribute?.('title');
@@ -2352,6 +2602,7 @@
       }
 
       function markRepeaterDraftChanged() {
+        state.repeaterDraftRevision = (state.repeaterDraftRevision ?? 0) + 1;
         state.repeaterDraftDirty = true;
         state.experimentError = null;
         renderRepeaterVariableStatus();
@@ -2480,6 +2731,7 @@
 
       function loadRepeaterHistoryEntry(entry, focus = false) {
         if (!entry) return;
+        state.repeaterDraftRevision = (state.repeaterDraftRevision ?? 0) + 1;
         state.repeaterSelectedHistoryId = entry.id;
         state.repeaterExpectedHistoryId = null;
         elements.repeaterRequestUrl.value = entry.request.url;
@@ -3208,7 +3460,7 @@
           ? 'Disarm to test a value' : 'Test a request value';
         testField.addEventListener('click', async () => {
           if (['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state)) {
-            const response = await runExperimentAction({action: 'disarm_runtime_hooks'});
+            const response = currentExperimentReceipt(await runExperimentAction({action: 'disarm_runtime_hooks'}));
             if (!response) return;
           }
           elements.hooksFieldUrl.value = request.url;
@@ -3416,7 +3668,7 @@
           const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Remove';
           remove.disabled = !libraryEditable;
           remove.addEventListener('click', async () => {
-            const response = await runExperimentAction({action: 'remove_automation_recipe', recipe_id: recipe.id});
+            const response = currentExperimentReceipt(await runExperimentAction({action: 'remove_automation_recipe', recipe_id: recipe.id}));
             if (response && state.automationEditingRecipeId === recipe.id) resetAutomationEditor();
           });
           actions.append(run, edit, remove);
@@ -3640,35 +3892,304 @@
         renderExperimentAudit(experiment);
       }
 
+      function experimentLifetimeKey(session) {
+        const experiment = session?.request_interception;
+        return JSON.stringify([experiment?.experiment_id ?? 0, experiment?.created_at_ms ?? 0,
+          experiment?.isolated ?? false, experiment?.target_id ?? null,
+          ...['repeater', 'object_experiment', 'runtime_hooks', 'automation_recipes'].flatMap(group =>
+            [session?.[group]?.session_id ?? 0, session?.[group]?.target_id ?? null])]);
+      }
+
+      function experimentContextKey() {
+        return JSON.stringify([state.experimentContextEpoch ?? 0, experimentLifetimeKey(state.debuggerSession),
+          state.debuggerSession?.target?.id ?? null]);
+      }
+
+      function currentExperimentReceipt(response) {
+        const owner = response && state.experimentReceiptOwners?.get(response);
+        if (!owner || owner.context !== experimentContextKey()) return null;
+        const generation = Math.max(state.debuggerSession?.generation ?? 0, state.experimentReceipt?.generation ?? 0);
+        if (response.generation < generation && owner.groups.some(group =>
+            !experimentRecordMatches(state.debuggerSession[group === 'experiment' ? 'request_interception' : group], response[group]))) return null;
+        return response;
+      }
+
+      function experimentEditorKey(names, selection = null) {
+        return JSON.stringify([selection, ...names.map(name => [elements[name]?.value, elements[name]?.checked])]);
+      }
+
+      function repeaterSubmissionKey() {
+        return JSON.stringify([experimentContextKey(), state.repeaterDraftRevision ?? 0, state.selectedRequestId,
+          ...['repeaterRequestUrl', 'repeaterRequestMethod', 'repeaterRequestTimeout', 'repeaterRequestHeaders',
+            'repeaterRequestBody', 'repeaterVariables'].map(name => elements[name].value)]);
+      }
+
+      function experimentActionGroups(action) {
+        const families = [
+          [['experiment', 'action_scope', 'object_experiment', 'runtime_hooks', 'automation_recipes', 'repeater'],
+            ['create_request_interception_experiment', 'dispose_request_interception_experiment']],
+          [['action_scope'], ['set_action_scope', 'close_experiment_page', 'create_experiment_page']],
+          [['experiment'], ['configure_request_interception', 'run_request_interception', 'clear_request_interception_result']],
+          [['object_experiment'], ['navigate_object_experiment', 'search_object_experiment', 'mutate_object_experiment']],
+          [['runtime_hooks'], ['add_runtime_hook', 'remove_runtime_hook', 'arm_runtime_hooks', 'disarm_runtime_hooks',
+            'clear_runtime_hook_hits', 'configure_runtime_field_test', 'compare_runtime_field_test']],
+          [['automation_recipes'], ['add_automation_recipe', 'update_automation_recipe', 'remove_automation_recipe',
+            'arm_automation_recipes', 'disarm_automation_recipes', 'cancel_automation_recipe', 'clear_automation_runs', 'run_automation_recipe']],
+          [['repeater'], ['configure_repeater_variables', 'run_repeater_request', 'cancel_repeater_request',
+            'compare_repeater_history', 'clear_repeater_history']]
+        ];
+        return families.find(([, actions]) => actions.includes(action))?.[0] ?? null;
+      }
+
+      function experimentReceiptBounded(value) {
+        // Validators allow additive fields. Bound those fields as well before
+        // retaining or comparing a receipt; never recurse over untrusted JSON.
+        const pending = [[value, 0]];
+        let nodes = 0, characters = 0;
+        while (pending.length) {
+          const [item, depth] = pending.pop();
+          if (++nodes > 65536 || depth > 64) return false;
+          if (typeof item === 'string') characters += item.length;
+          if (characters > 4 * 1024 * 1024) return false;
+          if (item && typeof item === 'object') {
+            const keys = Object.keys(item);
+            if (nodes + pending.length + keys.length > 65536) return false;
+            for (const key of keys) {
+              characters += key.length;
+              if (characters > 4 * 1024 * 1024) return false;
+              pending.push([item[key], depth + 1]);
+            }
+          }
+        }
+        return true;
+      }
+
+      function experimentRecordMatches(record, candidate) {
+        if (!experimentReceiptBounded(record) || !experimentReceiptBounded(candidate)) return false;
+        const pending = [[record, candidate]];
+        while (pending.length) {
+          const [left, right] = pending.pop();
+          if (left === null || typeof left !== 'object') {
+            if (left !== right) return false;
+          } else {
+            if (right === null || typeof right !== 'object' || Array.isArray(left) !== Array.isArray(right) ||
+                (Array.isArray(left) && left.length !== right.length)) return false;
+            // Additional alias fields are harmless; every authoritative field
+            // must still be present and equal to the validated group record.
+            for (const key of Object.keys(left)) {
+              if (!Object.hasOwn(right, key)) return false;
+              pending.push([left[key], right[key]]);
+            }
+          }
+        }
+        return true;
+      }
+
+      function isExperimentReceipt(response, request, submittedGeneration) {
+        const groups = experimentActionGroups(request.action);
+        if (!groups || !isPlainObject(response) || response.ok !== true ||
+            !isSafeIntegerInRange(response.generation, submittedGeneration, Number.MAX_SAFE_INTEGER) ||
+            !experimentReceiptBounded(response)) return false;
+        const validators = {experiment: isRequestInterception, action_scope: isActionScope,
+          object_experiment: isObjectExperiment, runtime_hooks: isRuntimeHooks,
+          automation_recipes: isAutomationRecipes, repeater: isRepeater};
+        if (groups.some(group => !validators[group](response[group]))) return false;
+        if (['create_request_interception_experiment', 'dispose_request_interception_experiment'].includes(request.action)) {
+          const experiment = response.experiment;
+          const isolated = request.action === 'create_request_interception_experiment';
+          if (experiment.isolated !== isolated || (isolated ? experiment.state !== 'ready' : experiment.state !== 'disposed') ||
+              ['repeater', 'object_experiment', 'runtime_hooks', 'automation_recipes'].some(group =>
+                response[group].session_id !== experiment.experiment_id || (group !== 'repeater' &&
+                  (response[group].isolated !== isolated || response[group].target_id !== experiment.target_id)))) return false;
+        }
+        if (request.action === 'create_experiment_page' &&
+            (!isBoundedText(response.target_id, 4096) || !response.target_id ||
+             !response.action_scope.targets.some(target => target.id === response.target_id))) return false;
+        if (['add_automation_recipe', 'update_automation_recipe'].includes(request.action)) {
+          const recipe = response.automation_recipes.recipes.find(item => item.id === response.recipe?.id);
+          if (!recipe || !experimentRecordMatches(recipe, response.recipe) ||
+              (request.action === 'update_automation_recipe' && recipe.id !== request.recipe_id)) return false;
+        }
+        if (request.action === 'run_automation_recipe') {
+          if (!Array.isArray(response.runs) || response.runs.length > 8 ||
+              response.runs.some((run, index) => !run || run.recipe_id !== request.recipe_id ||
+                response.runs.findIndex(other => other?.id === run.id) !== index ||
+                !response.automation_recipes.runs.some(record => experimentRecordMatches(record, run))) ||
+              !(response.runs.length ? experimentRecordMatches(response.runs.at(-1), response.run) : response.run === null)) return false;
+        }
+        return true;
+      }
+
+      function clearExperimentLifetime() {
+        for (const name of ['objectConfirm', 'hooksConfirm', 'hooksFieldConfirm', 'automationConfirm']) {
+          if (elements[name]) elements[name].checked = false;
+        }
+        for (const name of ['actionScopeNewUrl', 'actionScopeTarget', 'repeaterRequestUrl', 'repeaterRequestHeaders',
+          'repeaterRequestBody', 'repeaterVariables', 'experimentRequestUrl', 'experimentRequestHeaders',
+          'experimentRequestBody', 'experimentMethodFilter', 'experimentRewriteUrl', 'experimentRewriteMethod',
+          'experimentRewriteHeaders', 'experimentRewriteBody', 'experimentResponseHeaders', 'experimentResponseBody',
+          'objectPageUrl', 'objectPropertyQuery', 'objectValueQuery', 'objectClassQuery', 'objectShapeQuery',
+          'objectMutationProperty', 'objectMutationValue', 'hooksPageUrl', 'hooksLabel', 'hooksScript',
+          'hooksCondition', 'hooksEntryLogic', 'hooksReturnLogic', 'hooksReturnValue', 'hooksFunctionExpression',
+          'hooksFieldUrl', 'hooksFieldPointer', 'automationPageUrl', 'automationVariables', 'automationLabel', 'automationSource']) {
+          if (elements[name]) elements[name].value = '';
+        }
+        const defaults = {repeaterRequestMethod: 'GET', repeaterRequestTimeout: '15000', experimentRequestMethod: 'GET',
+          experimentUrlPattern: '*', experimentRuleMode: 'continue', experimentResponseCode: '200', objectOperation: 'set',
+          objectSimilarityThreshold: '0.75', hooksEntryMode: 'source', hooksLine: '1', hooksColumn: '1',
+          hooksReturnMode: 'none', hooksFieldMethod: 'POST', hooksFieldKind: 'json', automationTrigger: 'manual'};
+        for (const [name, value] of Object.entries(defaults)) if (elements[name]) elements[name].value = value;
+        for (const [name, checked] of Object.entries({objectRegex: false, objectCaseSensitive: false, objectShapeValues: false,
+          hooksEntryEnabled: true, hooksReturnEnabled: false, automationEnabled: true})) {
+          if (elements[name]) elements[name].checked = checked;
+        }
+        // Hidden workspaces also own disposable previews and text. Erase them
+        // immediately; polling only renders the currently visible workspace.
+        for (const name of ['repeaterHeaderRows', 'repeaterQueryRows', 'repeaterHistory', 'repeaterResponse', 'repeaterResponseMeta',
+          'repeaterComparison', 'repeaterBodyDiff', 'repeaterCompareBaseline', 'repeaterCompareCurrent', 'repeaterVariableStatus',
+          'repeaterActiveRequest', 'experimentResult', 'experimentResultMeta', 'experimentAudit', 'experimentArmedRule',
+          'objectResults', 'objectPreview', 'objectMutationResult', 'objectAudit', 'objectSearchMeta', 'objectSelectionMeta',
+          'hooksDefinitions', 'hooksHits', 'hooksHitMeta', 'hooksFieldObservations', 'hooksFieldBaseline', 'hooksFieldVariant',
+          'hooksFieldResult', 'hooksFieldStatus', 'sourceHooksNotice', 'runtimeHookTraffic', 'automationRuns', 'automationRunMeta',
+          'automationResult', 'automationResultMeta', 'actionScopeTargets']) {
+          const node = elements[name];
+          if (!node) continue;
+          node.textContent = ''; node.title = '';
+          if (node.dataset) { delete node.dataset.renderKey; delete node.dataset.optionKey; }
+        }
+        if (elements.runtimeHookTraffic) elements.runtimeHookTraffic.hidden = true;
+        // Collection definitions/drafts are durable, but these claims identify
+        // executions in the disposable lifetime and may not survive reused IDs.
+        state.collectionRunOwners?.clear();
+        Object.assign(state, {collectionSubmittedOwners: [], collectionPendingRunSelection: null,
+          collectionPendingSubmission: null, collectionRunPending: false, collectionSelectedHistoryId: null});
+        Object.assign(state, {experimentError: null, repeaterDraftDirty: false, repeaterVariablesDirty: false, repeaterVariablesKey: null,
+          repeaterSelectedHistoryId: null, repeaterExpectedHistoryId: null, experimentPrefillKey: null, repeaterPrefillKey: null,
+          repeaterHeadersSource: null, repeaterQuerySource: null, repeaterCompareBaselineId: null, repeaterCompareCurrentId: null,
+          repeaterComparisonKey: null, objectSelectedResultId: null, objectSelectionSearchId: 0, automationEditingRecipeId: null,
+          automationSelectedRunId: null, actionScopeDraftMode: null, actionScopeDraftRevision: -1,
+          selectedRuntimeHookRequest: null, runtimeHookTrafficKey: null, runtimeHookHitsKey: null, runtimeFieldTestKey: null});
+      }
+
+      function syncExperimentSession(previous, current, receiptAtPollStart = null, acknowledgement = false) {
+        const receipt = state.experimentReceipt;
+        state.experimentNeedsRefresh = false;
+        if (!acknowledgement && receipt && current.generation < receipt.generation && receiptAtPollStart !== receipt) {
+          // This GET was already in flight when the action was acknowledged.
+          // Keep its unrelated state, but do not roll back the applied groups.
+          state.experimentNeedsRefresh = true;
+          current = {...current};
+          for (const group of receipt.groups) current[group] = previous[group];
+          return current;
+        }
+        const restarted = current.generation < previous?.generation || (!acknowledgement && receipt && current.generation < receipt.generation);
+        const changed = experimentLifetimeKey(previous) !== experimentLifetimeKey(current);
+        const targetChanged = (previous?.target?.id ?? null) !== (current.target?.id ?? null);
+        if (restarted || changed || targetChanged) {
+          state.experimentContextEpoch = (state.experimentContextEpoch ?? 0) + 1;
+          state.repeaterSubmissionOwner = null;
+          const before = previous?.request_interception, after = current.request_interception;
+          let expired = false;
+          for (const owner of state.experimentActionOwners ?? []) {
+            let expected = false;
+            if (!restarted && owner.action === 'create_request_interception_experiment' && !owner.initialIsolated) {
+              const creation = JSON.stringify([after.experiment_id, after.created_at_ms]);
+              if (after.experiment_id > 0 && after.created_at_ms > 0 && ['creating', 'ready', 'error'].includes(after.state)) {
+                owner.creation ??= creation;
+                expected = owner.creation === creation;
+              }
+            }
+            if (!restarted && owner.action === 'dispose_request_interception_experiment') {
+              expected = before?.experiment_id === after.experiment_id && before?.created_at_ms === after.created_at_ms &&
+                (!owner.disposed || !after.isolated);
+              owner.disposed ||= !after.isolated;
+            }
+            if (!expected) {
+              expired = true;
+              owner.expired = true;
+              owner.transport?.retire?.('The disposable session ended. Native completion is unknown; no cancellation or retry was requested.');
+              if (state.debuggerActionOwner === owner.transport) {
+                state.debuggerActionOwner = null;
+                state.debuggerActionPending = false;
+              }
+              if (state.experimentPrimaryOwner === owner) {
+                state.experimentPrimaryOwner = null;
+                state.experimentPending = false;
+              }
+            }
+          }
+          if ((restarted || changed) && previous?.request_interception?.experiment_id > 0) clearExperimentLifetime();
+          if (expired) state.experimentError = 'The disposable session changed. Its pending action acknowledgement is unavailable; native completion is unknown. No cancellation or retry was sent.';
+        }
+        state.experimentReceipt = null;
+        return current;
+      }
+
       async function runExperimentAction(request) {
         const parallelControl = ['cancel_repeater_request', 'cancel_automation_recipe'].includes(request.action);
         if (state.experimentPending && !parallelControl) return null;
-        if (!parallelControl) state.experimentPending = true;
+        const session = state.debuggerSession;
+        if (!session || !experimentActionGroups(request.action)) return null;
+        const owner = {action: request.action, initialIsolated: session.request_interception.isolated, expired: false,
+          initialCreation: JSON.stringify([session.request_interception.experiment_id, session.request_interception.created_at_ms])};
+        if (state.experimentNeedsRefresh) {
+          state.experimentError = 'Waiting for a current debugger snapshot before another experiment action. No request was sent.';
+          renderExperiment();
+          return null;
+        }
+        state.experimentActionOwners ??= new Set();
+        state.experimentActionOwners.add(owner);
+        const generation = Math.max(session.generation, state.experimentReceipt?.generation ?? 0);
+        if (!parallelControl) {
+          state.experimentPending = true;
+          state.experimentPrimaryOwner = owner;
+        }
         state.experimentError = null;
         renderExperiment();
-        const response = await debuggerAction(request);
-        if (response?.experiment && isRequestInterception(response.experiment) && state.debuggerSession) {
-          state.debuggerSession.request_interception = response.experiment;
+        let result = null;
+        try {
+          const response = await debuggerAction(request, null, owner);
+          if (owner.expired) throw new Error('The disposable session changed while awaiting this action. Its acknowledgement is unavailable.');
+          if (!response) throw new Error(state.debuggerError || 'The experiment action acknowledgement is unavailable.');
+          if (response.ok === false) throw new Error(isBoundedText(response.error, 512) && response.error || 'The experiment action was rejected.');
+          if (!isExperimentReceipt(response, request, generation)) throw new Error('The experiment action returned an invalid acknowledgement.');
+          const current = state.debuggerSession;
+          const next = {...current};
+          const groups = experimentActionGroups(request.action).map(group => group === 'experiment' ? 'request_interception' : group);
+          for (const group of experimentActionGroups(request.action)) next[group === 'experiment' ? 'request_interception' : group] = response[group];
+          const lifecycle = ['create_request_interception_experiment', 'dispose_request_interception_experiment'].includes(request.action);
+          const receiptCreation = JSON.stringify([response.experiment?.experiment_id, response.experiment?.created_at_ms]);
+          if ((request.action === 'create_request_interception_experiment' && owner.creation && owner.creation !== receiptCreation) ||
+              (request.action === 'dispose_request_interception_experiment' && owner.initialCreation !== receiptCreation) ||
+              (!lifecycle && experimentLifetimeKey(next) !== experimentLifetimeKey(current))) {
+            throw new Error('The experiment acknowledgement belongs to another disposable session.');
+          }
+          const latestGeneration = Math.max(current.generation, state.experimentReceipt?.generation ?? 0);
+          if (response.generation < latestGeneration && experimentActionGroups(request.action).some(group =>
+              !experimentRecordMatches(current[group === 'experiment' ? 'request_interception' : group], response[group]))) {
+            throw new Error('Newer experiment state arrived before this acknowledgement. The current result and draft are retained.');
+          }
+          if (response.generation >= latestGeneration) {
+            const retainedGroups = state.experimentReceipt?.groups ?? [];
+            state.debuggerSession = syncExperimentSession(current, next, null, true);
+            state.experimentReceipt = {generation: response.generation, groups: [...new Set([...retainedGroups, ...groups])]};
+          }
+          result = response;
+        } catch (error) {
+          if (!owner.expired) state.experimentError = `${error.message} No automatic retry was sent.`;
+        } finally {
+          state.experimentActionOwners.delete(owner);
+          if (state.experimentPrimaryOwner === owner) {
+            state.experimentPrimaryOwner = null;
+            state.experimentPending = false;
+          }
+          if (!owner.expired) renderExperiment();
         }
-        if (response?.action_scope && isActionScope(response.action_scope) && state.debuggerSession) {
-          state.debuggerSession.action_scope = response.action_scope;
+        if (result && !owner.expired) {
+          state.experimentReceiptOwners ??= new WeakMap();
+          state.experimentReceiptOwners.set(result, {context: experimentContextKey(), groups: experimentActionGroups(request.action)});
         }
-        if (response?.object_experiment && isObjectExperiment(response.object_experiment) && state.debuggerSession) {
-          state.debuggerSession.object_experiment = response.object_experiment;
-        }
-        if (response?.runtime_hooks && isRuntimeHooks(response.runtime_hooks) && state.debuggerSession) {
-          state.debuggerSession.runtime_hooks = response.runtime_hooks;
-        }
-        if (response?.automation_recipes && isAutomationRecipes(response.automation_recipes) && state.debuggerSession) {
-          state.debuggerSession.automation_recipes = response.automation_recipes;
-        }
-        if (response?.repeater && isRepeater(response.repeater) && state.debuggerSession) {
-          state.debuggerSession.repeater = response.repeater;
-        }
-        if (!response) state.experimentError = state.debuggerError || 'The experiment action did not complete.';
-        if (!parallelControl) state.experimentPending = false;
-        renderExperiment();
-        return response;
+        return owner.expired ? null : result;
       }
 
       async function configureExperimentRule() {
@@ -3724,7 +4245,7 @@
           elements.objectPageUrl.focus();
           return;
         }
-        const response = await runExperimentAction({action: 'navigate_object_experiment', url});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'navigate_object_experiment', url}));
         if (response) {
           state.objectSelectedResultId = null;
           state.objectSelectionSearchId = 0;
@@ -3758,7 +4279,7 @@
           elements.objectPropertyQuery.focus();
           return;
         }
-        const response = await runExperimentAction(request);
+        const response = currentExperimentReceipt(await runExperimentAction(request));
         if (response?.object_experiment) {
           state.objectSelectionSearchId = response.object_experiment.search_id;
           state.objectSelectedResultId = response.object_experiment.results[0]?.id ?? null;
@@ -3803,7 +4324,7 @@
             return;
           }
         }
-        const response = await runExperimentAction(request);
+        const response = currentExperimentReceipt(await runExperimentAction(request));
         if (response) {
           elements.objectConfirm.checked = false;
           elements.objectMutationValue.value = '';
@@ -3819,7 +4340,7 @@
           elements.hooksPageUrl.focus();
           return;
         }
-        const response = await runExperimentAction({action: 'navigate_object_experiment', url});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'navigate_object_experiment', url}));
         if (response) {
           elements.hooksConfirm.checked = false;
           renderRuntimeHooks();
@@ -3838,6 +4359,8 @@
       }
 
       async function saveAutomationRecipe() {
+        const draft = () => experimentEditorKey(['automationLabel', 'automationTrigger', 'automationEnabled', 'automationSource'], state.automationEditingRecipeId);
+        const submittedDraft = draft();
         const request = {
           action: state.automationEditingRecipeId === null ? 'add_automation_recipe' : 'update_automation_recipe',
           label: elements.automationLabel.value.trim(),
@@ -3852,8 +4375,8 @@
           (!request.label ? elements.automationLabel : elements.automationSource).focus();
           return;
         }
-        const response = await runExperimentAction(request);
-        if (response) resetAutomationEditor();
+        const response = currentExperimentReceipt(await runExperimentAction(request));
+        if (response && draft() === submittedDraft) resetAutomationEditor();
       }
 
       async function runAutomationRecipe(recipeId) {
@@ -3864,10 +4387,10 @@
           return;
         }
         try {
-          const response = await runExperimentAction({
+          const response = currentExperimentReceipt(await runExperimentAction({
             action: 'run_automation_recipe', recipe_id: recipeId, confirmed: true,
             variables: parseAutomationVariables()
-          });
+          }));
           if (response?.run) state.automationSelectedRunId = response.run.id;
           if (response) elements.automationConfirm.checked = false;
         } catch (error) {
@@ -3877,6 +4400,10 @@
       }
 
       async function addRuntimeHook() {
+        const draft = () => experimentEditorKey(['hooksLabel', 'hooksScript', 'hooksLine', 'hooksColumn', 'hooksEntryMode',
+          'hooksFunctionExpression', 'hooksEntryEnabled', 'hooksReturnEnabled', 'hooksCondition', 'hooksEntryLogic',
+          'hooksReturnLogic', 'hooksReturnMode', 'hooksReturnValue'], state.selectedScriptId);
+        const submittedDraft = draft();
         try {
           const line = Number(elements.hooksLine.value);
           const column = Number(elements.hooksColumn.value);
@@ -3913,8 +4440,8 @@
             request.return_expression = elements.hooksReturnValue.value.trim();
             if (!request.return_expression) throw new TypeError('Enter one return-frame expression.');
           }
-          const response = await runExperimentAction(request);
-          if (response) {
+          const response = currentExperimentReceipt(await runExperimentAction(request));
+          if (response && draft() === submittedDraft) {
             elements.hooksConfirm.checked = false;
             elements.hooksLabel.value = '';
             elements.hooksFunctionExpression.value = '';
@@ -3992,13 +4519,13 @@
 
       async function applyRepeaterVariables() {
         try {
-          const variables = parseRepeaterVariables(elements.repeaterVariables.value);
-          const response = await runExperimentAction({action: 'configure_repeater_variables', variables});
-          if (response) {
-            state.repeaterVariablesDirty = false;
-            state.repeaterVariablesKey = JSON.stringify(variables);
-            renderRepeaterVariableStatus();
-          }
+          const draft = elements.repeaterVariables.value;
+          const variables = parseRepeaterVariables(draft);
+          const response = currentExperimentReceipt(await runExperimentAction({action: 'configure_repeater_variables', variables}));
+          if (!response || elements.repeaterVariables.value !== draft) return null;
+          state.repeaterVariablesDirty = false;
+          state.repeaterVariablesKey = JSON.stringify(variables);
+          renderRepeaterVariableStatus();
           return response;
         } catch (error) {
           state.experimentError = error.message;
@@ -4008,9 +4535,11 @@
       }
 
       async function runRepeaterRequest() {
+        if (state.repeaterSubmissionOwner) return;
+        const owner = {key: repeaterSubmissionKey()};
+        state.repeaterSubmissionOwner = owner;
+        const current = () => state.repeaterSubmissionOwner === owner && owner.key === repeaterSubmissionKey();
         try {
-          const applied = await applyRepeaterVariables();
-          if (!applied) return;
           const previousHistoryId = repeaterState()?.history.at(-1)?.id ?? 0;
           const method = elements.repeaterRequestMethod.value.trim();
           const body = elements.repeaterRequestBody.value;
@@ -4022,24 +4551,25 @@
           if (!Number.isInteger(timeout) || timeout < 100 || timeout > 30000) {
             throw new TypeError('Repeater timeout must be between 100 and 30000 ms.');
           }
-          const response = await runExperimentAction({
-            action: 'run_repeater_request',
-            url: elements.repeaterRequestUrl.value.trim(),
-            method,
-            headers: parseExperimentHeaders(elements.repeaterRequestHeaders.value, 'Request headers'),
-            body,
-            timeout_ms: timeout
-          });
-          const executionId = response?.repeater?.active_execution?.execution_id ??
-            response?.repeater?.history.at(-1)?.id;
+          const payload = {action: 'run_repeater_request', url: elements.repeaterRequestUrl.value.trim(), method,
+            headers: parseExperimentHeaders(elements.repeaterRequestHeaders.value, 'Request headers'), body, timeout_ms: timeout};
+          const applied = currentExperimentReceipt(await applyRepeaterVariables());
+          if (!applied || !current() || state.repeaterVariablesDirty) return;
+          const response = currentExperimentReceipt(await runExperimentAction(payload));
+          if (!response || !current()) return;
+          const executionId = response.repeater.active_execution?.execution_id ?? response.repeater.history.at(-1)?.id;
           if (Number.isSafeInteger(executionId) && executionId > previousHistoryId) {
             state.repeaterExpectedHistoryId = executionId;
             renderExperiment();
           }
           state.repeaterDraftDirty = false;
         } catch (error) {
-          state.experimentError = error.message;
-          renderExperiment();
+          if (current()) {
+            state.experimentError = error.message;
+            renderExperiment();
+          }
+        } finally {
+          if (state.repeaterSubmissionOwner === owner) state.repeaterSubmissionOwner = null;
         }
       }
 
@@ -4901,21 +5431,31 @@
         const historySelection = state.collectionHistorySelectionVersion;
         const targetId = state.debuggerSession?.target?.id;
         const experimentId = requestInterception()?.experiment_id;
-        const ready = () => ['running', 'paused'].includes(state.debuggerSession?.state) && targetId === state.debuggerSession?.target?.id &&
+        const context = experimentContextKey();
+        const ready = () => context === experimentContextKey() && ['running', 'paused'].includes(state.debuggerSession?.state) && targetId === state.debuggerSession?.target?.id &&
           experimentId === requestInterception()?.experiment_id && requestInterception()?.target_id === targetId && requestInterception()?.isolated &&
           ['ready', 'error'].includes(requestInterception()?.state) && ['ready', 'error'].includes(repeaterState()?.state);
         if (!ready()) { setCollectionNotice('error', 'Create an isolated context before running.'); return; }
         state.collectionRunPending = true;
-        state.collectionPendingSubmission = {requestId: request.id, createdAt: request.created_at_ms, targetId, experimentId};
+        const pendingOwner = {requestId: request.id, createdAt: request.created_at_ms, targetId, experimentId};
+        state.collectionPendingSubmission = pendingOwner;
         renderCollectionExecution();
         let savedEdits = false;
         try {
+          const expected = state.collectionDraftDirty ? collectionRequestDraft() : request;
+          const draftRevision = state.collectionDraftRevision ?? 0;
           if (state.collectionDraftDirty) {
             // The button explicitly says Save & Run. Selection and plain saves never send.
             if (!(await saveCollectionRequest())) return;
             savedEdits = true;
           }
           const saved = collectionRequest(request.id);
+          if (!ready()) throw new Error('The isolated context changed before the request could run.');
+          if (!saved || Object.keys(expected).some(key => !['created_at_ms', 'updated_at_ms'].includes(key) &&
+              JSON.stringify(expected[key]) !== JSON.stringify(saved[key])) || (state.collectionDraftRevision ?? 0) !== draftRevision) {
+            throw new Error('The submitted request draft changed before sending. No request was sent.');
+          }
+          const savedKey = JSON.stringify([saved, collectionFolderLineage(saved.folder_id)]);
           const variables = {};
           collectionFolderLineage(saved.folder_id).forEach(folder => folder.variables.forEach(variable => {
             variables[variable.name] = variable.value;
@@ -4925,19 +5465,25 @@
             headers: repeaterHeaderObject(saved.headers), body: saved.body, timeout_ms: saved.timeout_ms,
             collection_request_id: saved.id};
           if (!ready()) throw new Error('The isolated context changed before the request could run.');
-          if (!await runExperimentAction({action: 'configure_repeater_variables', variables})) {
+          const configured = currentExperimentReceipt(await runExperimentAction({action: 'configure_repeater_variables', variables}));
+          if (!configured) {
             throw new Error(state.experimentError || 'Request variables could not be configured.');
           }
           if (!ready()) throw new Error('The isolated context changed before the request could run.');
           if (state.apiCollectionNeedsReload || collectionRequest(saved.id)?.created_at_ms !== saved.created_at_ms) {
             throw new Error('The saved request was removed or replaced before sending. No request was sent.');
           }
+          if (savedKey !== JSON.stringify([collectionRequest(saved.id), collectionFolderLineage(saved.folder_id)]) ||
+              ((state.collectionDraftRevision ?? 0) !== draftRevision) ||
+              (state.collectionSelectedRequestId === saved.id && state.collectionDraftDirty)) {
+            throw new Error('The submitted request or its variables changed before sending. No request was sent.');
+          }
           const previousId = repeaterState()?.history.at(-1)?.id ?? 0;
           const submittedOwners = state.collectionSubmittedOwners ??= [];
           const submission = {...state.collectionPendingSubmission, afterExecutionId: previousId};
           submittedOwners.push(submission);
           if (submittedOwners.length > 25) submittedOwners.shift();
-          const response = await runExperimentAction(payload);
+          const response = currentExperimentReceipt(await runExperimentAction(payload));
           if (!response) throw new Error(state.experimentError || 'The run could not be confirmed. It was not automatically retried.');
           const acknowledgement = response.repeater?.active_execution?.collection_request_id === saved.id
             ? response.repeater.active_execution : response.repeater?.history.findLast(entry => entry.collection_request_id === saved.id && entry.id > previousId);
@@ -4954,11 +5500,13 @@
           }
           setCollectionNotice('ready', `${savedEdits ? 'Edits saved. ' : ''}Run submitted for “${saved.name}”. Responses remain tied to that submitted request.`);
         } catch (error) {
-          setCollectionNotice('error', `${savedEdits ? 'Edits saved. ' : ''}${error.message}`);
+          if (state.collectionPendingSubmission === pendingOwner) setCollectionNotice('error', `${savedEdits ? 'Edits saved. ' : ''}${error.message}`);
         } finally {
-          state.collectionPendingSubmission = null;
-          state.collectionRunPending = false;
-          renderApiCollection();
+          if (state.collectionPendingSubmission === pendingOwner) {
+            state.collectionPendingSubmission = null;
+            state.collectionRunPending = false;
+            renderApiCollection();
+          }
         }
       }
 
@@ -5942,6 +6490,12 @@
         }));
       }
 
+      const float32Panel = mountFloat32Inspector(document.querySelector('#tools-panel-float32'), {getArtifacts: () => state.artifacts});
+
+      function syncFloat32Panel() {
+        if (state.toolsTab === 'float32' && !document.querySelector('#screen-tools').hidden) float32Panel.refresh();
+      }
+
       function renderTools() {
         if (!toolsElements.notice) return;
         toolsElements.notice.dataset.kind = state.decoderStatus;
@@ -5952,13 +6506,18 @@
         });
         toolsElements.decoderPanel.hidden = state.toolsTab !== 'decoder';
         toolsElements.jwtPanel.hidden = state.toolsTab !== 'jwt';
+        document.querySelector('#tools-panel-float32').hidden = state.toolsTab !== 'float32';
+        if (state.toolsTab === 'float32') { toolsElements.notice.dataset.kind = 'ready'; toolsElements.notice.textContent = 'Read-only float32 diagnostics. Explicit local input; no target capture or execution.'; }
+        toolsElements.engineBadge.hidden = state.toolsTab === 'float32';
+        syncFloat32Panel();
         renderDecoder();
         renderInvestigationDecoder();
         renderJwt();
       }
 
       function setToolsTab(tab) {
-        const next = tab === 'jwt' ? 'jwt' : 'decoder';
+        const next = ['jwt', 'float32'].includes(tab) ? tab : 'decoder';
+        if (next !== 'float32') float32Panel.cancel();
         if (next !== state.toolsTab && !state.decoderPending && !state.jwtPending && state.decoderEngine.available) {
           setToolsNotice('ready', next === 'jwt'
             ? 'Paste a JWT to inspect its claims. Verify its signature separately before trusting them.'
@@ -6293,6 +6852,9 @@
       }
 
       function retireSourceAnalysis(except = null) {
+        for (const [key, payload] of state.deobfuscationCache ?? []) {
+          if (!except || !key.startsWith(`${except}|`)) retireDeobfuscationReveal(payload.inspectorView);
+        }
         for (const request of state.deobfuscationRequests?.values() ?? []) {
           if (request.status !== 'loading' || request.identity === except) continue;
           request.status = 'error';
@@ -6319,6 +6881,7 @@
         for (const cache of [state.deobfuscationRequests, state.deobfuscationCache, state.sourceFormatCache]) {
           for (const [key, value] of cache ?? []) {
             if (!key.startsWith(`${identity}|`)) continue;
+            retireDeobfuscationReveal(value.inspectorView);
             value.controller?.abort(); cache.delete(key);
           }
         }
@@ -6357,6 +6920,7 @@
           wireBytes -= value.sourceDocumentBytes ?? 0;
           characters -= (value.original_source?.length ?? value.sourceInput?.length ?? 0) + (value.representation?.text?.length ?? value.text?.length ?? 0);
           segments -= value.representation?.segments?.length ?? value.segments?.length ?? 0;
+          retireDeobfuscationReveal(value.inspectorView);
           cache.delete(key);
         }
       }
@@ -7050,14 +7614,14 @@
         if (view?.formatError) return `${original} · ${view.formatError}`;
         if (state.sourceDeobfuscated && sourceDerivedView(source)) {
           const status = state.deobfuscationRequests.get(deobfuscationKey(source))?.status;
-          return `${state.sourceFormatted ? 'Pretty printed derived' : 'Derived'} · mapped to original source${status === 'error' ? ' · last successful analysis' : status === 'loading' ? ' · reanalyzing' : ''}`;
+          return `${state.sourceFormatted ? 'Pretty printed derived' : 'Derived'} · mapped to original source${status === 'error' ? ' · last successful analysis' : status === 'loading' ? ' · reanalyzing' : status === 'cancelled' ? ' · analysis cancelled' : ''}`;
         }
         if (!state.sourceDeobfuscated || !source) {
           return state.sourceFormatted && source ? `Pretty printed ${original.toLowerCase()} · mapped to original source` : original;
         }
         const request = state.deobfuscationRequests.get(deobfuscationKey(source));
         const prefix = state.sourceFormatted ? `Pretty printed ${original.toLowerCase()}` : original;
-        return `${prefix} · ${request?.status === 'error' ? 'analysis failed' : 'analysis pending'}`;
+        return `${prefix} · ${request?.status === 'error' ? 'analysis failed' : request?.status === 'cancelled' ? 'analysis cancelled' : 'analysis pending'}`;
       }
 
       function sourceDerivedView(source) {
@@ -7124,7 +7688,7 @@
         const original = payload?.original_source;
         const representation = payload?.representation;
         const expectedAssumptions = assumeIntrinsics ? ['standard-intrinsics'] : [];
-        if (payload?.schema !== 'deobfuscation-analysis-v1' || payload.mode !== 'derived' || payload.source_truncated !== false ||
+        if (payload?.schema !== 'deobfuscation-analysis-v1' || !['rust-oxc', 'python-lexical'].includes(payload.engine) || payload.mode !== 'derived' || payload.source_truncated !== false ||
             payload.artifact_id !== (source.source_type === 'artifact' ? source.artifact_id : null) ||
             payload.script_id !== (source.source_type === 'script' ? source.script_id : null) ||
             typeof original !== 'string' || original.length > 4 * 1024 * 1024 ||
@@ -7132,7 +7696,7 @@
             (source.source_type === 'artifact' && (!/^[0-9a-f]{64}$/.test(source.sha256) || payload.analysis.source.sha256 !== source.sha256)) ||
             (source.source_type === 'script' && (liveOriginal === null || original !== liveOriginal)) ||
             JSON.stringify(payload.analysis?.assumptions) !== JSON.stringify(expectedAssumptions) ||
-            typeof representation?.text !== 'string' || representation.text.length > 4 * 1024 * 1024 ||
+            typeof representation?.text !== 'string' || representation.text.length > 4 * 1024 * 1024 + 512 * 1024 ||
             !Array.isArray(representation.segments) || representation.segments.length > 250000 ||
             !['utf-8-byte', 'unicode-code-point', undefined].includes(representation.offset_unit)) {
           throw new Error('The analyzer response does not match the submitted source and representation.');
@@ -7145,10 +7709,15 @@
             (analysis.classification?.label !== undefined && !boundedText(analysis.classification.label, 128)) ||
             (analysis.source.lines !== undefined && (!Number.isSafeInteger(analysis.source.lines) || analysis.source.lines < 0 || analysis.source.lines > 4194305)) ||
             (analysis.representation?.status !== undefined && !boundedText(analysis.representation.status, 128)) ||
+            (analysis.representation?.truncated !== undefined && typeof analysis.representation.truncated !== 'boolean') ||
+            (representation.truncated !== undefined && typeof representation.truncated !== 'boolean') ||
             (analysis.representation?.segment_count !== undefined && analysis.representation.segment_count !== representation.segments.length) ||
-            !rows(analysis.representation?.transformations, value => value && boundedText(value.id, 128) && boundedText(value.detail) && Number.isSafeInteger(value.count) && value.count >= 0) ||
+            !rows(analysis.representation?.transformations, value => value && boundedText(value.id, 128) && boundedText(value.detail) && Number.isSafeInteger(value.count) && value.count >= 0 && value.count <= 4096) ||
+            !rows(representation.transformations, value => value && boundedText(value.id, 128) && boundedText(value.detail) && Number.isSafeInteger(value.count) && value.count >= 0 && value.count <= 4096) ||
+            (analysis.limits !== undefined && (!analysis.limits || Array.isArray(analysis.limits) || typeof analysis.limits !== 'object' ||
+              Object.keys(analysis.limits).length > 32 || !Object.entries(analysis.limits).every(([key, value]) => boundedText(key, 128) && Number.isSafeInteger(value) && value >= 0))) ||
             !rows(analysis.string_tables, value => value && boundedText(value.kind, 128) && Number.isSafeInteger(value.offset) && value.offset >= 0 &&
-              Number.isSafeInteger(value.entry_count) && value.entry_count >= 0 && rows(value.encodings, entry => boundedText(entry, 128)) &&
+              value.offset <= original.length && Number.isSafeInteger(value.entry_count) && value.entry_count >= 0 && value.entry_count <= 2048 && rows(value.encodings, entry => boundedText(entry, 128)) &&
               (value.decoded_preview === undefined || boundedText(value.decoded_preview)))) {
           throw new Error('The analyzer returned malformed or oversized report metadata.');
         }
@@ -7162,19 +7731,43 @@
           throw new Error('The analyzer original bytes do not match their UTF-8 SHA-256.');
         }
         const segments = sourceSegmentsUTF16(original, representation.text, representation.segments, representation.offset_unit);
-        let end = 0, originalEnd = 0;
-        for (const segment of segments) {
+        const derivedBytes = new TextEncoder().encode(representation.text);
+        if (new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(derivedBytes) !== representation.text ||
+            derivedBytes.length > 4 * 1024 * 1024 + 512 * 1024 ||
+            (analysis.representation?.derived_bytes !== undefined && analysis.representation.derived_bytes !== derivedBytes.length) ||
+            (payload.engine === 'rust-oxc' && representation.offset_unit !== 'utf-8-byte')) {
+          throw new Error('The analyzer returned an invalid derived encoding or byte size.');
+        }
+        let end = 0, originalEnd = 0, synthetic = 0;
+        const changes = [];
+        for (const [index, segment] of segments.entries()) {
           if (!['verbatim', 'synthetic', 'replacement'].includes(segment.kind) ||
               ![segment.original_start, segment.original_end, segment.derived_start, segment.derived_end].every(Number.isSafeInteger) ||
               segment.derived_start !== end || segment.derived_end <= end || segment.derived_end > representation.text.length ||
-              segment.original_start < originalEnd || segment.original_end < segment.original_start || segment.original_end > original.length ||
+              segment.original_start < originalEnd || (payload.engine === 'rust-oxc' && segment.original_start !== originalEnd) ||
+              segment.original_end < segment.original_start || segment.original_end > original.length ||
               (segment.kind === 'synthetic' && segment.original_start !== segment.original_end) ||
+              (segment.kind !== 'synthetic' && segment.original_start === segment.original_end) ||
               (segment.kind === 'verbatim' && original.slice(segment.original_start, segment.original_end) !== representation.text.slice(segment.derived_start, segment.derived_end))) {
             throw new Error('The analyzer returned an invalid original-source map.');
           }
+          if (segment.kind === 'replacement') changes.push({index, original_start: segment.original_start, original_end: segment.original_end, derived_start: segment.derived_start, derived_end: segment.derived_end});
+          if (segment.kind === 'synthetic') synthetic++;
           end = segment.derived_end; originalEnd = segment.original_end;
         }
-        if (end !== representation.text.length) throw new Error('The analyzer source map is incomplete.');
+        if (end !== representation.text.length || (payload.engine === 'rust-oxc' && originalEnd !== original.length) || changes.length > 4096) {
+          throw new Error('The analyzer source map is incomplete or exceeds the change limit.');
+        }
+        if (payload.engine === 'rust-oxc') {
+          for (const summary of [analysis.representation?.transformations, representation.transformations]) {
+            if (summary && summary.reduce((total, entry) => total + entry.count, 0) !== changes.length) {
+              throw new Error('The analyzer transformation counts do not match its mapped replacements.');
+            }
+          }
+        }
+        // Local admission metadata, never an analyzer-provided proof or duplicate source.
+        return {changes, synthetic, originalBytes: bytes.length, derivedBytes: derivedBytes.length,
+          byteRanges: payload.engine === 'rust-oxc' && representation.offset_unit === 'utf-8-byte'};
       }
 
       async function loadDeobfuscation(source, {retry = false} = {}) {
@@ -7188,11 +7781,12 @@
         if (source.source_type === 'script' && state.deobfuscationCache.get(key)?.original_source !== liveOriginal) state.deobfuscationCache.delete(key);
         const assumeIntrinsics = Boolean(state.deobfuscationAssumeIntrinsics);
         const previous = state.deobfuscationRequests.get(key);
-        if (previous?.status === 'loading' || (!retry && (previous?.status === 'error' || state.deobfuscationCache.has(key)))) return;
+        if (previous?.status === 'loading' || (!retry && (['error', 'cancelled'].includes(previous?.status) || state.deobfuscationCache.has(key)))) return;
         retireSourceAnalysis();
         const controller = new AbortController();
         const request = {status: 'loading', error: null, identity, controller};
         state.deobfuscationRequests.set(key, request);
+        renderSources();
         while (state.deobfuscationRequests.size > 128) state.deobfuscationRequests.delete(state.deobfuscationRequests.keys().next().value);
         const current = () => state.deobfuscationRequests.get(key) === request && request.status === 'loading' &&
           !controller.signal.aborted && sourceIsCurrent(source) && deobfuscationKey(source) === key &&
@@ -7211,9 +7805,14 @@
           if (bytes.length > 32 * 1024 * 1024) throw new Error('The analyzer response exceeds the retained-document budget.');
           const payload = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
           if (!response.ok) throw new Error(payload.error || `Deobfuscation analysis returned ${response.status}`);
-          await validateSourceAnalysis(payload, source, assumeIntrinsics, liveOriginal);
+          const inspection = await validateSourceAnalysis(payload, source, assumeIntrinsics, liveOriginal);
           if (!current()) return;
+          payload.sourceInspection = inspection;
+          payload.inspectorView = {change: 0, pages: {}, open: {}, notice: ''};
           payload.sourceDocumentBytes = bytes.length;
+          if (payload.original_source.length + payload.representation.text.length > 8 * 1024 * 1024) {
+            throw new Error('The analysis exceeds the retained-source budget.');
+          }
           state.deobfuscationCache.delete(key);
           state.deobfuscationCache.set(key, payload);
           boundSourceAnalysis(state.deobfuscationCache, 8, 8 * 1024 * 1024, 250000);
@@ -7243,82 +7842,295 @@
         return row;
       }
 
+      function deobfuscationOwner(reference, view = null) {
+        const source = selectedSource();
+        if (!source || !sourceIsCurrent(source) || sourceIdentity(source) !== sourceIdentity(reference) ||
+            (reference.deobfuscationAssumption !== undefined && reference.deobfuscationAssumption !== Boolean(state.deobfuscationAssumeIntrinsics))) return null;
+        const payload = source.deobfuscation;
+        if (view && payload?.inspectorView !== view) return null;
+        return {source, payload, key: deobfuscationKey(source)};
+      }
+
+      function cancelDeobfuscation(reference, pending = null) {
+        const owner = deobfuscationOwner(reference);
+        if (!owner) return;
+        const request = state.deobfuscationRequests.get(owner.key);
+        if (request?.status !== 'loading' || (pending && pending !== request)) return;
+        request.status = 'cancelled';
+        request.error = 'Analysis cancelled. A bounded worker may still finish; its late result will not be applied.';
+        request.controller?.abort();
+        delete request.controller;
+        renderSources();
+      }
+
+      function retryDeobfuscation(reference) {
+        const owner = deobfuscationOwner(reference);
+        if (owner) return loadDeobfuscation(owner.source, {retry: true});
+      }
+
+      function retireDeobfuscationReveal(view) {
+        if (!view?.revealToken) return;
+        sourceFactsPanel.cancelOwned?.(view.revealToken, 'Original range request cancelled because its analysis selection changed.');
+        view.revealing = false;
+        view.revealGeneration = (view.revealGeneration ?? 0) + 1;
+        delete view.revealToken;
+      }
+
+      function updateDeobfuscationView(reference, view, section, delta) {
+        const owner = deobfuscationOwner(reference, view);
+        if (!owner) return;
+        if (section === 'changes') {
+          retireDeobfuscationReveal(view);
+          const count = owner.payload.sourceInspection?.changes.length ?? 0;
+          view.change = Math.max(0, Math.min(count - 1, view.change + delta));
+          view.notice = ''; view.revealing = false;
+          view.revealGeneration = (view.revealGeneration ?? 0) + 1;
+        } else view.pages[section] = Math.max(0, (view.pages[section] ?? 0) + delta);
+        renderDeobfuscationReport(owner.source);
+      }
+
+      function setDeobfuscationDisclosure(reference, view, section, event) {
+        if (deobfuscationOwner(reference, view) && elements.deobfuscationReport.contains(event.currentTarget)) {
+          view.open[section] = event.currentTarget.open;
+        }
+      }
+
+      async function revealDeobfuscationChange(reference, view) {
+        const owner = deobfuscationOwner(reference, view);
+        const change = owner?.payload.sourceInspection?.changes[view.change];
+        if (!change || !owner.payload.sourceInspection.byteRanges || view.revealing) return;
+        const wire = owner.payload.representation.segments[change.index];
+        if (owner.source.source_type === 'script') {
+          if (sourceOwnedLiveText(owner.source) !== owner.payload.original_source) return;
+          const position = sourceLocationForOffset(sourceLineStarts(owner.payload.original_source), change.original_start);
+          if (position.line >= 20000) {
+            view.notice = 'This range starts beyond the first 20,000 displayed lines. Its original byte offsets remain available above.';
+            renderDeobfuscationReport(owner.source); return;
+          }
+          if (getComputedStyle(elements.sourceSidebar).position === 'absolute') {
+            state.sourceSidebarOpen = false;
+            renderSourceSidebar();
+          }
+          revealOriginalLine(owner.source, position.line, position.column);
+          elements.sourcePosition.textContent = `Original live-source UTF-8 bytes [${wire.original_start}, ${wire.original_end}) · Line ${sourceRuntimeLine(owner.source, position.line) + 1}, Column ${position.column + sourceRuntimeColumn(owner.source, position.line) + 1}`;
+          return;
+        }
+        const unavailable = sourceFactsUnavailable(owner.source, location.protocol);
+        if (unavailable) {view.notice = unavailable; renderDeobfuscationReport(owner.source); return;}
+        if (['loading', 'loading-source'].includes(sourceFactsPanel.model.status)) {
+          view.notice = 'Original-byte verification is busy. Try revealing this change again when it finishes.';
+          renderDeobfuscationReport(owner.source); return;
+        }
+        view.revealing = true;
+        const generation = view.revealGeneration = (view.revealGeneration ?? 0) + 1;
+        const token = view.revealToken = {};
+        renderDeobfuscationReport(owner.source);
+        let failure = '';
+        try {
+          await sourceFactsPanel.navigate({start: wire.original_start, end: wire.original_end}, {
+            owner: token,
+            isCurrent: () => Boolean(deobfuscationOwner(reference, view)) && view.revealGeneration === generation && view.revealToken === token,
+          });
+        }
+        catch (error) { failure = `Original range unavailable: ${String(error.message).slice(0, 1024)}`; }
+        if (view.revealGeneration !== generation) return;
+        view.revealing = false;
+        delete view.revealToken;
+        const current = deobfuscationOwner(reference, view);
+        if (!current) return;
+        view.notice = failure || sourceFactsPanel.model.error || '';
+        renderDeobfuscationReport(current.source);
+      }
+
+      function deobfuscationButton(key, label, action, disabled = false) {
+        const button = textElement('button', 'secondary-button', label);
+        button.type = 'button'; button.dataset.deobControl = key; button.disabled = disabled;
+        button.addEventListener('click', action);
+        return button;
+      }
+
+      function deobfuscationDisclosure(reference, view, section, label, rows, pageSize = 4) {
+        const details = document.createElement('details');
+        details.className = 'deobfuscation-disclosure'; details.open = Boolean(view.open[section]);
+        const summary = textElement('summary', '', `${label} (${rows.length})`);
+        summary.dataset.deobControl = `disclosure-${section}`; details.append(summary);
+        details.addEventListener('toggle', setDeobfuscationDisclosure.bind(null, reference, view, section));
+        const page = Math.min(view.pages[section] ?? 0, Math.max(0, Math.ceil(rows.length / pageSize) - 1));
+        view.pages[section] = page;
+        const start = page * pageSize;
+        if (!rows.length) { details.append(textElement('p', 'deobfuscation-note', 'None reported.')); return details; }
+        details.append(textElement('p', 'deobfuscation-note', `Showing ${start + 1}–${Math.min(start + pageSize, rows.length)} of ${rows.length}`));
+        details.append(...rows.slice(start, start + pageSize));
+        if (rows.length > pageSize) {
+          const controls = document.createElement('div'); controls.className = 'deobfuscation-controls';
+          for (const [key, label, delta, disabled] of [['previous', 'Previous page', -1, page === 0], ['next', 'Next page', 1, start + pageSize >= rows.length]]) {
+            controls.append(deobfuscationButton(`${section}-${key}`, label,
+              updateDeobfuscationView.bind(null, reference, view, section, delta), disabled));
+          }
+          details.append(controls);
+        }
+        return details;
+      }
+
       function renderDeobfuscationReport(source) {
         elements.deobfuscationIntrinsics.checked = Boolean(state.deobfuscationAssumeIntrinsics);
         const container = elements.deobfuscationReport;
         if (!container) return;
         const target = source ?? selectedSource();
         if (!target || target.kind !== 'javascript') {
+          container.deobfuscationRender = null;
           container.textContent = 'Select a JavaScript source to analyze.';
           return;
         }
-        const request = state.deobfuscationRequests.get(deobfuscationKey(target));
-        if (request?.status === 'error') {
-          const retry = textElement('button', 'secondary-button', 'Retry analysis');
-          retry.type = 'button';
-          retry.addEventListener('click', loadDeobfuscation.bind(null, sourceReference(target), {retry: true}));
-          container.replaceChildren(document.createTextNode(`${request.error}${target.deobfuscation ? ' The last successful derived view remains available.' : ''}`), retry);
-          return;
-        }
+        const key = deobfuscationKey(target), request = state.deobfuscationRequests.get(key);
         const payload = target.deobfuscation;
-        if (!payload) {
-          container.textContent = request?.status === 'loading' ? 'Analyzing captured source…' : 'No analysis is loaded for this source.';
-          return;
+        const inspection = payload?.sourceInspection;
+        const view = payload?.inspectorView;
+        const stamp = JSON.stringify([key, request?.status, request?.error, view?.change, view?.pages, view?.notice, view?.revealing]);
+        if (container.deobfuscationRender?.stamp === stamp && container.deobfuscationRender?.view === view) return;
+        const sameOwner = container.deobfuscationRender?.key === key;
+        if (sameOwner && container.deobfuscationRender?.view === view && view) {
+          // Native `toggle` events are queued; preserve the actual disclosure
+          // state even if a page/control action runs before that event arrives.
+          for (const details of container.querySelectorAll('details')) {
+            const section = details.querySelector('summary')?.dataset.deobControl?.replace(/^disclosure-/, '');
+            if (section) view.open[section] = details.open;
+          }
         }
-        const analysis = payload.analysis ?? {};
-        const classification = analysis.classification ?? {};
-        const representation = analysis.representation ?? {};
-        const rows = [
-          ...(request?.status === 'loading' ? [deobfuscationRow('Status', 'Reanalyzing; the last successful report remains visible.')] : []),
-          deobfuscationRow('Classification', `${classification.label ?? 'unclassified'}${classification.confidence == null ? '' : ` · confidence ${classification.confidence}`}`),
-          deobfuscationRow('Representation', `${representation.status ?? 'unknown'} · ${representation.segment_count ?? 0} mapped segments${representation.truncated ? ' · truncated' : ''}`),
-          deobfuscationRow('Source', `${analysis.source?.lines ?? 0} lines · ${formatByteSize(analysis.source?.byte_size ?? 0)}`),
-        ];
-        const evidence = document.createElement('div');
-        evidence.className = 'deobfuscation-evidence';
-        (classification.evidence ?? []).forEach(entry => {
-          evidence.append(deobfuscationRow(entry.id, entry.detail));
-        });
-        const tables = document.createElement('div');
-        tables.className = 'deobfuscation-tables';
-        const tableList = analysis.string_tables ?? [];
-        tables.append(deobfuscationRow('String tables', tableList.length ? String(tableList.length) : 'none recovered'));
-        tableList.slice(0, 4).forEach(table => {
-          tables.append(deobfuscationRow(
-            `${table.kind} at character ${table.offset}`,
-            `${table.entry_count} entries · ${(table.encodings ?? []).join(', ')}${table.decoded_preview ? ` · ${table.decoded_preview.slice(0, 48)}` : ''}`
-          ));
-        });
-        const transformations = document.createElement('div');
-        transformations.className = 'deobfuscation-transformations';
-        transformations.append(deobfuscationRow('Transformations', String((representation.transformations ?? []).length)));
-        (representation.transformations ?? []).slice(0, 6).forEach(entry => {
-          transformations.append(deobfuscationRow(entry.id, `${entry.detail} (${entry.count})`));
-        });
-        const assumptions = (analysis.assumptions ?? []).map(() => deobfuscationRow('Assumption', 'Standard JavaScript intrinsics. Prototype overrides are not modeled.'));
-        const omissions = (analysis.omissions ?? []).map(message => deobfuscationRow('Unavailable', message));
-        container.replaceChildren(deobfuscationRow('Engine', payload.engine === 'rust-oxc' ? 'Static AST deobfuscation (Rust)' : 'Classification and formatting'), ...rows, ...assumptions, evidence, ...(analysis.omissions?.length ? [] : [tables]), transformations, ...omissions);
+        const focused = sameOwner && container.contains(document.activeElement) ? document.activeElement?.dataset?.deobControl : null;
+        const scroller = container.closest('.debug-panes') ?? container;
+        const scroll = sameOwner ? scroller.scrollTop : 0;
+        const snippetScroll = sameOwner && container.deobfuscationRender?.view === view && container.deobfuscationRender?.change === view?.change
+          ? [...container.querySelectorAll('pre')].map(node => [node.dataset.deobControl, node.scrollTop, node.scrollLeft]) : [];
+        // Only small view metadata is retained by the DOM. Source bytes stay in
+        // the bounded analysis cache and event handlers receive descriptors only.
+        container.deobfuscationRender = {key, view, stamp, change: view?.change};
+        const reference = {...sourceReference(target), deobfuscationAssumption: Boolean(state.deobfuscationAssumeIntrinsics)}, nodes = [];
+        if (request?.status === 'loading') {
+          const status = textElement('p', 'deobfuscation-notice', payload ? 'Reanalyzing. Last successful report remains below.' : 'Analyzing source without executing it…');
+          status.setAttribute('role', 'status'); nodes.push(status);
+          nodes.push(deobfuscationButton('cancel', 'Cancel analysis', cancelDeobfuscation.bind(null, reference, request)));
+        } else if (['error', 'cancelled'].includes(request?.status)) {
+          const status = textElement('p', 'deobfuscation-notice', `${request.error}${payload ? ' Last successful report remains below.' : ''}`);
+          status.setAttribute('role', 'status'); nodes.push(status);
+          nodes.push(deobfuscationButton('retry', 'Retry analysis', retryDeobfuscation.bind(null, reference)));
+        } else if (payload) {
+          nodes.push(deobfuscationButton('reanalyze', 'Reanalyze', retryDeobfuscation.bind(null, reference)));
+        }
+        if (!payload || !view || !inspection) {
+          nodes.push(textElement('p', 'deobfuscation-note', payload ? 'This retained report has no validated change-inspection metadata. Retry analysis to inspect exact ranges.' : 'No successful analysis is loaded for this source.'));
+        } else {
+          const analysis = payload.analysis, summary = analysis.representation ?? {};
+          const changes = inspection.changes;
+          nodes.push(textElement('strong', 'deobfuscation-title', `Static analysis · ${changes.length ? `${changes.length} changed spans` : 'No safe rewrites found'}`));
+          nodes.push(deobfuscationRow('Bytes', `${formatByteSize(inspection.originalBytes)} → ${formatByteSize(inspection.derivedBytes)}`));
+          nodes.push(deobfuscationRow('Source', `${target.source_type === 'script' ? 'Live script' : 'Captured artifact'} ${target.script_id ?? target.artifact_id}`));
+          nodes.push(deobfuscationRow('SHA-256', analysis.source.sha256));
+          nodes.push(textElement('p', 'deobfuscation-note', 'Original bytes are unchanged. Static reconstruction does not execute this source or prove equivalent runtime behavior. Pretty printing is a separate display layer.'));
+          if (summary.truncated || payload.representation.truncated) nodes.push(textElement('p', 'deobfuscation-notice', 'Partial result: a transformation budget was reached. Unreduced source remains.'));
+          if (!inspection.byteRanges) nodes.push(textElement('p', 'deobfuscation-notice', 'Legacy code-point map. Exact UTF-8 change inspection is unavailable for this report.'));
+          if (inspection.synthetic) nodes.push(textElement('p', 'deobfuscation-note', `${inspection.synthetic} synthetic insertion segments are separate from replacement spans. Verbatim segments preserve identical source slices.`));
+          if (changes.length && inspection.byteRanges) {
+            view.change = Math.max(0, Math.min(view.change, changes.length - 1));
+            const change = changes[view.change], wire = payload.representation.segments[change.index];
+            const controls = document.createElement('div'); controls.className = 'deobfuscation-controls';
+            controls.append(deobfuscationButton('change-previous', 'Previous change', updateDeobfuscationView.bind(null, reference, view, 'changes', -1), view.change === 0));
+            const position = textElement('span', 'deobfuscation-change-position', `Change ${view.change + 1} of ${changes.length}`);
+            position.setAttribute('role', 'status'); position.tabIndex = -1; position.dataset.deobControl = 'change-position'; controls.append(position);
+            controls.append(deobfuscationButton('change-next', 'Next change', updateDeobfuscationView.bind(null, reference, view, 'changes', 1), view.change + 1 === changes.length));
+            nodes.push(controls);
+            for (const [label, text, start, end, byteStart, byteEnd] of [
+              ['Original', payload.original_source, change.original_start, change.original_end, wire.original_start, wire.original_end],
+              ['Derived', payload.representation.text, change.derived_start, change.derived_end, wire.derived_start, wire.derived_end],
+            ]) {
+              const block = document.createElement('section'); block.className = 'deobfuscation-snippet';
+              block.append(textElement('strong', '', `${label} · UTF-8 [${byteStart}, ${byteEnd})`));
+              let limit = Math.min(end, start + 2048);
+              if (limit < end && /[\uD800-\uDBFF]/.test(text[limit - 1])) limit--;
+              const code = textElement('pre', '', text.slice(start, limit));
+              code.tabIndex = 0; code.dataset.deobControl = `snippet-${label.toLowerCase()}`;
+              code.setAttribute('aria-label', `${label} replacement span`); block.append(code);
+              if (limit < end) block.append(textElement('p', 'deobfuscation-note', `Snippet shows ${limit - start} of ${end - start} UTF-16 units. The exact range above covers the full span.`));
+              nodes.push(block);
+            }
+            nodes.push(textElement('p', 'deobfuscation-note', 'Mapped replacement. Per-change rule and assumption details were not provided; the summaries below describe the whole analysis.'));
+            const unavailable = target.source_type === 'artifact' ? sourceFactsUnavailable(target, location.protocol) : '';
+            nodes.push(deobfuscationButton('reveal', view.revealing ? 'Verifying original bytes…' : 'Reveal original range', revealDeobfuscationChange.bind(null, reference, view), Boolean(view.revealing || unavailable)));
+            if (unavailable) nodes.push(textElement('p', 'deobfuscation-note', `Original range navigation: ${unavailable}`));
+          }
+          if (view.notice) {const notice = textElement('p', 'deobfuscation-notice', view.notice); notice.setAttribute('role', 'status'); nodes.push(notice);}
+          const transformations = summary.transformations ?? [];
+          const total = transformations.reduce((sum, entry) => sum + entry.count, 0);
+          const transformRows = transformations.map(entry => deobfuscationRow(entry.id, `${entry.count} rewrites · ${entry.detail}`));
+          nodes.push(deobfuscationDisclosure(reference, view, 'transformations', `Transformation summary · ${Array.isArray(summary.transformations) ? `${total} reported rewrites` : 'not supplied'}`, transformRows));
+          const classificationRows = [deobfuscationRow('Heuristic label', analysis.classification?.label ?? 'unclassified'),
+            deobfuscationRow('Meaning', 'Source-shape signals, not a probability or a semantic guarantee.'),
+            ...(analysis.classification?.evidence ?? []).map(entry => deobfuscationRow(entry.id, entry.detail))];
+          nodes.push(deobfuscationDisclosure(reference, view, 'classification', 'Why this classification', classificationRows));
+          const tableRows = (analysis.string_tables ?? []).map(table => deobfuscationRow(`${table.kind} · code-point offset ${table.offset}`,
+            `${table.entry_count} reported entries · ${(table.encodings ?? []).join(', ')}${table.decoded_preview ? ` · preview: ${table.decoded_preview}` : ''}`));
+          nodes.push(deobfuscationDisclosure(reference, view, 'tables', 'Recovered tables', tableRows));
+          const limits = [deobfuscationRow('Engine', payload.engine === 'rust-oxc' ? 'Rust / Oxc static rewriting' : 'Legacy lexical analysis'),
+            deobfuscationRow('Assumption', analysis.assumptions.length ? 'Standard intrinsics requested. Visible conflicts may suppress the model; this is not evidence of pristine runtime prototypes.' : 'Standard-intrinsics modeling is off.'),
+            deobfuscationRow('UI retention', 'Up to 8 analysis documents, 8 Mi UTF-16 units of original and derived text, 250,000 map segments and 32 MiB of response data combined.'),
+            ...(analysis.omissions ?? []).map(message => deobfuscationRow('Unresolved', message)),
+            ...Object.entries(analysis.limits ?? {}).map(([name, value]) => deobfuscationRow(name.replaceAll('_', ' '), String(value)))];
+          nodes.push(deobfuscationDisclosure(reference, view, 'limits', 'Assumptions and limits', limits));
+        }
+        container.replaceChildren(...nodes);
+        container.deobfuscationRender.stamp = JSON.stringify([key, request?.status, request?.error, view?.change, view?.pages, view?.notice, view?.revealing]);
+        scroller.scrollTop = scroll;
+        for (const node of container.querySelectorAll('pre')) {
+          const previous = snippetScroll.find(([key]) => key === node.dataset.deobControl);
+          if (previous) {node.scrollTop = previous[1]; node.scrollLeft = previous[2];}
+        }
+        if (focused) {
+          const controls = [...container.querySelectorAll('[data-deob-control]')];
+          const neighbor = focused.endsWith('-next') ? focused.replace(/-next$/, '-previous')
+            : focused.endsWith('-previous') ? focused.replace(/-previous$/, '-next')
+            : ['retry', 'reanalyze'].includes(focused) ? 'cancel' : focused === 'cancel' ? 'retry' : '';
+          const control = controls.find(node => node.dataset.deobControl === focused && !node.disabled)
+            ?? controls.find(node => node.dataset.deobControl === neighbor && !node.disabled)
+            ?? controls.find(node => ['change-position', 'cancel'].includes(node.dataset.deobControl)) ?? container;
+          control?.focus({preventScroll: true});
+        }
       }
 
-      async function loadArtifactContent(artifact, {retry = false} = {}) {
+      async function loadArtifactContent(artifact, {retry = false, canvasOwner = null} = {}) {
+        if (artifact?.kind === 'canvas_data_url' && (!canvasOwner ||
+            state.canvasPreviewOwners?.get(sourceIdentity(artifact)) !== canvasOwner || !canvasGalleryVisible() || state.artifactReceiverError)) return;
         if (!sourceIsCurrent(artifact) || artifact.content !== undefined || artifact.loading || (artifact.loadError && !retry)) return;
         const identity = sourceIdentity(artifact);
         const controller = new AbortController();
         artifact.loading = true; artifact.loadError = null; artifact.controller = controller;
         artifact.previewUsed = state.sourcePreviewSequence = (state.sourcePreviewSequence ?? 0) + 1;
-        boundSourcePreviews(artifact);
-        const current = () => sourceIsCurrent(artifact) && state.artifacts.includes(artifact) && artifact.controller === controller && !controller.signal.aborted;
+        if (!canvasOwner) boundSourcePreviews(artifact);
+        const current = () => sourceIsCurrent(artifact) && state.artifacts.includes(artifact) && artifact.controller === controller && !controller.signal.aborted &&
+          (!canvasOwner || (state.canvasPreviewOwners?.get(identity) === canvasOwner && canvasGalleryVisible() && !state.artifactReceiverError));
         const timeout = setTimeout(() => {
           if (artifact.controller !== controller) return;
           artifact.loading = false; artifact.loadError = 'Artifact loading timed out. Retry explicitly.';
           delete artifact.controller; controller.abort();
-          if (sourceIdentity(selectedSource()) === identity) renderSources();
+          if (canvasOwner && canvasGalleryVisible()) renderFingerprintActivity();
+          else if (sourceIdentity(selectedSource()) === identity) renderSources();
         }, 10000);
-        renderSources();
+        if (!canvasOwner) renderSources();
+        let responseCancellation = null;
         try {
           const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?limit=2097152`, {cache: 'no-store', signal: controller.signal});
-          if (!response.ok) throw new Error(`Artifact store returned ${response.status}`);
-          const buffer = await sourceFactsReadBytes(response, 2097152, controller.signal);
+          if (!current()) { responseCancellation = response.body?.cancel().catch(() => {}); return; }
+          if (!response.ok) { responseCancellation = response.body?.cancel().catch(() => {}); throw new Error(`Artifact store returned ${response.status}`); }
+          // Sources may retire without waiting for a producer's cleanup. Canvas
+          // additionally owns a read credit until any body/reader cancellation
+          // settles, including the bounded reader's abort and error paths.
+          const ownedResponse = canvasOwner && response.body?.getReader ? {body: {getReader() {
+            const reader = response.body.getReader();
+            return {read: () => reader.read(), releaseLock: () => reader.releaseLock(), cancel: () => {
+              responseCancellation = reader.cancel().catch(() => {});
+              return responseCancellation;
+            }};
+          }}} : response;
+          const buffer = await sourceFactsReadBytes(ownedResponse, 2097152, controller.signal);
           if (!current()) return;
           if (buffer.length !== Math.min(artifact.byte_size, 2097152)) throw new Error('The artifact preview byte size changed.');
           const total = response.headers.get('X-Artifact-Total-Bytes');
@@ -7335,20 +8147,36 @@
           }
           // Hex is only a view: do not expand 2 MiB to 131,072 rows while the
           // editor can display only 20,000. The immutable blob is untouched.
-          artifact.content = artifact.kind === 'wasm'
+          const content = artifact.kind === 'wasm'
             ? formatWasmHex(buffer.subarray(0, 20000 * 16))
             : new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(buffer);
+          if (canvasOwner && (artifact.contentLossy || !canvasDataUrlPattern.test(content))) {
+            throw new Error('The retained bytes do not pass the bounded image data URL validator.');
+          }
+          if (canvasOwner) {
+            const inspection = inspectCanvasPng(content);
+            if (inspection.reason) canvasOwner.imageError = inspection.reason;
+            else canvasOwner.imageInfo = inspection;
+          }
+          artifact.content = content;
           artifact.contentTruncated = artifact.byte_size > buffer.length || (artifact.kind === 'wasm' && buffer.length > 20000 * 16);
           if (artifact.contentTruncated) artifact.content += artifact.kind === 'wasm'
             ? '\n\n[Hex preview limited to the first 20,000 rows; original bytes are unchanged]'
             : '\n\n[Viewer preview limited to the first 2 MiB; original bytes are unchanged]';
-          boundSourcePreviews();
+          if (!canvasOwner) boundSourcePreviews();
         } catch (error) {
-          if (current()) artifact.loadError = `Artifact bytes are unavailable: ${String(error.message).slice(0, 1024)}`;
+          if (current()) {
+            if (canvasOwner) for (const field of ['content', 'contentVerified', 'contentLossy', 'contentTruncated']) delete artifact[field];
+            artifact.loadError = `Artifact bytes are unavailable: ${String(error.message).slice(0, 1024)}`;
+          }
         } finally {
           clearTimeout(timeout);
           if (artifact.controller === controller) {artifact.loading = false; delete artifact.controller;}
-          if (sourceIdentity(selectedSource()) === identity) renderSources();
+          if (canvasOwner && responseCancellation) {
+            // Expose the failure/retirement now, but do not refund its credit.
+            try { if (canvasGalleryVisible()) renderFingerprintActivity(); }
+            finally { await responseCancellation; }
+          } else if (!canvasOwner && sourceIdentity(selectedSource()) === identity) renderSources();
         }
       }
 
@@ -7588,6 +8416,175 @@
         return ['running', 'paused'].includes(state.debuggerSession?.state);
       }
 
+      // One in-flight action and one bounded result. UI ownership is not native cancellation.
+      function memoryOwnerCurrent(owner) {
+        return Boolean(owner && !owner.expired && memoryAttached() && owner.targetId === state.debuggerSession?.target?.id &&
+          owner.scopeVersion === (state.memoryScopeVersion ?? 0));
+      }
+
+      function memoryBaselineKey(baseline) {
+        return baseline ? JSON.stringify([baseline.target_id, baseline.captured_at_ms, baseline.file_bytes]) : '';
+      }
+
+      function syncMemorySession(previous, current) {
+        state.memoryPollSequence = (state.memoryPollSequence ?? 0) + 1;
+        if (current.generation < previous?.generation) state.memoryNativeEpoch = (state.memoryNativeEpoch ?? 0) + 1;
+        const contexts = new Set((current?.scripts ?? []).filter(script => !script.target_type)
+          .map(script => script.execution_context_id));
+        const scriptIdentities = new Map((current?.scripts ?? []).filter(script => !script.target_type).map(script => [script.script_id, script.hash]));
+        const expired = current?.generation < previous?.generation ||
+          (previous?.scripts ?? []).some(script => !script.target_type && scriptIdentities.has(script.script_id) && scriptIdentities.get(script.script_id) !== script.hash) ||
+          (previous?.target?.id ?? null) !== (current?.target?.id ?? null) ||
+          (['running', 'paused'].includes(previous?.state) && !['running', 'paused'].includes(current?.state)) ||
+          (previous?.scripts ?? []).some(script => !script.target_type && !contexts.has(script.execution_context_id));
+        if (expired) state.memoryScopeVersion = (state.memoryScopeVersion ?? 0) + 1;
+        // Native baseline metadata is target-scoped, not a document identity.
+        if (current?.generation < previous?.generation || (previous?.target?.id ?? null) !== (current?.target?.id ?? null) ||
+            current.generation >= (state.memoryBaselineGeneration ?? 0)) {
+          state.memoryDiffBaseline = current?.heap_diff_baseline?.target_id === current?.target?.id
+            ? current.heap_diff_baseline : null;
+          state.memoryBaselineGeneration = current.generation;
+        }
+        if (expired && state.memoryMode === 'origin' && !state.memoryOperation) {
+          state.memorySearchPending = false;
+          state.memorySearchStatus = 'unavailable';
+          state.memorySearchMessage = 'Trace context expired. The retained sample is historical; native completion is unconfirmed until refreshed for its target.';
+        }
+        retireObsoleteMemoryRequest(current);
+      }
+
+      function memoryActionDeadline(action) {
+        // Native live search has 3+5+3 second commands and two 3 second releases.
+        // Heap capture is 3+60 seconds; search/diff workers add 20/60 seconds.
+        // These bound waiting for HTTP headers AND body, not native execution.
+        const deadlines = {search_live_objects: 30000, search_heap_snapshot: 120000,
+          capture_heap_diff_baseline: 90000, compare_heap_diff: 150000,
+          clear_heap_diff_baseline: 15000, start_memory_origin_trace: 15000,
+          stop_memory_origin_trace: 15000, clear_memory_origin_trace: 15000};
+        return Object.hasOwn(deadlines, action) ? deadlines[action] : 0;
+      }
+
+      function retireObsoleteMemoryRequest(current) {
+        const transport = state.debuggerActionOwner;
+        const operation = transport?.memoryOwner;
+        if (!operation || !transport.retire) return;
+        if (!memoryOwnerCurrent(operation) || operation.mode !== state.memoryMode ||
+            (operation.action === 'compare_heap_diff' && memoryBaselineKey(operation.baseline) !== memoryBaselineKey(state.memoryDiffBaseline))) {
+          transport.retire('Memory request ownership expired. Its native completion is unknown; no cancellation or retry was requested.');
+          return;
+        }
+        const trace = current.memory_origin_trace;
+        if (current.generation <= operation.submittedGeneration || !isMemoryOriginTrace(trace) ||
+            new Set(trace.steps.map(step => step.id)).size !== trace.steps.length) return;
+        const terminal = ['found', 'not_found', 'aborted', 'error'].includes(trace.state) && trace.target_id === operation.targetId;
+        const previousIdentity = trace.trace_id === operation.traceId && trace.started_at_ms === operation.traceStartedAt;
+        const request = transport.request;
+        const startedTrace = operation.action === 'start_memory_origin_trace' && terminal && !previousIdentity &&
+          trace.query === request.query && trace.scope === request.scope && trace.before_steps === request.before_steps && trace.after_steps === request.after_steps;
+        const stoppedTrace = operation.action === 'stop_memory_origin_trace' && terminal && previousIdentity;
+        const clearedTrace = operation.action === 'clear_memory_origin_trace' && trace.state === 'idle';
+        if (startedTrace || stoppedTrace || clearedTrace) {
+          transport.retire('A newer native trace lifecycle was observed. The action acknowledgement remains unavailable; ending this wait does not cancel or retry native work.');
+        }
+      }
+
+      function beginMemoryOperation(action, criteria = '') {
+        if (!memoryAttached() || state.memorySearchPending || state.debuggerActionPending) return null;
+        const operation = {
+          id: (state.memoryOperationSequence ?? 0) + 1, action, mode: state.memoryMode,
+          targetId: state.debuggerSession.target.id,
+          scopeVersion: state.memoryScopeVersion ?? 0, nativeEpoch: state.memoryNativeEpoch ?? 0,
+          pollSequence: state.memoryPollSequence ?? 0,
+          submittedAt: Date.now(), submittedGeneration: state.debuggerSession.generation, criteria,
+          traceId: state.debuggerSession.memory_origin_trace?.trace_id ?? 0,
+          traceStartedAt: state.debuggerSession.memory_origin_trace?.started_at_ms ?? 0,
+          baseline: state.memoryDiffBaseline ? { ...state.memoryDiffBaseline } : null
+        };
+        state.memoryOperationSequence = operation.id;
+        state.memoryOperation = operation;
+        state.memoryLastOperation = operation;
+        state.memorySearchPending = true;
+        return operation;
+      }
+
+      function finishMemoryOperation(operation, body) {
+        if (state.memoryOperation !== operation) return false;
+        state.memoryOperation = null;
+        state.memorySearchPending = false;
+        if (!memoryOwnerCurrent(operation) || operation.mode !== state.memoryMode ||
+            (body && Number.isSafeInteger(body.generation) && body.generation < operation.submittedGeneration) ||
+            (operation.action === 'compare_heap_diff' &&
+              memoryBaselineKey(operation.baseline) !== memoryBaselineKey(state.memoryDiffBaseline))) {
+          if (operation.mode === 'origin' && (state.memoryPollSequence ?? 0) > operation.pollSequence) {
+            // The old operation may belong to a prior epoch. Display the current
+            // validated poll without comparing its generation to that old reply.
+            applyMemoryOriginTrace(state.debuggerSession?.memory_origin_trace);
+          }
+          state.memorySearchStatus = 'unavailable';
+          state.memorySearchMessage = `The ${operation.action.replaceAll('_', ' ')} reply submitted to ${operation.targetId} at ${new Date(operation.submittedAt).toLocaleTimeString()} was discarded because target, context, mode, or baseline changed. Native completion is not cancelled or confirmed by discarding this reply.`;
+          renderMemory();
+          return false;
+        }
+        return true;
+      }
+
+      function isMemoryAcknowledgement(body, trace = false) {
+        return isPlainObject(body) && Object.keys(body).length === (trace ? 3 : 2) && body.ok === true &&
+          (!trace || Object.hasOwn(body, 'trace')) &&
+          isSafeIntegerInRange(body.generation, 0, Number.MAX_SAFE_INTEGER);
+      }
+
+      function memoryTracePollAfter(operation, generation = null) {
+        // Keep one authoritative session snapshot, not another trace payload queue.
+        // A completed poll can arrive while POST is pending; its ETag may make all
+        // following GETs 304, so reconcile it before accepting the action reply.
+        if (!memoryOwnerCurrent(operation) || operation.nativeEpoch !== (state.memoryNativeEpoch ?? 0) ||
+            (state.memoryPollSequence ?? 0) <= operation.pollSequence) return null;
+        const session = state.debuggerSession;
+        const trace = session?.memory_origin_trace;
+        if ((generation !== null && session.generation < generation) || !isMemoryOriginTrace(trace) ||
+            (trace.state !== 'idle' && trace.target_id !== operation.targetId) ||
+            new Set(trace.steps.map(step => step.id)).size !== trace.steps.length) return null;
+        return trace;
+      }
+
+      function reconcileMemoryOrigin(operation, body = null) {
+        const valid = isMemoryAcknowledgement(body, true);
+        const trace = memoryTracePollAfter(operation, valid ? body.generation : null) ?? (valid ? body.trace : null);
+        return trace ? applyMemoryOriginTrace(trace) : false;
+      }
+
+      function keepNewerMemoryBaseline(operation, body) {
+        if (body.generation >= (state.memoryBaselineGeneration ?? 0)) return false;
+        // The operation did complete, but its acknowledgement is not the current
+        // baseline. Do not lower the generation or delete a later client's data.
+        operation.acknowledgedGeneration = body.generation;
+        state.memorySearchStatus = 'ready';
+        state.memorySearchMessage = `${operation.action === 'clear_heap_diff_baseline' ? 'Reset' : 'Capture'} acknowledged for target ${operation.targetId} at generation ${body.generation}. Newer native baseline information at generation ${state.memoryBaselineGeneration} is retained.`;
+        renderMemory();
+        return true;
+      }
+
+      function memoryOperationFailed(message) {
+        state.memorySearchStatus = 'unavailable';
+        const attempt = state.memoryLastOperation;
+        const submitted = attempt ? `Submitted to ${attempt.targetId} at ${new Date(attempt.submittedAt).toLocaleTimeString()}. ` : '';
+        state.memorySearchMessage = `${submitted}${message} Completion is unconfirmed; no automatic retry. Any retained preview is from the last successful action. Refresh debugger state before choosing another action.`;
+      }
+
+      function commitMemoryOwner(operation) {
+        state.memoryResultOwner = operation;
+        state.memoryTargetId = operation.targetId;
+      }
+
+      function memoryResultSignature() {
+        // Live/snapshot/diff arrays are immutable until an explicit action. Origin
+        // refresh can replace at most 25 rows, so only that small window is hashed.
+        const rows = state.memoryMode === 'origin' ? JSON.stringify(state.memoryResults) : state.memoryResults;
+        return { rows, mode: state.memoryMode, selected: state.selectedMemoryResultId,
+          meta: state.memorySearchMeta, stale: !memoryOwnerCurrent(state.memoryResultOwner) };
+      }
+
       function selectMemoryResult(id, focus = false) {
         const result = state.memoryResults.find(candidate => candidate.id === id);
         if (!result) return;
@@ -7651,7 +8648,7 @@
             ? `${result.type} · ${formatSignedByteSize(result.self_size_delta)} self memory`
             : `${formatSignedByteSize(diff.self_size_delta)} total self memory · ${diff.duration_ms} ms native analysis`)
         );
-        summaryHead.append(summaryTitle, textElement('span', 'memory-readonly', 'Exact diff'));
+        summaryHead.append(summaryTitle, textElement('span', 'memory-readonly', Object.entries(diff).some(([key, value]) => (key.endsWith('_reached') || key === 'retained_size_saturated') && value) ? 'Bounded partial diff' : 'Indexed heap diff'));
         const facts = document.createElement('div'); facts.className = 'memory-properties';
         if (result) {
           facts.append(
@@ -7674,7 +8671,7 @@
         const ownersTitle = document.createElement('div');
         ownersTitle.append(
           textElement('h2', '', 'Top retained-memory changes'),
-          textElement('p', '', 'Exact dominators over reachable non-weak V8 heap edges')
+          textElement('p', '', 'Dominators over indexed reachable non-weak V8 heap edges; reported limits qualify this comparison')
         );
         ownersHead.append(ownersTitle, textElement('span', 'memory-readonly', 'Native C++'));
         const owners = document.createElement('div'); owners.className = 'memory-properties';
@@ -7708,21 +8705,15 @@
         const title = document.createElement('div');
         title.append(
           textElement('h2', '', result.location.function_name || '(anonymous)'),
-          textElement('p', '', debuggerLocationText(result.location, result.location.url))
+          textElement('p', '', `${result.location.url || '(recorded anonymous script)'}:${result.location.line + 1}:${result.location.column + 1}`)
         );
-        head.append(title, textElement('span', 'memory-readonly', result.is_first_match ? 'First appearance' : result.matched ? 'Present' : 'Not present'));
-        if (result.location.script_id && state.debuggerSession?.scripts.some(script => script.script_id === result.location.script_id)) {
-          const source = document.createElement('button'); source.type = 'button'; source.className = 'secondary-button'; source.textContent = 'Open source';
-          source.addEventListener('click', () => {
-            showScreen('sources');
-            revealDebuggerLocation(result.location);
-          });
-          head.append(source);
-        }
+        head.append(title, textElement('span', 'memory-readonly', result.is_first_match ? 'First appearance' : result.matched ? 'Observed' : result.coverage_partial ? 'Not found · partial' : 'Not found in sample'));
+        head.append(textElement('span', 'memory-source-unavailable',
+          'Source link unavailable: this trace records a script ID and location, without execution-context or source-hash identity.'));
         const facts = document.createElement('div'); facts.className = 'memory-properties';
         facts.append(
           memoryFactRow('trace step', result.is_first_match ? 'origin' : 'context', `${result.step} of ${trace?.step_count ?? result.step}`),
-          memoryFactRow('heap match', result.matched ? 'found' : 'absent', result.match ? `${result.match.type} · node ${result.match.id}` : 'No matching node in this snapshot'),
+          memoryFactRow('heap match', result.matched ? 'found' : 'absent', result.match ? `${result.match.type} · node ${result.match.id}` : result.coverage_partial ? 'No match in the inspected subset; absence is unproven' : 'No matching node in this sampled snapshot'),
           memoryFactRow('native probe', result.coverage_partial ? 'partial' : 'bounded', `${result.analyzed_nodes.toLocaleString()} of ${result.total_nodes.toLocaleString()} nodes · ${result.duration_ms} ms`),
           memoryFactRow('heap capture', 'temporary', `${formatByteSize(result.capture_bytes)} · deleted after probe`),
           memoryFactRow('source filter', result.location.framework_filtered ? 'applied' : 'direct', result.location.url || '(anonymous script)')
@@ -7735,7 +8726,7 @@
           textElement('h2', '', result.match ? result.match.name || `(${result.match.type})` : 'Temporal context'),
           textElement('p', '', result.match
             ? `${result.match.type} · ${result.match.self_size.toLocaleString()} self bytes`
-            : 'The value had not appeared at this function boundary')
+            : 'No value was found in the inspected nodes at this function boundary')
         );
         contextHead.append(contextTitle, textElement('span', 'memory-readonly', result.matched ? 'Native match' : 'Before window'));
         const explanation = textElement('div', 'memory-empty', result.is_first_match
@@ -7808,11 +8799,12 @@
             });
           }
           card.append(head, facts, path);
-          const referencesCard = document.createElement('article'); referencesCard.className = 'memory-detail-card';
+          const referencesCard = document.createElement('details'); referencesCard.className = 'memory-detail-card memory-detail-disclosure'; referencesCard.open = true;
+          const summary = textElement('summary', '', '3 · Incoming references'); referencesCard.append(summary);
           const referencesHead = document.createElement('header'); referencesHead.className = 'memory-detail-head';
           const referencesTitle = document.createElement('div');
           referencesTitle.append(
-            textElement('h2', '', 'Incoming references'),
+            textElement('h2', '', 'Referring nodes'),
             textElement('p', '', result.incoming_reference_limit_reached
               ? `Showing ${result.incoming_references.length} prioritized references of ${result.incoming_reference_count.toLocaleString()}`
               : `${result.incoming_reference_count.toLocaleString()} indexed references`)
@@ -7844,7 +8836,7 @@
           textElement('h2', '', result.class_name || 'Object'),
           textElement('p', '', `${result.property_count} own properties · ${similarity}`)
         );
-        head.append(title, textElement('span', 'memory-readonly', 'Read-only preview'));
+        head.append(title, textElement('span', 'memory-readonly', memoryOwnerCurrent(state.memoryResultOwner) ? 'Ephemeral preview' : 'Expired preview'));
         const properties = document.createElement('div'); properties.className = 'memory-properties';
         if (result.preview.length === 0) {
           properties.append(textElement('div', 'memory-empty', 'The matched object has no previewable own properties.'));
@@ -7875,31 +8867,39 @@
       function renderMemory() {
         const attached = memoryAttached();
         const targetId = state.debuggerSession?.target?.id ?? null;
-        const preserveDisconnectedOrigin = state.memoryMode === 'origin' && targetId === null &&
-          state.memorySearchMeta?.protocol_version === 1 && state.memorySearchMeta?.trace_id > 0;
-        if (state.memoryTargetId !== null && state.memoryTargetId !== targetId && !preserveDisconnectedOrigin) {
-          state.memoryResults = [];
-          state.selectedMemoryResultId = null;
-          state.memorySearchMeta = null;
-          state.memorySearchMessage = null;
-          state.memoryDiffBaseline = null;
-          state.memoryTargetId = null;
-          state.memorySearchStatus = attached ? 'idle' : 'offline';
-        } else if (!attached && state.memorySearchStatus !== 'searching' && !preserveDisconnectedOrigin) {
-          state.memorySearchStatus = 'offline';
-        } else if (attached && state.memorySearchStatus === 'offline') {
-          state.memorySearchStatus = 'idle';
-        }
+        const stale = state.memoryResultOwner && !memoryOwnerCurrent(state.memoryResultOwner);
+        if (!attached && !state.memorySearchPending && !state.memoryResultOwner && state.memorySearchStatus === 'idle') state.memorySearchStatus = 'offline';
+        if (attached && state.memorySearchStatus === 'offline') state.memorySearchStatus = 'idle';
+        elements.memoryTarget.textContent = attached ? `Selected target · ${targetId}` : 'Target unavailable';
+        elements.memoryTarget.title = targetId ?? 'No selected target';
+        const owner = state.memoryResultOwner;
+        const pending = state.memoryOperation;
+        elements.memorySubmission.textContent = pending
+          ? `Submitted to ${pending.targetId} · ${new Date(pending.submittedAt).toLocaleTimeString()} · ${pending.action.replaceAll('_', ' ')}. Waiting does not stop native work.`
+          : owner
+            ? `${stale ? 'Expired context · historical preview' : 'Last successful result'} · target ${owner.targetId} · ${new Date(owner.submittedAt).toLocaleTimeString()} · ${owner.action.replaceAll('_', ' ')}${owner.baseline && owner.action === 'compare_heap_diff' ? ` · submitted baseline ${owner.baseline.target_id} at ${new Date(owner.baseline.captured_at_ms).toLocaleTimeString()}` : ''}`
+            : state.memoryLastOperation
+              ? `Last submitted action · target ${state.memoryLastOperation.targetId} · ${new Date(state.memoryLastOperation.submittedAt).toLocaleTimeString()} · no accepted result`
+              : 'No submitted result. Editing criteria does not run a search.';
+        elements.memorySubmission.dataset.stale = String(Boolean(stale));
+        const attempt = state.memoryLastOperation;
+        elements.memorySubmittedCriteria.textContent = pending
+          ? `Pending attempt · target ${pending.targetId}\n${pending.criteria}`
+          : owner
+            ? `Retained result · target ${owner.targetId}\n${owner.criteria}${attempt && attempt !== owner ? `\n\nLatest attempt · target ${attempt.targetId} · ${new Date(attempt.submittedAt).toLocaleTimeString()}\n${attempt.criteria}` : ''}`
+            : attempt ? `Latest attempt · target ${attempt.targetId}\n${attempt.criteria}` : 'No submitted criteria';
+        const instructions = {live: 'Find an object by property, value, class, or shape. Inspect inert own-property previews.', snapshot: 'Capture once to find heap nodes, then follow retaining paths and incoming references.', diff: 'Capture a baseline, perform the page activity, then compare the current heap.', origin: 'Arm a bounded trace, trigger a page click, then inspect the first sampled appearance.'};
+        elements.memoryWorkflow.textContent = instructions[state.memoryMode];
         const snapshotMode = state.memoryMode === 'snapshot';
         const diffMode = state.memoryMode === 'diff';
         const originMode = state.memoryMode === 'origin';
         const liveMode = state.memoryMode === 'live';
         const originTrace = state.debuggerSession?.memory_origin_trace ?? null;
-        const originActive = originTrace && ['armed', 'capturing', 'stepping', 'stopping'].includes(originTrace.state);
+        const originActive = originTrace?.target_id === targetId && ['armed', 'capturing', 'stepping', 'stopping'].includes(originTrace.state);
         elements.memorySearchForm.dataset.mode = state.memoryMode;
         elements.memoryModeButtons.forEach(button => {
           button.setAttribute('aria-pressed', String(button.dataset.memoryMode === state.memoryMode));
-          button.disabled = state.memorySearchPending;
+          button.disabled = state.memorySearchPending || state.debuggerActionPending;
         });
         elements.memorySearchForm.querySelectorAll('.memory-live-only').forEach(element => {
           element.hidden = !liveMode;
@@ -7929,8 +8929,8 @@
             ? 'Capturing briefly pauses the target. Native C++ classifies root reachability and prioritizes hidden, internal, and weak incoming references. The temporary file is deleted immediately.'
             : 'Accessors are reported without invoking getters. Results are ephemeral and are never added to the evidence store.';
         const controls = elements.memorySearchForm.querySelectorAll('input, textarea, select');
-        controls.forEach(control => { control.disabled = !attached || state.memorySearchPending; });
-        elements.memorySearchButton.disabled = !attached || state.memorySearchPending;
+        controls.forEach(control => { control.disabled = !attached || state.memorySearchPending || state.debuggerActionPending; });
+        elements.memorySearchButton.disabled = !attached || state.memorySearchPending || state.debuggerActionPending;
         elements.memorySearchButton.setAttribute('aria-busy', String(state.memorySearchPending));
         elements.memorySearchButton.textContent = state.memorySearchPending
           ? originMode ? originTrace?.state === 'armed' ? 'Armed for page click...' : 'Tracing function boundaries...' : snapshotMode ? 'Capturing and indexing...' : 'Searching...'
@@ -7940,14 +8940,14 @@
         const baseline = state.memoryDiffBaseline;
         elements.memoryBaselineTitle.textContent = baseline ? 'Baseline ready' : 'Not captured';
         elements.memoryBaselineMeta.textContent = baseline
-          ? `${formatByteSize(baseline.file_bytes)} · captured ${new Date(baseline.captured_at_ms).toLocaleTimeString()}`
+          ? `Target ${baseline.target_id} · ${formatByteSize(baseline.file_bytes)} · captured ${new Date(baseline.captured_at_ms).toLocaleString()}. Native target-scoped baseline; document identity is not supplied.`
           : 'Capture the target before the activity you want to measure.';
-        elements.memoryCaptureBaseline.disabled = !attached || state.memorySearchPending;
-        elements.memoryClearBaseline.disabled = !baseline || state.memorySearchPending;
-        elements.memoryCompareSnapshot.disabled = !attached || !baseline || state.memorySearchPending;
-        elements.memoryCaptureBaseline.textContent = state.memorySearchPending && diffMode && !baseline
+        elements.memoryCaptureBaseline.disabled = !attached || state.memorySearchPending || state.debuggerActionPending;
+        elements.memoryClearBaseline.disabled = !attached || !baseline || baseline.target_id !== targetId || state.memorySearchPending || state.debuggerActionPending;
+        elements.memoryCompareSnapshot.disabled = !attached || !baseline || baseline.target_id !== targetId || state.memorySearchPending || state.debuggerActionPending;
+        elements.memoryCaptureBaseline.textContent = state.memoryOperation?.action === 'capture_heap_diff_baseline'
           ? 'Capturing baseline...' : baseline ? 'Replace baseline' : 'Capture baseline';
-        elements.memoryCompareSnapshot.textContent = state.memorySearchPending && diffMode && baseline
+        elements.memoryCompareSnapshot.textContent = state.memoryOperation?.action === 'compare_heap_diff'
           ? 'Capturing and comparing...' : 'Capture current and compare';
 
         const messages = diffMode ? {
@@ -7986,28 +8986,42 @@
           error: state.memorySearchMessage || 'Live object search failed.'
         };
         elements.memoryNotice.dataset.kind = state.memorySearchStatus;
-        elements.memoryNotice.textContent = messages[state.memorySearchStatus] ?? messages.idle;
-        elements.memoryResultLabel.textContent = diffMode ? 'Changed groups' : originMode ? 'Trace steps' : 'Matches';
+        elements.memoryNotice.textContent = state.memorySearchStatus === 'unavailable' ? state.memorySearchMessage : messages[state.memorySearchStatus] ?? messages.idle;
+        elements.memoryResultLabel.textContent = diffMode ? '2 · Changed groups' : originMode ? '2 · Sampled steps' : '2 · Matches';
         elements.memoryResultCount.textContent = String(state.memoryResults.length);
         elements.memoryResults.setAttribute('aria-label', diffMode ? 'Heap growth groups' : originMode ? 'Memory origin trace steps' : snapshotMode ? 'Heap snapshot matches' : 'Live object matches');
 
         const memoryResultsPane = elements.memoryDetail.parentElement;
+        const signature = memoryResultSignature();
+        const previous = state.memoryRenderSignature;
+        const sameRows = previous?.rows === signature.rows && previous?.mode === signature.mode;
+        const sameDetail = sameRows && previous?.selected === signature.selected && previous?.stale === signature.stale &&
+          (state.memoryResults.length > 0 || previous?.status === state.memorySearchStatus) &&
+          (originMode || previous?.meta === signature.meta);
+        if (sameDetail) return;
+        const focusedId = elements.memoryResults.contains(document.activeElement) ? document.activeElement?.dataset.resultId : null;
+        const resultsTop = elements.memoryResults.parentElement.scrollTop;
+        const detailTop = elements.memoryDetail.scrollTop;
+        state.memoryRenderSignature = {...signature, status: state.memorySearchStatus};
         if (state.memoryResults.length === 0) {
-          const empty = textElement('div', 'memory-empty', state.memorySearchStatus === 'empty'
+          const empty = textElement('div', 'memory-empty', state.memorySearchStatus === 'partial'
+            ? 'No matches in the inspected subset. Coverage limits prevent a claim of complete absence.'
+            : state.memorySearchStatus === 'empty'
             ? originMode
               ? 'The bounded trace contains no retained steps for this result.'
               : snapshotMode
               ? 'No heap nodes matched this value and reference scope. Adjust the value or scope.'
               : diffMode ? 'The compared heaps have no reported memory changes.'
                 : 'No objects matched. Broaden one criterion or lower the similarity threshold.'
-            : state.memorySearchStatus === 'error'
-              ? 'The last search did not replace any retained results.'
-                : diffMode ? 'Capture a baseline, use the page, then compare a second snapshot to see what grew.' : originMode ? 'Enter the value to trace, arm the trace, then perform the page action that creates it.' : snapshotMode ? 'Enter a value, then capture a snapshot to find matching objects and references.' : 'Enter a property name or value, then run a bounded live-object search.');
+            : ['error', 'unavailable'].includes(state.memorySearchStatus)
+              ? 'Results unavailable. No accepted results were returned; this is not an empty search.'
+                : diffMode ? state.memorySearchMeta ? 'No changed signature groups. Retained-owner changes are shown in the comparison detail.' : 'Capture a baseline, use the page, then compare a second snapshot to see what grew.' : originMode ? 'Enter the value to trace, arm the trace, then perform the page action that creates it.' : snapshotMode ? 'Enter a value, then capture a snapshot to find matching objects and references.' : 'Enter a property name or value, then run a bounded live-object search.');
           elements.memoryResults.removeAttribute('role');
           elements.memoryResults.replaceChildren(empty);
           memoryResultsPane?.setAttribute('data-empty', 'true');
-          elements.memoryDetail.hidden = true;
-          elements.memoryDetail.replaceChildren();
+          elements.memoryDetail.hidden = !(diffMode && state.memorySearchMeta);
+          if (diffMode && state.memorySearchMeta) { memoryResultsPane?.setAttribute('data-empty', 'false'); renderHeapDiffDetail(null); }
+          else elements.memoryDetail.replaceChildren();
           return;
         }
         memoryResultsPane?.setAttribute('data-empty', 'false');
@@ -8016,7 +9030,7 @@
         if (!state.memoryResults.some(result => result.id === state.selectedMemoryResultId)) {
           state.selectedMemoryResultId = state.memoryResults[0].id;
         }
-        elements.memoryResults.replaceChildren(...state.memoryResults.map(result => {
+        if (!sameRows) elements.memoryResults.replaceChildren(...state.memoryResults.map(result => {
           const row = document.createElement('button');
           row.type = 'button'; row.className = 'memory-result-row'; row.dataset.resultId = result.id;
           row.setAttribute('role', 'option');
@@ -8034,7 +9048,7 @@
           const metadata = diffMode
             ? `${result.type} · ${result.baseline_count.toLocaleString()} → ${result.current_count.toLocaleString()} objects (${formatSignedCount(result.count_delta)})`
             : originMode
-            ? `step ${result.step} · ${debuggerLocationText(result.location, result.location.url)} · ${result.analyzed_nodes.toLocaleString()} nodes in ${result.duration_ms} ms`
+            ? `step ${result.step} · ${`${result.location.url || '(recorded anonymous script)'}:${result.location.line + 1}:${result.location.column + 1}`} · ${result.analyzed_nodes.toLocaleString()} nodes in ${result.duration_ms} ms`
             : snapshotMode
             ? `${result.type} · ${result.self_size.toLocaleString()} self bytes · ${result.incoming_reference_count.toLocaleString()} incoming references`
             : `${result.property_count} properties · ${result.preview.slice(0, 5).map(property => property.name).join(', ') || 'no own properties'}`;
@@ -8047,15 +9061,52 @@
           row.addEventListener('keydown', moveMemorySelection);
           return row;
         }));
+        for (const row of elements.memoryResults.querySelectorAll('.memory-result-row')) {
+          const selected = row.dataset.resultId === state.selectedMemoryResultId;
+          row.setAttribute('aria-selected', String(selected)); row.tabIndex = selected ? 0 : -1;
+        }
+        const disclosure = elements.memoryDetail.querySelector('.memory-detail-disclosure');
+        const disclosureOpen = previous?.selected === signature.selected ? disclosure?.open : undefined;
+        const disclosureFocused = disclosure?.querySelector('summary') === document.activeElement;
         renderMemoryDetail();
+        const nextDisclosure = elements.memoryDetail.querySelector('.memory-detail-disclosure');
+        if (nextDisclosure && disclosureOpen !== undefined) nextDisclosure.open = disclosureOpen;
+        if (disclosureFocused) nextDisclosure?.querySelector('summary')?.focus({preventScroll: true});
+        elements.memoryResults.parentElement.scrollTop = resultsTop;
+        if (previous?.selected === signature.selected) elements.memoryDetail.scrollTop = detailTop;
+        if (focusedId) [...elements.memoryResults.querySelectorAll('.memory-result-row')]
+          .find(row => row.dataset.resultId === focusedId)?.focus({ preventScroll: true });
       }
 
       function applyMemoryOriginTrace(trace) {
-        if (!isMemoryOriginTrace(trace)) return false;
+        if (!isMemoryOriginTrace(trace) || new Set(trace.steps.map(step => step.id)).size !== trace.steps.length) return false;
+        const targetId = state.debuggerSession?.target?.id ?? null;
+        if (trace.state !== 'idle' && trace.target_id !== targetId) return false;
+        if (state.memoryOperation) return false;
+        const sameEpoch = state.memoryResultOwner?.nativeEpoch === (state.memoryNativeEpoch ?? 0) &&
+          state.memoryResultOwner?.targetId === targetId;
+        const previousTrace = state.memoryMode === 'origin' && sameEpoch ? state.memorySearchMeta : null;
+        if (previousTrace?.trace_id > trace.trace_id && trace.state !== 'idle') return false;
+        if (previousTrace?.trace_id === trace.trace_id && (previousTrace.step_count > trace.step_count ||
+            (!['armed', 'capturing', 'stepping', 'stopping'].includes(previousTrace.state) && ['armed', 'capturing', 'stepping', 'stopping'].includes(trace.state)))) return false;
+        if (sameEpoch && state.memorySearchMeta?.trace_id === trace.trace_id && !memoryOwnerCurrent(state.memoryResultOwner)) return false;
         const active = ['armed', 'capturing', 'stepping', 'stopping'].includes(trace.state);
         if (active && state.memoryMode !== 'origin') state.memoryMode = 'origin';
         if (state.memoryMode !== 'origin') return true;
+        if (trace.state === 'idle' && state.memoryResultOwner) {
+          state.memoryResultOwner.expired = true;
+          state.memorySearchPending = false;
+          state.memorySearchStatus = 'unavailable';
+          state.memorySearchMessage = 'The native trace is no longer available. Retained samples are historical; no active trace or complete absence is implied.';
+          return true;
+        }
         const previousFirstMatch = state.memorySearchMeta?.first_match_step ?? null;
+        if (trace.trace_id > 0 && (!sameEpoch || state.memorySearchMeta?.trace_id !== trace.trace_id)) {
+          state.memoryResultOwner = {targetId: trace.target_id, scopeVersion: state.memoryScopeVersion ?? 0, nativeEpoch: state.memoryNativeEpoch ?? 0,
+            submittedAt: trace.started_at_ms, action: 'start_memory_origin_trace', mode: 'origin',
+            criteria: `${trace.query} · ${trace.scope} · trace ${trace.trace_id}`, baseline: null};
+          state.memoryLastOperation = state.memoryResultOwner;
+        }
         state.memorySearchMeta = trace;
         state.memoryResults = trace.steps;
         state.memoryTargetId = trace.target_id;
@@ -8098,11 +9149,10 @@
           renderMemory();
           return;
         }
-        state.memorySearchPending = true;
+        const operation = beginMemoryOperation('start_memory_origin_trace', `${query} · ${elements.memoryReferenceScope.value} · ${beforeSteps} before / ${afterSteps} after`);
+        if (!operation) return;
         state.memorySearchStatus = 'searching';
         state.memorySearchMessage = 'Arming a bounded click-driven temporal trace.';
-        state.memoryResults = [];
-        state.selectedMemoryResultId = null;
         renderMemory();
         const body = await debuggerAction({
           action: 'start_memory_origin_trace', query,
@@ -8110,40 +9160,61 @@
           case_sensitive: false,
           before_steps: beforeSteps,
           after_steps: afterSteps
-        });
-        if (!isPlainObject(body) || body.ok !== true || !isMemoryOriginTrace(body.trace)) {
-          state.memorySearchPending = false;
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = state.debuggerError || 'The debugger returned malformed Memory Origin Trace state.';
+        }, operation);
+        if (!finishMemoryOperation(operation, body)) return;
+        if (!isMemoryAcknowledgement(body, true) || !isMemoryOriginTrace(body.trace) || body.trace.target_id !== operation.targetId ||
+            body.trace.query !== query || body.trace.scope !== elements.memoryReferenceScope.value ||
+            body.trace.before_steps !== beforeSteps || body.trace.after_steps !== afterSteps) {
+          reconcileMemoryOrigin(operation);
+          state.memoryLastOperation = operation;
+          memoryOperationFailed(state.debuggerError || 'The debugger returned malformed Memory Origin Trace state.');
           renderMemory();
           return;
         }
-        applyMemoryOriginTrace(body.trace);
+        if (!reconcileMemoryOrigin(operation, body)) memoryOperationFailed('The returned trace could not be adopted with its recorded identity.');
         renderMemory();
       }
 
       async function stopMemoryOriginTrace() {
-        if (!state.memorySearchPending) return;
-        const body = await debuggerAction({ action: 'stop_memory_origin_trace' });
-        if (!isPlainObject(body) || body.ok !== true) {
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = state.debuggerError || 'Memory Origin Trace could not be stopped.';
-          renderMemory();
-        }
+        const trace = state.debuggerSession?.memory_origin_trace;
+        if (!memoryOriginTraceActive() || trace?.target_id !== state.debuggerSession?.target?.id || state.debuggerActionPending) return;
+        const owner = {targetId: trace.target_id, scopeVersion: state.memoryScopeVersion ?? 0, nativeEpoch: state.memoryNativeEpoch ?? 0,
+          pollSequence: state.memoryPollSequence ?? 0, submittedGeneration: state.debuggerSession.generation,
+          action: 'stop_memory_origin_trace', mode: 'origin', submittedAt: Date.now(), criteria: `Stop trace ${trace.trace_id}`, baseline: null,
+          traceId: trace.trace_id, traceStartedAt: trace.started_at_ms};
+        state.memoryLastOperation = owner;
+        const body = await debuggerAction({ action: 'stop_memory_origin_trace' }, owner);
+        if (!memoryOwnerCurrent(owner) || state.debuggerSession?.memory_origin_trace?.trace_id !== trace.trace_id) return;
+        if (!isMemoryAcknowledgement(body, true) || body.generation < owner.submittedGeneration || !isMemoryOriginTrace(body.trace) || body.trace.trace_id !== trace.trace_id || body.trace.target_id !== owner.targetId) {
+          reconcileMemoryOrigin(owner);
+          memoryOperationFailed(state.debuggerError || 'The native stop outcome is unknown.');
+        } else reconcileMemoryOrigin(owner, body);
+        renderMemory();
       }
 
       async function clearMemoryOriginTrace() {
         if (state.memorySearchPending) return;
-        const body = await debuggerAction({ action: 'clear_memory_origin_trace' });
-        if (!isPlainObject(body) || body.ok !== true) {
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = state.debuggerError || 'Memory Origin Trace could not be cleared.';
-          renderMemory();
-          return;
+        const operation = beginMemoryOperation('clear_memory_origin_trace', 'Clear trace result');
+        if (!operation) return;
+        renderMemory();
+        const body = await debuggerAction({ action: 'clear_memory_origin_trace' }, operation);
+        if (!finishMemoryOperation(operation, body)) return;
+        if (!isMemoryAcknowledgement(body)) {
+          reconcileMemoryOrigin(operation);
+          state.memoryLastOperation = operation;
+          memoryOperationFailed(state.debuggerError || 'The native clear outcome is unknown.');
+          renderMemory(); return;
+        }
+        const newerTrace = memoryTracePollAfter(operation, body.generation);
+        if (newerTrace && newerTrace.state !== 'idle') {
+          applyMemoryOriginTrace(newerTrace);
+          state.memorySearchMessage = 'Clear acknowledged. A newer validated native trace is retained.';
+          renderMemory(); return;
         }
         state.memoryResults = [];
         state.selectedMemoryResultId = null;
         state.memorySearchMeta = null;
+        state.memoryResultOwner = null;
         state.memoryTargetId = null;
         state.memorySearchStatus = memoryAttached() ? 'idle' : 'offline';
         state.memorySearchMessage = 'Temporal trace result cleared.';
@@ -8182,15 +9253,15 @@
           elements.memoryPropertyQuery.focus();
           return;
         }
-        state.memorySearchPending = true;
+        const operation = beginMemoryOperation('search_live_objects', JSON.stringify(request));
+        if (!operation) return;
         state.memorySearchStatus = 'searching';
         state.memorySearchMessage = null;
         renderMemory();
-        const body = await debuggerAction(request);
-        state.memorySearchPending = false;
-        if (!isLiveObjectSearchResponse(body)) {
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = state.debuggerError || 'The debugger returned malformed live object results.';
+        const body = await debuggerAction(request, operation);
+        if (!finishMemoryOperation(operation, body)) return;
+        if (!isLiveObjectSearchResponse(body) || new Set(body.search.results.map(result => result.id)).size !== body.search.results.length) {
+          memoryOperationFailed(state.debuggerError || 'The debugger returned malformed live object results.');
           renderMemory();
           return;
         }
@@ -8198,7 +9269,7 @@
         state.memoryResults = search.results;
         state.selectedMemoryResultId = search.results[0]?.id ?? null;
         state.memorySearchMeta = search;
-        state.memoryTargetId = state.debuggerSession?.target?.id ?? null;
+        commitMemoryOwner(operation);
         const limits = [];
         if (search.timed_out) limits.push('time limit reached');
         if (search.result_limit_reached) limits.push(`${search.result_limit} result limit reached`);
@@ -8211,6 +9282,7 @@
       }
 
       async function runHeapSnapshotSearch() {
+        if (!memoryAttached() || state.memorySearchPending || state.debuggerActionPending) return;
         const query = elements.memoryValueQuery.value.trim();
         if (!query) {
           state.memorySearchStatus = 'error';
@@ -8219,18 +9291,18 @@
           elements.memoryValueQuery.focus();
           return;
         }
-        state.memorySearchPending = true;
+        const operation = beginMemoryOperation('search_heap_snapshot', `${query} · ${elements.memoryReferenceScope.value}`);
+        if (!operation) return;
         state.memorySearchStatus = 'searching';
         state.memorySearchMessage = null;
         renderMemory();
         const body = await debuggerAction({
           action: 'search_heap_snapshot', query, case_sensitive: false,
           scope: elements.memoryReferenceScope.value
-        });
-        state.memorySearchPending = false;
-        if (!isHeapSnapshotSearchResponse(body)) {
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = state.debuggerError || 'The native snapshot index returned malformed results.';
+        }, operation);
+        if (!finishMemoryOperation(operation, body)) return;
+        if (!isHeapSnapshotSearchResponse(body) || new Set(body.snapshot.results.map(result => result.id)).size !== body.snapshot.results.length || body.snapshot.scope !== elements.memoryReferenceScope.value) {
+          memoryOperationFailed(state.debuggerError || 'The native snapshot index returned malformed results.');
           renderMemory();
           return;
         }
@@ -8238,7 +9310,7 @@
         state.memoryResults = snapshot.results;
         state.selectedMemoryResultId = snapshot.results[0]?.id ?? null;
         state.memorySearchMeta = snapshot;
-        state.memoryTargetId = state.debuggerSession?.target?.id ?? null;
+        commitMemoryOwner(operation);
         const limits = [];
         if (snapshot.result_limit_reached) limits.push(`${snapshot.result_limit} result limit reached`);
         if (snapshot.node_limit_reached) limits.push('node limit reached');
@@ -8257,23 +9329,25 @@
 
       async function captureHeapDiffBaseline() {
         if (!memoryAttached() || state.memorySearchPending) return;
-        state.memorySearchPending = true;
+        const operation = beginMemoryOperation('capture_heap_diff_baseline', 'Capture baseline');
+        if (!operation) return;
         state.memorySearchStatus = 'searching';
         state.memorySearchMessage = 'Capturing the comparison baseline. The target may pause briefly.';
         renderMemory();
-        const body = await debuggerAction({ action: 'capture_heap_diff_baseline' });
-        state.memorySearchPending = false;
-        if (!isHeapDiffBaselineResponse(body)) {
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = state.debuggerError || 'The debugger returned malformed baseline metadata.';
+        const body = await debuggerAction({ action: 'capture_heap_diff_baseline' }, operation);
+        if (!finishMemoryOperation(operation, body)) return;
+        if (!isHeapDiffBaselineResponse(body) || body.baseline.target_id !== operation.targetId) {
+          memoryOperationFailed(state.debuggerError || 'The debugger returned malformed baseline metadata.');
           renderMemory();
           return;
         }
+        if (keepNewerMemoryBaseline(operation, body)) return;
+        state.memoryBaselineGeneration = body.generation;
         state.memoryDiffBaseline = body.baseline;
         state.memoryResults = [];
         state.selectedMemoryResultId = null;
         state.memorySearchMeta = null;
-        state.memoryTargetId = state.debuggerSession?.target?.id ?? null;
+        commitMemoryOwner(operation);
         state.memorySearchStatus = 'ready';
         state.memorySearchMessage = `${formatByteSize(body.baseline.file_bytes)} baseline captured. Run the activity you want to measure, then compare.`;
         renderMemory();
@@ -8281,16 +9355,19 @@
 
       async function clearHeapDiffBaseline() {
         if (state.memorySearchPending || !state.memoryDiffBaseline) return;
-        state.memorySearchPending = true;
+        const operation = beginMemoryOperation('clear_heap_diff_baseline', 'Reset baseline');
+        if (!operation) return;
         renderMemory();
-        const body = await debuggerAction({ action: 'clear_heap_diff_baseline' });
-        state.memorySearchPending = false;
-        if (!isPlainObject(body) || body.ok !== true) {
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = state.debuggerError || 'The heap comparison baseline could not be reset.';
+        const body = await debuggerAction({ action: 'clear_heap_diff_baseline' }, operation);
+        if (!finishMemoryOperation(operation, body)) return;
+        if (!isMemoryAcknowledgement(body)) {
+          memoryOperationFailed(state.debuggerError || 'The heap comparison baseline could not be reset.');
           renderMemory();
           return;
         }
+        if (keepNewerMemoryBaseline(operation, body)) return;
+        state.memoryBaselineGeneration = body.generation;
+        state.memoryResultOwner = null;
         state.memoryDiffBaseline = null;
         state.memoryResults = [];
         state.selectedMemoryResultId = null;
@@ -8302,22 +9379,22 @@
 
       async function runHeapSnapshotDiff() {
         if (!memoryAttached() || state.memorySearchPending) return;
-        if (!state.memoryDiffBaseline) {
+        if (!state.memoryDiffBaseline || state.memoryDiffBaseline.target_id !== state.debuggerSession?.target?.id) {
           state.memorySearchStatus = 'error';
           state.memorySearchMessage = 'Capture a baseline before comparing the heap.';
           renderMemory();
           elements.memoryCaptureBaseline.focus();
           return;
         }
-        state.memorySearchPending = true;
+        const operation = beginMemoryOperation('compare_heap_diff', 'Capture current and compare');
+        if (!operation) return;
         state.memorySearchStatus = 'searching';
-        state.memorySearchMessage = 'Capturing the current heap, then computing exact dominators and retained-size changes.';
+        state.memorySearchMessage = 'Capturing the current heap, then computing dominators and retained-size changes within the native index.';
         renderMemory();
-        const body = await debuggerAction({ action: 'compare_heap_diff' });
-        state.memorySearchPending = false;
+        const body = await debuggerAction({ action: 'compare_heap_diff' }, operation);
+        if (!finishMemoryOperation(operation, body)) return;
         if (!isHeapSnapshotDiffResponse(body)) {
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = state.debuggerError || 'The native heap comparison returned malformed results.';
+          memoryOperationFailed(state.debuggerError || 'The native heap comparison returned malformed results.');
           renderMemory();
           return;
         }
@@ -8325,7 +9402,7 @@
         state.memoryResults = diff.groups.map((group, index) => ({ ...group, id: `heap-diff-${index}` }));
         state.selectedMemoryResultId = state.memoryResults[0]?.id ?? null;
         state.memorySearchMeta = diff;
-        state.memoryTargetId = state.debuggerSession?.target?.id ?? null;
+        commitMemoryOwner(operation);
         const limits = [];
         if (diff.group_result_limit_reached) limits.push(`${diff.result_limit} group limit reached`);
         if (diff.dominator_result_limit_reached) limits.push(`${diff.result_limit} dominator limit reached`);
@@ -8343,8 +9420,11 @@
       }
 
       function setMemoryMode(mode) {
-        if (!['live', 'snapshot', 'diff', 'origin'].includes(mode) || state.memorySearchPending || mode === state.memoryMode) return;
+        if (!['live', 'snapshot', 'diff', 'origin'].includes(mode) || state.memorySearchPending || state.debuggerActionPending || mode === state.memoryMode) return;
         state.memoryMode = mode;
+        state.memoryTargetId = null;
+        state.memoryLastOperation = null;
+        state.memoryResultOwner = null;
         state.memoryResults = [];
         state.selectedMemoryResultId = null;
         state.memorySearchMeta = null;
@@ -8696,26 +9776,66 @@
         renderConsole();
       }
 
-      async function debuggerAction(request) {
+      async function debuggerAction(request, memoryOwner = null, experimentOwner = null) {
         const parallelControl = ['cancel_repeater_request', 'cancel_automation_recipe'].includes(request.action);
         if ((state.debuggerActionPending && !parallelControl) || (memoryOriginTraceActive() && request.action !== 'stop_memory_origin_trace')) return null;
-        if (!parallelControl) state.debuggerActionPending = true;
+        const deadline = memoryOwner ? memoryActionDeadline(request.action) : 0;
+        if (memoryOwner && (!deadline || memoryOwner.action !== request.action)) return null;
+        const owner = {memoryOwner, experimentOwner, request, retire: null};
+        if (experimentOwner) experimentOwner.transport = owner;
+        if (!parallelControl) {
+          state.debuggerActionOwner = owner;
+          state.debuggerActionPending = true;
+        }
+        const current = () => (parallelControl || state.debuggerActionOwner === owner) && !experimentOwner?.expired;
         state.debuggerError = null;
         renderDebugger();
-        let result = null;
+        let result = null, timer = null, controller = null, retired = false;
         try {
-          const response = await fetch('/api/debugger/actions', {
-            method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request)
-          });
-          const body = await response.json();
-          if (!response.ok) throw new Error(body.error || `Debugger returned ${response.status}`);
-          result = body;
+          let retirement;
+          if (memoryOwner || experimentOwner) {
+            controller = new AbortController();
+            retirement = new Promise((_, reject) => {
+              owner.retire = message => {
+                if (retired) return;
+                retired = true;
+                // Reject the UI wait even if a fetch/body implementation ignores
+                // abort. Abort only releases this HTTP read, never native work.
+                reject(new Error(message));
+                controller.abort();
+              };
+              if (memoryOwner) timer = setTimeout(() => owner.retire?.(`Memory action acknowledgement exceeded ${deadline / 1000} seconds. Native completion is unknown; no cancellation or retry was requested.`), deadline);
+            });
+          }
+          const transport = (async () => {
+            const response = await fetch('/api/debugger/actions', {
+              method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
+              ...(controller ? {signal: controller.signal} : {})
+            });
+            if ((memoryOwner || experimentOwner) && (retired || !current())) return null;
+            const body = await response.json();
+            if ((memoryOwner || experimentOwner) && (retired || !current())) return null;
+            if (!response.ok) throw new Error(body.error || `Debugger returned ${response.status}`);
+            return body;
+          })();
+          const body = await (retirement ? Promise.race([transport, retirement]) : transport);
+          if (current() && !retired) result = body;
         } catch (error) {
-          state.debuggerError = error.message;
+          if (current()) state.debuggerError = error.message;
         } finally {
-          if (!parallelControl) state.debuggerActionPending = false;
-          renderDebugger();
-          if (!state.debuggerRefreshing) scheduleDebuggerRefresh(0);
+          if (timer !== null) clearTimeout(timer);
+          owner.retire = null;
+          if (current()) {
+            if (!parallelControl) {
+              state.debuggerActionOwner = null;
+              state.debuggerActionPending = false;
+            }
+            renderDebugger();
+            // Refresh current controls even when the Memory caller exits on an
+            // expired owner. Generic callers and replaced tokens do not redraw.
+            if (memoryOwner) renderMemory();
+            if (!state.debuggerRefreshing) scheduleDebuggerRefresh(0);
+          }
         }
         return result;
       }
@@ -8740,13 +9860,14 @@
       async function refreshDebugger(force = false) {
         if (state.debuggerRefreshing || location.protocol === 'file:') return;
         state.debuggerRefreshing = true;
+        const experimentReceiptAtStart = state.experimentReceipt;
         try {
           const headers = !force && state.debuggerEtag ? { 'If-None-Match': state.debuggerEtag } : {};
           const wait = !force && state.debuggerEtag && state.debuggerSession?.state !== 'unavailable' ? 25000 : 0;
           const response = await fetch(`/api/debugger?wait_ms=${wait}`, { cache: 'no-store', headers });
           if (response.status === 304) return;
           if (!response.ok) throw new Error(`Debugger returned ${response.status}`);
-          const body = await response.json();
+          let body = await response.json();
           if (!isDebuggerResponse(body)) throw new TypeError('Malformed debugger response');
           const previousSession = state.debuggerSession;
           const previousSelectedScript = previousSession?.scripts.find(script => script.script_id === state.selectedScriptId);
@@ -8757,11 +9878,12 @@
           const previousBreakpoints = JSON.stringify(previousSession?.breakpoints ?? []);
           const previousOpenScripts = state.openScriptIds.join('\u0000');
           const previousPendingLine = state.pendingSourceLine ? `${state.pendingSourceLine.scriptId}:${state.pendingSourceLine.line}` : '';
+          body = syncExperimentSession(previousSession, body, experimentReceiptAtStart);
           state.debuggerSession = body;
           rebuildTrafficRequests();
-          state.memoryDiffBaseline = body.heap_diff_baseline;
+          syncMemorySession(previousSession, body);
           applyMemoryOriginTrace(body.memory_origin_trace);
-          state.debuggerEtag = response.headers.get('ETag');
+          state.debuggerEtag = state.experimentNeedsRefresh ? null : response.headers.get('ETag');
           state.debuggerError = null;
           state.debuggerRefreshFailed = false;
           renderLiveBrowserTabCount();
@@ -8883,12 +10005,14 @@
           renderShellStatus();
           const catalogSignature = JSON.stringify(body.artifacts);
           if (catalogSignature === state.artifactCatalogSignature) {
+            if (canvasGalleryVisible()) renderFingerprintActivity();
             renderSourceHealth();
             return;
           }
           state.artifactCatalogSignature = catalogSignature;
           if (body.artifacts.length === 0) {
             if (state.sessionMode === 'live') {
+              retireCanvasPreviews('Canvas previews released because the artifact catalog is empty.');
               for (const artifact of state.artifacts) releaseSourcePreview(artifact);
               state.artifacts = [];
               state.openArtifactIds = [];
@@ -8908,10 +10032,7 @@
             const descriptor = Object.fromEntries(sourceFactsFields.filter(field => Object.hasOwn(artifact, field)).map(field => [field, artifact[field]]));
             return Object.assign(prior ?? {}, descriptor, {origin: state.sessionMode === 'live' ? 'live' : 'demo'});
           });
-          await Promise.all(state.artifacts
-            .filter(artifact => artifact.kind === 'canvas_data_url')
-            .slice(-nativeCanvasCaptureDisplayLimit)
-            .map(loadArtifactContent));
+          if (!canvasGalleryVisible()) retireCanvasPreviews();
           state.openArtifactIds = state.openArtifactIds.filter(id => state.artifacts.some(artifact => artifact.artifact_id === id));
           if (!state.artifacts.some(artifact => artifact.artifact_id === state.selectedArtifactId)) {
             state.selectedArtifactId = state.artifacts[0].artifact_id;
@@ -8930,18 +10051,23 @@
             return;
           }
           state.artifactReceiverError = error.message;
+          state.artifactEtag = null;
+          retireCanvasPreviews('Canvas previews released because the artifact catalog is unavailable.');
+          if (canvasGalleryVisible()) renderFingerprintActivity();
           renderShellStatus();
           renderSources();
         } finally {
           state.artifactRefreshing = false;
           evidencePackagePanel.sync();
           evidenceWorkspace.sync();
+          syncFloat32Panel();
         }
       }
 
       function showScreen(name, trigger = null) {
         const screenName = name === 'backtraces' ? 'backtrace' : name;
         investigationBeforeScreen(screenName);
+        if (screenName !== 'signals') retireCanvasPreviews();
         if (screenName !== 'backtrace' && state.originTraceStatus === 'loading') {
           state.originTraceController?.abort();
           state.originTraceGeneration += 1;
@@ -8949,6 +10075,7 @@
         }
         evidenceWorkspace.setVisible(screenName === 'evidence');
         if (screenName !== 'sources') sourceFactsPanel.cancel();
+        if (screenName !== 'tools') float32Panel.cancel();
         if (screenName !== 'sources' && state.sourceHooksOpen) closeSourceHooks(false);
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
         document.querySelectorAll('.nav-button').forEach(button => {
@@ -9358,6 +10485,10 @@
       elements.requestCollectionPivot.addEventListener('click', copyInvestigationRequestToCollection);
       elements.requestDecoderPivot.addEventListener('click', useSelectedFieldInDecoder);
       elements.requestMemoryPivot.addEventListener('click', () => {
+        if (state.memorySearchPending || state.debuggerActionPending) {
+          showScreen('memory', elements.requestMemoryPivot);
+          return;
+        }
         const selected = state.selectedField;
         if (!selected) return;
         let value = String(selected.value ?? '').trim();
@@ -9366,6 +10497,8 @@
         }
         value = value.replace(/(?:…|\.{3})+$/u, '').slice(0, 512);
         if (!value) return;
+        state.memoryResultOwner = null;
+        state.memoryLastOperation = null;
         state.memoryMode = 'live';
         state.memoryResults = [];
         state.selectedMemoryResultId = null;
@@ -9410,6 +10543,7 @@
         }
       }));
       elements.deobfuscationIntrinsics.addEventListener('change', () => {
+        retireSourceAnalysis();
         state.deobfuscationAssumeIntrinsics = elements.deobfuscationIntrinsics.checked;
         renderSources();
       });
@@ -9525,7 +10659,7 @@
             return;
           }
         }
-        const response = await runExperimentAction({action: 'create_experiment_page', url});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'create_experiment_page', url}));
         if (response) elements.actionScopeNewUrl.value = '';
       });
       elements.experimentCreate.addEventListener('click', () => runExperimentAction({
@@ -9535,7 +10669,7 @@
         action: 'dispose_request_interception_experiment'
       }));
       elements.experimentClear.addEventListener('click', async () => {
-        const response = await runExperimentAction({ action: 'clear_request_interception_result' });
+        const response = currentExperimentReceipt(await runExperimentAction({ action: 'clear_request_interception_result' }));
         if (response) {
           state.experimentPrefillKey = null;
           prefillExperimentRequest();
@@ -9565,7 +10699,7 @@
         action: 'create_request_interception_experiment'
       }));
       elements.objectDispose.addEventListener('click', async () => {
-        const response = await runExperimentAction({action: 'dispose_request_interception_experiment'});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'dispose_request_interception_experiment'}));
         if (response) {
           state.objectSelectedResultId = null;
           state.objectSelectionSearchId = 0;
@@ -9610,7 +10744,7 @@
         action: 'create_request_interception_experiment'
       }));
       elements.hooksDispose.addEventListener('click', async () => {
-        const response = await runExperimentAction({action: 'dispose_request_interception_experiment'});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'dispose_request_interception_experiment'}));
         if (response) {
           elements.hooksConfirm.checked = false;
           elements.hooksDefinitionForm.reset();
@@ -9657,11 +10791,11 @@
       });
       elements.hooksConfirm.addEventListener('change', renderRuntimeHooks);
       elements.hooksArm.addEventListener('click', async () => {
-        const response = await runExperimentAction({action: 'arm_runtime_hooks', confirmed: elements.hooksConfirm.checked});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'arm_runtime_hooks', confirmed: elements.hooksConfirm.checked}));
         if (response) elements.hooksConfirm.checked = false;
       });
       elements.hooksDisarm.addEventListener('click', async () => {
-        const response = await runExperimentAction({action: 'disarm_runtime_hooks'});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'disarm_runtime_hooks'}));
         if (response) elements.hooksConfirm.checked = false;
       });
       bindRuntimeFieldTest();
@@ -9669,7 +10803,7 @@
         action: 'create_request_interception_experiment'
       }));
       elements.automationDispose.addEventListener('click', async () => {
-        const response = await runExperimentAction({action: 'dispose_request_interception_experiment'});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'dispose_request_interception_experiment'}));
         if (response) {
           state.automationSelectedRunId = null;
           elements.automationConfirm.checked = false;
@@ -9678,7 +10812,7 @@
         }
       });
       elements.automationClear.addEventListener('click', async () => {
-        const response = await runExperimentAction({action: 'clear_automation_runs'});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'clear_automation_runs'}));
         if (response) state.automationSelectedRunId = null;
       });
       elements.automationNavigationForm.addEventListener('submit', event => {
@@ -9700,10 +10834,10 @@
       elements.automationConfirm.addEventListener('change', renderAutomationRecipes);
       elements.automationArm.addEventListener('click', async () => {
         try {
-          const response = await runExperimentAction({
+          const response = currentExperimentReceipt(await runExperimentAction({
             action: 'arm_automation_recipes', confirmed: elements.automationConfirm.checked,
             variables: parseAutomationVariables()
-          });
+          }));
           if (response) elements.automationConfirm.checked = false;
         } catch (error) {
           state.experimentError = error.message;
@@ -9711,7 +10845,7 @@
         }
       });
       elements.automationDisarm.addEventListener('click', async () => {
-        const response = await runExperimentAction({action: 'disarm_automation_recipes'});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'disarm_automation_recipes'}));
         if (response) elements.automationConfirm.checked = false;
       });
       elements.automationCancel.addEventListener('click', () => runExperimentAction({
@@ -9731,7 +10865,7 @@
         action: 'create_request_interception_experiment'
       }));
       elements.repeaterDispose.addEventListener('click', async () => {
-        const response = await runExperimentAction({action: 'dispose_request_interception_experiment'});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'dispose_request_interception_experiment'}));
         if (response) {
           state.repeaterSelectedHistoryId = null;
           state.repeaterExpectedHistoryId = null;
@@ -9741,7 +10875,7 @@
         }
       });
       elements.repeaterClearHistory.addEventListener('click', async () => {
-        const response = await runExperimentAction({action: 'clear_repeater_history'});
+        const response = currentExperimentReceipt(await runExperimentAction({action: 'clear_repeater_history'}));
         if (response) {
           state.repeaterSelectedHistoryId = null;
           state.repeaterExpectedHistoryId = null;
@@ -9753,6 +10887,7 @@
         applyRepeaterVariables();
       });
       elements.repeaterVariables.addEventListener('input', () => {
+        state.repeaterDraftRevision = (state.repeaterDraftRevision ?? 0) + 1;
         state.repeaterVariablesDirty = true;
         state.experimentError = null;
         renderRepeaterVariableStatus();
@@ -9852,6 +10987,7 @@
         event.preventDefault(); saveCollectionRequest();
       });
       elements.collectionRequestForm.querySelectorAll('input, textarea, select').forEach(field => field.addEventListener('input', () => {
+        state.collectionDraftRevision = (state.collectionDraftRevision ?? 0) + 1;
         state.collectionDraftDirty = true;
         state.collectionDeleteRequestId = null;
         elements.collectionDraftStatus.textContent = 'Unsaved edits · Save or discard before switching.';
@@ -9864,7 +11000,7 @@
       elements.collectionCreateContext.addEventListener('click', async () => {
         if (state.experimentPending || elements.collectionCreateContext.disabled) return;
         elements.collectionCreateContext.disabled = true;
-        const result = await runExperimentAction({action: 'create_request_interception_experiment'});
+        const result = currentExperimentReceipt(await runExperimentAction({action: 'create_request_interception_experiment'}));
         if (!result) setCollectionNotice('error', state.experimentError || 'Isolated context could not be created.');
         renderApiCollection();
       });
@@ -9872,7 +11008,7 @@
       elements.collectionCancel.addEventListener('click', async () => {
         if (elements.collectionCancel.disabled) return;
         elements.collectionCancel.disabled = true;
-        const result = await runExperimentAction({action: 'cancel_repeater_request'});
+        const result = currentExperimentReceipt(await runExperimentAction({action: 'cancel_repeater_request'}));
         if (!result) setCollectionNotice('error', state.experimentError || 'Cancellation could not be confirmed.');
         renderApiCollection();
       });
@@ -10021,16 +11157,7 @@
       }));
       elements.memoryReferenceScope.addEventListener('change', () => {
         if (!['snapshot', 'origin'].includes(state.memoryMode) || state.memorySearchPending) return;
-        if (state.memoryMode === 'origin') {
-          state.memorySearchMessage = 'Reference scope changed. It will apply to the next trace.';
-          renderMemory();
-          return;
-        }
-        state.memoryResults = [];
-        state.selectedMemoryResultId = null;
-        state.memorySearchMeta = null;
-        state.memorySearchStatus = memoryAttached() ? 'idle' : 'offline';
-        state.memorySearchMessage = 'Reference scope changed. Capture a new snapshot to apply it.';
+        state.memorySearchMessage = 'Reference scope changed. It applies only to the next explicit action; the submitted result keeps its original scope.';
         renderMemory();
       });
       elements.memoryOriginStop.addEventListener('click', stopMemoryOriginTrace);

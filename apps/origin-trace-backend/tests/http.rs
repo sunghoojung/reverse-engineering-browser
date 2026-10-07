@@ -123,6 +123,140 @@ impl Server {
 fn specification() -> Value {
     serde_json::from_str(include_str!("../../../protocol/openapi.json")).unwrap()
 }
+
+#[tokio::test]
+async fn origin_trace_gap_markers_preserve_addressable_events_over_http() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../assets/origin-trace-gap-cases.json")).unwrap();
+    let server = Server::start_with_helper_canaries(true).await;
+    for case in fixture["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        for (field, path) in [("events", "events.jsonl"), ("edges", "trace.jsonl")] {
+            let rows = case[field]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|key| fixture[field][key.as_str().unwrap()].to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            server.file(path, format!("{rows}\n").as_bytes());
+        }
+        let query = case["query"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| {
+                format!(
+                    "{key}={}",
+                    value
+                        .as_str()
+                        .map_or_else(|| value.to_string(), str::to_owned)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+        let response = server.get(&format!("/api/origin-trace?{query}")).await;
+        let expected = case["http_status"].as_u64().unwrap() as u16;
+        assert_eq!(response.status().as_u16(), expected, "{name}");
+        let bytes = assert_contract_response(response, "get", "/api/origin-trace", expected).await;
+        if expected == 400 {
+            continue;
+        }
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], case["status"], "{name}");
+        let steps = body["steps"].as_array().unwrap();
+        assert_eq!(
+            json!(
+                steps
+                    .iter()
+                    .map(|step| &step["event"]["sequence_number"])
+                    .collect::<Vec<_>>()
+            ),
+            case["step_sequences"],
+            "{name}"
+        );
+        assert!(
+            steps.iter().all(|step| step["operation"] != "gap"),
+            "{name}"
+        );
+        if let Some(root) = steps.first() {
+            assert_eq!(root["event"]["session_id"], "7", "{name}");
+            assert_eq!(root["request_id"], "9007199254740995", "{name}");
+            assert_eq!(root["value"], "synthetic request", "{name}");
+        }
+        let gaps = body["gaps"].as_array().unwrap();
+        assert_eq!(
+            json!(gaps.iter().map(|gap| &gap["reason"]).collect::<Vec<_>>()),
+            case["gap_reasons"],
+            "{name}"
+        );
+        assert_eq!(body["coverage"]["gap_count"], gaps.len(), "{name}");
+        if let Some(gap) = gaps.iter().find(|gap| gap["reason"] == "capture_gap") {
+            let count = case["marker_count"].as_u64().unwrap();
+            let detail = gap["detail"].as_str().unwrap();
+            assert!(
+                detail.contains(&format!("{count} native queue-drop markers")),
+                "{name}"
+            );
+            assert!(detail.contains("Counts may overlap"), "{name}");
+            assert!(
+                detail.contains("do not identify a missing predecessor"),
+                "{name}"
+            );
+        }
+    }
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn origin_trace_step_limit_keeps_capture_gap_bounded_over_http() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../assets/origin-trace-gap-cases.json")).unwrap();
+    let server = Server::start().await;
+    let mut events = vec![fixture["events"]["gap"].clone()];
+    let mut edges = Vec::new();
+    for sequence in 1..=32 {
+        let mut event = fixture["events"]["root"].clone();
+        event["sequence_number"] = json!(sequence.to_string());
+        events.push(event);
+        if sequence > 1 {
+            let mut edge = fixture["edges"]["parent"].clone();
+            edge["from_sequence_number"] = json!(sequence.to_string());
+            edge["to_sequence_number"] = json!((sequence - 1).to_string());
+            edges.push(edge);
+        }
+    }
+    for (path, rows) in [("events.jsonl", events), ("trace.jsonl", edges)] {
+        server.file(
+            path,
+            rows.iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .as_bytes(),
+        );
+    }
+    let bytes = assert_contract_response(
+        server.get("/api/origin-trace?request_id=9007199254740995&root_process_id=42&root_sequence_number=32").await,
+        "get",
+        "/api/origin-trace",
+        200,
+    )
+    .await;
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["status"], "partial");
+    assert_eq!(body["steps"].as_array().unwrap().len(), 32);
+    assert_eq!(body["gaps"].as_array().unwrap().len(), 2);
+    assert_eq!(body["gaps"][0]["reason"], "step_limit");
+    assert_eq!(body["gaps"][0]["after_step"], 31);
+    assert_eq!(body["gaps"][1]["reason"], "capture_gap");
+}
 fn assert_schema(spec: &Value, schema: &Value, value: &Value, label: &str) {
     let document = json!({
         "$schema":"https://json-schema.org/draft/2020-12/schema",
@@ -246,7 +380,7 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 26, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 28, "Review route coverage when the API changes");
     let schemas = &spec["components"]["schemas"];
     let actions = schemas["DebuggerAction"]["oneOf"].as_array().unwrap();
     let results = &schemas["DebuggerResult"];
@@ -369,7 +503,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 26);
+    assert_eq!(operation_count, 28);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -4711,4 +4845,494 @@ async fn source_facts_real_worker_http_and_cli() {
     for table in ["scopes", "bindings", "callables", "regions", "operations"] {
         assert!(value[table].as_array().unwrap().is_empty());
     }
+}
+
+fn float32_request() -> Value {
+    json!({"protocol_version":1,"input":{"representation":"float32-le","channels":1,"frames":4,"source":{"kind":"bits","words":["3f800000","80000000","7fc00001","7f800000"]}},"reference":{"representation":"float32-le","channels":1,"frames":4,"source":{"kind":"bits","words":["3f800001","00000000","7fc00002","7f800000"]}},"tolerances":{"absolute":0,"relative":0,"ulps":1},"detail":{"start":0,"limit":256}})
+}
+#[tokio::test]
+async fn float32_http_cli_discovery_parity_and_no_helpers() {
+    const ROUTE: &str = "/api/float32/compare";
+    let server = Server::start_with_helper_canaries(true).await;
+    let request = float32_request();
+    let bytes = assert_contract_response(
+        server.action(ROUTE, request.clone()).await,
+        "post",
+        ROUTE,
+        200,
+    )
+    .await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["comparison"]["maximum_ulp_distance"], 1);
+    assert_eq!(result["comparison"]["numeric_equal_pairs"], 2);
+    assert!(result["detail"]["rows"][2]["input"]["value"].is_null());
+    let path = server.root.path().join("float32-request.json");
+    std::fs::write(&path, request.to_string()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "compare_float32",
+            "--base-url",
+            &server.url,
+            "--body-file",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        result
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["describe", "compare_float32"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let description: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        description["x-reb-execution"]["effects"],
+        json!(["analysis"])
+    );
+    assert!(description["components"]["schemas"]["Float32Result"].is_object());
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["list"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&output.stdout).contains("compare_float32"));
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
+    assert!(!server.root.path().join("collection.json").exists());
+    assert!(!server.root.path().join("analyst.json").exists());
+    let duplicate = request.to_string().replace(
+        "\"protocol_version\":1",
+        "\"protocol_version\":1,\"protocol_version\":1",
+    );
+    std::fs::write(&path, &duplicate).unwrap();
+    let rejected = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "compare_float32",
+            "--base-url",
+            &server.url,
+            "--body-file",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(2));
+    assert!(rejected.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("versioned contract"));
+    let response = server
+        .client
+        .post(format!("{}{ROUTE}", server.url))
+        .body(duplicate)
+        .send()
+        .await
+        .unwrap();
+    assert_contract_response(response, "post", ROUTE, 400).await;
+    let response = server
+        .client
+        .post(format!("{}{ROUTE}", server.url))
+        .header("origin", "https://outside.invalid")
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_contract_response(response, "post", ROUTE, 403).await;
+    let catalog: Value = server
+        .get("/api/analysis/catalog")
+        .await
+        .json()
+        .await
+        .unwrap();
+    for source in result["source_ids"].as_array().unwrap() {
+        assert!(
+            catalog["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["source_id"] == *source)
+        );
+    }
+}
+#[tokio::test]
+async fn float32_verified_artifact_rejects_corruption_stale_identity_missing_and_scan_limits() {
+    const ROUTE: &str = "/api/float32/compare";
+    let server = Server::start().await;
+    let bytes = [0, 0, 128, 63, 0, 0, 0, 128, 1, 0, 192, 127, 0, 0, 128, 127];
+    let mut artifact = put_source_facts_artifact(&server, &bytes, "response_body");
+    artifact["sensitive"] = json!(true);
+    artifact["mime_type"] = json!("application/octet-stream");
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n").as_bytes(),
+    );
+    let mut request = float32_request();
+    request["input"]["source"] = json!({"kind":"artifact","session_id":"11","artifact_id":"7","sha256":artifact["sha256"],"byte_length":bytes.len()});
+    let result: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server.action(ROUTE, request.clone()).await,
+            "post",
+            ROUTE,
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(result["input"]["origin"], "verified_artifact");
+    assert_eq!(result["input"]["sha256"], artifact["sha256"]);
+    for (field, value, status) in [
+        ("session_id", json!("12"), 404),
+        ("artifact_id", json!("8"), 404),
+        ("sha256", json!("0".repeat(64)), 409),
+        ("byte_length", json!(12), 409),
+        ("artifact_id", json!("../7"), 400),
+    ] {
+        let mut bad = request.clone();
+        bad["input"]["source"][field] = value;
+        assert_contract_response(server.action(ROUTE, bad).await, "post", ROUTE, status).await;
+    }
+    server.file(
+        &format!("artifacts/{}", artifact["content_path"].as_str().unwrap()),
+        &[0; 16],
+    );
+    assert_contract_response(
+        server.action(ROUTE, request.clone()).await,
+        "post",
+        ROUTE,
+        422,
+    )
+    .await;
+    server.file(
+        &format!("artifacts/{}", artifact["content_path"].as_str().unwrap()),
+        &bytes,
+    );
+    // Blank lines also consume the explicit line/work budget; no matching prefix.
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n{}", "\n".repeat(8192)).as_bytes(),
+    );
+    let error: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server.action(ROUTE, request.clone()).await,
+            "post",
+            ROUTE,
+            413,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(error["code"], "resource_limit");
+    // The new opt-in scan cap must not silently narrow existing readers.
+    let old_reader = server.get("/api/artifacts/7/content").await;
+    assert_eq!(old_reader.status(), 200);
+    assert_eq!(old_reader.bytes().await.unwrap().as_ref(), &bytes);
+    // Byte scan exhaustion is independent of the line cap and follows an early match.
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n{}", (" ".repeat(8191) + "\n").repeat(1024)).as_bytes(),
+    );
+    let bounded = server.action(ROUTE, request.clone()).await;
+    assert_contract_response(bounded, "post", ROUTE, 413).await;
+    let old_reader = server.get("/api/artifacts/7/content").await;
+    assert_eq!(old_reader.status(), 200);
+    assert_eq!(old_reader.bytes().await.unwrap().as_ref(), &bytes);
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n{artifact}\n").as_bytes(),
+    );
+    assert_contract_response(server.action(ROUTE, request).await, "post", ROUTE, 500).await;
+}
+
+const EVIDENCE_COMPARISON_ROUTE: &str = "/api/evidence/packages/compare";
+fn comparison_body(left: &Value, right: &Value) -> Value {
+    json!({"left":left,"right":right,"normalization_profile":"reb-declared-metadata-v1","facets":["events","artifacts","coverage","gaps","relationships","provenance","selection"]})
+}
+async fn compare_package_http(server: &Server, bytes: &[u8], status: u16) -> Value {
+    let response = server
+        .client
+        .post(format!("{}{}", server.url, EVIDENCE_COMPARISON_ROUTE))
+        .header("content-type", "application/json")
+        .body(bytes.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert!(response.headers().get("etag").is_none());
+    serde_json::from_slice(
+        &assert_contract_response(response, "post", EVIDENCE_COMPARISON_ROUTE, status).await,
+    )
+    .unwrap()
+}
+#[tokio::test]
+async fn evidence_comparison_http_cli_are_inert_and_schema_checked() {
+    let server = Server::start_with_helper_canaries(true).await;
+    for file in [
+        "events.jsonl",
+        "trace.jsonl",
+        "signals.jsonl",
+        "artifacts/manifest.jsonl",
+        "artifacts/blobs/not-an-artifact.bin",
+    ] {
+        server.file(file, b"PRIVATE_COMPARISON_STORE_CANARY\n");
+    }
+    let package = golden_evidence_package();
+    let mut right = package.clone();
+    right["records"]["events"][0]["monotonic_time_ns"] = json!("999");
+    right["package_id"] =
+        json!(origin_trace_backend::evidence_package::package_id(&right).unwrap());
+    let mut request = comparison_body(&package, &right);
+    request["limit"] = json!(2);
+    let bytes = serde_json::to_vec(&request).unwrap();
+    server.file("comparison.json", &bytes);
+    let before = snapshot(server.root.path());
+    let result = compare_package_http(&server, &bytes, 200).await;
+    assert_eq!(result["selected_metadata_equal"], false);
+    assert_eq!(result["counts"]["changed_declared_metadata"], 1);
+    assert_eq!(result["page"]["next_offset"], 2);
+    assert_eq!(result["comparability"]["observer_regime"], "unknown");
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["call", "compare_evidence_packages", "--endpoint-file"])
+        .arg(server.root.path().join("endpoint"))
+        .arg("--body-file")
+        .arg(server.root.path().join("comparison.json"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        result
+    );
+    request["offset"] = json!(2);
+    let next = compare_package_http(&server, &serde_json::to_vec(&request).unwrap(), 200).await;
+    assert_eq!(next["comparison_id"], result["comparison_id"]);
+    assert_ne!(next["rows"][0]["row_id"], result["rows"][0]["row_id"]);
+    assert_eq!(before, snapshot(server.root.path()));
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("PRIVATE_COMPARISON_STORE_CANARY"));
+}
+#[tokio::test]
+async fn evidence_comparison_rejects_original_duplicate_profile_and_private_fields() {
+    let server = Server::start().await;
+    let package = golden_evidence_package();
+    let request = comparison_body(&package, &package);
+    let raw = serde_json::to_string(&request).unwrap();
+    let duplicate = raw.replacen(
+        "\"process_id\":42",
+        "\"process_id\":42,\"\\u0070rocess_id\":42",
+        1,
+    );
+    for bytes in [
+        duplicate.as_bytes(),
+        b"{not json",
+        b"[]",
+        b"{\"left\":{},\"left\":{}}",
+    ] {
+        let response = compare_package_http(&server, bytes, 400).await;
+        assert_eq!(response["code"], "invalid_request");
+    }
+    server.file("duplicate-comparison.json", duplicate.as_bytes());
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "compare_evidence_packages",
+            "--base-url",
+            "http://127.0.0.1:1",
+            "--body-file",
+        ])
+        .arg(server.root.path().join("duplicate-comparison.json"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate JSON key"));
+    for field in ["protocol_version", "redaction_profile", "semantics_profile"] {
+        let mut altered = request.clone();
+        altered["right"][field] = json!("UNSUPPORTED_PRIVATE_CANARY");
+        let response =
+            compare_package_http(&server, &serde_json::to_vec(&altered).unwrap(), 400).await;
+        assert!(!response.to_string().contains("PRIVATE_CANARY"));
+    }
+    let mut altered = request.clone();
+    altered["left"]["PRIVATE_KEY"] = json!("PRIVATE_CANARY");
+    altered["left"]["package_id"] =
+        json!(origin_trace_backend::evidence_package::package_id(&altered["left"]).unwrap());
+    assert!(
+        !compare_package_http(&server, &serde_json::to_vec(&altered).unwrap(), 400)
+            .await
+            .to_string()
+            .contains("PRIVATE")
+    );
+    for (field, value) in [
+        ("facets", json!(["events", "events"])),
+        ("offset", json!(2182)),
+        ("limit", json!(101)),
+        ("limit", Value::Null),
+        ("offset", Value::Null),
+        ("normalization_profile", json!("heuristic-v1")),
+    ] {
+        let mut altered = request.clone();
+        altered[field] = value;
+        compare_package_http(&server, &serde_json::to_vec(&altered).unwrap(), 400).await;
+    }
+    let response = server
+        .client
+        .post(format!("{}{}", server.url, EVIDENCE_COMPARISON_ROUTE))
+        .header("origin", "https://foreign.invalid")
+        .body(raw)
+        .send()
+        .await
+        .unwrap();
+    assert_contract_response(response, "post", EVIDENCE_COMPARISON_ROUTE, 403).await;
+}
+#[test]
+fn evidence_comparison_cli_offline_discovery_includes_closed_contract_and_effects() {
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["describe", "compare_evidence_packages"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let operation: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(operation["operationId"], "compare_evidence_packages");
+    assert_eq!(
+        operation["x-max-body-bytes"],
+        origin_trace_backend::evidence_comparison::MAX_REQUEST_BYTES
+    );
+    assert_eq!(operation["x-reb-execution"]["effects"], json!(["analysis"]));
+    assert!(operation["components"]["schemas"]["EvidenceComparisonResult"].is_object());
+}
+
+#[tokio::test]
+async fn evidence_comparison_outer_and_original_byte_bounds_are_independent() {
+    let server = Server::start().await;
+    let package = serde_json::to_vec(&golden_evidence_package()).unwrap();
+    let padded = |maximum: usize| {
+        let mut p = Vec::with_capacity(maximum);
+        p.push(b'{');
+        p.resize(maximum - package.len() + 1, b' ');
+        p.extend_from_slice(&package[1..]);
+        assert_eq!(p.len(), maximum);
+        p
+    };
+    let max = origin_trace_backend::evidence_package::MAX_BYTES;
+    let mut bytes = b"{\"left\":".to_vec();
+    bytes.extend(padded(max));
+    bytes.extend_from_slice(b",\"right\":");
+    bytes.extend(padded(max));
+    bytes.extend_from_slice(
+        b",\"normalization_profile\":\"reb-declared-metadata-v1\",\"facets\":[\"events\"]}",
+    );
+    assert!(bytes.len() <= origin_trace_backend::evidence_comparison::MAX_REQUEST_BYTES);
+    assert_eq!(
+        compare_package_http(&server, &bytes, 200).await["selected_metadata_equal"],
+        true
+    );
+    // One-over original token cannot be rescued by normalized or compact JSON.
+    bytes.insert(10, b' ');
+    let response = compare_package_http(&server, &bytes, 400).await;
+    assert_eq!(response["code"], "resource_limit");
+    let raw = serde_json::to_string(&comparison_body(
+        &golden_evidence_package(),
+        &golden_evidence_package(),
+    ))
+    .unwrap();
+    // Escaped names still refer to the same schema fields and duplicate keys.
+    let escaped = raw.replace("session_id", "\\u0073ession_id");
+    assert_eq!(
+        compare_package_http(&server, escaped.as_bytes(), 200).await["selected_metadata_equal"],
+        true
+    );
+    let invalid = raw.replacen("configured_local_stores", "\\ud800", 1);
+    compare_package_http(&server, invalid.as_bytes(), 400).await;
+    let mut invalid = raw.as_bytes().to_vec();
+    invalid[20] = 255;
+    compare_package_http(&server, &invalid, 400).await;
+    // Reject framing before uploading the impossible body; avoid depending on
+    // TCP reset timing when the server refuses an oversized Content-Length.
+    let response = server
+        .client
+        .post(format!("{}{}", server.url, EVIDENCE_COMPARISON_ROUTE))
+        .header(
+            "content-length",
+            (origin_trace_backend::evidence_comparison::MAX_REQUEST_BYTES + 1).to_string(),
+        )
+        .header("connection", "close")
+        .send()
+        .await
+        .unwrap();
+    assert_contract_response(response, "post", EVIDENCE_COMPARISON_ROUTE, 400).await;
+}
+
+#[tokio::test]
+async fn evidence_comparison_body_deadline_and_interrupted_upload_leave_service_usable() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let server = Server::start_with_helper_canaries(true).await;
+    server.file("events.jsonl", b"PRIVATE_COMPARISON_DEADLINE_CANARY");
+    let before = snapshot(server.root.path());
+    let address = server.url.strip_prefix("http://").unwrap();
+    for interrupted in [false, true] {
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        stream.write_all(format!("POST {EVIDENCE_COMPARISON_ROUTE} HTTP/1.1\r\nHost: {address}\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{{").as_bytes()).await.unwrap();
+        if interrupted {
+            stream.shutdown().await.unwrap();
+        }
+        let mut raw = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut raw))
+            .await
+            .unwrap()
+            .unwrap();
+        let response = String::from_utf8(raw).unwrap();
+        assert!(response.starts_with(if interrupted {
+            "HTTP/1.1 400 "
+        } else {
+            "HTTP/1.1 408 "
+        }));
+        let value: Value =
+            serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(
+            value["code"],
+            if interrupted {
+                "invalid_request"
+            } else {
+                "timeout"
+            }
+        );
+        assert_eq!(
+            value["details"],
+            if interrupted {
+                json!({})
+            } else {
+                json!({"phase":"request_body"})
+            }
+        );
+        let package = golden_evidence_package();
+        compare_package_http(
+            &server,
+            &serde_json::to_vec(&comparison_body(&package, &package)).unwrap(),
+            200,
+        )
+        .await;
+    }
+    assert_eq!(before, snapshot(server.root.path()));
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
 }

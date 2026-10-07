@@ -42,7 +42,7 @@ impl Deobfuscator {
         let representation = representation(source, &response, assume_intrinsics)?;
         let stats = metrics(source);
         let classification = classify(&stats);
-        let analysis = json!({"schema":"deobfuscation-analysis-v1","source":{"url":null,"sha256":hex::encode(Sha256::digest(source.as_bytes())),"byte_size":source.len(),"lines":source.matches('\n').count()+1},"classification":classification,"stats":stats,"assumptions":representation["assumptions"],"representation":{"status":if representation["text"]==source {"unchanged"} else {"derived"},"derived_bytes":representation["text"].as_str().unwrap().len(),"segment_count":representation["segments"].as_array().unwrap().len(),"truncated":representation["truncated"],"transformations":representation["transformations"]},"string_tables":tables(source),"omissions":["Unsupported decoder operations, custom prototype hooks, mutable or escaping tables, and cross-scope propagation remain unresolved."],"limits":{"max_source_bytes":SOURCE_MAX,"max_derived_bytes":2097152,"max_segments":250000,"max_string_tables":64,"max_string_entries":2048}});
+        let analysis = json!({"schema":"deobfuscation-analysis-v1","source":{"url":null,"sha256":hex::encode(Sha256::digest(source.as_bytes())),"byte_size":source.len(),"lines":source.matches('\n').count()+1},"classification":classification,"stats":stats,"assumptions":representation["assumptions"],"representation":{"status":if representation["text"]==source {"unchanged"} else {"derived"},"derived_bytes":representation["text"].as_str().unwrap().len(),"segment_count":representation["segments"].as_array().unwrap().len(),"truncated":representation["truncated"],"transformations":representation["transformations"]},"string_tables":tables(source),"omissions":["Unsupported decoder operations, custom prototype hooks, mutable or escaping tables, and cross-scope propagation remain unresolved."],"limits":{"max_source_bytes":SOURCE_MAX,"max_derived_bytes":SOURCE_MAX+512*1024,"max_segments":250000,"max_string_tables":64,"max_string_entries":2048}});
         let mut result = json!({"schema":"deobfuscation-analysis-v1","engine":"rust-oxc","original_source":source,"source_truncated":false,"analysis":analysis});
         if derived {
             result["representation"] = representation;
@@ -98,6 +98,12 @@ fn representation(source: &str, response: &Value, intrinsics: bool) -> Result<Va
         return Err(malformed());
     }
     if response["ok"] != true {
+        if response["error_kind"] == "derived-validation" {
+            return Err(Error::new(
+                422,
+                "Derived JavaScript failed bounded syntax validation; original source is preserved",
+            ));
+        }
         return Err(Error::new(422, "JavaScript could not be parsed"));
     }
     let assumptions = json!(if intrinsics {
@@ -636,4 +642,27 @@ fn tables(source: &str) -> Vec<Value> {
     }
     tables.sort_by_key(|v| v["offset"].as_u64());
     tables
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derivation_failure_is_not_reported_as_an_original_parse_error() {
+        let response = json!({
+            "schema": "reb-deobfuscator-worker-v1",
+            "ok": false,
+            "parsed": true,
+            "error_kind": "derived-validation",
+        });
+        let error = representation("const result=1+2;", &response, false).unwrap_err();
+        assert_eq!(error.status, 422);
+        assert!(error.message.contains("Derived JavaScript"));
+        assert!(error.message.contains("original source is preserved"));
+        let mut original_error = response;
+        original_error.as_object_mut().unwrap().remove("error_kind");
+        let error = representation("const broken=;", &original_error, false).unwrap_err();
+        assert_eq!(error.message, "JavaScript could not be parsed");
+    }
 }

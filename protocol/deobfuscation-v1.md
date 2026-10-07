@@ -26,6 +26,16 @@ adding offsets. The UI uses UTF-16 to match JavaScript and debugger columns.
 text to a zero-width original position. Rust `replacement` segments anchor a
 folded value to the whole original expression, and a position within one maps
 to that expression's start. Transformations never change retained artifact bytes.
+Sources admits only known Rust/Oxc and legacy Python engines, ordered maps and
+complete contiguous derived coverage. Replacement original spans must be
+nonempty; synthetic spans must be zero-width. Rust maps must additionally cover
+the complete original contiguously and use UTF-8 bytes, and supplied aggregate
+transformation counts must sum to the number of mapped replacements (at most
+4,096). Original and derived byte sizes, scalar boundaries, and verbatim slices
+are checked before a changed span is exposed. Legacy code-point maps may omit
+original formatting whitespace and are ineligible for exact-byte change
+inspection. Missing optional summaries remain
+unknown. Aggregate rule families do not identify individual replacement rules.
 
 Sources are capped at 4 MiB. Worker analysis has a five-second adapter deadline, at most
 4,096 rewrites, and 64 diagnostics. `truncated` means a derivation or rewrite
@@ -34,8 +44,18 @@ are private and removed when analysis finishes or fails.
 
 Invalid identifiers/modes or malformed source return 400, missing artifacts 404,
 unavailable live debugging or a busy worker 409, native parse failures 422,
-an abnormal worker exit 502, and a worker timeout 408. A failed UI request is not automatically retried.
+an abnormal worker exit 502, and a worker timeout 408. Derived-output validation
+failure also returns 422 with a qualified message that the original is preserved;
+it is not reported as an original-source parse error. A failed UI request is not automatically retried.
 The previous successful representation survives an explicit retry failure.
+
+After rewriting, the worker bounds and reparses the complete candidate using
+the original parse goal. A rejected candidate has `ok: false`,
+`error_kind: "derived-validation"`, `parsed: true` (the original parsed), original
+text in `derived_source`, and an empty `transformations` list. Its diagnostic
+uses a zero-width range at zero rather than attributing a generated error to
+original bytes. Existing source-parse failures do not carry this error kind.
+The candidate check proves syntax acceptance only and never executes the source.
 
 `assume_intrinsics=0|1` defaults to 0. Opt-in responses carry
 `analysis.assumptions: ["standard-intrinsics"]`; default responses carry an empty

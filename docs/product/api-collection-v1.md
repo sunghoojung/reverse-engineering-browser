@@ -11,8 +11,53 @@ credential-free request contract and local persistence behavior.
 
 1. Open Collection and create folders or saved requests.
 2. Define root, folder, and request variables with `{{name}}` placeholders.
-3. Create the shared disposable Request Lab context.
-4. Run the selected saved request and inspect its ephemeral execution history.
+3. Save the template, then create the shared disposable Request Lab context.
+4. Use **Run saved request**, or the explicit **Save & Run** action when edits
+   are pending, and inspect its ephemeral response and execution history.
+
+The library, request editor, and response pane have separate jobs. Headers,
+Body, and Variables are keyboard-accessible request sections. Response Body and
+Headers describe the selected submitted run, including its resolved method,
+URL, duration, truncation and outcome. Folder settings, run history, and storage
+limits use disclosures. Narrow windows stack the authoring and result panes
+inside a scrolling workspace.
+
+Unsaved request and folder edits remain owned by their selected item. Selecting
+that item again, a debugger refresh, or a failed save preserves raw text and
+folder choices. Switching, creating, duplicating or deleting requires an
+explicit save or discard first. Leaving the Collection workspace preserves the
+current draft in panel memory; reloading the application does not persist it.
+A generation conflict retains the draft for review. Request ownership includes
+both ID and creation timestamp. If another window removed or replaced its owner, the last valid collection stays visible until edits are discarded
+and the current store is reloaded. Known-stale owners cannot be saved or run.
+Retry load is explicit. A request cannot move to a different folder while the
+current folder has unsaved edits; save or discard those edits first. Creating a
+folder selects that folder and clears the previous request selection.
+
+Selection and preview never send a request. Save & Run saves exactly once before
+submitting the saved snapshot; a run failure does not imply that saving failed.
+Repeated submissions are disabled while that operation is pending. A context
+change between variable configuration and sending stops the send. The recipe ID is reserved while variable configuration is pending, and its
+creation identity is rechecked before sending. An acknowledgement is distinct
+from completion: the previous response remains visible until the acknowledged
+run appears in a later snapshot. That completion selects the new result only
+while the request and history selection remain unchanged. New editor drafts
+remain untouched; choosing another run or request cancels this automatic
+selection. A late run cannot steal a newer request selection. Run history is scoped by saved request
+ID and disposable context, never matched by URL to captured Traffic. New recipes
+do not recycle IDs still present in ephemeral runs. History predating the
+recipe’s creation is excluded if another window reused an ID. A bounded
+25-entry, context-scoped in-memory ownership map also binds locally
+acknowledged executions to their exact recipe creation identity. A separate
+bounded 25-record dispatch ledger registers that identity before the run action
+starts, so a polling result cannot be attributed to a replacement recipe while
+the action acknowledgement is delayed or lost. It retains only context, recipe
+identity and the prior execution ID, never request or response content. Older
+history is outside that submission’s range. Once polling or acknowledgement
+identifies its execution, the dispatch claim is retired and only that exact
+execution keeps its owner; later runs are not claimed. Unresolved dispatches
+remain protected across a lost acknowledgement, while ambiguous overlapping
+incarnations stay unassigned until a specific acknowledgement resolves them.
 
 Traffic can create a saved request, but the import copies only the method and a
 URL with query and fragment removed. It never imports captured headers,

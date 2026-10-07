@@ -76,8 +76,12 @@ export async function runPackagedSmoke(app, directory, name, flags = [], environ
   const results = [...output.matchAll(/^SMOKE_OK (.+)$/gm)];
   assert.equal(results.length, 1, `${name}: missing or repeated completed WebKit result\n${output}`);
   const result = JSON.parse(results[0][1]);
-  const html = await readFile(join(root, 'apps/research-ui/index.html'), 'utf8');
-  assert.equal(result.title, html.match(/<title>([^<]+)<\/title>/)[1]);
+  // renderShellStatus replaces the HTML bootstrap title after evidence loads.
+  // Match the requested scenario, not whichever mode the app happened to report.
+  const titles = {offline: 'Origin Trace', fallback: 'Origin Trace',
+    demo: 'Origin Trace - Demo Evidence', live: 'Origin Trace - Live Session'};
+  assert(Object.hasOwn(titles, name), `Unknown packaged smoke scenario: ${name}`);
+  assert.equal(result.title, titles[name]);
   assert.equal(result.nativeShell, true);
   assert.equal(result.stylesLoaded, true);
   assert.equal(result.smokeExerciseError, null, output);

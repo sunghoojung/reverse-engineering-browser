@@ -1398,7 +1398,7 @@
           ['trace_target', 'parent_event', 'request_initiator', 'request_lifecycle', 'artifact_request'].includes(step.relation) &&
           ['observed', 'correlated'].includes(step.confidence);
         const validGap = gap => isPlainObject(gap) &&
-          ['ambiguous_request', 'missing_event', 'no_predecessor', 'cycle', 'step_limit'].includes(gap.reason) &&
+          ['ambiguous_request', 'missing_event', 'no_predecessor', 'cycle', 'step_limit', 'capture_gap'].includes(gap.reason) &&
           isSafeIntegerInRange(gap.after_step, 0, 31) &&
           typeof gap.detail === 'string' && gap.detail.length > 0;
         return body.steps.every(validStep) && body.gaps.every(validGap);

@@ -58,6 +58,14 @@ produce an ambiguous result instead of an arbitrary trace.
 - Traversal stops after 32 steps and reports `step_limit`.
 - Missing retained predecessors, cycles, ambiguous request identifiers, and
   events with no predecessor remain visible as named gaps.
+- Native queue-drop markers share their last retained event's reference. They
+  are validated separately and never become request roots or predecessor steps;
+  duplicate addressable events still fail closed. A trace reports one
+  `capture_gap` when its retained session/process streams contain such markers,
+  including markers whose anchor is outside the event window. This is a stream
+  coverage warning, not proof of a missing predecessor or value flow. Repeated
+  markers remain counted as marker records, not a unique lost-event total.
+  Coverage compares recorded links with named gaps, including this warning.
 
 ## User workflow
 

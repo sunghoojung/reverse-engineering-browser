@@ -3345,3 +3345,19 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   #screen-api-collection .screen-head { padding: 10px 12px; }
   #screen-api-collection .screen-head-actions { display: none; }
 }
+
+/* Shared return navigation uses the existing Rosé Pine shell tokens. */
+.main { display: flex; flex-direction: column; }
+.main > .screen { flex: 1 1 0; height: auto; min-height: 0; }
+.investigation-navigation { flex: 0 0 auto; max-height: 35vh; overflow: auto; padding: 4px 8px; border-bottom: 1px solid var(--line); background: var(--chrome); font: 11px/1.5 var(--sans); }
+.investigation-controls { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 5px; }
+.investigation-controls > button { min-height: 28px; white-space: normal; }
+.investigation-controls details { flex: 1 1 150px; min-width: 0; }
+.investigation-controls summary { min-height: 28px; padding: 5px; cursor: pointer; color: var(--muted); }
+#investigation-notice { margin: 5px 0; overflow-wrap: anywhere; color: var(--text); }
+#investigation-history-count { margin-right: 8px; color: var(--faint); }
+.investigation-navigation[data-status="stale"], .investigation-navigation[data-status="unavailable"], .investigation-navigation[data-status="ambiguous"] { border-left: 3px solid var(--amber); }
+.investigation-source-search { display: flex; flex-wrap: wrap; gap: 6px; }
+.investigation-source-search p { flex-basis: 100%; margin: 6px 0; overflow-wrap: anywhere; }
+.investigation-navigation [hidden], .investigation-navigation[hidden] { display: none; }
+.investigation-navigation :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

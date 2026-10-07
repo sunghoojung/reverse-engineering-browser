@@ -261,6 +261,29 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+  sources-history-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Exercise Sources history after production cache eviction
+        run: |
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          node tools/check-origin-trace-debugger.mjs --sources-history-ui-browser
+
+      - name: Upload rendered Sources history QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sources-history-ui-${{ github.run_id }}
+          path: build/sources-history-ui-qa
+          if-no-files-found: ignore
+          retention-days: 3
+
   test:
     timeout-minutes: 15
     strategy:

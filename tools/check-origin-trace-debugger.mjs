@@ -1787,7 +1787,7 @@ async function checkEvidenceObservationInteractions({evaluate,viewport,click,key
     const result=await evaluate(`(()=>{const names=['#evidence-investigation','.evidence-investigation-layout','#evidence-rows','#evidence-inspector'];return {width:innerWidth,height:innerHeight,page:document.documentElement.scrollWidth,panes:names.map(name=>{const n=document.querySelector(name),r=n.getBoundingClientRect();return {name,visible:r.width>0&&r.height>0,left:r.left,right:r.right,top:r.top,bottom:r.bottom,client:n.clientHeight,scroll:n.scrollHeight,width:n.clientWidth,scrollWidth:n.scrollWidth};})};})()`);
     assert(result.page<=result.width+1,`${label}: no page-wide horizontal overflow`);
     for(const pane of result.panes.filter(value=>value.visible)){assert(pane.left>=-1&&pane.right<=result.width+1&&pane.bottom<=result.height+1,`${label}: ${pane.name} stays in viewport`);assert(pane.scrollWidth<=pane.width+1,`${label}: ${pane.name} does not clip content horizontally`);}
-    const active=result.panes.find(value=>value.name==='#evidence-rows'&&value.visible)??result.panes.find(value=>value.name==='#evidence-inspector'&&value.visible);assert(active?.client>=120,`${label}: selected pane retains reading space`);
+    const active=result.panes.find(value=>value.name==='#evidence-rows'&&value.visible)??result.panes.find(value=>value.name==='#evidence-inspector'&&value.visible);assert(active?.client>=120,`${label}: selected pane retains reading space (${active?.client ?? 0}px; minimum 120px)`);
   };
   fixture.observationActive=true;
   await evaluate('state.eventEtag=null;state.artifactEtag=null;refresh()');
@@ -1857,7 +1857,13 @@ async function checkEvidenceObservationInteractions({evaluate,viewport,click,key
     await evaluate("document.querySelector('#evidence-search').value='';document.querySelector('#evidence-search').dispatchEvent(new Event('input',{bubbles:true}))");
     await evaluate("window.evidenceShortRequest=state.requests[0];state.requests[0]={...state.requests[0],protocolRequestId:'long-url-cdp',operation:'cdp_complete',tabId:'long-url-target',hostOnly:false,path:('https://fixture.invalid/'+('segment/'.repeat(300))).slice(0,2048)};renderEvidence()");
     await geometry(`${width} long correlated request`);
+    // A compact layout must preserve the actual qualifiers and every control,
+    // rather than buying reading space by hiding warnings or reducing coverage.
+    const essentials=await evaluate(`['#evidence-context-note','#evidence-workspace-notice','#evidence-coverage-summary','#evidence-search','#evidence-scope','#evidence-package-toggle','#evidence-previous','#evidence-next'].map(selector=>{const n=document.querySelector(selector),r=n.getBoundingClientRect(),style=getComputedStyle(n);return {selector,visible:r.width>0&&r.height>0&&r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight&&style.visibility!=='hidden',unclipped:n.scrollHeight<=n.clientHeight+1};})`);
+    assert(essentials.every(value=>value.visible&&value.unclipped),`${width}: context qualifications, notices and controls must remain visible and unclipped: ${JSON.stringify(essentials)}`);
     assert.match(await evaluate("document.querySelector('#evidence-context-note').textContent"),/No exact producer request key/);
+    assert.match(await evaluate("document.querySelector('#evidence-workspace-notice').textContent"),/Request context changed/);
+
     const paneHeight=await evaluate("document.querySelector('.evidence-investigation-layout').clientHeight");
     await click('#evidence-coverage-details > summary');
     assert.equal(await evaluate("document.querySelector('.evidence-investigation-layout').clientHeight"),paneHeight,'Expanded coverage must not consume reading-pane height');

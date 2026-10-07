@@ -3384,3 +3384,15 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   .evidence-context { grid-template-columns: minmax(0, 1fr) 220px; gap: 18px; }
   .evidence-coverage { display: grid; padding-left: 14px; border-left: 1px solid var(--line); }
 }
+
+/* Short narrow windows keep the warnings and controls without spending the
+   observation viewport on repeated vertical padding. Control sizes and type
+   stay unchanged; the real-browser guard still requires 120 px of reading space. */
+@media (max-width: 760px) and (max-height: 640px) {
+  #screen-evidence > .screen-head { min-height: 44px; padding-block: 6px; }
+  #screen-evidence .evidence-context { padding-block: 8px; }
+  #screen-evidence .evidence-workspace-notice { padding-block: 5px; }
+  #screen-evidence .evidence-observation-tools { padding-block: 6px; }
+  #screen-evidence .evidence-list-caption { padding-top: 6px; }
+  #screen-evidence .evidence-list-footer { padding-block: 5px; }
+}

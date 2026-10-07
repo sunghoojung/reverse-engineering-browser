@@ -160,9 +160,72 @@ async function checkConsolePaneScroll(root) {
   console.log('PASS Console pane-scroll and mutation-refresh clamp regressions, nested/current offsets, final resize clamping, bounded/dropped/detached owners, resize/visibility scheduling and divider keyboard geometry (geometry model; not rendered QA)');
 }
 
+export async function checkConsoleCompletion(root) {
+  const syntax = await readFile(join(root, 'apps/research-ui/source_syntax.js'), 'utf8');
+  const completion = await readFile(join(root, 'apps/research-ui/native_console_completion.js'), 'utf8');
+  const {suggest, query} = runInNewContext(syntax + completion +
+    ';({suggest:nativeConsoleSuggestions,query:nativeConsoleCompletionQuery})');
+  const plain = value => JSON.parse(JSON.stringify(value));
+  for (const [source, caret, prefix, start, end, path, names] of [
+    ['document.que', 12, 'que', 9, 12, ['document'], ['querySelector', 'querySelectorAll']],
+    ['document?.que', 13, 'que', 10, 13, ['document'], ['querySelector', 'querySelectorAll']],
+    ['document.  que', 14, 'que', 11, 14, ['document'], ['querySelector', 'querySelectorAll']],
+    ['/* inert */ Math.ra', 19, 'ra', 17, 19, ['Math'], ['random']],
+    ['// inert\nMath.ra', 16, 'ra', 14, 16, ['Math'], ['random']],
+    ['"😀"; document.querySelectorAll', 20, 'query', 15, 31, ['document'], ['querySelector']],
+  ]) {
+    const expected = {prefix, start, end, source, caret};
+    const local = suggest(source, caret);
+    assert.deepEqual(plain({...local, items:undefined}), expected, source);
+    assert.deepEqual(Array.from(local.items, item => item.name), names, source);
+    assert.deepEqual(plain(query(source, caret)), {path, ...expected}, source);
+  }
+  for (const source of ['"document.que', "'document.que", '`document.que',
+    '// document.que', '/* document.que', '/document.que',
+    'const pattern = /document.que', 'document.que' + '\u0001' + '// unfinished']) {
+    for (const explicit of [false, true]) {
+      assert.equal(suggest(source, source.length, explicit), null, source);
+      assert.equal(query(source, source.length, explicit), null, source);
+    }
+  }
+  // Catalog-only inference may inspect syntax for a known return type. Native
+  // queries must still reject calls, computed keys, and literal receivers.
+  for (const source of ['document.querySelector("a").sty', 'new Map().ge',
+    '[1, 2].ma', '"snow".toU', 'Promise.resolve(1).th']) {
+    assert(suggest(source, source.length), source);
+    assert.equal(query(source, source.length), null, source);
+  }
+  for (const source of ['window[pageGetter()].', 'customPageObject.']) {
+    assert.equal(suggest(source, source.length), null, source);
+  }
+  assert.equal(query('window[pageGetter()].', 'window[pageGetter()].'.length), null);
+  assert.deepEqual(Array.from(query('customPageObject.', 17).path), ['customPageObject']);
+  assert.equal(suggest('Math.log', 8), null, 'An exact name must remain ready to run');
+  assert.equal(suggest('Math.log', 8, true).items[0].name, 'log');
+  for (const complete of [suggest, query]) {
+    assert.equal(complete('', 0), null);
+    assert(complete('', 0, true));
+    assert.equal(complete('document.', -1), null);
+    assert.equal(complete('document.', 10), null);
+    assert(complete(' '.repeat(8180) + 'document.que', 8192));
+    assert.equal(complete(' '.repeat(8181) + 'document.que', 8193), null);
+  }
+  const chain = Array(8).fill('owner').join('.') + '.pr';
+  assert.equal(query(chain, chain.length).path.length, 8);
+  assert.equal(query('owner.' + chain, chain.length + 6), null);
+  for (const source of ['a'.repeat(128) + '.', 'a'.repeat(128)]) {
+    assert(query(source, source.length), '128-unit identifiers remain accepted');
+  }
+  for (const source of ['a'.repeat(129) + '.', 'a'.repeat(129)]) {
+    assert.equal(query(source, source.length), null, '129-unit identifiers remain rejected');
+  }
+  console.log('PASS Console completion shared lexical boundaries, UTF-16 ranges, catalog/native separation and exact input/path/identifier limits (not rendered QA)');
+}
+
 // Behavioral DOM fixture only. Pixel, hit testing and keyboard coverage use the
 // same browser driver as Requests, through --console-ui-browser.
 export async function checkConsoleDOM(root) {
+  await checkConsoleCompletion(root);
   await checkConsolePaneScroll(root);
   let document;
   class Node {

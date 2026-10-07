@@ -3598,3 +3598,17 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #tools-panel-float32 [hidden] { display: none !important; }
 @media (max-width: 1000px) { .float32-workspace { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 480px) { .float32-form, .float32-output { padding: 10px; } .float32-form fieldset { padding: 8px; } }
+
+/* Retained Traffic comparison shares the inspector's independently bounded pane. */
+.traffic-comparison { min-width: 0; min-height: 0; overflow: auto; padding: 12px; }
+.traffic-comparison[hidden] { display: none; }
+.traffic-comparison-toolbar { display: flex; flex-wrap: wrap; gap: 8px; }
+.traffic-comparison-notice, .traffic-comparison-identities, .traffic-comparison-coverage { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.traffic-comparison-identities { color: var(--muted); }
+.traffic-comparison-results { min-width: 0; }
+.traffic-comparison-section { margin: 12px 0; border-top: 1px solid var(--line); padding-top: 10px; }
+.traffic-comparison-section summary { cursor: pointer; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.traffic-comparison-rows { list-style: none; padding: 0; margin: 0; font-size: 12px; }
+.traffic-comparison-rows li { padding: 8px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; white-space: pre-wrap; }
+.traffic-comparison-path { display: block; color: var(--accent); margin-bottom: 4px; }
+.traffic-comparison :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

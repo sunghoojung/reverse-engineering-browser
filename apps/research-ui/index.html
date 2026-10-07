@@ -113,11 +113,13 @@
                   <button id="inspector-tab-payload" class="inspector-tab" type="button" role="tab" data-inspector-tab="payload" aria-controls="exchange-inspector" aria-selected="false" tabindex="-1">Payload</button>
                   <button id="inspector-tab-preview" class="inspector-tab" type="button" role="tab" data-inspector-tab="preview" aria-controls="exchange-inspector" aria-selected="false" tabindex="-1">Preview</button>
                   <button id="inspector-tab-response" class="inspector-tab" type="button" role="tab" data-inspector-tab="response" aria-controls="exchange-inspector" aria-selected="false" tabindex="-1">Response</button>
+                  <button id="inspector-tab-compare" class="inspector-tab" type="button" role="tab" data-inspector-tab="compare" aria-controls="traffic-comparison" aria-selected="false" tabindex="-1">Compare</button>
                   <button id="inspector-tab-initiator" class="inspector-tab" type="button" role="tab" data-inspector-tab="initiator" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Initiator</button>
                   <button id="inspector-tab-timing" class="inspector-tab" type="button" role="tab" data-inspector-tab="timing" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Timing</button>
                   <button id="inspector-tab-signals" class="inspector-tab" type="button" role="tab" data-inspector-tab="signals" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Signals</button>
                   <button id="inspector-tab-evidence" class="inspector-tab" type="button" role="tab" data-inspector-tab="evidence" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Evidence</button>
                 </div>
+                <section id="traffic-comparison" class="traffic-comparison" role="tabpanel" aria-labelledby="inspector-tab-compare" hidden></section>
                 <div id="exchange-inspector" class="exchange-inspector" role="tabpanel" aria-labelledby="inspector-tab-headers"></div>
                 <div hidden id="request-inspector" class="request-inspector" role="tabpanel" aria-labelledby="inspector-tab-payload" tabindex="0">
                   <h1 id="request-prompt">Choose a request value and trace where it came from.</h1>
@@ -1334,6 +1336,7 @@
     <script src="evidence_comparison.js"></script>
     <script src="source_syntax.js"></script>
     <script src="source_facts.js"></script>
+    <script src="traffic_comparison.js"></script>
     <script src="traffic_view.js"></script>
     <script src="request_value_test.js"></script>
     <script src="field_provenance.js"></script>

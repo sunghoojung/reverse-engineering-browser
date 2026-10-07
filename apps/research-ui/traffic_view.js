@@ -633,3 +633,160 @@ function renderTrafficDetails(container, request, tab, onDecode, onTrace, find =
     });
   }
 }
+
+// A baseline is an exact reference into the retained window, never a body copy.
+// Observed target/restart changes retire it permanently, even across A → B → A.
+function createTrafficComparisonController(identityOf, sameIdentity) {
+  let baseline = null, scope = null, generation = null, notice = '';
+  const exact = (identity, requests) => requests.filter(value => sameIdentity(identity, identityOf(value)));
+  function sync(requests, owner) {
+    const nextScope = JSON.stringify([owner.mode, owner.target, owner.capture]);
+    const replaced = scope !== null && (scope !== nextScope ||
+      Number.isSafeInteger(generation) && Number.isSafeInteger(owner.generation) && owner.generation < generation);
+    scope = nextScope; generation = owner.generation;
+    if (baseline && (replaced || exact(baseline, requests).length !== 1)) {
+      baseline = null;
+      notice = 'Baseline expired: its exact capture is no longer uniquely retained or the capture session changed. Select it again explicitly.';
+    }
+    return baseline ? exact(baseline, requests)[0] : null;
+  }
+  return {
+    sync,
+    pin(request, requests, owner) {
+      sync(requests, owner);
+      const identity = identityOf(request);
+      if (!identity || exact(identity, requests).length !== 1 || requests.filter(value => value.id === request.id).length !== 1) {
+        notice = 'A unique retained capture identity is required. Sample data cannot be pinned.'; return false;
+      }
+      baseline = identity; notice = ''; return true;
+    },
+    clear() {baseline = null; notice = 'Baseline cleared.';},
+    get identity() {return baseline;},
+    get notice() {return notice;}
+  };
+}
+
+function trafficComparisonOwner() {
+  return {mode: state.sessionMode, target: state.debuggerSession?.network?.target_id ?? state.debuggerSession?.target?.id ?? null,
+    capture: state.debuggerSession?.network?.capture_enabled ?? false, generation: state.debuggerSession?.generation ?? null};
+}
+
+// Lazy initialization keeps pure viewer/model fixtures independent of navigation.
+let trafficComparisonController = null;
+function syncTrafficComparison() {
+  trafficComparisonController ??= createTrafficComparisonController(investigationRequestIdentity, investigationSame);
+  return trafficComparisonController.sync(state.requests, trafficComparisonOwner());
+}
+
+function trafficComparisonLabel(request) {
+  const identity = investigationRequestIdentity(request);
+  if (!identity) return 'No exact captured request selected';
+  const context = identity.type === 'debugger-request'
+    ? `CDP target ${identity.target} · request ${identity.protocol} · start ${identity.started} ns`
+    : `session ${identity.session} · process ${identity.process} · event ${identity.sequence} · request ${identity.request}`;
+  return `${request.method} ${request.path} · ${context}`;
+}
+
+function renderTrafficComparison(container, request, active) {
+  const baseline = syncTrafficComparison();
+  if (!active) {
+    if (container.rebComparison) {container.replaceChildren(); delete container.rebComparison;}
+    return;
+  }
+  if (!container.rebComparison) {
+    const toolbar = trafficNode('div', 'traffic-comparison-toolbar');
+    const pin = trafficNode('button', 'secondary-button', 'Use selected as baseline'); pin.type = 'button'; pin.id = 'traffic-comparison-pin';
+    const clear = trafficNode('button', 'secondary-button', 'Clear baseline'); clear.type = 'button'; clear.id = 'traffic-comparison-clear';
+    toolbar.append(pin, clear);
+    const status = trafficNode('p', 'traffic-comparison-notice'); status.setAttribute('role', 'status');
+    const identities = trafficNode('div', 'traffic-comparison-identities');
+    const result = trafficNode('div', 'traffic-comparison-results');
+    result.tabIndex = 0; result.setAttribute('aria-label', 'Captured request comparison results');
+    container.append(toolbar, status, identities, result);
+    container.rebComparison = {pin, clear, status, identities, result, key: null, byteSnapshots: [], byteRevision: 0};
+    pin.addEventListener('click', () => {
+      const selected = state.requests.find(value => value.id === state.selectedRequestId);
+      trafficComparisonController.pin(selected, state.requests, trafficComparisonOwner());
+      renderInspector();
+    });
+    clear.addEventListener('click', () => {
+      trafficComparisonController.clear(); renderInspector();
+      container.rebComparison.pin.focus();
+    });
+  }
+  const view = container.rebComparison;
+  const selectedIdentity = investigationRequestIdentity(request);
+  const selectedUnique = selectedIdentity && state.requests.filter(value => value.id === request.id).length === 1 &&
+    state.requests.filter(value => investigationSame(selectedIdentity, investigationRequestIdentity(value))).length === 1;
+  view.pin.disabled = !selectedUnique;
+  view.clear.disabled = !baseline;
+  if ((document.activeElement === view.pin && view.pin.disabled) || (document.activeElement === view.clear && view.clear.disabled)) {
+    if (!view.pin.disabled) view.pin.focus();
+    else {container.tabIndex = -1; container.focus();}
+  }
+  view.status.textContent = trafficComparisonController.notice || (!selectedUnique
+    ? request ? 'The selected capture identity is unavailable or ambiguous. Choose a unique retained request.' : 'Choose a retained request from the ledger.'
+    : !baseline
+    ? 'Select a captured request as baseline, then choose another request from the ledger. Comparison stays local and sends no requests.'
+    : investigationSame(selectedIdentity, trafficComparisonController.identity)
+      ? 'Baseline selected. Choose another captured request to compare.'
+      : 'Comparing the current retained snapshots. Byte equality and JSON structure are separate; missing or truncated content stays inconclusive.');
+  // Match the pure model's original exchange inputs, without inspector-only
+  // HTTP empty-body fallbacks becoming evidence in the invalidation key.
+  const left = baseline?.exchange, right = request?.exchange;
+  // Only this visible pair owns byte snapshots (four × 128 KiB maximum).
+  // Compare bytes exactly so a future mutable adapter cannot leave stale rows.
+  const comparable = baseline && request && selectedUnique && !investigationSame(selectedIdentity, trafficComparisonController.identity);
+  const records = comparable ? [left?.request, left?.response, right?.request, right?.response] : [];
+  if (!comparable) view.byteSnapshots = [];
+  const byteKeys = records.map((record, index) => {
+    const bytes = record?.bytes;
+    if (!(bytes instanceof Uint8Array) || bytes.length > TRAFFIC_COMPARISON_LIMITS.bodyBytes) {
+      view.byteSnapshots[index] = null;
+      return bytes instanceof Uint8Array ? ['oversized', bytes.length] : null;
+    }
+    let prior = view.byteSnapshots[index];
+    if (!prior || prior.bytes.length !== bytes.length || !bytes.every((byte, offset) => byte === prior.bytes[offset])) {
+      prior = {bytes: bytes.slice(), revision: ++view.byteRevision}; view.byteSnapshots[index] = prior;
+    }
+    return prior.revision;
+  });
+  const key = JSON.stringify([trafficComparisonController.identity, selectedIdentity, selectedUnique, byteKeys,
+    ...[baseline, request].map(value => [value?.method, value?.path, value?.status, value?.hostOnly, value?.urlTruncated, value?.methodTruncated, value?.targetKind]),
+    ...records.map(record => [trafficPaneSignature(record, null), record?.headersTruncated, record?.headers_truncated])]);
+  if (view.key === key) return;
+  view.key = key;
+  view.identities.replaceChildren();
+  if (baseline) view.identities.append(trafficNode('p', '', `Baseline: ${trafficComparisonLabel(baseline)}`));
+  if (request) view.identities.append(trafficNode('p', '', `Selected: ${trafficComparisonLabel(request)}`));
+  const priorSections = new Map([...view.result.children].map(section => [section.dataset.label, section.open]));
+  const focusedSection = [...view.result.children].find(section => section.children[0] === document.activeElement)?.dataset.label;
+  view.result.replaceChildren();
+  if (!comparable) {
+    if (focusedSection) {
+      if (!view.pin.disabled) view.pin.focus({preventScroll: true});
+      else {container.tabIndex = -1; container.focus({preventScroll: true});}
+    }
+    return;
+  }
+  const report = trafficCompareRequests(baseline, request);
+  for (const section of report.sections) {
+    const details = trafficNode('details', 'traffic-comparison-section');
+    details.dataset.label = section.label;
+    details.open = priorSections.get(section.label) ?? /body/i.test(section.label);
+    const summary = trafficNode('summary', '', `${section.label} · ${section.structuralStatus ? 'JSON ' : ''}${section.status}${section.omitted ? ` · ${section.omitted} omitted` : ''}`);
+    details.append(summary, trafficNode('p', 'traffic-comparison-coverage', section.message));
+    if (section.rawStatus) details.append(trafficNode('p', 'traffic-comparison-coverage',
+      `Retained bytes: ${section.rawStatus}${section.structuralStatus ? ` · JSON structure: ${section.structuralStatus}` : ''}`));
+    if (section.omitted) details.append(trafficNode('p', 'traffic-comparison-coverage', `${section.omitted} additional changes omitted from this bounded view.`));
+    const rows = trafficNode('ol', 'traffic-comparison-rows');
+    for (const row of section.rows) {
+      const item = trafficNode('li', ''); item.dataset.kind = row.kind;
+      item.append(trafficNode('code', 'traffic-comparison-path', `${row.path || '(root)'} · ${row.kind}`),
+        trafficNode('div', '', `Baseline: ${row.before ?? '(absent)'}`), trafficNode('div', '', `Selected: ${row.after ?? '(absent)'}`));
+      rows.append(item);
+    }
+    details.append(rows); view.result.append(details);
+    if (focusedSection === section.label) summary.focus({preventScroll: true});
+  }
+}

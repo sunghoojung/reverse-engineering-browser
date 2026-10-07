@@ -2453,6 +2453,9 @@ async function selectOptionByKeyboard(key, label) {
   for (const letter of label) await key(letter, letter === ' ' ? 'Space' : `Key${letter.toUpperCase()}`, {
     windowsVirtualKeyCode:letter.toUpperCase().charCodeAt(0), text:letter, unmodifiedText:letter,
   });
+  // Linux/Windows render the popup in Chromium and commit its highlighted
+  // option with Enter. macOS type-ahead already commits the closed select.
+  if (process.platform !== 'darwin') await key('Enter', 'Enter', {windowsVirtualKeyCode:13, text:'\r', unmodifiedText:'\r'});
 }
 
 async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture,recordSourceCheck=()=>{}}) {

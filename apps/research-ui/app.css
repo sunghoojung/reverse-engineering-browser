@@ -3168,3 +3168,49 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .source-fact summary { cursor: pointer; }
 .source-fact pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0; font-size: 10px; }
 .source-facts-report :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Metadata packages extend retained Evidence, on the existing Rosé Pine palette. */
+.package-entry { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; grid-column: 1; }
+.package-entry[hidden] { display: none; }
+.package-entry span { color: var(--muted); font: 11px/1.5 var(--sans); }
+.request-inspector:has(.package-entry:not([hidden])) { grid-template-rows: auto auto auto minmax(0, 1fr); }
+.request-inspector:has(.package-entry:not([hidden])) > .trace-dock { grid-row: 1 / 5; }
+#screen-evidence:not([hidden]) { grid-template-rows: auto minmax(0, 1fr); }
+.evidence-content { min-width: 0; min-height: 0; overflow: auto; }
+.evidence-package-panel { padding: 16px; max-width: 1100px; margin: 0 auto; color: var(--text); }
+.evidence-package-panel h2 { font-size: 16px; margin: 0 0 8px; }
+.evidence-package-panel h3 { margin: 20px 0 8px; font-size: 14px; }
+.evidence-package-panel h4 { margin: 16px 0 8px; font-size: 12px; }
+.package-note { color: var(--muted); font: 12px/1.6 var(--sans); margin: 8px 0; overflow-wrap: anywhere; }
+.package-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0; font: 11px/1.5 var(--sans); }
+.package-toolbar label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
+.package-toolbar select, .package-toolbar input { min-width: 0; max-width: 100%; font: 12px var(--sans); }
+.package-toolbar select { color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 6px; }
+.package-toolbar button { white-space: normal; }
+.package-candidates { max-height: clamp(100px, 30vh, 250px); overflow: auto; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); }
+.package-candidates:empty { display: none; }
+.package-candidate { display: flex; align-items: flex-start; gap: 10px; padding: 8px; border-bottom: 1px solid var(--line-soft); font: 11px/1.6 var(--mono); cursor: pointer; }
+.package-candidate:last-child { border-bottom: 0; }
+.package-candidate input { flex: 0 0 auto; margin-top: 3px; accent-color: var(--accent); }
+.package-candidate span { overflow-wrap: anywhere; min-width: 0; }
+.package-disclosure { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 10px; font: 12px/1.6 var(--sans); }
+.package-disclosure summary { cursor: pointer; }
+.package-notice { border-left: 3px solid var(--accent); padding: 8px 12px; background: var(--panel-2); font: 12px/1.6 var(--sans); overflow-wrap: anywhere; }
+.package-notice[data-kind="error"], .package-notice[data-kind="invalid"] { border-color: var(--red); }
+.package-facts { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(0, 3fr); gap: 6px 16px; margin: 10px 0; font: 11px/1.6 var(--sans); }
+.package-facts dt { color: var(--muted); }
+.package-facts dd { margin: 0; overflow-wrap: anywhere; }
+.package-report-rows { margin: 8px 0; padding-left: 24px; font: 11px/1.7 var(--mono); }
+.package-report-rows li { padding: 6px 0; overflow-wrap: anywhere; }
+.evidence-package-panel :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 600px) { .evidence-package-panel { padding: 12px; } .package-facts { grid-template-columns: 1fr; gap: 3px; } .package-facts dd { margin-bottom: 7px; } }
+
+@media (max-width: 650px) {
+  #screen-backtrace > .screen-head, #screen-evidence > .screen-head { flex-wrap: wrap; }
+  #screen-backtrace .screen-head-actions .package-navigation { display: inline-flex; }
+}
+
+.package-window { position: relative; }
+.package-window-toolbar { position: sticky; top: 0; z-index: 1; margin: 0; padding: 6px 0; background: var(--panel); border-bottom: 1px solid var(--line); justify-content: space-between; }
+.package-pager { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.package-window > .package-note { font-size: 11px; line-height: 1.4; margin: 6px 0; }

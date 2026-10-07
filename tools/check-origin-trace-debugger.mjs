@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { runInNewContext } from "node:vm";
 import {
   readFile,
+  readdir,
   open,
   rm,
   mkdtemp,
@@ -15,8 +16,9 @@ import { createServer } from "node:http";
 import assert from "node:assert/strict";
 const trafficBrowser = process.argv[2] === "--traffic-ui-browser";
 const sourceFactsBrowser = process.argv[2] === "--source-facts-ui-browser";
+const evidenceBrowser = process.argv[2] === "--evidence-ui-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
-const root = process.argv[fieldsOnly || trafficBrowser || sourceFactsBrowser ? 3 : 2] || new URL("..", import.meta.url).pathname;
+const root = process.argv[fieldsOnly || trafficBrowser || sourceFactsBrowser || evidenceBrowser ? 3 : 2] || new URL("..", import.meta.url).pathname;
 // Facts are UI projections over the already validated Rust contract. These
 // fixtures exercise identity and stale/cancelled request ownership, not JS execution.
 const sourceFactsUI = runInNewContext(
@@ -195,6 +197,174 @@ assert.match(digestFacts.model.error,/timed out/);
 finishFactsDigest(await crypto.subtle.digest('SHA-256',factsBytes)); await digestNavigation;
 assert.equal(digestFacts.model.status,'error'); assert.equal(digestFacts.model.original,null);
 console.log('PASS Sources facts identity, UTF-8/BOM ranges, bounded streams, repeated loads, cancellation, stale responses, hash checks and timeout');
+
+// Native capabilities must not depend on callers remembering a URL flag.
+// Execute the actual JS consumer; Swift normalization itself is tested by the
+// compiled app during macOS app-build, not by a JS translation here.
+const nativeStateMarker=(await readFile(join(root,'apps/research-ui/app_state.js'),'utf8')).split('\n')[0];
+for(const [search,expected] of [['',false],['?x=a%2Bb&x=c%26d',false],['?native=1',true],['?native=0&native=2',true],['?%6Eative=1',true],['?Native=1',false]]){
+  let native=false;runInNewContext(nativeStateMarker,{location:{search},URLSearchParams,document:{documentElement:{classList:{add(name){assert.equal(name,'native-shell');native=true;}}}}});assert.equal(native,expected);
+}
+const nativeAppSource=await readFile(join(root,'apps/research-ui/macos/OriginTraceApp.swift'),'utf8');
+assert.match(nativeAppSource,/return nativeUIURL\(arguments\[urlFlag \+ 1\]\)/);
+assert.match(nativeAppSource,/let nativeURL = nativeUIURL\(liveURL\.absoluteString\)/);
+assert.match(nativeAppSource,/webView\.load\(URLRequest\(url: nativeURL\)\)/);
+assert.match(nativeAppSource,/webView\.load\(URLRequest\(url: requestedUIURL \?\? localApplicationURL\)\)/);
+assert.match(nativeAppSource,/webView\.load\(URLRequest\(url: localApplicationURL\)\)/);
+assert.match(nativeAppSource,/self\.localApplicationURL = localApplicationURL/);
+assert.match(nativeAppSource,/URL\(string: "reb:\/\/app\/index\.html\?native=1"\)/);
+assert.equal((nativeAppSource.match(/webView\.load\(URLRequest\(url:/g)??[]).length,3,'Review every new native entry path');
+assert.match(nativeAppSource,/components\.percentEncodedQuery = \(retained \+ \["native=1"\]\)\.joined/);
+assert.match(nativeAppSource,/name\.removingPercentEncoding != "native"/);
+assert.match(nativeAppSource,/contains\("--check-native-ui-url"\) \{\s+checkNativeUIURLs\(\)\s+return/);
+assert.match(await readFile(join(root,'scripts/build-research-app.sh'),'utf8'),/"\$\{macos_path\}\/OriginTrace" --check-native-ui-url/);
+console.log('PASS native entry-path wiring and actual JS query consumer (Swift helper execution requires macOS app-build)');
+
+// Exact-byte package workflow: the real HTTP validator remains authoritative.
+const packageUI = runInNewContext(
+  (await readFile(join(root, 'apps/research-ui/evidence_package.js'), 'utf8')) +
+  ';({evidencePackageKey,evidencePackageKeyText,evidencePackageSelectionKey,evidencePackageUnavailable,evidencePackageReadBytes,evidencePackageValidationResult,evidencePackageView,createEvidencePackageController})',
+  {TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,fetch},
+);
+const packageGoldenBytes = new Uint8Array(await readFile(join(root,'apps/origin-trace-backend/assets/evidence-packages/golden-v1.json')));
+const packageGolden = JSON.parse(new TextDecoder().decode(packageGoldenBytes));
+const packageValid = {protocol_version:1,status:'valid',package_id:packageGolden.package_id,origin:'untrusted_input',authenticity:'not_established',artifact_bytes:'not_present_not_reverified',
+  checks:{structure:'passed',semantic_digest:'passed',references:'passed',metadata_profile:'passed'},issues:[],issues_truncated:false};
+const packageInvalid = {...packageValid,status:'invalid',package_id:null,checks:{...packageValid.checks,structure:'failed'},issues:[{code:'duplicate_json_key',section:'document',index:null}]};
+assert(packageUI.evidencePackageValidationResult(packageValid));
+for (const value of [{...packageValid,authenticity:'verified'}, {...packageValid,artifact_bytes:'verified'}, {...packageValid,checks:{...packageValid.checks,references:'not_run'}},
+  {...packageValid,issues:packageInvalid.issues}, {...packageValid,package_id:null}, {...packageValid,issues_truncated:true}]) assert.equal(packageUI.evidencePackageValidationResult(value),false);
+assert.equal(packageUI.evidencePackageKey('event',{session_id:'18446744073709551615',process_id:4294967295,sequence_number:'18446744073709551615'}).sequence_number,'18446744073709551615');
+for (const key of [{session_id:7,process_id:42,sequence_number:'1'}, {session_id:'07',process_id:42,sequence_number:'1'}, {session_id:'7',process_id:0,sequence_number:'1'},
+  {session_id:'7',process_id:42,sequence_number:'18446744073709551616'}, {session_id:'7',process_id:42,sequence_number:'0'}]) assert.equal(packageUI.evidencePackageKey('event',key),null);
+assert.equal(packageUI.evidencePackageKey('artifact',{session_id:'7',artifact_id:'9',payload:'secret'}).payload,undefined);
+assert.notEqual(packageUI.evidencePackageKeyText('event',{session_id:'7',process_id:42,sequence_number:'1'}),packageUI.evidencePackageKeyText('event',{session_id:'8',process_id:42,sequence_number:'1'}));
+assert.match(packageUI.evidencePackageUnavailable('reb:'),/stored-evidence native mode/);
+assert.match(packageUI.evidencePackageUnavailable('file:'),/browser development UI/);
+assert.equal(packageUI.evidencePackageUnavailable('http:'),'');
+assert.equal(packageUI.evidencePackageView(packageGolden,packageValid).package_id,packageValid.package_id);
+assert.throws(()=>packageUI.evidencePackageView({...packageGolden,package_id:'different'},packageValid));
+await assert.rejects(packageUI.evidencePackageReadBytes(new Response(new Uint8Array(5)),4),/byte limit/);
+// Transport fragmentation cannot create an unbounded retained chunk array.
+let fragmentIndex=0;
+const fragmented=new Response(new ReadableStream({pull(stream){if(fragmentIndex===8192)stream.close();else stream.enqueue(new Uint8Array([fragmentIndex++%251]));}}));
+const fragmentedBytes=await packageUI.evidencePackageReadBytes(fragmented,8192);
+assert.equal(fragmentedBytes.length,8192);assert.equal(fragmentedBytes.buffer.byteLength,8192);
+assert(fragmentedBytes.every((byte,index)=>byte===index%251));
+let fragmentedCancelled=false;
+await assert.rejects(packageUI.evidencePackageReadBytes(new Response(new ReadableStream({pull(stream){stream.enqueue(new Uint8Array());},cancel(){fragmentedCancelled=true;}})),4),/transport chunk limit/);
+assert.equal(fragmentedCancelled,true);
+// Real streams close pending reads before their producer's cancellation cleanup
+// settles; a never-settling cancel hook must not defeat limits or UI deadlines.
+const packageWithinDeadline=async promise=>{let timer;try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Package reader did not retire within the fixture deadline')),2000);})]);}finally{clearTimeout(timer);}};
+for(const empty of [false,true]){
+  let cancelled=0;
+  const response=new Response(new ReadableStream({pull(stream){stream.enqueue(new Uint8Array(empty?0:5));},cancel(){cancelled++;return new Promise(()=>{});}}));
+  await packageWithinDeadline(assert.rejects(packageUI.evidencePackageReadBytes(response,4),empty?/transport chunk limit/:/byte limit/));
+  assert.equal(cancelled,1);assert.equal(response.body.locked,false);
+}
+const packageAbort=new AbortController();let cancelledPending=0;
+const pendingBody=new Response(new ReadableStream({cancel(){cancelledPending++;return new Promise(()=>{});}}));
+const pendingRead=packageUI.evidencePackageReadBytes(pendingBody,4,packageAbort.signal);
+packageAbort.abort();await packageWithinDeadline(assert.rejects(pendingRead,/cancelled/));assert.equal(cancelledPending,1);assert.equal(pendingBody.body.locked,false);
+const packageSharedChunk=new Uint8Array(1024*1024);let packageSharedIndex=0;
+const sharedResponse=new Response(new ReadableStream({pull(stream){if(packageSharedIndex===16)stream.close();else{packageSharedChunk[17]=packageSharedIndex++;stream.enqueue(packageSharedChunk.subarray(17,18));}}},{highWaterMark:0}));
+const sharedBytes=await packageUI.evidencePackageReadBytes(sharedResponse,16);assert.deepEqual([...sharedBytes],Array.from({length:16},(_,i)=>i));assert.equal(sharedBytes.buffer.byteLength,16);
+for(const width of [0,1,64]) {
+  let fragmentedTimeoutCancels=0;
+  const fragmentDeadline=packageUI.createEvidencePackageController({getSelection:()=>packageGolden.selection,protocol:'http:',onChange:()=>{},deadline:5,
+    fetcher:async()=>new Response(new ReadableStream({pull(stream){stream.enqueue(new Uint8Array(width));},cancel(){fragmentedTimeoutCancels++;return new Promise(()=>{});}}))});
+  await packageWithinDeadline(fragmentDeadline.export());assert.equal(fragmentDeadline.model.status,'error');assert.match(fragmentDeadline.model.message,/timed out/);assert.equal(fragmentedTimeoutCancels,1);
+}
+const packageRequests=[];
+let packageSelection=structuredClone(packageGolden.selection);
+const packageController=packageUI.createEvidencePackageController({getSelection:()=>packageSelection,protocol:'http:',onChange:()=>{},fetcher:async(url,options)=>{
+  packageRequests.push({url,options}); return url.endsWith('/export') ? new Response(packageGoldenBytes) : Response.json(packageValid);
+}});
+await packageController.export();
+assert.equal(packageRequests.length,2);
+assert.equal(packageRequests[0].url,'/api/evidence/packages/export');
+assert.equal(packageRequests[1].url,'/api/evidence/packages/validate');
+assert.deepEqual(JSON.parse(new TextDecoder().decode(packageRequests[0].options.body)),{protocol_version:1,profile:'reb-metadata-only-v1',selection:packageSelection});
+assert.deepEqual(packageRequests[1].options.body,packageGoldenBytes,'Export validation must preserve exact bytes');
+assert.equal(packageController.model.status,'ready');
+assert.deepEqual(packageController.model.bytes,packageGoldenBytes);
+packageController.clear(); assert.equal(packageController.model.bytes,null);
+// Duplicate members, invalid UTF-8, whitespace and BOM survive the client boundary.
+for (const bytes of [new TextEncoder().encode('{"format":"a","format":"b"}'),new Uint8Array([0xef,0xbb,0xbf,0x7b,0xff,0x7d]),new TextEncoder().encode('  {"x":1}\n')]) {
+  let received;
+  const control=packageUI.createEvidencePackageController({getSelection:()=>packageSelection,protocol:'http:',onChange:()=>{},fetcher:async(url,options)=>{
+    assert.equal(url,'/api/evidence/packages/validate'); received=options.body; return Response.json(packageInvalid);
+  }});
+  await control.validate({size:bytes.length,arrayBuffer:async()=>bytes.buffer});
+  assert.deepEqual(received,bytes,'Never parse or reserialize input before server validation');
+  assert.equal(control.model.status,'invalid'); assert.equal(control.model.bytes,null); assert.equal(control.model.document,null);
+}
+let packagePending=[];
+const delayedPackage=packageUI.createEvidencePackageController({getSelection:()=>packageSelection,protocol:'http:',onChange:()=>{},fetcher:(url,options)=>new Promise(resolve=>packagePending.push({url,options,resolve}))});
+const packageFirst=delayedPackage.export(); await delayedPackage.export(); assert.equal(packagePending.length,1,'Double export starts only one operation');
+delayedPackage.cancel(); assert.equal(packagePending[0].options.signal.aborted,true);
+packagePending[0].resolve(new Response(packageGoldenBytes)); await packageFirst;
+assert.equal(packagePending.length,1,'Cancelled export cannot begin validation'); assert.equal(delayedPackage.model.document,null);
+const packageSecond=delayedPackage.export(); packagePending[1].resolve(new Response(packageGoldenBytes));
+while(packagePending.length<3) await new Promise(resolve=>setTimeout(resolve,0));
+delayedPackage.clear(); packagePending[2].resolve(Response.json(packageValid)); await packageSecond;
+assert.equal(delayedPackage.model.bytes,null,'Changed selection/close cannot accept delayed validation');
+let packageFileResolve;
+const packageSlowFile=delayedPackage.validate({size:packageGoldenBytes.length,arrayBuffer:()=>new Promise(resolve=>{packageFileResolve=resolve;})});
+delayedPackage.cancel(); packageFileResolve(packageGoldenBytes.buffer); await packageSlowFile;
+assert.equal(packagePending.length,3,'A cancelled file read cannot send a request');
+for (const status of [400,404,408,409,413,422,503]) {
+  let calls=0;
+  const rejected=packageUI.createEvidencePackageController({getSelection:()=>packageSelection,protocol:'http:',onChange:()=>{},fetcher:async()=>{calls++;return new Response('{}',{status});}});
+  await rejected.export(); assert.equal(calls,1,'Rejected export must not auto-retry or validate'); assert.equal(rejected.model.status,'error'); assert.equal(rejected.model.bytes,null);
+  if(status===409) assert.match(rejected.model.message,/No writer was stopped/);
+  if(status===503) assert.match(rejected.model.message,/legacy stores are unsupported/);
+}
+const packageOffline=packageUI.createEvidencePackageController({getSelection:()=>packageSelection,protocol:'reb:',onChange:()=>{},fetcher:()=>{throw new Error('Offline must not fetch');}});
+await packageOffline.export(); assert.equal(packageOffline.model.status,'error');
+let oversizedRead=false;
+await packageController.validate({size:4194305,arrayBuffer:async()=>{oversizedRead=true;return new ArrayBuffer(0);}});
+assert.equal(oversizedRead,false,'File size checked before allocation/read');
+const packageWrongSelection=packageUI.createEvidencePackageController({getSelection:()=>({events:packageSelection.events.slice(0,1),artifacts:[]}),protocol:'http:',onChange:()=>{},
+  fetcher:async url=>url.endsWith('/export')?new Response(packageGoldenBytes):Response.json(packageValid)});
+await packageWrongSelection.export(); assert.equal(packageWrongSelection.model.status,'error'); assert.equal(packageWrongSelection.model.bytes,null);
+let packageTimeoutChanges=0;
+const packageSlow=packageUI.createEvidencePackageController({getSelection:()=>packageSelection,protocol:'http:',deadline:5,onChange:()=>packageTimeoutChanges++,
+  fetcher:async(_url,{signal})=>new Response(new ReadableStream({start(stream){signal.addEventListener('abort',()=>stream.error(new DOMException('Aborted','AbortError')),{once:true});}}))});
+await packageSlow.export(); assert.equal(packageSlow.model.status,'error'); assert.match(packageSlow.model.message,/timed out/); assert.equal(packageSlow.model.bytes,null); assert(packageTimeoutChanges>=2);
+console.log('Evidence package exact-byte, selection, bounds and interruption contracts passed');
+// Canonical backend JSON sorts object members; identity is order-independent.
+const reorderedPackage = structuredClone(packageGolden);
+for (const kind of ['events', 'artifacts']) {
+  reorderedPackage.selection[kind] = reorderedPackage.selection[kind].map(key => Object.fromEntries(Object.entries(key).sort())).reverse();
+}
+assert.equal(packageUI.evidencePackageSelectionKey(reorderedPackage.selection), packageUI.evidencePackageSelectionKey(packageGolden.selection));
+const orderedBytes = new TextEncoder().encode(JSON.stringify(reorderedPackage));
+const orderedControl = packageUI.createEvidencePackageController({getSelection:()=>packageGolden.selection,protocol:'http:',onChange:()=>{},
+  fetcher:async url=>url.endsWith('/export')?new Response(orderedBytes):Response.json(packageValid)});
+await orderedControl.export(); assert.equal(orderedControl.model.status,'ready'); assert.deepEqual(orderedControl.model.bytes,orderedBytes);
+await orderedControl.validate({size:4194305}); assert.equal(orderedControl.model.bytes,null,'An invalid new file cannot leave an older package downloadable');
+let selectionReply;
+const changingControl = packageUI.createEvidencePackageController({getSelection:()=>packageSelection,protocol:'http:',onChange:()=>{},
+  fetcher:()=>new Promise(resolve=>{selectionReply=resolve;})});
+const changedSelectionRun = changingControl.export(); packageSelection = {events:[],artifacts:[]};
+selectionReply(new Response(packageGoldenBytes)); await changedSelectionRun;
+assert.equal(changingControl.model.bytes,null); assert.equal(changingControl.model.status,'idle');
+packageSelection = structuredClone(packageGolden.selection);
+let timeoutFileResolve, timeoutFileCalls = 0;
+const timeoutFile = packageUI.createEvidencePackageController({getSelection:()=>packageSelection,protocol:'http:',deadline:5,onChange:()=>{},fetcher:()=>{timeoutFileCalls++;}});
+const timeoutFileRun = timeoutFile.validate({size:packageGoldenBytes.length,arrayBuffer:()=>new Promise(resolve=>{timeoutFileResolve=resolve;})});
+await new Promise(resolve=>setTimeout(resolve,15)); assert.equal(timeoutFile.model.status,'error');
+timeoutFileResolve(packageGoldenBytes.buffer); await timeoutFileRun;
+assert.equal(timeoutFileCalls,0,'A file read completing after timeout cannot send original bytes');
+for (const status of ['invalid','unsupported']) {
+  const control=packageUI.createEvidencePackageController({getSelection:()=>packageSelection,protocol:'http:',onChange:()=>{},fetcher:async()=>Response.json({...packageInvalid,status})});
+  await control.validate({size:packageGoldenBytes.length,arrayBuffer:async()=>packageGoldenBytes.buffer});
+  assert.equal(control.model.status,status); assert.equal(control.model.bytes,null);
+}
+console.log('PASS package canonical-key order, direct stale selection, unsupported response and non-abortable file deadline');
+
 
 const complete = runInNewContext(
   (await readFile(join(root, "apps/research-ui/source_syntax.js"), "utf8")) +
@@ -417,6 +587,98 @@ class TrafficFixtureNode {
 const trafficDocument = {activeElement: null, createElement: tag => new TrafficFixtureNode(tag), createTextNode: text => {
   const node = new TrafficFixtureNode("text"); node.textContent = text; return node;
 }};
+// Minimal DOM tests exercise the actual panel's event listeners and ownership.
+// They are not rendered, pointer-hit-test, native WebKit or visual QA.
+const packageSource = await readFile(join(root, 'apps/research-ui/evidence_package.js'), 'utf8');
+function packagePanelFixture(native = false) {
+  let copyResolve, downloadBlob, downloads = 0, copies = 0;
+  const packageDocument = {activeElement:null,body:null};
+  class PackageNode extends TrafficFixtureNode {
+    focus() {packageDocument.activeElement=this;}
+    remove() {if(this.parentNode) {if(this.contains(packageDocument.activeElement)) packageDocument.activeElement=null;this.parentNode.children.splice(this.parentNode.children.indexOf(this),1);this.parentNode=null;}}
+    replaceChildren(...nodes) {if(this.contains(packageDocument.activeElement)) packageDocument.activeElement=null;super.replaceChildren(...nodes);}
+    async emit(type, fields = {}) {await Promise.all((this.listeners.get(type)??[]).map(callback=>callback({target:this,currentTarget:this,...fields})));}
+    click() {if(this.tagName==='A') downloads++;return this.emit('click');}
+  }
+  packageDocument.createElement=tag=>new PackageNode(tag);
+  packageDocument.body=new PackageNode('body'); packageDocument.documentElement=new PackageNode('html');
+  if(native) packageDocument.documentElement.classList.add('native-shell');
+  const names=['scope','candidates','selection','selected','notice','report','file','export','validate','cancel','download','copy','save-note','page','previous','next','clear','context'];
+  const host=new PackageNode('section');
+  const nodes=Object.fromEntries(names.map(name=>[name,new PackageNode(name==='scope'?'select':name==='file'?'input':'div')]));
+  host.append(...Object.values(nodes)); packageDocument.body.append(host);
+  host.querySelector=selector=>nodes[/^\[data-package-(.+)\]$/.exec(selector)?.[1]];
+  packageDocument.querySelector=()=>host; nodes.scope.value='request'; nodes.scope.selectedOptions=[{textContent:'Selected request native events'}]; nodes.file.files=[];
+  let context={requestId:'fixture',events:packageGolden.records.events.map(row=>({...row,...row.key})),artifacts:packageGolden.records.artifacts.map(row=>({...row,...row.key})),eventsLimited:false};
+  context.requestEvents=context.events;
+  let pending = null;
+  const calls=[];
+  const fetcher=async(url,options)=>{calls.push({url,options});if(pending) return new Promise(resolve=>pending.push({resolve,options}));return url.endsWith('/export')?new Response(packageGoldenBytes):Response.json(packageValid);};
+  const create = runInNewContext(packageSource+';createEvidencePackagePanel', {document:packageDocument,location:{protocol:'http:'},fetch:fetcher,
+    TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,Blob,
+    URL:{createObjectURL:blob=>{downloadBlob=blob;return 'blob:synthetic';},revokeObjectURL(){}},
+    navigator:{clipboard:{writeText:()=>{copies++;return new Promise(resolve=>{copyResolve=resolve;});}}}});
+  const panel=create({getContext:()=>context}); panel.setVisible(true);
+  return {panel,nodes,host,document:packageDocument,calls,get context(){return context;},set context(value){context=value;},
+    defer(){pending=[];return pending;},resume(){pending=null;},resolveCopy(){copyResolve();},get copies(){return copies;},get downloads(){return downloads;},get blob(){return downloadBlob;}};
+}
+const panel = packagePanelFixture();
+const choosePackageRow = async (fixture,index=0,checked=true) => {const input=fixture.nodes.candidates.querySelectorAll('input')[index];input.checked=checked;await input.emit('change');return input;};
+for(let index=0;index<4;index++) await choosePackageRow(panel,index);
+panel.nodes.scope.value='artifacts'; await panel.nodes.scope.emit('change');
+for(let index=0;index<2;index++) await choosePackageRow(panel,index);
+await panel.nodes.export.emit('click');
+assert.equal(panel.panel.controller.model.status,'ready'); assert.equal(panel.downloads,0); assert.equal(panel.copies,0,'Validation must never copy automatically');
+assert.match(panel.nodes.report.textContent,/Authenticity.*not established/); assert.match(panel.nodes.report.textContent,/Unknown historical facts/);
+assert.match(panel.nodes.report.textContent,/markers.*overlap/i); assert.match(panel.nodes.report.textContent,/time 10 ns/);
+await panel.nodes.download.emit('click'); assert.equal(panel.downloads,1); assert.deepEqual(new Uint8Array(await panel.blob.arrayBuffer()),packageGoldenBytes);
+const staleCopy=panel.nodes.copy.emit('click'); assert.equal(panel.copies,1); await panel.nodes.clear.emit('click');
+const clearedNotice=panel.nodes.notice.textContent;panel.resolveCopy();await staleCopy;assert.equal(panel.nodes.notice.textContent,clearedNotice);
+// Repeated clipboard actions share the active explicit write, and leaving/reopening retires its notice.
+await panel.panel.controller.validate({size:packageGoldenBytes.length,arrayBuffer:async()=>packageGoldenBytes.buffer});
+const copy=panel.nodes.copy.emit('click');await panel.nodes.copy.emit('click');assert.equal(panel.copies,2);
+panel.panel.setVisible(false);panel.panel.setVisible(true);const reopenedNotice=panel.nodes.notice.textContent;panel.resolveCopy();await copy;
+assert.equal(panel.nodes.notice.textContent,reopenedNotice);
+const nativePanel=packagePanelFixture(true);
+await nativePanel.panel.controller.validate({size:packageGoldenBytes.length,arrayBuffer:async()=>packageGoldenBytes.buffer});
+assert.equal(nativePanel.nodes.download.disabled,true);assert.match(nativePanel.nodes['save-note'].textContent,/Download is unavailable in the native app/);
+await nativePanel.nodes.download.emit('click');assert.equal(nativePanel.downloads,0);assert.equal(nativePanel.nodes.copy.disabled,false);
+const nativeCopy=nativePanel.nodes.copy.emit('click');nativePanel.resolveCopy();await nativeCopy;assert.match(nativePanel.nodes.notice.textContent,/copied/);
+// The focused identity and scroll survive an artifact-only catalog refresh.
+panel.nodes.scope.value='artifacts';await panel.nodes.scope.emit('change');
+const focused=await choosePackageRow(panel,0);focused.focus();panel.nodes.candidates.scrollTop=42;
+panel.context={...panel.context,artifacts:[...panel.context.artifacts,{...panel.context.artifacts[0],artifact_id:'10'}]};panel.panel.sync();
+assert.equal(panel.document.activeElement.dataset.packageKey,focused.dataset.packageKey);assert.equal(panel.nodes.candidates.scrollTop,42);
+const selectedDisclosure=panel.nodes.selected.children[0];selectedDisclosure.open=true;panel.panel.sync();assert.equal(panel.nodes.selected.children[0],selectedDisclosure);
+panel.context={...panel.context,artifacts:[]};panel.panel.sync();assert.equal(panel.nodes.candidates.children.length,0);
+assert.equal(panel.document.activeElement,panel.nodes.candidates);assert.match(panel.nodes.selected.textContent,/session 7 \/ artifact 9/,'Eviction keeps exact selection visible');
+// Late export and validation cannot win after Escape, another request, or leaving the screen.
+panel.nodes.scope.value='request';await panel.nodes.scope.emit('change');await choosePackageRow(panel,0);
+let pending=panel.defer();const escaped=panel.nodes.export.emit('click');assert.equal(pending.length,1);assert.equal(panel.document.activeElement,panel.nodes.cancel);
+await panel.host.emit('keydown',{key:'Escape',preventDefault(){},stopPropagation(){}});assert.equal(pending[0].options.signal.aborted,true);
+pending[0].resolve(new Response(packageGoldenBytes));await escaped;assert.equal(panel.panel.controller.model.status,'cancelled');
+const switched=panel.nodes.export.emit('click');assert.equal(pending.length,2);panel.context={...panel.context,requestId:'other'};panel.panel.sync();
+pending[1].resolve(new Response(packageGoldenBytes));await switched;assert.equal(panel.panel.controller.model.bytes,null);assert.match(panel.nodes.selection.textContent,/0 \/ 1,024/);
+await choosePackageRow(panel,0);const leaving=panel.nodes.export.emit('click');panel.panel.setVisible(false);pending[2].resolve(new Response(packageGoldenBytes));await leaving;
+assert.equal(panel.panel.controller.model.bytes,null);panel.panel.setVisible(true);panel.resume();
+// Candidate mounting is bounded, paging never selects new rows, and the artifact cap holds across pages.
+panel.context={...panel.context,artifacts:Array.from({length:65},(_,index)=>({...packageGolden.records.artifacts[0],session_id:'7',artifact_id:String(index+1)}))};
+panel.nodes.scope.value='artifacts';await panel.nodes.scope.emit('change');assert.equal(panel.nodes.candidates.children.length,50);
+await panel.nodes.clear.emit('click');for(let index=0;index<50;index++) await choosePackageRow(panel,index);
+await panel.nodes.next.emit('click');assert.equal(panel.nodes.candidates.children.length,15);for(let index=0;index<15;index++) await choosePackageRow(panel,index);
+assert.match(panel.nodes.selection.textContent,/64 \/ 64/);assert.equal(panel.nodes.candidates.querySelectorAll('input')[14].checked,false);assert.match(panel.nodes.notice.textContent,/Selection limit/);
+assert.equal(panel.nodes.selected.children[0].querySelectorAll('li').length,50);
+await panel.nodes.clear.emit('click');
+panel.context={...panel.context,requestEvents:Array.from({length:1025},(_,index)=>({...packageGolden.records.events[0],session_id:'7',process_id:42,sequence_number:String(index+1)}))};
+panel.nodes.scope.value='request';await panel.nodes.scope.emit('change');
+for(let page=0;page<21;page++) {
+  assert(panel.nodes.candidates.children.length<=50);
+  for(let index=0;index<panel.nodes.candidates.children.length;index++) await choosePackageRow(panel,index);
+  if(page<20) await panel.nodes.next.emit('click');
+}
+assert.match(panel.nodes.selection.textContent,/1024 \/ 1,024/);assert.equal(panel.nodes.candidates.querySelectorAll('input')[24].checked,false);
+console.log('PASS package panel explicit actions, exact download bytes, native fallback, clipboard ownership, keyed refresh focus, eviction, caps, paging, Escape/navigation and stale selection (DOM fixture; not rendered QA)');
+
 const trafficSource = await readFile(join(root, "apps/research-ui/traffic_view.js"), "utf8");
 const trafficUI = runInNewContext(trafficSource + ";({trafficSortedRequests,trafficWindow,renderTrafficRows,renderTrafficDetails,trafficPaneSignature,trafficTableTypeLabel,TRAFFIC_ROW_LIMIT})", {
   document: trafficDocument, URL, TextEncoder, TextDecoder, Uint8Array, queueMicrotask,
@@ -550,6 +812,25 @@ for (const [validate, legacy] of [
 }
 console.log("PASS legacy and annotated Analyst/JWT failures, unchanged successes and bounded reason rejection");
 
+// An unchanged event ETag must not prevent artifact-only updates reaching Evidence.
+const packageRefreshState = {artifactRefreshing:false,artifactEtag:null,artifactCatalogSignature:null,artifacts:[],openArtifactIds:[],selectedArtifactId:null,sessionMode:'live'};
+let packageRefreshBody={artifacts:packageGolden.records.artifacts.map(row=>({...row,...row.key}))}, packageRefreshSyncs=0;
+const packageArtifactRefresh=runInNewContext(appSection('      async function refreshArtifacts()', '      function showScreen(')+';refreshArtifacts',{
+  state:packageRefreshState,location:{protocol:'http:'},fetch:async()=>Response.json(packageRefreshBody),isArtifactResponse:()=>true,
+  renderShellStatus(){},renderSourceHealth(){},renderSources(){},renderFingerprintActivity(){},loadArtifactContent(){},loadWasmInspection(){},
+  nativeCanvasCaptureDisplayLimit:10,document:{querySelector:()=>({hidden:true})},evidencePackagePanel:{sync(){packageRefreshSyncs++;}}
+});
+await packageArtifactRefresh();assert.equal(packageRefreshState.artifacts.length,2);assert.equal(packageRefreshSyncs,1);
+packageRefreshBody={artifacts:[]};await packageArtifactRefresh();assert.equal(packageRefreshState.artifacts.length,0);assert.equal(packageRefreshSyncs,2);
+console.log('PASS artifact-only and empty-catalog refresh synchronize the Evidence panel');
+
+// Background request eviction also happens outside Traffic; it must retire an
+// Evidence operation immediately rather than waiting for the next view render.
+const packageResetState={selectedRequestId:'evicted',originTraceGeneration:0,signalProfileGeneration:0};let packageResetContext;
+const packageReset=runInNewContext(appSection('      function resetRequestSelection()', '      function renderRequestCount(')+';resetRequestSelection',{
+  state:packageResetState,evidencePackagePanel:{sync(){packageResetContext=packageResetState.selectedRequestId;}}
+});packageReset();assert.equal(packageResetContext,null);
+
 // Every inspector render must refresh the strip from the same current request;
 // lifecycle callers must not be able to leave a stale pending/status badge.
 const summaryState = {selectedRequestId: "current", requests: [uiRequest("current")], inspectorTab: "headers",
@@ -557,12 +838,12 @@ const summaryState = {selectedRequestId: "current", requests: [uiRequest("curren
 const summaryElements = {};
 for (const name of ["selectedMethod", "selectedStatus", "selectedUrl", "requestCopyUrl", "requestCollectionPivot", "requestInspector", "requestSearchScope", "requestFilter"]) summaryElements[name] = new TrafficFixtureNode();
 summaryElements.requestSearchScope.value = "url";
-const summaryNodes = new Map(["#exchange-inspector", ".traffic-grid", ".detail-pane", "#request-evidence-toggle"].map(key => [key, new TrafficFixtureNode()]));
+const summaryNodes = new Map(["#exchange-inspector", ".traffic-grid", ".detail-pane", "#request-evidence-toggle", "#request-package-entry"].map(key => [key, new TrafficFixtureNode()]));
 let renderedSummaryRequest;
 const summaryInspector = runInNewContext(
   appSection("      function updateSelectionSummary(", "      function selectRequest(") +
   appSection("      function renderInspector()", "      function renderEvidence()") + ";renderInspector", {
-    state: summaryState, elements: summaryElements,
+    state: summaryState, elements: summaryElements, evidencePackagePanel: {sync() {}},
     document: {querySelectorAll: () => [], querySelector: selector => summaryNodes.get(selector)},
     renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;}, openFieldProvenance() {},
   });
@@ -1260,17 +1541,164 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
   return {status:'passed',path:'browser development Sources UI',source:'synthetic immutable-artifact fixture; no analyzed JavaScript executed',viewports:[[1440,900],[760,560]],checks:['real hit-tested Facts controls','offline HTTP artifact availability','100-row paging','keyboard categories and disclosure','UTF-8/BOM original-byte navigation','profile-complete/partial/truncated/unknown/unavailable/error states','identity rejection and prior-report retention','Cancel and explicit retry','stale selection','Close/Escape/reopen focus','narrow overlay dismissal','workspace return']};
 }
 
+// The rendered fixture tests presentation and user actions. The separate real
+// native-writer/HTTP probe establishes authoritative export and validation.
+function evidenceBrowserFixture() {
+  const fixture={mode:'valid',requests:[],pending:[],lastValidation:null};
+  const bytes=packageGoldenBytes;
+  fixture.events=packageGolden.records.events.map(row=>({...row,...row.key}));
+  fixture.artifacts=packageGolden.records.artifacts.map(row=>({...row,...row.key}));
+  fixture.handle=async(request,response)=>{
+    const path=new URL(request.url,'http://127.0.0.1').pathname;
+    if(!['/api/evidence/packages/export','/api/evidence/packages/validate'].includes(path)) return false;
+    let body=Buffer.alloc(0);
+    for await(const chunk of request) {
+      if(body.length+chunk.length>4194304){response.writeHead(413);response.end();return true;}
+      body=Buffer.concat([body,chunk]);
+    }
+    fixture.requests.push({path,bytes:body.length});
+    if(path.endsWith('/validate'))fixture.lastValidation=body;
+    const mode=fixture.mode;
+    if(mode==='pending_export'&&path.endsWith('/export')||mode==='pending_validate'&&path.endsWith('/validate')) await new Promise(resolve=>fixture.pending.push(resolve));
+    if(response.destroyed)return true;
+    const send=(status,value)=>{response.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});response.end(value);};
+    if(mode==='writer_busy'){send(409,'{"error":"Synthetic held writer lease"}');return true;}
+    if(mode==='unavailable'){send(503,'{"error":"Synthetic unavailable guarded store"}');return true;}
+    if(path.endsWith('/export')){send(200,bytes);return true;}
+    const invalid=mode==='invalid'||body.includes(Buffer.from('"protocol_version": 1, "protocol_version": 1'));
+    const value=mode==='unsupported'?{...packageInvalid,status:'unsupported'}:invalid?packageInvalid:packageValid;
+    send(200,JSON.stringify(value));return true;
+  };
+  fixture.release=()=>{for(const resolve of fixture.pending.splice(0))resolve();};
+  return fixture;
+}
+// Exercise raw request admission and fixture status transitions before launching
+// Chrome so a broken synthetic service cannot silently masquerade as UI success.
+const evidenceFixtureControl=evidenceBrowserFixture();
+async function evidenceFixtureResponse(path,body,mode='valid') {
+  evidenceFixtureControl.mode=mode;
+  const response={destroyed:false,writeHead(status,headers){this.status=status;this.headers=headers;},end(value){this.body=value;}};
+  assert(await evidenceFixtureControl.handle({url:path,async *[Symbol.asyncIterator](){yield body;}},response));return response;
+}
+assert.deepEqual((await evidenceFixtureResponse('/api/evidence/packages/export',Buffer.from('{}'))).body,packageGoldenBytes);
+assert.equal(JSON.parse((await evidenceFixtureResponse('/api/evidence/packages/validate',packageGoldenBytes)).body).status,'valid');
+for(const [mode,status] of [['writer_busy',409],['unavailable',503]])assert.equal((await evidenceFixtureResponse('/api/evidence/packages/export',Buffer.from('{}'),mode)).status,status);
+for(const status of ['invalid','unsupported'])assert.equal(JSON.parse((await evidenceFixtureResponse('/api/evidence/packages/validate',packageGoldenBytes,status)).body).status,status);
+console.log('PASS Evidence browser fixture raw bytes, valid/invalid/unsupported and guarded-export errors (not rendered QA)');
+
+async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture,setFile,verifyDownload}) {
+  const status=()=>evaluate('evidencePackagePanel.controller.model.status');
+  const until=async(expression,message)=>{const deadline=Date.now()+5000;while(Date.now()<deadline){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,25));}assert.fail(message);};
+  const ready=()=>until("evidencePackagePanel.controller.model.status==='ready'",'Validated metadata did not become ready');
+  const press=(value,code=value)=>key(value,code,{windowsVirtualKeyCode:({Enter:13,Escape:27,Home:36,End:35,ArrowDown:40,Tab:9,' ':32})[value],...(value==='Enter'?{text:'\r',unmodifiedText:'\r'}:value===' '?{text:' ',unmodifiedText:' '}:{})});
+  const reveal=async selector=>{
+    for(let attempt=0;attempt<4;attempt++){
+      const delta=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});if(!n)throw new Error('Missing Evidence control');const p=n.closest('.evidence-content');if(!p)return 0;const r=n.getBoundingClientRect(),b=p.getBoundingClientRect();return r.top<b.top+8?r.top-b.top-8:r.bottom>b.bottom-8?r.bottom-b.bottom+8:0;})()`);
+      if(Math.abs(delta)<=1)return;
+      await wheel('.evidence-content',delta,true);
+    }
+  };
+  const packageClick=async selector=>{await reveal(selector);await click(selector);};
+  const scope=async value=>{await packageClick('[data-package-scope]');await press(value==='artifacts'?'End':'Home');if(value==='retained')await press('ArrowDown');await press('Enter');await until(`document.querySelector('[data-package-scope]').value===${JSON.stringify(value)}`,'Keyboard retained-view selection failed');};
+  const pending=async()=>{const deadline=Date.now()+5000;while(Date.now()<deadline){if(fixture.pending.length)return;await new Promise(resolve=>setTimeout(resolve,25));}assert.fail('Evidence request never reached the delayed server');};
+  const geometry=async label=>{
+    const value=await evaluate(`(()=>{const p=document.querySelector('.evidence-content'),r=p.getBoundingClientRect(),n=document.querySelector('#evidence-package-panel');return {width:innerWidth,height:innerHeight,left:r.left,right:r.right,top:r.top,bottom:r.bottom,client:p.clientHeight,scroll:p.scrollHeight,scrollTop:p.scrollTop,panelWidth:n.clientWidth,panelScroll:n.scrollWidth,pageWidth:document.documentElement.scrollWidth};})()`);
+    assert(value.right<=value.width+1&&value.bottom<=value.height+1&&value.left>=0&&value.client>=120,`${label}: Evidence viewport must remain usable`);
+    assert(value.pageWidth<=value.width+1&&value.panelScroll<=value.panelWidth+1,`${label}: package text/controls must not cause horizontal overflow`);return value;
+  };
+  await evaluate(`window.evidenceFixtureEvents=${JSON.stringify(fixture.events)};state.events=evidenceFixtureEvents;state.artifacts=${JSON.stringify(fixture.artifacts)};state.sessionMode='demo';state.requests=[{id:'package-request',path:'https://fixture.invalid/package',method:'GET',status:200,time:1,type:'xhr',origin:'demo',tabId:'qa-tab',operation:'synthetic_qa',events:evidenceFixtureEvents,exchange:{request:{state:'empty',headers:[]},response:{state:'empty',headers:[]}}}];renderRequests();`);
+  await click('[data-request-id="package-request"]');await click('#request-evidence-toggle');await click('#request-package-entry [data-screen="evidence"]');
+  assert.equal(await evaluate("document.querySelector('#screen-evidence').hidden"),false);
+  assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),false,'Evidence entry must dismiss the navigation popup');
+  assert.equal(await evaluate("document.querySelectorAll('[data-package-candidates] input').length"),4);
+  for(let index=1;index<=4;index++)await packageClick(`[data-package-candidates] label:nth-child(${index}) input`);
+  await scope('artifacts');for(let index=1;index<=2;index++)await packageClick(`[data-package-candidates] label:nth-child(${index}) input`);
+  assert.match(await evaluate("document.querySelector('[data-package-selection]').textContent"),/4 \/ 1,024.*2 \/ 64/);
+  await packageClick('[data-package-export]');await ready();
+  assert.deepEqual(new Uint8Array(fixture.lastValidation),packageGoldenBytes,'Rendered export must send exact original response bytes to validation');
+  assert.match(await evaluate("document.querySelector('[data-package-report]').textContent"),/Authenticity.*not established/);
+  assert.match(await evaluate("document.querySelector('[data-package-report]').textContent"),/Unknown historical facts/);
+  await reveal('[data-package-report] h3');await geometry('1440x900 coverage');await screenshot('evidence-wide-coverage');
+  await verifyDownload(()=>packageClick('[data-package-download]'));
+  assert.match(await evaluate("document.querySelector('[data-package-notice]').textContent"),/Download requested.*Check your browser downloads/);
+  fixture.mode='writer_busy';await packageClick('[data-package-export]');await until("evidencePackagePanel.controller.model.status==='error'",'Held writer failure was not shown');
+  assert.match(await evaluate("document.querySelector('[data-package-notice]').textContent"),/No writer was stopped/);await reveal('[data-package-notice]');await screenshot('evidence-writer-refused');
+  fixture.mode='unavailable';await packageClick('[data-package-export]');await until("evidencePackagePanel.controller.model.status==='error'",'Unavailable guarded store was not shown');
+  assert.match(await evaluate("document.querySelector('[data-package-notice]').textContent"),/legacy stores are unsupported/);
+  fixture.mode='valid';await packageClick('[data-package-export]');await ready();
+  await packageClick('[data-package-upload] > summary');await setFile('golden');
+  fixture.mode='unsupported';await packageClick('[data-package-validate]');await until("evidencePackagePanel.controller.model.status==='unsupported'",'Unsupported version/profile state was hidden');
+  await reveal('[data-package-notice]');await screenshot('evidence-unsupported');
+  fixture.mode='valid';await setFile('duplicate');await packageClick('[data-package-validate]');await until("evidencePackagePanel.controller.model.status==='invalid'",'Duplicate input was not shown invalid');
+  assert(fixture.lastValidation.includes(Buffer.from('"protocol_version": 1, "protocol_version": 1')),'File input bytes were normalized before validation');
+  assert.equal(await evaluate("document.querySelector('[data-package-download]').disabled"),true);
+  await setFile('golden');await packageClick('[data-package-validate]');await ready();
+  fixture.mode='pending_validate';await packageClick('[data-package-validate]');await pending();
+  assert.equal(await evaluate("document.activeElement.hasAttribute('data-package-cancel')"),true,'Loading operation must focus its available Cancel action');
+  await press('Escape');fixture.mode='valid';fixture.release();assert.equal(await status(),'cancelled');
+  assert.equal(await evaluate("document.activeElement.hasAttribute('data-package-validate')"),true);
+  await packageClick('[data-package-validate]');await ready();
+  fixture.mode='pending_export';await packageClick('[data-package-export]');await pending();await packageClick('[data-package-cancel]');fixture.mode='valid';fixture.release();
+  assert.equal(await status(),'cancelled');await packageClick('[data-package-export]');await ready();
+  fixture.mode='pending_export';await packageClick('[data-package-export]');await pending();await packageClick('[data-package-candidates] label:first-child input');fixture.mode='valid';fixture.release();
+  assert.equal(await status(),'idle');assert.equal(await evaluate('evidencePackagePanel.controller.model.bytes'),null);
+  await packageClick('[data-package-candidates] label:first-child input');
+  fixture.mode='pending_validate';await packageClick('[data-package-validate]');await pending();await click('#screen-evidence .back-button');fixture.mode='valid';fixture.release();
+  assert.equal(await evaluate("document.querySelector('#screen-traffic').hidden"),false);
+  await click('#request-package-entry [data-screen="evidence"]');assert.equal(await status(),'cancelled');
+  fixture.mode='pending_export';await packageClick('[data-package-export]');await pending();await evaluate('state.requests=[];resetRequestSelection()');fixture.mode='valid';fixture.release();assert.equal(await status(),'idle');
+  assert.match(await evaluate("document.querySelector('[data-package-selection]').textContent"),/0 \/ 1,024.*0 \/ 64/);
+  await packageClick('[data-package-clear]');
+  await evaluate("state.events=Array.from({length:55},(_,i)=>({...evidenceFixtureEvents[0],sequence_number:String(i+100)}));evidencePackagePanel.sync()");await scope('retained');
+  assert.equal(await evaluate("document.querySelectorAll('[data-package-candidates] input').length"),50);
+  await packageClick('[data-package-candidates] label:first-child input');
+  await evaluate("window.packageFocusedKey=document.activeElement.dataset.packageKey;state.events.push({...evidenceFixtureEvents[0],sequence_number:'999'});evidencePackagePanel.sync()");
+  assert.equal(await evaluate('document.activeElement.dataset.packageKey===packageFocusedKey'),true,'Refresh detached the focused identity');
+  const beforeScroll=await evaluate("document.querySelector('.evidence-content').scrollTop");await wheel('[data-package-candidates]',100);
+  assert(await evaluate("document.querySelector('[data-package-candidates]').scrollTop>0"));
+  assert.equal(await evaluate("document.querySelector('.evidence-content').scrollTop"),beforeScroll,'Candidate scrolling moved the outer panel');
+  await packageClick('[data-package-next]');assert.equal(await evaluate("document.querySelectorAll('[data-package-candidates] input').length"),6);
+  await packageClick('[data-package-candidates] label:first-child input');await press(' ' ,'Space');
+  assert.equal(await evaluate("document.querySelector('[data-package-candidates] input').checked"),false,'Space must toggle the focused exact identity');
+  await press('Tab');await press(' ','Space');assert.equal(await evaluate("document.querySelectorAll('[data-package-candidates] input')[1].checked"),true);
+  await packageClick('[data-package-selected] summary');assert.match(await evaluate("document.querySelector('[data-package-selected]').textContent"),/event 100.*event 151/);
+  await reveal('[data-package-selected]');await screenshot('evidence-selected-pages');
+  for(const [width,height] of [[760,560],[360,740]]){
+    await viewport(width,height);await reveal('[data-package-window]');await geometry(`${width}x${height}`);
+    const windowGeometry=await evaluate(`(()=>{const box=selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,height:r.height};};return {outer:box('.evidence-content'),pager:box('[data-package-pager]'),list:box('[data-package-candidates]')};})()`);
+    assert(windowGeometry.pager.top>=windowGeometry.outer.top&&windowGeometry.pager.bottom<=windowGeometry.outer.bottom&&windowGeometry.pager.height>=24,`${width}x${height}: candidate paging must stay visible with the list`);
+    assert(windowGeometry.pager.bottom<=windowGeometry.list.top&&windowGeometry.list.bottom<=windowGeometry.outer.bottom&&windowGeometry.list.top>=windowGeometry.outer.top,`${width}x${height}: pager and candidate list must fit together without overlap`);
+    assert(windowGeometry.list.height>=100,`${width}x${height}: candidate list must retain a usable height`);
+    await packageClick('[data-package-previous]');await packageClick('[data-package-next]');
+    await reveal('[data-package-candidates]');await screenshot(`evidence-${width}-selection`);
+    const before=await geometry('before narrow scroll');await wheel('.evidence-content',150,true);const after=await geometry('after narrow scroll');
+    assert(after.scrollTop!==before.scrollTop,'Narrow Evidence content must scroll independently');
+    await reveal('[data-package-validate]');await packageClick('[data-package-validate]');await ready();await reveal('[data-package-report] h3');await screenshot(`evidence-${width}-coverage`);
+  }
+  await click('#screen-evidence .back-button');await click('#advanced-navigation > summary');await click('.nav-button[data-screen="backtrace"]');await click('#screen-backtrace .package-navigation');
+  assert.equal(await evaluate("document.querySelector('#screen-evidence').hidden"),false,'Narrow Backtraces must expose the package entry');
+  assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),false,'Backtraces entry must dismiss the navigation popup');
+  await geometry('narrow Backtraces return');await screenshot('evidence-narrow-reopened');
+  return {status:'passed',path:'browser development Evidence UI',source:'synthetic closed metadata fixture; authoritative native-writer HTTP checks are separate',viewports:[[1440,900],[760,560],[360,740]],checks:['Requests and narrow Backtraces pointer entry','exact scoped selection','explicit guarded export and retry','explicit browser download exact bytes; no automatic save','real file input exact-byte validation','invalid and unsupported states','writer refusal and unavailable store','Cancel and Escape focus','stale selection and Back/reopen','50-row paging','keyed refresh focus','Space/Tab keyboard selection','independent candidate/panel scrolling','narrow geometry and screenshots']};
+}
+
 async function checkTrafficBrowser() {
   const executable = process.env.REB_UI_CHROMIUM;
   assert(executable, "Set REB_UI_CHROMIUM to the installed Chrome/Chromium executable. Sandbox flags are not overridden.");
-  const directory = await mkdtemp(join(tmpdir(), sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
-  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
+  const directory = await mkdtemp(join(tmpdir(), evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
+  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
   await mkdir(output, {recursive: true});
   let trafficApiMode = "offline";
   const factsFixture = sourceFactsBrowser ? await sourceFactsBrowserFixture() : null;
+  const evidenceFixture = evidenceBrowser ? evidenceBrowserFixture() : null;
+  if(evidenceFixture){
+    await writeFile(join(directory,'golden.json'),packageGoldenBytes);
+    await writeFile(join(directory,'duplicate.json'),new TextDecoder().decode(packageGoldenBytes).replace('"protocol_version": 1','"protocol_version": 1, "protocol_version": 1'));
+  }
   const server = createServer(async (request, response) => {
     const path = new URL(request.url, "http://127.0.0.1").pathname;
     if (factsFixture && await factsFixture.handle(request, response)) return;
+    if (evidenceFixture && await evidenceFixture.handle(request, response)) return;
     if (path === "/api/events" && trafficApiMode === "malformed") {response.writeHead(200, {"Content-Type": "application/json"}); response.end('{"malformed":true}'); return;}
     if (path.startsWith("/api/")) {response.writeHead(503, {"Content-Type": "application/json"}); response.end('{"error":"Synthetic offline QA fixture"}'); return;}
     const name = path === "/" ? "index.html" : path.slice(1);
@@ -1337,11 +1765,17 @@ async function checkTrafficBrowser() {
       await command("Emulation.setDeviceMetricsOverride", {width, height, deviceScaleFactor: 1, mobile: false});
       await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     };
-    const wheel = async (selector, deltaY) => {
+    const wheel = async (selector, deltaY, edge = false) => {
       const point = await evaluate(`(() => {
         const node = document.querySelector(${JSON.stringify(selector)}), r = node.getBoundingClientRect();
-        const x = r.x+r.width/2, y = r.y+r.height/2, hit = document.elementFromPoint(x,y);
+        // A scrollable child can consume a wheel aimed at its parent's center.
+        // Evidence deliberately keeps a visible padding gutter beside its list.
+        const x = ${edge} ? r.x+node.clientLeft+node.clientWidth-4 : r.x+r.width/2;
+        const y = r.y+r.height/2, hit = document.elementFromPoint(x,y);
         if (r.width <= 0 || r.height <= 0 || x < 0 || x >= innerWidth || y < 0 || y >= innerHeight || !hit || !node.contains(hit)) throw new Error('Scroll target is clipped or offscreen: '+${JSON.stringify(selector)});
+        if (${edge}) for(let child=hit;child&&child!==node;child=child.parentElement) {
+          if (['auto','scroll','overlay'].includes(getComputedStyle(child).overflowY) && child.scrollHeight>child.clientHeight+1) throw new Error('Outer wheel target is owned by a nested scroller: '+${JSON.stringify(selector)});
+        }
         return {x,y,scrollTop:node.scrollTop};
       })()`);
       await command("Input.dispatchMouseEvent", {type: "mouseWheel", x:point.x, y:point.y, deltaX: 0, deltaY});
@@ -1457,7 +1891,7 @@ async function checkTrafficBrowser() {
     };
     captureFailure = async () => {
       const result = await command("Page.captureScreenshot", {format: "png"});
-      await writeFile(join(output, sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
+      await writeFile(join(output, evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
     };
     await viewport(1440, 900);
     await command("Page.navigate", {url: `http://127.0.0.1:${server.address().port}/`});
@@ -1467,7 +1901,26 @@ async function checkTrafficBrowser() {
     }
     assert(await evaluate("typeof renderRequests === 'function'"), "Application did not initialize");
     diagnostics.phase = "interactive validation";
-    if (sourceFactsBrowser) {
+    if (evidenceBrowser) {
+      const setFile=async name=>{
+        const doc=await command('DOM.getDocument');
+        const input=await command('DOM.querySelector',{nodeId:doc.root.nodeId,selector:'[data-package-file]'});
+        await command('DOM.setFileInputFiles',{nodeId:input.nodeId,files:[join(directory,name+'.json')]});
+      };
+      const downloadDirectory=join(directory,'downloads');await mkdir(downloadDirectory);
+      await command('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:downloadDirectory},false);
+      const verifyDownload=async trigger=>{
+        assert.deepEqual(await readdir(downloadDirectory),[],'Validation must not automatically save a file');
+        await trigger();
+        const deadline=Date.now()+5000;let saved;
+        while(Date.now()<deadline){try{saved=await readFile(join(downloadDirectory,'selected.reb-evidence.json'));if((await readdir(downloadDirectory)).every(name=>!name.endsWith('.crdownload')))break;}catch{}await new Promise(resolve=>setTimeout(resolve,25));}
+        assert(saved,'Explicit Download did not produce a completed file');
+        assert.deepEqual(new Uint8Array(saved),packageGoldenBytes,'Browser download must preserve exact validated bytes');
+        assert.deepEqual(await readdir(downloadDirectory),['selected.reb-evidence.json']);
+      };
+      validation=await checkEvidenceInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:evidenceFixture,setFile,verifyDownload});
+      assert.deepEqual(runtimeErrors,[],"Application raised uncaught errors during Evidence QA");
+    } else if (sourceFactsBrowser) {
       validation = await checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:factsFixture});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Sources QA");
     } else {
@@ -1578,6 +2031,7 @@ async function checkTrafficBrowser() {
     try {await lifecycle?.stop();}
     catch (error) {failure ??= error; diagnostics.cleanup_error = String(error.message).slice(0, 2048);}
     factsFixture?.release();
+    evidenceFixture?.release();
     server.closeAllConnections();
     if (server.listening) await new Promise(resolve => server.close(resolve));
     // Keep a profile only when its owned process could not be stopped.
@@ -1589,9 +2043,9 @@ async function checkTrafficBrowser() {
   }
   if (failure) throw failure;
   await writeFile(join(output, "validation.json"), JSON.stringify(validation, null, 2));
-  console.log(`PASS real Chromium ${sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
+  console.log(`PASS real Chromium ${evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
 }
-if (trafficBrowser || sourceFactsBrowser) {await checkTrafficBrowser(); process.exit(0);}
+if (trafficBrowser || sourceFactsBrowser || evidenceBrowser) {await checkTrafficBrowser(); process.exit(0);}
 
 if (fieldsOnly) process.exit(0);
 const temporary = await mkdtemp(join(tmpdir(), "origin-trace-debugger-"));

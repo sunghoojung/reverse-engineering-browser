@@ -95,6 +95,25 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+      - name: Exercise Evidence metadata in installed Chrome
+        if: ${{ !cancelled() }}
+        run: |
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          printf 'Browser executable: %s\n' "$REB_UI_CHROMIUM"
+          node --version
+          node tools/check-origin-trace-debugger.mjs --evidence-ui-browser
+
+      - name: Upload rendered Evidence metadata QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: evidence-ui-${{ github.run_id }}
+          path: build/evidence-ui-qa
+          if-no-files-found: ignore
+          retention-days: 3
+
   test:
     timeout-minutes: 15
     strategy:

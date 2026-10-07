@@ -1,3 +1,9 @@
+      const evidencePackagePanel = createEvidencePackagePanel({getContext: () => ({
+        requestId: state.selectedRequestId,
+        requestEvents: state.requests.find(request => request.id === state.selectedRequestId)?.events ?? [],
+        events: state.events, artifacts: state.artifacts, eventsLimited: state.eventsLimited
+      })});
+
       const sourceFactsPanel = createSourceFactsPanel({
         getSource: selectedSource,
         onNavigate: revealSourceFactRange,
@@ -966,6 +972,7 @@
         state.signalProfileKey = null;
         state.signalProfileEtag = null;
         state.signalProfileGeneration += 1;
+        evidencePackagePanel.sync();
       }
 
       function renderRequestCount(visibleCount, loadedCount) {
@@ -1592,6 +1599,8 @@
       }
 
       function renderInspector() {
+        evidencePackagePanel.sync();
+        document.querySelector('#request-package-entry').hidden = state.inspectorTab !== 'evidence';
         document.querySelectorAll('.inspector-tab').forEach(tab => {
           const selected = tab.dataset.inspectorTab === state.inspectorTab;
           tab.setAttribute('aria-selected', String(selected));
@@ -1750,6 +1759,7 @@
       }
 
       function renderEvidence() {
+        evidencePackagePanel.sync();
         document.querySelectorAll('.nav-button[data-screen="experiments"]')
           .forEach(button => {
             button.disabled = false;
@@ -8298,11 +8308,13 @@
           renderSources();
         } finally {
           state.artifactRefreshing = false;
+          evidencePackagePanel.sync();
         }
       }
 
       function showScreen(name, trigger = null) {
         const screenName = name === 'backtraces' ? 'backtrace' : name;
+        evidencePackagePanel.setVisible(screenName === 'evidence');
         if (screenName !== 'sources') sourceFactsPanel.cancel();
         if (screenName !== 'sources' && state.sourceHooksOpen) closeSourceHooks(false);
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
@@ -8317,6 +8329,7 @@
             }
           } else button.removeAttribute('aria-current');
         });
+        if (screenName === 'evidence') document.querySelector('#advanced-navigation').open = false;
         if (screenName === 'signals') renderFingerprintActivity();
         if (screenName === 'traffic') renderRuntimeHookTraffic();
         if (screenName === 'backtrace') renderBacktrace();

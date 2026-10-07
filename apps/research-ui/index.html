@@ -117,6 +117,7 @@
                 <div id="exchange-inspector" class="exchange-inspector" role="tabpanel" aria-labelledby="inspector-tab-headers"></div>
                 <div hidden id="request-inspector" class="request-inspector" role="tabpanel" aria-labelledby="inspector-tab-payload" tabindex="0">
                   <h1 id="request-prompt">Choose a request value and trace where it came from.</h1>
+                  <div id="request-package-entry" class="package-entry" hidden><button class="secondary-button" type="button" data-screen="evidence">Coverage &amp; metadata packages</button><span>Exact native identities; API markers do not establish completion.</span></div>
                   <div id="field-tabs" class="field-tabs" role="tablist" aria-label="Request values">
                     <button id="field-tab-body" class="field-tab" type="button" role="tab" data-field-tab="body" aria-controls="field-tree" aria-selected="true">Body</button>
                     <button id="field-tab-headers" class="field-tab" type="button" role="tab" data-field-tab="headers" aria-controls="field-tree" aria-selected="false" tabindex="-1">Headers</button>
@@ -387,7 +388,7 @@
           <section id="screen-backtrace" class="screen" aria-label="Request origin trace" hidden>
             <header class="screen-head">
               <div><h1>Backtraces</h1><div id="backtrace-subtitle" class="screen-subtitle">Follow a request back to its recorded origin.</div></div>
-              <div class="screen-head-actions"><button class="secondary-button" type="button" data-screen="traffic">View traffic</button></div>
+              <div class="screen-head-actions"><button class="secondary-button package-navigation" type="button" data-screen="evidence">Metadata packages</button><button class="secondary-button" type="button" data-screen="traffic">View traffic</button></div>
             </header>
             <div class="trace-toolbar">
               <label for="trace-request">Request</label>
@@ -415,16 +416,37 @@
 
           <section id="screen-evidence" class="screen" aria-label="Supporting evidence" hidden>
             <header class="screen-head">
-              <button class="back-button" type="button" data-screen="backtrace" aria-label="Back to trace">←</button>
-              <div><h1>Supporting Evidence</h1><div class="screen-subtitle">Probe events are evidence for the selected backtrace, not the starting point</div></div>
+              <button class="back-button" type="button" data-screen="traffic" aria-label="Back to requests">←</button>
+              <div><h1>Supporting Evidence</h1><div class="screen-subtitle">Exact metadata selections and bounded coverage</div></div>
+              <div class="screen-head-actions"><button class="secondary-button" type="button" data-screen="backtrace">Backtrace</button></div>
             </header>
-            <div class="evidence-tools">
-              <span class="scope-pill">session 1</span><span class="scope-pill">navigation 100</span><span class="scope-pill">frame 200</span>
-              <span id="evidence-count" class="evidence-count">0 events</span>
-            </div>
+            <div class="evidence-content">
+              <section id="evidence-package-panel" class="evidence-package-panel" aria-label="Metadata package workflow">
+                <h2>Metadata packages</h2>
+                <p class="package-note">Metadata only; capture completeness is unknown. Export never stops writers.</p>
+                <div class="package-window" data-package-window>
+                  <div class="package-toolbar package-window-toolbar">
+                    <label>View <select data-package-scope aria-label="Package selection view"><option value="request">Selected request</option><option value="retained">Retained events</option><option value="artifacts">Retained artifacts</option></select></label>
+                    <div data-package-pager class="package-pager" role="group" aria-label="Candidate pages"><button data-package-previous class="secondary-button" type="button">Previous</button><span data-package-page></span><button data-package-next class="secondary-button" type="button">Next</button></div>
+                  </div>
+                  <p data-package-context class="package-note"></p>
+                  <div data-package-candidates class="package-candidates" tabindex="-1" aria-label="Exact identities to include"></div>
+                </div>
+                <p data-package-selection class="package-note"></p>
+                <div data-package-selected></div>
+                <div class="package-toolbar"><button data-package-export class="primary-button" type="button" disabled>Export selected metadata</button><button data-package-clear class="secondary-button" type="button">Clear selection</button></div>
+                <details data-package-policy class="package-disclosure"><summary>Limits &amp; privacy</summary><p class="package-note">Select up to 1,024 event keys and 64 artifact keys. These retained windows contain at most 5,000 events or 500 artifacts; they are not full store inventories. Selected identities persist across pages and eviction. Refresh never selects new records. Export checks current retained-store presence under updated stopped-store guards. Historical build, capture settings, observer regime and epochs remain unknown. Payloads, URLs, headers, cookies, bodies and artifact bytes are never exported.</p></details>
+                <details data-package-upload class="package-disclosure"><summary>Validate a supplied package</summary><p class="package-note">Choose metadata JSON up to 4 MiB. Original bytes stay with this local validator; duplicate keys are preserved for rejection. Validation imports no evidence and runs no code.</p><div class="package-toolbar"><label>Package file <input data-package-file type="file" accept=".json,application/json" /></label><button data-package-validate class="secondary-button" type="button" disabled>Validate original bytes</button></div></details>
+                <p data-package-notice class="package-notice" role="status" aria-live="polite"></p>
+                <div class="package-toolbar"><button data-package-cancel class="secondary-button" type="button" hidden>Cancel</button><button data-package-download class="secondary-button" type="button" aria-describedby="package-save-note" disabled>Download validated package</button><button data-package-copy class="secondary-button" type="button" disabled>Copy validated metadata</button></div>
+                <p id="package-save-note" data-package-save-note class="package-note"></p>
+                <div data-package-report class="package-report"></div>
+              </section>
+            <div class="evidence-tools"><span>Selected backtrace records</span><span id="evidence-count" class="evidence-count">0 events</span></div>
             <div class="evidence-table" role="table" aria-label="Evidence events">
               <div class="evidence-head" role="row"><span role="columnheader">Time</span><span role="columnheader">Source</span><span role="columnheader">Category</span><span role="columnheader">Operation</span><span role="columnheader">Correlation IDs</span><span role="columnheader">Value / artifact</span></div>
               <div id="evidence-rows"></div>
+            </div>
             </div>
           </section>
 
@@ -1241,6 +1263,7 @@
 
     <script src="app_state.js"></script>
     <script src="evidence_models.js"></script>
+    <script src="evidence_package.js"></script>
     <script src="source_syntax.js"></script>
     <script src="source_facts.js"></script>
     <script src="traffic_view.js"></script>

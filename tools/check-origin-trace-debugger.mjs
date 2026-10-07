@@ -867,6 +867,23 @@ assert.equal(summaryElements.selectedStatus.textContent, "-");
 assert.equal(summaryElements.requestCopyUrl.disabled, true);
 console.log("PASS selected strip and inspector share current pending/response/failed/empty request metadata");
 
+// Exercise the actual production listeners: selecting a tab is idempotent,
+// whereas the shortcut deliberately toggles Evidence back to Headers.
+const stickyInspectorState={inspectorTab:'evidence',fieldTab:'body',requests:[],selectedRequestId:null};
+const explicitEvidenceTab=new TrafficFixtureNode('button');explicitEvidenceTab.dataset.inspectorTab='evidence';
+const evidenceShortcut=new TrafficFixtureNode('button');
+runInNewContext(appSection("      document.querySelectorAll('.inspector-tab').forEach(button => button.addEventListener('click'", "      enableTabKeyboardNavigation('.inspector-tab');"), {
+  state:stickyInspectorState,document:{querySelectorAll:()=>[explicitEvidenceTab],querySelector:()=>evidenceShortcut},
+  renderInspector(){},renderEvidence(){},refreshRequestSignalProfile(){}
+});
+explicitEvidenceTab.click();assert.equal(stickyInspectorState.inspectorTab,'evidence');
+evidenceShortcut.click();assert.equal(stickyInspectorState.inspectorTab,'headers');
+explicitEvidenceTab.click();assert.equal(stickyInspectorState.inspectorTab,'evidence');
+explicitEvidenceTab.click();assert.equal(stickyInspectorState.inspectorTab,'evidence');
+evidenceShortcut.click();assert.equal(stickyInspectorState.inspectorTab,'headers');
+console.log('PASS explicit Evidence tab selection preserves sticky selection while its shortcut deliberately toggles to Headers');
+
+
 const pivotProfile = {signals: [{category: "canvas", event_count: "1", confidence: "observed", relation: "parent_chain"}]};
 const pivotState = {requests: [uiRequest("selected")], selectedRequestId: "selected", signalProfile: pivotProfile,
   signalProfileStatus: "ready", trafficDetailOpen: false, inspectorTab: "headers"};
@@ -1911,7 +1928,13 @@ async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,scre
     assert(value.pageWidth<=value.width+1&&value.panelScroll<=value.panelWidth+1,`${label}: package text/controls must not cause horizontal overflow`);return value;
   };
   await evaluate(`window.evidenceFixtureEvents=${JSON.stringify(fixture.events)};state.events=evidenceFixtureEvents;state.artifacts=${JSON.stringify(fixture.artifacts)};state.sessionMode='demo';state.requests=[{id:'package-request',path:'https://fixture.invalid/package',method:'GET',status:200,time:1,type:'xhr',origin:'demo',tabId:'qa-tab',operation:'synthetic_qa',events:evidenceFixtureEvents,exchange:{request:{state:'empty',headers:[]},response:{state:'empty',headers:[]}}}];renderRequests();`);
-  await click('[data-request-id="package-request"]');await click('#request-evidence-toggle');await click('#request-package-entry [data-screen="evidence"]');
+  await click('[data-request-id="package-request"]');
+  // Inspector tabs survive Back and request selection. This entry is explicit;
+  // the observation subtest above separately exercises the Evidence toggle.
+  await click('#inspector-tab-evidence');
+  assert.equal(await evaluate("state.inspectorTab"),'evidence');
+  assert.equal(await evaluate("document.querySelector('#request-package-entry').hidden"),false);
+  await click('#request-package-entry [data-screen="evidence"]');
   assert.equal(await evaluate("document.querySelector('#screen-evidence').hidden"),false);
   assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),false,'Evidence entry must dismiss the navigation popup');
   await click('#evidence-package-toggle');

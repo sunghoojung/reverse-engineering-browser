@@ -1069,8 +1069,10 @@ capture/observer coverage distinct from raw-byte verification or equivalent
 behavior. Failed or malformed replies preserve the last accepted result. Close,
 Return to observations, leaving Evidence and a changed request retire pending
 ownership while preserving the local file drafts. Ordinary refresh does not
-remount the controls, change drafts or rerun a comparison. Escape cancels active
-work; a second Escape closes comparison and returns focus to its explicit entry.
+remount the controls, change drafts or rerun a comparison. Starting from Compare
+or a paging control moves focus to enabled Cancel while that trigger is disabled.
+Completion restores the Compare control only if Cancel still owns focus; newer
+focus choices remain untouched. Escape cancels active work; a second Escape closes comparison and returns focus to its explicit entry.
 A departing document disposes the owned component; BFCache suspension cancels
 work without discarding drafts. Navigation history contains only view metadata,
 not file objects, exported keys, comparison buffers or approvals.

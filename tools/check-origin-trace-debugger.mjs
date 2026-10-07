@@ -2487,13 +2487,16 @@ function observationPanelFixture(narrow = false, options = {}) {
       if(match){const [,tag,name,value]=match; const actual=name.startsWith('data-')?this.dataset[name.slice(5).replace(/-([a-z])/g,(_,letter)=>letter.toUpperCase())]:this.getAttribute(name);return (!tag||this.tagName.toLowerCase()===tag)&&actual!==null&&actual!==undefined&&(value===undefined||actual===value);}
       return super.matches(selector);
     }
-    focus(){document.activeElement=this;}
+    // Model the browser's disabled-focus fixup only for the native-key regression.
+    set disabled(value){this._disabled=Boolean(value);if(options.nativeFocus&&this._disabled&&document.activeElement===this)document.activeElement=document.body;}
+    get disabled(){return Boolean(this._disabled);}
+    focus(){if(!options.nativeFocus||!this.disabled)document.activeElement=this;}
     scrollIntoView(){}
     removeEventListener(type,fn){this.listeners.set(type,(this.listeners.get(type)||[]).filter(listener=>listener!==fn));}
     replaceChildren(...nodes){if(this.contains(document.activeElement))document.activeElement=null;super.replaceChildren(...nodes);}
     emit(type,fields={}){for(const callback of this.listeners.get(type)??[])callback({target:this,currentTarget:this,preventDefault(){},stopPropagation(){},...fields});}
   }
-  document.createElement=tag=>new ObservationNode(tag);document.documentElement=new ObservationNode('html');if(options.native)document.documentElement.classList.add('native-shell');
+  document.createElement=tag=>new ObservationNode(tag);document.body=new ObservationNode('body');document.documentElement=new ObservationNode('html');if(options.native)document.documentElement.classList.add('native-shell');
   const ids=['evidence-investigation','evidence-rows','evidence-inspector','evidence-search','evidence-scope','evidence-workspace-notice','evidence-package-toggle','evidence-package-mode','evidence-return','evidence-trace','evidence-window-count','evidence-previous','evidence-next','evidence-context-kind','evidence-context-title','evidence-context-note','evidence-count','evidence-coverage-summary','evidence-gap-details','evidence-coverage-details','evidence-coverage-popover','evidence-compare-toggle','evidence-comparison-section','evidence-comparison-panel','evidence-comparison-close','evidence-comparison-unavailable','evidence-package-panel'];
   const nodes=Object.fromEntries(ids.map(id=>[id,new ObservationNode()]));
   document.querySelector=selector=>nodes[selector.slice(1)]??null;
@@ -2609,6 +2612,53 @@ let hideResponse;hostReply=()=>new Promise(resolve=>{hideResponse=resolve;});con
 assert.deepEqual(Object.keys(hc.panel.snapshot()).sort(),['packages','page','pane','requestKey','selectedKey'],'Navigation stores bounded view metadata, never comparison files or result objects');
 n['evidence-compare-toggle'].click();const disposedHost=hostHandle();hc.panel.disposeComparison();assert.equal(hostHandle(),undefined);n['evidence-compare-toggle'].click();const replacementHost=hostHandle();assert.notEqual(replacementHost,disposedHost);assert.equal(replacementHost.controller.model.files[0],null);disposedHost.dispose();assert.equal(hostHandle(),replacementHost);assert(n['evidence-comparison-panel'].children.length>0);hc.panel.disposeComparison();
 const storedComparison=observationPanelFixture(false,{protocol:'reb:',fetcher:()=>{throw new Error('Stored-native comparison must not dispatch');}});storedComparison.nodes['evidence-package-toggle'].click();storedComparison.nodes['evidence-compare-toggle'].click();assert.equal(storedComparison.nodes['evidence-comparison-panel'].rebEvidenceComparison,undefined);assert.match(storedComparison.nodes['evidence-comparison-unavailable'].textContent,/unavailable in stored-evidence native mode/);
+// Unlike directly emitting on the section, a physical key begins at the current
+// focus owner. Native disabled buttons lose focus before Escape can bubble.
+for(const action of ['compare','previous','next']) {
+  let release,requests=0;
+  const fixture=observationPanelFixture(false,{nativeFocus:true,fetcher:()=>{requests++;return new Promise(resolve=>{release=resolve;});}});
+  const {nodes,document:doc}=fixture;
+  nodes['evidence-package-toggle'].click();nodes['evidence-compare-toggle'].click();
+  const host=nodes['evidence-comparison-panel'],handle=host.rebEvidenceComparison;
+  for(const input of host.querySelectorAll('input')){input.files=[comparisonFile(comparisonOriginal)];input.emit('change');}
+  if(action!=='compare')handle.controller.model.result={...comparisonResult,page:{offset:50,next_offset:100}};
+  const trigger=host.querySelector(`[data-comparison-action="${action}"]`);
+  trigger.disabled=false;trigger.focus();trigger.click();
+  assert.equal(handle.controller.model.busy,true);
+  assert.equal(doc.activeElement,host.querySelector('[data-comparison-action="cancel"]'),`${action}: disabling the active trigger must hand keyboard ownership to Cancel`);
+  for(let turn=0;turn<100&&!release;turn++)await new Promise(resolve=>setTimeout(resolve,0));
+  assert(release,'Held comparison must reach the service');
+  let stopped=false;
+  for(let target=doc.activeElement;target&&!stopped;target=target.parentNode)target.emit('keydown',{key:'Escape',stopPropagation(){stopped=true;}});
+  assert.equal(handle.controller.model.busy,false,'Escape from the actual focus owner must cancel');
+  assert.equal(nodes['evidence-comparison-section'].hidden,false);
+  assert.equal(doc.activeElement,host.querySelector('[data-comparison-action="compare"]'));
+  release(Response.json(comparisonResult));await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(requests,1,'Cancellation must not retry');
+  fixture.panel.disposeComparison();
+}
+// Completion may replace only its own disabled focus owner. A newer focus
+// selection, including a file input or control outside comparison, wins.
+for(const result of ['success','error']) for(const move of [null,'input','outside']) {
+  let release;
+  const fixture=observationPanelFixture(false,{nativeFocus:true,fetcher:()=>new Promise(resolve=>{release=resolve;})});
+  const {nodes,document:doc}=fixture;
+  fixture.panel.showPackages(true);fixture.panel.showComparison(true);
+  const host=nodes['evidence-comparison-panel'],handle=host.rebEvidenceComparison,inputs=host.querySelectorAll('input');
+  for(const input of inputs){input.files=[comparisonFile(comparisonOriginal)];input.emit('change');}
+  const compare=host.querySelector('[data-comparison-action="compare"]');compare.focus();compare.click();
+  for(let turn=0;turn<100&&!release;turn++)await new Promise(resolve=>setTimeout(resolve,0));
+  assert(release);
+  const expected=move==='input'?inputs[1]:move==='outside'?nodes['evidence-search']:compare;
+  if(move)expected.focus();
+  release(result==='success'?Response.json(comparisonResult):new Response('unavailable',{status:503}));
+  for(let turn=0;turn<100&&handle.controller.model.busy;turn++)await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(handle.controller.model.busy,false);
+  assert.equal(doc.activeElement,expected,`${result}: settlement must preserve ${move||'owned'} focus`);
+  assert.equal(Boolean(handle.controller.model.result),result==='success');
+  fixture.panel.disposeComparison();
+}
+console.log('PASS mounted comparison native-disabled focus ownership and focus-routed Escape for Compare/Previous/Next (DOM model, not rendered QA)');
 console.log('PASS mounted Evidence comparison host: observation-first lazy entry, draft/focus/DOM retention on refresh, Escape/Close/Return/navigation ownership, late file suppression, metadata-only history, owned disposal/remount and stored-native unavailability');
 // Invoke the actual application's page lifecycle handlers, not a replacement.
 const comparisonLifecycleApp=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
@@ -3801,7 +3851,7 @@ async function checkEvidenceComparisonInteractions({evaluate,viewport,click,key,
     await reveal(`${selector} .package-report-rows li:nth-child(4)`);await geometry(`${width} record`);await screenshot(`comparison-product-${width}-record`);
     await hit('#evidence-comparison-close');assert.equal(await evaluate("document.activeElement.id"),'evidence-compare-toggle');await press('Enter');assert.equal(await evaluate("document.activeElement.dataset.comparisonSide"),'0');assert(await evaluate(`${state}.controller.model.files.every((f,i)=>f===productComparisonFiles[i]||i===1&&f.name==='changed.json')`));
   }
-  await viewport(1440,900);fixture.mode='pending_compare';await hit('[data-comparison-action="compare"]');await until(`${state}.controller.model.busy`);await pending();await press('Escape');assert.equal(await evaluate(`${state}.controller.model.busy`),false);assert.equal(await evaluate("document.activeElement.dataset.comparisonAction"),'compare');fixture.release();fixture.mode='valid';
+  await viewport(1440,900);fixture.mode='pending_compare';await hit('[data-comparison-action="compare"]');await until(`${state}.controller.model.busy`);await pending();assert.equal(await evaluate("document.activeElement.dataset.comparisonAction"),'cancel','Pending comparison must keep keyboard ownership in its enabled Cancel control');await press('Escape');assert.equal(await evaluate(`${state}.controller.model.busy`),false);assert.equal(await evaluate("document.activeElement.dataset.comparisonAction"),'compare');fixture.release();fixture.mode='valid';
   await press('Escape');assert.equal(await evaluate("document.querySelector('#evidence-comparison-section').hidden"),true);assert.equal(await evaluate("document.activeElement.id"),'evidence-compare-toggle');const reopenCalls=calls();await press('Enter');assert.equal(calls(),reopenCalls,'Keyboard reopen must not replay');
   // Delay a real File.arrayBuffer, preserving the actual input/change workflow.
   await evaluate("window.comparisonOriginalFileRead=File.prototype.arrayBuffer;window.comparisonHoldFile=true;File.prototype.arrayBuffer=function(){if(window.comparisonHoldFile){window.comparisonHoldFile=false;const file=this;return new Promise((resolve,reject)=>{window.releaseProductFile=()=>comparisonOriginalFileRead.call(file).then(resolve,reject);});}return comparisonOriginalFileRead.call(this);}");

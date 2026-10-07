@@ -152,9 +152,16 @@
     const show = value => value.kind==='scalar' ? JSON.stringify(value.value) : `${value.kind} (${value.count} entries; inspect original for detail)`;
     const reference = r => r ? `${r.package_id} / ${r.facet}${r.key ? ' / '+Object.entries(r.key).map(([k,v])=>`${k}=${v}`).join(', ') : ''}` : 'No matched record';
     const controller=createController({fetcher,onChange:model=>{
+      const focused=doc.activeElement;
       compare.disabled=model.busy || model.files.some(f=>!f);cancel.disabled=!model.busy;
       notice.textContent=model.message;
       previous.disabled=model.busy || !model.result || model.result.page.offset===0; next.disabled=model.busy || !model.result || model.result.page.next_offset===null;
+      // Disabling the focused trigger otherwise sends native keyboard events to
+      // the document body, outside the comparison's scoped Escape handler.
+      if ([compare,cancel,previous,next].includes(focused) && focused.disabled) {
+        const nextFocus=model.busy ? cancel : compare;
+        if (!nextFocus.disabled) nextFocus.focus({preventScroll:true});
+      }
       if (results.resultIdentity === model.result) return;
       results.resultIdentity=model.result; results.replaceChildren();page.textContent='';
       if (!model.result) return;

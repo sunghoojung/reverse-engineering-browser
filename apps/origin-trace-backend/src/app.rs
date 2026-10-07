@@ -6,7 +6,7 @@ use crate::{
     decoder::Decoder,
     deobfuscation::Deobfuscator,
     error::{Code, Error, Phase, Reason, Result},
-    evidence, evidence_package,
+    evidence, evidence_package, float32,
     native_console::NativeConsole,
     origin_trace, source_facts, validation, vm, wasm,
     workspace::{Kind, Store},
@@ -30,12 +30,13 @@ use std::{
 };
 use tokio::sync::{Mutex, Semaphore};
 
-const UI_ASSETS: [&str; 15] = [
+const UI_ASSETS: [&str; 16] = [
     "index.html",
     "app.css",
     "app_state.js",
     "evidence_models.js",
     "evidence_package.js",
+    "float32_inspector.js",
     "source_syntax.js",
     "source_facts.js",
     "investigation_navigation.js",
@@ -152,6 +153,24 @@ impl App {
         })
         .await
         .map_err(|_| Error::new(500, "Package validator failed"))?
+    }
+    async fn float32_operation(&self, bytes: Vec<u8>) -> Result<Vec<u8>> {
+        let permit = tokio::time::timeout(Duration::from_secs(1), self.io.clone().acquire_owned())
+            .await
+            .map_err(|_| {
+                Error::new(408, "Float32 admission deadline exceeded").with_code(Code::Timeout)
+            })?
+            .map_err(|_| {
+                Error::new(503, "Float32 diagnostics unavailable")
+                    .with_code(Code::DependencyUnavailable)
+            })?;
+        let root = self.options.artifacts.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            float32::compare_bytes(&root, &bytes)
+        })
+        .await
+        .map_err(|_| Error::new(500, "Float32 diagnostic task failed"))?
     }
     async fn broker_connected(&self) -> bool {
         self.options.socket.is_none() || socket_connected(self.options.socket.as_deref()).await
@@ -718,6 +737,12 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                     .await
                     .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
             }
+            if path == "/api/float32/compare" {
+                return app
+                    .float32_operation(bytes.to_vec())
+                    .await
+                    .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
+            }
             let value: Value = serde_json::from_slice(&bytes)
                 .map_err(|_| Error::bad("The request body is malformed JSON"))?;
             if !value.is_object() {
@@ -942,6 +967,42 @@ mod tests {
                 assert_eq!(app.io.available_permits(), 4);
             } else if !package_pool {
                 assert_eq!(app.package_io.available_permits(), 2);
+            }
+            app.stop().await;
+        }
+    }
+    #[tokio::test]
+    async fn float32_admission_reasons_and_permit_release() {
+        for closed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut options = Options::parse_from(["origin-trace-backend"]);
+            options.artifacts = root.path().join("absent");
+            options.analyst_runner = Some(std::env::current_exe().unwrap());
+            let app = App::new(options, 0).await;
+            let permit = app.io.clone().acquire_many_owned(4).await.unwrap();
+            if closed {
+                app.io.close();
+            }
+            let error = app.float32_operation(b"{}".to_vec()).await.unwrap_err();
+            assert_eq!(error.status, if closed { 503 } else { 408 });
+            assert_eq!(
+                serde_json::to_value(&error).unwrap()["code"],
+                if closed {
+                    "dependency_unavailable"
+                } else {
+                    "timeout"
+                }
+            );
+            drop(permit);
+            if !closed {
+                assert_eq!(
+                    app.float32_operation(b"{}".to_vec())
+                        .await
+                        .unwrap_err()
+                        .status,
+                    400
+                );
+                assert_eq!(app.io.available_permits(), 4);
             }
             app.stop().await;
         }

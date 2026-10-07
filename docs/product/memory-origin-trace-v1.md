@@ -17,8 +17,35 @@ not a claim about an exact source statement or every asynchronous transition.
    match.
 4. Arm the trace, then click the page action that creates or changes the value.
 5. Inspect the chronological function-boundary rows. The first matching row is
-   highlighted and can open its live source location.
+   highlighted and shows its recorded source location.
 6. Stop an active trace or clear a completed result explicitly.
+
+## UI ownership and source identity
+
+The workspace records the submitted target, query, scope, and sample window.
+Target changes, observed execution-context destruction, source-ID reuse, and
+native generation resets expire the retained preview. Late action replies cannot
+relabel it as a new target's result. An unavailable or discarded reply does not
+mean the native trace stopped; only refreshed native state or an acknowledged
+explicit Stop establishes its current lifecycle. Older trace states cannot
+replace a newer sample window or revive a completed trace within the same native
+epoch. A validated poll received during a pending action is reconciled when the
+action settles, even if subsequent refreshes are 304. A matching terminal native
+poll ends an unread acknowledgement wait without waiting for the POST body.
+The 15-second Origin action deadline covers HTTP headers and body, not the
+trace's five-minute native lifetime. Expiry aborts only the HTTP read and reports
+an unconfirmed acknowledgement; it does not cancel native work or retry it.
+Target/context/epoch expiry also retires old request ownership. Late responses
+and old cleanup cannot clear a newer debugger action's pending latch. A native generation reset
+starts a new ordering epoch, so lower or reused trace IDs can be adopted without
+reviving an expired historical trace. Malformed acknowledgement generations never
+confirm Start, Stop or Clear.
+
+Version 1 locations contain a script ID, URL, line and column, but no recorded
+execution-context or source-hash identity. The UI therefore shows the recorded
+location as text and marks the live source link unavailable. It does not infer
+an exact source from a current script with a reused ID or matching URL. Completed
+samples stay ephemeral and bounded; this is not historical heap restoration.
 
 ## Sampling semantics
 

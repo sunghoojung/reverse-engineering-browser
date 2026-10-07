@@ -1,0 +1,279 @@
+{
+  "request": {
+    "protocol_version": 1,
+    "input": {
+      "representation": "float32-le",
+      "channels": 1,
+      "frames": 5,
+      "source": {
+        "kind": "bits",
+        "words": [
+          "3f800000",
+          "80000000",
+          "00000001",
+          "7f800000",
+          "7fc00001"
+        ]
+      }
+    },
+    "reference": {
+      "representation": "float32-le",
+      "channels": 1,
+      "frames": 5,
+      "source": {
+        "kind": "bits",
+        "words": [
+          "3f800001",
+          "00000000",
+          "00000002",
+          "7f800000",
+          "7fc00002"
+        ]
+      }
+    },
+    "tolerances": {
+      "absolute": 0,
+      "relative": 0,
+      "ulps": 0
+    },
+    "detail": {
+      "start": 0,
+      "limit": 64
+    }
+  },
+  "result": {
+    "comparison": {
+      "all_bits_equal": false,
+      "all_numeric_equal": false,
+      "all_within_tolerance": null,
+      "bit_equal_pairs": 1,
+      "compared_pairs": 5,
+      "excluded_nonfinite_pairs": 2,
+      "finite_pairs": 3,
+      "first_bit_mismatch": 0,
+      "input_tail": 0,
+      "layouts_match": true,
+      "maximum_absolute_delta": 1.1920928955078125e-07,
+      "maximum_relative_delta": 0.5,
+      "maximum_ulp_distance": 1,
+      "numeric_equal_pairs": 2,
+      "raw_bytes_equal": false,
+      "reference_tail": 0,
+      "representations_match": true,
+      "rms_delta": 6.882551541204759e-08,
+      "status": "complete",
+      "ulp_histogram": {
+        "five_to_sixteen": 0,
+        "one": 2,
+        "over_sixteen": 0,
+        "two_to_four": 0,
+        "zero": 1
+      },
+      "within_tolerance_pairs": 1
+    },
+    "detail": {
+      "limit": 64,
+      "next_start": null,
+      "returned": 5,
+      "rows": [
+        {
+          "byte_offset": 0,
+          "difference": {
+            "absolute_delta": 1.1920928955078125e-07,
+            "bit_equal": false,
+            "numeric_equal": false,
+            "relative_delta": 1.1920927533992823e-07,
+            "ulp_distance": 1,
+            "within_tolerance": false
+          },
+          "index": 0,
+          "input": {
+            "bits": "3f800000",
+            "class": "normal",
+            "sign_bit": 0,
+            "value": 1.0
+          },
+          "reference": {
+            "bits": "3f800001",
+            "class": "normal",
+            "sign_bit": 0,
+            "value": 1.0000001192092896
+          }
+        },
+        {
+          "byte_offset": 4,
+          "difference": {
+            "absolute_delta": 0.0,
+            "bit_equal": false,
+            "numeric_equal": true,
+            "relative_delta": 0.0,
+            "ulp_distance": 0,
+            "within_tolerance": true
+          },
+          "index": 1,
+          "input": {
+            "bits": "80000000",
+            "class": "zero",
+            "sign_bit": 1,
+            "value": -0.0
+          },
+          "reference": {
+            "bits": "00000000",
+            "class": "zero",
+            "sign_bit": 0,
+            "value": 0.0
+          }
+        },
+        {
+          "byte_offset": 8,
+          "difference": {
+            "absolute_delta": 1.401298464324817e-45,
+            "bit_equal": false,
+            "numeric_equal": false,
+            "relative_delta": 0.5,
+            "ulp_distance": 1,
+            "within_tolerance": false
+          },
+          "index": 2,
+          "input": {
+            "bits": "00000001",
+            "class": "subnormal",
+            "sign_bit": 0,
+            "value": 1.401298464324817e-45
+          },
+          "reference": {
+            "bits": "00000002",
+            "class": "subnormal",
+            "sign_bit": 0,
+            "value": 2.802596928649634e-45
+          }
+        },
+        {
+          "byte_offset": 12,
+          "difference": {
+            "absolute_delta": null,
+            "bit_equal": true,
+            "numeric_equal": true,
+            "relative_delta": null,
+            "ulp_distance": null,
+            "within_tolerance": null
+          },
+          "index": 3,
+          "input": {
+            "bits": "7f800000",
+            "class": "infinity",
+            "sign_bit": 0,
+            "value": null
+          },
+          "reference": {
+            "bits": "7f800000",
+            "class": "infinity",
+            "sign_bit": 0,
+            "value": null
+          }
+        },
+        {
+          "byte_offset": 16,
+          "difference": {
+            "absolute_delta": null,
+            "bit_equal": false,
+            "numeric_equal": false,
+            "relative_delta": null,
+            "ulp_distance": null,
+            "within_tolerance": null
+          },
+          "index": 4,
+          "input": {
+            "bits": "7fc00001",
+            "class": "nan",
+            "sign_bit": 0,
+            "value": null
+          },
+          "reference": {
+            "bits": "7fc00002",
+            "class": "nan",
+            "sign_bit": 0,
+            "value": null
+          }
+        }
+      ],
+      "start": 0,
+      "total": 5
+    },
+    "input": {
+      "artifact_id": null,
+      "byte_length": 20,
+      "channels": 1,
+      "frames": 5,
+      "layout": "interleaved",
+      "origin": "supplied_bits",
+      "representation": "float32-le",
+      "sample_count": 5,
+      "session_id": null,
+      "sha256": "1f735fc37d655e692175ae970b4420088430c80f24a7b597d1fb70530bce388d"
+    },
+    "input_summary": {
+      "finite_count": 3,
+      "finite_sum_absolute": 1.0,
+      "nan": 1,
+      "negative_infinity": 0,
+      "negative_zero": 1,
+      "normal": 1,
+      "positive_infinity": 1,
+      "positive_zero": 0,
+      "subnormal": 1
+    },
+    "limits": {
+      "bytes_per_input": 262144,
+      "detail_rows": 256,
+      "manifest_bytes": 8388608,
+      "manifest_records": 8192,
+      "request_bytes": 2097152,
+      "response_bytes": 524288,
+      "samples_per_input": 65536
+    },
+    "policies": {
+      "accumulation": "binary64_sequential_index_order",
+      "coverage": "complete_supplied_buffers_not_capture_completeness",
+      "nan": "never_numeric_equal_payload_preserved",
+      "nonfinite": "excluded_from_delta_ulp_tolerance",
+      "relative": "absolute_delta_over_maximum_magnitude_zero_is_zero",
+      "tolerance": "absolute_or_relative_or_ulp_finite_only",
+      "zero": "numeric_equal_bits_distinct"
+    },
+    "profile": "binary32-finite-steps-v1",
+    "protocol_version": 1,
+    "reference": {
+      "artifact_id": null,
+      "byte_length": 20,
+      "channels": 1,
+      "frames": 5,
+      "layout": "interleaved",
+      "origin": "supplied_bits",
+      "representation": "float32-le",
+      "sample_count": 5,
+      "session_id": null,
+      "sha256": "63b776d8e3f80f256c8ed5466073bdbcf4aeee8ef6d5a498339786e2a1d4430b"
+    },
+    "reference_summary": {
+      "finite_count": 3,
+      "finite_sum_absolute": 1.0000001192092896,
+      "nan": 1,
+      "negative_infinity": 0,
+      "negative_zero": 0,
+      "normal": 1,
+      "positive_infinity": 1,
+      "positive_zero": 1,
+      "subnormal": 1
+    },
+    "source_ids": [
+      "rust-f32-representation",
+      "oracle-binary32-format"
+    ],
+    "tolerances": {
+      "absolute": 0.0,
+      "relative": 0.0,
+      "ulps": 0
+    }
+  }
+}

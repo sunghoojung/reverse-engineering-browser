@@ -7,7 +7,7 @@ function initializePaneLayout() {
     { id: 'traffic-columns', parent: '.traffic-grid', panes: ['.request-pane', '.detail-pane'], axis: 'x', minimum: [380, 360], label: 'Traffic list and inspector' },
     { id: 'repeater', parent: '.repeater-split', panes: ['.repeater-request-pane', '.repeater-response-pane'], axis: 'x', minimum: [320, 260], label: 'Repeater request and response' },
     { id: 'sources', parent: '#screen-sources', panes: ['.sources-navigator', '.sources-editor'], axis: 'x', minimum: [140, 320], label: 'Source navigator and editor' },
-    { id: 'memory', parent: '.memory-grid', panes: ['.memory-search-pane', '.memory-results-pane'], axis: 'x', minimum: [220, 460], label: 'Memory criteria and results' },
+    { id: 'memory', parent: '.memory-grid', panes: ['.memory-search-pane', '.memory-output'], axis: 'x', minimum: [220, 460], label: 'Memory criteria and results' },
     { id: 'memory-detail', parent: '.memory-results-pane', panes: ['.memory-results-list', '.memory-detail'], axis: 'x', minimum: [210, 220], label: 'Memory matches and details' },
     { id: 'decoder', parent: '.decoder-grid', panes: ['.decoder-column:first-child', '.decoder-column:last-child'], axis: 'x', minimum: [340, 300], label: 'Decoder pipeline and output' }
   ];

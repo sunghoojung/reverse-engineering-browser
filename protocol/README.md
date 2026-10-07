@@ -201,3 +201,6 @@ bounded location model. Runtime hook hits carry optional `script_id` and
 `string_sha256`, computed over complete UTF-8 strings up to 4 KiB only while
 selected-value capture is enabled. These extensible nested fields do not change
 the existing capture or action envelope versions.
+
+[Float32 Comparison v1](float32-comparison-v1.md) defines explicit bounded binary32
+inputs, exact bits, finite metrics and completeness policies.

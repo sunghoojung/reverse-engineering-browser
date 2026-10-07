@@ -231,7 +231,12 @@ export async function checkCanvasInteractions({evaluate,viewport,click,key,wheel
   assert.match(await text('5'),/catalog is unavailable/);await screenshot('canvas-catalog-error');
   fixture.catalogError=false;await refresh();await decoded();
   await retireSnapshot();fixture.active=false;fixture.revision++;await refresh();await clean('empty live catalog');
-  assert.match(await evaluate("document.querySelector('#signal-render-list').textContent"),/No Canvas readback/);await screenshot('canvas-empty');
+  // Empty live catalogs retire the gallery nodes; the persistent summary owns
+  // the visible empty-state label after that cleanup.
+  await until("state.artifacts.length===0&&document.querySelector('#signal-render-summary')?.textContent==='No canvas readbacks'",'empty live catalog summary');
+  assert.equal(await evaluate("document.querySelectorAll('#signal-render-list .signal-render-card').length"),0);
+  assert.match(await evaluate("document.querySelector('#signal-render-summary').textContent"),/^No canvas readbacks$/);
+  await geometry('empty live catalog summary','#signal-render-summary');await screenshot('canvas-empty');
   await click('.nav-button[data-screen="traffic"]');await settle();await clean('normal phase closes before policy navigation');
   const sink=await evaluate('canvasBrowserReceipt');assert.deepEqual(sink.blocked,[]);assert.deepEqual(sink.errors,[]);record({label:'normal native image sink receipts',...sink});
   // A fresh document gets a real response CSP, not a replaced Image/error API.

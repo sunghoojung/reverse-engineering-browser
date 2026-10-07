@@ -1,12 +1,14 @@
+import {runPackagedSmoke} from "./check-origin-trace-package.mjs";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { mkdtemp, writeFile, readFile, access } from "node:fs/promises";
+import { spawn, execFileSync } from "node:child_process";
+import { mkdtemp, writeFile, readFile, access, mkdir, cp, rename } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
 const root = resolve(process.argv[2] ?? ".");
 const temporary = await mkdtemp(join(tmpdir(), "origin-trace-launcher-"));
-const contents = join(root, "build/Origin Trace.app/Contents");
+const app = resolve(process.argv[3] ?? join(root, "build/Origin Trace.app"));
+const contents = join(app, "Contents");
 const browser =
   process.env.ORIGIN_TRACE_TEST_BROWSER ??
   "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
@@ -88,6 +90,32 @@ try {
   console.log(
     "PASS packaged launcher starts a disposable live browser session",
   );
+  if (process.env.REB_CHECK_PACKAGED_APP_UI === "1") {
+    // Prove the running backend reads the relocated subtree, even while the
+    // compiler's development source directory still exists. Restore before
+    // starting the signed native app.
+    const css = join(contents, "Resources/research-ui/app.css");
+    const cssURL = new URL("/app.css", endpoint);
+    const cssResponse = await fetch(cssURL);
+    assert.equal(cssResponse.status, 200);
+    assert.deepEqual(Buffer.from(await cssResponse.arrayBuffer()), await readFile(css));
+    await rename(css, `${css}.package-check`);
+    try {
+      assert.equal((await fetch(cssURL)).status, 404, "Backend silently fell back to source-tree CSS");
+    } finally {
+      await rename(`${css}.package-check`, css);
+    }
+    execFileSync("codesign", ["--verify", "--deep", "--strict", app], {cwd: temporary});
+    try {
+      const {result} = await runPackagedSmoke(app, temporary, "live", ["--ui-url", endpoint]);
+      assert.equal(new URL(result.location).protocol, "http:");
+      assert.equal(result.captureMode, "live");
+    } finally {
+      const reports = join(root, "build/package-qa");
+      await mkdir(reports, {recursive: true});
+      await cp(join(temporary, "live.log"), join(reports, "live.log"));
+    }
+  }
 } finally {
   child.kill("SIGTERM");
   let timer;

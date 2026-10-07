@@ -1,0 +1,399 @@
+{
+  "comparability": {
+    "behavior": "not_established",
+    "capture_coverage": "unknown_or_partial",
+    "observer_regime": "unknown",
+    "timing": "not_established"
+  },
+  "comparison_id": "reb-comparison-v1:sha256:04ea84f22fd8d82dec2a14d84c03ccf22bc121c44f9dfe26b912743c86f2f717",
+  "counts": {
+    "ambiguous_cross_scope": 0,
+    "changed_declared_metadata": 1,
+    "equal_declared_metadata": 10,
+    "left_only": 0,
+    "right_only": 0
+  },
+  "coverage": {
+    "left": {
+      "artifacts": {
+        "capture_state": "unknown",
+        "limitations": [
+          "capture_configuration_unknown",
+          "creator_identity_incomplete",
+          "metadata_only",
+          "origin_scope_unknown",
+          "producer_build_unknown"
+        ],
+        "selected_count": 2,
+        "selection_state": "complete",
+        "source_scan": "complete"
+      },
+      "events": {
+        "capture_state": "unknown",
+        "limitations": [
+          "capture_configuration_unknown",
+          "metadata_only",
+          "origin_scope_unknown",
+          "producer_build_unknown"
+        ],
+        "selected_count": 4,
+        "selection_state": "complete",
+        "source_scan": "complete"
+      },
+      "excluded_sections": [
+        "analysis_documents",
+        "artifact_bytes",
+        "debugger_network",
+        "hook_values",
+        "signal_profiles",
+        "trace_edges"
+      ],
+      "selection": "complete"
+    },
+    "right": {
+      "artifacts": {
+        "capture_state": "unknown",
+        "limitations": [
+          "capture_configuration_unknown",
+          "creator_identity_incomplete",
+          "metadata_only",
+          "origin_scope_unknown",
+          "producer_build_unknown"
+        ],
+        "selected_count": 2,
+        "selection_state": "complete",
+        "source_scan": "complete"
+      },
+      "events": {
+        "capture_state": "unknown",
+        "limitations": [
+          "capture_configuration_unknown",
+          "metadata_only",
+          "origin_scope_unknown",
+          "producer_build_unknown"
+        ],
+        "selected_count": 4,
+        "selection_state": "complete",
+        "source_scan": "complete"
+      },
+      "excluded_sections": [
+        "analysis_documents",
+        "artifact_bytes",
+        "debugger_network",
+        "hook_values",
+        "signal_profiles",
+        "trace_edges"
+      ],
+      "selection": "complete"
+    }
+  },
+  "facets": [
+    "artifacts",
+    "coverage",
+    "events",
+    "gaps",
+    "provenance",
+    "relationships",
+    "selection"
+  ],
+  "left_package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7",
+  "limitations": [
+    "untrusted_input",
+    "authenticity_not_established",
+    "artifact_bytes_not_present_not_reverified",
+    "capture_configuration_unknown",
+    "observer_regime_unknown",
+    "historical_epochs_unknown",
+    "behavioral_equivalence_not_established",
+    "timing_equivalence_not_established"
+  ],
+  "normalization_profile": "reb-declared-metadata-v1",
+  "package_metadata_equal": false,
+  "page": {
+    "limit": 50,
+    "next_offset": null,
+    "offset": 0,
+    "total": 11
+  },
+  "protocol_version": 1,
+  "right_package_id": "reb-package-v1:sha256:701923e9c311d085959313edb035ecf2cb1d099dfe27ffc6ce490be1bcf5e341",
+  "rows": [
+    {
+      "alignment": "declared_scoped_key",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": true,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "artifacts",
+      "left": {
+        "facet": "artifacts",
+        "key": {
+          "artifact_id": "9",
+          "session_id": "7"
+        },
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "artifacts",
+        "key": {
+          "artifact_id": "9",
+          "session_id": "7"
+        },
+        "package_id": "reb-package-v1:sha256:701923e9c311d085959313edb035ecf2cb1d099dfe27ffc6ce490be1bcf5e341"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:212025ae6cd7f92aef742074b24253689621bf9373193cc3fd85ce9fa5f529d6",
+      "status": "equal_declared_metadata"
+    },
+    {
+      "alignment": "declared_scoped_key",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": true,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "artifacts",
+      "left": {
+        "facet": "artifacts",
+        "key": {
+          "artifact_id": "9",
+          "session_id": "8"
+        },
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "artifacts",
+        "key": {
+          "artifact_id": "9",
+          "session_id": "8"
+        },
+        "package_id": "reb-package-v1:sha256:701923e9c311d085959313edb035ecf2cb1d099dfe27ffc6ce490be1bcf5e341"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:9f4f8905229264bf844fcf1a91c989c4e3c929e3e6f2d226c638cc666e110787",
+      "status": "equal_declared_metadata"
+    },
+    {
+      "alignment": "selected_facet",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": null,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "coverage",
+      "left": {
+        "facet": "coverage",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "coverage",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:701923e9c311d085959313edb035ecf2cb1d099dfe27ffc6ce490be1bcf5e341"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:4b32c0f6aff0266992b3147359b9444c74ec4a4b27ee3741d013aff5c11e54a8",
+      "status": "equal_declared_metadata"
+    },
+    {
+      "alignment": "declared_scoped_key",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": null,
+      "differences": [
+        {
+          "field": "monotonic_time_ns",
+          "left": {
+            "kind": "scalar",
+            "value": "10"
+          },
+          "right": {
+            "kind": "scalar",
+            "value": "11"
+          }
+        }
+      ],
+      "differences_omitted": 0,
+      "facet": "events",
+      "left": {
+        "facet": "events",
+        "key": {
+          "process_id": 42,
+          "sequence_number": "1",
+          "session_id": "7"
+        },
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "events",
+        "key": {
+          "process_id": 42,
+          "sequence_number": "1",
+          "session_id": "7"
+        },
+        "package_id": "reb-package-v1:sha256:701923e9c311d085959313edb035ecf2cb1d099dfe27ffc6ce490be1bcf5e341"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:7b87ad6b5a7734dc0a5feabaa5421a79dd5af185e14b81fe94169b656a627502",
+      "status": "changed_declared_metadata"
+    },
+    {
+      "alignment": "declared_scoped_key",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": null,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "events",
+      "left": {
+        "facet": "events",
+        "key": {
+          "process_id": 42,
+          "sequence_number": "1",
+          "session_id": "8"
+        },
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "events",
+        "key": {
+          "process_id": 42,
+          "sequence_number": "1",
+          "session_id": "8"
+        },
+        "package_id": "reb-package-v1:sha256:701923e9c311d085959313edb035ecf2cb1d099dfe27ffc6ce490be1bcf5e341"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:5383647ec0b4e877ff622e9dc2c8014d0adeb08211ced1c901930c7bc3cce8dc",
+      "status": "equal_declared_metadata"
+    },
+    {
+      "alignment": "declared_scoped_key",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": null,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "events",
+      "left": {
+        "facet": "events",
+        "key": {
+          "process_id": 42,
+          "sequence_number": "3",
+          "session_id": "7"
+        },
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "events",
+        "key": {
+          "process_id": 42,
+          "sequence_number": "3",
+          "session_id": "7"
+        },
+        "package_id": "reb-package-v1:sha256:701923e9c311d085959313edb035ecf2cb1d099dfe27ffc6ce490be1bcf5e341"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:16978974fae27e6ee54809aa9ac7efe8e9e64dd284834d53b6c61be02c75fb0e",
+      "status": "equal_declared_metadata"
+    },
+    {
+      "alignment": "declared_scoped_key",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": null,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "events",
+      "left": {
+        "facet": "events",
+        "key": {
+          "process_id": 43,
+          "sequence_number": "1",
+          "session_id": "7"
+        },
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "events",
+        "key": {
+          "process_id": 43,
+          "sequence_number": "1",
+          "session_id": "7"
+        },
+        "package_id": "reb-package-v1:sha256:701923e9c311d085959313edb035ecf2cb1d099dfe27ffc6ce490be1bcf5e341"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:8c786f3ee27a8bc072d384449a0504b5a5b9c8929813b775030e0296a9b69a5f",
+      "status": "equal_declared_metadata"
+    },
+    {
+      "alignment": "selected_facet",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": null,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "gaps",
+      "left": {
+        "facet": "gaps",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "gaps",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:701923e9c311d085959313edb035ecf2cb1d099dfe27ffc6ce490be1bcf5e341"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:3d21c989158caad536c0a65cf6bac0bd684a57e26e977db3eb8324de38f21afe",
+      "status": "equal_declared_metadata"
+    },
+    {
+      "alignment": "selected_facet",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": null,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "provenance",
+      "left": {
+        "facet": "provenance",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "provenance",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:701923e9c311d085959313edb035ecf2cb1d099dfe27ffc6ce490be1bcf5e341"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:b1e295b46604d35960d549a51b282aad14e65f1e7bd3e903ef6380dcc6b17801",
+      "status": "equal_declared_metadata"
+    },
+    {
+      "alignment": "selected_facet",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": null,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "relationships",
+      "left": {
+        "facet": "relationships",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "relationships",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:701923e9c311d085959313edb035ecf2cb1d099dfe27ffc6ce490be1bcf5e341"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:24432de01f4d64547648cd0e5f4fad2d91ffa1663794aa75477ce8db60ecde33",
+      "status": "equal_declared_metadata"
+    },
+    {
+      "alignment": "selected_facet",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": null,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "selection",
+      "left": {
+        "facet": "selection",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "selection",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:701923e9c311d085959313edb035ecf2cb1d099dfe27ffc6ce490be1bcf5e341"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:3b2ed848228a3910fc539f1d0d5c09a3e4bcd97b2af111d8baa8551233f2e439",
+      "status": "equal_declared_metadata"
+    }
+  ],
+  "selected_metadata_equal": false
+}

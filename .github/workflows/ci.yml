@@ -151,6 +151,25 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+      - name: Exercise supplied comparisons in Evidence
+        env:
+          REB_UI_REQUIRE_EVIDENCE_NAVIGATION: "1"
+        if: ${{ !cancelled() }}
+        run: |
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          node tools/check-origin-trace-debugger.mjs --evidence-comparison-ui-browser
+
+      - name: Upload rendered Evidence comparison QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: evidence-comparison-ui-${{ github.run_id }}
+          path: build/comparison-ui-qa
+          if-no-files-found: ignore
+          retention-days: 3
+
   console-ui:
     runs-on: ubuntu-latest
     timeout-minutes: 10

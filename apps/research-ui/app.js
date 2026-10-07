@@ -22,6 +22,16 @@
         canOpenSource: () => typeof openInvestigation === 'function'
       });
 
+      // Ordinary refresh/navigation keeps file drafts in the owned component.
+      // A departing document disposes it; BFCache suspension only retires work.
+      window.addEventListener('pagehide', event => {
+        evidenceWorkspace.setVisible(false);
+        if (!event.persisted) evidenceWorkspace.disposeComparison();
+      });
+      window.addEventListener('pageshow', () => {
+        evidenceWorkspace.setVisible(!document.querySelector('#screen-evidence').hidden);
+      });
+
       const sourceFactsPanel = createSourceFactsPanel({
         getSource: selectedSource,
         onNavigate: revealSourceFactRange,

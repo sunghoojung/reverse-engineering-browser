@@ -450,7 +450,7 @@
               </div>
             </div>
             <div id="evidence-package-mode" class="evidence-content" hidden>
-              <div class="evidence-package-heading"><button id="evidence-return" class="secondary-button" type="button">← Return to observations</button><span>Explicit metadata selection · nothing is saved automatically</span></div>
+              <div class="evidence-package-heading"><button id="evidence-return" class="secondary-button" type="button">← Return to observations</button><span>Explicit metadata selection · nothing is saved automatically</span><button id="evidence-compare-toggle" class="secondary-button" type="button" aria-expanded="false" aria-controls="evidence-comparison-section">Compare supplied packages</button></div>
               <section id="evidence-package-panel" class="evidence-package-panel" aria-label="Metadata package workflow">
                 <h2>Metadata packages</h2>
                 <p class="package-note">Metadata only; capture completeness is unknown. Export never stops writers.</p>
@@ -471,6 +471,12 @@
                 <div class="package-toolbar"><button data-package-cancel class="secondary-button" type="button" hidden>Cancel</button><button data-package-download class="secondary-button" type="button" aria-describedby="package-save-note" disabled>Download validated package</button><button data-package-copy class="secondary-button" type="button" disabled>Copy validated metadata</button></div>
                 <p id="package-save-note" data-package-save-note class="package-note"></p>
                 <div data-package-report class="package-report"></div>
+              </section>
+              <section id="evidence-comparison-section" class="evidence-package-panel" aria-label="Compare supplied metadata packages" hidden>
+                <div class="evidence-comparison-heading"><h2>Compare supplied packages</h2><button id="evidence-comparison-close" class="secondary-button" type="button">Close comparison</button></div>
+                <p class="package-note">These files are independent of the selected observation. Nothing is selected, captured, exported or saved automatically.</p>
+                <p id="evidence-comparison-unavailable" class="package-note" role="status" hidden></p>
+                <div id="evidence-comparison-panel"></div>
               </section>
             </div>
           </section>
@@ -1325,6 +1331,7 @@
     <script src="evidence_models.js"></script>
     <script src="evidence_package.js"></script>
     <script src="float32_inspector.js"></script>
+    <script src="evidence_comparison.js"></script>
     <script src="source_syntax.js"></script>
     <script src="source_facts.js"></script>
     <script src="traffic_view.js"></script>

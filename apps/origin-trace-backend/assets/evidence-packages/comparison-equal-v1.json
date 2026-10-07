@@ -1,0 +1,387 @@
+{
+  "comparability": {
+    "behavior": "not_established",
+    "capture_coverage": "unknown_or_partial",
+    "observer_regime": "unknown",
+    "timing": "not_established"
+  },
+  "comparison_id": "reb-comparison-v1:sha256:20faa9898ae8000cc9ae75bea5736b4d5db67e3f19e8713552df382aed8562e4",
+  "counts": {
+    "ambiguous_cross_scope": 0,
+    "changed_declared_metadata": 0,
+    "equal_declared_metadata": 11,
+    "left_only": 0,
+    "right_only": 0
+  },
+  "coverage": {
+    "left": {
+      "artifacts": {
+        "capture_state": "unknown",
+        "limitations": [
+          "capture_configuration_unknown",
+          "creator_identity_incomplete",
+          "metadata_only",
+          "origin_scope_unknown",
+          "producer_build_unknown"
+        ],
+        "selected_count": 2,
+        "selection_state": "complete",
+        "source_scan": "complete"
+      },
+      "events": {
+        "capture_state": "unknown",
+        "limitations": [
+          "capture_configuration_unknown",
+          "metadata_only",
+          "origin_scope_unknown",
+          "producer_build_unknown"
+        ],
+        "selected_count": 4,
+        "selection_state": "complete",
+        "source_scan": "complete"
+      },
+      "excluded_sections": [
+        "analysis_documents",
+        "artifact_bytes",
+        "debugger_network",
+        "hook_values",
+        "signal_profiles",
+        "trace_edges"
+      ],
+      "selection": "complete"
+    },
+    "right": {
+      "artifacts": {
+        "capture_state": "unknown",
+        "limitations": [
+          "capture_configuration_unknown",
+          "creator_identity_incomplete",
+          "metadata_only",
+          "origin_scope_unknown",
+          "producer_build_unknown"
+        ],
+        "selected_count": 2,
+        "selection_state": "complete",
+        "source_scan": "complete"
+      },
+      "events": {
+        "capture_state": "unknown",
+        "limitations": [
+          "capture_configuration_unknown",
+          "metadata_only",
+          "origin_scope_unknown",
+          "producer_build_unknown"
+        ],
+        "selected_count": 4,
+        "selection_state": "complete",
+        "source_scan": "complete"
+      },
+      "excluded_sections": [
+        "analysis_documents",
+        "artifact_bytes",
+        "debugger_network",
+        "hook_values",
+        "signal_profiles",
+        "trace_edges"
+      ],
+      "selection": "complete"
+    }
+  },
+  "facets": [
+    "artifacts",
+    "coverage",
+    "events",
+    "gaps",
+    "provenance",
+    "relationships",
+    "selection"
+  ],
+  "left_package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7",
+  "limitations": [
+    "untrusted_input",
+    "authenticity_not_established",
+    "artifact_bytes_not_present_not_reverified",
+    "capture_configuration_unknown",
+    "observer_regime_unknown",
+    "historical_epochs_unknown",
+    "behavioral_equivalence_not_established",
+    "timing_equivalence_not_established"
+  ],
+  "normalization_profile": "reb-declared-metadata-v1",
+  "package_metadata_equal": true,
+  "page": {
+    "limit": 50,
+    "next_offset": null,
+    "offset": 0,
+    "total": 11
+  },
+  "protocol_version": 1,
+  "right_package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7",
+  "rows": [
+    {
+      "alignment": "declared_scoped_key",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": true,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "artifacts",
+      "left": {
+        "facet": "artifacts",
+        "key": {
+          "artifact_id": "9",
+          "session_id": "7"
+        },
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "artifacts",
+        "key": {
+          "artifact_id": "9",
+          "session_id": "7"
+        },
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:6572b7363f2e01c40155d7665b08ea60fcdc7259958a4a03951d5f92ef31133e",
+      "status": "equal_declared_metadata"
+    },
+    {
+      "alignment": "declared_scoped_key",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": true,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "artifacts",
+      "left": {
+        "facet": "artifacts",
+        "key": {
+          "artifact_id": "9",
+          "session_id": "8"
+        },
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "artifacts",
+        "key": {
+          "artifact_id": "9",
+          "session_id": "8"
+        },
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:73ff8fa74fa28def7c17192c47bbbafc09370d70d26538de7986876446765bbf",
+      "status": "equal_declared_metadata"
+    },
+    {
+      "alignment": "selected_facet",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": null,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "coverage",
+      "left": {
+        "facet": "coverage",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "coverage",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:e8d50cdf5394b70576d0b60f5bfae00a70e926c70a2f1c093058bc0b27343572",
+      "status": "equal_declared_metadata"
+    },
+    {
+      "alignment": "declared_scoped_key",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": null,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "events",
+      "left": {
+        "facet": "events",
+        "key": {
+          "process_id": 42,
+          "sequence_number": "1",
+          "session_id": "7"
+        },
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "events",
+        "key": {
+          "process_id": 42,
+          "sequence_number": "1",
+          "session_id": "7"
+        },
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:2d43ddeb083bcee86411ec20c6ace8163dcbd2eba6478a41c0fcef469eb1db95",
+      "status": "equal_declared_metadata"
+    },
+    {
+      "alignment": "declared_scoped_key",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": null,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "events",
+      "left": {
+        "facet": "events",
+        "key": {
+          "process_id": 42,
+          "sequence_number": "1",
+          "session_id": "8"
+        },
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "events",
+        "key": {
+          "process_id": 42,
+          "sequence_number": "1",
+          "session_id": "8"
+        },
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:7a6823c09070448d73d6fbf9d5ef0738f70538c6a7184400f77771ddda209bb4",
+      "status": "equal_declared_metadata"
+    },
+    {
+      "alignment": "declared_scoped_key",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": null,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "events",
+      "left": {
+        "facet": "events",
+        "key": {
+          "process_id": 42,
+          "sequence_number": "3",
+          "session_id": "7"
+        },
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "events",
+        "key": {
+          "process_id": 42,
+          "sequence_number": "3",
+          "session_id": "7"
+        },
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:f44a53ac92dbecc622bf43d95cfd4299d35c0164cc8299b4ed351d256c62f663",
+      "status": "equal_declared_metadata"
+    },
+    {
+      "alignment": "declared_scoped_key",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": null,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "events",
+      "left": {
+        "facet": "events",
+        "key": {
+          "process_id": 43,
+          "sequence_number": "1",
+          "session_id": "7"
+        },
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "events",
+        "key": {
+          "process_id": 43,
+          "sequence_number": "1",
+          "session_id": "7"
+        },
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:feb53a822e2c10b85b95161e41c29917f17d25bd0995f90878a96c2faa37daad",
+      "status": "equal_declared_metadata"
+    },
+    {
+      "alignment": "selected_facet",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": null,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "gaps",
+      "left": {
+        "facet": "gaps",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "gaps",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:8213951d5ceb9b7fef4abc9444638d18eeacd3a0938d8941ad21f911b41b1eb7",
+      "status": "equal_declared_metadata"
+    },
+    {
+      "alignment": "selected_facet",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": null,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "provenance",
+      "left": {
+        "facet": "provenance",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "provenance",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:8d83b8b65764db7cff61797393128e835aaf589ada258131bc314da7e545cd45",
+      "status": "equal_declared_metadata"
+    },
+    {
+      "alignment": "selected_facet",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": null,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "relationships",
+      "left": {
+        "facet": "relationships",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "relationships",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:ef5f9eea0e2e42d21783c1b49aedb9eb6bb36da3762c79b66440e56bdac41968",
+      "status": "equal_declared_metadata"
+    },
+    {
+      "alignment": "selected_facet",
+      "cross_scope_candidates": 0,
+      "declared_content_hash_match": null,
+      "differences": [],
+      "differences_omitted": 0,
+      "facet": "selection",
+      "left": {
+        "facet": "selection",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "right": {
+        "facet": "selection",
+        "key": null,
+        "package_id": "reb-package-v1:sha256:0d7a7e61a4c71c44d77e74ec17ed071a980359427be4b6a475a154e443fc57b7"
+      },
+      "row_id": "reb-comparison-row-v1:sha256:0359531c6dba80e24aa084eb25f6c9d07018cc96dc170a54e973cefee4525e87",
+      "status": "equal_declared_metadata"
+    }
+  ],
+  "selected_metadata_equal": true
+}

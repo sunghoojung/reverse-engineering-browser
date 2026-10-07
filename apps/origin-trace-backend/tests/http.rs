@@ -380,7 +380,7 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 27, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 28, "Review route coverage when the API changes");
     let schemas = &spec["components"]["schemas"];
     let actions = schemas["DebuggerAction"]["oneOf"].as_array().unwrap();
     let results = &schemas["DebuggerResult"];
@@ -503,7 +503,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 27);
+    assert_eq!(operation_count, 28);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -5052,4 +5052,287 @@ async fn float32_verified_artifact_rejects_corruption_stale_identity_missing_and
         format!("{artifact}\n{artifact}\n").as_bytes(),
     );
     assert_contract_response(server.action(ROUTE, request).await, "post", ROUTE, 500).await;
+}
+
+const EVIDENCE_COMPARISON_ROUTE: &str = "/api/evidence/packages/compare";
+fn comparison_body(left: &Value, right: &Value) -> Value {
+    json!({"left":left,"right":right,"normalization_profile":"reb-declared-metadata-v1","facets":["events","artifacts","coverage","gaps","relationships","provenance","selection"]})
+}
+async fn compare_package_http(server: &Server, bytes: &[u8], status: u16) -> Value {
+    let response = server
+        .client
+        .post(format!("{}{}", server.url, EVIDENCE_COMPARISON_ROUTE))
+        .header("content-type", "application/json")
+        .body(bytes.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert!(response.headers().get("etag").is_none());
+    serde_json::from_slice(
+        &assert_contract_response(response, "post", EVIDENCE_COMPARISON_ROUTE, status).await,
+    )
+    .unwrap()
+}
+#[tokio::test]
+async fn evidence_comparison_http_cli_are_inert_and_schema_checked() {
+    let server = Server::start_with_helper_canaries(true).await;
+    for file in [
+        "events.jsonl",
+        "trace.jsonl",
+        "signals.jsonl",
+        "artifacts/manifest.jsonl",
+        "artifacts/blobs/not-an-artifact.bin",
+    ] {
+        server.file(file, b"PRIVATE_COMPARISON_STORE_CANARY\n");
+    }
+    let package = golden_evidence_package();
+    let mut right = package.clone();
+    right["records"]["events"][0]["monotonic_time_ns"] = json!("999");
+    right["package_id"] =
+        json!(origin_trace_backend::evidence_package::package_id(&right).unwrap());
+    let mut request = comparison_body(&package, &right);
+    request["limit"] = json!(2);
+    let bytes = serde_json::to_vec(&request).unwrap();
+    server.file("comparison.json", &bytes);
+    let before = snapshot(server.root.path());
+    let result = compare_package_http(&server, &bytes, 200).await;
+    assert_eq!(result["selected_metadata_equal"], false);
+    assert_eq!(result["counts"]["changed_declared_metadata"], 1);
+    assert_eq!(result["page"]["next_offset"], 2);
+    assert_eq!(result["comparability"]["observer_regime"], "unknown");
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["call", "compare_evidence_packages", "--endpoint-file"])
+        .arg(server.root.path().join("endpoint"))
+        .arg("--body-file")
+        .arg(server.root.path().join("comparison.json"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        result
+    );
+    request["offset"] = json!(2);
+    let next = compare_package_http(&server, &serde_json::to_vec(&request).unwrap(), 200).await;
+    assert_eq!(next["comparison_id"], result["comparison_id"]);
+    assert_ne!(next["rows"][0]["row_id"], result["rows"][0]["row_id"]);
+    assert_eq!(before, snapshot(server.root.path()));
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("PRIVATE_COMPARISON_STORE_CANARY"));
+}
+#[tokio::test]
+async fn evidence_comparison_rejects_original_duplicate_profile_and_private_fields() {
+    let server = Server::start().await;
+    let package = golden_evidence_package();
+    let request = comparison_body(&package, &package);
+    let raw = serde_json::to_string(&request).unwrap();
+    let duplicate = raw.replacen(
+        "\"process_id\":42",
+        "\"process_id\":42,\"\\u0070rocess_id\":42",
+        1,
+    );
+    for bytes in [
+        duplicate.as_bytes(),
+        b"{not json",
+        b"[]",
+        b"{\"left\":{},\"left\":{}}",
+    ] {
+        let response = compare_package_http(&server, bytes, 400).await;
+        assert_eq!(response["code"], "invalid_request");
+    }
+    server.file("duplicate-comparison.json", duplicate.as_bytes());
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "compare_evidence_packages",
+            "--base-url",
+            "http://127.0.0.1:1",
+            "--body-file",
+        ])
+        .arg(server.root.path().join("duplicate-comparison.json"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate JSON key"));
+    for field in ["protocol_version", "redaction_profile", "semantics_profile"] {
+        let mut altered = request.clone();
+        altered["right"][field] = json!("UNSUPPORTED_PRIVATE_CANARY");
+        let response =
+            compare_package_http(&server, &serde_json::to_vec(&altered).unwrap(), 400).await;
+        assert!(!response.to_string().contains("PRIVATE_CANARY"));
+    }
+    let mut altered = request.clone();
+    altered["left"]["PRIVATE_KEY"] = json!("PRIVATE_CANARY");
+    altered["left"]["package_id"] =
+        json!(origin_trace_backend::evidence_package::package_id(&altered["left"]).unwrap());
+    assert!(
+        !compare_package_http(&server, &serde_json::to_vec(&altered).unwrap(), 400)
+            .await
+            .to_string()
+            .contains("PRIVATE")
+    );
+    for (field, value) in [
+        ("facets", json!(["events", "events"])),
+        ("offset", json!(2182)),
+        ("limit", json!(101)),
+        ("limit", Value::Null),
+        ("offset", Value::Null),
+        ("normalization_profile", json!("heuristic-v1")),
+    ] {
+        let mut altered = request.clone();
+        altered[field] = value;
+        compare_package_http(&server, &serde_json::to_vec(&altered).unwrap(), 400).await;
+    }
+    let response = server
+        .client
+        .post(format!("{}{}", server.url, EVIDENCE_COMPARISON_ROUTE))
+        .header("origin", "https://foreign.invalid")
+        .body(raw)
+        .send()
+        .await
+        .unwrap();
+    assert_contract_response(response, "post", EVIDENCE_COMPARISON_ROUTE, 403).await;
+}
+#[test]
+fn evidence_comparison_cli_offline_discovery_includes_closed_contract_and_effects() {
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["describe", "compare_evidence_packages"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let operation: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(operation["operationId"], "compare_evidence_packages");
+    assert_eq!(
+        operation["x-max-body-bytes"],
+        origin_trace_backend::evidence_comparison::MAX_REQUEST_BYTES
+    );
+    assert_eq!(operation["x-reb-execution"]["effects"], json!(["analysis"]));
+    assert!(operation["components"]["schemas"]["EvidenceComparisonResult"].is_object());
+}
+
+#[tokio::test]
+async fn evidence_comparison_outer_and_original_byte_bounds_are_independent() {
+    let server = Server::start().await;
+    let package = serde_json::to_vec(&golden_evidence_package()).unwrap();
+    let padded = |maximum: usize| {
+        let mut p = Vec::with_capacity(maximum);
+        p.push(b'{');
+        p.resize(maximum - package.len() + 1, b' ');
+        p.extend_from_slice(&package[1..]);
+        assert_eq!(p.len(), maximum);
+        p
+    };
+    let max = origin_trace_backend::evidence_package::MAX_BYTES;
+    let mut bytes = b"{\"left\":".to_vec();
+    bytes.extend(padded(max));
+    bytes.extend_from_slice(b",\"right\":");
+    bytes.extend(padded(max));
+    bytes.extend_from_slice(
+        b",\"normalization_profile\":\"reb-declared-metadata-v1\",\"facets\":[\"events\"]}",
+    );
+    assert!(bytes.len() <= origin_trace_backend::evidence_comparison::MAX_REQUEST_BYTES);
+    assert_eq!(
+        compare_package_http(&server, &bytes, 200).await["selected_metadata_equal"],
+        true
+    );
+    // One-over original token cannot be rescued by normalized or compact JSON.
+    bytes.insert(10, b' ');
+    let response = compare_package_http(&server, &bytes, 400).await;
+    assert_eq!(response["code"], "resource_limit");
+    let raw = serde_json::to_string(&comparison_body(
+        &golden_evidence_package(),
+        &golden_evidence_package(),
+    ))
+    .unwrap();
+    // Escaped names still refer to the same schema fields and duplicate keys.
+    let escaped = raw.replace("session_id", "\\u0073ession_id");
+    assert_eq!(
+        compare_package_http(&server, escaped.as_bytes(), 200).await["selected_metadata_equal"],
+        true
+    );
+    let invalid = raw.replacen("configured_local_stores", "\\ud800", 1);
+    compare_package_http(&server, invalid.as_bytes(), 400).await;
+    let mut invalid = raw.as_bytes().to_vec();
+    invalid[20] = 255;
+    compare_package_http(&server, &invalid, 400).await;
+    // Reject framing before uploading the impossible body; avoid depending on
+    // TCP reset timing when the server refuses an oversized Content-Length.
+    let response = server
+        .client
+        .post(format!("{}{}", server.url, EVIDENCE_COMPARISON_ROUTE))
+        .header(
+            "content-length",
+            (origin_trace_backend::evidence_comparison::MAX_REQUEST_BYTES + 1).to_string(),
+        )
+        .header("connection", "close")
+        .send()
+        .await
+        .unwrap();
+    assert_contract_response(response, "post", EVIDENCE_COMPARISON_ROUTE, 400).await;
+}
+
+#[tokio::test]
+async fn evidence_comparison_body_deadline_and_interrupted_upload_leave_service_usable() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let server = Server::start_with_helper_canaries(true).await;
+    server.file("events.jsonl", b"PRIVATE_COMPARISON_DEADLINE_CANARY");
+    let before = snapshot(server.root.path());
+    let address = server.url.strip_prefix("http://").unwrap();
+    for interrupted in [false, true] {
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        stream.write_all(format!("POST {EVIDENCE_COMPARISON_ROUTE} HTTP/1.1\r\nHost: {address}\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{{").as_bytes()).await.unwrap();
+        if interrupted {
+            stream.shutdown().await.unwrap();
+        }
+        let mut raw = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut raw))
+            .await
+            .unwrap()
+            .unwrap();
+        let response = String::from_utf8(raw).unwrap();
+        assert!(response.starts_with(if interrupted {
+            "HTTP/1.1 400 "
+        } else {
+            "HTTP/1.1 408 "
+        }));
+        let value: Value =
+            serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(
+            value["code"],
+            if interrupted {
+                "invalid_request"
+            } else {
+                "timeout"
+            }
+        );
+        assert_eq!(
+            value["details"],
+            if interrupted {
+                json!({})
+            } else {
+                json!({"phase":"request_body"})
+            }
+        );
+        let package = golden_evidence_package();
+        compare_package_http(
+            &server,
+            &serde_json::to_vec(&comparison_body(&package, &package)).unwrap(),
+            200,
+        )
+        .await;
+    }
+    assert_eq!(before, snapshot(server.root.path()));
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
 }

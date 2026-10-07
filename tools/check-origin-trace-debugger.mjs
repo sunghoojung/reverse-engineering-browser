@@ -1,4 +1,5 @@
 import {checkConsoleDOM, createConsoleFixture, checkConsoleInteractions} from './check-console-workspace.mjs';
+import {checkFloat32Model,float32BrowserFixture,checkFloat32Fixture,checkFloat32Interactions} from './check-float32-ui.mjs';
 import { spawn } from "node:child_process";
 import { runInNewContext } from "node:vm";
 import {
@@ -20,15 +21,42 @@ import {checkInvestigationCore, investigationFixture, checkInvestigationInteract
 const investigationBrowser = process.argv[2] === "--investigation-ui-browser";
 const collectionBrowser = process.argv[2] === "--collection-ui-browser";
 const consoleBrowser = process.argv[2] === "--console-ui-browser";
+const float32Browser = process.argv[2] === "--float32-ui-browser";
+const float32FixtureOnly = process.argv[2] === "--float32-fixture-only";
 const trafficBrowser = process.argv[2] === "--traffic-ui-browser";
 const sourceFactsBrowser = process.argv[2] === "--source-facts-ui-browser";
 const memoryBrowser = process.argv[2] === "--memory-ui-browser";
 const evidenceBrowser = process.argv[2] === "--evidence-ui-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
-const root = process.argv[fieldsOnly || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser || collectionBrowser || memoryBrowser ? 3 : 2] || new URL("..", import.meta.url).pathname;
+const root = process.argv[fieldsOnly || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
 await checkConsoleDOM(root);
 await checkCollectionController(root);
 await checkInvestigationCore(root);
+await checkFloat32Model(root);
+// The fixture serves the same declared public leaves as the product. Inspect
+// raw origin-form paths before URL normalization, so encoded/traversing paths
+// cannot become an allowed asset accidentally.
+const fixturePublicAssets = new Set(['index.html', ...[...(await readFile(join(root,'apps/research-ui/index.html'),'utf8')).matchAll(/(?:src|href)="([^"/]+\.(?:js|css))"/g)].map(match=>match[1])]);
+function fixtureAssetName(raw) {
+  const path=raw.split('?')[0],name=path==='/'?'index.html':path.startsWith('/')?path.slice(1):'';
+  return /^[a-z][a-z0-9_]*\.(?:html|js|css)$/.test(name) && fixturePublicAssets.has(name) ? name : null;
+}
+async function serveFixtureAsset(request,response) {
+  const name=fixtureAssetName(request.url);
+  if (!name) {response.writeHead(404);response.end();return;}
+  try {
+    response.writeHead(200, {'Content-Type':name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html'});
+    response.end(await readFile(join(root,'apps/research-ui',name)));
+  } catch {response.writeHead(404);response.end();}
+}
+for (const path of ['/float32_inspector.js','/float32_inspector.js?cache=1','/']) {
+  let status,body;await serveFixtureAsset({url:path},{writeHead:value=>{status=value;},end:value=>{body=value;}});
+  assert.equal(status,200);assert.deepEqual(body,await readFile(join(root,'apps/research-ui',fixtureAssetName(path))));
+}
+for (const path of ['/../float32_inspector.js','/x/../float32_inspector.js','/%66loat32_inspector.js','/%2e%2e/float32_inspector.js','/x%2ffloat32_inspector.js','//float32_inspector.js','/float32_inspector.js/','/analyst_runner_core.js','/missing.js','/float32_inspector.js#fragment']) {
+  let status;await serveFixtureAsset({url:path},{writeHead:value=>{status=value;},end(){}});assert.equal(status,404,path);
+}
+console.log('PASS actual fixture public-asset handler: Float32 bytes, canonical paths, private/unknown/traversing/encoded negatives (not rendered QA)');
 // Facts are UI projections over the already validated Rust contract. These
 // fixtures exercise identity and stale/cancelled request ownership, not JS execution.
 const sourceFactsUI = runInNewContext(
@@ -826,6 +854,7 @@ console.log("PASS legacy and annotated Analyst/JWT failures, unchanged successes
 const packageRefreshState = {artifactRefreshing:false,artifactEtag:null,artifactCatalogSignature:null,artifacts:[],openArtifactIds:[],selectedArtifactId:null,sessionMode:'live'};
 let packageRefreshBody={artifacts:packageGolden.records.artifacts.map(row=>({...row,...row.key}))}, packageRefreshSyncs=0;
 const packageArtifactRefresh=runInNewContext(appSection('      function liveScriptIdentity(', '      function liveSources(') + appSection('      async function refreshArtifacts()', '      function showScreen(')+';refreshArtifacts',{
+  syncFloat32Panel(){}, // Actual Float32 host integration is exercised in check-float32-ui.mjs.
   sourceFactsFields:sourceFactsUI.sourceFactsFields, sourceFactsIdentity:sourceFactsUI.sourceFactsIdentity, state:packageRefreshState,location:{protocol:'http:'},fetch:async()=>Response.json(packageRefreshBody),isArtifactResponse:()=>true,
   renderShellStatus(){},renderSourceHealth(){},renderSources(){},renderFingerprintActivity(){},loadArtifactContent(){},loadWasmInspection(){},
   nativeCanvasCaptureDisplayLimit:10,document:{querySelector:()=>({hidden:true})},evidenceWorkspace:{sync(){}},evidencePackagePanel:{sync(){packageRefreshSyncs++;}}
@@ -1168,7 +1197,7 @@ const ownershipFunctionNames = ['liveScriptIdentity', 'sourceIdentity', 'sourceI
   'sourceDisplayView', 'sourceViewLabel', 'sourceDerivedView', 'loadArtifactContent', 'refreshArtifacts',
   'closeSource', 'loadScriptContent', 'sourceRuntimeLine', 'sourceRuntimeColumn', 'prefillHookFromSource',
   'sourceDisplayName', 'sourceIcon', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent', 'updateSourceDecorations', 'breakpointLinesForSource',
-  'revealRuntimeHookHit', 'sourceArtifactIdentityMatches', 'selectArtifact', 'selectScript', 'sourceFormattedView'];
+  'revealRuntimeHookHit', 'sourceArtifactIdentityMatches', 'selectArtifact', 'selectScript', 'sourceFormattedView', 'syncFloat32Panel'];
 const ownershipModels = await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8');
 const ownershipSyntax = await readFile(join(root, 'apps/research-ui/source_syntax.js'), 'utf8');
 const ownershipProvenance = await readFile(join(root, 'apps/research-ui/field_provenance.js'), 'utf8');
@@ -3525,13 +3554,14 @@ async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeTe
 
 async function checkTrafficBrowser() {
   const executable = process.env.REB_UI_CHROMIUM;
-  assert(executable, "Set REB_UI_CHROMIUM to the installed Chrome/Chromium executable. Sandbox flags are not overridden.");
-  const directory = await mkdtemp(join(tmpdir(), memoryBrowser ? "reb-memory-ui-" : investigationBrowser ? "reb-investigation-ui-" : collectionBrowser ? "reb-collection-ui-" : consoleBrowser ? "reb-console-ui-" : evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
-  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", memoryBrowser ? "memory-ui-qa" : investigationBrowser ? "investigation-ui-qa" : collectionBrowser ? "collection-ui-qa" : consoleBrowser ? "console-ui-qa" : evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
+  assert(float32FixtureOnly || executable, "Set REB_UI_CHROMIUM to the installed Chrome/Chromium executable. Sandbox flags are not overridden.");
+  const directory = await mkdtemp(join(tmpdir(), memoryBrowser ? "reb-memory-ui-" : investigationBrowser ? "reb-investigation-ui-" : float32Browser || float32FixtureOnly ? "reb-float32-ui-" : collectionBrowser ? "reb-collection-ui-" : consoleBrowser ? "reb-console-ui-" : evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
+  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", memoryBrowser ? "memory-ui-qa" : investigationBrowser ? "investigation-ui-qa" : float32Browser || float32FixtureOnly ? "float32-ui-qa" : collectionBrowser ? "collection-ui-qa" : consoleBrowser ? "console-ui-qa" : evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
   await mkdir(output, {recursive: true});
   let trafficApiMode = "offline";
   const memoryFixture = memoryBrowser ? await memoryBrowserFixture() : null;
   const collectionFixture = collectionBrowser ? collectionBrowserFixture() : null;
+  let floatFixture;
   const factsFixture = investigationBrowser ? investigationFixture(await sourceFactsBrowserFixture()) : sourceFactsBrowser ? await sourceFactsBrowserFixture() : null;
   const consoleFixture = consoleBrowser ? createConsoleFixture() : null;
   const evidenceFixture = evidenceBrowser ? evidenceBrowserFixture() : null;
@@ -3543,17 +3573,13 @@ async function checkTrafficBrowser() {
     const path = new URL(request.url, "http://127.0.0.1").pathname;
     if (collectionFixture && await collectionFixture.handle(request, response)) return;
     if (memoryFixture && await memoryFixture.handle(request, response)) return;
+    if (floatFixture?.handle && await floatFixture.handle(request, response)) return;
     if (factsFixture && await factsFixture.handle(request, response)) return;
     if (consoleFixture && await consoleFixture.handle(request, response)) return;
     if (evidenceFixture && await evidenceFixture.handle(request, response)) return;
     if (path === "/api/events" && trafficApiMode === "malformed") {response.writeHead(200, {"Content-Type": "application/json"}); response.end('{"malformed":true}'); return;}
     if (path.startsWith("/api/")) {response.writeHead(503, {"Content-Type": "application/json"}); response.end('{"error":"Synthetic offline QA fixture"}'); return;}
-    const name = path === "/" ? "index.html" : path.slice(1);
-    if (!/^[a-z_]+\.(?:html|js|css)$/.test(name)) {response.writeHead(404); response.end(); return;}
-    try {
-      response.writeHead(200, {"Content-Type": name.endsWith(".js") ? "text/javascript" : name.endsWith(".css") ? "text/css" : "text/html"});
-      response.end(await readFile(join(root, "apps/research-ui", name)));
-    } catch {response.writeHead(404); response.end();}
+    await serveFixtureAsset(request, response);
   });
   const args = ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${directory}`,
     "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "about:blank"];
@@ -3562,6 +3588,14 @@ async function checkTrafficBrowser() {
   const commands = new Map();
   await rm(join(output, "validation.json"), {force: true});
   try {
+    if (float32Browser || float32FixtureOnly) {
+      floatFixture = await float32BrowserFixture(root, directory);
+      diagnostics.float32_backend = floatFixture.diagnostics;
+      await floatFixture.ready();
+      await checkFloat32Fixture(floatFixture, root);
+      if (float32FixtureOnly) validation = {status:'passed', path:'real backend fixture only', rendered:false};
+    }
+    if (!float32FixtureOnly) {
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => {cleanup(); reject(new Error("Loopback fixture server timed out"));}, 5000);
       const failed = error => {cleanup(); reject(error);};
@@ -3571,6 +3605,7 @@ async function checkTrafficBrowser() {
     });
     lifecycle = trafficBrowserProcess(executable, args);
     diagnostics = lifecycle.diagnostics;
+    if (floatFixture) diagnostics.float32_backend = floatFixture.diagnostics;
     const address = await lifecycle.ready(directory);
     diagnostics.phase = "CDP socket";
     socket = await trafficBrowserSocket(address);
@@ -3769,7 +3804,7 @@ async function checkTrafficBrowser() {
     };
     captureFailure = async () => {
       const result = await command("Page.captureScreenshot", {format: "png"});
-      await writeFile(join(output, memoryBrowser ? "memory-failure.png" : investigationBrowser ? "investigation-failure.png" : collectionBrowser ? "collection-failure.png" : consoleBrowser ? "console-failure.png" : evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
+      await writeFile(join(output, memoryBrowser ? "memory-failure.png" : investigationBrowser ? "investigation-failure.png" : float32Browser ? "float32-failure.png" : collectionBrowser ? "collection-failure.png" : consoleBrowser ? "console-failure.png" : evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
     };
     await viewport(1440, 900);
     await command("Page.navigate", {url: `http://127.0.0.1:${server.address().port}/`});
@@ -3791,6 +3826,9 @@ async function checkTrafficBrowser() {
     } else if (consoleBrowser) {
       validation = await checkConsoleInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:consoleFixture,type:text=>command("Input.insertText",{text}),recordGeometry:value=>{diagnostics.console_upper_panes=[...(diagnostics.console_upper_panes??[]).slice(-31),value];}});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Console QA");
+    } else if (float32Browser) {
+      validation = await checkFloat32Interactions({evaluate,viewport,click,key,command,wheel,screenshot,fixture:floatFixture});
+      assert.deepEqual(runtimeErrors,[],"Application raised uncaught errors during Float32 QA");
     } else if (evidenceBrowser) {
       const setFile=async name=>{
         const doc=await command('DOM.getDocument');
@@ -3907,6 +3945,7 @@ async function checkTrafficBrowser() {
     validation = {status: "passed", path: "browser development UI", source: "synthetic fixture", viewports: [[1440,900],[600,800],[360,740]], checks: ["500-row bound and paging", "synchronized selected summary", "visible bounded narrow split", "independent ledger and body scrolling", "hit-tested pointer controls", "pending to response to failed", "equal-length updates", "stable focus and scroll", "sort/filter selection", "dismissal and Escape", "eviction", "arrow-key rows and tabs", "malformed JSON", "sandboxed HTML", "reduced motion", "Back to traffic", "new capture", "empty/malformed/offline"]};
     }
     diagnostics.phase = "validated";
+    }
   } catch (error) {
     failure = error;
     diagnostics.failure = String(error.stack ?? error).slice(0, 65536);
@@ -3920,6 +3959,7 @@ async function checkTrafficBrowser() {
     commands.clear();
     try {await lifecycle?.stop();}
     catch (error) {failure ??= error; diagnostics.cleanup_error = String(error.message).slice(0, 2048);}
+    try { await floatFixture?.stop(); } catch (error) {failure ??= error; diagnostics.float32_cleanup_error = String(error.message);}
     factsFixture?.release(); consoleFixture?.release();
     collectionFixture?.release();
     memoryFixture?.release();
@@ -3932,17 +3972,17 @@ async function checkTrafficBrowser() {
     server.closeAllConnections();
     if (server.listening) await new Promise(resolve => server.close(resolve));
     // Keep a profile only when its owned process could not be stopped.
-    if (!lifecycle || lifecycle.diagnostics.cleanup?.exited) {
+    if ((!lifecycle || lifecycle.diagnostics.cleanup?.exited) && (!floatFixture || floatFixture.diagnostics.cleanup?.exited)) {
       try {await rm(directory, {recursive: true, force: true, maxRetries: 3, retryDelay: 100});}
       catch (error) {failure ??= error; diagnostics.profile_cleanup_error = String(error.message).slice(0, 2048);}
     }
     await writeFile(join(output, "browser-startup.json"), JSON.stringify(diagnostics, null, 2));
   }
   if (failure) throw failure;
-  await writeFile(join(output, "validation.json"), JSON.stringify(validation, null, 2));
-  console.log(`PASS real Chromium ${memoryBrowser ? 'Memory workflow' : collectionBrowser ? 'Collection' : consoleBrowser ? 'Console' : evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
+  await writeFile(join(output, float32FixtureOnly ? "fixture-validation.json" : "validation.json"), JSON.stringify(validation, null, 2));
+  console.log(`PASS ${float32FixtureOnly ? "real loopback fixture (not rendered QA)" : "real Chromium"} ${memoryBrowser ? 'Memory workflow' : float32Browser || float32FixtureOnly ? 'Float32 diagnostics' : collectionBrowser ? 'Collection' : consoleBrowser ? 'Console' : evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
 }
-if (investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser || collectionBrowser || memoryBrowser) {await checkTrafficBrowser(); process.exit(0);}
+if (investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly) {await checkTrafficBrowser(); process.exit(0);}
 
 if (fieldsOnly) process.exit(0);
 const temporary = await mkdtemp(join(tmpdir(), "origin-trace-debugger-"));

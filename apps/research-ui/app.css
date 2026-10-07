@@ -3549,3 +3549,33 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
         .memory-reference-row { grid-template-columns: 60px minmax(0, 1fr); }
         .memory-reference-source { grid-column: 1 / -1; }
       }
+
+/* Float32 is a cold, composable Tools inspector; the backend owns all math. */
+.float32-workspace { display: grid; grid-template-columns: minmax(260px, 0.9fr) minmax(300px, 1.3fr); gap: 16px; min-width: 0; align-items: start; }
+.float32-form, .float32-output { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.float32-form h2 { margin: 0 0 8px; }
+.float32-form p, .float32-output p { font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.float32-form fieldset { min-width: 0; margin: 16px 0; padding: 12px; border: 1px solid var(--line); border-radius: 6px; }
+.float32-form legend { font-size: 12px; font-weight: 600; }
+.float32-form label { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 12px; margin: 8px 0; }
+.float32-controls { display: flex; flex-wrap: wrap; gap: 12px; }
+.float32-controls label { flex: 1 1 100px; }
+.float32-form input, .float32-form select, .float32-form textarea { box-sizing: border-box; width: 100%; min-width: 0; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 8px; }
+.float32-form textarea { min-height: 96px; resize: vertical; font-family: var(--mono); }
+.float32-form label.float32-check { flex-direction: row; align-items: center; }
+.float32-check input { width: auto; }
+.float32-actions, .float32-page { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
+.float32-page span { font-size: 12px; }
+.float32-receipt { font-weight: 600; color: var(--accent); }
+.float32-identity { margin: 12px 0; font-size: 12px; overflow-wrap: anywhere; }
+.float32-identity summary { cursor: pointer; line-height: 1.5; }
+.float32-metrics { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(0, 1fr); gap: 8px 12px; font-size: 12px; }
+.float32-metrics dt { color: var(--muted); }
+.float32-metrics dd { margin: 0; overflow-wrap: anywhere; }
+.float32-rows { max-height: 520px; overflow: auto; scrollbar-gutter: stable; border-top: 1px solid var(--line); }
+.float32-row { border-bottom: 1px solid var(--line); padding: 8px 0; }
+.float32-row h4 { font-size: 12px; margin: 4px 0; }
+.float32-row p { font-family: var(--mono); margin: 4px 0; }
+#tools-panel-float32 [hidden] { display: none !important; }
+@media (max-width: 1000px) { .float32-workspace { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 480px) { .float32-form, .float32-output { padding: 10px; } .float32-form fieldset { padding: 8px; } }

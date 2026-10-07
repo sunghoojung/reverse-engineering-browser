@@ -5942,6 +5942,12 @@
         }));
       }
 
+      const float32Panel = mountFloat32Inspector(document.querySelector('#tools-panel-float32'), {getArtifacts: () => state.artifacts});
+
+      function syncFloat32Panel() {
+        if (state.toolsTab === 'float32' && !document.querySelector('#screen-tools').hidden) float32Panel.refresh();
+      }
+
       function renderTools() {
         if (!toolsElements.notice) return;
         toolsElements.notice.dataset.kind = state.decoderStatus;
@@ -5952,13 +5958,18 @@
         });
         toolsElements.decoderPanel.hidden = state.toolsTab !== 'decoder';
         toolsElements.jwtPanel.hidden = state.toolsTab !== 'jwt';
+        document.querySelector('#tools-panel-float32').hidden = state.toolsTab !== 'float32';
+        if (state.toolsTab === 'float32') { toolsElements.notice.dataset.kind = 'ready'; toolsElements.notice.textContent = 'Read-only float32 diagnostics. Explicit local input; no target capture or execution.'; }
+        toolsElements.engineBadge.hidden = state.toolsTab === 'float32';
+        syncFloat32Panel();
         renderDecoder();
         renderInvestigationDecoder();
         renderJwt();
       }
 
       function setToolsTab(tab) {
-        const next = tab === 'jwt' ? 'jwt' : 'decoder';
+        const next = ['jwt', 'float32'].includes(tab) ? tab : 'decoder';
+        if (next !== 'float32') float32Panel.cancel();
         if (next !== state.toolsTab && !state.decoderPending && !state.jwtPending && state.decoderEngine.available) {
           setToolsNotice('ready', next === 'jwt'
             ? 'Paste a JWT to inspect its claims. Verify its signature separately before trusting them.'
@@ -9227,6 +9238,7 @@
           state.artifactRefreshing = false;
           evidencePackagePanel.sync();
           evidenceWorkspace.sync();
+          syncFloat32Panel();
         }
       }
 
@@ -9240,6 +9252,7 @@
         }
         evidenceWorkspace.setVisible(screenName === 'evidence');
         if (screenName !== 'sources') sourceFactsPanel.cancel();
+        if (screenName !== 'tools') float32Panel.cancel();
         if (screenName !== 'sources' && state.sourceHooksOpen) closeSourceHooks(false);
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
         document.querySelectorAll('.nav-button').forEach(button => {

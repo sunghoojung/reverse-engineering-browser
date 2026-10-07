@@ -95,7 +95,9 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-      - name: Exercise Evidence metadata in installed Chrome
+      - name: Exercise linked Evidence in installed Chrome
+        env:
+          REB_UI_REQUIRE_EVIDENCE_NAVIGATION: "1"
         if: ${{ !cancelled() }}
         run: |
           REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"

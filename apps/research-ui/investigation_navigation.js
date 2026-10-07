@@ -79,7 +79,7 @@ let investigationRange = null;
 let investigationPendingReturn = null;
 let investigationPassiveSource = false;
 let investigationDecoderOrigin = null;
-const investigationNames = {traffic:'Requests', backtrace:'Backtrace', sources:'Sources', tools:'Decoder', signals:'Fingerprinting', 'api-collection':'Collection', 'field-provenance':'Field trace', experiments:'Experiments', analyst:'Analyst', memory:'Memory', vm:'VM candidates'};
+const investigationNames = {traffic:'Requests', evidence:'Evidence', backtrace:'Backtrace', sources:'Sources', tools:'Decoder', signals:'Fingerprinting', 'api-collection':'Collection', 'field-provenance':'Field trace', experiments:'Experiments', analyst:'Analyst', memory:'Memory', vm:'VM candidates'};
 const investigationScreen = () => document.querySelector('.screen:not([hidden])')?.id.replace('screen-', '') ?? 'traffic';
 function investigationSelector(node, root = document, stableOnly = false) {
   if (!node || !root.contains(node)) return null;
@@ -87,11 +87,11 @@ function investigationSelector(node, root = document, stableOnly = false) {
   if (stableOnly) {
     // Dynamic rows may reorder while a local read is pending. Never restore
     // focus by ordinal position into a different piece of evidence.
-    for (const key of ['requestId','traceKey','artifactId','scriptId']) {
+    for (const key of ['requestId','traceKey','artifactId','scriptId','evidenceKey']) {
       const value = node.dataset?.[key];
       if (!value || value.length > 256 || key === 'traceKey' && value.startsWith('gap:')) continue;
       const attribute = key.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`);
-      const selector = `[data-${attribute}="${CSS.escape(value)}"]`;
+      const selector = `${key === 'evidenceKey' ? 'button' : ''}[data-${attribute}="${CSS.escape(value)}"]`;
       if (root.querySelectorAll(selector).length === 1 && root.querySelector(selector) === node) return selector;
     }
     return null;
@@ -116,13 +116,13 @@ function investigationSnapshot() {
   const request = state.requests.find(item => item.id === state.selectedRequestId);
   const source = selectedSource();
   const scroll = [];
-  const panes = '.exchange-content, .detail-pane, .sources-editor, .sources-navigator, .debug-panes, .trace-inspector, .trace-list-pane, .decoder-column, .tools-shell, #request-rows, #source-code-wrap, #source-tree, #backtrace-steps, #decoder-input, #decoder-output';
+  const panes = '.exchange-content, .detail-pane, .sources-editor, .sources-navigator, .debug-panes, .trace-inspector, .trace-list-pane, .decoder-column, .tools-shell, #request-rows, #source-code-wrap, #source-tree, #backtrace-steps, #decoder-input, #decoder-output, #evidence-rows, #evidence-inspector, #evidence-package-mode';
   for (const node of new Set([root, ...root.querySelectorAll(panes)])) {
     if (scroll.length >= 32) break;
     const selector = investigationSelector(node, root);
     if (selector) scroll.push({selector, top: Math.min(node.scrollTop, 1e8), left: Math.min(node.scrollLeft, 1e8)});
   }
-  return {screen, label: investigationNames[screen] ?? 'workspace', request: investigationRequestIdentity(request),
+  return {screen, label: investigationNames[screen] ?? 'workspace', evidence: screen === 'evidence' ? evidenceWorkspace.snapshot() : null, request: investigationRequestIdentity(request),
     artifact: investigationArtifactIdentity(source), script: source?.source_type === 'script' ? investigationScriptIdentity(source) ?? {unavailable:true} : null,
     consoleScope: screen === 'traffic' && root.dataset.consoleTraffic === 'true' ? {session:document.querySelector('#console-experiment-traffic').dataset.session, target:document.querySelector('#console-experiment-traffic').dataset.document} : null,
     runtimeHook: screen === 'traffic' && state.selectedRuntimeHookRequest ? {...state.selectedRuntimeHookRequest} : null,
@@ -138,7 +138,7 @@ function restoreInvestigation(entry) {
   if (entry.screen === 'sources' && entry.script?.unavailable) {
     investigationNotice('Return unavailable: the original live script identity was unknown or exceeded the bounded navigation metadata limit.', 'unavailable'); return false;
   }
-  if (['traffic','backtrace'].includes(entry.screen) && !entry.consoleScope && !entry.runtimeHook && entry.request) {
+  if (['traffic','backtrace','evidence'].includes(entry.screen) && !entry.consoleScope && !entry.runtimeHook && entry.request) {
     request = investigationResolve(entry.request, state.requests, investigationRequestIdentity);
     if (request.status !== 'ready') {investigationNotice(`Return unavailable: ${request.message}`, request.status); return false;}
     if (state.requests.filter(item => item.id === request.record.id).length !== 1) {investigationNotice('Return unavailable: Requests cannot disambiguate this reused row identifier.', 'ambiguous'); return false;}
@@ -158,6 +158,9 @@ function restoreInvestigation(entry) {
     if (panel.dataset.session !== entry.consoleScope.session || panel.dataset.document !== entry.consoleScope.target) {investigationNotice('Return unavailable: this separate Console activity view has been replaced.', 'stale'); return false;}
   }
   if (entry.runtimeHook && (runtimeHooksState()?.session_id !== entry.runtimeHook.sessionId || !runtimeHooksState()?.requests.some(item => item.id === entry.runtimeHook.id))) {investigationNotice('Return unavailable: the isolated request trail expired.', 'stale'); return false;}
+  if (entry.screen === 'evidence' && !evidenceWorkspace.canRestore(entry.evidence, request?.record ?? state.requests.find(item => item.id === state.selectedRequestId))) {
+    investigationNotice('Return unavailable: the original Evidence request or selected native record is missing, changed or ambiguous.', 'stale'); return false;
+  }
   retireInvestigationReturn();
   investigationRestore = true;
   try {
@@ -168,6 +171,7 @@ function restoreInvestigation(entry) {
       document.querySelector('#console-experiment-traffic').hidden = !entry.consoleScope;
       state.selectedRuntimeHookRequest = entry.runtimeHook;
       state.inspectorTab = entry.inspectorTab; state.fieldTab = entry.fieldTab; state.selectedField = fieldSets[entry.fieldTab]?.find(field => field.path === entry.fieldPath) ?? null; renderInspector();}
+    if (entry.screen === 'evidence' && !evidenceWorkspace.restore(entry.evidence)) {investigationNotice('The original Evidence selection can no longer be restored.', 'stale'); return false;}
     if (entry.screen === 'backtrace') state.selectedTraceRow = entry.traceRow;
     if (source && selectArtifact(source.record.artifact_id, null, {passive:true, identity:entry.artifact}) === false) return false;
     if (entry.screen === 'sources' && entry.script && selectScript(entry.script.id) === false) return false;
@@ -221,6 +225,10 @@ function investigationGapKey(saved) {
 }
 function investigationContextMatches(entry) {
   if (investigationScreen() !== entry.screen) return false;
+  if (entry.screen === 'evidence') {
+    const current = evidenceWorkspace.snapshot();
+    if (!evidenceWorkspace.canRestore(entry.evidence) || current.selectedKey !== entry.evidence.selectedKey || current.pane !== entry.evidence.pane || current.packages !== entry.evidence.packages) return false;
+  }
   if (entry.screen === 'sources') {
     const source = selectedSource();
     if (entry.artifact && state.artifacts.filter(item => item.artifact_id === entry.artifact.artifact).length !== 1) return false;
@@ -228,7 +236,7 @@ function investigationContextMatches(entry) {
     if (entry.script && !investigationSame(entry.script, investigationScriptIdentity(source))) return false;
     if (state.sourceFormatted !== entry.sourceFormatted || state.sourceDeobfuscated !== entry.sourceDeobfuscated || state.sourceWasm !== entry.sourceWasm) return false;
   }
-  if (['traffic','backtrace'].includes(entry.screen) && entry.request && !entry.consoleScope && !entry.runtimeHook) {
+  if (['traffic','backtrace','evidence'].includes(entry.screen) && entry.request && !entry.consoleScope && !entry.runtimeHook) {
     if (state.requests.filter(item => item.id === state.selectedRequestId).length !== 1 ||
         !investigationSame(entry.request, investigationRequestIdentity(state.requests.find(item => item.id === state.selectedRequestId)))) return false;
   }

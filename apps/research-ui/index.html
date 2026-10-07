@@ -121,7 +121,7 @@
                 <div id="exchange-inspector" class="exchange-inspector" role="tabpanel" aria-labelledby="inspector-tab-headers"></div>
                 <div hidden id="request-inspector" class="request-inspector" role="tabpanel" aria-labelledby="inspector-tab-payload" tabindex="0">
                   <h1 id="request-prompt">Choose a request value and trace where it came from.</h1>
-                  <div id="request-package-entry" class="package-entry" hidden><button class="secondary-button" type="button" data-screen="evidence">Coverage &amp; metadata packages</button><span>Exact native identities; API markers do not establish completion.</span></div>
+                  <div id="request-package-entry" class="package-entry" hidden><button class="secondary-button" type="button" data-screen="evidence">Inspect observations &amp; artifacts</button><span>Recorded links, context correlations and missing evidence.</span></div>
                   <div id="field-tabs" class="field-tabs" role="tablist" aria-label="Request values">
                     <button id="field-tab-body" class="field-tab" type="button" role="tab" data-field-tab="body" aria-controls="field-tree" aria-selected="true">Body</button>
                     <button id="field-tab-headers" class="field-tab" type="button" role="tab" data-field-tab="headers" aria-controls="field-tree" aria-selected="false" tabindex="-1">Headers</button>
@@ -393,7 +393,7 @@
           <section id="screen-backtrace" class="screen" aria-label="Request origin trace" hidden>
             <header class="screen-head">
               <div><h1>Backtraces</h1><div id="backtrace-subtitle" class="screen-subtitle">Follow a request back to its recorded origin.</div></div>
-              <div class="screen-head-actions"><button class="secondary-button package-navigation" type="button" data-screen="evidence">Metadata packages</button><button class="secondary-button" type="button" data-screen="traffic">View traffic</button></div>
+              <div class="screen-head-actions"><button class="secondary-button package-navigation" type="button" data-screen="evidence">Evidence</button><button class="secondary-button" type="button" data-screen="traffic">View traffic</button></div>
             </header>
             <div class="trace-toolbar">
               <label for="trace-request">Request</label>
@@ -422,10 +422,28 @@
           <section id="screen-evidence" class="screen" aria-label="Supporting evidence" hidden>
             <header class="screen-head">
               <button class="back-button" type="button" data-screen="traffic" aria-label="Back to requests">←</button>
-              <div><h1>Supporting Evidence</h1><div class="screen-subtitle">Exact metadata selections and bounded coverage</div></div>
-              <div class="screen-head-actions"><button class="secondary-button" type="button" data-screen="backtrace">Backtrace</button></div>
+              <div><h1>Evidence</h1><div class="screen-subtitle">Inspect what was recorded and how it connects</div></div>
+              <div class="screen-head-actions"><button id="evidence-trace" class="secondary-button" type="button">Backtrace</button><button id="evidence-package-toggle" class="secondary-button" type="button" aria-expanded="false" aria-controls="evidence-package-mode">Metadata package</button></div>
             </header>
-            <div class="evidence-content">
+            <div id="evidence-investigation" class="evidence-investigation">
+              <section class="evidence-context" aria-label="Investigation context">
+                <div class="evidence-context-main"><div id="evidence-context-kind" class="evidence-eyebrow"></div><h2 id="evidence-context-title"></h2><p id="evidence-context-note"></p></div>
+                <div class="evidence-coverage"><strong id="evidence-count">0 observations</strong><span id="evidence-coverage-summary">Capture coverage unknown</span><details id="evidence-coverage-details"><summary>Coverage &amp; gaps</summary><div id="evidence-coverage-popover" class="evidence-coverage-popover" tabindex="0" aria-label="Coverage and gap details"><p id="evidence-gap-details"></p><p>Retained order is not a total execution order. Missing records do not prove that an operation did not occur.</p></div></details></div>
+              </section>
+              <div id="evidence-workspace-notice" class="evidence-workspace-notice" role="status" aria-live="polite" hidden></div>
+              <div class="evidence-mobile-tabs" role="tablist" aria-label="Evidence pane"><button type="button" id="evidence-observations-tab" role="tab" aria-controls="evidence-observations-pane" data-evidence-pane="observations" aria-selected="true">Observations</button><button type="button" id="evidence-detail-tab" role="tab" aria-controls="evidence-inspector" data-evidence-pane="detail" aria-selected="false" tabindex="-1">Selected record</button></div>
+              <div class="evidence-investigation-layout" data-evidence-pane="observations">
+                <section id="evidence-observations-pane" class="evidence-observations" aria-label="Recorded observations">
+                  <div class="evidence-observation-tools"><label class="evidence-search-label"><span>Filter observations</span><input aria-label="Filter observations" id="evidence-search" type="search" placeholder="Operation, payload, source…" autocomplete="off" /></label><label class="evidence-scope-label"><span>Show</span><select aria-label="Observation scope" id="evidence-scope"><option value="related">Request &amp; context</option><option value="all">Retained window</option></select></label></div>
+                  <div class="evidence-list-caption"><span>Recorded observations</span><span id="evidence-window-count"></span></div>
+                  <div id="evidence-rows" class="evidence-observation-list" tabindex="-1"></div>
+                  <div class="evidence-list-footer"><span id="evidence-order-note">Grouped by relationship · retained order within groups</span><div><button id="evidence-previous" class="secondary-button" type="button">Previous</button><button id="evidence-next" class="secondary-button" type="button">Next</button></div></div>
+                </section>
+                <aside id="evidence-inspector" class="evidence-inspector" tabindex="-1" aria-label="Selected recorded observation"></aside>
+              </div>
+            </div>
+            <div id="evidence-package-mode" class="evidence-content" hidden>
+              <div class="evidence-package-heading"><button id="evidence-return" class="secondary-button" type="button">← Return to observations</button><span>Explicit metadata selection · nothing is saved automatically</span></div>
               <section id="evidence-package-panel" class="evidence-package-panel" aria-label="Metadata package workflow">
                 <h2>Metadata packages</h2>
                 <p class="package-note">Metadata only; capture completeness is unknown. Export never stops writers.</p>
@@ -447,11 +465,6 @@
                 <p id="package-save-note" data-package-save-note class="package-note"></p>
                 <div data-package-report class="package-report"></div>
               </section>
-            <div class="evidence-tools"><span>Selected backtrace records</span><span id="evidence-count" class="evidence-count">0 events</span></div>
-            <div class="evidence-table" role="table" aria-label="Evidence events">
-              <div class="evidence-head" role="row"><span role="columnheader">Time</span><span role="columnheader">Source</span><span role="columnheader">Category</span><span role="columnheader">Operation</span><span role="columnheader">Correlation IDs</span><span role="columnheader">Value / artifact</span></div>
-              <div id="evidence-rows"></div>
-            </div>
             </div>
           </section>
 

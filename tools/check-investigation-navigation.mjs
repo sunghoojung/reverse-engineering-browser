@@ -101,6 +101,7 @@ export async function checkAdvancedNavigation(root) {
     const context={document,state:{originTraceStatus:'idle',sourceHooksOpen:false},investigationRevision:0,
       investigationBeforeScreen:name=>{current=name;},investigationScreen:()=>current,
       evidencePackagePanel:{setVisible:noop},sourceFactsPanel:{cancel:noop},
+      evidenceWorkspace:{setVisible:noop},
       window:{matchMedia:()=>({matches:narrow})},requestAnimationFrame:callback=>frames.push(callback),selectedSource:()=>null,
       elements:{requestRows:{querySelectorAll:()=>[]},requestFilter:destination}};
     for(const name of ['renderFingerprintActivity','renderRuntimeHookTraffic','renderBacktrace','renderExperiment','renderApiCollection','refreshApiCollection','renderLocalAnalyst','refreshLocalAnalyst','renderTools','refreshDecoderEngine','renderDebugger','renderSources','renderMemory','renderVmLab'])context[name]=noop;
@@ -478,9 +479,9 @@ async function checkInvestigationReturns(root) {
     const state={selectedRequestId:'same',selectedField:{path:'selected'},requests:[{id:'same',origin:'live',operation:'response_completed',events:[event]}],originTraceKey:'same:11:17:41',originTrace:{steps:[{event:{...event,sequence_number:'41'},monotonic_time_ns:'1',confidence:'observed',category:'network',operation:'request_started',frame_id:'1',request_id:'91',artifact_id:'7',value:'prior root'}],gaps:[]}};
     const node=()=>({children:[],setAttribute(){},append(...children){this.children.push(...children);},replaceChildren(...children){this.children=children;}});
     const elements={evidenceRows:node(),evidenceCount:node(),evidenceLinkCount:node()};
-    const context=createContext({state,elements,evidencePackagePanel:{sync(){}},sampleEvidence:[{value:'must not substitute sample data'}],document:{querySelectorAll:()=>[],querySelector:()=>({hidden:true}),createElement:node},integerText:(event,key)=>String(event[key]),formatMilliseconds:String,renderBacktrace(){}});
+    const context=createContext({state,elements,evidencePackagePanel:{sync(){}},evidenceWorkspace:{sync(){}},sampleEvidence:[{value:'must not substitute sample data'}],document:{querySelectorAll:()=>[],querySelector:()=>({hidden:true}),createElement:node},integerText:(event,key)=>String(event[key]),formatMilliseconds:String,renderBacktrace(){}});
     runInContext(rootFunction+'\n'+section('      function renderEvidence(', '      async function refreshOriginTrace('),context);
-    context.renderEvidence();assert.equal(elements.evidenceRows.children.length,0);assert.match(elements.evidenceCount.textContent,/Trace unavailable/);
+    context.renderEvidence();assert.equal(elements.evidenceRows.children.length,0);assert.equal(elements.evidenceLinkCount.textContent,'0','Completed stale trace cannot become an Evidence count');
     state.originTrace=null;context.renderEvidence();assert.equal(elements.evidenceRows.children.length,0,'Live requests never fall back to sample evidence');
   }
   console.log('PASS production return ownership, zero scroll, exact trace reread, stable gap/focus identity, actual request-ID collision guard, original-only source pivot and fetch/body/304 retained-root races (not rendered QA)');

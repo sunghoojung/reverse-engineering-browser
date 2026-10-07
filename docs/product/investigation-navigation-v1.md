@@ -148,7 +148,8 @@ before acceptance; passing pure checks is not rendered-browser evidence.
 ## Explicit remaining integration gaps
 
 The supported identity-aware path in this version is captured Requests, native
-Backtrace, captured Sources, verified original JavaScript ranges and Decoder
+Backtrace, native Evidence observations, captured Sources, verified original
+JavaScript ranges and Decoder
 origin navigation. Collection copy has a verified source return, but generic return to Collection
 keeps its current owner-managed draft and execution selection; it does not
 restore historical recipe versions or run results. Generic return to Analyst,
@@ -169,4 +170,9 @@ Evidence selection/export can retain explicit native event keys while labeling
 their relation to a debugger request as correlation. Exact selected keys do not
 upgrade a host/method/time request association to causal evidence. An adapter
 must carry that qualifier or show a retained-window context; it must not silently
-select or discard records. This version does not yet implement that D12 adapter.
+select or discard records. The Evidence workspace keeps that qualifier in its live selection/export context.
+Its shared return adapter stores only request key, selected native key, page,
+visible pane and package-mode flag. It preflights the original request without
+changing current selection, then restores the Evidence controller before scroll
+and focus. Missing, duplicate or replaced records fail closed. Current search,
+scope and package selections remain controller-owned; history is not consent.

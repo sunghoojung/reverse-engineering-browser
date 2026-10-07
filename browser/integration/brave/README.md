@@ -6,6 +6,14 @@ ignored by the parent repository. Project-wide authorization and capture policy
 is in [SAFETY.md](../../../SAFETY.md); this guide describes the
 browser integration's enforcement details.
 
+## Native worker source foundation
+
+The dormant dedicated-worker source foundation adds bounded native compile
+observations for classic scripts and JavaScript modules. It has no production
+activation or transport yet, and the working CDP worker extractor is unchanged.
+Shared/service workers remain unsupported. See the
+[status, privacy gates, identity contract, and release checklist](../../../protocol/native-worker-source-v1.md).
+
 ## Native console
 
 The disabled-by-default native console is a separate mutation path. Patch 0011

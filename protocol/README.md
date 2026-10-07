@@ -13,6 +13,9 @@ lexical binding/effect analysis, original-byte ranges and explicit unknown cover
 [Native Console v2](native-console-v2.md) defines the opt-in mutable console,
 its disposable browser ownership, wire layouts, and limits.
 
+[Native Worker Source v1](native-worker-source-v1.md) describes the dormant
+dedicated-worker source queue, pinned hooks, and blockers to production activation.
+
 ## Two representations
 
 1. Native hot paths use the fixed 320-byte C++ `EventRecord` in

@@ -32,8 +32,12 @@ component("renderer_sink") {
 
   sources = [
     "common/native_probe_event.h",
+    "common/native_worker_source.cc",
+    "common/native_worker_source.h",
     "renderer/native_probe_sink.cc",
     "renderer/native_probe_sink.h",
+    "renderer/native_worker_source_sink.cc",
+    "renderer/native_worker_source_sink.h",
   ]
 
   deps = [ "//base" ]

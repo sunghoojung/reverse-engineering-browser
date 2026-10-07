@@ -142,25 +142,25 @@ class NativeWorkerSourceQueue final {
     return active_generation_.load(std::memory_order_acquire) != 0;
   }
   [[nodiscard]] NativeWorkerCaptureStatus Configure(const NativeWorkerSourcePolicy& policy,
-                                                   std::uint64_t now_ns) noexcept;
+                                                    std::uint64_t now_ns) noexcept;
   void Disable() noexcept;
   // Worker teardown immediately revokes the matching generation without
   // waiting for a producer/consumer. Pending storage is cleared when possible.
   void RetireWorker(NativeWorkerToken worker) noexcept;
   [[nodiscard]] NativeWorkerCaptureStatus Begin(NativeWorkerKind kind,
-                                               NativeWorkerToken worker,
-                                               std::uint64_t now_ns,
-                                               NativeWorkerCaptureTicket& ticket) noexcept;
+                                                NativeWorkerToken worker,
+                                                std::uint64_t now_ns,
+                                                NativeWorkerCaptureTicket& ticket) noexcept;
   [[nodiscard]] NativeWorkerCaptureStatus Capture(const NativeWorkerCaptureTicket& ticket,
-                                                 NativeWorkerToken parent_context,
-                                                 NativeWorkerSourceKind kind,
-                                                 NativeWorkerText source,
-                                                 NativeWorkerText url,
-                                                 std::uint64_t now_ns) noexcept;
+                                                  NativeWorkerToken parent_context,
+                                                  NativeWorkerSourceKind kind,
+                                                  NativeWorkerText source,
+                                                  NativeWorkerText url,
+                                                  std::uint64_t now_ns) noexcept;
   [[nodiscard]] NativeWorkerCaptureStatus Take(NativeWorkerSourceHeader& header,
-                                              std::span<std::uint8_t> source,
-                                              std::span<char> url,
-                                              std::uint64_t now_ns) noexcept;
+                                               std::span<std::uint8_t> source,
+                                               std::span<char> url,
+                                               std::uint64_t now_ns) noexcept;
   [[nodiscard]] NativeWorkerSourceStats Stats() noexcept;
 
  private:

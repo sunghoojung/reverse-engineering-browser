@@ -329,8 +329,7 @@ bool CheckNativeWorkerSources() {
     return reb::NativeWorkerText{
         std::span(reinterpret_cast<const std::uint8_t*>(value.data()), value.size()), {}};
   };
-  const auto capture = [&](
-                           const reb::NativeWorkerText source,
+  const auto capture = [&](const reb::NativeWorkerText source,
                            const std::string_view url =
                                "https://user:secret@fixture.invalid/a.js?q=secret#secret") {
     return queue.Capture(ticket, parent, Source::kClassic, source, latin(url), 2);
@@ -348,26 +347,27 @@ bool CheckNativeWorkerSources() {
   if (queue.Configure(policy, 1) != Status::kAccepted ||
       queue.Begin(Kind::kShared, worker, 1, ticket) != Status::kUnsupportedWorker ||
       queue.Begin(Kind::kService, worker, 1, ticket) != Status::kUnsupportedWorker ||
-      queue.Begin(Kind::kDedicated, {worker.high + 1, worker.low}, 1, ticket) != Status::kWrongWorker ||
+      queue.Begin(Kind::kDedicated, {worker.high + 1, worker.low}, 1, ticket) !=
+          Status::kWrongWorker ||
       queue.Begin(Kind::kDedicated, worker, 100, ticket) != Status::kExpired ||
       queue.Begin(Kind::kDedicated, worker, 1, ticket) != Status::kAccepted ||
       capture(latin("a\xe9")) != Status::kAccepted ||
       queue.Take(header, {}, url, 3) != Status::kOutputTooSmall ||
-      queue.Take(header, output_span, url, 3) != Status::kAccepted ||
-      header.worker != worker || header.parent_context != parent ||
-      header.browser_context != policy.browser_context ||
+      queue.Take(header, output_span, url, 3) != Status::kAccepted || header.worker != worker ||
+      header.parent_context != parent || header.browser_context != policy.browser_context ||
       header.renderer_instance != policy.renderer_instance || header.session_id != 17 ||
       header.generation != 1 || header.sequence != 1 || header.sensitive != 1 ||
       header.source_size != 3 || header.source_code_units != 2 ||
-      std::string_view(reinterpret_cast<const char*>(output.get()), header.source_size) != "a\xc3\xa9" ||
+      std::string_view(reinterpret_cast<const char*>(output.get()), header.source_size) !=
+          "a\xc3\xa9" ||
       std::string_view(url.data(), header.url_size) != "https://fixture.invalid/a.js" ||
       header.url_status != reb::NativeWorkerUrlStatus::kSanitized) {
     return false;
   }
   const std::u16string utf16 = u"\u00e9\U0001f642";
   if (capture({{}, utf16}, "blob:https://fixture.invalid/private-id") != Status::kAccepted ||
-      queue.Take(header, output_span, url, 3) != Status::kAccepted ||
-      header.source_size != 6 || header.source_code_units != 3 || header.url_size != 0 ||
+      queue.Take(header, output_span, url, 3) != Status::kAccepted || header.source_size != 6 ||
+      header.source_code_units != 3 || header.url_size != 0 ||
       header.url_status != reb::NativeWorkerUrlStatus::kOpaqueOmitted ||
       std::string_view(reinterpret_cast<const char*>(output.get()), header.source_size) !=
           "\xc3\xa9\xf0\x9f\x99\x82") {
@@ -377,8 +377,7 @@ bool CheckNativeWorkerSources() {
   const std::string too_large(reb::kNativeWorkerSourceMaxBytes + 1, 'x');
   if (capture({{}, malformed}) != Status::kInvalid ||
       capture(latin(too_large)) != Status::kTooLarge ||
-      capture({{}, {}, true}) != Status::kSourceUnavailable ||
-      capture({}) != Status::kAccepted ||
+      capture({{}, {}, true}) != Status::kSourceUnavailable || capture({}) != Status::kAccepted ||
       queue.Take(header, output_span, url, 3) != Status::kAccepted || header.source_size != 0 ||
       header.dropped_before != 3 || header.sequence != 6) {
     return false;
@@ -408,7 +407,8 @@ bool CheckNativeWorkerSources() {
   if (capture(latin("retire on reconfigure")) != Status::kAccepted ||
       queue.Configure(policy, 1) != Status::kAccepted || queue.Stats().retired != 1 ||
       queue.Capture(stale_ticket, parent, Source::kClassic, latin("stale"), {}, 2) !=
-          Status::kStaleGeneration || queue.Stats().stale != 1 ||
+          Status::kStaleGeneration ||
+      queue.Stats().stale != 1 ||
       queue.Begin(Kind::kDedicated, worker, 1, ticket) != Status::kAccepted ||
       capture(latin("must disappear on teardown")) != Status::kAccepted) {
     return false;
@@ -427,8 +427,8 @@ bool CheckNativeWorkerSources() {
       queue.Begin(Kind::kDedicated, worker, 1, ticket) != Status::kAccepted ||
       capture(latin(std::string_view(too_large).substr(0, reb::kNativeWorkerSourceMaxBytes))) !=
           Status::kAccepted ||
-      queue.Take(header, output_span, url, 100) != Status::kExpired ||
-      queue.Stats().queued != 0 || queue.Stats().retired != 3) {
+      queue.Take(header, output_span, url, 100) != Status::kExpired || queue.Stats().queued != 0 ||
+      queue.Stats().retired != 3) {
     return false;
   }
   queue.Disable();
@@ -449,8 +449,8 @@ bool CheckNativeWorkerSourceUrls() {
   const std::string max_label(63, 'a');
   const std::string max_label_url = "https://" + max_label + ".invalid/a.js";
   const std::string over_label_url = "https://a" + max_label + ".invalid/a.js";
-  const std::string max_host = max_label + "." + max_label + "." + max_label + "." +
-                               std::string(61, 'b');
+  const std::string max_host =
+      max_label + "." + max_label + "." + max_label + "." + std::string(61, 'b');
   const std::string max_host_url = "https://" + max_host + "./a.js";
   const std::string over_host_url = "https://" + max_host + "b/a.js";
   const std::array cases{
@@ -477,8 +477,7 @@ bool CheckNativeWorkerSourceUrls() {
       UrlCase{"https://:443/private.js", "", UrlStatus::kInvalidOmitted},
       UrlCase{"https://[::1/private.js", "", UrlStatus::kInvalidOmitted},
       UrlCase{"https://fixture.invalid:65536/private.js", "", UrlStatus::kInvalidOmitted},
-      UrlCase{"https://fixture.invalid:999999999999999999999/a.js", "",
-              UrlStatus::kInvalidOmitted},
+      UrlCase{"https://fixture.invalid:999999999999999999999/a.js", "", UrlStatus::kInvalidOmitted},
       UrlCase{"https://fixture.invalid:-1/a.js", "", UrlStatus::kInvalidOmitted},
       UrlCase{"https://fixture.invalid:+1/a.js", "", UrlStatus::kInvalidOmitted},
       UrlCase{"https://fixture.invalid:port/a.js", "", UrlStatus::kInvalidOmitted},
@@ -521,12 +520,12 @@ bool CheckNativeWorkerSourceUrls() {
   std::array<char, reb::kNativeWorkerSourceMaxUrlBytes> url{};
   for (const auto& test : cases) {
     const reb::NativeWorkerText input{
-        std::span(reinterpret_cast<const std::uint8_t*>(test.input.data()), test.input.size()),
-        {}};
+        std::span(reinterpret_cast<const std::uint8_t*>(test.input.data()), test.input.size()), {}};
     reb::NativeWorkerSourceHeader header;
-    if (queue.Capture(ticket, {}, reb::NativeWorkerSourceKind::kClassic, {kSource, {}}, input,
-                       2) != Status::kAccepted ||
-        queue.Take(header, output, url, 3) != Status::kAccepted || header.url_status != test.status ||
+    if (queue.Capture(ticket, {}, reb::NativeWorkerSourceKind::kClassic, {kSource, {}}, input, 2) !=
+            Status::kAccepted ||
+        queue.Take(header, output, url, 3) != Status::kAccepted ||
+        header.url_status != test.status ||
         std::string_view(url.data(), header.url_size) != test.expected ||
         header.source_size != kSource.size() || output != kSource || header.sensitive != 1) {
       return false;
@@ -557,8 +556,8 @@ bool CheckNativeWorkerSourceConcurrency() {
   std::thread producer([&] {
     constexpr std::array<std::uint8_t, 3> kText{'a', 'b', 'c'};
     for (std::uint64_t index = 0; index < kAttempts; ++index) {
-      const auto status = queue.Capture(ticket, {}, reb::NativeWorkerSourceKind::kModule,
-                                        {kText, {}}, {}, 2);
+      const auto status =
+          queue.Capture(ticket, {}, reb::NativeWorkerSourceKind::kModule, {kText, {}}, {}, 2);
       if (status != Status::kAccepted && status != Status::kFull && status != Status::kBusy) {
         valid.store(false);
       }
@@ -611,9 +610,8 @@ int main(const int argc, char* argv[]) {
   }
   if (!RunEventDemo() || !CheckEventJson() || !CheckNativeQueueLimits() ||
       !CheckNativeWorkerSources() || !CheckNativeWorkerSourceUrls() ||
-      !CheckNativeWorkerSourceConcurrency() ||
-      !CheckNativeQueueProducers() || !MeasureNativeQueueReuse(iterations) ||
-      !CheckNativeQueueNotifications(iterations)) {
+      !CheckNativeWorkerSourceConcurrency() || !CheckNativeQueueProducers() ||
+      !MeasureNativeQueueReuse(iterations) || !CheckNativeQueueNotifications(iterations)) {
     std::cerr << "Native event queue validation failed\n";
     return 1;
   }

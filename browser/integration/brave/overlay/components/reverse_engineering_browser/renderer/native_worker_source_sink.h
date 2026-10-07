@@ -16,9 +16,10 @@ namespace reb {
 COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK)
 bool IsNativeWorkerSourceCaptureEnabled() noexcept;
 COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK)
-NativeWorkerCaptureStatus BeginNativeWorkerSourceCapture(NativeWorkerToken worker,
-                                                        std::uint64_t now_ns,
-                                                        NativeWorkerCaptureTicket& ticket) noexcept;
+NativeWorkerCaptureStatus BeginNativeWorkerSourceCapture(
+    NativeWorkerToken worker,
+    std::uint64_t now_ns,
+    NativeWorkerCaptureTicket& ticket) noexcept;
 COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK)
 NativeWorkerCaptureStatus CaptureNativeWorkerSource(const NativeWorkerCaptureTicket& ticket,
                                                     NativeWorkerToken parent_context,

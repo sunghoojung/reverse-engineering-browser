@@ -36,8 +36,7 @@ NativeWorkerCaptureStatus Encode(const NativeWorkerText text,
   for (std::size_t index = 0; index < units; ++index) {
     std::uint32_t point = text.utf16.empty() ? text.latin1[index] : text.utf16[index];
     if (point >= 0xd800 && point <= 0xdbff) {
-      if (index + 1 == units || text.utf16[index + 1] < 0xdc00 ||
-          text.utf16[index + 1] > 0xdfff) {
+      if (index + 1 == units || text.utf16[index + 1] < 0xdc00 || text.utf16[index + 1] > 0xdfff) {
         return NativeWorkerCaptureStatus::kInvalid;
       }
       point = 0x10000U + ((point - 0xd800U) << 10U) + (text.utf16[++index] - 0xdc00U);
@@ -148,8 +147,7 @@ NativeWorkerUrlStatus SanitizeUrl(const NativeWorkerText text,
   size = 0;
   std::array<std::uint8_t, kNativeWorkerSourceMaxUrlBytes> encoded{};
   std::size_t encoded_size = 0;
-  if (Encode(text, encoded, encoded.size(), encoded_size) !=
-      NativeWorkerCaptureStatus::kAccepted) {
+  if (Encode(text, encoded, encoded.size(), encoded_size) != NativeWorkerCaptureStatus::kAccepted) {
     return NativeWorkerUrlStatus::kInvalidOmitted;
   }
   if (encoded_size == 0) {
@@ -203,8 +201,8 @@ NativeWorkerSourceQueue::~NativeWorkerSourceQueue() {
   Disable();
 }
 
-NativeWorkerCaptureStatus NativeWorkerSourceQueue::Configure(
-    const NativeWorkerSourcePolicy& policy, const std::uint64_t now_ns) noexcept {
+NativeWorkerCaptureStatus NativeWorkerSourceQueue::Configure(const NativeWorkerSourcePolicy& policy,
+                                                             const std::uint64_t now_ns) noexcept {
   active_generation_.store(0, std::memory_order_release);
   const std::lock_guard lock(mutex_);
   ClearLocked();
@@ -273,7 +271,9 @@ void NativeWorkerSourceQueue::CountContention() noexcept {
 }
 
 NativeWorkerCaptureStatus NativeWorkerSourceQueue::Begin(
-    const NativeWorkerKind kind, const NativeWorkerToken worker, const std::uint64_t now_ns,
+    const NativeWorkerKind kind,
+    const NativeWorkerToken worker,
+    const std::uint64_t now_ns,
     NativeWorkerCaptureTicket& ticket) noexcept {
   ticket = {};
   if (!IsEnabled()) [[likely]] {
@@ -307,10 +307,12 @@ NativeWorkerCaptureStatus NativeWorkerSourceQueue::DropLocked(
   return status;
 }
 
-NativeWorkerCaptureStatus NativeWorkerSourceQueue::Capture(
-    const NativeWorkerCaptureTicket& ticket, const NativeWorkerToken parent_context,
-    const NativeWorkerSourceKind kind, const NativeWorkerText source, const NativeWorkerText url,
-    const std::uint64_t now_ns) noexcept {
+NativeWorkerCaptureStatus NativeWorkerSourceQueue::Capture(const NativeWorkerCaptureTicket& ticket,
+                                                           const NativeWorkerToken parent_context,
+                                                           const NativeWorkerSourceKind kind,
+                                                           const NativeWorkerText source,
+                                                           const NativeWorkerText url,
+                                                           const std::uint64_t now_ns) noexcept {
   if (!IsEnabled()) [[likely]] {
     return NativeWorkerCaptureStatus::kDisabled;
   }
@@ -355,7 +357,8 @@ NativeWorkerCaptureStatus NativeWorkerSourceQueue::Capture(
   slot.header.sequence = stats_.attempted;
   slot.header.monotonic_time_ns = now_ns;
   slot.header.source_kind = kind;
-  slot.header.source_code_units = static_cast<std::uint32_t>(source.latin1.size() + source.utf16.size());
+  slot.header.source_code_units =
+      static_cast<std::uint32_t>(source.latin1.size() + source.utf16.size());
   slot.header.url_status = SanitizeUrl(url, slot.url, slot.header.url_size);
   const auto encoded = Encode(source, slot.source, kNativeWorkerSourceMaxBytes, source_size);
   slot.header.source_size = static_cast<std::uint32_t>(source_size);
@@ -373,9 +376,9 @@ NativeWorkerCaptureStatus NativeWorkerSourceQueue::Capture(
 }
 
 NativeWorkerCaptureStatus NativeWorkerSourceQueue::Take(NativeWorkerSourceHeader& header,
-                                                       const std::span<std::uint8_t> source,
-                                                       const std::span<char> url,
-                                                       const std::uint64_t now_ns) noexcept {
+                                                        const std::span<std::uint8_t> source,
+                                                        const std::span<char> url,
+                                                        const std::uint64_t now_ns) noexcept {
   header = {};
   if (!IsEnabled()) {
     return NativeWorkerCaptureStatus::kDisabled;

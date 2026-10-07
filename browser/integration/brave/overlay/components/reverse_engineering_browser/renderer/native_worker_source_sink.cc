@@ -22,15 +22,18 @@ bool IsNativeWorkerSourceCaptureEnabled() noexcept {
 }
 
 NativeWorkerCaptureStatus BeginNativeWorkerSourceCapture(
-    const NativeWorkerToken worker, const std::uint64_t now_ns,
+    const NativeWorkerToken worker,
+    const std::uint64_t now_ns,
     NativeWorkerCaptureTicket& ticket) noexcept {
   return GetNativeWorkerSourceQueue().Begin(NativeWorkerKind::kDedicated, worker, now_ns, ticket);
 }
 
-NativeWorkerCaptureStatus CaptureNativeWorkerSource(
-    const NativeWorkerCaptureTicket& ticket, const NativeWorkerToken parent_context,
-    const NativeWorkerSourceKind kind, const NativeWorkerText source, const NativeWorkerText url,
-    const std::uint64_t now_ns) noexcept {
+NativeWorkerCaptureStatus CaptureNativeWorkerSource(const NativeWorkerCaptureTicket& ticket,
+                                                    const NativeWorkerToken parent_context,
+                                                    const NativeWorkerSourceKind kind,
+                                                    const NativeWorkerText source,
+                                                    const NativeWorkerText url,
+                                                    const std::uint64_t now_ns) noexcept {
   return GetNativeWorkerSourceQueue().Capture(ticket, parent_context, kind, source, url, now_ns);
 }
 

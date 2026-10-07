@@ -971,8 +971,12 @@ REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium)" \
 The existing browser CI job runs Requests, Sources and Evidence separately and
 uploads `build/evidence-ui-qa/`. Evidence includes genuine pointer/keyboard
 selection, real file input, explicit download byte comparison, failures,
-interruption, scrolling and narrow layouts. Its synthetic service tests the UI;
-the real native-writer/guarded-export/validator integration is a separate check.
+interruption, scrolling and narrow layouts. Download QA waits for the matching
+Chrome frame, filename and download GUID to report completion before checking
+exact bytes and the single output file. Cancellation, missing completion or
+corrupt completed bytes fail; filename existence alone is not completion.
+Its synthetic service tests the UI; the real native-writer/guarded-export/validator
+integration is a separate check.
 A validation receipt is written only after interactions and cleanup succeed.
 
 All native HTTP entry paths, including an explicit loopback `--ui-url` without a

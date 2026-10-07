@@ -1,8 +1,26 @@
       const evidencePackagePanel = createEvidencePackagePanel({getContext: () => ({
-        requestId: state.selectedRequestId,
+        requestId: evidenceRequestKey(state.requests.find(request => request.id === state.selectedRequestId)),
         requestEvents: state.requests.find(request => request.id === state.selectedRequestId)?.events ?? [],
+        requestCorrelated: evidenceDebuggerRequest(state.requests.find(request => request.id === state.selectedRequestId)),
         events: state.events, artifacts: state.artifacts, eventsLimited: state.eventsLimited
       })});
+
+      const evidenceWorkspace = createEvidenceWorkspace({
+        getContext: () => ({request: state.requests.find(request => request.id === state.selectedRequestId),
+          events: state.events, artifacts: state.artifacts, eventsLimited: state.eventsLimited,
+          error: state.eventFailureKind, mode: state.sessionMode}),
+        packagePanel: evidencePackagePanel,
+        onTrace: () => typeof openInvestigation === 'function'
+          ? openInvestigation({kind: 'trace', identity: investigationRequestIdentity(state.requests.find(request => request.id === state.selectedRequestId))})
+          : showScreen('backtrace'),
+        onRequest: () => typeof openInvestigation === 'function'
+          ? openInvestigation({kind: 'request', identity: investigationRequestIdentity(state.requests.find(request => request.id === state.selectedRequestId))})
+          : showScreen('traffic'),
+        onSource: identity => typeof openInvestigation === 'function'
+          ? openInvestigation({kind: 'artifact', identity, relation: 'Exact artifact referenced by the selected native record. Producer and value flow are not established.'})
+          : false,
+        canOpenSource: () => typeof openInvestigation === 'function'
+      });
 
       const sourceFactsPanel = createSourceFactsPanel({
         getSource: selectedSource,
@@ -1767,37 +1785,8 @@
               ? 'Open disposable experiments for the selected request field.'
               : 'Experiments use the attached debugger target; selecting a request field is optional.';
           });
-        const documentSteps = state.originTrace?.steps ?? [];
-        const firstTime = documentSteps.length ? BigInt(documentSteps[documentSteps.length - 1].monotonic_time_ns) : 0n;
-        const tracedEvidence = documentSteps.map(step => ({
-          relative: formatMilliseconds(BigInt(step.monotonic_time_ns) - firstTime, '+'),
-          source: step.confidence,
-          category: step.category,
-          type: step.operation,
-          correlation: `session ${step.event.session_id} · process ${step.event.process_id} · seq ${step.event.sequence_number} · frame ${step.frame_id} · request ${step.request_id} · artifact ${step.artifact_id}`,
-          value: step.value || step.relation
-        }));
-        const gapEvidence = (state.originTrace?.gaps ?? []).map(gap => ({
-          relative: 'gap', source: 'unknown', category: 'trace', type: gap.reason,
-          correlation: `after step ${gap.after_step + 1}`, value: gap.detail
-        }));
-        const selectedSampleEvidence = !state.originTrace && state.selectedField ? sampleEvidence : [];
-        const evidence = [...tracedEvidence, ...gapEvidence, ...selectedSampleEvidence];
-        elements.evidenceRows.replaceChildren(...evidence.map(event => {
-          const row = document.createElement('div'); row.className = 'evidence-row'; row.setAttribute('role', 'row');
-          const values = [event.relative, event.source, event.category, event.type, event.correlation, event.value];
-          values.forEach((value, index) => {
-            const cell = document.createElement('span'); cell.textContent = String(value ?? ''); cell.title = cell.textContent;
-            cell.setAttribute('role', 'cell');
-            if (index === 1) cell.className = event.source === 'observed' ? 'source-live' : 'source-sample';
-            if (index === 2) cell.className = 'category-cell';
-            if (index === 4) cell.className = 'correlation-cell';
-            row.append(cell);
-          });
-          return row;
-        }));
-        elements.evidenceCount.textContent = `${evidence.length} trace records`;
-        elements.evidenceLinkCount.textContent = String(evidence.length);
+        evidenceWorkspace.sync();
+        elements.evidenceLinkCount.textContent = String(state.originTrace?.steps?.length ?? 0);
         if (!document.querySelector('#screen-backtrace').hidden) renderBacktrace();
       }
 
@@ -8309,12 +8298,13 @@
         } finally {
           state.artifactRefreshing = false;
           evidencePackagePanel.sync();
+          evidenceWorkspace.sync();
         }
       }
 
       function showScreen(name, trigger = null) {
         const screenName = name === 'backtraces' ? 'backtrace' : name;
-        evidencePackagePanel.setVisible(screenName === 'evidence');
+        evidenceWorkspace.setVisible(screenName === 'evidence');
         if (screenName !== 'sources') sourceFactsPanel.cancel();
         if (screenName !== 'sources' && state.sourceHooksOpen) closeSourceHooks(false);
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });

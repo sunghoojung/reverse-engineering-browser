@@ -5,10 +5,129 @@ The [JSON Schema](evidence-package-v1.schema.json) defines the closed
 embedded under `EvidencePackage*` components in [OpenAPI](openapi.json).
 [SAFETY.md](../SAFETY.md) remains the authorization and capture policy.
 
-This slice provides only inert validation of a supplied document. It does not
-export stored evidence, acquire store leases, import records into backend
-state, persist packages, copy artifact bytes, fetch references, or execute
-analysis helpers. Export requires a separate stopped-store implementation.
+Two operations share this contract: explicit selected-source export under
+cooperative stopped-writer leases, and inert validation of a supplied document.
+Neither imports records into backend state, persists packages on the server,
+copies artifact bytes, fetches references, or executes source or analysis helpers.
+
+## Selected stopped-store export
+
+`POST /api/evidence/packages/export` (`export_evidence_package`) takes this closed
+request, at most 256 KiB:
+
+```json
+{"protocol_version":1,"profile":"reb-metadata-only-v1","selection":{"events":[{"session_id":"7","process_id":42,"sequence_number":"1"}],"artifacts":[{"session_id":"7","artifact_id":"9"}]}}
+```
+
+Only `profile` is optional, with the default shown. Both selector arrays are
+required; maximum counts are 1024 events and 64 artifacts. Duplicate keys,
+unknown members, unsupported profiles and ambiguous/bare identities are rejected.
+There are no paths, URLs, wildcards, latest aliases or caller-supplied evidence.
+The normal local-origin checks, no-store and nosniff response headers apply.
+
+```sh
+reb-api describe export_evidence_package
+reb-api call export_evidence_package --endpoint-file backend.endpoint \
+  --body-file selection.json --output selected.reb-evidence.json
+reb-api call validate_evidence_package --endpoint-file backend.endpoint \
+  --body-file selected.reb-evidence.json
+```
+
+Export scans each requested source to exact EOF. Every row, including unselected
+rows, must pass its native contract and bounded duplicate-rejecting parser.
+Duplicate ordinary scoped keys fail even when the full source records agree;
+conflicts in an omitted payload or extension still fail. No neighboring record
+substitutes for a missing selection. Only selected records are projected through
+the whitelist. All selected unique blobs are streamed completely and their exact
+length and SHA-256 verified. Hash deduplication is scoped to this held snapshot.
+No body, raw payload, URL, header, MIME text, unknown field or diagnostic escapes.
+Unrequested stores are not inspected. An empty selection performs no store read
+and says only `empty_selection`, never empty or disabled capture.
+
+The package is normalized, assigned its semantic ID, and checked by the shared
+validator while the same whole-operation deadline and all leases remain held.
+Source row order, selector order, source paths and omitted payload-only changes
+do not affect metadata identity. The package contains no export clock or source
+file hash. Historical nulls, unknown capture state and missing references are
+preserved; the backend build and current capture configuration are not substitutes.
+
+### Cooperative leases and safe local files
+
+Updated event brokers own an exclusive nonblocking `flock` on
+`<output-basename>.reb-lock-v1` beside every event, trace and signal output before
+opening or truncating any of them. ArtifactReceiver owns
+`evidence.reb-lock-v1` inside its root at the library ownership boundary, before
+manifest/blob scans or changes. Each immutable regular guard is user-owned,
+mode 0600, single-linked and contains exactly `REB_EVIDENCE_GUARD_V1\n`.
+Guards are never rewritten, deleted or replaced after creation. Writers retain
+them through their last buffered flush and close, including while idle on stdin
+or a socket. Exiting or process death releases the lease, not the guard inode.
+
+Export acquires shared nonblocking leases in event-then-artifact order, holding
+both until all immutable response bytes and final identity checks are complete.
+Active writers and clears fail with 409 instead of waiting. The endpoint does
+not stop any process. A broker stop request, disconnected socket or current
+capture boolean cannot establish the receiver's state or replace either lease.
+
+Backend clear uses the same exclusive guard for every existing configured output,
+acquiring all before any truncation. Missing legacy guards fail with 503 for
+export and clear; existing read-only tail APIs continue to read legacy stores.
+No caller override or automatic guard creation weakens this boundary. Start a
+new recording with the updated producers to obtain guarded stores. Do not add
+or replace a marker file to make an old or live capture appear consistent.
+
+Configured roots may resolve a symlink once (including macOS temporary-root
+aliases). Below those pinned directory handles, all reads and native writes use
+`openat`/descriptor I/O without following symlinks. Regular source and guard
+files must be owned by the effective user, single-linked and not group/other
+writable; store directories must be user-owned and not group/other writable.
+A world-writable directory such as `/tmp` cannot itself be a store root; use a
+private subdirectory. The exporter rejects FIFOs, devices, directories used as
+files, symlink descendants, traversal and mismatched manifest blob names.
+Guard filenames and artifact-owned manifest/blob destinations are reserved from
+broker output configuration. Broker outputs cannot live in an artifact root.
+This prevents a second writer role or filename alias from bypassing a held lease.
+
+Descriptors and anchored entries are checked for device/inode, complete size,
+mtime and ctime; root, blob-directory and guard identities are rechecked before
+return. File replacement, append, truncation and ordinary out-of-contract edits
+abort instead of returning an old inode as a new snapshot. Advisory leases
+coordinate supported REB writers; they do not authenticate evidence or defeat a
+malicious same-user/privileged writer restoring metadata. Only ordinary local
+regular filesystems are supported. A kernel read can still block: cooperative
+deadlines and bounded work are not a hard cancellation guarantee.
+
+### Export limits and errors
+
+- Events: 64 MiB complete scan, 100000 nonempty rows, 4096 bytes per row including
+  its separator. Manifest: 16 MiB, 10000 rows, 8192 bytes per row.
+- Each selected blob: 16 MiB; distinct verified bytes: 128 MiB; fixed 64 KiB read
+  buffer. Zero-byte artifacts still require their empty-content hash.
+- Retained source indexes/projections: 32 MiB with conservative preallocation
+  accounting. Relationships and gaps: 4096 each. Package bytes: 4 MiB.
+- The same parsed-node, depth, string and cardinality bounds apply to source
+  rows and output. One ten-second cooperative deadline covers the whole export,
+  including parse, scans, hashes, projection, canonicalization and final validation.
+  Two package operations share the existing bounded I/O pool; total permit wait
+  is separately capped at one second. Disconnects do not release running permits.
+
+Errors use fixed messages and empty details, with explicit shared reason codes:
+400 `invalid_request`; 404 `target_unavailable` for missing selected identities;
+409 `state_conflict` for active leases, changed sources or duplicate/conflicting
+identities; 413 `resource_limit`; 408 `timeout`; 422 `protocol_error` for malformed
+source, hash/length mismatch or inconsistent references; and 503
+`dependency_unavailable` for missing guards/sources, unsafe files or unsupported
+safe-open platforms. Existing request-body transport size statuses are unchanged.
+Exports never retry automatically or silently choose newer evidence.
+
+CLI JSON operations now accept optional `--output PATH` or `--output -`.
+File output is a complete mode-0600 temporary in the destination directory,
+synced and atomically persisted without clobbering an existing entry; the parent
+directory is synced too. Export responses must pass the inert validator before
+any final file is published. Invalid or incomplete downloads leave no final
+package. Default JSON stdout remains pretty printed; explicit stdout preserves
+received JSON bytes. Validation can save an explicit invalid-result JSON when
+requested. Output paths are never sent to the server.
 
 ## Validation operation
 

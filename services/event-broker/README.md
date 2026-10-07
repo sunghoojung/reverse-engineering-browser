@@ -102,3 +102,18 @@ deadline expires.
 Run `make e2e` to validate deterministic ingestion and evidence storage without
 launching Brave. Run `make live` after a complete custom
 Brave app build to start the broker, Origin Trace, and Brave as one session.
+
+## Store ownership
+
+Every configured output has an immutable mode-0600 `<basename>.reb-lock-v1`
+guard. All exclusive nonblocking leases are acquired before any output is
+truncated and retained through the last buffered flush and close. Source files
+are opened relative to pinned directories without following symlinks; hardlink
+aliases, guard filenames and artifact-owned destinations are rejected. Store
+roots must be user-owned and not group/other writable. Use a private directory
+below `/tmp`, not `/tmp` itself. A busy guard fails startup without truncation.
+The fixed `Event store ready` diagnostic follows successful safe opening.
+
+Do not remove or replace guards. Shared selected-package export and backend
+clear use the same guards; stop this writer before either operation. See
+[Evidence Package v1](../../protocol/evidence-package-v1.md#cooperative-leases-and-safe-local-files).

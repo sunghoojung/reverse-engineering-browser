@@ -45,16 +45,23 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-pub fn truncate_private(path: &Path) -> Result<()> {
-    let mut options = OpenOptions::new();
-    options.write(true);
+/// Publish complete private CLI bytes without replacing any existing entry.
+/// The temporary is created in the destination directory for atomic publication.
+pub fn write_private_noclobber(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
-    let file = options.open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(Error::bad("Store must be a regular file"));
-    }
-    file.set_len(0)?;
-    file.sync_all()?;
+    temporary
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o600))?;
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist_noclobber(path)
+        .map_err(|e| Error::from(e.error))?;
+    File::open(parent)?.sync_all()?;
     Ok(())
 }

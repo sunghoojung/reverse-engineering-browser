@@ -64,7 +64,8 @@ e2e: origin-trace-backend producer broker artifact-producer artifact-receiver de
 	test "$$(grep -c 'vm-sample.js' $(BUILD_DIR)/sessions/artifacts/manifest.jsonl)" = "1"
 	test "$$(grep -c '\"execution_context_id\":\"2200\",\"capture_origin\":\"dynamic_javascript\".*vm-sample.js' $(BUILD_DIR)/sessions/artifacts/manifest.jsonl)" = "1"
 	test "$$(python3 -c 'import json; print(json.load(open("$(BUILD_DIR)/sessions/artifacts/analysis/vm-analysis-v1.json"))["summary"]["likely_vm_count"])')" = "1"
-	python3 tools/validate-evidence-store.py $(BUILD_DIR)/sessions/demo.jsonl
+	python3 tools/validate-evidence-store.py $(BUILD_DIR)/sessions/demo.jsonl \
+		--broker $(BROKER_BINARY) --receiver $(ARTIFACT_RECEIVER_BINARY) --producer $(PRODUCER_BINARY)
 
 ui: e2e heap-snapshot decoder deob-worker-build
 	$(ORIGIN_TRACE_BACKEND) \

@@ -172,6 +172,11 @@
       ]);
       const signalEventDisplayLimit = 500;
       const nativeCanvasCaptureDisplayLimit = 24;
+      const canvasPreviewByteLimit = 8 * 1024 * 1024; // Reserved/retained UTF-16 text bytes, not decoded pixels.
+      const canvasPreviewReadLimit = 2;
+      const canvasPreviewAxisLimit = 4096;
+      const canvasPreviewPixelLimit = 4 * 1024 * 1024;
+      const canvasGalleryPixelLimit = 16 * 1024 * 1024; // Mounted declared pixels, not decoder/RSS memory.
       const nativeCanvasDrawingMethods = new Set([
         'save', 'restore', 'scale', 'rotate', 'translate', 'transform',
         'setTransform', 'resetTransform', 'beginPath', 'closePath', 'moveTo',
@@ -183,7 +188,78 @@
         'addColorStop', 'setLineDash', 'getContext'
       ]);
       const nativeCanvasCallLimit = 128;
-      const canvasDataUrlPattern = /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
+      const canvasDataUrlPattern = /^data:image\/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/]+={0,2}$/;
+      const canvasPngCrcTable = Uint32Array.from({length: 256}, (_, value) => {
+        for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ ((value & 1) ? 0xedb88320 : 0);
+        return value >>> 0;
+      });
+
+      // Deliberately narrow PNG admission, not a decoder or a general PNG validator.
+      // https://www.w3.org/TR/png-3/ sections 5 and 11. No compressed data is inflated.
+      function inspectCanvasPng(content) {
+        const reject = reason => ({reason: `${reason} Original evidence is unchanged.`});
+        if (typeof content !== 'string' || content.length > 2097152 || !canvasDataUrlPattern.test(content)) {
+          return reject('The retained bytes do not pass the bounded image data URL validator.');
+        }
+        if (!content.startsWith('data:image/png;base64,')) return reject('Preview format is unsupported: only static PNG is admitted.');
+        const encoded = content.slice('data:image/png;base64,'.length);
+        const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+        if (encoded.length % 4 || (encoded.endsWith('==') && (alphabet.indexOf(encoded.at(-3)) & 15)) ||
+            (encoded.endsWith('=') && !encoded.endsWith('==') && (alphabet.indexOf(encoded.at(-2)) & 3))) {
+          return reject('PNG base64 encoding is not canonical.');
+        }
+        let bytes;
+        try { bytes = atob(encoded); } catch { return reject('PNG base64 encoding is malformed.'); }
+        const byte = offset => bytes.charCodeAt(offset);
+        const uint32 = offset => ((byte(offset) * 0x1000000) + (byte(offset + 1) << 16) +
+          (byte(offset + 2) << 8) + byte(offset + 3));
+        if (bytes.slice(0, 8) !== '\x89PNG\r\n\x1a\n') return reject('PNG signature is invalid.');
+        let offset = 8, chunks = 0, width = 0, height = 0, colorType = 0, idatBytes = 0, hasIdat = false;
+        const ancillary = new Set();
+        while (offset < bytes.length) {
+          if (++chunks > 256) return reject('PNG exceeds the 256-chunk preview limit.');
+          if (bytes.length - offset < 12) return reject('PNG chunk is truncated.');
+          const length = uint32(offset), type = bytes.slice(offset + 4, offset + 8), data = offset + 8;
+          if (length > bytes.length - offset - 12) return reject('PNG chunk length is invalid or truncated.');
+          if (!/^[A-Za-z]{2}[A-Z][A-Za-z]$/.test(type)) return reject('PNG chunk type is invalid.');
+          let crc = 0xffffffff;
+          for (let index = offset + 4; index < data + length; index++) crc = (crc >>> 8) ^ canvasPngCrcTable[(crc ^ byte(index)) & 255];
+          if (((crc ^ 0xffffffff) >>> 0) !== uint32(data + length)) return reject('PNG chunk CRC does not match.');
+          if (chunks === 1 && type !== 'IHDR') return reject('PNG must begin with IHDR.');
+          if (type === 'IHDR') {
+            if (chunks !== 1 || length !== 13) return reject('PNG has a duplicate or malformed IHDR.');
+            width = uint32(data); height = uint32(data + 4); colorType = byte(data + 9);
+            if (!width || !height || width > canvasPreviewAxisLimit || height > canvasPreviewAxisLimit) {
+              return reject('PNG dimensions exceed the 4096-pixel axis limit or are zero.');
+            }
+            if (width * height > canvasPreviewPixelLimit) return reject('PNG exceeds the 4 Mi-pixel preview limit.');
+            if (byte(data + 8) !== 8 || ![2, 6].includes(colorType) || byte(data + 10) !== 0 ||
+                byte(data + 11) !== 0 || byte(data + 12) !== 0) {
+              return reject('PNG preview supports only non-interlaced 8-bit RGB or RGBA with standard compression and filtering.');
+            }
+          } else if (type === 'IDAT') {
+            hasIdat = true; idatBytes += length;
+          } else if (type === 'IEND') {
+            if (length || !hasIdat || !idatBytes || data + 4 !== bytes.length) return reject('PNG is incomplete or has trailing data.');
+            return {width, height, pixels: width * height};
+          } else if (['acTL', 'fcTL', 'fdAT'].includes(type)) {
+            return reject('Animated PNG previews are unsupported.');
+          } else {
+            // Only fixed-size sRGB, sBIT and pHYs metadata is admitted. Refusing other
+            // chunks also excludes embedded compressed profiles/text and extensions.
+            if (!['sRGB', 'sBIT', 'pHYs'].includes(type)) return reject(`PNG chunk ${type} is unsupported for previews.`);
+            if (hasIdat || ancillary.has(type)) return reject('PNG metadata is duplicated or follows image data.');
+            ancillary.add(type);
+            if ((type === 'sRGB' && (length !== 1 || byte(data) > 3)) ||
+                (type === 'sBIT' && (length !== (colorType === 2 ? 3 : 4) ||
+                  [...bytes.slice(data, data + length)].some(value => value.charCodeAt(0) < 1 || value.charCodeAt(0) > 8))) ||
+                (type === 'pHYs' && (length !== 9 || uint32(data) > 0x7fffffff ||
+                  uint32(data + 4) > 0x7fffffff || byte(data + 8) > 1))) return reject('PNG metadata is malformed.');
+          }
+          offset = data + length + 4;
+        }
+        return reject('PNG is missing IEND.');
+      }
 
       function canvasReadbackName(operation) {
         const match = /^(toDataURL|toBlob|getImageData)$/.exec(operation) ??
@@ -313,10 +389,6 @@
           if (index === -1) return;
           claimed.add(index);
           capture.artifact = artifacts[index];
-          if (!capture.artifact.contentTruncated &&
-              canvasDataUrlPattern.test(capture.artifact.content ?? '')) {
-            capture.dataUrl = capture.artifact.content;
-          }
         });
         return captures.sort((left, right) => {
           const delta = integerValue(left.evidenceEvent, 'monotonic_time_ns') -
@@ -325,24 +397,135 @@
         }).slice(-nativeCanvasCaptureDisplayLimit).reverse();
       }
 
+      function canvasGalleryVisible() {
+        return !document.querySelector('#screen-signals').hidden && state.signalView === 'rendering';
+      }
+
+      function releaseCanvasPreview(artifact, reason) {
+        const error = artifact.loadError;
+        const owner = state.canvasPreviewOwners?.get(sourceIdentity(artifact));
+        if (owner?.artifact === artifact) {
+          owner.image?.removeAttribute('src');
+          delete owner.image; delete owner.imageInfo; delete owner.imageError; delete owner.mounted;
+        }
+        releaseSourcePreview(artifact);
+        if (error) artifact.loadError = error;
+        // A removed catalog object may no longer be found by releaseSourcePreview.
+        artifact.controller?.abort();
+        for (const field of ['content', 'contentTruncated', 'loading', 'controller', 'previewUsed', 'contentVerified', 'contentLossy']) delete artifact[field];
+        artifact.canvasPreviewNotice = reason;
+      }
+
+      function retireCanvasPreviews(reason = 'Preview released while the Rendering gallery is closed.') {
+        for (const owner of state.canvasPreviewOwners?.values() ?? []) releaseCanvasPreview(owner.artifact, reason);
+        state.canvasPreviewOwners?.clear();
+        for (const artifact of state.artifacts) {
+          if (artifact.kind === 'canvas_data_url') releaseCanvasPreview(artifact, reason);
+        }
+        // Remove src before detaching: hidden/detached gallery nodes must not own image data.
+        elements.signalRenderList.querySelectorAll('img').forEach(image => image.removeAttribute('src'));
+        elements.signalRenderList.replaceChildren();
+      }
+
+      function syncCanvasPreviews(captures) {
+        if (!canvasGalleryVisible() || state.artifactReceiverError) {
+          retireCanvasPreviews(state.artifactReceiverError
+            ? 'Canvas previews released because the artifact catalog is unavailable.' : undefined);
+          return;
+        }
+        const previous = state.canvasPreviewOwners ?? new Map();
+        const owners = new Map();
+        let reservedBytes = 0;
+        for (const capture of captures.slice(0, nativeCanvasCaptureDisplayLimit)) {
+          const artifact = capture.artifact;
+          if (!artifact || artifact.kind !== 'canvas_data_url') continue;
+          const identity = sourceIdentity(artifact);
+          if (owners.has(identity)) continue;
+          let reason = '';
+          if (!sourceIsCurrent(artifact)) reason = 'The exact Canvas artifact identity is unavailable or ambiguous.';
+          else if (!Number.isSafeInteger(artifact.byte_size) || artifact.byte_size <= 0 || artifact.byte_size > 2097152) {
+            reason = 'Canvas preview exceeds the 2 MiB encoded-byte limit or has an invalid size.';
+          } else if (reservedBytes + artifact.byte_size * 2 > canvasPreviewByteLimit) {
+            reason = 'Canvas preview evicted by the 8 MiB gallery text budget. Original evidence is unchanged.';
+          }
+          if (reason) { releaseCanvasPreview(artifact, reason); continue; }
+          // Reserve the maximum UTF-16 cost before reading, so completion order
+          // cannot overcommit the cache or evict/reload the same 24 cards forever.
+          reservedBytes += artifact.byte_size * 2;
+          const prior = previous.get(identity);
+          owners.set(identity, prior?.artifact === artifact ? prior : {artifact, identity});
+          delete artifact.canvasPreviewNotice;
+        }
+        for (const [identity, owner] of previous) {
+          if (owners.get(identity) !== owner) releaseCanvasPreview(owner.artifact,
+            'Canvas preview evicted from the visible gallery. Original evidence is unchanged.');
+        }
+        state.canvasPreviewOwners = owners;
+        for (const artifact of state.artifacts) {
+          if (artifact.kind === 'canvas_data_url' && !owners.has(sourceIdentity(artifact)) &&
+              (artifact.content !== undefined || artifact.loading)) releaseCanvasPreview(artifact,
+            'Canvas preview evicted from the visible gallery. Original evidence is unchanged.');
+        }
+        pumpCanvasPreviews();
+      }
+
+      function pumpCanvasPreviews() {
+        if (!canvasGalleryVisible() || state.artifactReceiverError) return;
+        const reads = state.canvasPreviewReads ??= new Set();
+        for (const owner of state.canvasPreviewOwners?.values() ?? []) {
+          if (reads.size >= canvasPreviewReadLimit) break;
+          const artifact = owner.artifact;
+          if (reads.has(owner) || artifact.content !== undefined || artifact.loading || artifact.loadError) continue;
+          reads.add(owner);
+          // Keep the slot until the actual operation settles, even when an
+          // aborted fetch ignores cancellation. Late headers are never read.
+          void loadArtifactContent(artifact, {canvasOwner: owner}).finally(() => {
+            reads.delete(owner);
+            if (canvasGalleryVisible()) renderFingerprintActivity();
+          });
+        }
+      }
+
+      function retryCanvasPreview(identity) {
+        const owner = state.canvasPreviewOwners?.get(identity);
+        if (!owner || !canvasGalleryVisible() || state.artifactReceiverError) return;
+        delete owner.artifact.loadError;
+        renderFingerprintActivity();
+      }
+
       function canvasPreview(capture, label, replayLabel, capturedOutput = false) {
         const preview = document.createElement('figure');
         preview.className = 'signal-canvas-preview';
         preview.append(textElement('figcaption', '', label));
         const frame = document.createElement('div');
         frame.className = 'signal-canvas-frame';
-        if (capturedOutput && capture.dataUrl) {
+        const artifact = capture.artifact;
+        const owner = artifact && state.canvasPreviewOwners?.get(sourceIdentity(artifact));
+        if (capturedOutput && owner && owner.artifact === artifact && owner.mounted && owner.imageInfo &&
+            !owner.imageError && artifact.content !== undefined && !artifact.contentTruncated &&
+            sourceIsCurrent(artifact) && canvasGalleryVisible() && !state.artifactReceiverError) {
           const image = document.createElement('img');
-          image.src = capture.dataUrl;
+          owner.image = image;
           image.alt = replayLabel;
           image.decoding = 'async';
+          image.addEventListener('error', () => {
+            if (state.canvasPreviewOwners?.get(owner.identity) !== owner || owner.image !== image ||
+                !canvasGalleryVisible() || !sourceIsCurrent(artifact)) return;
+            image.removeAttribute('src');
+            owner.imageError = 'The browser could not decode this PNG preview. Original evidence is unchanged.';
+            delete owner.imageInfo; delete owner.mounted;
+            renderFingerprintActivity();
+          });
+          // Header/structure and aggregate admission both precede the first src assignment.
+          image.src = artifact.content;
           frame.append(image);
         } else if (capture.calls.length === 0 || !capture.width || !capture.height || !capture.demo) {
           frame.classList.add('unavailable');
           const explanation = capturedOutput && !state.canvasImageCaptureEnabled
             ? 'Image capture is off for this session. Restart with REB_CAPTURE_CANVAS_IMAGES=1 to retain sensitive Canvas output.'
             : capturedOutput && capture.artifact
-              ? 'The Canvas artifact was retained but did not pass the bounded image data URL validator.'
+              ? capture.artifact.canvasPreviewNotice || owner?.imageError || capture.previewReason || capture.artifact.loadError || (capture.artifact.loading
+                ? 'Loading the retained Canvas preview…' : 'Canvas preview is waiting for a bounded read slot.')
               : capture.calls.length
                 ? 'Operation names were retained, but arguments were not, so a faithful local replay cannot be generated.'
                 : 'This capture retained the readback call, but no supported earlier drawing operations.';
@@ -350,6 +533,12 @@
             textElement('strong', '', 'Preview unavailable'),
             textElement('span', '', explanation)
           );
+          if (capturedOutput && capture.artifact?.loadError && !capture.artifact.canvasPreviewNotice) {
+            const retry = textElement('button', 'secondary-button', 'Retry preview');
+            retry.type = 'button';
+            retry.addEventListener('click', retryCanvasPreview.bind(null, sourceIdentity(capture.artifact)));
+            frame.append(retry);
+          }
         } else {
           const canvas = document.createElement('canvas');
           canvas.width = capture.width;
@@ -438,7 +627,7 @@
         evidence.append(textElement(
           'p', '', capture.demo
             ? 'This demo image is generated locally from visible calls and is not production evidence.'
-            : capture.dataUrl
+            : capture.artifact && sourceIsCurrent(capture.artifact)
               ? 'Sensitive Canvas output was captured locally for this session and linked to the native readback event.'
               : 'Operation metadata remains available even when sensitive Canvas image capture is off.'
         ));
@@ -452,8 +641,27 @@
       }
 
       function renderFingerprintRendering(signalEvents) {
-        renderSignalSurfaceOverview(signalEvents);
         const captures = canvasRenderCaptures(signalEvents);
+        syncCanvasPreviews(captures);
+        if (!canvasGalleryVisible()) return;
+        renderSignalSurfaceOverview(signalEvents);
+        // Count only the exact current owners and prioritize newest captures.
+        // Old DOM sources are removed below before any new source is assigned.
+        for (const owner of state.canvasPreviewOwners?.values() ?? []) {
+          delete owner.mounted; delete owner.image;
+        }
+        let pixels = 0;
+        for (const capture of captures) {
+          const owner = capture.artifact && state.canvasPreviewOwners?.get(sourceIdentity(capture.artifact));
+          if (!owner || owner.artifact !== capture.artifact || !owner.imageInfo || owner.imageError) continue;
+          if (pixels + owner.imageInfo.pixels > canvasGalleryPixelLimit) {
+            capture.previewReason = 'Preview omitted by the 16 Mi-pixel gallery budget. Original evidence is unchanged.';
+            continue;
+          }
+          pixels += owner.imageInfo.pixels;
+          owner.mounted = true;
+          capture.width = owner.imageInfo.width; capture.height = owner.imageInfo.height;
+        }
         const readbackCount = signalEvents.filter(event => event.category === 'canvas' &&
           canvasReadbackName(decodePayload(event))).length;
         elements.signalRenderCount.textContent = String(captures.length);
@@ -463,6 +671,7 @@
             : `${captures.length} canvas ${captures.length === 1 ? 'readback' : 'readbacks'}`
           : 'No canvas readbacks';
         if (!captures.length) {
+          elements.signalRenderList.querySelectorAll('img').forEach(image => image.removeAttribute('src'));
           elements.signalRenderList.replaceChildren(textElement(
             'div', 'signal-render-empty',
             'No Canvas readback has been captured. Activity from other fingerprint-relevant surfaces remains available.'
@@ -474,6 +683,7 @@
           .map(detail => detail.dataset.captureKey));
         const focused = document.activeElement?.matches('summary')
           ? document.activeElement.parentElement.dataset.captureKey : null;
+        elements.signalRenderList.querySelectorAll('img').forEach(image => image.removeAttribute('src'));
         elements.signalRenderList.replaceChildren(...captures.map(renderCanvasCapture));
         elements.signalRenderList.querySelectorAll('details').forEach(detail => {
           detail.open = expanded.has(detail.dataset.captureKey);
@@ -7886,25 +8096,41 @@
         }
       }
 
-      async function loadArtifactContent(artifact, {retry = false} = {}) {
+      async function loadArtifactContent(artifact, {retry = false, canvasOwner = null} = {}) {
+        if (artifact?.kind === 'canvas_data_url' && (!canvasOwner ||
+            state.canvasPreviewOwners?.get(sourceIdentity(artifact)) !== canvasOwner || !canvasGalleryVisible() || state.artifactReceiverError)) return;
         if (!sourceIsCurrent(artifact) || artifact.content !== undefined || artifact.loading || (artifact.loadError && !retry)) return;
         const identity = sourceIdentity(artifact);
         const controller = new AbortController();
         artifact.loading = true; artifact.loadError = null; artifact.controller = controller;
         artifact.previewUsed = state.sourcePreviewSequence = (state.sourcePreviewSequence ?? 0) + 1;
-        boundSourcePreviews(artifact);
-        const current = () => sourceIsCurrent(artifact) && state.artifacts.includes(artifact) && artifact.controller === controller && !controller.signal.aborted;
+        if (!canvasOwner) boundSourcePreviews(artifact);
+        const current = () => sourceIsCurrent(artifact) && state.artifacts.includes(artifact) && artifact.controller === controller && !controller.signal.aborted &&
+          (!canvasOwner || (state.canvasPreviewOwners?.get(identity) === canvasOwner && canvasGalleryVisible() && !state.artifactReceiverError));
         const timeout = setTimeout(() => {
           if (artifact.controller !== controller) return;
           artifact.loading = false; artifact.loadError = 'Artifact loading timed out. Retry explicitly.';
           delete artifact.controller; controller.abort();
-          if (sourceIdentity(selectedSource()) === identity) renderSources();
+          if (canvasOwner && canvasGalleryVisible()) renderFingerprintActivity();
+          else if (sourceIdentity(selectedSource()) === identity) renderSources();
         }, 10000);
-        renderSources();
+        if (!canvasOwner) renderSources();
+        let responseCancellation = null;
         try {
           const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?limit=2097152`, {cache: 'no-store', signal: controller.signal});
-          if (!response.ok) throw new Error(`Artifact store returned ${response.status}`);
-          const buffer = await sourceFactsReadBytes(response, 2097152, controller.signal);
+          if (!current()) { responseCancellation = response.body?.cancel().catch(() => {}); return; }
+          if (!response.ok) { responseCancellation = response.body?.cancel().catch(() => {}); throw new Error(`Artifact store returned ${response.status}`); }
+          // Sources may retire without waiting for a producer's cleanup. Canvas
+          // additionally owns a read credit until any body/reader cancellation
+          // settles, including the bounded reader's abort and error paths.
+          const ownedResponse = canvasOwner && response.body?.getReader ? {body: {getReader() {
+            const reader = response.body.getReader();
+            return {read: () => reader.read(), releaseLock: () => reader.releaseLock(), cancel: () => {
+              responseCancellation = reader.cancel().catch(() => {});
+              return responseCancellation;
+            }};
+          }}} : response;
+          const buffer = await sourceFactsReadBytes(ownedResponse, 2097152, controller.signal);
           if (!current()) return;
           if (buffer.length !== Math.min(artifact.byte_size, 2097152)) throw new Error('The artifact preview byte size changed.');
           const total = response.headers.get('X-Artifact-Total-Bytes');
@@ -7921,20 +8147,36 @@
           }
           // Hex is only a view: do not expand 2 MiB to 131,072 rows while the
           // editor can display only 20,000. The immutable blob is untouched.
-          artifact.content = artifact.kind === 'wasm'
+          const content = artifact.kind === 'wasm'
             ? formatWasmHex(buffer.subarray(0, 20000 * 16))
             : new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(buffer);
+          if (canvasOwner && (artifact.contentLossy || !canvasDataUrlPattern.test(content))) {
+            throw new Error('The retained bytes do not pass the bounded image data URL validator.');
+          }
+          if (canvasOwner) {
+            const inspection = inspectCanvasPng(content);
+            if (inspection.reason) canvasOwner.imageError = inspection.reason;
+            else canvasOwner.imageInfo = inspection;
+          }
+          artifact.content = content;
           artifact.contentTruncated = artifact.byte_size > buffer.length || (artifact.kind === 'wasm' && buffer.length > 20000 * 16);
           if (artifact.contentTruncated) artifact.content += artifact.kind === 'wasm'
             ? '\n\n[Hex preview limited to the first 20,000 rows; original bytes are unchanged]'
             : '\n\n[Viewer preview limited to the first 2 MiB; original bytes are unchanged]';
-          boundSourcePreviews();
+          if (!canvasOwner) boundSourcePreviews();
         } catch (error) {
-          if (current()) artifact.loadError = `Artifact bytes are unavailable: ${String(error.message).slice(0, 1024)}`;
+          if (current()) {
+            if (canvasOwner) for (const field of ['content', 'contentVerified', 'contentLossy', 'contentTruncated']) delete artifact[field];
+            artifact.loadError = `Artifact bytes are unavailable: ${String(error.message).slice(0, 1024)}`;
+          }
         } finally {
           clearTimeout(timeout);
           if (artifact.controller === controller) {artifact.loading = false; delete artifact.controller;}
-          if (sourceIdentity(selectedSource()) === identity) renderSources();
+          if (canvasOwner && responseCancellation) {
+            // Expose the failure/retirement now, but do not refund its credit.
+            try { if (canvasGalleryVisible()) renderFingerprintActivity(); }
+            finally { await responseCancellation; }
+          } else if (!canvasOwner && sourceIdentity(selectedSource()) === identity) renderSources();
         }
       }
 
@@ -9763,12 +10005,14 @@
           renderShellStatus();
           const catalogSignature = JSON.stringify(body.artifacts);
           if (catalogSignature === state.artifactCatalogSignature) {
+            if (canvasGalleryVisible()) renderFingerprintActivity();
             renderSourceHealth();
             return;
           }
           state.artifactCatalogSignature = catalogSignature;
           if (body.artifacts.length === 0) {
             if (state.sessionMode === 'live') {
+              retireCanvasPreviews('Canvas previews released because the artifact catalog is empty.');
               for (const artifact of state.artifacts) releaseSourcePreview(artifact);
               state.artifacts = [];
               state.openArtifactIds = [];
@@ -9788,10 +10032,7 @@
             const descriptor = Object.fromEntries(sourceFactsFields.filter(field => Object.hasOwn(artifact, field)).map(field => [field, artifact[field]]));
             return Object.assign(prior ?? {}, descriptor, {origin: state.sessionMode === 'live' ? 'live' : 'demo'});
           });
-          await Promise.all(state.artifacts
-            .filter(artifact => artifact.kind === 'canvas_data_url')
-            .slice(-nativeCanvasCaptureDisplayLimit)
-            .map(loadArtifactContent));
+          if (!canvasGalleryVisible()) retireCanvasPreviews();
           state.openArtifactIds = state.openArtifactIds.filter(id => state.artifacts.some(artifact => artifact.artifact_id === id));
           if (!state.artifacts.some(artifact => artifact.artifact_id === state.selectedArtifactId)) {
             state.selectedArtifactId = state.artifacts[0].artifact_id;
@@ -9810,6 +10051,9 @@
             return;
           }
           state.artifactReceiverError = error.message;
+          state.artifactEtag = null;
+          retireCanvasPreviews('Canvas previews released because the artifact catalog is unavailable.');
+          if (canvasGalleryVisible()) renderFingerprintActivity();
           renderShellStatus();
           renderSources();
         } finally {
@@ -9823,6 +10067,7 @@
       function showScreen(name, trigger = null) {
         const screenName = name === 'backtraces' ? 'backtrace' : name;
         investigationBeforeScreen(screenName);
+        if (screenName !== 'signals') retireCanvasPreviews();
         if (screenName !== 'backtrace' && state.originTraceStatus === 'loading') {
           state.originTraceController?.abort();
           state.originTraceGeneration += 1;

@@ -299,6 +299,7 @@ async function checkFloat32HostLifecycle(root, fixture) {
   const document={activeElement:null,createElement:()=>new Node(),querySelector:selector=>selector==='#tools-panel-float32'?container:selector==='#screen-tools'?screen:{hidden:true}};
   const env={TextEncoder,TextDecoder,Uint8Array,DataView,crypto,atob,btoa,AbortController,setTimeout,clearTimeout,location:{protocol:'http:'},document,
     Option:function(text,value){const option=new Node(value);option.textContent=text;return option;},state,isArtifactResponse:body=>body.valid!==false,
+    canvasGalleryVisible:()=>false,retireCanvasPreviews(){},
     renderShellStatus(){},renderSourceHealth(){},renderSources(){},loadArtifactContent(){},nativeCanvasCaptureDisplayLimit:20,evidencePackagePanel:{sync(){}},evidenceWorkspace:{sync(){}},renderFingerprintActivity(){},
     fetch:async(url,options)=>{
       if(url.startsWith('/api/artifacts'))return {status:catalogStatus,ok:catalogStatus===200,headers:new Headers(),json:async()=>({artifacts:catalog,valid:catalogValid})};

@@ -112,7 +112,7 @@ export async function checkAdvancedNavigation(root) {
     const context={document,state:{originTraceStatus:'idle',sourceHooksOpen:false},investigationRevision:0,
       investigationBeforeScreen:name=>{current=name;},investigationScreen:()=>current,
       evidencePackagePanel:{setVisible:noop},sourceFactsPanel:{cancel:noop},float32Panel:{cancel:noop},
-      evidenceWorkspace:{setVisible:noop},
+      evidenceWorkspace:{setVisible:noop},retireCanvasPreviews:noop,
       window:{matchMedia:()=>({matches:narrow})},requestAnimationFrame:callback=>frames.push(callback),selectedSource:()=>null,
       elements:{requestRows:{querySelectorAll:()=>[]},requestFilter:destination}};
     for(const name of ['renderFingerprintActivity','renderRuntimeHookTraffic','renderBacktrace','renderExperiment','renderApiCollection','refreshApiCollection','renderLocalAnalyst','refreshLocalAnalyst','renderTools','refreshDecoderEngine','renderDebugger','renderSources','renderMemory','renderVmLab'])context[name]=noop;
@@ -513,7 +513,7 @@ async function checkInvestigationReturns(root) {
     document.querySelector=s=>s==='.screen:not([hidden])'?screens.find(screen=>!screen.hidden):s==='#advanced-navigation'?navigation:s==='#investigation-back'?back:s==='#investigation-notice'?notice:s==='#investigation-navigation'?bar:s==='#console-experiment-traffic'?consolePanel:screens.find(screen=>'#'+screen.id===s)??null;
     document.querySelectorAll=s=>s==='.screen'?screens:[];
     const context=createContext({document,state,CSS:{escape:s=>s},Promise,requestAnimationFrame:fn=>frames.push(fn),integerText:(e,k)=>String(e[k]),
-      selectedSource:()=>null,sourceFactsPanel:{cancel:noop},float32Panel:{cancel:noop},evidenceWorkspace:{setVisible:noop},
+      selectedSource:()=>null,sourceFactsPanel:{cancel:noop},float32Panel:{cancel:noop},evidenceWorkspace:{setVisible:noop},retireCanvasPreviews:noop,
       renderInspector:noop,renderRuntimeHookTraffic:noop,fieldSets:{body:[]},elements:{requestRows:{querySelectorAll:()=>[row]},requestFilter:row}});
     const run=code=>runInContext(code,context);
     run(rootFunction+'\n'+nav+'\n'+section('      function showScreen(', '      async function refresh()'));

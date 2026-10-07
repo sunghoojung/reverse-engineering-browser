@@ -1124,6 +1124,7 @@ console.log("PASS legacy and annotated Analyst/JWT failures, unchanged successes
 const packageRefreshState = {artifactRefreshing:false,artifactEtag:null,artifactCatalogSignature:null,artifacts:[],openArtifactIds:[],selectedArtifactId:null,sessionMode:'live'};
 let packageRefreshBody={artifacts:packageGolden.records.artifacts.map(row=>({...row,...row.key}))}, packageRefreshSyncs=0;
 const packageArtifactRefresh=runInNewContext(appSection('      function liveScriptIdentity(', '      function liveSources(') + appSection('      async function refreshArtifacts()', '      function showScreen(')+';refreshArtifacts',{
+  canvasGalleryVisible:()=>false, retireCanvasPreviews(){},
   syncFloat32Panel(){}, // Actual Float32 host integration is exercised in check-float32-ui.mjs.
   sourceFactsFields:sourceFactsUI.sourceFactsFields, sourceFactsIdentity:sourceFactsUI.sourceFactsIdentity, state:packageRefreshState,location:{protocol:'http:'},fetch:async()=>Response.json(packageRefreshBody),isArtifactResponse:()=>true,
   renderShellStatus(){},renderSourceHealth(){},renderSources(){},renderFingerprintActivity(){},loadArtifactContent(){},loadWasmInspection(){},
@@ -1809,13 +1810,17 @@ console.log('PASS Experiments receipt-to-caller continuation ownership: exact re
 console.log('PASS Experiments production POST/poll receipts: HTTP-200 refusal, required groups/generations, no chained Send or automatic retries, valid success, stale poll/304 ordering, reused lifetime consent/result erasure, A-B-A ownership and bounded additive aliases (not rendered QA)');
 
 const ownershipFunctionNames = ['liveScriptIdentity', 'sourceIdentity', 'sourceIsCurrent', 'sourceReference', 'setSourceCursor', 'sourceCursorFor',
-  'retireSourceAnalysis', 'releaseSourcePreview', 'boundSourcePreviews', 'boundSourceAnalysis',
+  'retireSourceAnalysis', 'releaseSourcePreview', 'canvasGalleryVisible', 'releaseCanvasPreview', 'retireCanvasPreviews', 'syncCanvasPreviews', 'pumpCanvasPreviews', 'retryCanvasPreview', 'boundSourcePreviews', 'boundSourceAnalysis',
   'liveSources', 'capturedSources', 'selectedSource', 'deobfuscationKey', 'sourceOwnedLiveText', 'validateSourceAnalysis', 'loadDeobfuscation',
   'sourceDisplayView', 'sourceViewLabel', 'sourceDerivedView', 'loadArtifactContent', 'refreshArtifacts',
   'closeSource', 'loadScriptContent', 'sourceRuntimeLine', 'sourceRuntimeColumn', 'prefillHookFromSource',
   'sourceDisplayName', 'sourceIcon', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent', 'updateSourceDecorations', 'breakpointLinesForSource',
   'revealRuntimeHookHit', 'sourceArtifactIdentityMatches', 'selectArtifact', 'selectScript', 'sourceFormattedView', 'syncFloat32Panel', 'textElement', 'deobfuscationRow', 'deobfuscationOwner', 'cancelDeobfuscation', 'retryDeobfuscation', 'retireDeobfuscationReveal',
   'updateDeobfuscationView', 'setDeobfuscationDisclosure', 'revealDeobfuscationChange', 'deobfuscationButton', 'deobfuscationDisclosure', 'renderDeobfuscationReport'];
+const canvasProductionRules=runInNewContext(
+  appSection('      const nativeCanvasCaptureDisplayLimit =','      const nativeCanvasDrawingMethods')+
+  appSection('      const canvasDataUrlPattern =','      function canvasReadbackName(')+
+  ';({nativeCanvasCaptureDisplayLimit,canvasPreviewByteLimit,canvasPreviewReadLimit,canvasDataUrlPattern,canvasPreviewAxisLimit,canvasPreviewPixelLimit,canvasGalleryPixelLimit,inspectCanvasPng})', {atob});
 const ownershipModels = await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8');
 const ownershipSyntax = await readFile(join(root, 'apps/research-ui/source_syntax.js'), 'utf8');
 const ownershipProvenance = await readFile(join(root, 'apps/research-ui/field_provenance.js'), 'utf8');
@@ -1840,10 +1845,12 @@ function ownedContext(patch = {}) {
     sourceFactsPanel:{original:()=>undefined,cancel(){}}, investigationBeforeSelection(){}, location:{protocol:'http:'}, document:{querySelector:()=>({hidden:true})},
     renderSources(){}, renderSourceHealth(){}, renderShellStatus(){}, renderFingerprintActivity(){},
     runtimeHooksState:()=>({workers:[], isolated:true, target_id:state.debuggerSession?.target?.id}),
-    sourceName:source=>source.url, nativeCanvasCaptureDisplayLimit:4, evidencePackagePanel:{sync(){}}, evidenceWorkspace:{sync(){}},
+    elements:{signalRenderList:new TrafficFixtureNode()}, ...canvasProductionRules,
+    sourceName:source=>source.url, evidencePackagePanel:{sync(){}}, evidenceWorkspace:{sync(){}},
     ...patch, state};
-  return {state, sandbox, api:runInNewContext(ownershipModels + ownershipSyntax + ownershipProvenanceSite + ownershipFunctionNames.map(sourceProductionFunction).join('\n') +
-    `;({${ownershipFunctionNames.join(',')},revealProvenanceSite})`, sandbox)};
+  const functions=[...ownershipFunctionNames,...(patch.functions??[])];
+  return {state, sandbox, api:runInNewContext(ownershipModels + ownershipSyntax + ownershipProvenanceSite + functions.map(sourceProductionFunction).join('\n') +
+    `;({${functions.join(',')},revealProvenanceSite})`, sandbox)};
 }
 const sourceOwnershipReceipt = [];
 const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{resolve=done;}); return {promise,resolve};};
@@ -2356,6 +2363,389 @@ if (process.env.REB_SOURCE_OWNERSHIP_BACKEND_URL) {
   sourceOwnershipReceipt.push({test:'real_rust_worker_http_to_sources_admission',status:'passed',artifacts:javascript.length,intrinsicModes:2});
 }
 console.log('PASS Sources pending refresh owners, analyzer identity/hash/maps, worker targets, cursor scope, explicit retry, close/eviction byte bounds, bounded hex, stable editor and keyboard tab handlers (not rendered QA)');
+// Canvas ownership uses the real catalog, reader, renderer and screen transition.
+// Data URLs are inert authored text; no image is decoded by this fixture.
+const canvasOwnershipReceipt=[];
+const canvasText='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAARzQklUCAgICHwIZIgAAAANSURBVHicY/jPwPAfAAUAAf+JmT0dAAAAAElFTkSuQmCC';
+async function canvasArtifact(id,text=canvasText,session='1') {
+  return {...await ownedArtifact(id,text,session),kind:'canvas_data_url',mime_type:'text/plain',
+    capture_origin:'canvas_to_data_url',execution_context_id:'0',creator_event_id:id,sensitive:true};
+}
+function canvasContext(patch={}) {
+  const sourceAssignments=[];
+  class CanvasNode extends TrafficFixtureNode {
+    set src(value){sourceAssignments.push(this);this.setAttribute('src',value);}get src(){return this.getAttribute('src')??'';}
+  }
+  const screen=new TrafficFixtureNode();screen.id='screen-signals';screen.hidden=patch.hidden??false;
+  const navigation=new TrafficFixtureNode();
+  const document={activeElement:null,createElement:tag=>new CanvasNode(tag),
+    querySelector:selector=>selector==='#screen-signals'?screen:navigation,
+    querySelectorAll:selector=>selector==='.screen'?[screen]:[]};
+  const elements=Object.fromEntries(['signalRenderList','signalRenderCount','signalRenderSummary'].map(key=>[key,new TrafficFixtureNode()]));
+  let context, events=[];
+  const canvasEvents=artifacts=>artifacts.map(artifact=>({category:'canvas',type:'api_call',operation:'canvas.toDataURL',payload:Buffer.from('canvas.toDataURL').toString('hex'),
+    session_id:artifact.session_id,process_id:1,frame_id:'1',sequence_number:artifact.creator_event_id,monotonic_time_ns:artifact.creator_event_id}));
+  context=ownedContext({functions:['canvasReadbackName','canvasRenderCaptures','canvasPreview','renderCanvasCapture','renderFingerprintRendering','showScreen'],
+    document,elements,nativeCanvasDrawingMethods:new Set(),nativeCanvasCallLimit:128,
+    integerValue:(event,key)=>BigInt(event[key]),integerText:(event,key)=>String(event[key]),decodePayload:event=>event.operation,
+    textElement:(tag,className,text)=>{const node=new TrafficFixtureNode(tag);node.className=className;node.textContent=text;return node;},
+    signalEventKey:event=>`${event.session_id}:${event.sequence_number}`,matchingSignalProfileFamily:()=>null,
+    renderSignalSurfaceOverview(){},renderFingerprintActivity(){context.api.renderFingerprintRendering(events);},
+    investigationBeforeScreen(){},float32Panel:{cancel(){}},evidenceWorkspace:{sync(){},setVisible(){}},
+    ...patch,state:{signalView:'rendering',canvasImageCaptureEnabled:true,canvasRenderCaptures:[],...patch.state}});
+  return {...context,screen,elements,sourceAssignments,events(artifacts){events=canvasEvents(artifacts);},render(){context.api.renderFingerprintRendering(events);}};
+}
+async function canvasSettled(context) {
+  for(let attempt=0;attempt<1000;attempt++) {
+    if(!(context.state.canvasPreviewReads?.size)) return;
+    await new Promise(resolve=>setTimeout(resolve,1));
+  }
+  assert.fail('Canvas fixture did not settle');
+}
+function canvasAccounting(context) {
+  const loaded=context.state.artifacts.filter(value=>value.kind==='canvas_data_url'&&value.content!==undefined);
+  const reserved=[...(context.state.canvasPreviewOwners?.values()??[])].reduce((sum,owner)=>sum+owner.artifact.byte_size*2,0);
+  const textBytes=loaded.reduce((sum,artifact)=>sum+artifact.content.length*2,0);
+  assert(loaded.length<=24);assert(reserved<=8*1024*1024);assert(textBytes<=reserved);
+  assert((context.state.canvasPreviewOwners?.size??0)<=24);assert((context.state.canvasPreviewReads?.size??0)<=2);
+  return {loaded:loaded.length,reservedUTF16Bytes:reserved,retainedUTF16Bytes:textBytes};
+}
+{
+  const original=await canvasArtifact('1');let catalog=[],reads=0;
+  const context=canvasContext({hidden:true,fetch:async url=>url.startsWith('/api/artifacts?')
+    ? Response.json({count:catalog.length,artifacts:catalog}) : (reads++,new Response(canvasText))});
+  for(let total=24;total<=480;total+=24) {
+    catalog=Array.from({length:total},(_,index)=>({...original,artifact_id:String(index+1),creator_event_id:String(index+1)}));
+    await context.api.refreshArtifacts();assert.equal(context.state.artifactReceiverError,null);canvasAccounting(context);
+  }
+  assert.equal(reads,0);assert.equal(context.state.artifacts.length,480);
+  await context.api.loadArtifactContent(context.state.artifacts[0]);assert.equal(reads,0,'Generic selected-source loads cannot bypass Canvas ownership');
+  canvasOwnershipReceipt.push({test:'20_hidden_catalogs_480_descriptors',status:'passed',contentReads:reads,...canvasAccounting(context)});
+}
+{
+  const original=await canvasArtifact('1');let catalog=[],reads=0,maxReads=0,maxLoaded=0,rawReservations=0,maxRawReservations=0;
+  const context=canvasContext({fetch:async url=>url.startsWith('/api/artifacts?')
+    ? Response.json({count:catalog.length,artifacts:catalog}) : (reads++,new Response(canvasText))});
+  context.sandbox.sourceFactsReadBytes=async(...args)=>{
+    maxReads=Math.max(maxReads,context.state.canvasPreviewReads.size);canvasAccounting(context);
+    rawReservations+=args[1];maxRawReservations=Math.max(maxRawReservations,rawReservations);assert(rawReservations<=4*1024*1024);
+    try{return await sourceFactsUI.sourceFactsReadBytes(...args);}finally{rawReservations-=args[1];}
+  };
+  for(let total=24;total<=480;total+=24) {
+    catalog=Array.from({length:total},(_,index)=>({...original,artifact_id:String(index+1),creator_event_id:String(index+1)}));
+    context.events(catalog);await context.api.refreshArtifacts();await canvasSettled(context);
+    assert.equal(context.state.artifactReceiverError,null);maxLoaded=Math.max(maxLoaded,canvasAccounting(context).loaded);
+  }
+  assert.equal(reads,480);assert.equal(maxReads,2);assert.equal(maxLoaded,24);
+  const retained=context.state.artifacts.filter(artifact=>artifact.content!==undefined);
+  assert.equal(retained[0].artifact_id,'457');assert.equal(context.elements.signalRenderList.querySelectorAll('img').length,24);
+  for(let refresh=0;refresh<20;refresh++)context.render();await canvasSettled(context);assert.equal(reads,480,'Stable gallery must not churn');
+  const detached=[...context.elements.signalRenderList.querySelectorAll('img')];assert(detached.every(image=>image.src===canvasText));
+  context.state.signalView='activity';context.render();assert.equal(context.elements.signalRenderList.children.length,0);
+  assert(detached.every(image=>!image.getAttribute('src')));assert.equal(canvasAccounting(context).loaded,0);
+  context.state.signalView='rendering';context.events(context.state.artifacts.slice(0,3));context.render();await canvasSettled(context);
+  assert.equal(canvasAccounting(context).loaded,3);assert(context.state.artifacts.slice(0,3).every(artifact=>artifact.content===canvasText));
+  context.api.showScreen('other',{classList:{contains:()=>true}});assert.equal(canvasAccounting(context).loaded,0);
+  assert.equal(context.elements.signalRenderList.children.length,0);assert.equal(context.state.artifacts.length,480);
+  canvasOwnershipReceipt.push({test:'visible_growth_rollover_stable_scope_activity_navigation',status:'passed',maxReads,maxRawReadBufferReservations:maxRawReservations,maxRetained:maxLoaded,retainedDescriptors:480,afterNavigation:canvasAccounting(context)});
+}
+{
+  const large='data:image/png;base64,'+'A'.repeat(2097152-'data:image/png;base64,'.length),original=await canvasArtifact('1',large);let reads=0;
+  const artifacts=Array.from({length:24},(_,index)=>({...original,artifact_id:String(index+1),creator_event_id:String(index+1)}));
+  const context=canvasContext({state:{artifacts},fetch:async()=>{reads++;return new Response(large);}});
+  context.events(artifacts);context.render();await canvasSettled(context);
+  assert.equal(reads,2);assert.equal(canvasAccounting(context).loaded,2);
+  assert.equal(context.state.canvasPreviewOwners.size,2);assert.equal(artifacts.filter(value=>/8 MiB/.test(value.canvasPreviewNotice)).length,22);
+  for(let refresh=0;refresh<30;refresh++)context.render();await canvasSettled(context);assert.equal(reads,2);
+  canvasOwnershipReceipt.push({test:'aggregate_reservations_stop_byte_budget_reload_churn',status:'passed',contentReads:reads,...canvasAccounting(context)});
+}
+{
+  const old=await canvasArtifact('1'),other=await canvasArtifact('2'),replacement=await canvasArtifact('1',canvasText,'2');
+  const held=[],signals=[];let catalog=[old,other],reads=0,cancelled=0,lateBodyReads=0;
+  const context=canvasContext({fetch:async(url,options)=>{
+    if(url.startsWith('/api/artifacts?'))return Response.json({count:catalog.length,artifacts:catalog});
+    reads++;signals.push(options.signal);const pending=ownedDeferred();held.push(pending);return pending.promise;
+  }});
+  context.events(catalog);await context.api.refreshArtifacts();assert.equal(reads,2);const stale=[...context.state.artifacts];
+  context.events([replacement]);catalog=[replacement];await context.api.refreshArtifacts();
+  assert(signals.every(signal=>signal.aborted));assert.equal(reads,2,'Retired noncooperative reads still occupy the two slots');
+  assert.equal(context.elements.signalRenderList.querySelectorAll('img').length,0);
+  held[0].resolve({ok:true,body:{cancel:async()=>{cancelled++;},getReader(){lateBodyReads++;throw Error('Stale body read');}}});
+  held[1].resolve({ok:true,body:{cancel:async()=>{cancelled++;},getReader(){lateBodyReads++;throw Error('Stale body read');}}});
+  for(let attempt=0;attempt<100&&reads<3;attempt++)await new Promise(resolve=>setTimeout(resolve,1));
+  assert.equal(reads,3);assert.equal(cancelled,2);assert.equal(lateBodyReads,0);assert(stale.every(artifact=>artifact.content===undefined));
+  held[2].resolve(new Response(canvasText));await canvasSettled(context);assert.equal(context.state.artifacts[0].session_id,'2');
+  assert.equal(context.state.artifacts[0].content,canvasText);
+  canvasOwnershipReceipt.push({test:'catalog_session_replacement_late_headers_keep_read_credit',status:'passed',staleBodyReads:lateBodyReads,cancelledResponses:cancelled,...canvasAccounting(context)});
+}
+{
+  const artifact=await canvasArtifact('1');let status=200,reads=0,failContent=true;
+  const context=canvasContext({fetch:async url=>url.startsWith('/api/artifacts?')
+    ? new Response(JSON.stringify({count:1,artifacts:[artifact]}),{status,headers:{ETag:'"canvas"'}})
+    : (reads++,new Response(failContent?'wrong bytes':canvasText))});
+  context.events([artifact]);await context.api.refreshArtifacts();await canvasSettled(context);
+  assert.equal(reads,1);assert.match(context.state.artifacts[0].loadError,/byte size/);
+  for(let repeat=0;repeat<3;repeat++)await context.api.refreshArtifacts();await canvasSettled(context);assert.equal(reads,1);
+  failContent=false;context.elements.signalRenderList.querySelector('button').click();await canvasSettled(context);assert.equal(reads,2);
+  const image=context.elements.signalRenderList.querySelector('img');assert(image);
+  status=503;await context.api.refreshArtifacts();assert.equal(context.state.artifactEtag,null);assert.equal(canvasAccounting(context).loaded,0);
+  assert.equal(context.state.artifacts.length,1);assert(!image.getAttribute('src'));assert.match(context.elements.signalRenderList.textContent,/catalog is unavailable/);
+  status=200;await context.api.refreshArtifacts();await canvasSettled(context);assert.equal(reads,3,'An unchanged recovered catalog restores the visible gallery');
+  assert.equal(context.state.artifacts[0].content,canvasText);
+  canvasOwnershipReceipt.push({test:'explicit_retry_catalog_error_cleanup_same_catalog_recovery',status:'passed',contentReads:reads,...canvasAccounting(context)});
+}
+{
+  const source=await ownedArtifact('50');source.content='const a = 1;';
+  const one=await canvasArtifact('1'),two=await canvasArtifact('2');const held=[],signals=[];let reads=0;
+  const context=canvasContext({state:{artifacts:[source,one,two]},fetch:async(url,options)=>{
+    reads++;signals.push(options.signal);
+    if(reads>2)return new Response(canvasText);
+    return new Response(new ReadableStream({start(controller){held.push(controller);},cancel(){}}));
+  }});
+  const sourceKey=context.api.sourceIdentity(source)+'|verified';const result={original_source:'const a = 1;'};
+  context.state.deobfuscationCache.set(sourceKey,result);
+  context.events([one,two]);context.render();await new Promise(resolve=>setImmediate(resolve));assert.equal(reads,2);
+  context.api.showScreen('other',{classList:{contains:()=>true}});await canvasSettled(context);
+  assert(signals.every(signal=>signal.aborted));assert.equal(canvasAccounting(context).loaded,0);
+  assert.equal(source.content,'const a = 1;');assert.equal(context.state.deobfuscationCache.get(sourceKey),result);
+  context.screen.hidden=false;context.render();await canvasSettled(context);assert.equal(reads,4);
+  const detached=[...context.elements.signalRenderList.querySelectorAll('img')];assert.equal(detached.length,2);
+  context.events([]);context.render();assert.equal(canvasAccounting(context).loaded,0);assert(detached.every(image=>!image.src));
+  assert.match(context.elements.signalRenderList.textContent,/No Canvas readback/);
+  canvasOwnershipReceipt.push({test:'body_abort_reopen_empty_scope_preserves_source_analysis',status:'passed',abortedReads:2,contentReads:reads,...canvasAccounting(context)});
+}
+{
+  const artifacts=await Promise.all(['1','2','3'].map(id=>canvasArtifact(id)));const held=[],timers=new Map();let sequence=0,reads=0,cancelled=0;
+  const context=canvasContext({state:{artifacts},
+    setTimeout(callback,delay){const id=++sequence;timers.set(id,{callback,delay});return id;},clearTimeout(id){timers.delete(id);},
+    fetch:async()=>{reads++;if(reads>2)return new Response(canvasText);const pending=ownedDeferred();held.push(pending);return pending.promise;}});
+  context.events(artifacts);context.render();assert.equal(reads,2);assert.equal(timers.size,2);
+  for(const timer of [...timers.values()]){assert.equal(timer.delay,10000);timer.callback();}
+  assert.equal(reads,2);assert.equal(context.state.canvasPreviewReads.size,2);
+  assert.equal(artifacts.filter(artifact=>/timed out/.test(artifact.loadError)).length,2);
+  for(const pending of held)pending.resolve({body:{cancel:async()=>{cancelled++;}},ok:true});
+  await canvasSettled(context);assert.equal(cancelled,2);assert.equal(reads,3);assert.equal(canvasAccounting(context).loaded,1);
+  context.render();await canvasSettled(context);assert.equal(reads,3,'Timed-out previews require explicit retry');
+  assert.equal(timers.size,0);
+  canvasOwnershipReceipt.push({test:'deadline_keeps_noncooperative_fetch_credit_and_failed_reason',status:'passed',lateHeadersCancelled:cancelled,contentReads:reads,...canvasAccounting(context)});
+}
+{
+  const oversized={...await canvasArtifact('1'),byte_size:2097153},invalid=await canvasArtifact('2','invalid image'),wrongHash={...await canvasArtifact('3'),sha256:'b'.repeat(64)};
+  const artifacts=[oversized,invalid,wrongHash];let reads=0;
+  const context=canvasContext({state:{artifacts},fetch:async url=>{reads++;return new Response(url.includes('/2/')?'invalid image':canvasText);}});
+  context.events(artifacts);context.render();await canvasSettled(context);assert.equal(reads,2);assert.equal(canvasAccounting(context).loaded,0);
+  assert.match(oversized.canvasPreviewNotice,/2 MiB/);assert.match(invalid.loadError,/image data URL validator/);assert.match(wrongHash.loadError,/SHA-256/);
+  for(let repeat=0;repeat<5;repeat++)context.render();await canvasSettled(context);assert.equal(reads,2);
+  context.sandbox.fetch=async()=>Response.json({count:0,artifacts:[]});await context.api.refreshArtifacts();
+  assert.equal(context.state.artifacts.length,0);assert.equal(context.state.canvasPreviewOwners.size,0);assert.equal(context.elements.signalRenderList.children.length,0);
+  canvasOwnershipReceipt.push({test:'oversize_invalid_hash_admission_and_empty_live_catalog',status:'passed',contentReads:reads,...canvasAccounting(context)});
+}
+// Cancellation itself is an owned operation. A producer may settle a read or
+// return error/stale headers while keeping body/reader cancellation pending.
+for(const boundary of ['error-headers','reader-error']) {
+  const original=await canvasArtifact('1'),artifacts=Array.from({length:24},(_,index)=>({...original,artifact_id:String(index+1),creator_event_id:String(index+1)}));
+  const pending=[];let reads=0,active=0,maximum=0;
+  const context=canvasContext({state:{artifacts},fetch:async()=>{
+    reads++;
+    const cancel=()=>{const held=ownedDeferred();pending.push(held);active++;maximum=Math.max(maximum,active);return held.promise.finally(()=>{active--;});};
+    return boundary==='error-headers'?{ok:false,status:503,body:{cancel}}
+      :{ok:true,headers:new Headers(),body:{getReader:()=>({read:async()=>({done:false,value:'not a byte chunk'}),cancel,releaseLock(){}})}};
+  }});
+  context.events(artifacts);context.render();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(reads,2);assert.equal(active,2);assert.equal(context.state.canvasPreviewReads.size,2);
+  assert.equal(artifacts.filter(artifact=>artifact.loadError).length,2,'Failure is visible without waiting for cancellation');
+  assert.equal(context.elements.signalRenderList.querySelectorAll('button').length,2);
+  for(let repeat=0;repeat<10;repeat++)context.render();await new Promise(resolve=>setImmediate(resolve));assert.equal(reads,2);
+  for(let wave=0;wave<24;wave++) {
+    pending.splice(0).forEach((held,index)=>held.resolve(index%2?Promise.reject(new Error('Cancellation rejected')):undefined));
+    await new Promise(resolve=>setImmediate(resolve));assert(active<=2);canvasAccounting(context);
+    if(reads===24&&active===0&&context.state.canvasPreviewReads.size===0)break;
+  }
+  assert.equal(reads,24);assert.equal(active,0);assert.equal(context.state.canvasPreviewReads.size,0);assert.equal(maximum,2);
+  context.render();await canvasSettled(context);assert.equal(reads,24,'Failed owners cannot cause cancellation/retry churn');
+  canvasOwnershipReceipt.push({test:`${boundary}_credit_includes_pending_and_rejected_cancellation`,status:'passed',fetchesBeforeCancellationSettlement:2,maxPendingCancellations:maximum,contentReads:reads});
+}
+for(const boundary of ['stale-headers','reader-abort']) {
+  const old=await Promise.all(['1','2'].map(id=>canvasArtifact(id))),newer=await Promise.all(['1','2'].map(id=>canvasArtifact(id,canvasText,'2')));
+  const headers=[],bodyReads=[],cancellations=[];let reads=0,cancelled=0;
+  const context=canvasContext({state:{artifacts:old},fetch:async()=>{
+    reads++;if(reads>2)return new Response(canvasText);
+    const cancel=()=>{cancelled++;const held=ownedDeferred();cancellations.push(held);return held.promise;};
+    if(boundary==='stale-headers'){const held=ownedDeferred();headers.push({held,response:{ok:true,body:{cancel}}});return held.promise;}
+    const held=ownedDeferred();bodyReads.push(held);
+    return {ok:true,headers:new Headers(),body:{getReader:()=>({read:()=>held.promise,cancel,releaseLock(){}})}};
+  }});
+  context.events(old);context.render();await new Promise(resolve=>setImmediate(resolve));assert.equal(reads,2);
+  context.api.showScreen('other',{classList:{contains:()=>true}});
+  context.state.artifacts=newer;context.events(newer);context.screen.hidden=false;context.render();
+  for(const {held,response} of headers)held.resolve(response);
+  for(const held of bodyReads)held.resolve({done:true});
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(cancelled,2);assert.equal(reads,2);assert.equal(context.state.canvasPreviewReads.size,2);
+  for(let repeat=0;repeat<10;repeat++){context.api.showScreen('other',{classList:{contains:()=>true}});context.screen.hidden=false;context.render();}
+  assert.equal(reads,2);assert(old.every(artifact=>artifact.content===undefined));assert(newer.every(artifact=>artifact.content===undefined));
+  cancellations.forEach(held=>held.resolve());await canvasSettled(context);assert.equal(reads,4);
+  assert(newer.every(artifact=>artifact.content===canvasText));assert(old.every(artifact=>artifact.content===undefined));
+  canvasOwnershipReceipt.push({test:`${boundary}_holds_cancellation_credit_across_replacement_and_reopen`,status:'passed',fetchesBeforeCancellationSettlement:2,retiredOwners:2,contentReads:reads,...canvasAccounting(context)});
+}
+{
+  const artifact=await canvasArtifact('1'),held=ownedDeferred();let reads=0;
+  const context=canvasContext({state:{artifacts:[artifact]},fetch:async()=>++reads===1?{ok:false,status:503,body:{cancel:()=>held.promise}}:new Response(canvasText)});
+  context.events([artifact]);context.render();await new Promise(resolve=>setImmediate(resolve));assert.match(artifact.loadError,/503/);
+  context.elements.signalRenderList.querySelector('button').click();await new Promise(resolve=>setImmediate(resolve));assert.equal(reads,1);
+  assert.equal(context.state.canvasPreviewReads.size,1);held.resolve();await canvasSettled(context);
+  assert.equal(reads,2);assert.equal(artifact.content,canvasText);assert.equal(artifact.loadError,null);
+  canvasOwnershipReceipt.push({test:'explicit_retry_waits_for_prior_cancellation_credit',status:'passed',contentReads:reads,...canvasAccounting(context)});
+}
+{
+  const artifact=await ownedArtifact('1'),held=ownedDeferred();let cancelled=0;
+  const context=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'1'},fetch:async()=>({ok:false,status:503,body:{cancel(){cancelled++;return held.promise;}}})});
+  await context.api.loadArtifactContent(artifact);assert.equal(cancelled,1);assert.match(artifact.loadError,/503/);
+  assert.equal(artifact.loading,false);assert.equal(context.state.canvasPreviewReads,undefined);held.resolve();
+  canvasOwnershipReceipt.push({test:'non_canvas_sources_keep_nonblocking_cancellation_behavior',status:'passed'});
+}
+{
+  const artifact=await canvasArtifact('1'),cleanup=ownedDeferred(),newHeaders=ownedDeferred();let reads=0;
+  const context=canvasContext({state:{artifacts:[artifact]},fetch:async()=>++reads===1?{ok:false,status:503,body:{cancel:()=>cleanup.promise}}:newHeaders.promise});
+  context.events([artifact]);context.render();await new Promise(resolve=>setImmediate(resolve));
+  context.api.showScreen('other',{classList:{contains:()=>true}});context.screen.hidden=false;context.render();
+  context.elements.signalRenderList.querySelector('button').click();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(reads,2);assert.equal(context.state.canvasPreviewReads.size,2);const controller=artifact.controller;
+  assert(controller&&!controller.signal.aborted);cleanup.resolve();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(artifact.controller,controller);assert.equal(artifact.loading,true);assert.equal(artifact.loadError,null);
+  newHeaders.resolve(new Response(canvasText));await canvasSettled(context);assert.equal(artifact.content,canvasText);assert.equal(artifact.loadError,null);
+  canvasOwnershipReceipt.push({test:'retired_cancellation_cannot_clear_reopened_same_artifact_owner',status:'passed',contentReads:reads,...canvasAccounting(context)});
+}
+{
+  const artifact=await canvasArtifact('1'),cleanup=ownedDeferred();let renders=0,settled=false;
+  const context=canvasContext({state:{artifacts:[artifact]},renderFingerprintActivity(){renders++;throw new Error('Fixture render failed');},
+    fetch:async()=>({ok:false,status:503,body:{cancel:()=>cleanup.promise}})});
+  const owner={artifact,identity:context.api.sourceIdentity(artifact)};context.state.canvasPreviewOwners=new Map([[owner.identity,owner]]);
+  const result=context.api.loadArtifactContent(artifact,{canvasOwner:owner}).then(()=>{settled=true;return null;},error=>{settled=true;return error;});
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(renders,1);assert.equal(settled,false,'A render exception cannot skip owned cancellation settlement');
+  cleanup.resolve();assert.match((await result).message,/Fixture render failed/);assert.equal(settled,true);assert.match(artifact.loadError,/503/);
+  canvasOwnershipReceipt.push({test:'render_exception_cannot_release_pending_cancellation',status:'passed'});
+}
+// Fixtures only rewrite headers/chunks around a one-pixel PNG. They never
+// inflate data or ask a browser to decode the oversized declared dimensions.
+function canvasPngChunk(type,data=Buffer.alloc(0)) {
+  const bytes=Buffer.concat([Buffer.from(type),data]);let crc=0xffffffff;
+  for(const byte of bytes){crc^=byte;for(let bit=0;bit<8;bit++)crc=(crc>>>1)^((crc&1)?0xedb88320:0);}
+  const chunk=Buffer.alloc(data.length+12);chunk.writeUInt32BE(data.length);bytes.copy(chunk,4);chunk.writeUInt32BE((crc^0xffffffff)>>>0,data.length+8);return chunk;
+}
+function canvasPngFixture({width=1,height=1,depth=8,color=6,compression=0,filter=0,interlace=0,before=[],after=[],idat,tail=Buffer.alloc(0)}={}) {
+  const original=Buffer.from(canvasText.split(',')[1],'base64'),header=Buffer.alloc(13),idatOffset=original.indexOf(Buffer.from('IDAT'));
+  header.writeUInt32BE(width);header.writeUInt32BE(height,4);header.set([depth,color,compression,filter,interlace],8);
+  return Buffer.concat([original.subarray(0,8),canvasPngChunk('IHDR',header),...before,
+    ...(idat??[canvasPngChunk('IDAT',original.subarray(idatOffset+4,idatOffset+4+original.readUInt32BE(idatOffset-4)))]),...after,canvasPngChunk('IEND'),tail]);
+}
+const canvasPngUrl=bytes=>'data:image/png;base64,'+bytes.toString('base64');
+{
+  const inspect=canvasProductionRules.inspectCanvasPng,valid=canvasPngFixture();
+  assert.deepEqual({...inspect(canvasText)},{width:1,height:1,pixels:1});
+  for(const options of [{width:4096,height:1024},{width:1024,height:4096},{width:2048,height:2048},{color:2}]) {
+    const admitted=inspect(canvasPngUrl(canvasPngFixture(options)));assert.equal(admitted.reason,undefined,JSON.stringify(options));
+    assert.equal(admitted.pixels,(options.width??1)*(options.height??1));
+  }
+  const sRGB=canvasPngChunk('sRGB',Buffer.from([0])),sBIT=canvasPngChunk('sBIT',Buffer.from([8,8,8,8])),pHYs=canvasPngChunk('pHYs',Buffer.from([0,0,14,196,0,0,14,196,1]));
+  assert.equal(inspect(canvasPngUrl(canvasPngFixture({before:[sRGB,sBIT,pHYs]}))).reason,undefined);
+  assert.equal(inspect(canvasPngUrl(canvasPngFixture({color:2,before:[canvasPngChunk('sBIT',Buffer.from([8,8,8]))]}))).reason,undefined);
+  const negatives=[
+    ['zero-width',{width:0},/axis/],['zero-height',{height:0},/axis/],['wide',{width:4097},/axis/],['tall',{height:4097},/axis/],
+    ['huge',{width:0xffffffff,height:0xffffffff},/axis/],['pixel-product',{width:2049,height:2048},/4 Mi-pixel/],
+    ['16-bit',{depth:16},/8-bit/],['palette',{color:3},/RGB/],['greyscale',{color:0},/RGB/],
+    ['interlaced',{interlace:1},/non-interlaced/],['compression',{compression:1},/compression/],['filter',{filter:1},/filtering/],
+    ['animation-control',{before:[canvasPngChunk('acTL',Buffer.alloc(8))]},/Animated/],
+    ['animation-frame',{after:[canvasPngChunk('fcTL',Buffer.alloc(26))]},/Animated/],
+    ['animation-data',{after:[canvasPngChunk('fdAT',Buffer.alloc(4))]},/Animated/],
+    ['embedded-profile',{before:[canvasPngChunk('iCCP',Buffer.from('x\0\0'))]},/unsupported/],
+    ['compressed-text',{before:[canvasPngChunk('zTXt')]},/unsupported/],['unknown-critical',{before:[canvasPngChunk('ABCD')]},/unsupported/],
+    ['palette-chunk',{before:[canvasPngChunk('PLTE',Buffer.alloc(3))]},/unsupported/],
+    ['duplicate-header',{before:[valid.subarray(8,33)]},/duplicate/],['empty-idat',{idat:[canvasPngChunk('IDAT')]},/incomplete/],
+    ['missing-idat',{idat:[]},/incomplete/],['trailing-byte',{tail:Buffer.from([0])},/trailing/],
+    ['duplicate-end',{tail:canvasPngChunk('IEND')},/trailing/],['early-end',{before:[canvasPngChunk('IEND')]},/incomplete/],
+    ['sbit-length',{before:[canvasPngChunk('sBIT',Buffer.from([8,8,8]))]},/metadata/],['sbit-zero',{before:[canvasPngChunk('sBIT',Buffer.from([0,8,8,8]))]},/metadata/],
+    ['sbit-large',{before:[canvasPngChunk('sBIT',Buffer.from([9,8,8,8]))]},/metadata/],['sbit-duplicate',{before:[sBIT,sBIT]},/duplicated/],
+    ['srgb-length',{before:[canvasPngChunk('sRGB')]},/metadata/],['srgb-value',{before:[canvasPngChunk('sRGB',Buffer.from([4]))]},/metadata/],
+    ['phys-length',{before:[canvasPngChunk('pHYs')]},/metadata/],['phys-unit',{before:[canvasPngChunk('pHYs',Buffer.from([0,0,0,0,0,0,0,0,2]))]},/metadata/],
+    ['duplicate-metadata',{before:[sRGB,sRGB]},/duplicated/],['nonconsecutive-idat',{idat:[canvasPngChunk('IDAT',Buffer.from([1])),sRGB,canvasPngChunk('IDAT',Buffer.from([2]))]},/follows/],
+    ['reserved-bit',{before:[canvasPngChunk('abca')]},/type/],['nonletter',{before:[canvasPngChunk('ab1D')]},/type/],
+    ['chunk-count',{idat:Array.from({length:255},()=>canvasPngChunk('IDAT',Buffer.from([1])))},/256-chunk/],
+  ];
+  for(const [name,options,reason] of negatives)assert.match(inspect(canvasPngUrl(canvasPngFixture(options))).reason,reason,name);
+  for(const index of [12,20,32,45,57,69]){const broken=Buffer.from(valid);broken[index]^=1;assert(inspect(canvasPngUrl(broken)).reason,`CRC/type mutation ${index}`);}
+  for(let length=0;length<valid.length;length++)assert(inspect(canvasPngUrl(valid.subarray(0,length))).reason,`truncated ${length}`);
+  const hugeLength=Buffer.from(valid);hugeLength.writeUInt32BE(0xffffffff,8);assert.match(inspect(canvasPngUrl(hugeLength)).reason,/length/);
+  const nonHeader=Buffer.concat([valid.subarray(0,8),canvasPngChunk('IDAT',Buffer.from([1]))]);assert.match(inspect(canvasPngUrl(nonHeader)).reason,/IHDR/);
+  const canonical=canvasPngUrl(valid);
+  for(const text of [canonical+'\n',canonical.replace('base64,','base64, '),canonical.replace(/==$/,'='),canonical.replace(/==$/,'A==='),canonical.replace('ggg==','ggh==')])assert(inspect(text).reason,'Malformed/noncanonical base64');
+  for(const mime of ['jpeg','webp','gif','svg+xml','avif','apng'])assert.match(inspect(canvasText.replace('image/png',`image/${mime}`)).reason,/only static PNG/);
+  canvasOwnershipReceipt.push({test:'bounded_png_header_crc_chunk_profile_and_base64_negatives',status:'passed',negativeProfiles:negatives.length,truncatedBoundaries:valid.length,noInflation:true});
+}
+{
+  const fixtures=[
+    ['oversized',canvasPngUrl(canvasPngFixture({width:100000,height:100000})),/4096-pixel/],
+    ['pixels',canvasPngUrl(canvasPngFixture({width:4096,height:4096})),/4 Mi-pixel/],
+    ['animated',canvasPngUrl(canvasPngFixture({after:[canvasPngChunk('acTL',Buffer.alloc(8))]})),/Animated/],
+    ['profile',canvasPngUrl(canvasPngFixture({before:[canvasPngChunk('iCCP')]})),/unsupported/],
+    ...['jpeg','webp','gif','svg+xml','avif','apng'].map(mime=>[mime,canvasText.replace('image/png',`image/${mime}`),/only static PNG/]),
+  ];
+  for(const [name,text,reason] of fixtures) {
+    const artifact=await canvasArtifact('1',text);let reads=0;
+    const c=canvasContext({state:{artifacts:[artifact]},fetch:async()=>{reads++;return new Response(text);}});
+    c.events([artifact]);c.render();await canvasSettled(c);
+    assert.equal(c.elements.signalRenderList.querySelectorAll('img').length,0,name);assert.equal(c.sourceAssignments.length,0,name);
+    assert.match(c.elements.signalRenderList.textContent,reason,name);assert.equal(artifact.content,text,'Retained exact bytes are unchanged');
+    assert.match(c.elements.signalRenderList.textContent,/Sensitive Canvas output was captured locally/,'Unsupported preview does not erase capture provenance');
+    for(let refresh=0;refresh<20;refresh++)c.render();await canvasSettled(c);assert.equal(reads,1,'No refusal/refetch churn');
+    c.api.showScreen('other',{classList:{contains:()=>true}});assert.equal(artifact.content,undefined);
+  }
+  canvasOwnershipReceipt.push({test:'unsupported_and_oversized_never_assign_src_original_bytes_preserved',status:'passed',cases:fixtures.length});
+}
+{
+  const text=canvasPngUrl(canvasPngFixture({width:2048,height:2048}));
+  const artifacts=await Promise.all(Array.from({length:6},(_,i)=>canvasArtifact(String(i+1),text)));
+  const c=canvasContext({state:{artifacts},fetch:async()=>new Response(text)});let maxPixels=0;
+  c.sandbox.document.createElement=(original=>tag=>{
+    const node=original(tag);if(tag==='img')Object.defineProperty(node,'src',{set(value){
+      const owner=[...c.state.canvasPreviewOwners.values()].find(owner=>owner.image===node);assert(owner?.mounted&&owner.imageInfo);
+      const active=c.sourceAssignments.filter(image=>image.getAttribute('src')).length;maxPixels=Math.max(maxPixels,(active+1)*4*1024*1024);assert(maxPixels<=16*1024*1024);
+      c.sourceAssignments.push(node);node.setAttribute('src',value);
+    },get(){return node.getAttribute('src')??'';}});return node;
+  })(c.sandbox.document.createElement);
+  c.events(artifacts);c.render();await canvasSettled(c);
+  assert.equal(c.elements.signalRenderList.querySelectorAll('img').length,4);assert.equal(maxPixels,16*1024*1024);
+  assert.deepEqual([...c.state.canvasPreviewOwners.values()].filter(owner=>owner.mounted).map(owner=>owner.artifact.artifact_id),['6','5','4','3']);
+  assert.match(c.elements.signalRenderList.textContent,/16 Mi-pixel/);
+  const oldImages=[...c.elements.signalRenderList.querySelectorAll('img')];
+  for(let i=0;i<10;i++)c.render();assert(oldImages.every(image=>!image.src));assert.equal(c.elements.signalRenderList.querySelectorAll('img').length,4);
+  c.events(artifacts.slice(0,2));c.render();assert.equal(c.elements.signalRenderList.querySelectorAll('img').length,2);
+  assert(artifacts.slice(2).every(artifact=>artifact.content===undefined));
+  c.state.signalView='activity';c.render();assert(c.sourceAssignments.every(image=>!image.src));
+  canvasOwnershipReceipt.push({test:'aggregate_newest_priority_never_overlaps_old_and_new_sources',status:'passed',maxMountedDeclaredPixels:maxPixels});
+}
+{
+  const artifact=await canvasArtifact('1'),c=canvasContext({state:{artifacts:[artifact]},fetch:async()=>new Response(canvasText)});
+  c.events([artifact]);c.render();await canvasSettled(c);
+  assert.match(c.elements.signalRenderList.textContent,/Sensitive Canvas output was captured locally/);
+  const oldImage=c.elements.signalRenderList.querySelector('img'),owner=c.state.canvasPreviewOwners.values().next().value;
+  c.render();const currentImage=c.elements.signalRenderList.querySelector('img');
+  for(const fail of oldImage.listeners.get('error'))fail();assert.equal(owner.imageError,undefined,'Detached error cannot poison current render');
+  for(const fail of currentImage.listeners.get('error'))fail();assert.match(owner.imageError,/could not decode/);
+  assert.equal(c.elements.signalRenderList.querySelectorAll('img').length,0);assert.equal(artifact.content,canvasText);
+  for(let i=0;i<5;i++)c.render();assert.equal(c.elements.signalRenderList.querySelectorAll('img').length,0);
+  c.api.showScreen('other',{classList:{contains:()=>true}});c.screen.hidden=false;c.render();await canvasSettled(c);
+  const replacement=c.state.canvasPreviewOwners.values().next().value;assert.notEqual(replacement,owner);assert(replacement.image);
+  for(const fail of currentImage.listeners.get('error'))fail();assert.equal(replacement.imageError,undefined,'Old owner error cannot poison reopened owner');
+  const forged=c.api.canvasPreview({artifact:{...artifact},dataUrl:canvasText,calls:[],demo:false},'forged','forged',true);
+  assert.equal(forged.querySelectorAll('img').length,0,'Copied descriptors cannot reuse owner admission');
+  const absent=canvasContext();absent.events([artifact]);absent.render();assert.match(absent.elements.signalRenderList.textContent,/Operation metadata remains available/);
+  canvasOwnershipReceipt.push({test:'decoder_error_visible_retained_bytes_stale_dom_and_owner_events_ignored',status:'passed'});
+}
+console.log('PASS Canvas PNG admission before img.src: declared axes/per-image/gallery pixels, narrow static RGB/RGBA8 profile, CRC/chunk/base64 validation, no inflation, exact owners and stale decoder-error protection (not decoder-memory or rendered QA)');
+
+console.log('PASS Canvas gallery ownership: hidden/visible 480-entry growth, 24 owners / 8 MiB UTF-16 reservations, two unsettled reads, no churn, scope/navigation/DOM cleanup, session replacement, stale headers and explicit retry (no image decoding or RSS claim)');
+if(process.env.REB_CANVAS_OWNERSHIP_RECEIPT)await writeFile(process.env.REB_CANVAS_OWNERSHIP_RECEIPT,JSON.stringify({scope:'Production-function and DOM ownership accounting, not image decoding or process RSS',results:canvasOwnershipReceipt},null,2));
+
 if (process.env.REB_SOURCE_OWNERSHIP_RECEIPT) await writeFile(process.env.REB_SOURCE_OWNERSHIP_RECEIPT, JSON.stringify({scope:'Production-function and DOM fixtures; not rendered acceptance',results:sourceOwnershipReceipt},null,2));
 
 // The decoded-field handoff must never silently rebind a chain to edited input
@@ -4571,7 +4961,7 @@ async function checkMemoryEntryReadiness() {
     runInNewContext(layoutSource+';initializePaneLayout();',context);frame();
     const divider=body.children.find(n=>n.id==='pane-divider-sources');assert.equal(divider.hidden,false);
     const state={originTraceStatus:'idle',sourceHooksOpen:false};
-    const transition=runInNewContext(showScreen+';showScreen',{...context,state,investigationBeforeScreen(){},evidenceWorkspace:{setVisible(){}},sourceFactsPanel:{cancel(){}},float32Panel:{cancel(){}},renderMemory(){},renderDebugger(){},renderSources(){},selectedSource:()=>null});
+    const transition=runInNewContext(showScreen+';showScreen',{...context,state,retireCanvasPreviews(){},investigationBeforeScreen(){},evidenceWorkspace:{setVisible(){}},sourceFactsPanel:{cancel(){}},float32Panel:{cancel(){}},renderMemory(){},renderDebugger(){},renderSources(){},selectedSource:()=>null});
     const fixture={requests:[]};let readyExpressions=0;
     const evaluate=async code=>{
       const result=runInNewContext(code,context);

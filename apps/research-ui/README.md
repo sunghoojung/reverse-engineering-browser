@@ -578,10 +578,56 @@ does not present those pixels as native capture. A live readback lists up to 128
 supported Canvas operation names observed earlier in the same renderer stream.
 When the session explicitly enables Canvas image capture, the exact bounded
 `toDataURL` result is shown as captured output. The UI keeps the newest 24
-readbacks and loads at most 48 MiB of Canvas preview data. The native format
-still does not retain drawing arguments or a canvas object identifier, so local
-replay remains unavailable and the earlier-call relationship stays
-renderer-scoped.
+readbacks. Only the visible Rendering gallery loads previews, scoped to its
+current readbacks. Canvas owns a separate maximum of 24 previews and 8 MiB of
+UTF-16 text reservations/retained text; each descriptor reserves twice its
+encoded byte size before admission (at most 2 MiB encoded bytes per preview).
+Newest previews have priority, and budget omissions remain labeled without
+refetching on every refresh. At most two unfinished preview reads are allowed,
+including retired reads whose fetch or response-body/reader cancellation has
+not settled. Header/body errors remain visible immediately; explicit retries
+do not bypass cancellation credits. Their bounded streaming
+read buffers total at most 4 MiB; transient text, hashing and image decoding are
+separate from the retained-text budget. A ten-second deadline aborts a read;
+failed reads expose an explicit Retry preview action.
+
+Activity, leaving Signals, changing the visible readback scope, catalog
+replacement/emptying and catalog failures retire obsolete preview ownership,
+abort pending reads and remove image sources from the gallery DOM. Late
+responses cannot restore retired payloads. Artifact metadata and immutable
+files remain available; an empty live catalog still reflects its actual empty
+metadata window. Sources previews and verified analysis results keep their
+independent budgets and identity checks.
+
+Before assigning any captured image to `img.src`, the UI separately admits a
+narrow static PNG profile: non-interlaced 8-bit RGB/RGBA, at most 4096 pixels per
+axis and 4 Mi (4,194,304) declared pixels per image. At most 16 Mi (16,777,216)
+declared pixels are mounted across the current gallery, with newest captures
+first. The UI checks canonical base64, signature, chunk framing/CRC, a single
+first IHDR, consecutive nonempty-in-total IDAT data and a final empty IEND with
+no trailing bytes. At most 256 chunks are inspected. Only optional fixed-size
+sRGB, sBIT and pHYs metadata is admitted, once each and before IDAT. Other chunks,
+including animation, compressed profiles/text and unknown extensions, produce
+an explicit unsupported-preview reason; the original evidence is unchanged.
+
+The producer retains bounded `data:image/*` output, so this intentionally narrower
+preview policy can omit valid captured images, including JPEG, WebP, other PNG
+profiles and PNGs carrying embedded color profiles. Unsupported previews retain their exact text
+inside the existing text budget and do not cause automatic refetches. Scope
+changes release that text normally. A browser decode failure is labeled without
+changing stored evidence; errors from detached images or retired owners cannot
+poison the current preview. Image admission follows the exact current artifact
+owner, and old DOM sources are removed before new sources are assigned.
+
+These checks bound admitted declared dimensions and mounted pixel counts. They
+do not inflate IDAT, validate its compressed contents, measure decoder allocations,
+or bound JavaScript heap, native decoder caches or process RSS. Removing `src`
+does not prove immediate decoder-memory reclamation. Browser/native interaction
+and decoder behavior need separate rendered validation; giant-header fixtures
+must remain inert. The profile follows the [PNG specification's structure and
+chunk rules](https://www.w3.org/TR/png-3/). The native capture still does not retain
+drawing arguments or a canvas object identifier, so local replay remains
+unavailable and the earlier-call relationship stays renderer-scoped.
 
 The fingerprint workspace scopes Rendering and Activity to a captured browser
 tab, all tabs, or explicitly unattributed events. The selected tab is a stable

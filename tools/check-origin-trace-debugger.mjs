@@ -2739,14 +2739,49 @@ for(const phase of ['service','file']){
   let screen='evidence',notice='';const raf=[],back={focus(){owner.activeElement=back;}};
   const document={get activeElement(){return owner.activeElement;},querySelector:s=>s==='.screen:not([hidden])'?{id:`screen-${screen}`}:s==='#screen-evidence'?evidenceRoot:s==='#investigation-notice'?{textContent:notice}:s==='#investigation-back'?back:null};
   const sandbox={state,document,CSS:{escape:s=>s},evidenceWorkspace:fixture.panel,sourceFactsPanel:{},selectedSource:()=>null,integerText:(e,k)=>String(e[k]),requestAnimationFrame:fn=>raf.push(fn),selectRequest:id=>{state.selectedRequestId=id;fixture.context={...fixture.context,request:state.requests.find(r=>r.id===id)};fixture.panel.sync();},showScreen:name=>{screen=name;fixture.panel.setVisible(name==='evidence');},noticeWriter:s=>{notice=s;}};
-  const navCode=await readFile(join(root,'apps/research-ui/investigation_navigation.js'),'utf8');const nav=runInNewContext(appSection('      function requestTraceRoot(','      function requestSignalProfileSelection(')+navCode+';investigationNotice=noticeWriter;({snapshot:investigationSnapshot,restore:restoreInvestigation})',sandbox);
+  const navCode=await readFile(join(root,'apps/research-ui/investigation_navigation.js'),'utf8');const nav=runInNewContext(appSection('      function requestTraceRoot(','      function requestSignalProfileSelection(')+navCode+';investigationNotice=noticeWriter;({snapshot:investigationSnapshot,restore:restoreInvestigation,history:createInvestigationHistory})',sandbox);
   const saved=nav.snapshot();assert.equal(saved.focus,'#evidence-compare-toggle');assert.equal(saved.evidence.packages,true);assert(!JSON.stringify(saved).includes('reb-package-v1:sha256:'),'Comparison bytes/IDs are not stored in shared navigation');
   screen='sources';fixture.panel.setVisible(false);state.selectedRequestId='other';fixture.context={...fixture.context,request:other};fixture.panel.sync();assert.equal(await pending,false);
   nodes['evidence-search'].value='newer filter';nodes['evidence-scope'].value='all';assert(nav.restore(saved));await Promise.resolve();for(const callback of raf.splice(0))callback();
   release(phase==='file'?packageGoldenBytes.buffer:Response.json(comparisonResult));await new Promise(resolve=>setTimeout(resolve,0));
   assert.equal(screen,'evidence');assert.equal(state.selectedRequestId,request.id);assert.equal(fixture.panel.snapshot().selectedKey,'7:42:102');assert.equal(nodes['evidence-search'].value,'newer filter');assert.equal(nodes['evidence-scope'].value,'all');assert.equal(owner.activeElement,nodes['evidence-compare-toggle']);assert.equal(nodes['evidence-rows'].scrollTop,55);assert.equal(nodes['evidence-inspector'].scrollTop,81);assert.equal(nodes['evidence-package-mode'].scrollTop,27);
   assert.equal(nodes['evidence-comparison-section'].hidden,true);assert(handle.controller.model.files.every((f,i)=>f===files[i]));assert.equal(handle.controller.model.result,phase==='file'?null:previous);assert.equal(requests,phase==='file'?1:2);
-  const calls=requests;fixture.panel.showComparison(true);assert.equal(requests,calls);assert.equal(nodes['evidence-comparison-panel'].rebEvidenceComparison,handle);fixture.panel.showComparison(false);fixture.panel.showPackages(false);assert.equal(fixture.panel.snapshot().selectedKey,'7:42:102');assert.equal(nodes['evidence-search'].value,'newer filter');assert.equal(nodes['evidence-rows'].scrollTop,55);fixture.panel.disposeComparison();
+  const calls=requests;fixture.panel.showComparison(true);assert.equal(requests,calls);assert.equal(nodes['evidence-comparison-panel'].rebEvidenceComparison,handle);fixture.panel.showComparison(false);fixture.panel.showPackages(false);assert.equal(fixture.panel.snapshot().selectedKey,'7:42:102');assert.equal(nodes['evidence-search'].value,'newer filter');assert.equal(nodes['evidence-rows'].scrollTop,55);
+  // The actual workspace arrow consumes shared Back; returning to that saved
+  // Evidence stop must use Forward, not a second Back on an empty back stack.
+  const trafficRoot={id:'screen-traffic',dataset:{},contains:()=>false,querySelectorAll:()=>[],querySelector:()=>null};
+  const sourceRoot={...trafficRoot,id:'screen-sources'},originalQuery=document.querySelector;
+  document.querySelector=selector=>selector==='#screen-traffic'?trafficRoot:selector==='#screen-sources'?sourceRoot:selector==='#console-experiment-traffic'?{dataset:{}}:originalQuery(selector);
+  sandbox.fieldSets={body:[]};sandbox.renderInspector=()=>{};state.fieldTab='body';
+  let historyState,workspaceClick,fallbacks=0;
+  const history=nav.history({snapshot:nav.snapshot,restore:nav.restore,changed:value=>{historyState=value;}});
+  const flush=async()=>{await Promise.resolve();for(const callback of raf.splice(0))callback();};
+  screen='traffic';fixture.panel.setVisible(false);history.record();
+  screen='evidence';fixture.panel.setVisible(true);history.record();
+  screen='sources';fixture.panel.setVisible(false);assert(history.back());await flush();
+  assert.equal(screen,'evidence');assert.equal(historyState.back.screen,'traffic');
+  fixture.panel.showPackages(true);fixture.panel.showComparison(true);release=null;
+  const leaving=handle.controller.compare();while(!release)await new Promise(resolve=>setTimeout(resolve,0));
+  const ownedFiles=[...handle.controller.model.files],beforeLeave=requests;
+  const arrow={dataset:{screen:'traffic'},classList:{contains:name=>name==='back-button'},addEventListener:(name,callback)=>{assert.equal(name,'click');workspaceClick=callback;}};
+  const workspaceHandler=appSection("      document.querySelectorAll('[data-screen]').forEach(",'      elements.signalFilters.forEach(');
+  runInNewContext(workspaceHandler,{document:{querySelectorAll:()=>[arrow]},investigationNavigation:history,showScreen:()=>{fallbacks++;}});
+  owner.activeElement=arrow;await workspaceClick();await flush();
+  assert.equal(await leaving,false);assert.equal(screen,'traffic');assert.equal(fallbacks,0,'The arrow must use shared history rather than create a new navigation branch');
+  assert.equal(historyState.back,null);assert.equal(historyState.forward.screen,'evidence');
+  assert.equal(history.back(),false,'The old second-Back driver action cannot return to Evidence');assert.equal(screen,'traffic');
+  release(phase==='file'?packageGoldenBytes.buffer:Response.json(comparisonResult));await new Promise(resolve=>setTimeout(resolve,0));
+  assert(history.forward());await flush();
+  assert.equal(screen,'evidence');assert.equal(state.selectedRequestId,request.id);
+  assert.equal(fixture.panel.snapshot().selectedKey,'7:42:102');assert.equal(fixture.panel.snapshot().packages,true);
+  assert.equal(nodes['evidence-comparison-panel'].rebEvidenceComparison,handle);
+  assert(handle.controller.model.files.every((file,index)=>file===ownedFiles[index]));
+  assert.equal(handle.controller.model.busy,false);assert.equal(nodes['evidence-comparison-section'].hidden,true);assert.equal(requests,beforeLeave,'Forward must not replay the cancelled comparison');
+  assert.equal(nodes['evidence-search'].value,'newer filter');assert.equal(nodes['evidence-scope'].value,'all');
+  assert.equal(owner.activeElement,back,'The workspace arrow has no stable selector; its return must retain the guarded shared fallback focus');
+  assert.equal(nodes['evidence-rows'].scrollTop,55);assert.equal(nodes['evidence-inspector'].scrollTop,81);
+  fixture.panel.showComparison(true);assert.equal(owner.activeElement,nodes['evidence-comparison-panel'].querySelector('[data-comparison-side="0"]'));assert.equal(requests,beforeLeave);
+  fixture.panel.disposeComparison();
 }
 console.log('PASS final linked Evidence comparison: actual shared snapshot/restore preserves newer filters, selected record, stable entry focus, independent scroll and file drafts, while cancelling late service/file work without replay or history payloads');
 
@@ -3866,7 +3901,9 @@ async function checkEvidenceComparisonInteractions({evaluate,viewport,click,key,
   assert(await evaluate(`${state}.controller.model.files.every((f,i)=>f===comparisonEvidenceReturn.files[i])&&document.querySelector('#evidence-search').value===comparisonEvidenceReturn.search&&document.querySelector('#evidence-scope').value===comparisonEvidenceReturn.scope&&document.querySelector('#evidence-rows').scrollTop===comparisonEvidenceReturn.list&&document.querySelector('#evidence-inspector').scrollTop===comparisonEvidenceReturn.detail&&evidenceWorkspace.snapshot().selectedKey===comparisonEvidenceReturn.key`),'Shared Source Back must preserve comparison drafts and Evidence ownership');
   assert.equal(calls(),beforeSource);assert.equal(fixture.derivedRequests,0);await screenshot('comparison-linked-source-back');
   await click('#evidence-package-toggle');await hit('#evidence-compare-toggle');fixture.mode='pending_compare';await hit('[data-comparison-action="compare"]');await until(`${state}.controller.model.busy`);await pending();await click('#screen-evidence .back-button');fixture.release();fixture.mode='valid';assert.equal(await evaluate(`${state}.controller.model.busy`),false);
-  await click('#investigation-back');await until("!document.querySelector('#screen-evidence').hidden");if(await evaluate("document.querySelector('#evidence-package-mode').hidden"))await click('#evidence-package-toggle');assert.equal(await evaluate("document.querySelector('#evidence-comparison-section').hidden"),true);await hit('#evidence-compare-toggle');assert.equal(await evaluate(`${state}.controller.model.files[1].name`),'changed.json');
+  // The workspace arrow above already traversed shared Back; Evidence is now the Forward destination.
+  assert.equal(await evaluate("document.querySelector('#investigation-forward').textContent"),'Forward to Evidence');
+  await click('#investigation-forward');await until("!document.querySelector('#screen-evidence').hidden");if(await evaluate("document.querySelector('#evidence-package-mode').hidden"))await click('#evidence-package-toggle');assert.equal(await evaluate("document.querySelector('#evidence-comparison-section').hidden"),true);await hit('#evidence-compare-toggle');assert.equal(await evaluate(`${state}.controller.model.files[1].name`),'changed.json');
   // Use production page lifecycle handlers while an actual service call waits.
   fixture.mode='pending_compare';await hit('[data-comparison-action="compare"]');await pending();
   await evaluate(`window.retiredProductComparison=${state};window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:false}));window.dispatchEvent(new PageTransitionEvent('pageshow',{persisted:false}))`);assert.equal(await evaluate(`${state}===undefined`),true);fixture.release();

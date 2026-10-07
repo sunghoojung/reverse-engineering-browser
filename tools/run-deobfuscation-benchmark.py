@@ -27,6 +27,7 @@ NODE_TIMEOUT_SECONDS = 3
 # a generic serializer. Accessors, symbols, cycles and exotic objects fail closed.
 OBSERVE = r"""
 ;(() => {
+  const {isProxy} = require('node:util').types;
   const seen = new Set();
   let nodes = 0;
   const encode = (value, depth = 0) => {
@@ -49,6 +50,7 @@ OBSERVE = r"""
       case 'object': break;
       default: throw Error('unsupported observation type');
     }
+    if (isProxy(value)) throw Error('proxy observation');
     if (seen.has(value)) throw Error('cyclic or shared observation object');
     seen.add(value);
     const array = Array.isArray(value);
@@ -179,12 +181,14 @@ def oracle_self_test(node: str) -> int:
     for source in [
         "const result={get x(){process.stdout.write('getter-called');return 1;}};",
         "const result=()=>0;",
+        "const result=new Proxy({}, {});",
+        "const result=new Proxy({}, {getPrototypeOf(){process.stdout.write('proxy-trap');return Object.prototype;},ownKeys(){process.stdout.write('proxy-trap');return [];}});",
     ]:
         try:
             node_result(node, source)
         except subprocess.CalledProcessError as error:
-            if "getter-called" in error.stdout:
-                raise BenchmarkFailure("oracle executed an accessor") from error
+            if "getter-called" in error.stdout or "proxy-trap" in error.stdout:
+                raise BenchmarkFailure("oracle invoked an accessor or proxy trap") from error
         else:
             raise BenchmarkFailure("oracle accepted an unsupported observation")
     return len(controls)

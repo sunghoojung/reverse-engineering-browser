@@ -123,6 +123,140 @@ impl Server {
 fn specification() -> Value {
     serde_json::from_str(include_str!("../../../protocol/openapi.json")).unwrap()
 }
+
+#[tokio::test]
+async fn origin_trace_gap_markers_preserve_addressable_events_over_http() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../assets/origin-trace-gap-cases.json")).unwrap();
+    let server = Server::start_with_helper_canaries(true).await;
+    for case in fixture["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        for (field, path) in [("events", "events.jsonl"), ("edges", "trace.jsonl")] {
+            let rows = case[field]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|key| fixture[field][key.as_str().unwrap()].to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            server.file(path, format!("{rows}\n").as_bytes());
+        }
+        let query = case["query"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| {
+                format!(
+                    "{key}={}",
+                    value
+                        .as_str()
+                        .map_or_else(|| value.to_string(), str::to_owned)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+        let response = server.get(&format!("/api/origin-trace?{query}")).await;
+        let expected = case["http_status"].as_u64().unwrap() as u16;
+        assert_eq!(response.status().as_u16(), expected, "{name}");
+        let bytes = assert_contract_response(response, "get", "/api/origin-trace", expected).await;
+        if expected == 400 {
+            continue;
+        }
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], case["status"], "{name}");
+        let steps = body["steps"].as_array().unwrap();
+        assert_eq!(
+            json!(
+                steps
+                    .iter()
+                    .map(|step| &step["event"]["sequence_number"])
+                    .collect::<Vec<_>>()
+            ),
+            case["step_sequences"],
+            "{name}"
+        );
+        assert!(
+            steps.iter().all(|step| step["operation"] != "gap"),
+            "{name}"
+        );
+        if let Some(root) = steps.first() {
+            assert_eq!(root["event"]["session_id"], "7", "{name}");
+            assert_eq!(root["request_id"], "9007199254740995", "{name}");
+            assert_eq!(root["value"], "synthetic request", "{name}");
+        }
+        let gaps = body["gaps"].as_array().unwrap();
+        assert_eq!(
+            json!(gaps.iter().map(|gap| &gap["reason"]).collect::<Vec<_>>()),
+            case["gap_reasons"],
+            "{name}"
+        );
+        assert_eq!(body["coverage"]["gap_count"], gaps.len(), "{name}");
+        if let Some(gap) = gaps.iter().find(|gap| gap["reason"] == "capture_gap") {
+            let count = case["marker_count"].as_u64().unwrap();
+            let detail = gap["detail"].as_str().unwrap();
+            assert!(
+                detail.contains(&format!("{count} native queue-drop markers")),
+                "{name}"
+            );
+            assert!(detail.contains("Counts may overlap"), "{name}");
+            assert!(
+                detail.contains("do not identify a missing predecessor"),
+                "{name}"
+            );
+        }
+    }
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn origin_trace_step_limit_keeps_capture_gap_bounded_over_http() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../assets/origin-trace-gap-cases.json")).unwrap();
+    let server = Server::start().await;
+    let mut events = vec![fixture["events"]["gap"].clone()];
+    let mut edges = Vec::new();
+    for sequence in 1..=32 {
+        let mut event = fixture["events"]["root"].clone();
+        event["sequence_number"] = json!(sequence.to_string());
+        events.push(event);
+        if sequence > 1 {
+            let mut edge = fixture["edges"]["parent"].clone();
+            edge["from_sequence_number"] = json!(sequence.to_string());
+            edge["to_sequence_number"] = json!((sequence - 1).to_string());
+            edges.push(edge);
+        }
+    }
+    for (path, rows) in [("events.jsonl", events), ("trace.jsonl", edges)] {
+        server.file(
+            path,
+            rows.iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .as_bytes(),
+        );
+    }
+    let bytes = assert_contract_response(
+        server.get("/api/origin-trace?request_id=9007199254740995&root_process_id=42&root_sequence_number=32").await,
+        "get",
+        "/api/origin-trace",
+        200,
+    )
+    .await;
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["status"], "partial");
+    assert_eq!(body["steps"].as_array().unwrap().len(), 32);
+    assert_eq!(body["gaps"].as_array().unwrap().len(), 2);
+    assert_eq!(body["gaps"][0]["reason"], "step_limit");
+    assert_eq!(body["gaps"][0]["after_step"], 31);
+    assert_eq!(body["gaps"][1]["reason"], "capture_gap");
+}
 fn assert_schema(spec: &Value, schema: &Value, value: &Value, label: &str) {
     let document = json!({
         "$schema":"https://json-schema.org/draft/2020-12/schema",

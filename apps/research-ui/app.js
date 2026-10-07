@@ -2035,7 +2035,8 @@
           missing_event: 'Missing event · predecessor not retained',
           no_predecessor: 'Missing predecessor · no recorded link',
           cycle: 'Trace stopped · correlation cycle',
-          step_limit: 'Trace stopped · step limit reached'
+          step_limit: 'Trace stopped · step limit reached',
+          capture_gap: 'Capture incomplete · native queue drops'
         };
         (trace?.steps ?? []).forEach((step, index) => {
           models.push({key: `${step.event.process_id}:${step.event.sequence_number}`, index: String(index + 1),
@@ -2059,11 +2060,10 @@
         if (active) traceStepDetails(active); else elements.traceStepDetails.replaceChildren();
         if (hasSteps) {
           const {linked_steps: linked, gap_count: gaps} = trace.coverage;
-          const possible = linked + gaps;
-          const links = possible ? `${linked} of ${possible} predecessor links recorded` : 'No predecessor links were needed';
-          const gapsText = gaps ? `${gaps} missing predecessor${gaps === 1 ? '' : 's'}` : 'no missing predecessors';
-          elements.coverageValue.textContent = `${trace.coverage.percent}% predecessor coverage · ${links} · ${gapsText}`;
-          elements.coverageValue.title = 'Coverage counts recorded predecessor links against explicit missing-predecessor gaps.';
+          const links = `${linked} recorded predecessor link${linked === 1 ? '' : 's'}`;
+          const gapsText = `${gaps} reported gap${gaps === 1 ? '' : 's'}`;
+          elements.coverageValue.textContent = `${trace.coverage.percent}% trace coverage · ${links} · ${gapsText}`;
+          elements.coverageValue.title = 'Coverage counts recorded predecessor links against named gaps. Queue-drop markers describe retained streams and do not identify missing links or prove value flow.';
         } else {
           elements.coverageValue.textContent = '';
           elements.coverageValue.removeAttribute?.('title');

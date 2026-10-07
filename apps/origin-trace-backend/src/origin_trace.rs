@@ -82,8 +82,19 @@ pub fn build(
         validation::canonical(&json!(sequence), 64, false, "root_sequence_number")?;
     }
     let mut by_reference = BTreeMap::new();
+    let mut capture_gaps = Vec::new();
     for event in events {
-        if by_reference.insert(reference(event)?, event).is_some() {
+        let key = reference(event)?;
+        // Queue-loss metadata deliberately shares the last retained event's
+        // reference. It must never replace that event or satisfy an edge.
+        if event["type"] == "gap" {
+            let marker = step(event, "trace_target", "observed")?;
+            validation::canonical(&marker["value"], 64, true, "Gap drop count")?;
+            if event["payload_truncated"] != false {
+                return Err(Error::bad("Origin trace input contains a malformed gap"));
+            }
+            capture_gaps.push(key);
+        } else if by_reference.insert(key, event).is_some() {
             return Err(Error::bad(
                 "Origin trace input contains a duplicate event reference",
             ));
@@ -145,7 +156,9 @@ pub fn build(
     }
     let candidates: Vec<_> = events
         .iter()
-        .filter(|e| e["category"] == "network" && e["request_id"] == request_id)
+        .filter(|e| {
+            e["type"] != "gap" && e["category"] == "network" && e["request_id"] == request_id
+        })
         .collect();
     let preferred = if let (Some(pid), Some(sequence)) = (root_process, root_sequence) {
         candidates
@@ -260,6 +273,24 @@ pub fn build(
                 "step_limit",
                 31,
                 "The bounded trace step limit was reached.",
+            ));
+        }
+        let marker_count = capture_gaps
+            .iter()
+            .filter(|(session, process, _)| {
+                steps.iter().any(|s| {
+                    s["event"]["session_id"] == session.as_str()
+                        && s["event"]["process_id"] == *process
+                })
+            })
+            .count();
+        if marker_count > 0 {
+            gaps.push(gap(
+                "capture_gap",
+                0,
+                &format!(
+                    "The retained window contains {marker_count} native queue-drop markers in this trace's session/process streams. Counts may overlap; these markers do not identify a missing predecessor or prove value flow."
+                ),
             ));
         }
         if gaps.is_empty() {

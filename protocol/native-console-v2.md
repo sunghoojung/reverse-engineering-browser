@@ -88,13 +88,17 @@ and page temporary variables require explicit researcher actions.
 | Retained renderer values | 128 handles; expire after 60 seconds, swept once per second |
 | Property page / depth | 16 properties plus prototype; UI depth 8; first 65536 array indices |
 | Completion | 8 path components, 24 suggestions, 1024 lexical names, 4096 names per prototype, 8 prototypes |
-| Renderer messages | 32 / 32 KiB; visible saturating drop count |
+| Renderer messages | 32 / 32 KiB serialized JSON; visible saturating drop count |
 | Browser activity | 64 events; visible saturating drop count |
 | UI transcript / history | Each 128 entries / 256 KiB; transcript eviction is visible |
 | Snippets / activity view | 16 / 64 KiB snippets; 128 metadata records |
 | Event monitors | 8 Elements, four event types each, 60 seconds |
 | Synchronous watchdog / dispatch / reply | 200 ms / 500 ms / 2 seconds |
 | Session / await wait | One hour / ten seconds |
+
+Renderer message accounting includes JSON escaping and record metadata, so a poll
+always fits the response limit. Queue pressure evicts the oldest messages with a
+visible drop count; polling or clearing releases their encoded storage.
 
 These are transport and retained-state bounds, not a hard page heap quota.
 Retained objects can keep reachable page data alive. Key and event-type enumeration can allocate

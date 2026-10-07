@@ -9,7 +9,9 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 
+#include "components/reverse_engineering_browser/common/native_console_messages.h"
 #include "components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "reb/event.hpp"
 #include "reb/spsc_ring.hpp"
@@ -144,6 +146,83 @@ bool CheckEventJson() {
   }
   std::cout << "Event JSON: checked=" << checked
             << " all_payload_sizes=passed all_byte_values=passed oversized=passed\n";
+  return true;
+}
+
+bool CheckNativeConsoleMessages() {
+  // Queue counters and their owned strings must never acquire separate owners.
+  static_assert(!std::is_copy_constructible_v<reb::NativeConsoleMessages>);
+  static_assert(!std::is_copy_assignable_v<reb::NativeConsoleMessages>);
+  static_assert(!std::is_move_constructible_v<reb::NativeConsoleMessages>);
+  static_assert(!std::is_move_assignable_v<reb::NativeConsoleMessages>);
+  reb::NativeConsoleMessages queue;
+  constexpr std::string_view kEmpty = "{\"status\":\"ok\",\"messages\":[],\"dropped\":0}";
+  const auto reply = [](std::string_view records, std::uint32_t dropped) {
+    return "{\"status\":\"ok\",\"messages\":[" + std::string(records) +
+           "],\"dropped\":" + std::to_string(dropped) + "}";
+  };
+  if (queue.Poll() != kEmpty)
+    return false;
+
+  // The former raw-text accounting accepted 16 x 2048 control bytes, then
+  // drained them before rejecting the ~192 KiB JSON response. Charge the actual
+  // encoded records instead; retain the newest whole records and report loss.
+  std::string controls = "{\"text\":\"";
+  for (unsigned i = 0; i < 2048; ++i)
+    controls += "\\u0001";
+  controls += "\"}";
+  for (unsigned i = 0; i < 16; ++i)
+    queue.Push(controls);
+  const auto bounded = queue.Poll();
+  if (bounded != reply(controls + "," + controls, 14) ||
+      bounded.size() > reb::kNativeConsolePayloadLimit || queue.Poll() != kEmpty)
+    return false;
+
+  // Count pressure, repeated wraparound and FIFO order are independent of the
+  // encoded-byte limit. Quoted controls and UTF-8 remain serialized inert text.
+  for (unsigned pass = 0; pass < 64; ++pass) {
+    std::string expected;
+    for (unsigned i = 0; i < 40; ++i) {
+      const auto record = "{\"text\":\"雪\\n\\\"\\\\\",\"id\":" + std::to_string(i) + "}";
+      queue.Push(record);
+      if (i >= 8) {
+        if (!expected.empty())
+          expected += ',';
+        expected += record;
+      }
+    }
+    if (queue.Poll() != reply(expected, 8))
+      return false;
+  }
+
+  const std::string exact =
+      "{\"text\":\"" + std::string(reb::NativeConsoleMessages::kByteLimit - 11, 'x') + "\"}";
+  queue.Push(exact);
+  if (queue.Poll() != reply(exact, 0))
+    return false;
+  queue.Push(exact);
+  queue.Push("{}");
+  if (queue.Poll() != reply("{}", 1))
+    return false;
+
+  queue.Push("{}");
+  queue.Push(std::string(reb::NativeConsoleMessages::kByteLimit + 1, 'x'));
+  queue.Push("");
+  if (queue.Poll() != reply("{}", 2))
+    return false;
+  queue.Drop(std::numeric_limits<std::uint32_t>::max());
+  queue.Drop();
+  if (queue.Poll() != reply("", reb::NativeConsoleMessages::kDropLimit))
+    return false;
+  queue.Push(controls);
+  queue.Drop();
+  queue.Reset();
+  if (queue.Poll() != kEmpty)
+    return false;
+
+  std::cout << "Native console messages: escaping=passed count_limit=passed byte_limit=passed "
+               "fifo_wraparound=passed rejected_record=passed drop_saturation=passed "
+               "reset=passed\n";
   return true;
 }
 
@@ -334,10 +413,10 @@ int main(const int argc, char* argv[]) {
     std::cerr << "Usage: " << argv[0] << " [--queue-iterations COUNT]\n";
     return 2;
   }
-  if (!RunEventDemo() || !CheckEventJson() || !CheckNativeQueueLimits() ||
-      !CheckNativeQueueProducers() || !MeasureNativeQueueReuse(iterations) ||
-      !CheckNativeQueueNotifications(iterations)) {
-    std::cerr << "Native event queue validation failed\n";
+  if (!RunEventDemo() || !CheckEventJson() || !CheckNativeConsoleMessages() ||
+      !CheckNativeQueueLimits() || !CheckNativeQueueProducers() ||
+      !MeasureNativeQueueReuse(iterations) || !CheckNativeQueueNotifications(iterations)) {
+    std::cerr << "Native event/console queue validation failed\n";
     return 1;
   }
   return 0;

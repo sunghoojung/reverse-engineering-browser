@@ -3351,6 +3351,196 @@
           "$ref": "#/components/schemas/RebExecutionMetadata"
         }
       }
+    },
+    "/api/source-facts": {
+      "get": {
+        "operationId": "get_source_facts",
+        "summary": "Get exact JavaScript source facts",
+        "description": "Requires exact session_id and artifact_id for an immutable JavaScript artifact. The complete blob must pass size and SHA256 verification and strict UTF-8 decoding. Rejects extra parameters, live scripts, ambiguous manifests, oversized source and identity mismatch without a fallback. Unavailable/partial lexical coverage is a successful structured result; inspect ok and coverage.",
+        "tags": [
+          "source-facts"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JavaScriptSourceFacts"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Requested record not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Bounded worker timed out or busy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "State conflict, unavailable live session, or stale generation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Worker/protocol response or input processing failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "JavaScript source facts worker terminated or returned an invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Required worker unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Local artifact, evidence-store, or worker I/O failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "description": "Exact captured artifact identity; no fallback selection.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": true,
+            "description": "Exact captured artifact identity; no fallback selection.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          }
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis",
+            "process-launch"
+          ],
+          "state_dependent_effects": [
+            {
+              "effects": [
+                "process-stop"
+              ],
+              "when": "The bounded local JavaScript worker process group is cleaned up on completion or failure."
+            }
+          ],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "exact-source",
+              "condition": "Exact session_id and artifact_id select one verified immutable UTF-8 JavaScript artifact of at most 4 MiB."
+            },
+            {
+              "id": "deobfuscator-ready",
+              "condition": "The local Rust/Oxc worker must be executable and idle; it shares the existing analysis worker lock."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Read-only lexical analysis of retained local evidence. No runtime execution, browser control, model call, network request, artifact mutation or source fallback. Coverage is scoped to lexical-effects-v1.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/source_facts.rs",
+              "symbol": "load"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/deobfuscation.rs",
+              "symbol": "Deobfuscator::source_facts"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
     }
   },
   "components": {
@@ -15692,6 +15882,1405 @@
             "$ref": "#/components/schemas/EvidencePackageSelection"
           }
         }
+      },
+      "JavaScriptSourceRange": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "start",
+          "end"
+        ],
+        "properties": {
+          "start": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "end": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          }
+        },
+        "description": "Half-open offsets in exact original UTF-8 bytes, at Unicode scalar boundaries."
+      },
+      "JavaScriptSourceScope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "parent_id",
+          "range",
+          "kind"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "range": {
+            "$ref": "#/components/schemas/JavaScriptSourceRange"
+          },
+          "kind": {
+            "enum": [
+              "program",
+              "function",
+              "catch",
+              "with",
+              "block"
+            ]
+          }
+        }
+      },
+      "JavaScriptSourceBinding": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "scope_id",
+          "name",
+          "range",
+          "kind"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "scope_id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 4194304
+          },
+          "range": {
+            "$ref": "#/components/schemas/JavaScriptSourceRange"
+          },
+          "kind": {
+            "enum": [
+              "var",
+              "let",
+              "const",
+              "using",
+              "await using",
+              "function",
+              "function-name",
+              "parameter",
+              "import",
+              "class",
+              "class-name",
+              "catch",
+              "lexical"
+            ]
+          }
+        }
+      },
+      "JavaScriptSourceCallable": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "scope_id",
+          "range",
+          "body_range",
+          "kind",
+          "async",
+          "generator"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "scope_id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "range": {
+            "$ref": "#/components/schemas/JavaScriptSourceRange"
+          },
+          "body_range": {
+            "$ref": "#/components/schemas/JavaScriptSourceRange"
+          },
+          "kind": {
+            "enum": [
+              "function",
+              "arrow"
+            ]
+          },
+          "async": {
+            "type": "boolean"
+          },
+          "generator": {
+            "type": "boolean"
+          }
+        }
+      },
+      "JavaScriptSourceRegion": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "parent_id",
+          "callable_id",
+          "range",
+          "kind",
+          "entry_order"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "callable_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "range": {
+            "$ref": "#/components/schemas/JavaScriptSourceRange"
+          },
+          "kind": {
+            "enum": [
+              "program",
+              "callable-body",
+              "eager-argument",
+              "conditional-then",
+              "conditional-else",
+              "short-circuit-right",
+              "repeated-test",
+              "repeated-body",
+              "repeated-update"
+            ]
+          },
+          "entry_order": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          }
+        }
+      },
+      "JavaScriptSourceOperation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "region_id",
+          "order",
+          "range",
+          "kind",
+          "detail"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "region_id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "order": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "range": {
+            "$ref": "#/components/schemas/JavaScriptSourceRange"
+          },
+          "kind": {
+            "enum": [
+              "reference",
+              "read",
+              "write",
+              "call",
+              "construct",
+              "literal",
+              "operator",
+              "return",
+              "throw",
+              "control",
+              "function-value",
+              "template",
+              "array",
+              "object"
+            ]
+          },
+          "detail": {
+            "type": "object"
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "reference",
+                  "read"
+                ]
+              },
+              "detail": {
+                "$ref": "#/components/schemas/JavaScriptSourceReferenceDetail"
+              }
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "write"
+                ]
+              },
+              "detail": {
+                "$ref": "#/components/schemas/JavaScriptSourceWriteDetail"
+              }
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "call",
+                  "construct"
+                ]
+              },
+              "detail": {
+                "$ref": "#/components/schemas/JavaScriptSourceCallDetail"
+              }
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "literal"
+                ]
+              },
+              "detail": {
+                "$ref": "#/components/schemas/JavaScriptSourceLiteralDetail"
+              }
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "operator"
+                ]
+              },
+              "detail": {
+                "$ref": "#/components/schemas/JavaScriptSourceOperatorDetail"
+              }
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "return"
+                ]
+              },
+              "detail": {
+                "$ref": "#/components/schemas/JavaScriptSourceReturnDetail"
+              }
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "throw"
+                ]
+              },
+              "detail": {
+                "$ref": "#/components/schemas/JavaScriptSourceThrowDetail"
+              }
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "control"
+                ]
+              },
+              "detail": {
+                "$ref": "#/components/schemas/JavaScriptSourceControlDetail"
+              }
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "function-value"
+                ]
+              },
+              "detail": {
+                "$ref": "#/components/schemas/JavaScriptSourceFunctionDetail"
+              }
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "template"
+                ]
+              },
+              "detail": {
+                "$ref": "#/components/schemas/JavaScriptSourceTemplateDetail"
+              }
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "array",
+                  "object"
+                ]
+              },
+              "detail": {
+                "$ref": "#/components/schemas/JavaScriptSourceEmptyDetail"
+              }
+            }
+          }
+        ]
+      },
+      "JavaScriptSourceFrontier": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "range",
+          "reason"
+        ],
+        "properties": {
+          "range": {
+            "$ref": "#/components/schemas/JavaScriptSourceRange"
+          },
+          "reason": {
+            "enum": [
+              "dynamic-scope",
+              "unsupported-environment",
+              "external-or-implicit",
+              "implicit-arguments-environment",
+              "this-environment",
+              "binding-candidate-limit",
+              "duplicate-declarations",
+              "unsupported-assignment-target",
+              "property-key-coercion",
+              "property-read-getter-proxy-or-throw",
+              "property-write-setter-proxy-or-throw",
+              "optional-chain-effects",
+              "private-property-effects",
+              "super-reference-effects",
+              "spread-iterator-effects",
+              "unknown-call-mutation-or-throw",
+              "unsupported-binding-environment",
+              "async-or-generator-execution",
+              "parameter-default-or-destructuring-effects",
+              "destructuring-binding-effects",
+              "abrupt-completion-no-cfg",
+              "exception-flow",
+              "try-catch-finally-effects",
+              "switch-selection-and-fallthrough",
+              "enumeration-or-iterator-effects",
+              "class-initialization-effects",
+              "labeled-control-flow",
+              "module-linking-and-evaluation",
+              "operator-coercion-or-throw",
+              "delete-reference-effects",
+              "update-numeric-coercion-or-throw",
+              "destructuring-assignment-effects",
+              "spread-property-getter-or-proxy",
+              "template-substitution-coercion",
+              "tagged-template-call-effects",
+              "unsupported-expression-effects",
+              "resource-disposal-effects"
+            ]
+          }
+        }
+      },
+      "JavaScriptSourceCoverage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "truncated",
+          "diagnostics",
+          "frontiers"
+        ],
+        "properties": {
+          "status": {
+            "enum": [
+              "complete",
+              "partial",
+              "unavailable"
+            ]
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "diagnostics": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "string",
+              "maxLength": 1024
+            }
+          },
+          "frontiers": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/JavaScriptSourceFrontier"
+            }
+          }
+        }
+      },
+      "JavaScriptSourceFactsWorker": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "ok",
+          "source_bytes",
+          "offset_unit",
+          "profile",
+          "coverage",
+          "scopes",
+          "bindings",
+          "callables",
+          "regions",
+          "operations",
+          "limits"
+        ],
+        "properties": {
+          "schema": {
+            "const": "reb-javascript-source-facts-v1"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "source_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 25231360
+          },
+          "offset_unit": {
+            "const": "utf-8-byte"
+          },
+          "profile": {
+            "const": "lexical-effects-v1"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/JavaScriptSourceCoverage"
+          },
+          "scopes": {
+            "type": "array",
+            "maxItems": 16384,
+            "items": {
+              "$ref": "#/components/schemas/JavaScriptSourceScope"
+            }
+          },
+          "bindings": {
+            "type": "array",
+            "maxItems": 16384,
+            "items": {
+              "$ref": "#/components/schemas/JavaScriptSourceBinding"
+            }
+          },
+          "callables": {
+            "type": "array",
+            "maxItems": 16384,
+            "items": {
+              "$ref": "#/components/schemas/JavaScriptSourceCallable"
+            }
+          },
+          "regions": {
+            "type": "array",
+            "maxItems": 16384,
+            "items": {
+              "$ref": "#/components/schemas/JavaScriptSourceRegion"
+            }
+          },
+          "operations": {
+            "type": "array",
+            "maxItems": 16384,
+            "items": {
+              "$ref": "#/components/schemas/JavaScriptSourceOperation"
+            }
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "max_source_bytes",
+              "max_ast_nodes",
+              "max_facts",
+              "max_frontiers",
+              "preflight_depth",
+              "preflight_nodes",
+              "max_binding_candidates"
+            ],
+            "properties": {
+              "max_source_bytes": {
+                "const": 4194304
+              },
+              "max_ast_nodes": {
+                "const": 32768
+              },
+              "max_facts": {
+                "const": 16384
+              },
+              "max_frontiers": {
+                "const": 256
+              },
+              "preflight_depth": {
+                "const": 128
+              },
+              "preflight_nodes": {
+                "const": 500000
+              },
+              "max_binding_candidates": {
+                "const": 64
+              }
+            }
+          }
+        },
+        "description": "Bounded Rust/Oxc lexical facts. IDs are local to exactly the supplied source bytes. Total facts across the five arrays cannot exceed max_facts. See protocol/javascript-source-facts-v1.md.",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "coverage": {
+                  "properties": {
+                    "status": {
+                      "const": "unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "ok": {
+                  "const": false
+                },
+                "scopes": {
+                  "maxItems": 0
+                },
+                "bindings": {
+                  "maxItems": 0
+                },
+                "callables": {
+                  "maxItems": 0
+                },
+                "regions": {
+                  "maxItems": 0
+                },
+                "operations": {
+                  "maxItems": 0
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "coverage": {
+                  "properties": {
+                    "status": {
+                      "const": "complete"
+                    }
+                  }
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "coverage": {
+                  "properties": {
+                    "truncated": {
+                      "const": false
+                    },
+                    "frontiers": {
+                      "maxItems": 0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "JavaScriptSourceFacts": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "ok",
+          "source_bytes",
+          "offset_unit",
+          "profile",
+          "coverage",
+          "scopes",
+          "bindings",
+          "callables",
+          "regions",
+          "operations",
+          "limits",
+          "source"
+        ],
+        "properties": {
+          "schema": {
+            "const": "reb-javascript-source-facts-v1"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "source_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4194304
+          },
+          "offset_unit": {
+            "const": "utf-8-byte"
+          },
+          "profile": {
+            "const": "lexical-effects-v1"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/JavaScriptSourceCoverage"
+          },
+          "scopes": {
+            "type": "array",
+            "maxItems": 16384,
+            "items": {
+              "$ref": "#/components/schemas/JavaScriptSourceScope"
+            }
+          },
+          "bindings": {
+            "type": "array",
+            "maxItems": 16384,
+            "items": {
+              "$ref": "#/components/schemas/JavaScriptSourceBinding"
+            }
+          },
+          "callables": {
+            "type": "array",
+            "maxItems": 16384,
+            "items": {
+              "$ref": "#/components/schemas/JavaScriptSourceCallable"
+            }
+          },
+          "regions": {
+            "type": "array",
+            "maxItems": 16384,
+            "items": {
+              "$ref": "#/components/schemas/JavaScriptSourceRegion"
+            }
+          },
+          "operations": {
+            "type": "array",
+            "maxItems": 16384,
+            "items": {
+              "$ref": "#/components/schemas/JavaScriptSourceOperation"
+            }
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "max_source_bytes",
+              "max_ast_nodes",
+              "max_facts",
+              "max_frontiers",
+              "preflight_depth",
+              "preflight_nodes",
+              "max_binding_candidates"
+            ],
+            "properties": {
+              "max_source_bytes": {
+                "const": 4194304
+              },
+              "max_ast_nodes": {
+                "const": 32768
+              },
+              "max_facts": {
+                "const": 16384
+              },
+              "max_frontiers": {
+                "const": 256
+              },
+              "preflight_depth": {
+                "const": 128
+              },
+              "preflight_nodes": {
+                "const": 500000
+              },
+              "max_binding_candidates": {
+                "const": 64
+              }
+            }
+          },
+          "source": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Artifact"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "javascript"
+                  },
+                  "byte_size": {
+                    "maximum": 4194304
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "description": "Worker facts bound to fully verified immutable JavaScript artifact identity. Original source is never executed or rewritten. Complete coverage means complete within the declared lexical profile, not runtime or cross-artifact proof.",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "coverage": {
+                  "properties": {
+                    "status": {
+                      "const": "unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "ok": {
+                  "const": false
+                },
+                "scopes": {
+                  "maxItems": 0
+                },
+                "bindings": {
+                  "maxItems": 0
+                },
+                "callables": {
+                  "maxItems": 0
+                },
+                "regions": {
+                  "maxItems": 0
+                },
+                "operations": {
+                  "maxItems": 0
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "coverage": {
+                  "properties": {
+                    "status": {
+                      "const": "complete"
+                    }
+                  }
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "coverage": {
+                  "properties": {
+                    "truncated": {
+                      "const": false
+                    },
+                    "frontiers": {
+                      "maxItems": 0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "JavaScriptSourceTarget": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "binding_ids",
+              "resolution",
+              "name"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "binding"
+                ]
+              },
+              "binding_ids": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                }
+              },
+              "resolution": {
+                "enum": [
+                  "lexical-only",
+                  "declaration"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 4194304
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "binding_ids",
+              "resolution",
+              "name"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "ambiguous"
+                ]
+              },
+              "binding_ids": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 64,
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                }
+              },
+              "resolution": {
+                "enum": [
+                  "duplicate-declarations"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 4194304
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "binding_ids",
+              "resolution"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "unresolved"
+                ]
+              },
+              "binding_ids": {
+                "type": "array",
+                "minItems": 0,
+                "maxItems": 0,
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                }
+              },
+              "resolution": {
+                "enum": [
+                  "dynamic-scope",
+                  "unsupported-environment",
+                  "external-or-implicit",
+                  "implicit-arguments-environment",
+                  "this-environment",
+                  "binding-candidate-limit"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 4194304
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "object_range",
+              "key_range",
+              "computed"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "property"
+                ]
+              },
+              "object_range": {
+                "$ref": "#/components/schemas/JavaScriptSourceRange"
+              },
+              "key_range": {
+                "$ref": "#/components/schemas/JavaScriptSourceRange"
+              },
+              "computed": {
+                "type": "boolean"
+              }
+            }
+          }
+        ]
+      },
+      "JavaScriptSourceWriteValue": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "value_range"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "initialize"
+                ]
+              },
+              "value_range": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/JavaScriptSourceRange"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "operator",
+              "value_range"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "assign"
+                ]
+              },
+              "operator": {
+                "enum": [
+                  "=",
+                  "+=",
+                  "-=",
+                  "*=",
+                  "/=",
+                  "%=",
+                  "**=",
+                  "<<=",
+                  ">>=",
+                  ">>>=",
+                  "|=",
+                  "^=",
+                  "&=",
+                  "||=",
+                  "&&=",
+                  "??="
+                ]
+              },
+              "value_range": {
+                "$ref": "#/components/schemas/JavaScriptSourceRange"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "operator",
+              "stored_value",
+              "expression_result"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "update"
+                ]
+              },
+              "operator": {
+                "enum": [
+                  "++",
+                  "--"
+                ]
+              },
+              "expression_result": {
+                "enum": [
+                  "old",
+                  "new"
+                ]
+              },
+              "stored_value": {
+                "const": "new"
+              }
+            }
+          }
+        ]
+      },
+      "JavaScriptSourceReceiver": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "range"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "method"
+                ]
+              },
+              "range": {
+                "$ref": "#/components/schemas/JavaScriptSourceRange"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "detached",
+                  "constructor"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "JavaScriptSourceReferenceDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target"
+        ],
+        "properties": {
+          "target": {
+            "$ref": "#/components/schemas/JavaScriptSourceTarget"
+          }
+        }
+      },
+      "JavaScriptSourceWriteDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target",
+          "value"
+        ],
+        "properties": {
+          "target": {
+            "$ref": "#/components/schemas/JavaScriptSourceTarget"
+          },
+          "value": {
+            "$ref": "#/components/schemas/JavaScriptSourceWriteValue"
+          }
+        }
+      },
+      "JavaScriptSourceCallDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "callee_range",
+          "argument_ranges",
+          "receiver",
+          "target",
+          "call_target",
+          "argument_policy"
+        ],
+        "properties": {
+          "callee_range": {
+            "$ref": "#/components/schemas/JavaScriptSourceRange"
+          },
+          "argument_ranges": {
+            "type": "array",
+            "maxItems": 32768,
+            "items": {
+              "$ref": "#/components/schemas/JavaScriptSourceRange"
+            }
+          },
+          "receiver": {
+            "$ref": "#/components/schemas/JavaScriptSourceReceiver"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JavaScriptSourceTarget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "call_target": {
+            "enum": [
+              "unknown"
+            ]
+          },
+          "argument_policy": {
+            "enum": [
+              "eager-left-to-right"
+            ]
+          }
+        }
+      },
+      "JavaScriptSourceLiteralDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "identity"
+        ],
+        "properties": {
+          "identity": {
+            "enum": [
+              "original-bytes"
+            ]
+          }
+        }
+      },
+      "JavaScriptSourceOperatorDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "operator"
+        ],
+        "properties": {
+          "operator": {
+            "enum": [
+              "==",
+              "!=",
+              "===",
+              "!==",
+              "<",
+              "<=",
+              ">",
+              ">=",
+              "<<",
+              ">>",
+              ">>>",
+              "+",
+              "-",
+              "*",
+              "/",
+              "%",
+              "**",
+              "|",
+              "^",
+              "&",
+              "in",
+              "instanceof",
+              "!",
+              "~",
+              "typeof",
+              "void",
+              "&&",
+              "||",
+              "??",
+              "++",
+              "--",
+              "+=",
+              "-=",
+              "*=",
+              "/=",
+              "%=",
+              "**=",
+              "<<=",
+              ">>=",
+              ">>>=",
+              "|=",
+              "^=",
+              "&="
+            ]
+          },
+          "conditional": {
+            "enum": [
+              true
+            ]
+          },
+          "value_result": {
+            "enum": [
+              "old",
+              "new"
+            ]
+          }
+        }
+      },
+      "JavaScriptSourceReturnDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "value_range"
+        ],
+        "properties": {
+          "value_range": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JavaScriptSourceRange"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "JavaScriptSourceThrowDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "value_range"
+        ],
+        "properties": {
+          "value_range": {
+            "$ref": "#/components/schemas/JavaScriptSourceRange"
+          }
+        }
+      },
+      "JavaScriptSourceControlDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "flow"
+        ],
+        "properties": {
+          "flow": {
+            "enum": [
+              "unresolved"
+            ]
+          }
+        }
+      },
+      "JavaScriptSourceFunctionDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "callable_id"
+        ],
+        "properties": {
+          "callable_id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          }
+        }
+      },
+      "JavaScriptSourceTemplateDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "identity"
+        ],
+        "properties": {
+          "identity": {
+            "enum": [
+              "original-raw-and-cooked-syntax"
+            ]
+          }
+        }
+      },
+      "JavaScriptSourceEmptyDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "properties": {}
       }
     }
   },

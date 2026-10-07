@@ -8,6 +8,7 @@ mod fold;
 mod preflight;
 mod proxy;
 mod request_field;
+mod source_facts;
 use serde::{Deserialize, Serialize};
 
 const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
@@ -231,16 +232,20 @@ fn serve(reader: &mut impl BufRead, writer: &mut impl Write) -> io::Result<()> {
         let response = match read_request(reader, MAX_REQUEST_BYTES) {
             Ok(None) => return Ok(()),
             Ok(Some(line)) => {
-                let field_mode = serde_json::from_slice::<serde_json::Value>(&line)
+                let operation = serde_json::from_slice::<serde_json::Value>(&line)
                     .ok()
                     .and_then(|value| {
                         value
                             .get("operation")
                             .and_then(|v| v.as_str())
                             .map(str::to_owned)
-                    })
-                    .is_some_and(|operation| operation == "request_field");
-                if field_mode {
+                    });
+                if operation.as_deref() == Some("source_facts") {
+                    match serde_json::from_slice::<source_facts::Request>(&line) {
+                        Ok(request) => source_facts::analyze(request),
+                        Err(_) => source_facts::invalid("invalid source facts request", 0),
+                    }
+                } else if operation.as_deref() == Some("request_field") {
                     match serde_json::from_slice::<request_field::Request>(&line) {
                         Ok(request) => serde_json::to_value(request_field::extract(request))?,
                         Err(_) => {

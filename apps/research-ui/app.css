@@ -2485,7 +2485,7 @@
       }
 
       .sources-debugger[data-attached="false"] .debug-controls,
-      .sources-debugger[data-attached="false"] .debug-panes > :not(#artifact-details):not(#deobfuscation-details) { display: none; }
+      .sources-debugger[data-attached="false"] .debug-panes > :not(#artifact-details):not(#deobfuscation-details):not(#source-facts-details) { display: none; }
       .sources-debugger[data-attached="false"] { grid-template-rows: auto minmax(0, 1fr); }
 
       /* Experiment tools share setup, editor, and result panes. */
@@ -3155,3 +3155,16 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .console-traffic-event pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .native-console-command { border-bottom: 0; padding-bottom: 0; }
+
+/* Captured JavaScript facts share the existing Sources details pane. */
+.source-facts-report { overflow-wrap: anywhere; }
+.source-facts-report p { margin: 6px 0 10px; }
+.source-facts-identity { font-family: var(--mono); font-size: 10px; }
+.source-facts-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.source-facts-status[role="alert"], .source-facts-coverage { color: var(--text); }
+.source-facts-list { display: grid; gap: 8px; }
+.source-fact { display: grid; gap: 6px; padding: 8px 0; border-top: 1px solid var(--line); min-width: 0; }
+.source-fact > button { text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.source-fact summary { cursor: pointer; }
+.source-fact pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0; font-size: 10px; }
+.source-facts-report :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

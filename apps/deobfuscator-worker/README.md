@@ -64,3 +64,14 @@ the expected transformation families, rejects budget truncation, and reports
 wall time, rewrite count, changed-source coverage, and child peak RSS. The
 fixtures are repository-owned regression programs, not captured or untrusted
 malware samples.
+
+## Inert source facts
+
+The `source_facts` operation reuses this worker's preflight and Oxc parser to
+return bounded lexical declarations, callable ranges and evaluation-region
+facts over the exact supplied bytes. The public API binds them to a verified
+immutable artifact; worker-local IDs alone are not cross-source identities.
+See [JavaScript source facts v1](../../protocol/javascript-source-facts-v1.md)
+for the API/CLI, byte coordinates, budgets, unknown frontiers and deliberately
+limited meaning of ordering and binding resolution. The operation does not
+rewrite source, resolve values, follow imports, or execute analyzed code.

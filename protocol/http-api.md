@@ -39,6 +39,13 @@ apps/origin-trace-backend/target/debug/reb-api call get_artifact_content \
   --param offset=0 --param limit=2097152 --output artifact-chunk.bin --show-headers
 ```
 
+Immutable JavaScript lexical facts are available as `get_source_facts`:
+`reb-api call get_source_facts --endpoint-file /tmp/reb-api-endpoint
+--param session_id=1 --param artifact_id=2`. Both identifiers must match the
+stored artifact; no live/URL/derived-source fallback is supported. See
+[JavaScript source facts v1](javascript-source-facts-v1.md) for exact-byte ranges,
+limits, and partial/unavailable coverage semantics.
+
 `spec` prints the complete embedded OpenAPI document for validators and client
 generators without contacting a server. `describe` is an operation-detail
 document rather than a complete OpenAPI document. It includes the referenced

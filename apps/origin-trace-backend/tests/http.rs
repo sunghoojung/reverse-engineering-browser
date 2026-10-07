@@ -246,7 +246,7 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 25, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 26, "Review route coverage when the API changes");
     let schemas = &spec["components"]["schemas"];
     let actions = schemas["DebuggerAction"]["oneOf"].as_array().unwrap();
     let results = &schemas["DebuggerResult"];
@@ -369,7 +369,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 25);
+    assert_eq!(operation_count, 26);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -689,6 +689,7 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
             409,
         ),
         ("/api/deobfuscation", "/api/deobfuscation", 400),
+        ("/api/source-facts", "/api/source-facts", 400),
         ("/api/origin-trace", "/api/origin-trace", 400),
         (
             "/api/request-signal-profile",
@@ -4278,4 +4279,436 @@ async fn capture_clear_requires_stopped_guards_for_every_output_before_any_trunc
         assert!(fs::read(server.root.path().join(path)).unwrap().is_empty());
     }
     assert_eq!(clear().await.status(), 200);
+}
+
+fn source_facts_document(source: &str) -> Value {
+    json!({
+        "schema":"reb-javascript-source-facts-v1", "ok":true,
+        "source_bytes":source.len(), "offset_unit":"utf-8-byte", "profile":"lexical-effects-v1",
+        "coverage":{"status":"complete","truncated":false,"diagnostics":[],"frontiers":[]},
+        "scopes":[{"id":0,"parent_id":null,"range":{"start":0,"end":source.len()},"kind":"program"}],
+        "bindings":[], "callables":[],
+        "regions":[{"id":0,"parent_id":null,"callable_id":null,"range":{"start":0,"end":source.len()},"kind":"program","entry_order":0}],
+        "operations":[],
+        "limits":{"max_source_bytes":4194304,"max_ast_nodes":32768,"max_facts":16384,"max_frontiers":256,"max_binding_candidates":64,"preflight_depth":128,"preflight_nodes":500000}
+    })
+}
+
+fn put_source_facts_artifact(server: &Server, bytes: &[u8], kind: &str) -> Value {
+    let hash = hex::encode(Sha256::digest(bytes));
+    let artifact = json!({
+        "protocol_version":1,"artifact_id":"7","session_id":"11","navigation_id":"13",
+        "frame_id":"17","parent_artifact_id":"0","creator_event_id":"19",
+        "execution_context_id":"23","capture_origin":"dynamic_javascript",
+        "kind":kind,"url":"https://example.test/source.js","mime_type":"text/javascript",
+        "byte_size":bytes.len(),"sha256":hash,"sensitive":false,
+        "content_path":format!("blobs/{hash}.bin")
+    });
+    let mut artifact = artifact;
+    if kind != "javascript" {
+        artifact["capture_origin"] = json!("unknown");
+    }
+    server.file(&format!("artifacts/blobs/{hash}.bin"), bytes);
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n").as_bytes(),
+    );
+    artifact
+}
+
+#[cfg(unix)]
+fn source_facts_worker(directory: &Path, tail: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let worker = directory.join("source-facts-worker");
+    std::fs::write(
+        &worker,
+        format!(
+            "#!/bin/sh\nIFS= read -r request\ncase \"$request\" in *'\"operation\":\"source_facts\"'*) ;; *) exit 2;; esac\n{tail}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+    worker
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn source_facts_http_and_cli_preserve_exact_identity_and_coverage() {
+    let directory = tempfile::tempdir().unwrap();
+    let response_path = directory.path().join("response.json");
+    let worker = source_facts_worker(
+        directory.path(),
+        &format!("/bin/cat '{}'", response_path.display()),
+    );
+    let server =
+        Server::start_with_args(&["--deobfuscator".into(), worker.display().to_string()]).await;
+    let source = "const café = 1; café;";
+    let mut document = source_facts_document(source);
+    document["bindings"] =
+        json!([{"id":0,"scope_id":0,"name":"café","range":{"start":6,"end":11},"kind":"const"}]);
+    document["operations"] = json!([{"id":0,"region_id":0,"order":0,"range":{"start":17,"end":22},"kind":"read","detail":{"target":{"kind":"binding","binding_ids":[0],"resolution":"lexical-only","name":"café"}}}]);
+    let artifact = put_source_facts_artifact(&server, source.as_bytes(), "javascript");
+    std::fs::write(&response_path, document.to_string()).unwrap();
+    let path = "/api/source-facts?session_id=11&artifact_id=7";
+    let bytes =
+        assert_contract_response(server.get(path).await, "get", "/api/source-facts", 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    let mut expected_identity = artifact.clone();
+    expected_identity
+        .as_object_mut()
+        .unwrap()
+        .remove("content_path");
+    assert_eq!(result["source"], expected_identity);
+    assert_eq!(result["source_bytes"], source.len());
+    assert_eq!(result["bindings"], document["bindings"]);
+    assert_eq!(result["operations"], document["operations"]);
+    assert_eq!(
+        std::fs::read(server.root.path().join(format!(
+            "artifacts/blobs/{}.bin",
+            artifact["sha256"].as_str().unwrap()
+        )))
+        .unwrap(),
+        source.as_bytes()
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["list"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("get_source_facts")
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["describe", "get_source_facts"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let description: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(description["components"]["schemas"]["JavaScriptSourceFacts"].is_object());
+    assert_eq!(
+        description["x-reb-execution"]["effects"],
+        json!(["analysis", "process-launch"])
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "get_source_facts",
+            "--base-url",
+            &server.url,
+            "--param",
+            "session_id=11",
+            "--param",
+            "artifact_id=7",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        result
+    );
+
+    for (status, ok, truncated) in [("partial", true, true), ("unavailable", false, false)] {
+        let mut partial = source_facts_document(source);
+        partial["coverage"] = json!({"status":status,"truncated":truncated,"diagnostics":["Synthetic coverage limit"],"frontiers":[{"range":{"start":0,"end":source.len()},"reason":"unsupported-expression-effects"}]});
+        partial["ok"] = json!(ok);
+        if status == "unavailable" {
+            for table in ["scopes", "bindings", "callables", "regions", "operations"] {
+                partial[table] = json!([]);
+            }
+        }
+        std::fs::write(&response_path, partial.to_string()).unwrap();
+        let bytes =
+            assert_contract_response(server.get(path).await, "get", "/api/source-facts", 200).await;
+        let result: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["coverage"], partial["coverage"]);
+        assert_eq!(result["ok"], ok);
+    }
+    for query in [
+        "",
+        "?artifact_id=7",
+        "?session_id=11",
+        "?session_id=011&artifact_id=7",
+        "?session_id=11&artifact_id=07",
+        "?session_id=11&artifact_id=7&artifact_id=7",
+        "?session_id=11&artifact_id=7&script_id=1",
+        "?session_id=11&artifact_id=7&process_id=1",
+    ] {
+        assert_contract_response(
+            server.get(&format!("/api/source-facts{query}")).await,
+            "get",
+            "/api/source-facts",
+            400,
+        )
+        .await;
+    }
+    for query in [
+        "?session_id=12&artifact_id=7",
+        "?session_id=11&artifact_id=8",
+    ] {
+        assert_contract_response(
+            server.get(&format!("/api/source-facts{query}")).await,
+            "get",
+            "/api/source-facts",
+            404,
+        )
+        .await;
+    }
+    put_source_facts_artifact(&server, source.as_bytes(), "wasm");
+    assert_eq!(server.get(path).await.status(), 400);
+    put_source_facts_artifact(&server, b"const invalid=\xff;", "javascript");
+    assert_eq!(server.get(path).await.status(), 400);
+    put_source_facts_artifact(&server, &vec![b' '; 4 * 1024 * 1024 + 1], "javascript");
+    assert_eq!(server.get(path).await.status(), 400);
+    let exact_limit = " ".repeat(4 * 1024 * 1024);
+    put_source_facts_artifact(&server, exact_limit.as_bytes(), "javascript");
+    std::fs::write(
+        &response_path,
+        source_facts_document(&exact_limit).to_string(),
+    )
+    .unwrap();
+    assert_contract_response(server.get(path).await, "get", "/api/source-facts", 200).await;
+    let artifact = put_source_facts_artifact(&server, source.as_bytes(), "javascript");
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n{artifact}\n").as_bytes(),
+    );
+    assert_eq!(server.get(path).await.status(), 500);
+    put_source_facts_artifact(&server, source.as_bytes(), "javascript");
+    server.file(
+        &format!(
+            "artifacts/blobs/{}.bin",
+            artifact["sha256"].as_str().unwrap()
+        ),
+        &vec![b' '; source.len()],
+    );
+    assert_eq!(server.get(path).await.status(), 500);
+
+    // Source mode accepts an empty verified program without substituting text.
+    put_source_facts_artifact(&server, b"", "javascript");
+    std::fs::write(&response_path, source_facts_document("").to_string()).unwrap();
+    assert_contract_response(server.get(path).await, "get", "/api/source-facts", 200).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn source_facts_reject_unavailable_or_invalid_worker_without_fallback() {
+    let directory = tempfile::tempdir().unwrap();
+    let response_path = directory.path().join("response.json");
+    let worker = source_facts_worker(
+        directory.path(),
+        &format!("/bin/cat '{}'", response_path.display()),
+    );
+    let server =
+        Server::start_with_args(&["--deobfuscator".into(), worker.display().to_string()]).await;
+    let source = "const café = 1; café;";
+    put_source_facts_artifact(&server, source.as_bytes(), "javascript");
+    let path = "/api/source-facts?session_id=11&artifact_id=7";
+    let valid = source_facts_document(source);
+    for invalid in [
+        json!({}),
+        {
+            let mut v = valid.clone();
+            v["scopes"][0]["parent_id"] = json!(0);
+            v
+        },
+        {
+            let mut v = valid.clone();
+            v["regions"][0]["parent_id"] = json!(0);
+            v
+        },
+        {
+            let mut v = valid.clone();
+            v["operations"] = json!([
+            {"id":0,"region_id":0,"order":0,"range":{"start":0,"end":0},"kind":"literal","detail":{"identity":"original-bytes"}},
+            {"id":1,"region_id":0,"order":0,"range":{"start":0,"end":0},"kind":"literal","detail":{"identity":"original-bytes"}}]);
+            v
+        },
+        {
+            let mut v = valid.clone();
+            v["operations"] = json!([
+            {"id":0,"region_id":0,"order":0,"range":{"start":0,"end":0},"kind":"invented","detail":{}}]);
+            v
+        },
+        {
+            let mut v = valid.clone();
+            v["operations"] = json!([
+            {"id":0,"region_id":0,"order":0,"range":{"start":0,"end":0},"kind":"literal","detail":{"identity":"original-bytes","unbounded":["not a fact"]}}]);
+            v
+        },
+        {
+            let mut v = valid.clone();
+            v["operations"] = json!([
+            {"id":0,"region_id":0,"order":0,"range":{"start":0,"end":0},"kind":"read","detail":{"target":{"kind":"binding","binding_ids":[],"resolution":"lexical-only","name":"café"}}}]);
+            v
+        },
+        {
+            let mut v = valid.clone();
+            v["source_bytes"] = json!(0);
+            v
+        },
+        {
+            let mut v = valid.clone();
+            v["offset_unit"] = json!("utf-16");
+            v
+        },
+        {
+            let mut v = valid.clone();
+            v["scopes"][0]["range"]["end"] = json!(10);
+            v
+        },
+        {
+            let mut v = valid.clone();
+            v["scopes"][0]["parent_id"] = json!(12);
+            v
+        },
+        {
+            let mut v = valid.clone();
+            v["regions"][0]["callable_id"] = json!(12);
+            v
+        },
+        {
+            let mut v = valid.clone();
+            v["scopes"] = json!([v["scopes"][0], v["scopes"][0]]);
+            v
+        },
+        {
+            let mut v = valid.clone();
+            v["coverage"]["truncated"] = json!(true);
+            v
+        },
+        {
+            let mut v = valid.clone();
+            v["ok"] = json!(false);
+            v
+        },
+        {
+            let mut v = valid.clone();
+            v["operations"] = json!([{"id":0,"region_id":0,"order":0,"range":{"start":0,"end":0},"kind":"read","detail":{"target":{"binding_ids":[99]}}}]);
+            v
+        },
+    ] {
+        std::fs::write(&response_path, invalid.to_string()).unwrap();
+        let bytes =
+            assert_contract_response(server.get(path).await, "get", "/api/source-facts", 502).await;
+        assert!(!String::from_utf8_lossy(&bytes).contains("café"));
+    }
+    std::fs::write(&response_path, b"not json").unwrap();
+    assert_eq!(server.get(path).await.status(), 502);
+    source_facts_worker(directory.path(), "exit 1");
+    assert_eq!(server.get(path).await.status(), 502);
+    std::fs::remove_file(&worker).unwrap();
+    assert_contract_response(server.get(path).await, "get", "/api/source-facts", 503).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn source_facts_share_worker_lock_and_deadline() {
+    let directory = tempfile::tempdir().unwrap();
+    let started = directory.path().join("started");
+    let worker = source_facts_worker(
+        directory.path(),
+        &format!("printf started > '{}'; /bin/sleep 60", started.display()),
+    );
+    let server =
+        Server::start_with_args(&["--deobfuscator".into(), worker.display().to_string()]).await;
+    put_source_facts_artifact(&server, b"const value=1;", "javascript");
+    let client = server.client.clone();
+    let url = format!(
+        "{}/api/source-facts?session_id=11&artifact_id=7",
+        server.url
+    );
+    let task = tokio::spawn(async move { client.get(url).send().await.unwrap() });
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !started.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "Source facts worker did not start"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        server
+            .get("/api/deobfuscation?artifact_id=7")
+            .await
+            .status(),
+        409
+    );
+    assert_eq!(
+        server
+            .get("/api/source-facts?session_id=11&artifact_id=7")
+            .await
+            .status(),
+        409
+    );
+    let bytes =
+        assert_contract_response(task.await.unwrap(), "get", "/api/source-facts", 408).await;
+    let error: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(error["code"], "timeout");
+    assert_eq!(error["details"]["phase"], "worker");
+}
+
+#[tokio::test]
+#[ignore = "requires REB_SOURCE_FACTS_TEST_WORKER pointing to the built Rust/Oxc worker"]
+async fn source_facts_real_worker_http_and_cli() {
+    let worker =
+        std::env::var("REB_SOURCE_FACTS_TEST_WORKER").expect("Set the built Rust/Oxc worker path");
+    assert!(
+        Path::new(&worker).is_file(),
+        "Build the Rust/Oxc worker first"
+    );
+    let server = Server::start_with_args(&["--deobfuscator".into(), worker]).await;
+    let source = "const café = 1; function f(value) { if (value) return café; return; } const g = () => f(café); g();";
+    put_source_facts_artifact(&server, source.as_bytes(), "javascript");
+    let path = "/api/source-facts?session_id=11&artifact_id=7";
+    let bytes =
+        assert_contract_response(server.get(path).await, "get", "/api/source-facts", 200).await;
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["ok"], true);
+    assert!(
+        value["bindings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|binding| binding["name"] == "café")
+    );
+    assert_eq!(value["callables"].as_array().unwrap().len(), 2);
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "get_source_facts",
+            "--base-url",
+            &server.url,
+            "--param",
+            "session_id=11",
+            "--param",
+            "artifact_id=7",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        value
+    );
+    put_source_facts_artifact(&server, b"function broken(", "javascript");
+    let bytes =
+        assert_contract_response(server.get(path).await, "get", "/api/source-facts", 200).await;
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["ok"], false);
+    assert_eq!(value["coverage"]["status"], "unavailable");
+    for table in ["scopes", "bindings", "callables", "regions", "operations"] {
+        assert!(value[table].as_array().unwrap().is_empty());
+    }
 }

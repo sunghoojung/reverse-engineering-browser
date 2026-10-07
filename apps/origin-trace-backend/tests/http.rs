@@ -380,7 +380,7 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 26, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 27, "Review route coverage when the API changes");
     let schemas = &spec["components"]["schemas"];
     let actions = schemas["DebuggerAction"]["oneOf"].as_array().unwrap();
     let results = &schemas["DebuggerResult"];
@@ -503,7 +503,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 26);
+    assert_eq!(operation_count, 27);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -4845,4 +4845,211 @@ async fn source_facts_real_worker_http_and_cli() {
     for table in ["scopes", "bindings", "callables", "regions", "operations"] {
         assert!(value[table].as_array().unwrap().is_empty());
     }
+}
+
+fn float32_request() -> Value {
+    json!({"protocol_version":1,"input":{"representation":"float32-le","channels":1,"frames":4,"source":{"kind":"bits","words":["3f800000","80000000","7fc00001","7f800000"]}},"reference":{"representation":"float32-le","channels":1,"frames":4,"source":{"kind":"bits","words":["3f800001","00000000","7fc00002","7f800000"]}},"tolerances":{"absolute":0,"relative":0,"ulps":1},"detail":{"start":0,"limit":256}})
+}
+#[tokio::test]
+async fn float32_http_cli_discovery_parity_and_no_helpers() {
+    const ROUTE: &str = "/api/float32/compare";
+    let server = Server::start_with_helper_canaries(true).await;
+    let request = float32_request();
+    let bytes = assert_contract_response(
+        server.action(ROUTE, request.clone()).await,
+        "post",
+        ROUTE,
+        200,
+    )
+    .await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["comparison"]["maximum_ulp_distance"], 1);
+    assert_eq!(result["comparison"]["numeric_equal_pairs"], 2);
+    assert!(result["detail"]["rows"][2]["input"]["value"].is_null());
+    let path = server.root.path().join("float32-request.json");
+    std::fs::write(&path, request.to_string()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "compare_float32",
+            "--base-url",
+            &server.url,
+            "--body-file",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        result
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["describe", "compare_float32"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let description: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        description["x-reb-execution"]["effects"],
+        json!(["analysis"])
+    );
+    assert!(description["components"]["schemas"]["Float32Result"].is_object());
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["list"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&output.stdout).contains("compare_float32"));
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
+    assert!(!server.root.path().join("collection.json").exists());
+    assert!(!server.root.path().join("analyst.json").exists());
+    let duplicate = request.to_string().replace(
+        "\"protocol_version\":1",
+        "\"protocol_version\":1,\"protocol_version\":1",
+    );
+    std::fs::write(&path, &duplicate).unwrap();
+    let rejected = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "compare_float32",
+            "--base-url",
+            &server.url,
+            "--body-file",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(2));
+    assert!(rejected.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("versioned contract"));
+    let response = server
+        .client
+        .post(format!("{}{ROUTE}", server.url))
+        .body(duplicate)
+        .send()
+        .await
+        .unwrap();
+    assert_contract_response(response, "post", ROUTE, 400).await;
+    let response = server
+        .client
+        .post(format!("{}{ROUTE}", server.url))
+        .header("origin", "https://outside.invalid")
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_contract_response(response, "post", ROUTE, 403).await;
+    let catalog: Value = server
+        .get("/api/analysis/catalog")
+        .await
+        .json()
+        .await
+        .unwrap();
+    for source in result["source_ids"].as_array().unwrap() {
+        assert!(
+            catalog["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["source_id"] == *source)
+        );
+    }
+}
+#[tokio::test]
+async fn float32_verified_artifact_rejects_corruption_stale_identity_missing_and_scan_limits() {
+    const ROUTE: &str = "/api/float32/compare";
+    let server = Server::start().await;
+    let bytes = [0, 0, 128, 63, 0, 0, 0, 128, 1, 0, 192, 127, 0, 0, 128, 127];
+    let mut artifact = put_source_facts_artifact(&server, &bytes, "response_body");
+    artifact["sensitive"] = json!(true);
+    artifact["mime_type"] = json!("application/octet-stream");
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n").as_bytes(),
+    );
+    let mut request = float32_request();
+    request["input"]["source"] = json!({"kind":"artifact","session_id":"11","artifact_id":"7","sha256":artifact["sha256"],"byte_length":bytes.len()});
+    let result: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server.action(ROUTE, request.clone()).await,
+            "post",
+            ROUTE,
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(result["input"]["origin"], "verified_artifact");
+    assert_eq!(result["input"]["sha256"], artifact["sha256"]);
+    for (field, value, status) in [
+        ("session_id", json!("12"), 404),
+        ("artifact_id", json!("8"), 404),
+        ("sha256", json!("0".repeat(64)), 409),
+        ("byte_length", json!(12), 409),
+        ("artifact_id", json!("../7"), 400),
+    ] {
+        let mut bad = request.clone();
+        bad["input"]["source"][field] = value;
+        assert_contract_response(server.action(ROUTE, bad).await, "post", ROUTE, status).await;
+    }
+    server.file(
+        &format!("artifacts/{}", artifact["content_path"].as_str().unwrap()),
+        &[0; 16],
+    );
+    assert_contract_response(
+        server.action(ROUTE, request.clone()).await,
+        "post",
+        ROUTE,
+        422,
+    )
+    .await;
+    server.file(
+        &format!("artifacts/{}", artifact["content_path"].as_str().unwrap()),
+        &bytes,
+    );
+    // Blank lines also consume the explicit line/work budget; no matching prefix.
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n{}", "\n".repeat(8192)).as_bytes(),
+    );
+    let error: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server.action(ROUTE, request.clone()).await,
+            "post",
+            ROUTE,
+            413,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(error["code"], "resource_limit");
+    // The new opt-in scan cap must not silently narrow existing readers.
+    let old_reader = server.get("/api/artifacts/7/content").await;
+    assert_eq!(old_reader.status(), 200);
+    assert_eq!(old_reader.bytes().await.unwrap().as_ref(), &bytes);
+    // Byte scan exhaustion is independent of the line cap and follows an early match.
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n{}", (" ".repeat(8191) + "\n").repeat(1024)).as_bytes(),
+    );
+    let bounded = server.action(ROUTE, request.clone()).await;
+    assert_contract_response(bounded, "post", ROUTE, 413).await;
+    let old_reader = server.get("/api/artifacts/7/content").await;
+    assert_eq!(old_reader.status(), 200);
+    assert_eq!(old_reader.bytes().await.unwrap().as_ref(), &bytes);
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n{artifact}\n").as_bytes(),
+    );
+    assert_contract_response(server.action(ROUTE, request).await, "post", ROUTE, 500).await;
 }

@@ -111,7 +111,7 @@ export async function checkAdvancedNavigation(root) {
     const noop=()=>{};
     const context={document,state:{originTraceStatus:'idle',sourceHooksOpen:false},investigationRevision:0,
       investigationBeforeScreen:name=>{current=name;},investigationScreen:()=>current,
-      evidencePackagePanel:{setVisible:noop},sourceFactsPanel:{cancel:noop},
+      evidencePackagePanel:{setVisible:noop},sourceFactsPanel:{cancel:noop},float32Panel:{cancel:noop},
       evidenceWorkspace:{setVisible:noop},
       window:{matchMedia:()=>({matches:narrow})},requestAnimationFrame:callback=>frames.push(callback),selectedSource:()=>null,
       elements:{requestRows:{querySelectorAll:()=>[]},requestFilter:destination}};
@@ -222,6 +222,7 @@ export async function checkInvestigationInteractions({evaluate,viewport,click,ke
   assert(await evaluate('Boolean(state.selectedTraceRow)'),'Trace selection was lost');
   await evaluate("document.querySelector('#investigation-back').focus()");await enter();await arrived('traffic','Keyboard Back to request');
   assert.equal(await evaluate('state.selectedRequestId'),origin.id);assert.equal(await evaluate('state.inspectorTab'),origin.tab);
+  await until("document.activeElement.id==='trace-origin'",'Origin trigger focus was not restored after the return frame');
   assert.equal(await evaluate('document.activeElement.id'),'trace-origin','Origin trigger focus was not restored');
   assert.equal(await evaluate('toolsElements.input.value'),Buffer.from('雪').toString('base64'),'Decoder draft was lost on return');
   await screenshot('investigation-returned-request');
@@ -495,6 +496,41 @@ async function checkInvestigationReturns(root) {
     context.renderEvidence();assert.equal(elements.evidenceRows.children.length,0);assert.equal(elements.evidenceLinkCount.textContent,'0','Completed stale trace cannot become an Evidence count');
     state.originTrace=null;context.renderEvidence();assert.equal(elements.evidenceRows.children.length,0,'Live requests never fall back to sample evidence');
   }
+  // The real shell changes screens synchronously, but return focus belongs to
+  // its guarded animation frame. Screen arrival alone is not a focus receipt.
+  for(const interruption of [null,'interaction','identity']) {
+    const frames=[],document={activeElement:null};
+    const trigger={id:'trace-origin',focus(){document.activeElement=this;}};
+    const back={id:'investigation-back',classList:{contains:()=>false},focus(){document.activeElement=this;}};
+    const row={dataset:{requestId:'native'},focus(){document.activeElement=this;}};
+    const screens=['traffic','backtrace'].map(name=>({id:`screen-${name}`,hidden:name!=='backtrace',dataset:{},
+      contains:node=>name==='traffic'&&node===trigger,querySelector:s=>s==='#trace-origin'?trigger:null,querySelectorAll:()=>[]}));
+    const notice={textContent:''},bar={dataset:{},querySelector:()=>({open:false})},consolePanel={dataset:{}};
+    const navigation={open:false,contains:()=>false};
+    const request={id:'native',origin:'live',operation:'request_started',events:[{session_id:'11',process_id:17,sequence_number:'41',request_id:'91',type:'request_started'}]};
+    const state={requests:[request],selectedRequestId:'native',selectedRuntimeHookRequest:null,inspectorTab:'evidence',fieldTab:'body',originTraceStatus:'ready',decoderSteps:[]};
+    const noop=()=>{};
+    document.querySelector=s=>s==='.screen:not([hidden])'?screens.find(screen=>!screen.hidden):s==='#advanced-navigation'?navigation:s==='#investigation-back'?back:s==='#investigation-notice'?notice:s==='#investigation-navigation'?bar:s==='#console-experiment-traffic'?consolePanel:screens.find(screen=>'#'+screen.id===s)??null;
+    document.querySelectorAll=s=>s==='.screen'?screens:[];
+    const context=createContext({document,state,CSS:{escape:s=>s},Promise,requestAnimationFrame:fn=>frames.push(fn),integerText:(e,k)=>String(e[k]),
+      selectedSource:()=>null,sourceFactsPanel:{cancel:noop},float32Panel:{cancel:noop},evidenceWorkspace:{setVisible:noop},
+      renderInspector:noop,renderRuntimeHookTraffic:noop,fieldSets:{body:[]},elements:{requestRows:{querySelectorAll:()=>[row]},requestFilter:row}});
+    const run=code=>runInContext(code,context);
+    run(rootFunction+'\n'+nav+'\n'+section('      function showScreen(', '      async function refresh()'));
+    context.entry={screen:'traffic',label:'Requests',request:run('investigationRequestIdentity(state.requests[0])'),inspectorTab:'evidence',fieldTab:'body',fieldPath:'',focus:'#trace-origin',scroll:[]};
+    document.activeElement=back;
+    assert(run('restoreInvestigation(entry)'));
+    assert.equal(run('investigationScreen()'),'traffic','The screen arrives before the deferred return focus');
+    assert.equal(document.activeElement,back,'An immediate screen-only assertion reproduces the CI pre-frame focus');
+    await Promise.resolve();await Promise.resolve();
+    assert.equal(frames.length,2,'Both production shell and exact-return focus are deferred');
+    if(interruption==='interaction')run('retireInvestigationReturn()');
+    if(interruption==='identity')state.requests=[{...request,events:[{...request.events[0],session_id:'12'}]}];
+    for(const frame of frames.splice(0))frame();
+    if(!interruption)assert.equal(document.activeElement,trigger,'Settled exact return restores the original trigger');
+    else assert.notEqual(document.activeElement,trigger,'A newer interaction or replaced identity must prevent stale trigger focus');
+  }
+  console.log('PASS investigation screen-before-focus counterexample, real shell/return frame ordering, settled trigger and interruption/identity guards (production functions, not rendered QA)');
   console.log('PASS production return ownership, zero scroll, exact trace reread, stable gap/focus identity, actual request-ID collision guard, original-only source pivot and fetch/body/304 retained-root races (not rendered QA)');
 }
 

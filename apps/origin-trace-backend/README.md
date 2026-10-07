@@ -147,3 +147,13 @@ no socket or capture boolean substitutes for a lease. The package contract
 explains reserved paths, private directories, limits and threat boundaries.
 CLI `--output PATH` is private, atomic and no-clobber for JSON or binary output;
 an export must pass validation before its final file is created.
+
+## Float32 diagnostics
+
+`POST /api/float32/compare` and `reb-api call compare_float32` inspect explicit raw
+word arrays, base64 buffers or complete hash-verified artifact identities. The
+optional reference produces separate raw-byte, word, numeric and caller-tolerance
+results. Bounds, exceptional values, endian/layout assumptions and null/partial
+policies are documented in [Float32 Comparison v1](../../protocol/float32-comparison-v1.md).
+The cold operation is in-process, read-only and uses the existing I/O admission
+pool. No native capture or executable helper is involved.

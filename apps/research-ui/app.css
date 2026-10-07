@@ -2148,6 +2148,8 @@
       .memory-results-pane[data-empty="true"] { grid-template-columns: 1fr; }
       .memory-results-pane[data-empty="true"] .memory-results-list { border-right: 0; }
       .memory-results-list { min-width: 0; overflow: auto; border-right: 1px solid var(--line); }
+      /* Keep row hit targets clear of both halves of the shared 8px resize handles. */
+      #memory-results { padding-inline: 4px; }
       .memory-results-head { display: grid; grid-template-columns: minmax(0, 1fr) 62px; gap: 8px; padding: 9px 11px; border-bottom: 1px solid var(--line); color: var(--faint); font: 650 10px var(--mono); letter-spacing: normal; text-transform: uppercase; }
       .memory-result-row { width: 100%; min-height: 54px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 8px; padding: 9px 11px; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; color: var(--text); text-align: left; }
       .memory-result-row:hover { background: var(--panel-3); }
@@ -3499,3 +3501,81 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   #screen-evidence .evidence-list-footer > span { min-width: 0; flex: 1; }
   #screen-evidence .evidence-list-footer > div { flex: 0 0 auto; }
 }
+
+      /* Memory is an explicit capture workflow, with a submitted receipt separate from draft criteria. */
+      #screen-memory:not([hidden]) { grid-template-rows: auto auto auto minmax(0, 1fr); }
+      #screen-memory > .screen-head { min-height: 52px; height: auto; }
+      .memory-target { min-width: 0; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 11px var(--mono); }
+      #screen-memory .screen-head-actions { min-width: 0; flex-wrap: wrap; }
+      .memory-output { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); }
+      .memory-receipt { min-width: 0; max-height: 180px; overflow: auto; border-bottom: 1px solid var(--line); background: var(--chrome); }
+      .memory-submission { padding: 10px 14px 5px; color: var(--muted); font: 11px/1.5 var(--sans); overflow-wrap: anywhere; }
+      .memory-submission[data-stale="true"] { color: var(--amber); }
+      .memory-submitted > summary { padding: 4px 14px 9px; cursor: pointer; color: var(--faint); font-size: 11px; }
+      .memory-submitted pre { margin: 0; padding: 0 14px 12px; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--mono); }
+      .memory-stage { display: flex; align-items: flex-start; gap: 10px; grid-column: 1 / -1; padding-bottom: 4px; }
+      .memory-stage > span { width: 23px; height: 23px; display: grid; place-items: center; flex: 0 0 auto; border: 1px solid var(--accent); color: var(--accent); border-radius: 50%; font: 11px var(--mono); }
+      .memory-stage strong { display: block; font-size: 12px; font-weight: 600; }
+      .memory-stage small { display: block; margin-top: 5px; color: var(--muted); font: 11px/1.5 var(--sans); }
+      .memory-notice[data-kind="unavailable"]::before { background: var(--amber); }
+      .memory-results-head { position: sticky; top: 0; z-index: 1; background: var(--chrome); }
+      .memory-detail-head { flex-wrap: wrap; }
+      .memory-detail-head > div { min-width: 0; flex: 1 1 180px; }
+      .memory-detail-head h2, .memory-detail-head p { overflow-wrap: anywhere; }
+      .memory-source-unavailable { color: var(--amber); font: 11px/1.5 var(--sans); }
+      .memory-detail-disclosure > summary { padding: 12px; color: var(--accent); cursor: pointer; font-size: 12px; }
+      #screen-memory :is(button, summary, input, textarea, select):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+      @media (max-width: 950px) {
+        .memory-grid { grid-template-columns: 245px minmax(0, 1fr); }
+        /* Keep readable stacked panes inside a real scroll owner in short windows. */
+        .memory-results-pane { overflow: auto; grid-template-columns: 1fr; grid-template-rows: minmax(150px, .7fr) minmax(170px, 1fr); }
+        .memory-results-list { border-right: 0; border-bottom: 1px solid var(--line); }
+        .memory-results-pane[data-empty="true"] { grid-template-rows: 1fr; }
+      }
+      @media (max-width: 650px) {
+        #screen-memory .screen-head { height: auto; padding-block: 10px; flex-wrap: wrap; gap: 8px; }
+        #screen-memory > .memory-mode-switch { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .memory-grid { display: block; overflow: auto; }
+        .memory-search-pane { max-height: none; overflow: visible; }
+        .memory-form { grid-template-columns: 1fr; }
+        .memory-output { min-height: 520px; }
+        .memory-results-pane { min-height: 420px; grid-template-rows: minmax(150px, auto) minmax(220px, auto); }
+        .memory-results-list { max-height: 220px; }
+        .memory-detail { max-height: 420px; padding: 10px; }
+        .memory-property { grid-template-columns: minmax(0, 1fr) minmax(0, .7fr); }
+        .memory-property-value { grid-column: 1 / -1; border-top: 1px solid var(--line-soft); }
+        .memory-path-step { grid-template-columns: minmax(0, 1fr) 60px; }
+        .memory-path-name { grid-column: 1 / -1; padding-left: 14px; }
+        .memory-reference-row { grid-template-columns: 60px minmax(0, 1fr); }
+        .memory-reference-source { grid-column: 1 / -1; }
+      }
+
+/* Float32 is a cold, composable Tools inspector; the backend owns all math. */
+.float32-workspace { display: grid; grid-template-columns: minmax(260px, 0.9fr) minmax(300px, 1.3fr); gap: 16px; min-width: 0; align-items: start; }
+.float32-form, .float32-output { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.float32-form h2 { margin: 0 0 8px; }
+.float32-form p, .float32-output p { font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.float32-form fieldset { min-width: 0; margin: 16px 0; padding: 12px; border: 1px solid var(--line); border-radius: 6px; }
+.float32-form legend { font-size: 12px; font-weight: 600; }
+.float32-form label { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 12px; margin: 8px 0; }
+.float32-controls { display: flex; flex-wrap: wrap; gap: 12px; }
+.float32-controls label { flex: 1 1 100px; }
+.float32-form input, .float32-form select, .float32-form textarea { box-sizing: border-box; width: 100%; min-width: 0; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 8px; }
+.float32-form textarea { min-height: 96px; resize: vertical; font-family: var(--mono); }
+.float32-form label.float32-check { flex-direction: row; align-items: center; }
+.float32-check input { width: auto; }
+.float32-actions, .float32-page { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
+.float32-page span { font-size: 12px; }
+.float32-receipt { font-weight: 600; color: var(--accent); }
+.float32-identity { margin: 12px 0; font-size: 12px; overflow-wrap: anywhere; }
+.float32-identity summary { cursor: pointer; line-height: 1.5; }
+.float32-metrics { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(0, 1fr); gap: 8px 12px; font-size: 12px; }
+.float32-metrics dt { color: var(--muted); }
+.float32-metrics dd { margin: 0; overflow-wrap: anywhere; }
+.float32-rows { max-height: 520px; overflow: auto; scrollbar-gutter: stable; border-top: 1px solid var(--line); }
+.float32-row { border-bottom: 1px solid var(--line); padding: 8px 0; }
+.float32-row h4 { font-size: 12px; margin: 4px 0; }
+.float32-row p { font-family: var(--mono); margin: 4px 0; }
+#tools-panel-float32 [hidden] { display: none !important; }
+@media (max-width: 1000px) { .float32-workspace { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 480px) { .float32-form, .float32-output { padding: 10px; } .float32-form fieldset { padding: 8px; } }

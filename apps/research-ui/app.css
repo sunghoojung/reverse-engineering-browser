@@ -3277,3 +3277,69 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
    shrink their grid tracks and paint over the next warning or scope row. */
 .workspace[data-console-open="true"] #screen-traffic .request-pane { grid-template-rows: repeat(3, max-content) minmax(112px, 1fr); }
 .workspace[data-console-open="true"] #screen-traffic .request-pane:has(.request-search-status:not([hidden])) { grid-template-rows: repeat(4, max-content) minmax(112px, 1fr); }
+
+/* Collection is an authoring desk: library, editable template, submitted result. */
+#screen-api-collection:not([hidden]) { grid-template-rows: auto auto minmax(0, 1fr); }
+#screen-api-collection .screen-head { min-height: 56px; height: auto; }
+.collection-statusbar { display: flex; align-items: center; min-width: 0; border-bottom: 1px solid var(--line); background: var(--panel-2); }
+.collection-statusbar .collection-notice { flex: 1; min-width: 0; border: 0; }
+.collection-statusbar > button { flex-shrink: 0; margin: 5px 10px 5px 0; }
+#collection-grid { grid-template-columns: minmax(200px, .6fr) minmax(320px, 1.15fr) minmax(290px, 1fr); }
+.collection-library { display: flex; flex-direction: column; }
+.collection-library .collection-tree { min-height: 90px; flex: 1 1 auto; overflow: auto; }
+.collection-library .collection-scope-card { flex: 0 0 auto; max-height: 65%; overflow: auto; }
+.collection-tree-row:focus-visible, .collection-history-row:focus-visible, .collection-tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.collection-pane-head h2, .collection-pane-head p { overflow-wrap: anywhere; }
+.collection-pane-head h2 { font-size: 12px; }
+.collection-editor-pane { display: flex; flex-direction: column; overflow: hidden; }
+.collection-editor-pane > .collection-pane-head { flex: 0 0 auto; }
+#collection-request-form { flex: 1; min-height: 0; align-content: start; overflow: auto; }
+.collection-command-row { display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 8px; }
+.collection-author-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.collection-author-actions button { min-height: 30px; padding: 5px 9px; }
+.collection-help { margin: 0; color: var(--muted); font: 11px/1.5 var(--sans); overflow-wrap: anywhere; }
+.collection-properties { border: 1px solid var(--line); border-radius: 4px; padding: 9px; }
+.collection-properties summary { cursor: pointer; color: var(--muted); font: 11px var(--sans); }
+.collection-properties[open] { display: grid; gap: 10px; }
+.collection-properties[open] > summary { margin-bottom: 10px; }
+.collection-tabs { display: flex; align-items: stretch; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--line); }
+.collection-tabs button { min-height: 32px; padding: 7px 12px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font: 11px var(--sans); }
+.collection-tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); background: var(--accent-soft); }
+.collection-content-panel[hidden] { display: none; }
+.collection-content-panel { display: grid; gap: 8px; }
+.collection-content-panel textarea { min-height: 170px; tab-size: 2; }
+#collection-request-body { min-height: 240px; }
+#collection-grid .collection-run-pane { grid-column: auto; display: flex; flex-direction: column; gap: 8px; padding: 10px; border-top: 0; }
+.collection-run-card { flex: 0 0 auto; }
+.collection-context .collection-help, .collection-history-card .collection-help { margin: 0 10px 9px; }
+.collection-context .collection-author-actions { padding: 0 10px 10px; }
+.collection-run-card summary .experiment-card-badge { margin-left: 6px; }
+.collection-response-card { display: flex; flex: 1 0 240px; flex-direction: column; min-height: 240px; overflow: hidden; }
+.collection-response-card header { flex: 0 0 auto; }
+.collection-response-card header p { overflow-wrap: anywhere; }
+.collection-response-card .repeater-response { flex: 1; min-height: 130px; max-height: 600px; overflow: auto; }
+.collection-response-card .repeater-response:not(.experiment-empty) { display: block; }
+.collection-response-card .experiment-result-body { max-height: none; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; }
+.collection-response-card .repeater-response-header { overflow-wrap: anywhere; }
+#collection-grid[data-state="empty"] { grid-template-columns: minmax(200px, .6fr) minmax(320px, 2.15fr); }
+#collection-grid[data-state="empty"] .collection-run-pane { display: none; }
+@media (max-width: 1100px) and (min-width: 761px) {
+  #collection-grid { grid-template-columns: 220px minmax(0, 1fr); overflow: auto; align-content: start; }
+  #collection-grid .collection-library { grid-row: 1 / 3; max-height: 100%; position: sticky; top: 0; }
+  #collection-grid .collection-editor-pane { min-height: 400px; max-height: 560px; }
+  #collection-grid .collection-run-pane { grid-column: 2; border-top: 1px solid var(--line); }
+}
+@media (max-width: 760px) {
+  #collection-grid, #collection-grid[data-state="empty"] { grid-template-columns: minmax(0, 1fr); overflow: auto; align-content: start; }
+  #collection-grid .collection-pane { min-height: 0; overflow: visible; }
+  #collection-grid .collection-library .collection-tree { flex: none; min-height: 70px; max-height: 150px; overflow: auto; }
+  #collection-grid .collection-library .collection-scope-card { max-height: none; }
+  #collection-grid .collection-editor-pane { min-height: 320px; }
+  #collection-request-form { overflow: visible; }
+  #collection-grid .collection-run-pane { grid-column: 1; }
+  .collection-form-row { grid-template-columns: minmax(0, 1fr); }
+  .collection-response-card .repeater-response { flex: none; min-height: 160px; max-height: 300px; }
+  .collection-response-card { flex: none; }
+  #screen-api-collection .screen-head { padding: 10px 12px; }
+  #screen-api-collection .screen-head-actions { display: none; }
+}

@@ -256,6 +256,14 @@ Large captures use an explicit 8-million UTF-16-unit search budget, newest
 requests first. A partial-search notice reports inspected and omitted coverage
 and suggests narrowing filters. See the [content search design](../../docs/product/traffic-content-search-v1.md).
 
+Collection uses a saved-request library, template editor, and submitted-response
+pane. Headers, Body, and Variables are keyboard-accessible request sections;
+responses have Body and Headers views with the submitted run identity. Folder
+settings and history are expandable. Unsaved edits stay with the selected item
+until explicitly saved or discarded, including across refresh failures. Run is
+labeled **Save & Run** when it will first persist edits. Selection never sends.
+See [API Collection v1](../../docs/product/api-collection-v1.md).
+
 The dark theme uses [Rosé Pine Moon](https://rosepinetheme.com/palette/), with
 slightly brighter secondary labels for legibility. Appearance switches to the
 existing light theme.
@@ -395,6 +403,22 @@ receipt before accepting rendered behavior. A startup error cannot produce a
 passing receipt. These browser fixtures do not replace real Rust/Oxc HTTP/CLI
 integration, native live WKWebView testing, or macOS package validation. Stored
 `reb://` evidence still reports Sources facts as unsupported.
+
+Collection has a separate mode on the same sandbox-preserving browser QA driver:
+
+```sh
+REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium)" \
+  node tools/check-origin-trace-debugger.mjs --collection-ui-browser
+```
+
+It uses a synthetic loopback collection store and scripted disposable transport,
+never a real target request. CI checks pointer/keyboard authoring, dirty draft
+ownership, invalid/failed/conflicting saves, explicit Save & Run, late-result
+identity, inert response text, independent response scroll, load retry, and
+760/360 px layouts. Genuine screenshots and success-only validation are retained
+under `build/collection-ui-qa`. The normal JavaScript gate separately exercises
+actual controller functions for deterministic failure and stale-result races;
+those DOM fixtures do not establish rendered acceptance.
 
 ### Interface styling
 

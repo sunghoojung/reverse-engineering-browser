@@ -14,6 +14,14 @@ activation or transport yet, and the working CDP worker extractor is unchanged.
 Shared/service workers remain unsupported. See the
 [status, privacy gates, identity contract, and release checklist](../../../protocol/native-worker-source-v1.md).
 
+## Native worker metadata foundation
+
+The separate dormant [metadata queue and projection](../../../protocol/native-worker-observation-v1.md)
+models dedicated-worker lifecycle, compile identity and exact tagged direct-message
+pairs without retaining message bodies. Patch 0011 adds disabled pinned Blink
+observation points and carries a separate tag through direct in-process messages. It has no browser-authoritative controller,
+production transport, broker/UI adapter or activation yet.
+
 ## Native console
 
 The disabled-by-default native console is a separate mutation path. Patch 0011

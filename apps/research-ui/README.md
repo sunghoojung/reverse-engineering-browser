@@ -12,6 +12,11 @@ and limits.
 
 ## Connected investigations
 
+**Advanced** is a manually opened workspace chooser. Completed workspace
+navigation closes it at every width; choosing an item returns keyboard focus
+to its summary. Linked Back/Forward keeps its existing destination-focus
+restoration. A refused link leaves the current workspace and chooser intact.
+
 Cross-workspace navigation uses one in-memory Back/Forward trail (at most 24
 stops). Alt+Left and Alt+Right work outside editors; visible controls remain
 available. Returns validate the exact retained session/event or artifact/hash,

@@ -48,9 +48,72 @@ export async function checkInvestigationCore(root) {
   const fixture = investigationFixture({handle:async()=>false,release(){}});
   assert(evidence.isBrokerResponse({count:1,events:[fixture.event]}),'Synthetic investigation event must pass normal broker admission');
   assert(evidence.isOriginTraceResponse(fixture.trace),'Synthetic trace must pass the production trace contract');
+  await checkAdvancedNavigation(root);
   await checkInvestigationReturns(root);
   await checkCollectionNavigation(root, source);
   console.log('PASS investigation exact identity, u64 boundaries, CDP correlation separation, stale/ambiguous resolution, bounded branching return history and packaged asset wiring (not rendered QA)');
+}
+
+// Exercise the actual shared-shell switch, rather than a navigation stub. A
+// workspace under Advanced is still a destination, not a request to open its menu.
+export async function checkAdvancedNavigation(root) {
+  const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
+  const source=app.slice(app.indexOf('      function showScreen('),app.indexOf('      async function refresh()'));
+  const advanced=['backtrace','memory','experiments','analyst','tools'];
+  const names=['traffic','api-collection','sources','signals',...advanced,'evidence','vm','field-provenance'];
+  for(const narrow of [false,true]) {
+    const focused=[],frames=[];let current='traffic';
+    const document={activeElement:null};
+    const summary={focus(){document.activeElement=this;focused.push('summary');}};
+    const group={open:false,contains:node=>node===summary||buttons.some(button=>advanced.includes(button.dataset.screen)&&node===button),querySelector:()=>summary};
+    const buttons=names.filter(name=>!['evidence','vm','field-provenance'].includes(name)).map(name=>({
+      dataset:{screen:name},classList:{contains:value=>value==='nav-button'},
+      closest:()=>advanced.includes(name)?group:null,
+      setAttribute(key,value){this[key]=value;},removeAttribute(key){delete this[key];},
+    }));
+    const screens=names.map(name=>({id:`screen-${name}`,hidden:name!=='traffic'}));
+    const destination={focus(){document.activeElement=this;focused.push('destination');}};
+    document.querySelectorAll=selector=>selector==='.screen'?screens:selector==='.nav-button'?buttons:[];
+    document.querySelector=selector=>selector==='#advanced-navigation'?group:selector.endsWith('.back-button')?destination:null;
+    const noop=()=>{};
+    const context={document,state:{originTraceStatus:'idle',sourceHooksOpen:false},investigationRevision:0,
+      investigationBeforeScreen:name=>{current=name;},investigationScreen:()=>current,
+      evidencePackagePanel:{setVisible:noop},sourceFactsPanel:{cancel:noop},
+      window:{matchMedia:()=>({matches:narrow})},requestAnimationFrame:callback=>frames.push(callback),selectedSource:()=>null,
+      elements:{requestRows:{querySelectorAll:()=>[]},requestFilter:destination}};
+    for(const name of ['renderFingerprintActivity','renderRuntimeHookTraffic','renderBacktrace','renderExperiment','renderApiCollection','refreshApiCollection','renderLocalAnalyst','refreshLocalAnalyst','renderTools','refreshDecoderEngine','renderDebugger','renderSources','renderMemory','renderVmLab'])context[name]=noop;
+    const showScreen=runInNewContext(source+';showScreen',context);
+    const flush=()=>{for(const callback of frames.splice(0))callback();};
+    for(const name of ['traffic','backtraces','sources','tools','sources','backtrace','traffic','evidence']) {
+      showScreen(name);flush();
+      assert.equal(group.open,false,`${name}: linked navigation must not open or retain Advanced at ${narrow?'narrow':'wide'} widths`);
+      assert.equal(screens.filter(screen=>!screen.hidden).length,1);
+    }
+    for(const name of advanced) {
+      const button=buttons.find(button=>button.dataset.screen===name);
+      group.open=true;document.activeElement=button;focused.length=0;
+      showScreen(name,button);flush();
+      assert.equal(group.open,false,`${name}: choosing a menu destination must dismiss Advanced`);
+      assert.equal(button['aria-current'],'page');
+      assert.equal(document.activeElement,summary,'A hidden menu item must not retain focus');
+      assert.deepEqual(focused,['summary']);
+      // Selecting the current workspace again is also a completed choice.
+      group.open=true;showScreen(name,button);assert.equal(group.open,false);
+    }
+    const primary=buttons.find(button=>button.dataset.screen==='sources');
+    group.open=true;document.activeElement=primary;focused.length=0;
+    showScreen('sources',primary);flush();
+    assert.equal(group.open,false);assert.equal(document.activeElement,primary);
+    assert.deepEqual(focused,[],'Primary navigation must keep its own focus');
+    group.open=true;document.activeElement=destination;focused.length=0;
+    showScreen('tools');
+    assert.equal(group.open,false);assert.deepEqual(focused,[],'Linked navigation must not redirect unrelated focus to the menu');
+    flush();assert.equal(document.activeElement,destination);
+    group.open=true;document.activeElement=buttons.find(button=>button.dataset.screen==='backtrace');focused.length=0;
+    showScreen('sources');assert.equal(document.activeElement,summary);flush();
+    assert.deepEqual(focused,['summary','destination'],'Existing destination focus must follow safe dismissal');
+  }
+  console.log('PASS shared Advanced chooser dismissal, repeated choices, primary focus and linked destination focus at wide/narrow widths (production functions, not rendered QA)');
 }
 
 export function investigationFixture(base) {
@@ -77,20 +140,31 @@ export function investigationFixture(base) {
 export async function checkInvestigationInteractions({evaluate,viewport,click,key,wheel,screenshot,dialog,typeText,fixture}) {
   const until=async(expression,message)=>{const start=Date.now();while(Date.now()-start<5000){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,25));}assert.fail(message);};
   const enter=()=>key('Enter','Enter',{windowsVirtualKeyCode:13,text:'\r',unmodifiedText:'\r'});
+  const closed=async label=>{
+    assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),false,`${label}: Advanced must be dismissed`);
+    assert.equal(await evaluate("Boolean(document.activeElement?.closest('#advanced-navigation .advanced-items'))"),false,`${label}: focus must not remain in the hidden chooser`);
+  };
+  const arrived=async(name,label)=>{
+    await until(`investigationScreen()===${JSON.stringify(name)}`,`${label}: destination did not open`);
+    await closed(label);
+  };
   const paneClick=async selector=>{
     const delta=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});const p=n?.closest('#source-sidebar .debug-panes, .trace-inspector, .decoder-column');if(!n)throw Error('Missing control');if(!p)return 0;const r=n.getBoundingClientRect(),b=p.getBoundingClientRect();return r.top<b.top?r.top-b.top:r.bottom>b.bottom?r.bottom-b.bottom:0})()`);
     if(delta){const parent=await evaluate(`(()=>{const p=document.querySelector(${JSON.stringify(selector)}).closest('#source-sidebar .debug-panes, .trace-inspector, .decoder-column');if(p.id)return '#'+p.id;return p.classList.contains('debug-panes')?'#source-sidebar .debug-panes':p.classList.contains('trace-inspector')?'.trace-inspector':'.decoder-column'})()`);await wheel(parent,delta);}
     await click(selector);
   };
   await until('state.requests.length===1 && state.artifacts.length===2','Synthetic request and sources did not load');
+  await closed('Initial workspace');
   const derivedBefore=fixture.calls.filter(call=>call.path==='/api/deobfuscation').length;
   await click('.request-row'); await click('#request-evidence-toggle');
   const origin=await evaluate('({id:state.selectedRequestId,tab:state.inspectorTab})');
   await click('#trace-origin');
   await until('state.originTraceStatus===\'ready\'','Request trace did not load');
+  await arrived('backtrace','Request to Backtrace');
   assert.match(await evaluate("document.querySelector('#trace-step-details').textContent"),/No value flow|Recorded event link|Recorded link/);
   await paneClick('[data-investigation-source]');
   await until('state.selectedArtifactId===\'7\' && selectedSource().content!==undefined','Trace source did not open');
+  await arrived('sources','Backtrace to retained source');
   await click('#source-facts-toggle');
   await until("document.querySelectorAll('#source-facts-report .source-fact').length>0",'Facts did not render');
   await paneClick('.source-fact > button');
@@ -98,49 +172,50 @@ export async function checkInvestigationInteractions({evaluate,viewport,click,ke
   const sourcePosition=await evaluate("({top:document.querySelector('#source-sidebar .debug-panes').scrollTop,code:elements.sourceCodeWrap.scrollTop})");
   await screenshot('investigation-source-original');
   await click('#investigation-decode-range');
-  assert.equal(await evaluate('investigationScreen()'),'tools');
+  await arrived('tools','Verified range to Decoder');
   assert.equal(await evaluate('toolsElements.inputEncoding.value'),'base64');
   assert.equal(await evaluate('toolsElements.input.value'),Buffer.from('雪').toString('base64'));
   assert.equal(await evaluate('state.decoderSteps.length'),0,'Opening Decoder must not run a transform');
   assert.match(await evaluate("document.querySelector('#investigation-decoder-origin').textContent"),/original bytes.*SHA-256/);
   await screenshot('investigation-decoder-evidence');
   await click('#investigation-back');
-  await until("investigationScreen()==='sources'",'Back to original source failed');
+  await arrived('sources','Back to original source');
   assert.equal(await evaluate('state.selectedArtifactId'),'7');
   await until("document.activeElement.id==='investigation-decode-range'",'Source trigger focus was not restored');
   assert.equal(await evaluate("document.querySelector('#source-sidebar .debug-panes').scrollTop"),sourcePosition.top,'Source details scroll was not restored');
   assert.equal(await evaluate('elements.sourceCodeWrap.scrollTop'),sourcePosition.code,'Original source scroll was not restored');
-  await click('#investigation-back');await until("investigationScreen()==='backtrace'",'Back to trace failed');
+  await click('#investigation-back');await arrived('backtrace','Back to trace');
   assert(await evaluate('Boolean(state.selectedTraceRow)'),'Trace selection was lost');
-  await evaluate("document.querySelector('#investigation-back').focus()");await enter();await until("investigationScreen()==='traffic'",'Keyboard Back to request failed');
+  await evaluate("document.querySelector('#investigation-back').focus()");await enter();await arrived('traffic','Keyboard Back to request');
   assert.equal(await evaluate('state.selectedRequestId'),origin.id);assert.equal(await evaluate('state.inspectorTab'),origin.tab);
   assert.equal(await evaluate('document.activeElement.id'),'trace-origin','Origin trigger focus was not restored');
   assert.equal(await evaluate('toolsElements.input.value'),Buffer.from('雪').toString('base64'),'Decoder draft was lost on return');
   await screenshot('investigation-returned-request');
   // Native keyboard activation of the shared return controls.
-  await click('#investigation-forward');await until("investigationScreen()==='backtrace'",'Forward failed');
+  await click('#investigation-forward');await arrived('backtrace','Forward to trace');
   await key('ArrowLeft','ArrowLeft',{windowsVirtualKeyCode:37,modifiers:1});
-  await until("investigationScreen()==='traffic'",'Alt+Left failed');
+  await arrived('traffic','Alt+Left');
   await key('ArrowRight','ArrowRight',{windowsVirtualKeyCode:39,modifiers:1});
-  await until("investigationScreen()==='backtrace'",'Alt+Right failed');
-  await click('#investigation-forward');await until("investigationScreen()==='sources'",'Forward to Sources failed');
-  await click('#investigation-forward');await until("investigationScreen()==='tools'",'Forward to Decoder failed');
+  await arrived('backtrace','Alt+Right');
+  await click('#investigation-forward');await arrived('sources','Forward to Sources');
+  await click('#investigation-forward');await arrived('tools','Forward to Decoder');
   await click('#decoder-input');await key('a','KeyA',{windowsVirtualKeyCode:65,modifiers:2});await key('Backspace','Backspace',{windowsVirtualKeyCode:8});await typeText('bmV3ZXI=');
   await until("toolsElements.input.value==='bmV3ZXI='",'Editing the Decoder draft through its control failed');
   assert.match(await evaluate("document.querySelector('#investigation-decoder-origin').textContent"),/Input changed/);
   await paneClick('#investigation-decoder-origin button');
   await until("investigationScreen()==='sources' && document.querySelector('#source-position').textContent.includes('Original UTF-8 bytes')",'Open original evidence did not reveal the verified range');
+  await arrived('sources','Open original evidence');
   assert.equal(await evaluate('toolsElements.input.value'),'bmV3ZXI=','Origin navigation replaced a newer Decoder draft');
   const replace=async accept=>{
     const pending=paneClick('#investigation-decode-range');let clickError;pending.catch(error=>{clickError=error;});
     try {await dialog(accept);await pending;} catch(error) {await pending.catch(()=>{});throw clickError||error;}
   };
-  await replace(false);assert.equal(await evaluate('investigationScreen()'),'sources');assert.equal(await evaluate('toolsElements.input.value'),'bmV3ZXI=');
-  await replace(true);await until("investigationScreen()==='tools'",'Confirmed handoff did not open Decoder');
+  await replace(false);await arrived('sources','Declined Decoder replacement');assert.equal(await evaluate('toolsElements.input.value'),'bmV3ZXI=');
+  await replace(true);await arrived('tools','Confirmed Decoder replacement');
   assert.equal(await evaluate('toolsElements.input.value'),Buffer.from('雪').toString('base64'));
   assert.equal(await evaluate('state.decoderSteps.length'),0,'Replacement automatically executed a transformation');
   await screenshot('investigation-confirmed-replacement');
-  for(let stop=0;stop<24 && await evaluate('investigationScreen()')!=='backtrace';stop++)await click('#investigation-back');
+  for(let stop=0;stop<24 && await evaluate('investigationScreen()')!=='backtrace';stop++){await click('#investigation-back');await closed('Return after origin/replacement');}
   await until("investigationScreen()==='backtrace'",'Could not return to the exact trace after origin/replacement actions');
   assert.equal(fixture.calls.filter(call=>call.path==='/api/deobfuscation').length,derivedBefore,'Investigation pivots automatically requested derived analysis');
   // Synthetic delivery faults exercise production identity and cancellation gates.
@@ -149,33 +224,69 @@ export async function checkInvestigationInteractions({evaluate,viewport,click,ke
   fixture.traceMode='pending';await click('#trace-load');
   const start=Date.now();while(!fixture.tracePending.length&&Date.now()-start<5000)await new Promise(resolve=>setTimeout(resolve,25));
   assert(fixture.tracePending.length);await click('#investigation-back');fixture.traceMode='ready';fixture.releaseTrace();
-  await new Promise(resolve=>setTimeout(resolve,100));assert.equal(await evaluate('investigationScreen()'),'traffic');assert.notEqual(await evaluate('state.originTraceStatus'),'loading');
+  await new Promise(resolve=>setTimeout(resolve,100));await arrived('traffic','Leave pending trace');assert.notEqual(await evaluate('state.originTraceStatus'),'loading');
   fixture.artifactMode='missing';await evaluate('refreshArtifacts()');
-  await click('#trace-origin');await until("state.originTraceStatus==='ready'",'Retry trace failed');
+  await click('#trace-origin');await until("state.originTraceStatus==='ready'",'Retry trace failed');await arrived('backtrace','Retry trace with missing source');
   assert(await evaluate("document.querySelector('[data-investigation-source]').disabled"));
   assert.match(await evaluate("document.querySelector('#trace-step-details').textContent"),/not retained/);
   fixture.artifactMode='ambiguous';await evaluate('refreshArtifacts();').then(()=>evaluate('renderBacktrace()'));
   assert.match(await evaluate("document.querySelector('#trace-step-details').textContent"),/Multiple retained artifacts/);
   fixture.artifactMode='ready';await evaluate('refreshArtifacts()');await evaluate('renderBacktrace()');
-  await paneClick('[data-investigation-source]');
+  await paneClick('[data-investigation-source]');await arrived('sources','Recovered retained source');
   // Console location is a search, never exact artifact navigation or byte offsets.
   const before=await evaluate('state.selectedArtifactId');
   await evaluate("document.dispatchEvent(new CustomEvent('reb-console-location',{detail:{url:'https://fixture.invalid/facts-8.js',line:999,unavailable:false}}))");
   assert.equal(await evaluate('state.selectedArtifactId'),before);
   assert.match(await evaluate("document.querySelector('#investigation-source-search').textContent"),/do not verify shared identity/);
-  await click('#investigation-source-search button:last-child');
+  await click('#investigation-source-search button:last-child');await arrived('sources','Explicit unverified search candidate');
   // An old request identity cannot silently reopen a reused ID in a new session.
   fixture.session='12';await evaluate('refresh()');await until("state.events[0]?.session_id==='12'",'Session change did not load');
+  await click('#advanced-navigation > summary');
+  assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),true);
   await click('#investigation-back');assert.equal(await evaluate('investigationScreen()'),'sources');
+  assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),true,'A refused return must not blanket-close a manually opened chooser');
+  await click('#advanced-navigation > summary');await closed('Manual dismissal after refused return');
   assert.match(await evaluate("document.querySelector('#investigation-notice').textContent"),/Return unavailable/);
   for(const size of [[760,560],[360,740]]){
     await viewport(...size);await click('#investigation-navigation summary');
     if(!await evaluate("document.querySelector('#investigation-navigation details').open"))await click('#investigation-navigation summary');
     assert(await evaluate("(()=>{const b=document.querySelector('#investigation-back').getBoundingClientRect();return b.left>=0&&b.right<=innerWidth&&b.top>=0&&b.bottom<=innerHeight})()"));
+    await closed(`Narrow stale return ${size[0]}`);
     await screenshot(`investigation-return-unavailable-${size[0]}`);
   }
+  // Manual use stays native: genuine summary/item clicks and Enter/Tab/Escape,
+  // never a test-only assignment to details.open or synthetic button.click().
+  for(const size of [[1440,900],[760,560],[360,740]]) {
+    await viewport(...size);
+    const choices=size[0]===1440?['backtrace','memory','experiments','analyst','tools']:['tools'];
+    for(const name of choices) {
+      await click('#advanced-navigation > summary');
+      await until("document.querySelector('#advanced-navigation').open",'Pointer did not open Advanced');
+      await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+      assert.equal(await evaluate("document.querySelector('#advanced-navigation').open"),true,'The manual chooser must stay open until a choice');
+      if(name==='tools')await screenshot(`investigation-manual-chooser-${size[0]}`);
+      await click(`#advanced-navigation .nav-button[data-screen="${name}"]`);
+      await arrived(name,`Pointer Advanced → ${name} at ${size[0]}`);
+      assert.equal(await evaluate("document.activeElement===document.querySelector('#advanced-navigation > summary')"),true,'Choosing a hidden menu item must return focus to summary');
+    }
+    await enter();await until("document.querySelector('#advanced-navigation').open",'Enter did not reopen Advanced');
+    await key('Tab','Tab',{windowsVirtualKeyCode:9});
+    assert.equal(await evaluate('document.activeElement.dataset.screen'),'backtrace','Tab must enter the chooser');
+    await key('Escape','Escape',{windowsVirtualKeyCode:27});await closed('Escape from chooser');
+    assert.equal(await evaluate("document.activeElement===document.querySelector('#advanced-navigation > summary')"),true);
+    for(let repeat=0;repeat<2;repeat++) {
+      await enter();await until("document.querySelector('#advanced-navigation').open",'Keyboard could not reopen Advanced');
+      await key('Tab','Tab',{windowsVirtualKeyCode:9});await enter();
+      await arrived('backtrace',`Keyboard choice ${repeat+1} at ${size[0]}`);
+      assert.equal(await evaluate("document.activeElement===document.querySelector('#advanced-navigation > summary')"),true);
+    }
+    await screenshot(`investigation-keyboard-choice-${size[0]}`);
+    await click('#advanced-navigation > summary');
+    await click('.nav-button[data-screen="sources"]');await arrived('sources',`Primary choice at ${size[0]}`);
+    assert.equal(await evaluate('document.activeElement.dataset.screen'),'sources','Primary choice must keep its own focus');
+  }
   assert.equal(fixture.calls.filter(call=>call.method!=='GET').length,0,'Investigation navigation issued an action request');
-  return {status:'passed',path:'existing browser development driver',source:'original synthetic request + immutable UTF-8/BOM artifact + explicit synthetic trace/facts delivery',viewports:[[1440,900],[760,560],[360,740]],checks:['request → trace → exact session artifact → verified original UTF-8 range → Decoder evidence → Back','no derived-analysis request or automatic transform/send/capture/action','real Open original evidence click','native decline/confirm replacement dialogs preserve newer drafts','preserved request/trace/source selection, Decoder draft and trigger focus','keyboard Back/Forward','missing and ambiguous source','foreign-session trace rejection','interrupted trace delivery','Console URL search does not navigate','session-change stale return','bounded narrow controls']};
+  return {status:'passed',path:'existing browser development driver',source:'original synthetic request + immutable UTF-8/BOM artifact + explicit synthetic trace/facts delivery',viewports:[[1440,900],[760,560],[360,740]],checks:['Advanced dismissed at every linked pivot and Back/Forward without hidden menu focus','manual pointer choices, Enter/Tab/Escape and repeated selection at all three widths','refused return preserves an explicitly open chooser','request → trace → exact session artifact → verified original UTF-8 range → Decoder evidence → Back','no derived-analysis request or automatic transform/send/capture/action','real Open original evidence click','native decline/confirm replacement dialogs preserve newer drafts','preserved request/trace/source selection, Decoder draft and trigger focus','keyboard Back/Forward','missing and ambiguous source','foreign-session trace rejection','interrupted trace delivery','Console URL search does not navigate','session-change stale return','bounded narrow controls']};
 }
 
 // These regressions exercise the production navigation and selection functions,

@@ -21,3 +21,5 @@ mod workspace;
 pub use app::App;
 pub use config::Options;
 pub use endpoint::PublishedEndpoint;
+
+pub use durable::write_private_noclobber;

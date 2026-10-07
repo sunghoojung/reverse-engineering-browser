@@ -338,9 +338,10 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
     let binary = definition["responses"]["200"]["content"]
         .get("application/octet-stream")
         .is_some();
-    if binary != output.is_some() {
-        return Err("Binary responses require --output PATH or --output -; JSON responses do not accept --output".into());
+    if binary && output.is_none() {
+        return Err("Binary responses require --output PATH or --output -".into());
     }
+    let export_package = definition["operationId"] == "export_evidence_package";
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -373,7 +374,10 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
         if raw.len() as u64 > limit {
             return Err("Request body exceeds its byte limit".into());
         }
-        if definition["operationId"] == "validate_evidence_package" {
+        if matches!(
+            definition["operationId"].as_str(),
+            Some("validate_evidence_package" | "export_evidence_package")
+        ) {
             origin_trace_backend::evidence_package::parse_bytes(&raw)?;
             request = request.header("content-type", "application/json").body(raw);
         } else {
@@ -398,6 +402,11 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
         return Ok(0);
     }
     let mut bytes = Vec::new();
+    let response_limit = if export_package && status.is_success() {
+        origin_trace_backend::evidence_package::MAX_BYTES
+    } else {
+        64 * 1024 * 1024
+    };
     loop {
         let chunk = match response.chunk().await {
             Ok(chunk) => chunk,
@@ -417,7 +426,7 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
         let Some(chunk) = chunk else {
             break;
         };
-        if bytes.len().saturating_add(chunk.len()) > 64 * 1024 * 1024 {
+        if bytes.len().saturating_add(chunk.len()) > response_limit {
             if json_errors && !status.is_success() {
                 eprintln!(
                     "{}",
@@ -429,7 +438,12 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 );
                 return Ok(2);
             }
-            return Err("API response exceeds 64 MiB".into());
+            return Err(if export_package {
+                "Evidence package response exceeds its byte limit"
+            } else {
+                "API response exceeds 64 MiB"
+            }
+            .into());
         }
         bytes.extend_from_slice(&chunk);
     }
@@ -448,15 +462,21 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
         }
         return Ok(1);
     }
+    if !binary {
+        if export_package {
+            let result = origin_trace_backend::evidence_package::validate_bytes(&bytes)?;
+            if result["status"] != "valid" {
+                return Err("The exported evidence package failed validation".into());
+            }
+        } else {
+            let _: Value = serde_json::from_slice(&bytes)?;
+        }
+    }
     if let Some(path) = output {
         if path == "-" {
             std::io::stdout().write_all(&bytes)?;
         } else {
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)?
-                .write_all(&bytes)?;
+            origin_trace_backend::write_private_noclobber(std::path::Path::new(&path), &bytes)?;
         }
     } else {
         let value: Value = serde_json::from_slice(&bytes)?;

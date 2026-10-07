@@ -63,3 +63,20 @@ Content bytes, artifact count, and manifest bytes have independent bounds, so
 empty artifacts cannot grow storage or duplicate checks indefinitely. In
 standard-input mode, the receiver stops on invalid or rejected input because a
 pipe cannot resynchronize safely.
+
+## Store ownership
+
+`ArtifactReceiver` itself holds the immutable mode-0600 `evidence.reb-lock-v1`
+guard exclusively from construction through its final close. A second receiver
+or shared package export cannot bypass that ownership. Manifest, blob and
+temporary I/O stays relative to pinned directory descriptors; symlink/hardlink
+aliases fail before mutation. Temporary files use exclusive creation and blobs
+use atomic no-clobber publication before manifest acknowledgment. An orphaned
+temporary entry or unsupported linked store fails safely rather than overwriting
+existing evidence. Store roots are user-owned and not group/other writable.
+
+The fixed `Artifact store ready` diagnostic follows successful initialization.
+A live idle receiver still owns its writer lease after the broker stops. Stop
+this receiver before artifact package export; never remove or replace its guard.
+See [Evidence Package v1](../../protocol/evidence-package-v1.md#cooperative-leases-and-safe-local-files)
+for the cooperative threat boundary and legacy-store compatibility.

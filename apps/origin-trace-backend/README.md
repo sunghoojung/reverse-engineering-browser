@@ -118,4 +118,15 @@ versioned [package contract](../../protocol/evidence-package-v1.md) defines
 bounded duplicate-rejecting parsing, canonical content identity, reference and
 coverage checks, and the exact metadata whitelist. Validity never authenticates
 an exporter or re-verifies omitted artifact bytes. This operation does not read
-or write configured evidence stores; selected-store export is not implemented.
+or write configured evidence stores.
+
+`POST /api/evidence/packages/export` (`export_evidence_package`) now reads exact
+explicit metadata selections from cooperatively stopped configured stores.
+Shared nonblocking leases exclude updated broker, receiver and backend-clear
+writers; pinned safe descriptors, complete bounded scans and full selected-blob
+hashes precede canonical output. Raw payloads, URLs, headers, bodies and artifact
+bytes are omitted. Missing legacy guards are unsupported for export and clear;
+no socket or capture boolean substitutes for a lease. The package contract
+explains reserved paths, private directories, limits and threat boundaries.
+CLI `--output PATH` is private, atomic and no-clobber for JSON or binary output;
+an export must pass validation before its final file is created.

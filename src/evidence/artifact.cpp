@@ -1,5 +1,6 @@
 #include "reb/artifact.hpp"
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -19,44 +20,6 @@
 
 namespace reb {
 namespace {
-
-bool SyncFile(const std::filesystem::path& path, std::string& error) {
-  const int descriptor = open(path.c_str(), O_RDONLY | O_CLOEXEC);
-  if (descriptor < 0) {
-    error = "Unable to open file for durable commit: " + std::string(std::strerror(errno));
-    return false;
-  }
-  if (fsync(descriptor) != 0) {
-    const int sync_error = errno;
-    close(descriptor);
-    error = "Unable to durably commit file: " + std::string(std::strerror(sync_error));
-    return false;
-  }
-  if (close(descriptor) != 0) {
-    error = "Unable to close durably committed file: " + std::string(std::strerror(errno));
-    return false;
-  }
-  return true;
-}
-
-bool SyncDirectory(const std::filesystem::path& path, std::string& error) {
-  const int descriptor = open(path.c_str(), O_RDONLY | O_CLOEXEC);
-  if (descriptor < 0) {
-    error = "Unable to open directory for durable commit: " + std::string(std::strerror(errno));
-    return false;
-  }
-  if (fsync(descriptor) != 0) {
-    const int sync_error = errno;
-    close(descriptor);
-    error = "Unable to durably commit directory: " + std::string(std::strerror(sync_error));
-    return false;
-  }
-  if (close(descriptor) != 0) {
-    error = "Unable to close durably committed directory: " + std::string(std::strerror(errno));
-    return false;
-  }
-  return true;
-}
 
 constexpr std::array<std::uint32_t, 64> kSha256RoundConstants = {
     0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U, 0x3956c25bU, 0x59f111f1U, 0x923f82a4U,
@@ -431,11 +394,6 @@ void SaturatingAdd(std::uint64_t& value, const std::uint64_t increment) noexcept
               : value + increment;
 }
 
-void RemoveFileBestEffort(const std::filesystem::path& path) noexcept {
-  std::error_code ignored;
-  std::filesystem::remove(path, ignored);
-}
-
 }  // namespace
 
 bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
@@ -523,88 +481,105 @@ const char* ArtifactCaptureOriginName(const ArtifactCaptureOrigin origin) noexce
 
 ArtifactReceiver::ArtifactReceiver(std::filesystem::path store_directory,
                                    ArtifactReceiverLimits limits)
-    : store_directory_(std::move(store_directory)),
-      blob_directory_(store_directory_ / "blobs"),
-      manifest_path_(store_directory_ / "manifest.jsonl"),
-      limits_(limits) {
+    : store_directory_(std::move(store_directory)), limits_(limits) {
   if (limits_.max_artifact_bytes == 0 || limits_.max_store_bytes == 0 ||
       limits_.max_artifact_bytes > limits_.max_store_bytes || limits_.max_artifacts == 0 ||
       limits_.max_manifest_bytes == 0) {
     throw std::invalid_argument("Artifact receiver limits are invalid");
   }
   std::error_code error;
-  std::filesystem::create_directories(blob_directory_, error);
+  const bool created_store = std::filesystem::create_directories(store_directory_, error);
   if (error) {
     throw std::runtime_error("Unable to create artifact store: " + error.message());
   }
-  std::filesystem::permissions(store_directory_, std::filesystem::perms::owner_all,
-                               std::filesystem::perm_options::replace, error);
+  if (created_store) {
+    std::filesystem::permissions(store_directory_, std::filesystem::perms::owner_all,
+                                 std::filesystem::perm_options::replace, error);
+  }
   if (error) {
     throw std::runtime_error("Unable to secure artifact store: " + error.message());
   }
-  std::filesystem::permissions(blob_directory_, std::filesystem::perms::owner_all,
-                               std::filesystem::perm_options::replace, error);
-  if (error) {
-    throw std::runtime_error("Unable to secure artifact blob store: " + error.message());
+  if (!evidence_guard_.Acquire(store_directory_, "evidence.reb-lock-v1")) {
+    throw std::runtime_error("Artifact store is busy or has an unsupported evidence guard");
   }
-  for (const auto& entry : std::filesystem::directory_iterator(blob_directory_)) {
-    if (!entry.is_regular_file() || entry.path().extension() != ".bin") {
+  const int directory = evidence_guard_.Directory();
+  if (!blob_directory_.Open(directory, "blobs")) {
+    throw std::runtime_error("Unable to open safe artifact blob directory");
+  }
+  const int iterator_descriptor = dup(blob_directory_.Descriptor());
+  DIR* const entries = iterator_descriptor < 0 ? nullptr : fdopendir(iterator_descriptor);
+  if (!entries) {
+    if (iterator_descriptor >= 0) {
+      close(iterator_descriptor);
+    }
+    throw std::runtime_error("Unable to inspect artifact blob directory");
+  }
+  bool valid_blobs = true;
+  while (true) {
+    errno = 0;
+    const auto* entry = readdir(entries);
+    if (!entry) {
+      valid_blobs = errno == 0;
+      break;
+    }
+    const std::string name(entry->d_name);
+    if (!name.ends_with(".bin")) {
       continue;
     }
-    const std::uint64_t size = entry.file_size();
-    if (size > std::numeric_limits<std::uint64_t>::max() - stored_bytes_) {
-      throw std::runtime_error("Artifact store byte count overflow");
+    struct stat metadata {};
+    if (fstatat(blob_directory_.Descriptor(), name.c_str(), &metadata, AT_SYMLINK_NOFOLLOW) != 0 ||
+        !EvidenceGuard::SafeFile(metadata) || metadata.st_size < 0 ||
+        static_cast<std::uint64_t>(metadata.st_size) >
+            std::numeric_limits<std::uint64_t>::max() - stored_bytes_) {
+      valid_blobs = false;
+      break;
     }
-    stored_bytes_ += size;
+    stored_bytes_ += static_cast<std::uint64_t>(metadata.st_size);
   }
-  if (stored_bytes_ > limits_.max_store_bytes) {
-    throw std::runtime_error("Existing artifact store exceeds its configured byte limit");
+  closedir(entries);
+  if (!valid_blobs || stored_bytes_ > limits_.max_store_bytes) {
+    throw std::runtime_error("Existing artifact blobs are unsafe or exceed the store limit");
   }
-
-  const bool manifest_exists = std::filesystem::exists(manifest_path_, error);
-  if (error) {
-    throw std::runtime_error("Unable to inspect artifact manifest: " + error.message());
+  struct stat metadata {};
+  if (fstatat(directory, "manifest.jsonl", &metadata, AT_SYMLINK_NOFOLLOW) != 0) {
+    if (errno == ENOENT) {
+      return;
+    }
+    throw std::runtime_error("Unable to inspect artifact manifest");
   }
-  if (manifest_exists) {
-    manifest_bytes_ = std::filesystem::file_size(manifest_path_, error);
-    if (error || manifest_bytes_ > limits_.max_manifest_bytes) {
-      throw std::runtime_error(error ? "Unable to size artifact manifest: " + error.message()
-                                     : "Existing artifact manifest exceeds its byte limit");
+  if (!EvidenceGuard::SafeFile(metadata) || metadata.st_size < 0 ||
+      static_cast<std::uint64_t>(metadata.st_size) > limits_.max_manifest_bytes) {
+    throw std::runtime_error("Existing artifact manifest is unsafe or exceeds its byte limit");
+  }
+  manifest_bytes_ = static_cast<std::uint64_t>(metadata.st_size);
+  EvidenceFile manifest;
+  manifest.Open(EvidenceGuard::OpenFile(directory, "manifest.jsonl", O_RDONLY), false);
+  if (!manifest) {
+    throw std::runtime_error("Unable to read safe artifact manifest");
+  }
+  if (manifest_bytes_ > 0) {
+    char last = 0;
+    if (pread(manifest.Descriptor(), &last, 1, static_cast<off_t>(manifest_bytes_ - 1)) != 1 ||
+        last != '\n') {
+      throw std::runtime_error("Artifact manifest ends with an incomplete record");
     }
-    std::filesystem::permissions(
-        manifest_path_, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-        std::filesystem::perm_options::replace, error);
-    if (error) {
-      throw std::runtime_error("Unable to secure artifact manifest: " + error.message());
+  }
+  std::string line;
+  while (std::getline(manifest, line)) {
+    std::uint64_t artifact_id = 0;
+    std::uint64_t session_id = 0;
+    if (!ParseManifestRecord(line, artifact_id, session_id) ||
+        (limits_.expected_session_id != 0 && session_id != limits_.expected_session_id) ||
+        !artifact_ids_.insert(artifact_id).second) {
+      throw std::runtime_error(
+          "Artifact manifest contains an invalid, duplicate, or mismatched record");
     }
-    std::ifstream manifest(manifest_path_, std::ios::binary);
-    if (!manifest) {
-      throw std::runtime_error("Unable to read artifact manifest");
+    if (artifact_ids_.size() > limits_.max_artifacts) {
+      throw std::runtime_error("Existing artifact manifest exceeds its artifact count limit");
     }
-    if (manifest_bytes_ > 0) {
-      manifest.seekg(-1, std::ios::end);
-      if (manifest.get() != '\n') {
-        throw std::runtime_error("Artifact manifest ends with an incomplete record");
-      }
-      manifest.seekg(0, std::ios::beg);
-    }
-    std::string line;
-    while (std::getline(manifest, line)) {
-      std::uint64_t artifact_id = 0;
-      std::uint64_t session_id = 0;
-      if (!ParseManifestRecord(line, artifact_id, session_id) ||
-          (limits_.expected_session_id != 0 && session_id != limits_.expected_session_id) ||
-          !artifact_ids_.insert(artifact_id).second) {
-        throw std::runtime_error(
-            "Artifact manifest contains an invalid, duplicate, or mismatched record");
-      }
-      if (artifact_ids_.size() > limits_.max_artifacts) {
-        throw std::runtime_error("Existing artifact manifest exceeds its artifact count limit");
-      }
-    }
-    if (!manifest.eof()) {
-      throw std::runtime_error("Unable to read artifact manifest");
-    }
+  }
+  if (!manifest.eof() || manifest.Failed()) {
+    throw std::runtime_error("Unable to read artifact manifest");
   }
 }
 
@@ -657,22 +632,15 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
                   "Artifact metadata is not valid printable UTF-8");
   }
 
-  const std::filesystem::path temporary_path =
-      store_directory_ / ("artifact-" + std::to_string(header.artifact_id) + ".part");
-  std::ofstream temporary(temporary_path, std::ios::binary | std::ios::trunc);
+  const int directory = evidence_guard_.Directory();
+  const std::string temporary_name = "artifact-" + std::to_string(header.artifact_id) + ".part";
+  EvidenceFile temporary;
+  temporary.Open(EvidenceGuard::OpenFile(directory, temporary_name, O_WRONLY | O_CREAT | O_EXCL),
+                 true);
   if (!temporary) {
-    return Reject(ArtifactReceiveStatus::kIoError, "Unable to open temporary artifact file");
+    return Reject(ArtifactReceiveStatus::kIoError, "Unable to create safe temporary artifact file");
   }
-  std::error_code permission_error;
-  std::filesystem::permissions(
-      temporary_path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-      std::filesystem::perm_options::replace, permission_error);
-  if (permission_error) {
-    temporary.close();
-    RemoveFileBestEffort(temporary_path);
-    return Reject(ArtifactReceiveStatus::kIoError,
-                  "Unable to secure temporary artifact file: " + permission_error.message());
-  }
+  const auto remove_temporary = [&] { return unlinkat(directory, temporary_name.c_str(), 0) == 0; };
 
   Sha256 sha256;
   std::array<std::uint8_t, 64 * 1024> buffer{};
@@ -684,57 +652,58 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
     const std::streamsize received = stream.gcount();
     if (received <= 0) {
       temporary.close();
-      RemoveFileBestEffort(temporary_path);
+      remove_temporary();
       return Reject(ArtifactReceiveStatus::kInvalid, "Truncated artifact content");
     }
     const auto received_size = static_cast<std::size_t>(received);
     temporary.write(reinterpret_cast<const char*>(buffer.data()), received);
     if (!temporary) {
       temporary.close();
-      RemoveFileBestEffort(temporary_path);
+      remove_temporary();
       return Reject(ArtifactReceiveStatus::kIoError, "Unable to write artifact content");
     }
     sha256.Update(buffer.data(), received_size);
     remaining -= static_cast<std::uint64_t>(received_size);
   }
   temporary.flush();
+  if (!temporary || fsync(temporary.Descriptor()) != 0) {
+    temporary.close();
+    remove_temporary();
+    return Reject(ArtifactReceiveStatus::kIoError, "Unable to durably flush artifact content");
+  }
   temporary.close();
   if (!temporary) {
-    RemoveFileBestEffort(temporary_path);
-    return Reject(ArtifactReceiveStatus::kIoError, "Unable to flush artifact content");
-  }
-  std::string sync_error;
-  if (!SyncFile(temporary_path, sync_error)) {
-    RemoveFileBestEffort(temporary_path);
-    return Reject(ArtifactReceiveStatus::kIoError, std::move(sync_error));
+    remove_temporary();
+    return Reject(ArtifactReceiveStatus::kIoError, "Unable to close artifact content");
   }
 
   const std::array<std::uint8_t, 32> digest = sha256.Final();
   if (!IsZeroDigest(header.expected_sha256) && digest != header.expected_sha256) {
-    RemoveFileBestEffort(temporary_path);
+    remove_temporary();
     return Reject(ArtifactReceiveStatus::kInvalid, "Artifact SHA-256 mismatch");
   }
   const std::string digest_hex = DigestHex(digest);
-  const std::filesystem::path blob_path = blob_directory_ / (digest_hex + ".bin");
-  std::error_code error;
-  const bool blob_exists = std::filesystem::exists(blob_path, error);
-  if (error) {
-    RemoveFileBestEffort(temporary_path);
-    return Reject(ArtifactReceiveStatus::kIoError,
-                  "Unable to inspect artifact blob: " + error.message());
+  const std::string blob_name = digest_hex + ".bin";
+  bool blob_exists = false;
+  if (linkat(directory, temporary_name.c_str(), blob_directory_.Descriptor(), blob_name.c_str(),
+             0) != 0) {
+    if (errno != EEXIST) {
+      remove_temporary();
+      return Reject(ArtifactReceiveStatus::kIoError, "Unable to commit artifact blob");
+    }
+    const int existing = EvidenceGuard::OpenFile(blob_directory_.Descriptor(), blob_name, O_RDONLY);
+    if (existing < 0) {
+      remove_temporary();
+      return Reject(ArtifactReceiveStatus::kIoError, "Existing artifact blob is unsafe");
+    }
+    close(existing);
+    blob_exists = true;
   }
-  if (blob_exists) {
-    std::filesystem::remove(temporary_path, error);
-  } else {
-    std::filesystem::rename(temporary_path, blob_path, error);
+  if (!remove_temporary()) {
+    return Reject(ArtifactReceiveStatus::kIoError, "Unable to retire temporary artifact link");
   }
-  if (error) {
-    RemoveFileBestEffort(temporary_path);
-    return Reject(ArtifactReceiveStatus::kIoError,
-                  "Unable to commit artifact blob: " + error.message());
-  }
-  if (!blob_exists && !SyncDirectory(blob_directory_, sync_error)) {
-    return Reject(ArtifactReceiveStatus::kIoError, std::move(sync_error));
+  if (fsync(blob_directory_.Descriptor()) != 0 || fsync(directory) != 0) {
+    return Reject(ArtifactReceiveStatus::kIoError, "Unable to durably commit artifact directories");
   }
 
   std::ostringstream manifest_entry;
@@ -754,39 +723,26 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
   const std::string manifest_line = manifest_entry.str();
   if (manifest_line.size() > limits_.max_manifest_bytes - manifest_bytes_) {
     if (!blob_exists) {
-      RemoveFileBestEffort(blob_path);
+      static_cast<void>(unlinkat(blob_directory_.Descriptor(), blob_name.c_str(), 0));
     }
     return Reject(ArtifactReceiveStatus::kTooLarge,
                   "Artifact manifest exceeds its configured byte limit");
   }
 
-  const bool manifest_existed = std::filesystem::exists(manifest_path_, error);
-  if (error) {
-    return Reject(ArtifactReceiveStatus::kIoError,
-                  "Unable to inspect artifact manifest: " + error.message());
-  }
-  std::ofstream manifest(manifest_path_, std::ios::app);
+  EvidenceFile manifest;
+  manifest.Open(EvidenceGuard::OpenFile(directory, "manifest.jsonl", O_WRONLY | O_APPEND | O_CREAT),
+                true);
   if (!manifest) {
-    return Reject(ArtifactReceiveStatus::kIoError, "Unable to open artifact manifest");
-  }
-  std::filesystem::permissions(
-      manifest_path_, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-      std::filesystem::perm_options::replace, permission_error);
-  if (permission_error) {
-    return Reject(ArtifactReceiveStatus::kIoError,
-                  "Unable to secure artifact manifest: " + permission_error.message());
+    return Reject(ArtifactReceiveStatus::kIoError, "Unable to open safe artifact manifest");
   }
   manifest << manifest_line;
   manifest.flush();
+  if (!manifest || fsync(manifest.Descriptor()) != 0 || fsync(directory) != 0) {
+    return Reject(ArtifactReceiveStatus::kIoError, "Unable to durably append artifact manifest");
+  }
   manifest.close();
   if (!manifest) {
-    return Reject(ArtifactReceiveStatus::kIoError, "Unable to write artifact manifest");
-  }
-  if (!SyncFile(manifest_path_, sync_error)) {
-    return Reject(ArtifactReceiveStatus::kIoError, std::move(sync_error));
-  }
-  if (!manifest_existed && !SyncDirectory(store_directory_, sync_error)) {
-    return Reject(ArtifactReceiveStatus::kIoError, std::move(sync_error));
+    return Reject(ArtifactReceiveStatus::kIoError, "Unable to close artifact manifest");
   }
 
   if (!blob_exists) {

@@ -1827,6 +1827,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Clear requires supported immutable output guards and safe pinned files. Legacy unguarded stores and unsupported safe-open platforms are unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "x-source": "apps/origin-trace-backend/src/app.rs",
@@ -3032,6 +3042,308 @@
             {
               "path": "apps/origin-trace-backend/src/evidence_package.rs",
               "symbol": "evidence_package::validate_bytes"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/evidence/packages/export": {
+      "post": {
+        "operationId": "export_evidence_package",
+        "summary": "Export selected metadata from cooperatively stopped evidence stores",
+        "description": "Reads only explicitly selected configured source sections, under shared nonblocking lifetime guards. Updated broker and artifact receiver writers must have exited. A missing legacy guard is unsupported; socket absence or a stop request is not a snapshot. Full bounded source scans establish exact selections, reference coverage and duplicates; full selected artifact byte hashes are verified. The response omits raw payloads, URLs, paths, headers, bodies and artifact bytes. Advisory leases do not protect against malicious same-user or privileged writers. No source execution, capture control, persistence, network access or retries.",
+        "tags": [
+          "evidence"
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "A closed exact selection, never paths, URLs, wildcards or caller evidence. Both arrays and protocol_version are required. Empty selection reads no source and cannot attest empty capture.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvidencePackageExportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Canonical metadata-only package. Source-store leases are held until these response bytes are constructed and descriptor/directory-entry checks finish. The server does not persist the package.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvidencePackage"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid selector, unknown member, duplicate JSON member or selector, invalid JSON or request profile.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Request-body, one-second total permit wait, or ten-second cooperative whole-export deadline expired. Filesystem reads may still block in the kernel; this is not a hard kill guarantee.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Local package worker or contract initialization failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Missing/unreadable source or guard, unsafe file/path/ownership/link/permissions, unavailable admission, or unsupported safe-open platform.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "An exact selected identity was not found in the complete requested scan.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A cooperating writer or clear holds the store lease, a source changed, or a duplicate/conflicting source identity was found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "A source, row, record, retained-memory, blob, reference, gap or package resource limit was exceeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Malformed or unsupported source contract, inconsistent artifact length/hash, or inconsistent package references/cycle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/evidence_package.rs",
+        "x-max-body-bytes": 262144,
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            },
+            {
+              "id": "cooperatively-stopped-stores",
+              "condition": "Every requested source has a valid immutable v1 guard, no lifetime-exclusive writer or clear lease, private user-owned regular files and safe pinned directories."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Read-only selected-source scan, full selected-blob SHA-256 verification and closed metadata projection under bounded shared advisory leases. Empty selection performs no source read. No target/capture mutation, data write, helper/process launch, outbound network or automatic retry. Guard metadata proves cooperative consistency only; historical builds, capture configuration, origin scope and authorization remain unknown or not attested.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/evidence_package.rs",
+              "symbol": "evidence_package::export_bytes_at"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/evidence.rs",
+              "symbol": "evidence::frozen::Store::event"
             }
           ]
         },
@@ -15358,6 +15670,28 @@
         },
         "description": "HTTP 200 is validation data, not acceptance. package_id is null unless the supported package digest matches. Unsupported package versions/profiles are not interpreted best-effort. A valid result does not attest provenance or reverify artifact bytes.",
         "x-max-response-bytes": 65536
+      },
+      "EvidencePackageExportRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "protocol_version",
+          "selection"
+        ],
+        "properties": {
+          "protocol_version": {
+            "type": "integer",
+            "const": 1
+          },
+          "profile": {
+            "type": "string",
+            "const": "reb-metadata-only-v1",
+            "default": "reb-metadata-only-v1"
+          },
+          "selection": {
+            "$ref": "#/components/schemas/EvidencePackageSelection"
+          }
+        }
       }
     }
   },

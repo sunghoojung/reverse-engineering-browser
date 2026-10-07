@@ -10,6 +10,8 @@
 #include <type_traits>
 #include <unordered_set>
 
+#include "reb/evidence_guard.hpp"
+
 namespace reb {
 
 inline constexpr std::uint32_t kArtifactMagic = 0x41424552U;
@@ -135,9 +137,10 @@ class ArtifactReceiver final {
  private:
   [[nodiscard]] ArtifactReceiveStatus Reject(ArtifactReceiveStatus status, std::string message);
 
+  // Lives through all receiver-owned scans, writes, flushes and closes.
+  EvidenceGuard evidence_guard_;
   std::filesystem::path store_directory_;
-  std::filesystem::path blob_directory_;
-  std::filesystem::path manifest_path_;
+  EvidenceDirectory blob_directory_;
   ArtifactReceiverLimits limits_;
   std::uint64_t stored_bytes_ = 0;
   std::uint64_t manifest_bytes_ = 0;

@@ -1,4 +1,5 @@
-//! Inert, metadata-only package validation. No filesystem, network, or helper access.
+//! Metadata-only package identity, inert validation, and explicitly selected
+//! cooperative stopped-store export. Validation has no source-store access.
 use crate::error::{Error, Result};
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value, json};
@@ -722,6 +723,59 @@ fn references(
     }
     Ok(())
 }
+fn coverage_observations(
+    package: &Value,
+    section: &str,
+    kind: &str,
+    budget: &Budget,
+) -> std::result::Result<(BTreeSet<&'static str>, bool), ParseError> {
+    let values = records(package, section);
+    let mut limitations: BTreeSet<&str> = BASE_LIMITATIONS.into_iter().collect();
+    for relation in array(package, "relationships") {
+        budget.check()?;
+        if relation["from_kind"] == kind {
+            match relation["resolution"].as_str().unwrap() {
+                "outside_selection" => {
+                    limitations.insert("reference_outside_selection");
+                }
+                "missing_in_retained_source" => {
+                    limitations.insert("reference_missing");
+                }
+                "not_inspected" => {
+                    limitations.insert("reference_not_inspected");
+                }
+                "insufficient_identity" => {
+                    limitations.insert("creator_identity_incomplete");
+                }
+                _ => (),
+            }
+        }
+    }
+    let mut partial = false;
+    if kind == "event" {
+        if values.iter().any(|v| {
+            v["payload_truncated"] == true
+                || v["flags"].as_u64().is_some_and(|flags| flags & 1 != 0)
+        }) {
+            limitations.insert("payload_was_truncated");
+        }
+        for gap in array(package, "gaps") {
+            budget.check()?;
+            match gap["kind"].as_str() {
+                Some("queue_drop_marker") => {
+                    limitations.insert("capture_gap");
+                    partial = true;
+                }
+                Some("sequence_discontinuity") => {
+                    limitations.insert("sequence_discontinuity");
+                    partial = true;
+                }
+                _ => (),
+            }
+        }
+    }
+    Ok((limitations, partial))
+}
 fn coverage(
     package: &Value,
     report: &mut Report,
@@ -749,48 +803,7 @@ fn coverage(
         budget.check()?;
         let values = records(package, section);
         let requested = !values.is_empty();
-        let mut limitations: BTreeSet<&str> = BASE_LIMITATIONS.into_iter().collect();
-        for relation in array(package, "relationships") {
-            if relation["from_kind"] == kind {
-                match relation["resolution"].as_str().unwrap() {
-                    "outside_selection" => {
-                        limitations.insert("reference_outside_selection");
-                    }
-                    "missing_in_retained_source" => {
-                        limitations.insert("reference_missing");
-                    }
-                    "not_inspected" => {
-                        limitations.insert("reference_not_inspected");
-                    }
-                    "insufficient_identity" => {
-                        limitations.insert("creator_identity_incomplete");
-                    }
-                    _ => (),
-                }
-            }
-        }
-        let mut partial = false;
-        if kind == "event" {
-            if values.iter().any(|v| {
-                v["payload_truncated"] == true
-                    || v["flags"].as_u64().is_some_and(|flags| flags & 1 != 0)
-            }) {
-                limitations.insert("payload_was_truncated");
-            }
-            for gap in array(package, "gaps") {
-                match gap["kind"].as_str() {
-                    Some("queue_drop_marker") => {
-                        limitations.insert("capture_gap");
-                        partial = true;
-                    }
-                    Some("sequence_discontinuity") => {
-                        limitations.insert("sequence_discontinuity");
-                        partial = true;
-                    }
-                    _ => (),
-                }
-            }
-        }
+        let (limitations, partial) = coverage_observations(package, section, kind, budget)?;
         let c = &package["coverage"][section];
         let supplied: BTreeSet<_> = array(c, "limitations")
             .iter()
@@ -1008,6 +1021,672 @@ fn validate(raw: &[u8], budget: &Budget) -> Result<Value> {
 /// Validate supplied bytes inertly. Success is internal consistency, not authenticity.
 pub fn validate_bytes(raw: &[u8]) -> Result<Value> {
     validate(raw, &Budget::new())
+}
+
+pub const MAX_EXPORT_REQUEST_BYTES: usize = 256 * 1024;
+
+/// Returns response bytes constructed under all requested shared store leases.
+/// It never starts/stops capture, fetches content, or executes captured code.
+pub fn export_bytes(
+    raw: &[u8],
+    events: &std::path::Path,
+    artifacts: &std::path::Path,
+) -> Result<Vec<u8>> {
+    export_bytes_at(
+        raw,
+        events,
+        artifacts,
+        Instant::now() + Duration::from_secs(10),
+    )
+}
+pub(crate) fn export_bytes_at(
+    raw: &[u8],
+    events: &std::path::Path,
+    artifacts: &std::path::Path,
+    deadline: Instant,
+) -> Result<Vec<u8>> {
+    let budget = Budget { deadline };
+    export_with_budget(raw, events, artifacts, &budget)
+}
+fn export_failure(error: ParseError, budget: &Budget) -> Error {
+    use crate::error::Code;
+    if budget.check().is_err() {
+        Error::new(408, "The evidence export exceeded its deadline").with_code(Code::Timeout)
+    } else if error == ParseError::ResourceLimit {
+        Error::new(413, "The evidence export exceeds a resource limit")
+            .with_code(Code::ResourceLimit)
+    } else {
+        Error::protocol("The evidence source has an unsupported or malformed record")
+    }
+}
+fn export_request(raw: &[u8], budget: &Budget) -> Result<Value> {
+    if raw.len() > MAX_EXPORT_REQUEST_BYTES {
+        return Err(Error::bad("The export request exceeds its byte limit"));
+    }
+    let value = parse(raw, budget).map_err(|error| {
+        if budget.check().is_err() {
+            export_failure(error, budget)
+        } else {
+            Error::bad("The export request is invalid")
+        }
+    })?;
+    if value["protocol_version"] != 1
+        || value.get("profile").is_some_and(|v| v != REDACTION_PROFILE)
+        || value
+            .as_object()
+            .unwrap()
+            .keys()
+            .any(|k| !["protocol_version", "profile", "selection"].contains(&k.as_str()))
+        || !value["selection"].is_object()
+        || value["selection"].as_object().unwrap().len() != 2
+    {
+        return Err(Error::bad("The export request is invalid"));
+    }
+    for (section, kind, maximum) in [
+        ("events", "event", MAX_EVENTS),
+        ("artifacts", "artifact", MAX_ARTIFACTS),
+    ] {
+        let values = value["selection"][section]
+            .as_array()
+            .ok_or_else(|| Error::bad("The export selection is invalid"))?;
+        if values.len() > maximum {
+            return Err(Error::bad("The export selection exceeds its count limit"));
+        }
+        let mut seen = BTreeSet::new();
+        for item in values {
+            budget.check().map_err(|e| export_failure(e, budget))?;
+            let k = key(kind, item).ok_or_else(|| Error::bad("The export selection is invalid"))?;
+            if *item != key_value(k) || !seen.insert(k) {
+                return Err(Error::bad("The export selection is invalid or duplicated"));
+            }
+        }
+    }
+    Ok(value)
+}
+fn key_value(key: Key) -> Value {
+    match key {
+        Key::Event(session, process, sequence) => {
+            json!({"session_id":session.to_string(),"process_id":process,"sequence_number":sequence.to_string()})
+        }
+        Key::Artifact(session, artifact) => {
+            json!({"session_id":session.to_string(),"artifact_id":artifact.to_string()})
+        }
+    }
+}
+fn empty_package(selection: Value) -> Value {
+    json!({"format":"reb-evidence-package","protocol_version":1,"serialization_profile":SERIALIZATION_PROFILE,
+        "redaction_profile":REDACTION_PROFILE,"semantics_profile":SEMANTICS_PROFILE,"package_id":null,"selection":selection,
+        "provenance":{"origin":"configured_local_stores","consistency":"empty_selection","producer_build":null,"browser_build":null,"capture_configuration":null,"capture_authorization":"not_attested","origin_scope":"unknown"},
+        "coverage":{"selection":"empty","events":null,"artifacts":null,"excluded_sections":EXCLUDED_SECTIONS},
+        "records":{"events":[],"artifacts":[]},"relationships":[],"gaps":[]})
+}
+fn build_coverage(package: &mut Value, budget: &Budget) -> std::result::Result<(), ParseError> {
+    let empty = records(package, "events").is_empty() && records(package, "artifacts").is_empty();
+    package["coverage"]["selection"] = json!(if empty { "empty" } else { "complete" });
+    package["provenance"]["consistency"] = json!(if empty {
+        "empty_selection"
+    } else {
+        "cooperative_stopped_store_v1"
+    });
+    for (section, kind) in [("events", "event"), ("artifacts", "artifact")] {
+        let count = records(package, section).len();
+        let (limitations, partial) = coverage_observations(package, section, kind, budget)?;
+        package["coverage"][section] = json!({"selection_state":if count == 0 {"not_requested"} else {"complete"},"selected_count":count,
+            "source_scan":if count == 0 {"not_read"} else {"complete"},"capture_state":if partial {"partial"} else {"unknown"},"limitations":limitations});
+    }
+    Ok(())
+}
+fn finish_export(mut package: Value, budget: &Budget) -> Result<Vec<u8>> {
+    build_coverage(&mut package, budget).map_err(|e| export_failure(e, budget))?;
+    let mut package = normalized(&package, budget).map_err(|e| export_failure(e, budget))?;
+    package["package_id"] = json!(
+        digest(
+            &canonical(&package, budget).map_err(|e| export_failure(e, budget))?,
+            budget
+        )
+        .map_err(|e| export_failure(e, budget))?
+    );
+    let mut writer = BoundedWriter {
+        bytes: Vec::new(),
+        budget,
+    };
+    serde_json::to_writer(&mut writer, &package)
+        .map_err(|_| export_failure(ParseError::ResourceLimit, budget))?;
+    let result = validate(&writer.bytes, budget)?;
+    budget.check().map_err(|e| export_failure(e, budget))?;
+    if result["status"] != "valid" {
+        if array(&result, "issues")
+            .iter()
+            .any(|v| v["code"] == "resource_limit")
+        {
+            return Err(export_failure(ParseError::ResourceLimit, budget));
+        }
+        return Err(Error::protocol(
+            "The retained evidence cannot form a consistent metadata package",
+        ));
+    }
+    Ok(writer.bytes)
+}
+fn export_with_budget(
+    raw: &[u8],
+    events: &std::path::Path,
+    artifacts: &std::path::Path,
+    budget: &Budget,
+) -> Result<Vec<u8>> {
+    let request = export_request(raw, budget)?;
+    let package = empty_package(request["selection"].clone());
+    if array(&package["selection"], "events").is_empty()
+        && array(&package["selection"], "artifacts").is_empty()
+    {
+        return finish_export(package, budget);
+    }
+    #[cfg(unix)]
+    {
+        stored_export(package, events, artifacts, budget)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (events, artifacts);
+        Err(
+            Error::new(503, "Safe evidence export is unsupported on this platform")
+                .with_code(crate::error::Code::DependencyUnavailable),
+        )
+    }
+}
+
+#[cfg(unix)]
+fn source_event(value: &Value, budget: &Budget) -> Result<(Key, Value, Vec<u8>, bool)> {
+    fn malformed() -> Error {
+        Error::protocol("The evidence source has an unsupported or malformed record")
+    }
+    budget.check().map_err(|e| export_failure(e, budget))?;
+    let k = key("event", value).ok_or_else(malformed)?;
+    for field in [
+        "protocol_version",
+        "monotonic_time_ns",
+        "navigation_id",
+        "frame_id",
+        "artifact_id",
+        "request_id",
+        "category",
+        "type",
+        "payload_encoding",
+        "payload",
+        "payload_size",
+    ] {
+        if value[field].is_null() {
+            return Err(malformed());
+        }
+    }
+    if value["payload_encoding"] != "hex" {
+        return Err(malformed());
+    }
+    let payload_size = value["payload_size"]
+        .as_u64()
+        .filter(|n| *n <= 128)
+        .ok_or_else(malformed)?;
+    let raw_payload = value["payload"].as_str().ok_or_else(malformed)?;
+    if raw_payload.len() != payload_size as usize * 2
+        || !raw_payload.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err(malformed());
+    }
+    let payload = hex::decode(raw_payload).map_err(|_| malformed())?;
+    let mut projected = json!({"key":key_value(k),"operation":null,"observation":"marker_observed","outcome":"not_recorded","placement":"unknown"});
+    for field in [
+        "protocol_version",
+        "monotonic_time_ns",
+        "navigation_id",
+        "frame_id",
+        "thread_id",
+        "tab_id",
+        "artifact_id",
+        "parent_event_id",
+        "request_id",
+        "browser_context_id_high",
+        "browser_context_id_low",
+        "initiator_request_id",
+        "initiator_process_id",
+        "category",
+        "type",
+        "status_code",
+        "error_code",
+        "resource_type",
+        "flags",
+        "encoded_data_length",
+        "decoded_body_length",
+        "payload_size",
+        "payload_truncated",
+    ] {
+        if value.get(field).is_some_and(Value::is_null) {
+            return Err(malformed());
+        }
+        projected[field] = value[field].clone();
+    }
+    if value["protocol_version"] == 2 {
+        if value
+            .get("tab_id")
+            .is_some_and(|v| v.as_u64().is_none_or(|n| n > u32::MAX as u64))
+        {
+            return Err(malformed());
+        }
+        projected["tab_id"] = Value::Null;
+    }
+    let gap = value["type"] == "gap";
+    if gap {
+        projected["type"] = json!("api_call");
+    }
+    static SOURCE_EVENT: LazyLock<jsonschema::Validator> = LazyLock::new(|| {
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../protocol/evidence-package-v1.schema.json"
+        ))
+        .expect("package schema");
+        jsonschema::validator_for(
+            &json!({"$defs":schema["$defs"],"$ref":"#/$defs/EvidencePackageEventMetadata"}),
+        )
+        .expect("event metadata schema")
+    });
+    if !SOURCE_EVENT.is_valid(&projected) {
+        return Err(malformed());
+    }
+    for field in [
+        "monotonic_time_ns",
+        "navigation_id",
+        "frame_id",
+        "artifact_id",
+        "parent_event_id",
+        "request_id",
+        "browser_context_id_high",
+        "browser_context_id_low",
+    ] {
+        if !projected[field].is_null() && unsigned(&projected[field], false).is_none() {
+            return Err(malformed());
+        }
+    }
+    for field in ["encoded_data_length", "decoded_body_length"] {
+        if !projected[field].is_null() && signed(&projected[field]).is_none() {
+            return Err(malformed());
+        }
+    }
+    if projected["flags"].as_u64().is_some_and(|f| {
+        projected["payload_truncated"]
+            .as_bool()
+            .is_some_and(|t| t != (f & 1 != 0))
+    }) {
+        return Err(malformed());
+    }
+    if !gap
+        && projected["category"] == "web_audio"
+        && projected["type"] == "api_call"
+        && projected["payload_truncated"] == false
+        && let Some(operation) = AUDIO_OPERATIONS
+            .iter()
+            .find(|name| name.as_bytes() == payload)
+    {
+        projected["operation"] = json!(operation);
+    }
+    Ok((k, projected, payload, gap))
+}
+#[cfg(unix)]
+fn source_artifact(value: &mut Value) -> Result<(Key, Value)> {
+    let k = key("artifact", value)
+        .ok_or_else(|| Error::protocol("The artifact source contains a malformed record"))?;
+    let legacy =
+        value.get("execution_context_id").is_none() && value.get("capture_origin").is_none();
+    crate::evidence::validate_artifact(value)
+        .map_err(|_| Error::protocol("The artifact source contains a malformed record"))?;
+    let mut projected =
+        json!({"key":key_value(k),"verification":"sha256_verified_at_export","content":"omitted"});
+    for field in [
+        "protocol_version",
+        "navigation_id",
+        "frame_id",
+        "parent_artifact_id",
+        "creator_event_id",
+        "execution_context_id",
+        "capture_origin",
+        "kind",
+        "sha256",
+        "sensitive",
+    ] {
+        projected[field] = value[field].clone();
+    }
+    projected["byte_size"] = json!(value["byte_size"].as_u64().unwrap().to_string());
+    if legacy {
+        projected["execution_context_id"] = Value::Null;
+    }
+    Ok((k, projected))
+}
+#[cfg(unix)]
+struct ExportMemory {
+    retained: usize,
+}
+#[cfg(unix)]
+impl ExportMemory {
+    fn charge(&mut self, bytes: usize) -> Result<()> {
+        self.retained = self
+            .retained
+            .checked_add(bytes)
+            .ok_or_else(crate::evidence::frozen::limit)?;
+        if self.retained > 32 * 1024 * 1024 {
+            return Err(crate::evidence::frozen::limit());
+        }
+        Ok(())
+    }
+}
+#[cfg(unix)]
+fn stored_export(
+    mut package: Value,
+    events: &std::path::Path,
+    artifacts: &std::path::Path,
+    budget: &Budget,
+) -> Result<Vec<u8>> {
+    use crate::evidence::frozen::{self, Store};
+    let events_selected: BTreeSet<_> = array(&package["selection"], "events")
+        .iter()
+        .map(|v| key("event", v).unwrap())
+        .collect();
+    let artifacts_selected: BTreeSet<_> = array(&package["selection"], "artifacts")
+        .iter()
+        .map(|v| key("artifact", v).unwrap())
+        .collect();
+    // Fixed lease order, before any source read, and held until final immutable
+    // bytes and all descriptor/directory-entry checks have been completed.
+    let events_store = if events_selected.is_empty() {
+        None
+    } else {
+        Some(Store::event(events, false)?)
+    };
+    let artifacts_store = if artifacts_selected.is_empty() {
+        None
+    } else {
+        Some(Store::artifacts(artifacts)?)
+    };
+    // Reserve fixed overhead for bounded selector/window trees and their roots
+    // before charging each retained source identity, projection and reference.
+    let mut memory = ExportMemory {
+        retained: 1024 * 1024,
+    };
+    let mut seen: BTreeMap<Key, [u8; 32]> = BTreeMap::new();
+    let mut windows: BTreeMap<(u64, u32), (u64, u64)> = BTreeMap::new();
+    for k in &events_selected {
+        if let Key::Event(s, p, n) = *k {
+            windows
+                .entry((s, p))
+                .and_modify(|(lo, hi)| {
+                    *lo = (*lo).min(n);
+                    *hi = (*hi).max(n);
+                })
+                .or_insert((n, n));
+        }
+    }
+    let mut markers: BTreeMap<(u64, u32, u64, u64, Option<u64>), u64> = BTreeMap::new();
+    let mut event_file = None;
+    if let Some((store, basename)) = &events_store {
+        let mut file = store.root.file(basename, false)?;
+        file.lines(64 * 1024 * 1024, 4096, 100_000, budget.deadline, |line| {
+            let value = parse(line, budget).map_err(|e| export_failure(e, budget))?;
+            let (k, projected, payload, gap) = source_event(&value, budget)?;
+            if gap {
+                if let Key::Event(s, p, n) = k
+                    && windows
+                        .get(&(s, p))
+                        .is_some_and(|(lo, hi)| *lo <= n && n <= *hi)
+                {
+                    let count = if projected["payload_truncated"] == true
+                        || projected["flags"].as_u64().is_some_and(|f| f & 1 != 0)
+                    {
+                        None
+                    } else {
+                        std::str::from_utf8(&payload)
+                            .ok()
+                            .and_then(|v| unsigned(&json!(v), false))
+                    };
+                    let marker = (
+                        s,
+                        p,
+                        n,
+                        unsigned(&projected["monotonic_time_ns"], false).unwrap(),
+                        count,
+                    );
+                    if !markers.contains_key(&marker) {
+                        if markers.len() >= MAX_GAPS {
+                            return Err(frozen::limit());
+                        }
+                        memory.charge(512)?;
+                    }
+                    *markers.entry(marker).or_default() += 1;
+                }
+            } else {
+                let digest: [u8; 32] =
+                    Sha256::digest(serde_json::to_vec(&value).map_err(|_| frozen::limit())?).into();
+                if let Some(previous) = seen.get(&k) {
+                    return Err(Error::conflict(if *previous == digest {
+                        "The evidence source contains a duplicate identity"
+                    } else {
+                        "The evidence source contains a conflicting identity"
+                    }));
+                }
+                // Conservative allocation allowance includes map nodes, keys,
+                // digests and selected Value trees, before retained growth.
+                memory.charge(256)?;
+                seen.insert(k, digest);
+                if events_selected.contains(&k) {
+                    memory.charge(16 * 1024)?;
+                    package["records"]["events"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(projected);
+                }
+            }
+            Ok(())
+        })?;
+        event_file = Some(file);
+    }
+    let mut artifact_file = None;
+    if let Some(store) = &artifacts_store {
+        let mut file = store.root.file("manifest.jsonl", false)?;
+        file.lines(16 * 1024 * 1024, 8192, 10_000, budget.deadline, |line| {
+            let mut value = parse(line, budget).map_err(|e| export_failure(e, budget))?;
+            let digest: [u8; 32] =
+                Sha256::digest(serde_json::to_vec(&value).map_err(|_| frozen::limit())?).into();
+            let (k, projected) = source_artifact(&mut value)?;
+            if let Some(previous) = seen.get(&k) {
+                return Err(Error::conflict(if *previous == digest {
+                    "The evidence source contains a duplicate identity"
+                } else {
+                    "The evidence source contains a conflicting identity"
+                }));
+            }
+            memory.charge(256)?;
+            seen.insert(k, digest);
+            if artifacts_selected.contains(&k) {
+                memory.charge(8 * 1024)?;
+                package["records"]["artifacts"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(projected);
+            }
+            Ok(())
+        })?;
+        artifact_file = Some(file);
+    }
+    if events_selected
+        .iter()
+        .chain(artifacts_selected.iter())
+        .any(|k| !seen.contains_key(k))
+    {
+        return Err(
+            Error::new(404, "An exact selected evidence identity was not found")
+                .with_code(crate::error::Code::TargetUnavailable),
+        );
+    }
+    let mut verified = BTreeMap::new();
+    let mut blobs_directory = None;
+    if let Some(store) = &artifacts_store {
+        let blobs = store.root.child("blobs")?;
+        let mut verified_bytes = 0u64;
+        for value in records(&package, "artifacts") {
+            frozen::check(budget.deadline)?;
+            let expected = unsigned(&value["byte_size"], false).unwrap();
+            let hash = value["sha256"].as_str().unwrap();
+            if expected > frozen::MAX_BLOB_BYTES {
+                return Err(frozen::limit());
+            }
+            if let Some((size, _)) = verified.get(hash) {
+                if *size != expected {
+                    return Err(Error::protocol(
+                        "The selected artifact byte count or hash is inconsistent",
+                    ));
+                }
+                continue;
+            }
+            verified_bytes = frozen::verified_total(verified_bytes, expected)?;
+            let mut blob = blobs.file(&format!("{hash}.bin"), false)?;
+            blob.hash(expected, hash, budget.deadline)?;
+            verified.insert(hash.to_owned(), (expected, blob));
+        }
+        blobs_directory = Some(blobs);
+    }
+    for ((s, p, n, time, count), occurrences) in markers {
+        push_gap(
+            &mut package,
+            json!({"kind":"queue_drop_marker","session_id":s.to_string(),"process_id":p,"anchor_sequence":n.to_string(),"monotonic_time_ns":time.to_string(),"reported_dropped_count":count.map(|c| c.to_string()),"count_state":if count.is_some(){"reported"}else{"count_unknown"},"occurrences":occurrences}),
+            &mut memory,
+        )?;
+    }
+    let mut previous: Option<(u64, u32, u64)> = None;
+    for k in seen.keys() {
+        frozen::check(budget.deadline)?;
+        if let Key::Event(s, p, n) = *k
+            && windows
+                .get(&(s, p))
+                .is_some_and(|(lo, hi)| *lo <= n && n <= *hi)
+        {
+            if let Some((ps, pp, pn)) = previous
+                && (ps, pp) == (s, p)
+                && n > pn + 1
+            {
+                push_gap(
+                    &mut package,
+                    json!({"kind":"sequence_discontinuity","session_id":s.to_string(),"process_id":p,"first_missing_sequence":(pn+1).to_string(),"last_missing_sequence":(n-1).to_string()}),
+                    &mut memory,
+                )?;
+            }
+            previous = Some((s, p, n));
+        }
+    }
+    let mut relationships = Vec::new();
+    for (section, kind) in [("events", "event"), ("artifacts", "artifact")] {
+        for value in records(&package, section) {
+            frozen::check(budget.deadline)?;
+            let from = key(kind, &value["key"]).unwrap();
+            let claims = match from {
+                Key::Event(s, p, _) => vec![
+                    (
+                        "parent_event",
+                        "event",
+                        unsigned(&value["parent_event_id"], true)
+                            .map(|n| Some(Key::Event(s, p, n))),
+                    ),
+                    (
+                        "event_artifact",
+                        "artifact",
+                        unsigned(&value["artifact_id"], true).map(|n| Some(Key::Artifact(s, n))),
+                    ),
+                ],
+                Key::Artifact(s, _) => vec![
+                    (
+                        "parent_artifact",
+                        "artifact",
+                        unsigned(&value["parent_artifact_id"], true)
+                            .map(|n| Some(Key::Artifact(s, n))),
+                    ),
+                    (
+                        "artifact_creator",
+                        "event",
+                        unsigned(&value["creator_event_id"], true).map(|_| None),
+                    ),
+                ],
+            };
+            for (relation, to_kind, claim) in claims {
+                let Some(to) = claim else { continue };
+                let resolution = match to {
+                    None => "insufficient_identity",
+                    Some(k) if events_selected.contains(&k) || artifacts_selected.contains(&k) => {
+                        "included"
+                    }
+                    Some(_)
+                        if (to_kind == "event" && events_store.is_none())
+                            || (to_kind == "artifact" && artifacts_store.is_none()) =>
+                    {
+                        "not_inspected"
+                    }
+                    Some(k) if seen.contains_key(&k) => "outside_selection",
+                    Some(_) => "missing_in_retained_source",
+                };
+                if relationships.len() >= MAX_RELATIONSHIPS {
+                    return Err(frozen::limit());
+                }
+                memory.charge(4096)?;
+                relationships.push(json!({"from_kind":kind,"from_key":key_value(from),"relation":relation,"to_kind":to_kind,"to_key":to.map(key_value),"resolution":resolution}));
+            }
+        }
+    }
+    for relation in &relationships {
+        if relation["resolution"] == "missing_in_retained_source" {
+            push_gap(
+                &mut package,
+                json!({"kind":"missing_reference","from_kind":relation["from_kind"],"from_key":relation["from_key"],"relation":relation["relation"],"to_kind":relation["to_kind"],"to_key":relation["to_key"]}),
+                &mut memory,
+            )?;
+        } else if relation["resolution"] == "insufficient_identity" {
+            let from = key("artifact", &relation["from_key"]).unwrap();
+            let creator = records(&package, "artifacts")
+                .iter()
+                .find(|v| key("artifact", &v["key"]) == Some(from))
+                .unwrap()["creator_event_id"]
+                .clone();
+            push_gap(
+                &mut package,
+                json!({"kind":"creator_identity_incomplete","artifact_key":relation["from_key"],"creator_event_id":creator}),
+                &mut memory,
+            )?;
+        }
+    }
+    package["relationships"] = json!(relationships);
+    let bytes = finish_export(package, budget)?;
+    if let Some(file) = &event_file {
+        file.verify()?;
+    }
+    if let Some(file) = &artifact_file {
+        file.verify()?;
+    }
+    for (_, file) in verified.values() {
+        frozen::check(budget.deadline)?;
+        file.verify()?;
+    }
+    if let Some(directory) = &blobs_directory {
+        directory.verify()?;
+    }
+    if let Some((store, _)) = &events_store {
+        store.verify()?;
+    }
+    if let Some(store) = &artifacts_store {
+        store.verify()?;
+    }
+    frozen::check(budget.deadline)?;
+    Ok(bytes)
+}
+#[cfg(unix)]
+fn push_gap(package: &mut Value, gap: Value, memory: &mut ExportMemory) -> Result<()> {
+    let gaps = package["gaps"].as_array_mut().unwrap();
+    if gaps.len() >= MAX_GAPS {
+        return Err(crate::evidence::frozen::limit());
+    }
+    memory.charge(4096)?;
+    gaps.push(gap);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1741,5 +2420,129 @@ mod tests {
         for operation in AUDIO_OPERATIONS {
             assert!(sources.contains(operation), "{operation}");
         }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn export_request_memory_and_whole_deadline_bounds_are_exact() {
+        let empty = json!({"protocol_version":1,"selection":{"events":[],"artifacts":[]}});
+        let raw = serde_json::to_vec(&empty).unwrap();
+        let path = std::path::Path::new("/nonexistent-source-that-empty-selection-must-not-read");
+        let past = Budget {
+            deadline: Instant::now(),
+        };
+        assert_eq!(
+            export_with_budget(&raw, path, path, &past)
+                .unwrap_err()
+                .status,
+            408
+        );
+        assert_eq!(
+            finish_export(empty_package(empty["selection"].clone()), &past)
+                .unwrap_err()
+                .status,
+            408
+        );
+        let mut exact = raw.clone();
+        exact.resize(MAX_EXPORT_REQUEST_BYTES, b' ');
+        assert!(export_request(&exact, &Budget::new()).is_ok());
+        exact.push(b' ');
+        assert_eq!(
+            export_request(&exact, &Budget::new()).unwrap_err().status,
+            400
+        );
+        for (section, kind, count) in [
+            ("events", "event", MAX_EVENTS),
+            ("artifacts", "artifact", MAX_ARTIFACTS),
+        ] {
+            let mut request = empty.clone();
+            request["selection"][section] = json!(
+                (1..=count)
+                    .map(|n| key_value(if kind == "event" {
+                        Key::Event(1, 1, n as u64)
+                    } else {
+                        Key::Artifact(1, n as u64)
+                    }))
+                    .collect::<Vec<_>>()
+            );
+            assert!(export_request(&serde_json::to_vec(&request).unwrap(), &Budget::new()).is_ok());
+            request["selection"][section]
+                .as_array_mut()
+                .unwrap()
+                .push(key_value(if kind == "event" {
+                    Key::Event(1, 1, (count + 1) as u64)
+                } else {
+                    Key::Artifact(1, (count + 1) as u64)
+                }));
+            assert_eq!(
+                export_request(&serde_json::to_vec(&request).unwrap(), &Budget::new())
+                    .unwrap_err()
+                    .status,
+                400
+            );
+        }
+        // Reserve fixed overhead for bounded selector/window trees and their roots
+        // before charging each retained source identity, projection and reference.
+        let mut memory = ExportMemory {
+            retained: 1024 * 1024,
+        };
+        memory.charge(31 * 1024 * 1024).unwrap();
+        assert_eq!(memory.charge(1).unwrap_err().status, 413);
+        let mut total = 0;
+        for _ in 0..8 {
+            total = crate::evidence::frozen::verified_total(total, 16 * 1024 * 1024).unwrap();
+        }
+        assert_eq!(total, 128 * 1024 * 1024);
+        assert_eq!(
+            crate::evidence::frozen::verified_total(total, 1)
+                .unwrap_err()
+                .status,
+            413
+        );
+        assert_eq!(
+            crate::evidence::frozen::verified_total(0, 16 * 1024 * 1024 + 1)
+                .unwrap_err()
+                .status,
+            413
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn source_operation_projection_uses_exact_full_registry_and_historical_nulls() {
+        let source = include_bytes!("../assets/evidence-packages/source-v1/events.jsonl");
+        let first = source.split(|b| *b == b'\n').next().unwrap();
+        let original: Value = serde_json::from_slice(first).unwrap();
+        for operation in AUDIO_OPERATIONS {
+            let mut value = original.clone();
+            value["payload"] = json!(hex::encode(operation));
+            value["payload_size"] = json!(operation.len());
+            let (_, projected, _, _) = source_event(&value, &Budget::new()).unwrap();
+            assert_eq!(projected["operation"], operation);
+            assert_eq!(projected["placement"], "unknown");
+            assert_eq!(projected["outcome"], "not_recorded");
+            value["flags"] = json!(1);
+            value["payload_truncated"] = json!(true);
+            assert!(source_event(&value, &Budget::new()).unwrap().1["operation"].is_null());
+        }
+        for payload in [
+            "AudioBuffer.getChannelData CANARY",
+            "AudioBuffer.getChannel",
+            "CANARY_UNKNOWN_OPERATION",
+        ] {
+            let mut value = original.clone();
+            value["payload"] = json!(hex::encode(payload));
+            value["payload_size"] = json!(payload.len());
+            assert!(source_event(&value, &Budget::new()).unwrap().1["operation"].is_null());
+        }
+        let mut legacy = original;
+        legacy.as_object_mut().unwrap().remove("payload_truncated");
+        legacy["flags"] = json!(1);
+        let (_, projection, _, _) = source_event(&legacy, &Budget::new()).unwrap();
+        assert!(projection["payload_truncated"].is_null());
+        assert!(projection["operation"].is_null());
+        let mut package = empty_package(json!({"events":[projection["key"]],"artifacts":[]}));
+        package["records"]["events"] = json!([projection]);
+        let (limitations, _) =
+            coverage_observations(&package, "events", "event", &Budget::new()).unwrap();
+        assert!(limitations.contains("payload_was_truncated"));
     }
 }

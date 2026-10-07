@@ -27,6 +27,7 @@
 #include "../local_resources.hpp"
 #include "reb/event.hpp"
 #include "reb/event_broker.hpp"
+#include "reb/evidence_guard.hpp"
 #include "reb/local_ipc.hpp"
 #include "reb/origin_trace.hpp"
 #include "reb/request_signal_profile.hpp"
@@ -169,11 +170,11 @@ bool MakeSessionPolicy(const Options& options, reb::SessionPolicy& policy) noexc
 }
 
 bool StoreEvent(reb::EventBroker& broker,
-                std::ofstream& store,
+                std::ostream& store,
                 reb::OriginTraceIndex* trace_index,
-                std::ofstream* trace_store,
+                std::ostream* trace_store,
                 reb::RequestSignalProfileIndex* signal_index,
-                std::ofstream* signal_store,
+                std::ostream* signal_store,
                 const reb::EventRecord& event) {
   if (broker.Ingest(event) != reb::IngestStatus::kAccepted) {
     return true;
@@ -206,7 +207,7 @@ bool StoreEvent(reb::EventBroker& broker,
   return true;
 }
 
-bool FlushStores(std::ofstream& store, std::ofstream* trace_store, std::ofstream* signal_store) {
+bool FlushStores(std::ostream& store, std::ostream* trace_store, std::ostream* signal_store) {
   store.flush();
   if (!store) {
     std::cerr << "Unable to write event store\n";
@@ -230,11 +231,11 @@ bool FlushStores(std::ofstream& store, std::ofstream* trace_store, std::ofstream
 }
 
 bool IngestStandardInput(reb::EventBroker& broker,
-                         std::ofstream& store,
+                         std::ostream& store,
                          reb::OriginTraceIndex* trace_index,
-                         std::ofstream* trace_store,
+                         std::ostream* trace_store,
                          reb::RequestSignalProfileIndex* signal_index,
-                         std::ofstream* signal_store) {
+                         std::ostream* signal_store) {
   reb::EventRecord event{};
   while (std::cin.read(reinterpret_cast<char*>(&event), sizeof(event))) {
     if (!StoreEvent(broker, store, trace_index, trace_store, signal_index, signal_store, event)) {
@@ -359,11 +360,11 @@ bool IngestSocket(const int descriptor,
                   const reb::SessionPolicy& policy,
                   const reb::LocalIpcToken& expected_token,
                   reb::EventBroker& broker,
-                  std::ofstream& store,
+                  std::ostream& store,
                   reb::OriginTraceIndex* trace_index,
-                  std::ofstream* trace_store,
+                  std::ostream* trace_store,
                   reb::RequestSignalProfileIndex* signal_index,
-                  std::ofstream* signal_store) {
+                  std::ostream* signal_store) {
   reb::LocalIpcHello hello;
   std::string error;
   const TimedReadStatus hello_status =
@@ -499,35 +500,67 @@ int main(const int argc, char* argv[]) {
     return 2;
   }
 
-  std::ofstream store(options.store_path, std::ios::out | std::ios::trunc);
-  if (!store) {
-    std::cerr << "Unable to open event store: " << options.store_path << '\n';
-    return 1;
+  // Acquire every output's lifetime guard before any truncation. Sidecars can
+  // otherwise be configured to name another broker's main event store.
+  std::array<reb::EvidenceGuard, 3> guards;
+  const std::array<std::string, 3> paths = {options.store_path, options.trace_store_path,
+                                            options.signal_store_path};
+  std::array<std::string, 3> names;
+  for (std::size_t index = 0; index < paths.size(); ++index) {
+    if (paths[index].empty()) {
+      continue;
+    }
+    const std::filesystem::path path(paths[index]);
+    names[index] = path.filename().string();
+    const auto parent = path.has_parent_path() ? path.parent_path() : std::filesystem::path(".");
+    // Guard files and artifact-owned manifest/blob names are reserved. A
+    // different store role must never acquire an unrelated guard for them.
+    std::error_code path_error;
+    const auto resolved_parent = std::filesystem::weakly_canonical(parent, path_error);
+    const bool artifact_root =
+        !path_error &&
+        std::filesystem::exists(resolved_parent / "evidence.reb-lock-v1", path_error);
+    if (path_error || artifact_root || names[index].ends_with(".reb-lock-v1") ||
+        names[index] == "manifest.jsonl" ||
+        (resolved_parent.filename() == "blobs" && names[index].ends_with(".bin")) ||
+        !guards[index].Acquire(parent, names[index] + ".reb-lock-v1")) {
+      std::cerr << "Event output is busy or has an unsupported evidence path or guard\n";
+      return 1;
+    }
   }
-
-  std::ofstream trace_store;
+  std::array<reb::EvidenceFile, 3> files;
+  // Open without truncating, reject aliases, and pin all output descriptors.
+  for (std::size_t index = 0; index < paths.size(); ++index) {
+    if (paths[index].empty()) {
+      continue;
+    }
+    files[index].Open(
+        reb::EvidenceGuard::OpenFile(guards[index].Directory(), names[index], O_WRONLY | O_CREAT),
+        true);
+    if (!files[index]) {
+      std::cerr << "Unable to open safe event output\n";
+      return 1;
+    }
+  }
+  for (std::size_t index = 0; index < paths.size(); ++index) {
+    if (!paths[index].empty() && ftruncate(files[index].Descriptor(), 0) != 0) {
+      std::cerr << "Unable to truncate event output\n";
+      return 1;
+    }
+  }
+  auto& store = files[0];
+  auto& trace_store = files[1];
+  auto& signal_store = files[2];
   std::unique_ptr<reb::OriginTraceIndex> trace_index;
   if (!options.trace_store_path.empty()) {
-    trace_store.open(options.trace_store_path, std::ios::out | std::ios::trunc);
-    if (!trace_store) {
-      std::cerr << "Unable to open origin trace store: " << options.trace_store_path << '\n';
-      return 1;
-    }
     trace_index = std::make_unique<reb::OriginTraceIndex>(options.capacity);
   }
-
-  std::ofstream signal_store;
   std::unique_ptr<reb::RequestSignalProfileIndex> signal_index;
   if (!options.signal_store_path.empty()) {
-    signal_store.open(options.signal_store_path, std::ios::out | std::ios::trunc);
-    if (!signal_store) {
-      std::cerr << "Unable to open request signal profile store: " << options.signal_store_path
-                << '\n';
-      return 1;
-    }
     signal_index = std::make_unique<reb::RequestSignalProfileIndex>(options.capacity);
   }
 
+  std::cerr << "Event store ready\n";
   reb::EventBroker broker(options.capacity, policy);
   bool ingested = false;
   if (options.socket_path.empty()) {

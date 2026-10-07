@@ -1,0 +1,32 @@
+{
+  "protocol_version": 1,
+  "selection": {
+    "events": [
+      {
+        "session_id": "7",
+        "process_id": 42,
+        "sequence_number": "1"
+      },
+      {
+        "session_id": "7",
+        "process_id": 42,
+        "sequence_number": "4"
+      },
+      {
+        "session_id": "8",
+        "process_id": 43,
+        "sequence_number": "1"
+      }
+    ],
+    "artifacts": [
+      {
+        "session_id": "7",
+        "artifact_id": "9"
+      },
+      {
+        "session_id": "8",
+        "artifact_id": "9"
+      }
+    ]
+  }
+}

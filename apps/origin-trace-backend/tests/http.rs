@@ -246,7 +246,7 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 24, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 25, "Review route coverage when the API changes");
     let schemas = &spec["components"]["schemas"];
     let actions = schemas["DebuggerAction"]["oneOf"].as_array().unwrap();
     let results = &schemas["DebuggerResult"];
@@ -369,7 +369,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 24);
+    assert_eq!(operation_count, 25);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -3030,31 +3030,6 @@ fn evidence_package_standalone_schema_and_openapi_components_are_identical() {
 
 #[tokio::test]
 async fn evidence_package_http_and_cli_validate_frozen_untrusted_metadata_without_store_access() {
-    fn snapshot(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, String> {
-        fn visit(
-            root: &Path,
-            path: &Path,
-            result: &mut std::collections::BTreeMap<std::path::PathBuf, String>,
-        ) {
-            for entry in std::fs::read_dir(path).unwrap() {
-                let entry = entry.unwrap();
-                let path = entry.path();
-                let key = path.strip_prefix(root).unwrap().to_path_buf();
-                if entry.file_type().unwrap().is_dir() {
-                    result.insert(key, "directory".to_owned());
-                    visit(root, &path, result);
-                } else {
-                    result.insert(
-                        key,
-                        hex::encode(Sha256::digest(std::fs::read(path).unwrap())),
-                    );
-                }
-            }
-        }
-        let mut result = std::collections::BTreeMap::new();
-        visit(root, root, &mut result);
-        result
-    }
     let server = Server::start_with_helper_canaries(true).await;
     // Any attempt to interpret configured stores would encounter malformed data.
     // Full directory snapshots also detect writes, blob changes and sidecars.
@@ -3154,13 +3129,12 @@ async fn evidence_package_http_and_cli_validate_frozen_untrusted_metadata_withou
         .arg(&output_path)
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    assert!(
-        String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("JSON responses do not accept --output")
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&output_path).unwrap()).unwrap(),
+        result
     );
-    assert!(!output_path.exists());
+    std::fs::remove_file(output_path).unwrap();
     assert_eq!(snapshot(server.root.path()), before);
 }
 
@@ -3591,4 +3565,717 @@ async fn evidence_package_raw_body_bounds_and_local_trust_are_enforced() {
             .unwrap();
         assert_contract_response(response, "post", EVIDENCE_PACKAGE_ROUTE, 403).await;
     }
+}
+
+#[cfg(unix)]
+const EXPORT_PACKAGE_ROUTE: &str = "/api/evidence/packages/export";
+#[cfg(unix)]
+fn prepare_export_fixture(server: &Server) -> Value {
+    use std::os::unix::fs::PermissionsExt;
+    server.file(
+        "events.jsonl",
+        include_bytes!("../assets/evidence-packages/source-v1/events.jsonl"),
+    );
+    let manifest = include_bytes!("../assets/evidence-packages/source-v1/manifest.jsonl");
+    server.file("artifacts/manifest.jsonl", manifest);
+    let rows: Vec<Value> = std::str::from_utf8(manifest)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for (row, blob) in rows.iter().zip([
+        include_bytes!("../assets/evidence-packages/source-v1/javascript.bin").as_slice(),
+        include_bytes!("../assets/evidence-packages/source-v1/wasm.bin").as_slice(),
+    ]) {
+        server.file(
+            &format!("artifacts/{}", row["content_path"].as_str().unwrap()),
+            blob,
+        );
+    }
+    for name in ["events.jsonl.reb-lock-v1", "artifacts/evidence.reb-lock-v1"] {
+        server.file(name, b"REB_EVIDENCE_GUARD_V1\n");
+        std::fs::set_permissions(
+            server.root.path().join(name),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    serde_json::from_slice(include_bytes!(
+        "../assets/evidence-packages/source-v1/selection.json"
+    ))
+    .unwrap()
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn guarded_export_round_trips_canonical_private_cli_bytes_without_secrets_or_effects() {
+    use std::os::unix::fs::PermissionsExt;
+    let server = Server::start_with_helper_canaries(true).await;
+    let mut selection = prepare_export_fixture(&server);
+    let before = snapshot(server.root.path());
+    let response = server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await;
+    let bytes = assert_contract_response(response, "post", EXPORT_PACKAGE_ROUTE, 200).await;
+    let package: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        package,
+        serde_json::from_slice::<Value>(include_bytes!(
+            "../assets/evidence-packages/exported-v1.json"
+        ))
+        .unwrap()
+    );
+    assert_eq!(
+        package["package_id"],
+        "reb-package-v1:sha256:8d38c640d538fb57565723579edbc25588ae7707552b25db94386af4357b5461"
+    );
+    assert_eq!(package["records"]["events"].as_array().unwrap().len(), 3);
+    assert_eq!(package["records"]["artifacts"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        package["records"]["events"][0]["operation"],
+        "AudioBuffer.getChannelData"
+    );
+    assert!(package["records"]["events"][2]["thread_id"].is_null());
+    assert!(package["records"]["artifacts"][1]["execution_context_id"].is_null());
+    assert_eq!(package["coverage"]["events"]["capture_state"], "partial");
+    assert_eq!(package["coverage"]["artifacts"]["capture_state"], "unknown");
+    assert_eq!(
+        package["provenance"]["consistency"],
+        "cooperative_stopped_store_v1"
+    );
+    assert!(package["provenance"]["producer_build"].is_null());
+    assert!(
+        package["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["kind"] == "sequence_discontinuity"
+                && v["first_missing_sequence"] == "3"
+                && v["last_missing_sequence"] == "3")
+    );
+    assert!(
+        package["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["kind"] == "queue_drop_marker"
+                && v["reported_dropped_count"] == "5"
+                && v["occurrences"] == 2)
+    );
+    for resolution in [
+        "outside_selection",
+        "missing_in_retained_source",
+        "insufficient_identity",
+        "included",
+    ] {
+        assert!(
+            package["relationships"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["resolution"] == resolution),
+            "{resolution}"
+        );
+    }
+    assert!(!String::from_utf8_lossy(&bytes).contains("CANARY"));
+    let validation = server
+        .action(EVIDENCE_PACKAGE_ROUTE, package.clone())
+        .await
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_untrusted_package_result(&validation, "valid");
+    assert_eq!(snapshot(server.root.path()), before);
+    // Row/selection order and omitted raw secret values are not semantic identity.
+    let mut rows: Vec<Value> = std::str::from_utf8(include_bytes!(
+        "../assets/evidence-packages/source-v1/events.jsonl"
+    ))
+    .unwrap()
+    .lines()
+    .map(|line| serde_json::from_str(line).unwrap())
+    .collect();
+    rows.reverse();
+    rows[0]["unknown_extension"]["Authorization"] = json!("DIFFERENT_CANARY");
+    server.file("events.jsonl", &jsonl(&rows));
+    selection["selection"]["events"]
+        .as_array_mut()
+        .unwrap()
+        .reverse();
+    selection["selection"]["artifacts"]
+        .as_array_mut()
+        .unwrap()
+        .reverse();
+    let reordered = server
+        .action(EXPORT_PACKAGE_ROUTE, selection.clone())
+        .await
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(reordered.as_ref(), bytes.as_slice());
+    server.file("selection.json", &serde_json::to_vec(&selection).unwrap());
+    let output_path = server.root.path().join("selected.reb-evidence.json");
+    let call = || {
+        Command::new(env!("CARGO_BIN_EXE_reb-api"))
+            .args([
+                "call",
+                "export_evidence_package",
+                "--base-url",
+                &server.url,
+                "--body-file",
+            ])
+            .arg(server.root.path().join("selection.json"))
+            .arg("--output")
+            .arg(&output_path)
+            .output()
+            .unwrap()
+    };
+    let output = call();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert_eq!(std::fs::read(&output_path).unwrap(), bytes);
+    assert_eq!(
+        std::fs::metadata(&output_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let second = call();
+    assert_eq!(second.status.code(), Some(2));
+    assert_eq!(std::fs::read(&output_path).unwrap(), bytes);
+    let result = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "validate_evidence_package",
+            "--base-url",
+            &server.url,
+            "--body-file",
+        ])
+        .arg(&output_path)
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert_untrusted_package_result(&serde_json::from_slice(&result.stdout).unwrap(), "valid");
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn guarded_export_selection_guards_privacy_conflicts_and_missing_sources_fail_closed() {
+    use std::{
+        fs,
+        os::{
+            fd::AsRawFd,
+            unix::fs::{PermissionsExt, symlink},
+        },
+    };
+    let server = Server::start().await;
+    let selection = prepare_export_fixture(&server);
+    let assert_error = |response: reqwest::Response, status: u16, code: &'static str| async move {
+        let bytes = assert_contract_response(response, "post", EXPORT_PACKAGE_ROUTE, status).await;
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["code"], code);
+        assert_eq!(value["details"], json!({}));
+        assert!(!String::from_utf8_lossy(&bytes).contains("CANARY"));
+    };
+    let mut missing = selection.clone();
+    missing["selection"]["events"][0]["sequence_number"] = json!("5");
+    assert_error(
+        server.action(EXPORT_PACKAGE_ROUTE, missing).await,
+        404,
+        "target_unavailable",
+    )
+    .await;
+    let mut duplicate = selection.clone();
+    let item = duplicate["selection"]["events"][0].clone();
+    duplicate["selection"]["events"]
+        .as_array_mut()
+        .unwrap()
+        .push(item);
+    assert_error(
+        server.action(EXPORT_PACKAGE_ROUTE, duplicate).await,
+        400,
+        "invalid_request",
+    )
+    .await;
+    for guard in ["events.jsonl.reb-lock-v1", "artifacts/evidence.reb-lock-v1"] {
+        let file = fs::File::open(server.root.path().join(guard)).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        assert_error(
+            server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await,
+            409,
+            "state_conflict",
+        )
+        .await;
+        drop(file);
+    }
+    let original = fs::read(server.root.path().join("events.jsonl")).unwrap();
+    let mut rows: Vec<Value> = std::str::from_utf8(&original)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    rows.push(rows[0].clone());
+    server.file("events.jsonl", &jsonl(&rows));
+    assert_error(
+        server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await,
+        409,
+        "state_conflict",
+    )
+    .await;
+    rows.last_mut().unwrap()["unknown_extension"]["Authorization"] =
+        json!("CANARY_DIFFERENT_SECRET");
+    server.file("events.jsonl", &jsonl(&rows));
+    assert_error(
+        server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await,
+        409,
+        "state_conflict",
+    )
+    .await;
+    server.file("events.jsonl", &original);
+    for path in [
+        "events.jsonl",
+        "events.jsonl.reb-lock-v1",
+        "artifacts/manifest.jsonl",
+        "artifacts/evidence.reb-lock-v1",
+    ] {
+        let full = server.root.path().join(path);
+        let saved = fs::read(&full).unwrap();
+        let permissions = fs::metadata(&full).unwrap().permissions();
+        fs::remove_file(&full).unwrap();
+        assert_error(
+            server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await,
+            503,
+            "dependency_unavailable",
+        )
+        .await;
+        symlink("/dev/null", &full).unwrap();
+        assert_error(
+            server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await,
+            503,
+            "dependency_unavailable",
+        )
+        .await;
+        fs::remove_file(&full).unwrap();
+        fs::write(&full, saved).unwrap();
+        fs::set_permissions(&full, permissions).unwrap();
+    }
+    fs::set_permissions(
+        server.root.path().join("artifacts"),
+        fs::Permissions::from_mode(0o777),
+    )
+    .unwrap();
+    assert_error(
+        server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await,
+        503,
+        "dependency_unavailable",
+    )
+    .await;
+    fs::set_permissions(
+        server.root.path().join("artifacts"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    // Event-only selection must not inspect the deliberately malformed artifact store.
+    server.file("artifacts/manifest.jsonl", b"CANARY_MALFORMED_SOURCE");
+    let mut event_only = selection.clone();
+    event_only["selection"]["artifacts"] = json!([]);
+    let event_package: Value = server
+        .action(EXPORT_PACKAGE_ROUTE, event_only)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        event_package["coverage"]["artifacts"]["source_scan"],
+        "not_read"
+    );
+    assert!(
+        event_package["relationships"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["resolution"] == "not_inspected")
+    );
+    let empty = json!({"protocol_version":1,"selection":{"events":[],"artifacts":[]}});
+    let empty_package: Value = server
+        .action(EXPORT_PACKAGE_ROUTE, empty)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        empty_package["provenance"]["consistency"],
+        "empty_selection"
+    );
+    for section in ["events", "artifacts"] {
+        assert_eq!(
+            empty_package["coverage"][section]["source_scan"],
+            "not_read"
+        );
+        assert_eq!(
+            empty_package["coverage"][section]["capture_state"],
+            "unknown"
+        );
+    }
+}
+
+fn snapshot(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, String> {
+    fn visit(
+        root: &Path,
+        path: &Path,
+        result: &mut std::collections::BTreeMap<std::path::PathBuf, String>,
+    ) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let key = path.strip_prefix(root).unwrap().to_path_buf();
+            if entry.file_type().unwrap().is_dir() {
+                result.insert(key, "directory".to_owned());
+                visit(root, &path, result);
+            } else {
+                result.insert(
+                    key,
+                    hex::encode(Sha256::digest(std::fs::read(path).unwrap())),
+                );
+            }
+        }
+    }
+    let mut result = std::collections::BTreeMap::new();
+    visit(root, root, &mut result);
+    result
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn guarded_export_verifies_full_blobs_safe_paths_shared_hashes_and_zero_bytes() {
+    use std::{fs, os::unix::fs::symlink};
+    let server = Server::start().await;
+    let mut selection = prepare_export_fixture(&server);
+    selection["selection"]["events"] = json!([]);
+    let manifest_path = server.root.path().join("artifacts/manifest.jsonl");
+    let initial = fs::read(&manifest_path).unwrap();
+    let mut manifest: Vec<Value> = std::str::from_utf8(&initial)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let blob_path = server
+        .root
+        .path()
+        .join("artifacts")
+        .join(manifest[0]["content_path"].as_str().unwrap());
+    let original = fs::read(&blob_path).unwrap();
+    let error = |response: reqwest::Response, status: u16| async move {
+        let bytes = assert_contract_response(response, "post", EXPORT_PACKAGE_ROUTE, status).await;
+        assert!(!String::from_utf8_lossy(&bytes).contains("CANARY"));
+    };
+    for index in [original.len() / 2, original.len() - 1] {
+        let mut bytes = original.clone();
+        bytes[index] ^= 1;
+        fs::write(&blob_path, bytes).unwrap();
+        error(
+            server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await,
+            422,
+        )
+        .await;
+    }
+    fs::write(&blob_path, &original).unwrap();
+    manifest[0]["byte_size"] = json!(original.len() + 1);
+    server.file("artifacts/manifest.jsonl", &jsonl(&manifest));
+    error(
+        server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await,
+        422,
+    )
+    .await;
+    manifest[0]["byte_size"] = json!(16 * 1024 * 1024 + 1);
+    server.file("artifacts/manifest.jsonl", &jsonl(&manifest));
+    error(
+        server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await,
+        413,
+    )
+    .await;
+    manifest[0]["byte_size"] = json!(original.len());
+    for path in [
+        "../CANARY_ESCAPE",
+        "/CANARY_ABSOLUTE",
+        "blobs/../CANARY_PARENT",
+        "blobs/not-the-hash.bin",
+    ] {
+        manifest[0]["content_path"] = json!(path);
+        server.file("artifacts/manifest.jsonl", &jsonl(&manifest));
+        error(
+            server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await,
+            422,
+        )
+        .await;
+    }
+    server.file("artifacts/manifest.jsonl", &initial);
+    fs::remove_file(&blob_path).unwrap();
+    error(
+        server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await,
+        503,
+    )
+    .await;
+    symlink("/dev/null", &blob_path).unwrap();
+    error(
+        server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await,
+        503,
+    )
+    .await;
+    fs::remove_file(&blob_path).unwrap();
+    fs::write(&blob_path, &original).unwrap();
+    fs::hard_link(&blob_path, server.root.path().join("hard-link.bin")).unwrap();
+    error(
+        server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await,
+        503,
+    )
+    .await;
+    fs::remove_file(server.root.path().join("hard-link.bin")).unwrap();
+    let blobs = server.root.path().join("artifacts/blobs");
+    let moved = server.root.path().join("saved-blobs");
+    fs::rename(&blobs, &moved).unwrap();
+    symlink(&moved, &blobs).unwrap();
+    error(
+        server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await,
+        503,
+    )
+    .await;
+    fs::remove_file(&blobs).unwrap();
+    fs::rename(&moved, &blobs).unwrap();
+    // Same original hash under distinct scoped artifact keys is legal; both
+    // claims must still agree on original byte size. No bare-ID join is used.
+    manifest = std::str::from_utf8(&initial)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    manifest[1]["sha256"] = manifest[0]["sha256"].clone();
+    manifest[1]["content_path"] = manifest[0]["content_path"].clone();
+    manifest[1]["byte_size"] = manifest[0]["byte_size"].clone();
+    server.file("artifacts/manifest.jsonl", &jsonl(&manifest));
+    assert_eq!(
+        server
+            .action(EXPORT_PACKAGE_ROUTE, selection.clone())
+            .await
+            .status(),
+        200
+    );
+    let empty_hash = hex::encode(Sha256::digest([]));
+    manifest[0]["sha256"] = json!(empty_hash);
+    manifest[0]["content_path"] = json!(format!("blobs/{empty_hash}.bin"));
+    manifest[0]["byte_size"] = json!(0);
+    server.file(&format!("artifacts/blobs/{empty_hash}.bin"), b"");
+    server.file("artifacts/manifest.jsonl", &jsonl(&manifest));
+    let package: Value = server
+        .action(EXPORT_PACKAGE_ROUTE, selection)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(package["records"]["artifacts"][0]["byte_size"], "0");
+    assert_eq!(package["records"]["artifacts"][0]["sha256"], empty_hash);
+    assert!(
+        package["relationships"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["resolution"] == "insufficient_identity")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn guarded_export_rejects_raw_duplicates_bad_source_rows_cycles_and_cli_invalid_outputs() {
+    use std::io::{Read, Write};
+    let server = Server::start().await;
+    let selection = prepare_export_fixture(&server);
+    for body in [
+        br#"{"protocol_version":1,"protocol_version":1,"selection":{"events":[],"artifacts":[]}}"#
+            .as_slice(),
+        br#"{"protocol_version":1,"selection":{"events":[],"events":[],"artifacts":[]}}"#
+            .as_slice(),
+    ] {
+        let response = server
+            .client
+            .post(format!("{}{}", server.url, EXPORT_PACKAGE_ROUTE))
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_contract_response(response, "post", EXPORT_PACKAGE_ROUTE, 400).await;
+        server.file("bad-selection.json", body);
+        let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+            .args([
+                "call",
+                "export_evidence_package",
+                "--base-url",
+                "http://127.0.0.1:1",
+                "--body-file",
+            ])
+            .arg(server.root.path().join("bad-selection.json"))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate JSON key"));
+    }
+    let original = std::fs::read(server.root.path().join("events.jsonl")).unwrap();
+    let original_rows: Vec<Value> = std::str::from_utf8(&original)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for (field, value) in [
+        ("process_id", json!(0)),
+        ("tab_id", Value::Null),
+        ("category", json!("CANARY_UNKNOWN_CATEGORY")),
+        ("monotonic_time_ns", json!("18446744073709551616")),
+        ("payload", json!("CANARY_NOT_HEX")),
+        ("flags", json!(8)),
+        ("status_code", json!(2147483648u64)),
+    ] {
+        let mut rows = original_rows.clone();
+        rows[1][field] = value;
+        server.file("events.jsonl", &jsonl(&rows));
+        let bytes = assert_contract_response(
+            server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await,
+            "post",
+            EXPORT_PACKAGE_ROUTE,
+            422,
+        )
+        .await;
+        assert!(!String::from_utf8_lossy(&bytes).contains("CANARY"));
+    }
+    let mut rows = original_rows;
+    rows[0]["parent_event_id"] = json!("4");
+    rows[2]["parent_event_id"] = json!("1");
+    server.file("events.jsonl", &jsonl(&rows));
+    assert_contract_response(
+        server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await,
+        "post",
+        EXPORT_PACKAGE_ROUTE,
+        422,
+    )
+    .await;
+    server.file("events.jsonl", b"{\"CANARY_KEY\":1,\"CANARY_KEY\":2}\n");
+    let bytes = assert_contract_response(
+        server.action(EXPORT_PACKAGE_ROUTE, selection).await,
+        "post",
+        EXPORT_PACKAGE_ROUTE,
+        422,
+    )
+    .await;
+    assert!(!String::from_utf8_lossy(&bytes).contains("CANARY"));
+    // A successful HTTP status from an untrusted endpoint is insufficient for
+    // CLI persistence. Invalid and incomplete responses leave no final entry.
+    for (body, extra) in [
+        (b"{\"CANARY_INVALID_EXPORT\":true}".to_vec(), 0),
+        (
+            include_bytes!("../assets/evidence-packages/exported-v1.json").to_vec(),
+            100,
+        ),
+    ] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let sender = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0; 4096];
+            let _ = stream.read(&mut buffer);
+            write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()+extra).unwrap();
+            stream.write_all(&body).unwrap();
+        });
+        let output_path = server.root.path().join("never-created.json");
+        server.file(
+            "empty-selection.json",
+            br#"{"protocol_version":1,"selection":{"events":[],"artifacts":[]}}"#,
+        );
+        let result = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+            .args([
+                "call",
+                "export_evidence_package",
+                "--base-url",
+                &url,
+                "--body-file",
+            ])
+            .arg(server.root.path().join("empty-selection.json"))
+            .arg("--output")
+            .arg(&output_path)
+            .output()
+            .unwrap();
+        sender.join().unwrap();
+        assert_eq!(result.status.code(), Some(2));
+        assert!(!output_path.exists());
+        assert!(!String::from_utf8_lossy(&result.stderr).contains("CANARY"));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn capture_clear_requires_stopped_guards_for_every_output_before_any_truncation() {
+    use std::{
+        fs,
+        os::{fd::AsRawFd, unix::fs::PermissionsExt},
+    };
+    let socket = tempfile::tempdir().unwrap();
+    let server = Server::start_with_args(&[
+        "--broker-pid".into(),
+        "2147483647".into(),
+        "--socket".into(),
+        socket.path().join("absent.sock").display().to_string(),
+    ])
+    .await;
+    server.file("events.jsonl", b"legacy bytes\n");
+    let clear = || {
+        server.action(
+            "/api/capture/actions",
+            json!({"action":"clear","confirm":true}),
+        )
+    };
+    assert_eq!(clear().await.status(), 503);
+    assert_eq!(
+        fs::read(server.root.path().join("events.jsonl")).unwrap(),
+        b"legacy bytes\n"
+    );
+    for name in ["events.jsonl", "trace.jsonl", "signals.jsonl"] {
+        server.file(name, b"retained bytes\n");
+        let guard = format!("{name}.reb-lock-v1");
+        server.file(&guard, b"REB_EVIDENCE_GUARD_V1\n");
+        fs::set_permissions(
+            server.root.path().join(guard),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    for name in ["events.jsonl", "trace.jsonl", "signals.jsonl"] {
+        let guard = fs::File::open(server.root.path().join(format!("{name}.reb-lock-v1"))).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(guard.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) },
+            0
+        );
+        assert_eq!(clear().await.status(), 409);
+        for path in ["events.jsonl", "trace.jsonl", "signals.jsonl"] {
+            assert_eq!(
+                fs::read(server.root.path().join(path)).unwrap(),
+                b"retained bytes\n"
+            );
+        }
+        drop(guard);
+    }
+    assert_eq!(clear().await.status(), 200);
+    for path in ["events.jsonl", "trace.jsonl", "signals.jsonl"] {
+        assert!(fs::read(server.root.path().join(path)).unwrap().is_empty());
+    }
+    assert_eq!(clear().await.status(), 200);
 }

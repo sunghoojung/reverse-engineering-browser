@@ -58,7 +58,9 @@ Successful JSON is printed to stdout without a wrapper. A 304 produces no
 stdout body; `--show-headers` prints status, ETag and other response headers to
 stderr. HTTP errors exit nonzero and show the server's error text. Binary
 content requires `--output PATH` (or explicit `--output -` for stdout), and a
-file path is never overwritten. The CLI does not provide additional permissions
+file path is never overwritten. JSON also accepts optional `--output`; file
+publication uses a synced mode-0600 temporary and atomic no-clobber persistence.
+Exported evidence packages must validate before publication. The CLI does not provide additional permissions
 on its own.
 
 ```sh
@@ -227,7 +229,7 @@ retry mutations after a timeout or dropped connection.
 
 ## Execution metadata
 
-All 24 operations and all 74 top-level request action variants, including the 59
+All 25 operations and all 74 top-level request action variants, including the 59
 debugger actions, carry version 1 `x-reb-execution` metadata. It is a source-owned,
 static advisory catalog. It does not grant permission, verify target ownership,
 report current availability, replace server validation, or prove that an action
@@ -391,3 +393,21 @@ Duplicate JSON keys are rejected before HTTP or CLI materialization. See
 [Evidence Package v1](evidence-package-v1.md) for the closed metadata schema,
 canonical serialization/digest, limits, safe issues, and provenance boundaries.
 No source store or artifact content is accessed, and no export is implied.
+
+
+## Guarded evidence package export
+
+`POST /api/evidence/packages/export` (`export_evidence_package`) reads an exact
+bounded event/artifact selection from the configured local stores. It requires
+updated producer guard files and stopped relevant writers, fully scans requested
+sources, verifies complete selected blobs, and emits closed metadata with honest
+coverage and unknown historical provenance. Empty selection reads no sources.
+No capture control, raw content export, helper execution or automatic retry is
+included. Source/guard aliases and unsafe store permissions fail closed.
+
+Use `reb-api call export_evidence_package --body-file selection.json --output
+selected.reb-evidence.json` with the usual endpoint option. See
+[Evidence Package v1](evidence-package-v1.md#selected-stopped-store-export) for
+request shape, safe persistence, exact limits, lease compatibility and stable
+error reasons. Backend event clear now also requires matching exclusive guards
+for all existing configured outputs; legacy unguarded clear returns 503.

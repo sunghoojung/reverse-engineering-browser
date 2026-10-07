@@ -114,8 +114,11 @@ Primitive conversions follow the
 [ECMAScript abstract operations](https://tc39.es/ecma262/2024/multipage/abstract-operations.html).
 Number-to-string conversion is limited to finite values in the ordinary decimal
 range; large radix integers, lone surrogates, function-source strings and dynamic
-constructors remain unresolved. A trusted-fixture differential matrix compares
-1,810 arithmetic/equality/relational/coercion cases against Node. Array allocation,
+constructors remain unresolved. The checked-in
+[trusted fixture corpus](../../tools/fixtures/deobfuscation-benchmark/corpus-v2.json)
+compares typed observations against Node and includes wrong-output controls in
+its runner. The previously reported 1,810-case exploratory matrix is not a
+reproducible checked-in gate and is not claimed as current coverage. Array allocation,
 output size and recursive evaluation remain bounded by the existing limits.
 
 ## Bounded control-flow recovery

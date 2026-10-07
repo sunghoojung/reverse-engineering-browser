@@ -421,6 +421,15 @@ impl<'s> Folder<'s> {
 }
 
 impl<'a> Visit<'a> for Folder<'_> {
+    fn visit_object_property(&mut self, property: &ObjectProperty<'a>) {
+        // A shorthand value shares its token with the property key. Replacing
+        // that token with a parenthesized primitive would produce `{(1)}`.
+        // Keep the complete shorthand form and its exact original bytes.
+        if !property.shorthand {
+            walk::walk_object_property(self, property);
+        }
+    }
+
     fn visit_statements(&mut self, statements: &oxc_allocator::Vec<'a, Statement<'a>>) {
         let outer = std::mem::take(&mut self.constants);
         let outer_tables = std::mem::take(&mut self.tables);

@@ -98,6 +98,12 @@ fn representation(source: &str, response: &Value, intrinsics: bool) -> Result<Va
         return Err(malformed());
     }
     if response["ok"] != true {
+        if response["error_kind"] == "derived-validation" {
+            return Err(Error::new(
+                422,
+                "Derived JavaScript failed bounded syntax validation; original source is preserved",
+            ));
+        }
         return Err(Error::new(422, "JavaScript could not be parsed"));
     }
     let assumptions = json!(if intrinsics {
@@ -636,4 +642,27 @@ fn tables(source: &str) -> Vec<Value> {
     }
     tables.sort_by_key(|v| v["offset"].as_u64());
     tables
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derivation_failure_is_not_reported_as_an_original_parse_error() {
+        let response = json!({
+            "schema": "reb-deobfuscator-worker-v1",
+            "ok": false,
+            "parsed": true,
+            "error_kind": "derived-validation",
+        });
+        let error = representation("const result=1+2;", &response, false).unwrap_err();
+        assert_eq!(error.status, 422);
+        assert!(error.message.contains("Derived JavaScript"));
+        assert!(error.message.contains("original source is preserved"));
+        let mut original_error = response;
+        original_error.as_object_mut().unwrap().remove("error_kind");
+        let error = representation("const broken=;", &original_error, false).unwrap_err();
+        assert_eq!(error.message, "JavaScript could not be parsed");
+    }
 }

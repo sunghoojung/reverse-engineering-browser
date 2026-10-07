@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_REQUEST_BYTES: usize = MAX_SOURCE_BYTES * 6 + 64 * 1024;
 const MAX_TRANSFORMATIONS: usize = 4096;
+const MAX_DERIVED_BYTES: usize = MAX_SOURCE_BYTES + 512 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct Request {
@@ -36,6 +37,8 @@ struct Response {
     transformations: Vec<Transformation>,
     transformations_truncated: bool,
     assumptions: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_kind: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     function_location: Option<preflight::FunctionLocation>,
 }
@@ -78,8 +81,43 @@ fn error_response(message: impl Into<String>) -> Response {
         transformations: Vec::new(),
         transformations_truncated: false,
         assumptions: vec![],
+        error_kind: None,
         function_location: None,
     }
+}
+
+// Validate the whole candidate before publishing any rewrite receipts. The
+// heap-backed preflight bounds recursive Oxc parsing of generated text too.
+fn validate_derived(source: &str, source_type: SourceType) -> Result<(), &'static str> {
+    if source.len() > MAX_DERIVED_BYTES {
+        return Err("derived output exceeds its byte limit; original source is preserved");
+    }
+    preflight::check(source).map_err(|_| {
+        "derived output failed bounded syntax preflight; original source is preserved"
+    })?;
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if parsed.panicked || !parsed.diagnostics.is_empty() {
+        return Err("derived output failed syntax validation; original source is preserved");
+    }
+    Ok(())
+}
+
+fn validate_response(mut response: Response, original: &str, source_type: SourceType) -> Response {
+    let Err(message) = validate_derived(&response.derived_source, source_type) else {
+        return response;
+    };
+    response.ok = false;
+    response.error_kind = Some("derived-validation");
+    // This diagnostic describes generated text, not a range in original evidence.
+    response.syntax_errors = vec![SyntaxError {
+        message: message.to_string(),
+        start: 0,
+        end: 0,
+    }];
+    response.derived_source = original.to_string();
+    response.transformations.clear();
+    response
 }
 
 fn analyze(request: Request) -> Response {
@@ -101,6 +139,7 @@ fn analyze(request: Request) -> Response {
                 transformations: vec![],
                 transformations_truncated: false,
                 assumptions: vec![],
+                error_kind: None,
                 function_location,
             },
             Err(message) => {
@@ -161,7 +200,7 @@ fn analyze(request: Request) -> Response {
         derived_source.push_str(&request.source[offset..]);
     }
 
-    Response {
+    let response = Response {
         schema: "reb-deobfuscator-worker-v1",
         ok: parsed_ok,
         parsed: true,
@@ -180,8 +219,13 @@ fn analyze(request: Request) -> Response {
         } else {
             vec![]
         },
+        error_kind: None,
         function_location: None,
+    };
+    if parsed_ok && !response.transformations.is_empty() {
+        return validate_response(response, &request.source, parsed.program.source_type);
     }
+    response
 }
 
 // Read at most limit bytes, then drain the remainder of an oversized record.
@@ -284,7 +328,69 @@ fn main() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_SOURCE_BYTES, Request, analyze};
+    use super::*;
+
+    #[test]
+    fn preserves_shorthand_while_folding_value_positions() {
+        for source in [
+            "const x=1; const result={x};",
+            "const x=1; const result={nested:{x}, explicit:x, [x]:x};",
+            "const 雪=1; const result={/* key */ 雪};",
+            "const x=1; const result=()=>({x});",
+            "const x=1; export {x};",
+            "const x=1; let y; ({x:y}={x}); const result=y;",
+        ] {
+            let response = analyze(Request {
+                source: source.to_string(),
+                assume_intrinsics: false,
+                function_at_byte: None,
+            });
+            assert!(response.ok, "{source}: {:?}", response.syntax_errors);
+            assert!(validate_derived(&response.derived_source, SourceType::unambiguous()).is_ok());
+            assert!(!response.derived_source.contains("{(1)}"));
+            if source.contains("explicit:x") {
+                assert!(response.derived_source.contains("explicit:(1)"));
+                assert!(response.derived_source.contains("[(1)]:(1)"));
+                assert!(response.derived_source.contains("nested:{x}"));
+            } else {
+                assert_eq!(response.derived_source, source);
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_candidate_discards_receipts_and_preserves_original() {
+        let original = "const result=1+2;";
+        let mut response = analyze(Request {
+            source: original.to_string(),
+            assume_intrinsics: false,
+            function_at_byte: None,
+        });
+        assert_eq!(response.transformations.len(), 1);
+        response.derived_source = "const result={(3)};".to_string();
+        response.transformations[0].replacement = "{(3)}".to_string();
+        let rejected = validate_response(response, original, SourceType::unambiguous());
+        assert!(!rejected.ok);
+        assert!(rejected.parsed); // The original parsed successfully.
+        assert_eq!(rejected.error_kind, Some("derived-validation"));
+        assert_eq!(rejected.derived_source, original);
+        assert!(rejected.transformations.is_empty());
+        assert!(
+            rejected.syntax_errors[0]
+                .message
+                .contains("original source is preserved")
+        );
+        assert!(
+            validate_derived(&"x".repeat(MAX_DERIVED_BYTES + 1), SourceType::unambiguous()).is_err()
+        );
+        assert!(
+            validate_derived(
+                &format!("{}0;", "!".repeat(10_000)),
+                SourceType::unambiguous()
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn folds_finite_numeric_literals_and_preserves_unsafe_math() {

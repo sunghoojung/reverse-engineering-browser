@@ -90,7 +90,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent("app.css")),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/pane_layout.js", "/app.js", "/app_state.js", "/evidence_models.js", "/source_syntax.js", "/traffic_view.js", "/request_value_test.js", "/field_provenance.js", "/native_console_completion.js", "/native_console.js":
+      case "/pane_layout.js", "/app.js", "/app_state.js", "/evidence_models.js", "/source_syntax.js", "/source_facts.js", "/traffic_view.js", "/request_value_test.js", "/field_provenance.js", "/native_console_completion.js", "/native_console.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -99,6 +99,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         response = (try healthResponse(), "application/json; charset=utf-8", 200, [:])
       case "/api/native-console":
         response = (Data("{\"contract_version\":2,\"available\":false,\"state\":\"idle\",\"session_id\":null,\"message\":\"Open a live workspace to use the native console\"}".utf8), "application/json; charset=utf-8", 200, [:])
+      case "/api/source-facts":
+        // The stored-evidence scheme has no reviewed source-facts adapter.
+        // Live workspaces use the bundled Rust HTTP backend instead.
+        response = (try JSONSerialization.data(withJSONObject: [
+          "error": "JavaScript facts are unavailable in stored-evidence native mode. Open a live workspace or the browser development UI.",
+          "code": "dependency_unavailable", "details": [:]
+        ]), "application/json; charset=utf-8", 503, [:])
       case "/api/deobfuscation":
         handleDeobfuscation(requestURL, to: urlSchemeTask)
         return

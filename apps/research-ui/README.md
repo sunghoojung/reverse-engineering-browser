@@ -354,6 +354,31 @@ A browser startup or sandbox error is a failed/unavailable check, never a pass;
 do not disable the sandbox to run it. Native macOS interaction remains a separate
 product-path requirement.
 
+### Rendered Sources facts regression check
+
+The same `requests-ui` CI owner also runs a separate Sources facts mode:
+
+```sh
+REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium)" \
+  node tools/check-origin-trace-debugger.mjs --source-facts-ui-browser
+```
+
+This uses the existing browser lifecycle and strict hit-tested pointer/keyboard
+checks with synthetic immutable source artifacts. It covers exact selection,
+100-row paging, keyboard categories and disclosure, original UTF-8/BOM byte
+navigation, profile-relative coverage, unknown frontiers, unavailable and error
+states, retained reports, cancellation and retry, source changes, Hooks dismissal,
+Close/Escape focus, and narrow-sidebar navigation. Analyzed source is never
+executed. Sources runs even if Requests fails, unless the job is cancelled.
+
+Separate screenshots, bounded startup/failure diagnostics, and a success-only
+`validation.json` are written under `build/source-facts-ui-qa` and uploaded as
+`source-facts-ui-<run id>`. Inspect these screenshots as well as the interaction
+receipt before accepting rendered behavior. A startup error cannot produce a
+passing receipt. These browser fixtures do not replace real Rust/Oxc HTTP/CLI
+integration, native live WKWebView testing, or macOS package validation. Stored
+`reb://` evidence still reports Sources facts as unsupported.
+
 ### Interface styling
 
 The shared shell keeps the existing Rosé Pine Moon tokens, thin pane dividers,
@@ -581,6 +606,47 @@ The production Rust AST passes and their ReverseJS comparison are documented in
 server uses a built worker when available (debug before release), or the explicit
 `REB_DEOBFUSCATOR_WORKER` executable. Worker failures remain errors; a missing
 worker makes AST operations unavailable with an explicit error. Deob stays inside Sources.
+
+## Captured JavaScript facts
+
+In **Sources**, select a captured JavaScript artifact and choose **Facts**.
+The existing Rust/Oxc worker returns bounded lexical scopes, declarations,
+callables, regions and operations for that exact session, artifact and SHA-256.
+This is an explicit, inert analysis action. Live debugger scripts and derived
+text are not accepted. The Details pane shows complete-within-profile, partial,
+unavailable and truncated states, diagnostics and unknown-effect frontiers.
+Each category displays 100 rows per page; fact details are capped at 4,096
+characters. Shadowed declarations retain distinct IDs and ambiguous bindings
+remain candidates. Neither is proof of initialized values, dataflow or runtime
+call targets; region-local order is conditional on entry and normal completion.
+
+An **Original bytes** link loads the complete original artifact through the
+existing verified 2 MiB chunk endpoint (at most 4 MiB total), checks its SHA-256,
+and strictly decodes UTF-8 while retaining a byte-order mark. It then switches
+the existing editor to original source and reveals the selected half-open byte
+range. The start-line span is highlighted when browser highlights are available;
+multiline ranges remain explicitly labeled. The editor's 20,000-line display
+limit remains visible and links beyond it report that limit. A lossy preview,
+a different session, changed hash or derived representation is never used as a
+byte-coordinate substitute.
+
+Cancel, closing Facts, source changes and leaving Sources discard pending
+responses. An already started bounded worker may finish, but its result is not
+applied. Response readers own a bounded byte buffer: at most 33 MiB for facts
+and 2 MiB per original-source chunk. They reject more than 65,536 stream chunks,
+including empty chunks, and yield every 256 chunks so fragmented responses cannot
+starve cancellation or deadlines. Cancelling does not wait for producer cleanup.
+Requests have a ten-second deadline including response-body reads;
+retries are explicit, and a failed retry preserves the last successful report
+for the same exact source. Only one report and one verified original source are
+retained by this view.
+
+The native app's live workspace loads the bundled Rust HTTP backend and shares
+this feature with browser development. The separate `reb://` stored-evidence
+native interface does not have the reviewed adapter: Facts is disabled with a
+visible explanation in Details, and direct requests return structured HTTP 503
+`dependency_unavailable`. No Swift parser or duplicate validator is substituted.
+See [JavaScript source facts v1](../../protocol/javascript-source-facts-v1.md).
 
 ## Programmatic HTTP access
 

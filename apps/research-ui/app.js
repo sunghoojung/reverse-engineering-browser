@@ -1,3 +1,13 @@
+      const sourceFactsPanel = createSourceFactsPanel({
+        getSource: selectedSource,
+        onNavigate: revealSourceFactRange,
+        openSidebar() {
+          if (state.sourceHooksOpen) closeSourceHooks(false);
+          state.sourceSidebarOpen = true;
+          renderSourceSidebar();
+        }
+      });
+
       async function refreshVmAnalysis(requestId = state.vmAnalysisRequestId) {
         if (location.protocol === 'file:') return;
         const normalizedRequestId = requestId || null;
@@ -6369,7 +6379,7 @@
             return {content: rows.map(row => row.byte_offset === null ? `;; ${row.text}` : `${row.kind === 'instruction' ? `func ${row.function_index}`.padEnd(11) : row.kind.padEnd(11)} ${row.text}`).join('\n'), lineMap: null, wasmRows: rows};
           }
         }
-        const original = source.deobfuscation?.original_source ?? source.content ?? '';
+        const original = sourceFactsPanel.original(source) ?? source.deobfuscation?.original_source ?? source.content ?? '';
         const derived = state.sourceDeobfuscated && source.kind === 'javascript' ? sourceDerivedView(source) : null;
         const active = derived?.text ?? original;
         const formatResult = state.sourceFormatted
@@ -6413,14 +6423,14 @@
           }
           return;
         }
-        if (source.loading) {
+        if (source.loading && sourceFactsPanel.original(source) === undefined) {
           elements.sourceLanguage.textContent = 'Detecting syntax';
           elements.sourceCode.hidden = true;
           elements.sourceCodeEmpty.hidden = false;
           elements.sourceCodeEmpty.textContent = source.source_type === 'script' ? 'Loading live script source…' : 'Loading immutable artifact bytes…';
           return;
         }
-        if (source.loadError) {
+        if (source.loadError && sourceFactsPanel.original(source) === undefined) {
           elements.sourceLanguage.textContent = 'Unavailable';
           elements.sourceCode.hidden = true;
           elements.sourceCodeEmpty.hidden = false;
@@ -6526,6 +6536,7 @@
 
       function renderSources() {
         const source = selectedSource();
+        sourceFactsPanel.sync(source);
         const view = source?.content !== undefined ? sourceDisplayView(source) : null;
         document.querySelectorAll('[data-source-collection]').forEach(tab => {
           const selected = tab.dataset.sourceCollection === state.sourceCollection;
@@ -6599,6 +6610,30 @@
           row.tabIndex = -1;
           row.focus({preventScroll: true});
           row.scrollIntoView({block: 'center'});
+        }
+      }
+
+      function revealSourceFactRange(source, range, position) {
+        if (sourceFactsIdentity(selectedSource()) !== sourceFactsIdentity(source)) return;
+        if (position.line >= 20000) throw new Error('This range starts beyond the first 20,000 displayed lines. Its original byte offsets remain available in Facts.');
+        // This uses separately hash-verified, strict UTF-8 original bytes, never
+        // a lossy preview, derived text, or a live debugger script.
+        if (getComputedStyle(elements.sourceSidebar).position === 'absolute') {
+          state.sourceSidebarOpen = false;
+          renderSourceSidebar();
+        }
+        revealOriginalLine(source, position.line, position.column);
+        const row = elements.sourceCode.querySelector(`[data-line="${position.line + 1}"]`);
+        if (!row) throw new Error('This original range is outside the current source view.');
+        const text = row.querySelector('.source-text');
+        const highlight = sourceOccurrenceRange(text, {column: position.column,
+          length: Math.min(position.length, text.textContent.length - position.column)});
+        if (highlight && globalThis.Highlight && globalThis.CSS?.highlights) CSS.highlights.set('source-search-match', new Highlight(highlight));
+        elements.sourcePosition.textContent = `Original UTF-8 bytes [${range.start}, ${range.end}) · Line ${position.line + 1}, Column ${position.column + 1}${position.multiline ? ' · range continues on following lines' : ''}`;
+        if (highlight) {
+          const bounds = highlight.getBoundingClientRect();
+          const viewport = elements.sourceCodeWrap.getBoundingClientRect();
+          elements.sourceCodeWrap.scrollLeft += bounds.left - viewport.left - Math.min(120, viewport.width / 4);
         }
       }
 
@@ -8268,6 +8303,7 @@
 
       function showScreen(name, trigger = null) {
         const screenName = name === 'backtraces' ? 'backtrace' : name;
+        if (screenName !== 'sources') sourceFactsPanel.cancel();
         if (screenName !== 'sources' && state.sourceHooksOpen) closeSourceHooks(false);
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
         document.querySelectorAll('.nav-button').forEach(button => {

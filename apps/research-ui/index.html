@@ -247,6 +247,7 @@
                 <label><span class="sr-only" hidden>Find in source</span><input id="source-search" class="source-search" type="search" placeholder="Find" aria-label="Find in source" title="Find text; Enter for next, Shift+Enter for previous (first 1000 matches)" /></label>
                 <button id="source-pretty" class="source-tool" type="button" aria-label="Pretty print source" title="Pretty print source" disabled>{ }</button>
                 <button id="source-wasm" class="source-tool" type="button" aria-label="Inspect WebAssembly module" aria-pressed="false" hidden>Inspect</button>
+                <button id="source-facts-toggle" class="source-tool" type="button" aria-controls="source-facts-details" aria-expanded="false" disabled>Facts</button>
                 <button id="source-deob" class="source-tool" type="button" aria-label="Show deobfuscated representation" title="Show deobfuscated representation" disabled>Deob</button>
                 <button id="source-hook-pivot" class="source-tool" type="button" aria-controls="hooks-workspace" aria-expanded="false" title="Open Runtime Hooks beside source" disabled>Hooks</button>
                 <button id="source-sidebar-toggle" class="source-tool" type="button" aria-controls="source-sidebar" aria-expanded="false">Details</button>
@@ -287,6 +288,7 @@
               <div id="debug-state" class="debug-state"><div class="debug-state-line"><strong>Offline</strong><span class="debug-target">Run a live session to attach</span></div></div>
               <div class="debug-panes">
                 <details id="artifact-details" class="debug-pane" open><summary>Source details</summary><div id="artifact-facts" class="debug-pane-body">Select a source to inspect capture or runtime metadata.</div></details>
+                <details id="source-facts-details" class="debug-pane"><summary>JavaScript facts</summary><div id="source-facts-report" class="debug-pane-body source-facts-report" aria-live="polite"></div></details>
                 <details id="deobfuscation-details" class="debug-pane" open><summary>Deobfuscation</summary><label class="deobfuscation-assumption"><input id="deobfuscation-intrinsics" type="checkbox"> Assume standard JavaScript intrinsics</label><div id="deobfuscation-report" class="debug-pane-body">Select a JavaScript source to analyze.</div></details>
                 <details class="debug-pane" open><summary>Watch</summary><div class="debug-pane-body"><form id="watch-form" class="debug-form"><input id="watch-expression" type="text" placeholder="Add expression" aria-label="Watch expression" autocomplete="off" /><button type="submit" aria-label="Add watch expression">+</button></form><div id="watch-list"></div></div></details>
                 <details class="debug-pane" open><summary>Breakpoints</summary><div id="breakpoint-list" class="debug-pane-body">No breakpoints</div></details>
@@ -1240,6 +1242,7 @@
     <script src="app_state.js"></script>
     <script src="evidence_models.js"></script>
     <script src="source_syntax.js"></script>
+    <script src="source_facts.js"></script>
     <script src="traffic_view.js"></script>
     <script src="request_value_test.js"></script>
     <script src="field_provenance.js"></script>

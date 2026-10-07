@@ -7,6 +7,9 @@ research UI. Authorization, capture, and privacy rules are defined in
 [WASM Inspection v1](wasm-inspection-v1.md) defines bounded static module
 inspection and its original-byte coordinates.
 
+[JavaScript Source Facts v1](javascript-source-facts-v1.md) defines exact-artifact
+lexical binding/effect analysis, original-byte ranges and explicit unknown coverage.
+
 [Native Console v2](native-console-v2.md) defines the opt-in mutable console,
 its disposable browser ownership, wire layouts, and limits.
 

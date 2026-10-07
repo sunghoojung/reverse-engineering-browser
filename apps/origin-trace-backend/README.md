@@ -70,6 +70,19 @@ bounded inert decoding. The native app bundles the same helper; see
 coverage semantics. HTTP tests verify offsets, imported function numbering,
 CLI parity, malformed and oversized input, partial coverage, and corruption.
 
+Immutable JavaScript source facts use `GET /api/source-facts` with exact
+`session_id` and `artifact_id`. The adapter verifies the complete artifact and
+strict UTF-8 before invoking the existing Rust/Oxc worker under its shared lock.
+`reb-api describe get_source_facts` and `reb-api call get_source_facts` expose the
+same [versioned contract](../../protocol/javascript-source-facts-v1.md), including
+original-byte ranges, lexical binding/effect facts and explicit partial or
+unavailable coverage. No source is executed or rewritten.
+`make check` also runs the real-worker HTTP/CLI integration test after building
+the helper. Standalone backend `cargo test` keeps that test explicitly ignored;
+set `REB_SOURCE_FACTS_TEST_WORKER` to the built worker and run
+`cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml source_facts_real_worker_http_and_cli -- --ignored`
+to exercise that boundary directly.
+
 API failures preserve their HTTP status and human `error` text and add stable
 `code` and bounded `details` fields. The shared envelope and enum live in
 `src/error.rs` and the OpenAPI `Error`, `ErrorCode`, and `ErrorDetails` schemas.

@@ -14,8 +14,188 @@ import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
 const trafficBrowser = process.argv[2] === "--traffic-ui-browser";
+const sourceFactsBrowser = process.argv[2] === "--source-facts-ui-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
-const root = process.argv[fieldsOnly || trafficBrowser ? 3 : 2] || new URL("..", import.meta.url).pathname;
+const root = process.argv[fieldsOnly || trafficBrowser || sourceFactsBrowser ? 3 : 2] || new URL("..", import.meta.url).pathname;
+// Facts are UI projections over the already validated Rust contract. These
+// fixtures exercise identity and stale/cancelled request ownership, not JS execution.
+const sourceFactsUI = runInNewContext(
+  (await readFile(join(root, 'apps/research-ui/source_facts.js'), 'utf8')) +
+  ';({sourceFactsIdentity,sourceFactsUnavailable,isSourceFactsReport,sourceFactsPosition,sourceFactsReadBytes,createSourceFactsController})',
+  {TextEncoder, TextDecoder, Uint8Array, AbortController, setTimeout, clearTimeout, fetch, crypto},
+);
+const factsBytes = new TextEncoder().encode('\ufeffconst 雪 = "😀";\n雪++;');
+const factsHash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', factsBytes)), byte => byte.toString(16).padStart(2, '0')).join('');
+const factsArtifact = {source_type:'artifact', protocol_version:1, artifact_id:'7', session_id:'11', navigation_id:'13', frame_id:'17', parent_artifact_id:'0', creator_event_id:'19', execution_context_id:'23', capture_origin:'dynamic_javascript', kind:'javascript', url:'https://fixture.invalid/facts.js', mime_type:'text/javascript', byte_size:factsBytes.length, sha256:factsHash, sensitive:false};
+const factsFixture = source => ({schema:'reb-javascript-source-facts-v1', profile:'lexical-effects-v1', offset_unit:'utf-8-byte', source_bytes:source.byte_size, ok:true,
+  source:Object.fromEntries(Object.entries(source).filter(([key]) => key !== 'source_type')),
+  scopes:[{id:0,parent_id:null,range:{start:0,end:source.byte_size},kind:'program'}], bindings:[], callables:[], regions:[{id:0,parent_id:null,callable_id:null,range:{start:0,end:source.byte_size},kind:'program',entry_order:0}], operations:[],
+  coverage:{status:'complete',truncated:false,frontiers:[],diagnostics:[]}, limits:{max_source_bytes:4194304,max_ast_nodes:32768,max_facts:16384,max_frontiers:256,max_binding_candidates:64,preflight_depth:128,preflight_nodes:500000}});
+assert.equal(sourceFactsUI.sourceFactsUnavailable(factsArtifact, 'http:'), '');
+assert.match(sourceFactsUI.sourceFactsUnavailable(factsArtifact, 'reb:'), /stored-evidence native mode/);
+assert.match(sourceFactsUI.sourceFactsUnavailable({...factsArtifact,source_type:'script'}, 'http:'), /captured JavaScript/);
+for (const source of [{...factsArtifact,artifact_id:'07'},{...factsArtifact,session_id:'18446744073709551616'},{...factsArtifact,byte_size:4194305}]) assert(sourceFactsUI.sourceFactsUnavailable(source, 'http:'));
+const factsReport = factsFixture(factsArtifact);
+assert(sourceFactsUI.isSourceFactsReport(factsReport, factsArtifact));
+for (const field of Object.keys(factsReport.source)) {
+  const foreign = structuredClone(factsReport); foreign.source[field] = null;
+  assert.equal(sourceFactsUI.isSourceFactsReport(foreign, factsArtifact), false, field);
+}
+for (const update of [{offset_unit:'utf-16'}, {source_bytes:0}, {ok:false}, {bindings:Array(16385).fill({})},
+  {scopes:[{...factsReport.scopes[0],range:{start:0,end:factsBytes.length+1}}]},
+  {scopes:[factsReport.scopes[0],factsReport.scopes[0]]},
+  {scopes:[{...factsReport.scopes[0],kind:'executed'}]},
+  {coverage:{status:'complete',truncated:true,frontiers:[],diagnostics:[]}},
+  {coverage:{status:'partial',truncated:false,frontiers:Array(257).fill({}),diagnostics:[]}}]) {
+  assert.equal(sourceFactsUI.isSourceFactsReport({...factsReport,...update}, factsArtifact), false);
+}
+const partialFacts = {...factsReport, coverage:{status:'partial',truncated:true,frontiers:[{range:{start:0,end:0},reason:'fact-limit'}],diagnostics:['Bounded coverage']}};
+assert(sourceFactsUI.isSourceFactsReport(partialFacts, factsArtifact));
+const unavailableFacts = {...factsReport,ok:false,scopes:[],regions:[],coverage:{status:'unavailable',truncated:false,frontiers:[],diagnostics:['Malformed source']}};
+assert(sourceFactsUI.isSourceFactsReport(unavailableFacts, factsArtifact));
+assert.equal(sourceFactsUI.isSourceFactsReport({...unavailableFacts,scopes:factsReport.scopes}, factsArtifact), false);
+const snowOffset = new TextEncoder().encode('\ufeffconst ').length;
+const snowPosition = sourceFactsUI.sourceFactsPosition(factsBytes,{start:snowOffset,end:snowOffset+3});
+assert.equal(snowPosition.line,0); assert.equal(snowPosition.column,7); assert.equal(snowPosition.length,1);
+assert.throws(() => sourceFactsUI.sourceFactsPosition(factsBytes,{start:snowOffset+1,end:snowOffset+3}));
+assert.equal(sourceFactsUI.sourceFactsPosition(factsBytes,{start:0,end:factsBytes.length}).multiline,true);
+assert.equal(sourceFactsUI.sourceFactsPosition(new Uint8Array(),{start:0,end:0}).column,0);
+await assert.rejects(sourceFactsUI.sourceFactsReadBytes(new Response(new Uint8Array(5)),4), /byte limit/);
+// Response storage owns one bounded byte buffer, never a retained chunk list.
+const factsReaderFixture = (read, cancel = async () => {}) => {
+  const counts = {reads:0,cancels:0,releases:0};
+  return {counts, response:{body:{getReader:()=>({
+    read:()=>{counts.reads++;return read(counts.reads);},
+    cancel:()=>{counts.cancels++;return cancel();},
+    releaseLock:()=>{counts.releases++;},
+  })}}};
+};
+const factsFragmented = (count, width) => factsReaderFixture(async index => index>count
+  ? {done:true} : {done:false,value:new Uint8Array(width).fill(index%251)});
+for (const [count,width] of [[0,0],[65536,0],[65536,1]]) {
+  const fixture=factsFragmented(count,width);
+  const result=await sourceFactsUI.sourceFactsReadBytes(fixture.response,count*width);
+  assert.equal(result.length,count*width);assert.equal(result.buffer.byteLength,count*width);
+  if(width) for(let index=0;index<result.length;index++) assert.equal(result[index],(index+1)%251);
+  assert.deepEqual(fixture.counts,{reads:count+1,cancels:0,releases:1});
+}
+for (const width of [0,1]) {
+  const fixture=factsFragmented(65537,width);
+  await assert.rejects(sourceFactsUI.sourceFactsReadBytes(fixture.response,65537),/stream chunk limit/);
+  assert.deepEqual(fixture.counts,{reads:65537,cancels:1,releases:1});
+}
+const oversizedFacts=factsFragmented(1,5);
+await assert.rejects(sourceFactsUI.sourceFactsReadBytes(oversizedFacts.response,4),/byte limit/);
+assert.deepEqual(oversizedFacts.counts,{reads:1,cancels:1,releases:1});
+const nonbyteFacts=factsReaderFixture(async()=>({done:false,value:[1]}));
+await assert.rejects(sourceFactsUI.sourceFactsReadBytes(nonbyteFacts.response,4),/non-byte chunk/);
+assert.equal(nonbyteFacts.counts.cancels,1);assert.equal(nonbyteFacts.counts.releases,1);
+const reusedFactsChunk=new Uint8Array(1024*1024);
+const aliasedFacts=factsReaderFixture(async index=>{
+  if(index>factsBytes.length)return {done:true};
+  reusedFactsChunk[17]=factsBytes[index-1];
+  return {done:false,value:reusedFactsChunk.subarray(17,18)};
+});
+const ownedFactsBytes=await sourceFactsUI.sourceFactsReadBytes(aliasedFacts.response,factsBytes.length);
+assert.deepEqual(ownedFactsBytes,factsBytes,'Copy each fragmented UTF-8/BOM byte before its producer reuses the backing store');
+assert.equal(ownedFactsBytes.buffer.byteLength,factsBytes.length);
+assert.notEqual(ownedFactsBytes.buffer,reusedFactsChunk.buffer);
+const cancelledFactsSignal=new AbortController();cancelledFactsSignal.abort();
+const preCancelledFacts=factsFragmented(1,1);
+await assert.rejects(sourceFactsUI.sourceFactsReadBytes(preCancelledFacts.response,1,cancelledFactsSignal.signal),/cancelled/);
+assert.deepEqual(preCancelledFacts.counts,{reads:0,cancels:1,releases:1});
+const fragmentedFactsSignal=new AbortController();
+const interruptibleFacts=factsFragmented(65537,1);
+const interruptFactsTimer=setTimeout(()=>fragmentedFactsSignal.abort(),0);
+try {
+  await assert.rejects(sourceFactsUI.sourceFactsReadBytes(interruptibleFacts.response,65537,fragmentedFactsSignal.signal),/cancelled/);
+} finally {clearTimeout(interruptFactsTimer);}
+assert(interruptibleFacts.counts.reads<=256,'Fragmented streams must yield to cancellation/deadline tasks');
+assert.equal(interruptibleFacts.counts.cancels,1);assert.equal(interruptibleFacts.counts.releases,1);
+const stalledFactsSignal=new AbortController();let stalledFactsCancelled=0;
+const stalledFactsResponse=new Response(new ReadableStream({cancel(){stalledFactsCancelled++;return new Promise(()=>{});}}));
+const stalledFactsRead=sourceFactsUI.sourceFactsReadBytes(stalledFactsResponse,4,stalledFactsSignal.signal);
+stalledFactsSignal.abort();
+let stalledFactsWatchdog;
+try {
+  await assert.rejects(Promise.race([stalledFactsRead,new Promise((_,reject)=>{stalledFactsWatchdog=setTimeout(()=>reject(new Error('Stalled reader did not cancel promptly')),1000);})]),/cancelled/);
+} finally {clearTimeout(stalledFactsWatchdog);}
+assert.equal(stalledFactsCancelled,1);assert.equal(stalledFactsResponse.body.locked,false);
+console.log('PASS Sources owned response bytes, exact byte/chunk limits, empty/fragmented/aliased streams and cancellation despite stalled producer cleanup');
+let selectedFactsArtifact = factsArtifact;
+let factsPending = [];
+let factsNavigations = [];
+const factsController = sourceFactsUI.createSourceFactsController({getSource:()=>selectedFactsArtifact,protocol:'http:',onChange:()=>{},onNavigate:(...args)=>factsNavigations.push(args),cryptoApi:crypto,
+  fetcher:(url,options)=>new Promise(resolve=>factsPending.push({url,options,resolve}))});
+const deliverFacts = (entry, source = selectedFactsArtifact) => entry.resolve(Response.json(factsFixture(source)));
+factsController.sync(selectedFactsArtifact);
+const firstFactsLoad = factsController.load();
+assert.equal(factsPending.length,1); assert.match(factsPending[0].url,/session_id=11&artifact_id=7$/);
+await factsController.load(); assert.equal(factsPending.length,1,'Repeated load shares one in-flight request');
+factsController.cancel(); assert.equal(factsPending[0].options.signal.aborted,true);
+const secondFactsLoad = factsController.load();
+deliverFacts(factsPending[1]); await secondFactsLoad;
+const retainedFactsReport = factsController.model.report;
+deliverFacts(factsPending[0]); await firstFactsLoad;
+assert.equal(factsController.model.report,retainedFactsReport,'A cancelled older response cannot replace current facts');
+const staleFactsLoad = factsController.load();
+selectedFactsArtifact = {...factsArtifact,session_id:'12'}; factsController.sync(selectedFactsArtifact);
+deliverFacts(factsPending[2],factsArtifact); await staleFactsLoad;
+assert.equal(factsController.model.report,null,'Switching source clears facts and rejects delayed responses');
+selectedFactsArtifact = factsArtifact; factsController.sync(selectedFactsArtifact);
+const matchingFactsLoad = factsController.load(); deliverFacts(factsPending[3]); await matchingFactsLoad;
+const nav = factsController.navigate({start:snowOffset,end:snowOffset+3});
+assert.match(factsPending[4].url,/artifact[s]\/7\/content\?offset=0&limit=2097152$/);
+factsPending[4].resolve(new Response(factsBytes,{headers:{'X-Artifact-Total-Bytes':String(factsBytes.length),'X-Artifact-Offset':'0','X-Artifact-Truncated':'false'}})); await nav;
+assert.equal(factsNavigations.length,1); assert.equal(factsNavigations[0][2].column,7);
+assert.equal(factsController.original(factsArtifact),'\ufeffconst 雪 = "😀";\n雪++;');
+await factsController.navigate({start:0,end:0}); assert.equal(factsPending.length,5,'Repeated navigation reuses verified original bytes');
+selectedFactsArtifact = {...factsArtifact,sha256:'b'.repeat(64)}; factsController.sync(selectedFactsArtifact);
+assert.equal(factsController.original(selectedFactsArtifact),undefined,'Changed hash invalidates original bytes');
+const mismatchedFactsLoad = factsController.load(); deliverFacts(factsPending[5],factsArtifact); await mismatchedFactsLoad;
+assert.equal(factsController.model.status,'error'); assert.equal(factsController.model.report,null);
+for (const body of [new Response(factsBytes,{headers:{'X-Artifact-Truncated':'1'}}),new Response(new Uint8Array(factsBytes.length),{headers:{'X-Artifact-Total-Bytes':String(factsBytes.length),'X-Artifact-Offset':'0','X-Artifact-Truncated':'false'}})]) {
+  const attempt = factsController.navigate({start:0,end:0}); factsPending.at(-1).resolve(body); await attempt;
+  assert.equal(factsController.model.status,'error'); assert.equal(factsController.original(selectedFactsArtifact),undefined);
+}
+selectedFactsArtifact = factsArtifact;
+let timeoutNavigations = 0;
+const slowFacts = sourceFactsUI.createSourceFactsController({getSource:()=>selectedFactsArtifact,protocol:'http:',deadline:5,onChange:()=>{},onNavigate:()=>timeoutNavigations++,cryptoApi:crypto,
+  fetcher:async(_url,{signal})=>new Response(new ReadableStream({start(stream){signal.addEventListener('abort',()=>stream.error(new DOMException('Aborted','AbortError')),{once:true});}}))});
+await slowFacts.load(); assert.match(slowFacts.model.error,/timed out/); assert.equal(timeoutNavigations,0);
+assert.equal(slowFacts.model.report,null);
+for (const mode of ['facts','source']) {
+  let cancelledBody=0, bodyChunks=0;
+  const fragmentedController=sourceFactsUI.createSourceFactsController({getSource:()=>factsArtifact,protocol:'http:',deadline:5,onChange:()=>{},onNavigate:()=>{throw new Error('Timed-out fragmented source navigated');},cryptoApi:crypto,
+    fetcher:async()=>new Response(new ReadableStream({
+      pull(stream){bodyChunks++;stream.enqueue(new Uint8Array());},
+      cancel(){cancelledBody++;return new Promise(()=>{});},
+    }),{headers:{'X-Artifact-Total-Bytes':String(factsBytes.length),'X-Artifact-Offset':'0','X-Artifact-Truncated':'false'}})});
+  const operation=mode==='facts'?fragmentedController.load():fragmentedController.navigate({start:0,end:0});
+  let watchdog;
+  try {
+    await Promise.race([operation,new Promise((_,reject)=>{watchdog=setTimeout(()=>reject(new Error('Fragmented controller deadline stalled')),2000);})]);
+  } finally {clearTimeout(watchdog);}
+  assert.match(fragmentedController.model.error,/timed out/);assert.equal(fragmentedController.model.status,'error');
+  assert.equal(fragmentedController.model.report,null);assert.equal(fragmentedController.model.original,null);
+  assert.equal(cancelledBody,1);assert(bodyChunks<65536,'Body deadlines must run before exhausting the chunk budget');
+}
+let finishFactsDigest, factsDigestArrived, factsDigestTimedOut;
+const digestArrival = new Promise(resolve=>{factsDigestArrived=resolve;});
+const digestTimeout = new Promise(resolve=>{factsDigestTimedOut=resolve;});
+const digestFacts = sourceFactsUI.createSourceFactsController({getSource:()=>factsArtifact,protocol:'http:',deadline:100,onChange:model=>{if(model.status==='error') factsDigestTimedOut();},onNavigate:()=>{throw new Error('Late digest navigated');},
+  cryptoApi:{subtle:{digest:()=>new Promise(resolve=>{finishFactsDigest=resolve;factsDigestArrived();})}},
+  fetcher:async()=>new Response(factsBytes,{headers:{'X-Artifact-Total-Bytes':String(factsBytes.length),'X-Artifact-Offset':'0','X-Artifact-Truncated':'false'}})});
+const digestNavigation = digestFacts.navigate({start:0,end:0});
+let digestWatchdog;
+try { await Promise.race([Promise.all([digestArrival,digestTimeout]),new Promise((_,reject)=>{digestWatchdog=setTimeout(()=>reject(new Error('Digest timeout fixture did not reach both states')),2000);})]); }
+finally { clearTimeout(digestWatchdog); }
+assert.equal(digestFacts.model.status,'error','Deadline ends busy state while non-abortable digest is pending');
+assert.match(digestFacts.model.error,/timed out/);
+finishFactsDigest(await crypto.subtle.digest('SHA-256',factsBytes)); await digestNavigation;
+assert.equal(digestFacts.model.status,'error'); assert.equal(digestFacts.model.original,null);
+console.log('PASS Sources facts identity, UTF-8/BOM ranges, bounded streams, repeated loads, cancellation, stale responses, hash checks and timeout');
+
 const complete = runInNewContext(
   (await readFile(join(root, "apps/research-ui/source_syntax.js"), "utf8")) +
     (await readFile(join(root, "apps/research-ui/native_console_completion.js"), "utf8")) +
@@ -914,15 +1094,183 @@ console.log("PASS Chromium silent port-file startup, partial/malformed ports, la
 // Real, synthetic UI QA using the runner's installed Chromium and Node's CDP
 // WebSocket. No package install, network capture, sandbox override, or backend
 // exposure is needed. Do not substitute these screenshots for native macOS QA.
+// Synthetic immutable artifacts exercise the real Sources UI without page
+// instrumentation, captured third-party content, or executing analyzed code.
+async function sourceFactsBrowserFixture() {
+  const text = '\ufeffconst 雪 = "😀";\nfunction shadow(雪) { return 雪; }\n雪;';
+  const bytes = Buffer.from(text);
+  const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)), byte=>byte.toString(16).padStart(2,'0')).join('');
+  const artifact = id => ({protocol_version:1,artifact_id:id,session_id:'11',navigation_id:'13',frame_id:'17',parent_artifact_id:'0',creator_event_id:'19',execution_context_id:'23',capture_origin:'dynamic_javascript',kind:'javascript',url:`https://fixture.invalid/facts-${id}.js`,mime_type:'text/javascript',byte_size:bytes.length,sha256:hash,sensitive:false});
+  const artifacts = [artifact('7'),artifact('8')];
+  const snow = Buffer.byteLength('\ufeffconst ');
+  const fixture = {mode:'partial',pending:[],requests:[],artifacts,bytes,snow};
+  const report = source => ({schema:'reb-javascript-source-facts-v1',profile:'lexical-effects-v1',offset_unit:'utf-8-byte',source_bytes:bytes.length,source,ok:fixture.mode!=='unavailable',
+    scopes:fixture.mode==='unavailable'?[]:[{id:0,parent_id:null,range:{start:0,end:bytes.length},kind:'program'}],
+    regions:fixture.mode==='unavailable'?[]:[{id:0,parent_id:null,callable_id:null,range:{start:0,end:bytes.length},kind:'program',entry_order:0}],
+    bindings:fixture.mode==='unavailable'?[]:[{id:0,scope_id:0,name:'雪',range:{start:snow,end:snow+3},kind:'const'}],callables:[],
+    operations:fixture.mode==='unavailable'?[]:Array.from({length:205},(_,id)=>({id,region_id:0,order:id,range:{start:snow,end:snow+3},kind:'read',detail:{target:{kind:'binding',binding_ids:[0],resolution:'lexical-only',name:'雪'}}})),
+    coverage:{status:fixture.mode==='unavailable'?'unavailable':fixture.mode==='complete'?'complete':'partial',truncated:fixture.mode==='truncated',diagnostics:fixture.mode==='unavailable'?['Synthetic parse rejection']:[],frontiers:['unavailable','complete'].includes(fixture.mode)?[]:[{range:{start:snow,end:snow+3},reason:'abrupt-completion'}]},
+    limits:{max_source_bytes:4194304,max_ast_nodes:32768,max_facts:16384,max_frontiers:256,max_binding_candidates:64,preflight_depth:128,preflight_nodes:500000}});
+  fixture.handle = async (request,response) => {
+    const url = new URL(request.url,'http://127.0.0.1');
+    const json = (status,value) => {if(!response.destroyed){response.writeHead(status,{'Content-Type':'application/json'});response.end(JSON.stringify(value));}};
+    if(url.pathname==='/api/events'){json(200,{count:0,events:[],capture_mode:'demo',broker_connected:false,capture_controls_available:false});return true;}
+    if(url.pathname==='/api/artifacts'){json(200,{count:artifacts.length,artifacts});return true;}
+    if(url.pathname==='/api/source-facts'){
+      fixture.requests.push(url.search);
+      const source=artifacts.find(value=>value.artifact_id===url.searchParams.get('artifact_id') && value.session_id===url.searchParams.get('session_id'));
+      if(!source){json(404,{error:'Synthetic exact source not found'});return true;}
+      if(fixture.mode==='pending') await new Promise(resolve=>fixture.pending.push(resolve));
+      if(fixture.mode==='error'){json(503,{error:'Synthetic worker unavailable',code:'dependency_unavailable',details:{}});return true;}
+      const value=report(source);
+      if(fixture.mode==='malformed') value.source={...source,sha256:'b'.repeat(64)};
+      json(200,value);return true;
+    }
+    if(/^\/api\/artifacts\/[78]\/content$/.test(url.pathname)){
+      const offset=Number(url.searchParams.get('offset')||0),limit=Number(url.searchParams.get('limit')||2097152);
+      const chunk=bytes.subarray(offset,offset+limit);
+      response.writeHead(200,{'Content-Type':'application/octet-stream','X-Artifact-Total-Bytes':String(bytes.length),'X-Artifact-Offset':String(offset),'X-Artifact-Truncated':String(offset+chunk.length<bytes.length)});response.end(chunk);return true;
+    }
+    return false;
+  };
+  fixture.release = () => {for(const resolve of fixture.pending.splice(0)) resolve();};
+  return fixture;
+}
+
+// Keep fixture routing admissible to the normal refresh path before launching
+// Chrome; a blanket offline events response would prevent artifact discovery.
+const sourcesFixtureControl = await sourceFactsBrowserFixture();
+const sourcesFixtureModels = runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+';({isBrokerResponse,isArtifactResponse})');
+async function sourcesFixtureResponse(url) {
+  const response={destroyed:false,writeHead(status,headers){this.status=status;this.headers=headers;},end(body){this.body=body;}};
+  assert(await sourcesFixtureControl.handle({url},response));return response;
+}
+const sourcesEventsControl=await sourcesFixtureResponse('/api/events?limit=5000');
+assert.equal(sourcesEventsControl.status,200);assert(sourcesFixtureModels.isBrokerResponse(JSON.parse(sourcesEventsControl.body)));
+const sourcesArtifactsControl=await sourcesFixtureResponse('/api/artifacts?limit=500');
+assert.equal(sourcesArtifactsControl.status,200);assert(sourcesFixtureModels.isArtifactResponse(JSON.parse(sourcesArtifactsControl.body)));
+const sourcesFactsControl=await sourcesFixtureResponse('/api/source-facts?session_id=11&artifact_id=7');
+assert.equal(JSON.parse(sourcesFactsControl.body).source.artifact_id,'7');
+assert.equal((await sourcesFixtureResponse('/api/source-facts?session_id=12&artifact_id=7')).status,404);
+const sourcesBytesControl=await sourcesFixtureResponse('/api/artifacts/7/content?offset=0&limit=2097152');
+assert.equal(sourcesBytesControl.headers['X-Artifact-Truncated'],'false');assert.deepEqual(sourcesBytesControl.body,sourcesFixtureControl.bytes);
+console.log('PASS Sources browser fixture event admission, exact artifact identity, response and byte headers (not rendered QA)');
+
+async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture}) {
+  const press = value => {
+    const code = {Enter:13,Escape:27,Home:36,End:35,ArrowDown:40}[value];
+    return key(value,value,{windowsVirtualKeyCode:code,
+      ...(value==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});
+  };
+  const until = async (expression,message) => {
+    const started=Date.now();
+    while(Date.now()-started<5000){if(await evaluate(expression)) return;await new Promise(resolve=>setTimeout(resolve,25));}
+    assert.fail(message);
+  };
+  const pendingRequest = async () => {
+    const started=Date.now();
+    while(Date.now()-started<5000){if(fixture.pending.length) return;await new Promise(resolve=>setTimeout(resolve,25));}
+    assert.fail('Synthetic source-facts request did not reach the server');
+  };
+  const sourceClick = async selector => {
+    // Scroll only the intended Sources details pane, then use the same strict
+    // hit-tested pointer helper. Do not hide clipping by scrolling the workspace.
+    const delta=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});if(!n)throw new Error('Missing source control');const p=n.closest('#source-sidebar .debug-panes');if(!p)return 0;const r=n.getBoundingClientRect(),b=p.getBoundingClientRect();return r.top<b.top?r.top-b.top:r.bottom>b.bottom?r.bottom-b.bottom:0;})()`);
+    if(delta) await wheel('#source-sidebar .debug-panes',delta);
+    await click(selector);
+  };
+  await until("state.artifacts.length===2",'Synthetic captured sources did not load');
+  await click('[data-screen="sources"]');
+  await click('[data-artifact-id="7"]');
+  await evaluate("state.sourceHooksOpen=true; document.querySelector('#screen-sources').dataset.hooksOpen='true'; renderSourceSidebar()");
+  await click('#source-facts-toggle');
+  assert.equal(await evaluate("state.sourceHooksOpen"),false,'Facts must dismiss the mutually exclusive Hooks pane');
+  await until("document.querySelectorAll('#source-facts-report .source-fact').length===100",'Facts did not load visibly');
+  assert.match(await evaluate("document.querySelector('#source-facts-report').textContent"),/Session 11 · artifact 7/);
+  assert.match(await evaluate("document.querySelector('.source-facts-coverage').textContent"),/Partial coverage.*1 unknown frontiers/);
+  assert(!await evaluate("document.querySelector('.source-facts-status').textContent.includes('No facts loaded')"));
+  assert(await evaluate("getComputedStyle(document.querySelector('#source-facts-details')).display!=='none'"),'Stored HTTP artifacts must expose facts without a live debugger');
+  await sourceClick('[data-facts-action="next"]');
+  assert.match(await evaluate("document.querySelector('#source-facts-report').textContent"),/Showing 101–200 of 205/);
+  await sourceClick('[data-facts-action="next"]');
+  assert.equal(await evaluate("document.querySelectorAll('#source-facts-report .source-fact').length"),5);
+  await sourceClick('[data-facts-action="previous"]');
+  await sourceClick('[data-facts-action="previous"]');
+  await sourceClick('#source-facts-report select');
+  await press('Home');await press('ArrowDown');await press('Enter');
+  await until("document.querySelector('#source-facts-report select').value==='bindings'",'Keyboard category selection failed');
+  assert.equal(await evaluate("document.querySelectorAll('#source-facts-report .source-fact').length"),1);
+  await sourceClick('.source-fact > button');
+  await until("document.querySelector('#source-position').textContent.includes('Original UTF-8 bytes')",'Original-byte link did not navigate');
+  assert.match(await evaluate("document.querySelector('#source-position').textContent"),/Line 1, Column 8/);
+  assert.equal(await evaluate("state.sourceFormatted || state.sourceDeobfuscated"),false);
+  assert(await evaluate("document.querySelector('#source-code .source-text').textContent.startsWith('\\ufeffconst 雪')"),'Original BOM must remain in byte-mapped view');
+  await screenshot('source-facts-wide-original');
+  fixture.mode='complete';await sourceClick('[data-facts-action="retry-facts"]');
+  await until("document.querySelector('.source-facts-coverage').textContent.includes('Complete within lexical-effects-v1 only')",'Complete coverage must remain profile-relative');
+  fixture.mode='truncated';await sourceClick('[data-facts-action="retry-facts"]');
+  await until("document.querySelector('.source-facts-coverage').textContent.includes('TRUNCATED')",'Truncated coverage was hidden');
+  await sourceClick('#source-facts-report select');await press('End');await press('Enter');
+  await until("document.querySelector('#source-facts-report select').value==='frontiers'",'Unknown-frontier category did not open');
+  assert.match(await evaluate("document.querySelector('.source-fact').textContent"),/abrupt-completion/);
+  fixture.mode='error';await sourceClick('[data-facts-action="retry-facts"]');
+  await until("document.querySelector('.source-facts-status').textContent.includes('Synthetic worker unavailable')",'Worker failure was hidden');
+  fixture.mode='malformed';await sourceClick('[data-facts-action="retry-facts"]');
+  await until("document.querySelector('.source-facts-status').textContent.includes('did not match')",'Changed source identity was accepted');
+  assert.match(await evaluate("document.querySelector('#source-facts-report').textContent"),/last successful facts remain visible/);
+  fixture.mode='unavailable';await sourceClick('[data-facts-action="retry-facts"]');
+  await until("document.querySelector('.source-facts-coverage').textContent.includes('Analysis unavailable')",'Unavailable analysis was hidden');
+  assert.equal(await evaluate("document.querySelectorAll('#source-facts-report .source-fact').length"),0);
+  fixture.mode='pending';await sourceClick('[data-facts-action="retry-facts"]');await pendingRequest();
+  await until("document.querySelector('[data-facts-action=cancel]')!==null",'Pending request has no Cancel');
+  await sourceClick('[data-facts-action="cancel"]');fixture.mode='partial';fixture.release();
+  assert(!await evaluate("document.querySelector('.source-facts-status').textContent.includes('Analyzing')"));
+  await sourceClick('[data-facts-action="retry-facts"]');
+  await until("document.querySelector('.source-facts-coverage').textContent.includes('Partial coverage')",'Explicit retry failed');
+  fixture.mode='pending';await sourceClick('[data-facts-action="retry-facts"]');await pendingRequest();
+  await click('[data-artifact-id="8"]');fixture.mode='partial';fixture.release();
+  assert.equal(await evaluate("document.querySelectorAll('#source-facts-report .source-fact').length"),0,'Old artifact result survived selection');
+  assert.match(await evaluate("document.querySelector('#source-facts-report').textContent"),/Session 11 · artifact 8/);
+  await sourceClick('[data-facts-action="analyze-captured-source"]');
+  await until("document.querySelectorAll('#source-facts-report .source-fact').length>0",'Second artifact did not load');
+  assert(fixture.requests.every(query=>new URLSearchParams(query).get('session_id')==='11'));
+  await sourceClick('[data-facts-action="close"]');
+  assert.equal(await evaluate("document.querySelector('#source-facts-details').open"),false);
+  assert.equal(await evaluate("document.activeElement.id"),'source-facts-toggle');
+  await press('Enter');await until("document.querySelector('#source-facts-details').open",'Keyboard reopen failed');
+  await press('Escape');assert.equal(await evaluate("document.querySelector('#source-facts-details').open"),false);
+  await viewport(760,560);await click('#source-facts-toggle');
+  await sourceClick('#source-facts-report select');await press('Home');await press('ArrowDown');await press('Enter');
+  await until("document.querySelector('#source-facts-report select').value==='bindings'",'Narrow category failed');
+  await screenshot('source-facts-narrow-details');
+  await sourceClick('.source-fact > button');
+  await until("document.querySelector('#source-sidebar').hidden",'Narrow overlay obscures original source after navigation');
+  assert(await evaluate("document.activeElement.classList.contains('source-line')"),'Original range should own keyboard focus');
+  assert(await evaluate("document.documentElement.scrollWidth<=innerWidth"),'Sources has horizontal page overflow');
+  await screenshot('source-facts-narrow-original');
+  await click('#source-facts-toggle');assert.equal(await evaluate("document.querySelector('#source-sidebar').hidden"),false,'Facts must reopen its hidden sidebar');
+  await sourceClick('[data-facts-action="close"]');
+  await viewport(1440,900);await click('#source-facts-toggle');
+  fixture.mode='pending';await sourceClick('[data-facts-action="retry-facts"]');await pendingRequest();
+  await click('[data-screen="traffic"]');fixture.mode='partial';fixture.release();
+  assert(!await evaluate("document.querySelector('.source-facts-status').textContent.includes('Analyzing')"),'Leaving Sources must cancel response ownership');
+  await click('[data-screen="sources"]');
+  await click('[data-artifact-id="8"]');
+  assert.equal(await evaluate("state.selectedArtifactId"),'8');
+  return {status:'passed',path:'browser development Sources UI',source:'synthetic immutable-artifact fixture; no analyzed JavaScript executed',viewports:[[1440,900],[760,560]],checks:['real hit-tested Facts controls','offline HTTP artifact availability','100-row paging','keyboard categories and disclosure','UTF-8/BOM original-byte navigation','profile-complete/partial/truncated/unknown/unavailable/error states','identity rejection and prior-report retention','Cancel and explicit retry','stale selection','Close/Escape/reopen focus','narrow overlay dismissal','workspace return']};
+}
+
 async function checkTrafficBrowser() {
   const executable = process.env.REB_UI_CHROMIUM;
   assert(executable, "Set REB_UI_CHROMIUM to the installed Chrome/Chromium executable. Sandbox flags are not overridden.");
-  const directory = await mkdtemp(join(tmpdir(), "reb-requests-ui-"));
-  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", "requests-ui-qa");
+  const directory = await mkdtemp(join(tmpdir(), sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
+  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
   await mkdir(output, {recursive: true});
   let trafficApiMode = "offline";
+  const factsFixture = sourceFactsBrowser ? await sourceFactsBrowserFixture() : null;
   const server = createServer(async (request, response) => {
     const path = new URL(request.url, "http://127.0.0.1").pathname;
+    if (factsFixture && await factsFixture.handle(request, response)) return;
     if (path === "/api/events" && trafficApiMode === "malformed") {response.writeHead(200, {"Content-Type": "application/json"}); response.end('{"malformed":true}'); return;}
     if (path.startsWith("/api/")) {response.writeHead(503, {"Content-Type": "application/json"}); response.end('{"error":"Synthetic offline QA fixture"}'); return;}
     const name = path === "/" ? "index.html" : path.slice(1);
@@ -1026,9 +1374,9 @@ async function checkTrafficBrowser() {
       await command("Input.dispatchMouseEvent", {type: "mousePressed", ...rect, button: "left", clickCount: 1});
       await command("Input.dispatchMouseEvent", {type: "mouseReleased", ...rect, button: "left", clickCount: 1});
     };
-    const key = async (value, code = value) => {
-      await command("Input.dispatchKeyEvent", {type: "keyDown", key: value, code});
-      await command("Input.dispatchKeyEvent", {type: "keyUp", key: value, code});
+    const key = async (value, code = value, native = {}) => {
+      await command("Input.dispatchKeyEvent", {type: "keyDown", key: value, code, ...native});
+      await command("Input.dispatchKeyEvent", {type: "keyUp", key: value, code, windowsVirtualKeyCode:native.windowsVirtualKeyCode});
     };
     const columnsAligned = async () => {
       const measured = await evaluate(`(() => {
@@ -1109,7 +1457,7 @@ async function checkTrafficBrowser() {
     };
     captureFailure = async () => {
       const result = await command("Page.captureScreenshot", {format: "png"});
-      await writeFile(join(output, "requests-failure.png"), Buffer.from(result.data, "base64"));
+      await writeFile(join(output, sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
     };
     await viewport(1440, 900);
     await command("Page.navigate", {url: `http://127.0.0.1:${server.address().port}/`});
@@ -1119,6 +1467,10 @@ async function checkTrafficBrowser() {
     }
     assert(await evaluate("typeof renderRequests === 'function'"), "Application did not initialize");
     diagnostics.phase = "interactive validation";
+    if (sourceFactsBrowser) {
+      validation = await checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:factsFixture});
+      assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Sources QA");
+    } else {
     await evaluate(`window.fixtureRequests = Array.from({length:520}, (_,i) => ({id:'qa-'+i,path:'https://fixture.invalid/api/item-'+i+'?view=compact',method:i%3?'GET':'POST',status:i%11===0?'pending':200,time:i%11===0?'pending':i/2,type:'xhr',origin:'demo',tabId:'qa-tab',hostOnly:false,operation:'synthetic_qa',events:[],exchange:{request:{state:'available',mime:'application/json',text:'{"id":"qa","value":"first"}',headers:[['content-type','application/json']]},response:{state:i%11===0?'loading':'available',mime:'application/json',text:i%11===0?'':'{"result":"first"}',headers:[['content-type','application/json'],['x-fixture','one']]}}})); state.requests=fixtureRequests; state.sessionMode='demo'; renderRequests(); document.querySelector('#network-notice').textContent='Synthetic browser QA fixture · no live capture';`);
     assert.equal(await evaluate("document.querySelectorAll('.request-row').length"), 500);
     assert(await columnsAligned(), "Request headers and row columns must align with the scrollbar gutter");
@@ -1210,6 +1562,7 @@ async function checkTrafficBrowser() {
     await screenshot("requests-empty");
     assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during rendered QA");
     validation = {status: "passed", path: "browser development UI", source: "synthetic fixture", viewports: [[1440,900],[600,800],[360,740]], checks: ["500-row bound and paging", "synchronized selected summary", "visible bounded narrow split", "independent ledger and body scrolling", "hit-tested pointer controls", "pending to response to failed", "equal-length updates", "stable focus and scroll", "sort/filter selection", "dismissal and Escape", "eviction", "arrow-key rows and tabs", "malformed JSON", "sandboxed HTML", "reduced motion", "Back to traffic", "new capture", "empty/malformed/offline"]};
+    }
     diagnostics.phase = "validated";
   } catch (error) {
     failure = error;
@@ -1224,6 +1577,7 @@ async function checkTrafficBrowser() {
     commands.clear();
     try {await lifecycle?.stop();}
     catch (error) {failure ??= error; diagnostics.cleanup_error = String(error.message).slice(0, 2048);}
+    factsFixture?.release();
     server.closeAllConnections();
     if (server.listening) await new Promise(resolve => server.close(resolve));
     // Keep a profile only when its owned process could not be stopped.
@@ -1235,9 +1589,9 @@ async function checkTrafficBrowser() {
   }
   if (failure) throw failure;
   await writeFile(join(output, "validation.json"), JSON.stringify(validation, null, 2));
-  console.log(`PASS real Chromium Requests interactions; screenshots: ${output}`);
+  console.log(`PASS real Chromium ${sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
 }
-if (trafficBrowser) {await checkTrafficBrowser(); process.exit(0);}
+if (trafficBrowser || sourceFactsBrowser) {await checkTrafficBrowser(); process.exit(0);}
 
 if (fieldsOnly) process.exit(0);
 const temporary = await mkdtemp(join(tmpdir(), "origin-trace-debugger-"));

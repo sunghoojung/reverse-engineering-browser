@@ -36,6 +36,31 @@ impl Deobfuscator {
                 "Source is empty or exceeds the deobfuscation byte limit",
             ));
         }
+        let response = self
+            .request(json!({"source":source,"assume_intrinsics":assume_intrinsics}))
+            .await?;
+        let representation = representation(source, &response, assume_intrinsics)?;
+        let stats = metrics(source);
+        let classification = classify(&stats);
+        let analysis = json!({"schema":"deobfuscation-analysis-v1","source":{"url":null,"sha256":hex::encode(Sha256::digest(source.as_bytes())),"byte_size":source.len(),"lines":source.matches('\n').count()+1},"classification":classification,"stats":stats,"assumptions":representation["assumptions"],"representation":{"status":if representation["text"]==source {"unchanged"} else {"derived"},"derived_bytes":representation["text"].as_str().unwrap().len(),"segment_count":representation["segments"].as_array().unwrap().len(),"truncated":representation["truncated"],"transformations":representation["transformations"]},"string_tables":tables(source),"omissions":["Unsupported decoder operations, custom prototype hooks, mutable or escaping tables, and cross-scope propagation remain unresolved."],"limits":{"max_source_bytes":SOURCE_MAX,"max_derived_bytes":2097152,"max_segments":250000,"max_string_tables":64,"max_string_entries":2048}});
+        let mut result = json!({"schema":"deobfuscation-analysis-v1","engine":"rust-oxc","original_source":source,"source_truncated":false,"analysis":analysis});
+        if derived {
+            result["representation"] = representation;
+        }
+        Ok(result)
+    }
+    pub async fn source_facts(&self, source: &str) -> Result<Value> {
+        if source.len() > SOURCE_MAX {
+            return Err(Error::bad("Source exceeds the source facts byte limit"));
+        }
+        let response = self
+            .request(json!({"operation":"source_facts","source":source}))
+            .await?;
+        crate::source_facts::validate(source, &response)?;
+        Ok(response)
+    }
+
+    async fn request(&self, request: Value) -> Result<Value> {
         if !worker::executable(&self.path) {
             return Err(
                 Error::new(503, "The Rust JavaScript analysis worker is unavailable")
@@ -45,8 +70,7 @@ impl Deobfuscator {
         let _guard = self.lock.try_lock().map_err(|_| {
             Error::conflict("Deobfuscation worker is busy; retry when analysis finishes")
         })?;
-        let mut input =
-            serde_json::to_vec(&json!({"source":source,"assume_intrinsics":assume_intrinsics}))?;
+        let mut input = serde_json::to_vec(&request)?;
         input.push(b'\n');
         let output = worker::run(
             Command::new(&self.path)
@@ -64,17 +88,8 @@ impl Deobfuscator {
                 "JavaScript analysis worker terminated unexpectedly; original source is preserved",
             ));
         }
-        let response: Value = serde_json::from_slice(&output.bytes)
-            .map_err(|_| Error::new(502, "Deobfuscation worker returned malformed JSON"))?;
-        let representation = representation(source, &response, assume_intrinsics)?;
-        let stats = metrics(source);
-        let classification = classify(&stats);
-        let analysis = json!({"schema":"deobfuscation-analysis-v1","source":{"url":null,"sha256":hex::encode(Sha256::digest(source.as_bytes())),"byte_size":source.len(),"lines":source.matches('\n').count()+1},"classification":classification,"stats":stats,"assumptions":representation["assumptions"],"representation":{"status":if representation["text"]==source {"unchanged"} else {"derived"},"derived_bytes":representation["text"].as_str().unwrap().len(),"segment_count":representation["segments"].as_array().unwrap().len(),"truncated":representation["truncated"],"transformations":representation["transformations"]},"string_tables":tables(source),"omissions":["Unsupported decoder operations, custom prototype hooks, mutable or escaping tables, and cross-scope propagation remain unresolved."],"limits":{"max_source_bytes":SOURCE_MAX,"max_derived_bytes":2097152,"max_segments":250000,"max_string_tables":64,"max_string_entries":2048}});
-        let mut result = json!({"schema":"deobfuscation-analysis-v1","engine":"rust-oxc","original_source":source,"source_truncated":false,"analysis":analysis});
-        if derived {
-            result["representation"] = representation;
-        }
-        Ok(result)
+        serde_json::from_slice(&output.bytes)
+            .map_err(|_| Error::new(502, "Deobfuscation worker returned malformed JSON"))
     }
 }
 fn representation(source: &str, response: &Value, intrinsics: bool) -> Result<Value> {

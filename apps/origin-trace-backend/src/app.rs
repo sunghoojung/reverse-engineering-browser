@@ -8,7 +8,7 @@ use crate::{
     error::{Code, Error, Phase, Reason, Result},
     evidence, evidence_package,
     native_console::NativeConsole,
-    origin_trace, validation, vm, wasm,
+    origin_trace, source_facts, validation, vm, wasm,
     workspace::{Kind, Store},
 };
 use axum::{
@@ -30,12 +30,13 @@ use std::{
 };
 use tokio::sync::{Mutex, Semaphore};
 
-const UI_ASSETS: [&str; 12] = [
+const UI_ASSETS: [&str; 13] = [
     "index.html",
     "app.css",
     "app_state.js",
     "evidence_models.js",
     "source_syntax.js",
+    "source_facts.js",
     "traffic_view.js",
     "request_value_test.js",
     "field_provenance.js",
@@ -215,6 +216,28 @@ impl App {
                 value
             }
             "/api/debugger/source" => self.debugger.source(q.required("script_id")?).await?,
+            "/api/source-facts" => {
+                // Never infer identity from a URL, live script, or selected UI row.
+                if q.0
+                    .keys()
+                    .any(|key| !["session_id", "artifact_id"].contains(&key.as_str()))
+                {
+                    return Err(Error::bad(
+                        "Source facts require only session_id and artifact_id",
+                    ));
+                }
+                q.number("session_id", None, 64, false)?;
+                q.number("artifact_id", None, 64, false)?;
+                let session = q.required("session_id")?.to_owned();
+                let id = q.required("artifact_id")?.to_owned();
+                let root = self.options.artifacts.clone();
+                let (source, identity) = self
+                    .blocking(move || source_facts::load(&root, &session, &id))
+                    .await?;
+                let mut result = self.deobfuscator.source_facts(&source).await?;
+                result["source"] = identity;
+                result
+            }
             "/api/deobfuscation" => {
                 let script = q.one("script_id")?;
                 let artifact = q.one("artifact_id")?;

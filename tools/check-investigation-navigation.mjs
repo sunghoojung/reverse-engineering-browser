@@ -100,7 +100,7 @@ export async function checkAdvancedNavigation(root) {
     const noop=()=>{};
     const context={document,state:{originTraceStatus:'idle',sourceHooksOpen:false},investigationRevision:0,
       investigationBeforeScreen:name=>{current=name;},investigationScreen:()=>current,
-      evidencePackagePanel:{setVisible:noop},sourceFactsPanel:{cancel:noop},
+      evidencePackagePanel:{setVisible:noop},sourceFactsPanel:{cancel:noop},float32Panel:{cancel:noop},
       evidenceWorkspace:{setVisible:noop},
       window:{matchMedia:()=>({matches:narrow})},requestAnimationFrame:callback=>frames.push(callback),selectedSource:()=>null,
       elements:{requestRows:{querySelectorAll:()=>[]},requestFilter:destination}};

@@ -340,6 +340,15 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
 }
 
 pub fn find_artifact(root: &Path, id: &str) -> Result<Value> {
+    find_artifact_bounded(root, id, usize::MAX, u64::MAX)
+}
+/// Same complete manifest validation with deterministic cold-path scan bounds.
+pub fn find_artifact_bounded(
+    root: &Path,
+    id: &str,
+    max_records: usize,
+    max_bytes: u64,
+) -> Result<Value> {
     use std::io::BufRead;
     let path = root.join("manifest.jsonl");
     let file = match regular_file(&path) {
@@ -352,6 +361,8 @@ pub fn find_artifact(root: &Path, id: &str) -> Result<Value> {
     let mut reader = std::io::BufReader::new(file);
     let mut selected = None;
     let mut seen = BTreeSet::new();
+    let mut scanned = 0u64;
+    let mut records = 0usize;
     let started = std::time::Instant::now();
     loop {
         if started.elapsed() > std::time::Duration::from_secs(5) {
@@ -362,6 +373,16 @@ pub fn find_artifact(root: &Path, id: &str) -> Result<Value> {
         }
         let mut bytes = Vec::new();
         let size = reader.by_ref().take(8193).read_until(b'\n', &mut bytes)?;
+        scanned = scanned.saturating_add(size as u64);
+        if size > 0 {
+            records = records.saturating_add(1);
+        }
+        if scanned > max_bytes || records > max_records {
+            return Err(
+                Error::new(413, "Artifact manifest scan exceeds its resource limit")
+                    .with_code(crate::error::Code::ResourceLimit),
+            );
+        }
         if size == 0 {
             break;
         }

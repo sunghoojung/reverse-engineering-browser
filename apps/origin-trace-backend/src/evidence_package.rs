@@ -1023,6 +1023,22 @@ pub fn validate_bytes(raw: &[u8]) -> Result<Value> {
     validate(raw, &Budget::new())
 }
 
+/// Internal comparison boundary: validate the original bytes before normalizing.
+/// Does not promote supplied provenance or omitted artifact-byte assertions.
+pub(crate) fn validated_normalized_bytes(raw: &[u8]) -> Result<Value> {
+    let budget = Budget::new();
+    let report = validate(raw, &budget)?;
+    if report["status"] != "valid" {
+        return Err(Error::bad(
+            "A supplied metadata package failed strict validation",
+        ));
+    }
+    let package = parse(raw, &budget).map_err(|e| Error::bad(e.to_string()))?;
+    let mut value = normalized(&package, &budget).map_err(|e| Error::bad(e.to_string()))?;
+    value["package_id"] = report["package_id"].clone();
+    Ok(value)
+}
+
 pub const MAX_EXPORT_REQUEST_BYTES: usize = 256 * 1024;
 
 /// Returns response bytes constructed under all requested shared store leases.

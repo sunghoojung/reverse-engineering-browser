@@ -204,3 +204,8 @@ the existing capture or action envelope versions.
 
 [Float32 Comparison v1](float32-comparison-v1.md) defines explicit bounded binary32
 inputs, exact bits, finite metrics and completeness policies.
+
+[Supplied Evidence Comparison v1](evidence-comparison-v1.md) defines the read-only
+comparison of two strictly validated metadata packages, exact scoped references,
+cross-session ambiguities, unknown observer comparability, deterministic bounded
+pages and the local HTTP/CLI contract.

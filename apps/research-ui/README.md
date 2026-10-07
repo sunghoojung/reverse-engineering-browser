@@ -302,6 +302,10 @@ narrow windows. Both panes stay within the available workspace height; the
 request ledger and inspector body scroll independently. Captured-tab and domain
 filters share a compact row at narrow widths. REB's Signals and Evidence tools remain separate tabs. Missing
 headers, bodies, initiators, and timing phases stay explicitly unavailable.
+Request signal profiles are owned by the exact selected session, request and root
+event. Late responses cannot replace a newer selection or refresh. Malformed or
+failed refreshes preserve only the last validated profile for that same identity
+and require a full response on retry; changed or ambiguous owners clear it.
 No cache, recording, throttling, or invented waterfall controls are implied.
 The layout follows familiar [network inspection conventions](https://developer.chrome.com/docs/devtools/network/reference)
 while keeping Origin Trace's own controls and Rosé Pine Moon palette.
@@ -1083,6 +1087,46 @@ plus catalog refresh, passive entry, wrong analyzer identity/preview bytes,
 explicit retries, stable Find/scroll, keyboard file tabs and close cleanup at
 1440×900, 760×560 and 360×740. Production-function and DOM fixtures run in
 `make lint`; they do not replace real browser screenshots or native acceptance.
+
+### Compare supplied packages
+
+Evidence still opens on recorded observations. Open **Metadata package**, then
+**Compare supplied packages**, to choose two local metadata JSON files and click
+**Compare metadata**. File selection alone makes no request. This secondary view
+uses the same reviewed local API and bounded reader; it does not export selected
+observations, capture more data or save files automatically. The two inputs are
+independent of the current observation selection.
+
+Comparison keeps declared metadata differences, scoped references and unknown
+capture/observer coverage distinct from raw-byte verification or equivalent
+behavior. Failed or malformed replies preserve the last accepted result. Close,
+Return to observations, leaving Evidence and a changed request retire pending
+ownership while preserving the local file drafts. Ordinary refresh does not
+remount the controls, change drafts or rerun a comparison. Starting from Compare
+or a paging control moves focus to enabled Cancel while that trigger is disabled.
+Completion restores the Compare control only if Cancel still owns focus; newer
+focus choices remain untouched. Escape cancels active work; a second Escape closes comparison and returns focus to its explicit entry.
+A departing document disposes the owned component; BFCache suspension cancels
+work without discarding drafts. Navigation history contains only view metadata,
+not file objects, exported keys, comparison buffers or approvals.
+
+Comparison works in browser HTTP and the native application's live HTTP
+workspace, including the native=1 entry marker. Stored `reb://` mode has an
+explicit unsupported explanation and mounts no comparison file inputs. This
+restriction does not apply to the whole native app. macOS runtime and packaged
+asset acceptance remain separate checks.
+
+`--evidence-comparison-ui-browser` in the shared debugger test now exercises the
+actual product host and scripts, rather than the earlier isolated component
+fixture. It covers real file inputs, backend-produced equal/changed synthetic
+results, error retention, pending ownership, late File reads, Close/Escape,
+Return/navigation, page disposal/remount, retained package export/validation,
+wide/narrow layouts and the live native HTTP marker. CI uploads
+`build/comparison-ui-qa/`. The mock service is UI evidence, not a replacement for
+the real API/CLI integrity/admission tests. Shared Source navigation uses the
+scoped receiving adapter and bounded Back trail. The strict Evidence browser
+mode also requires Source → Back restoration of filters, focus and scroll
+without automatic derived analysis. See [the comparison contract and bounds](../../protocol/evidence-comparison-v1.md).
 
 ## Float32 comparison
 

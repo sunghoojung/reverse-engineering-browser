@@ -148,7 +148,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent("app.css")),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/pane_layout.js", "/app.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/source_syntax.js", "/source_facts.js", "/investigation_navigation.js", "/traffic_view.js", "/request_value_test.js", "/field_provenance.js", "/native_console_completion.js", "/native_console.js":
+      case "/pane_layout.js", "/app.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/investigation_navigation.js", "/traffic_view.js", "/request_value_test.js", "/field_provenance.js", "/native_console_completion.js", "/native_console.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -157,7 +157,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         response = (try healthResponse(), "application/json; charset=utf-8", 200, [:])
       case "/api/native-console":
         response = (Data("{\"contract_version\":2,\"available\":false,\"state\":\"idle\",\"session_id\":null,\"message\":\"Open a live workspace to use the native console\"}".utf8), "application/json; charset=utf-8", 200, [:])
-      case "/api/evidence/packages/export", "/api/evidence/packages/validate":
+      case "/api/evidence/packages/export", "/api/evidence/packages/validate", "/api/evidence/packages/compare":
         response = (try JSONSerialization.data(withJSONObject: [
           "error": "Metadata packages are unavailable in stored-evidence native mode. Open a live workspace or the browser development UI.",
           "code": "dependency_unavailable", "details": [:]

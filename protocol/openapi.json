@@ -3772,6 +3772,204 @@
           ]
         }
       }
+    },
+    "/api/evidence/packages/compare": {
+      "post": {
+        "operationId": "compare_evidence_packages",
+        "summary": "Compare two supplied evidence metadata packages",
+        "description": "Read-only bounded comparison after strict validation of both original package byte tokens. Rejects malformed, duplicate, unsupported, contradictory or oversized input; unsupported observer/profile data cannot be coerced into comparable evidence. Explicit facets and normalization are part of deterministic identity. Exact declared session/process keys may align metadata; coincident IDs across sessions remain unmatched or ambiguous. No raw artifact-byte verification, capture-completeness, behavioral, causal or timing-equivalence claim. Results page deterministic rows and preserve unknown capture settings. No evidence store reads, helpers, browser actions, persistence, automatic export or network access. A shared package permit is reserved with nonblocking admission before comparison-body ingestion and transferred through blocking work, limiting simultaneously retained comparison bodies/work to two. Busy requests receive 503/resource_limit before their bodies are read.",
+        "tags": [
+          "evidence"
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "One Content-Length, no Transfer-Encoding, at most 8392704 request bytes; each original nested package token at most 4194304 bytes. Required explicit profile and 1..7 unique facets; offset 0..2181 and limit 1..100.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvidenceComparisonRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "At most 524288 bytes; full bounded summary plus one deterministic page, at most 100 rows. Unknown observer regimes and missing records never establish unchanged capture or behavior.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvidenceComparisonResult"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid framing or comparison options, rejected original package (including duplicate keys, digest/reference/profile errors), or resource limits. No input or unrecognized fields are echoed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Body, admission or cooperative comparison deadline exceeded. No successful partial comparison is returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Local validation worker or contract initialization failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Comparison capacity is full (resource_limit) before request body ingestion, or package admission infrastructure is closed (dependency_unavailable). At most two package operations may reserve comparison bodies/work; rejection does not read/retain the large body and is not an automatic retry instruction. An HTTP client still uploading after early rejection may instead observe a transport error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/evidence_comparison.rs",
+        "x-max-body-bytes": 8392704,
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Inert bounded local analysis of two supplied untrusted metadata packages only. Reads no configured stores or artifact bytes, writes no files, controls no browser, starts no helper and accesses no external network. Identical profile labels do not establish equivalent observer regimes; matching declared hashes do not reverify absent artifact bytes.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/evidence_comparison.rs",
+              "symbol": "evidence_comparison::compare_bytes"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
     }
   },
   "components": {
@@ -3983,7 +4181,8 @@
                   "missing_event",
                   "no_predecessor",
                   "cycle",
-                  "step_limit"
+                  "step_limit",
+                  "capture_gap"
                 ]
               },
               "after_step": {
@@ -18425,6 +18624,478 @@
             }
           }
         }
+      },
+      "EvidenceComparisonRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "left",
+          "right",
+          "normalization_profile",
+          "facets"
+        ],
+        "properties": {
+          "left": {
+            "$ref": "#/components/schemas/EvidencePackage"
+          },
+          "right": {
+            "$ref": "#/components/schemas/EvidencePackage"
+          },
+          "normalization_profile": {
+            "type": "string",
+            "const": "reb-declared-metadata-v1"
+          },
+          "facets": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 7,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "artifacts",
+                "coverage",
+                "events",
+                "gaps",
+                "provenance",
+                "relationships",
+                "selection"
+              ]
+            }
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2181,
+            "default": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50
+          }
+        },
+        "description": "Original nested package JSON tokens, each at most 4194304 bytes, are independently duplicate-rejecting validated before canonicalization. Only exact declared metadata comparison is supported. Facets select full retained sections; no heuristic or URL matching. Outer keys must be unique and supported."
+      },
+      "EvidenceComparisonReference": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "package_id",
+          "facet",
+          "key"
+        ],
+        "properties": {
+          "package_id": {
+            "$ref": "#/components/schemas/EvidencePackageId"
+          },
+          "facet": {
+            "type": "string",
+            "enum": [
+              "artifacts",
+              "coverage",
+              "events",
+              "gaps",
+              "provenance",
+              "relationships",
+              "selection"
+            ]
+          },
+          "key": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvidencePackageEventKey"
+              },
+              {
+                "$ref": "#/components/schemas/EvidencePackageArtifactKey"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "EvidenceComparisonValueSummary": {
+        "anyOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "value"
+            ],
+            "properties": {
+              "kind": {
+                "const": "scalar",
+                "type": "string"
+              },
+              "value": {
+                "type": [
+                  "string",
+                  "integer",
+                  "boolean",
+                  "null"
+                ],
+                "maxLength": 4096
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "count"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "object",
+                  "array"
+                ]
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4096
+              }
+            }
+          }
+        ]
+      },
+      "EvidenceComparisonDifference": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "field",
+          "left",
+          "right"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "left": {
+            "$ref": "#/components/schemas/EvidenceComparisonValueSummary"
+          },
+          "right": {
+            "$ref": "#/components/schemas/EvidenceComparisonValueSummary"
+          }
+        }
+      },
+      "EvidenceComparisonRow": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "row_id",
+          "facet",
+          "status",
+          "alignment",
+          "left",
+          "right",
+          "cross_scope_candidates",
+          "differences",
+          "differences_omitted",
+          "declared_content_hash_match"
+        ],
+        "properties": {
+          "row_id": {
+            "type": "string",
+            "pattern": "^reb-comparison-row-v1:sha256:[0-9a-f]{64}$",
+            "minLength": 93,
+            "maxLength": 93
+          },
+          "facet": {
+            "type": "string",
+            "enum": [
+              "artifacts",
+              "coverage",
+              "events",
+              "gaps",
+              "provenance",
+              "relationships",
+              "selection"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "equal_declared_metadata",
+              "changed_declared_metadata",
+              "left_only",
+              "right_only"
+            ]
+          },
+          "alignment": {
+            "type": "string",
+            "enum": [
+              "declared_scoped_key",
+              "selected_facet",
+              "ambiguous_cross_scope",
+              "unmatched"
+            ]
+          },
+          "left": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvidenceComparisonReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "right": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvidenceComparisonReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cross_scope_candidates": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1024
+          },
+          "differences": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+              "$ref": "#/components/schemas/EvidenceComparisonDifference"
+            }
+          },
+          "differences_omitted": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 64
+          },
+          "declared_content_hash_match": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "EvidenceComparisonResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "protocol_version",
+          "comparison_id",
+          "normalization_profile",
+          "left_package_id",
+          "right_package_id",
+          "facets",
+          "package_metadata_equal",
+          "selected_metadata_equal",
+          "comparability",
+          "limitations",
+          "coverage",
+          "counts",
+          "page",
+          "rows"
+        ],
+        "properties": {
+          "protocol_version": {
+            "type": "integer",
+            "const": 1
+          },
+          "comparison_id": {
+            "type": "string",
+            "pattern": "^reb-comparison-v1:sha256:[0-9a-f]{64}$",
+            "minLength": 89,
+            "maxLength": 89
+          },
+          "normalization_profile": {
+            "type": "string",
+            "const": "reb-declared-metadata-v1"
+          },
+          "left_package_id": {
+            "$ref": "#/components/schemas/EvidencePackageId"
+          },
+          "right_package_id": {
+            "$ref": "#/components/schemas/EvidencePackageId"
+          },
+          "facets": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 7,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "artifacts",
+                "coverage",
+                "events",
+                "gaps",
+                "provenance",
+                "relationships",
+                "selection"
+              ]
+            }
+          },
+          "package_metadata_equal": {
+            "type": "boolean"
+          },
+          "selected_metadata_equal": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "comparability": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "observer_regime",
+              "capture_coverage",
+              "behavior",
+              "timing"
+            ],
+            "properties": {
+              "observer_regime": {
+                "type": "string",
+                "const": "unknown"
+              },
+              "capture_coverage": {
+                "type": "string",
+                "const": "unknown_or_partial"
+              },
+              "behavior": {
+                "type": "string",
+                "const": "not_established"
+              },
+              "timing": {
+                "type": "string",
+                "const": "not_established"
+              }
+            }
+          },
+          "limitations": {
+            "type": "array",
+            "minItems": 8,
+            "maxItems": 8,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "untrusted_input",
+                "authenticity_not_established",
+                "artifact_bytes_not_present_not_reverified",
+                "capture_configuration_unknown",
+                "observer_regime_unknown",
+                "historical_epochs_unknown",
+                "behavioral_equivalence_not_established",
+                "timing_equivalence_not_established"
+              ]
+            }
+          },
+          "coverage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "left",
+              "right"
+            ],
+            "properties": {
+              "left": {
+                "$ref": "#/components/schemas/EvidencePackageCoverage"
+              },
+              "right": {
+                "$ref": "#/components/schemas/EvidencePackageCoverage"
+              }
+            }
+          },
+          "counts": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "equal_declared_metadata",
+              "changed_declared_metadata",
+              "left_only",
+              "right_only",
+              "ambiguous_cross_scope"
+            ],
+            "properties": {
+              "equal_declared_metadata": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2181
+              },
+              "changed_declared_metadata": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2181
+              },
+              "left_only": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2181
+              },
+              "right_only": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2181
+              },
+              "ambiguous_cross_scope": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2181
+              }
+            }
+          },
+          "page": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "offset",
+              "limit",
+              "total",
+              "next_offset"
+            ],
+            "properties": {
+              "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2181
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100
+              },
+              "total": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2181
+              },
+              "next_offset": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 2181
+              }
+            }
+          },
+          "rows": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/EvidenceComparisonRow"
+            }
+          }
+        },
+        "description": "Equality is limited to declared selected metadata. A null selected_metadata_equal means no selected record rows were present. Full keys are exporter declarations, not independently authenticated capture ownership. Cross-scope candidates are counted but never paired. A declared hash/size match does not verify omitted raw bytes. Nested differences summarize type/count without claiming those summaries establish equality. Stable result identity excludes page offset/limit; row identity includes exact input package IDs and facet/key references."
       }
     }
   },

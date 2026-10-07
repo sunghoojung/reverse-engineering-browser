@@ -25,6 +25,10 @@ a browser, covering exact UTF-8 handoffs, source identity, search cancellation,
 chain prefixes, and bounds. These checks run in CI through `make lint`.
 `cargo test` covers HTTP
 contracts, locality, bounded reads, durable state conflicts, and worker shutdown.
+The `origin_trace_gap` HTTP regressions cover native queue markers sharing their
+anchor identity, missing anchors, repeated markers, unrelated streams, malformed
+markers, genuine duplicate events, exact large IDs, and bounded coverage. The
+native Swift builder runs the same synthetic cases during `make app-build`.
 
 The listener accepts only `127.0.0.1`, `localhost`, or `::1`; every API request
 validates Host, Origin, and fetch-site headers. Static serving allowlists the
@@ -143,6 +147,14 @@ no socket or capture boolean substitutes for a lease. The package contract
 explains reserved paths, private directories, limits and threat boundaries.
 CLI `--output PATH` is private, atomic and no-clobber for JSON or binary output;
 an export must pass validation before its final file is created.
+
+`POST /api/evidence/packages/compare` (`compare_evidence_packages`) validates two
+supplied original package documents and compares explicitly selected declared
+metadata facets. Exact scoped references, changed fields, unmatched/cross-scope
+ambiguities, unknown observer regimes and bounded deterministic pages remain
+visible. A declared hash match never reverifies absent raw bytes. This read-only
+operation does not touch stores, helpers, capture or network. See the
+[comparison contract](../../protocol/evidence-comparison-v1.md).
 
 ## Float32 diagnostics
 

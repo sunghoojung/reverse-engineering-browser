@@ -9,6 +9,7 @@ mod durable;
 mod endpoint;
 mod error;
 mod evidence;
+pub mod evidence_comparison;
 pub mod evidence_package;
 pub mod float32;
 mod native_console;

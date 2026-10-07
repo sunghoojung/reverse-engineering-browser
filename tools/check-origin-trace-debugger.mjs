@@ -27,8 +27,9 @@ const trafficBrowser = process.argv[2] === "--traffic-ui-browser";
 const sourceFactsBrowser = process.argv[2] === "--source-facts-ui-browser";
 const memoryBrowser = process.argv[2] === "--memory-ui-browser";
 const evidenceBrowser = process.argv[2] === "--evidence-ui-browser";
+const comparisonBrowser = process.argv[2] === "--evidence-comparison-ui-browser";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
-const root = process.argv[fieldsOnly || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
+const root = process.argv[fieldsOnly || investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly ? 3 : 2] || new URL("..", import.meta.url).pathname;
 await checkConsoleDOM(root);
 await checkCollectionController(root);
 await checkInvestigationCore(root);
@@ -739,6 +740,126 @@ for (const direction of [1, -1]) {
 }
 assert.equal(trafficUI.trafficSortedRequests([uiRequest("pending"), uiRequest("done", {time: 2})], "time", -1)[0].id, "done");
 assert.deepEqual(Array.from(trafficUI.trafficSortedRequests([uiRequest("native", {time: "12.300 ms"}), uiRequest("cdp", {time: 2})], "time"), request => request.id), ["cdp", "native"]);
+// Supplied-package comparison is secondary, explicit, bounded and read-only.
+const comparisonResult = JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/evidence-packages/comparison-equal-v1.json'),'utf8'));
+const comparisonChangedInput = new Uint8Array(await readFile(join(root,'apps/origin-trace-backend/assets/evidence-packages/comparison-changed-input-v1.json')));
+const comparisonChangedResult = JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/evidence-packages/comparison-changed-result-v1.json'),'utf8'));
+const comparisonSource = await readFile(join(root,'apps/research-ui/evidence_comparison.js'),'utf8');
+const comparisonUI = runInNewContext(packageSource+'\n'+comparisonSource+'\nRebEvidenceComparison', {TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,fetch});
+const comparisonFile = raw => { const bytes = new TextEncoder().encode(raw);return {size:bytes.length,arrayBuffer:async()=>bytes.buffer}; };
+const comparisonOriginal = JSON.stringify(packageGolden);
+let comparisonReply = () => Response.json(comparisonResult), comparisonCalls = [];
+const comparisonController = comparisonUI.createController({fetcher:async(url,options)=>{comparisonCalls.push({url,options});return comparisonReply();}});
+comparisonController.select(0,comparisonFile(comparisonOriginal)); comparisonController.select(1,comparisonFile(comparisonOriginal));
+assert.equal(comparisonCalls.length,0,'Choosing local files must not dispatch');
+assert(await comparisonController.compare()); assert.equal(comparisonCalls.length,1);
+assert.equal(comparisonCalls[0].url,'/api/evidence/packages/compare');assert.equal(comparisonController.model.result.selected_metadata_equal,true);
+const previousComparison=comparisonController.model.result;comparisonReply=()=>Response.json({error:'PRIVATE_CANARY'},{status:400});
+assert.equal(await comparisonController.compare(),false);assert.equal(comparisonController.model.result,previousComparison);assert(!comparisonController.model.message.includes('PRIVATE_CANARY'));
+comparisonReply=()=>Response.json({error:'PRIVATE_CANARY',code:'resource_limit'},{status:503});assert.equal(await comparisonController.compare(),false);assert.match(comparisonController.model.message,/busy or unavailable/);assert.equal(comparisonController.model.result,previousComparison);assert(!comparisonController.model.message.includes('PRIVATE_CANARY'));
+comparisonController.select(0,comparisonFile(comparisonOriginal.replace('"process_id":42','"process_id":42,"process_id":42')));
+await comparisonController.compare();assert.match(comparisonCalls.at(-1).options.body,/"process_id":42,"process_id":42/,'Original duplicate members reach strict service unchanged');
+comparisonController.select(0,{size:4194305,arrayBuffer(){throw new Error('Oversized file read');}});const noReadCalls=comparisonCalls.length;await comparisonController.compare();assert.equal(comparisonCalls.length,noReadCalls);
+comparisonController.select(0,{size:1,arrayBuffer:async()=>new Uint8Array([255]).buffer});await comparisonController.compare();assert.equal(comparisonCalls.length,noReadCalls,'Invalid UTF-8 never dispatches');
+let finishComparisonFile;comparisonController.select(0,{size:1,arrayBuffer:()=>new Promise(resolve=>{finishComparisonFile=resolve;})});
+const cancelledComparison=comparisonController.compare();comparisonController.close();assert.equal(await cancelledComparison,false);finishComparisonFile(new Uint8Array([123]).buffer);await Promise.resolve();assert.equal(comparisonCalls.length,noReadCalls,'Retired file read cannot dispatch');
+let finishComparisonReply;comparisonReply=()=>new Promise(resolve=>{finishComparisonReply=resolve;});comparisonController.select(0,comparisonFile(comparisonOriginal));
+const lateComparison=comparisonController.compare();while(!finishComparisonReply) await new Promise(resolve=>setTimeout(resolve,0));
+await comparisonController.compare();assert.equal(comparisonCalls.length,noReadCalls+1,'Repeated Compare does not replay');
+comparisonController.clear();assert.equal(await lateComparison,false);finishComparisonReply(Response.json(comparisonResult));await new Promise(resolve=>setTimeout(resolve,0));assert.equal(comparisonController.model.result,null);
+comparisonReply=()=>Response.json({...comparisonResult,right_package_id:'reb-package-v1:sha256:'+'0'.repeat(64)});
+comparisonController.select(0,comparisonFile(comparisonOriginal));comparisonController.select(1,comparisonFile(comparisonOriginal));assert.equal(await comparisonController.compare(),false);assert.equal(comparisonController.model.result,null,'Wrong input identity cannot populate results');
+comparisonReply=()=>new Response(new Uint8Array(524289));assert.equal(await comparisonController.compare(),false);assert.equal(comparisonController.model.result,null);
+comparisonController.dispose();
+let comparisonLateDeadline;
+const comparisonDeadline=comparisonUI.createController({deadline:10,fetcher:()=>new Promise(resolve=>{comparisonLateDeadline=resolve;})});
+comparisonDeadline.select(0,comparisonFile(comparisonOriginal));comparisonDeadline.select(1,comparisonFile(comparisonOriginal));
+let comparisonWatchdog;
+try {assert.equal(await Promise.race([comparisonDeadline.compare(),new Promise((_,reject)=>{comparisonWatchdog=setTimeout(()=>reject(new Error('Comparison deadline failed to settle')),2000);})]),false);}finally{clearTimeout(comparisonWatchdog);}
+assert.equal(comparisonDeadline.model.busy,false);assert.match(comparisonDeadline.model.message,/timed out/);assert.equal(comparisonDeadline.model.result,null);comparisonLateDeadline(Response.json(comparisonResult));await new Promise(resolve=>setTimeout(resolve,0));assert.equal(comparisonDeadline.model.result,null);comparisonDeadline.dispose();
+
+// Actual mount/event listeners use a small DOM. This is not rendered UI proof.
+class ComparisonNode extends TrafficFixtureNode {
+  async emit(type){await Promise.all((this.listeners.get(type)||[]).map(fn=>fn({target:this})));}
+  removeEventListener(type,fn){this.listeners.set(type,(this.listeners.get(type)||[]).filter(v=>v!==fn));}
+}
+const comparisonDocument={createElement:tag=>new ComparisonNode(tag)};const comparisonHost=new ComparisonNode('section');comparisonHost.ownerDocument=comparisonDocument;
+const comparisonMounted=comparisonUI.mount(comparisonHost,{fetcher:async()=>Response.json(comparisonResult)});
+assert.equal(comparisonUI.mount(comparisonHost),comparisonMounted,'Mount is idempotent');
+const comparisonInputs=comparisonHost.querySelectorAll('input');comparisonInputs.forEach(input=>{input.files=[comparisonFile(comparisonOriginal)];});for(const input of comparisonInputs) await input.emit('change');
+await comparisonHost.querySelectorAll('button')[0].emit('click');assert.match(comparisonHost.textContent,/11 equal/);assert.match(comparisonHost.textContent,/unknown or partial capture/i);assert.match(comparisonHost.textContent,/Raw bytes were not reverified/);
+assert.equal(comparisonHost.querySelectorAll('li').length,11);comparisonMounted.close();assert.equal(comparisonMounted.controller.model.result.comparison_id,comparisonResult.comparison_id);
+comparisonMounted.dispose();assert.equal(comparisonHost.children.length,0);assert.equal(comparisonHost.rebEvidenceComparison,undefined);
+console.log('PASS secondary comparison originals, UTF-8, size bounds, explicit dispatch, duplicate preservation, stable identities, retained failures, repeated clicks, cancellation, late replies and mount/dispose');
+
+// Review regressions: malformed successful replies must preserve the last result.
+const differentPackageId='reb-package-v1:sha256:'+'1'.repeat(64);
+const distinctComparison=structuredClone(comparisonResult);
+distinctComparison.right_package_id=differentPackageId;distinctComparison.package_metadata_equal=false;
+for(const row of distinctComparison.rows)if(row.right)row.right.package_id=differentPackageId;
+assert(comparisonUI.validResult(distinctComparison,0,comparisonResult.left_package_id,differentPackageId));
+const changedComparison=structuredClone(distinctComparison);
+changedComparison.rows[0].status='changed_declared_metadata';changedComparison.rows[0].differences=[{field:'kind',left:{kind:'scalar',value:'javascript'},right:{kind:'scalar',value:'wasm'}}];
+changedComparison.counts.equal_declared_metadata--;changedComparison.counts.changed_declared_metadata++;changedComparison.selected_metadata_equal=false;
+assert(comparisonUI.validResult(changedComparison,0,comparisonResult.left_package_id,differentPackageId),'Changed descriptors may retain matching declared hashes');
+const corruptComparisons=[];
+for(const wrap of [id=>[id],id=>({value:id}),()=>null,()=>17,()=>true,id=>id+'\n']){
+  const comparison=structuredClone(comparisonResult);comparison.comparison_id=wrap(comparison.comparison_id);corruptComparisons.push(comparison);
+  const row=structuredClone(comparisonResult);row.rows[0].row_id=wrap(row.rows[0].row_id);corruptComparisons.push(row);
+}
+const duplicateArrayIds=structuredClone(comparisonResult);duplicateArrayIds.comparison_id=[duplicateArrayIds.comparison_id];duplicateArrayIds.rows[0].row_id=[duplicateArrayIds.rows[0].row_id];duplicateArrayIds.rows[1]=structuredClone(duplicateArrayIds.rows[0]);corruptComparisons.push(duplicateArrayIds);
+const duplicateStringIds=structuredClone(comparisonResult);duplicateStringIds.rows[1].row_id=duplicateStringIds.rows[0].row_id;corruptComparisons.push(duplicateStringIds);
+const countsContradiction=structuredClone(comparisonResult);countsContradiction.rows[0].status='changed_declared_metadata';countsContradiction.rows[0].differences=[{field:'byte_size',left:{kind:'scalar',value:'0'},right:{kind:'scalar',value:'1'}}];countsContradiction.rows[0].declared_content_hash_match=false;corruptComparisons.push(countsContradiction);
+const equalityContradiction=structuredClone(comparisonResult);equalityContradiction.package_metadata_equal=false;corruptComparisons.push(equalityContradiction);
+const hashContradiction=structuredClone(comparisonResult);hashContradiction.rows[0].declared_content_hash_match=false;corruptComparisons.push(hashContradiction);
+let repairReply=comparisonResult;
+const repairController=comparisonUI.createController({fetcher:async()=>Response.json(repairReply)});
+repairController.select(0,comparisonFile(comparisonOriginal));repairController.select(1,comparisonFile(comparisonOriginal));assert(await repairController.compare());const retainedRepairResult=repairController.model.result;
+for(const malformed of corruptComparisons){assert.equal(comparisonUI.validResult(malformed,0,comparisonResult.left_package_id,comparisonResult.right_package_id),false);repairReply=malformed;assert.equal(await repairController.compare(),false);assert.equal(repairController.model.result,retainedRepairResult,'Malformed success must not replace retained evidence');}
+assert.equal(comparisonUI.validResult(comparisonResult,0,[comparisonResult.left_package_id],comparisonResult.right_package_id),false);
+repairController.dispose();
+// Counts are global; partial-page counts may be smaller, never greater.
+const partialComparison=structuredClone(changedComparison);partialComparison.page={offset:50,limit:50,total:61,next_offset:null};partialComparison.counts.equal_declared_metadata+=50;
+assert(comparisonUI.validResult(partialComparison,50,comparisonResult.left_package_id,differentPackageId));
+for(const full of [false,true]){
+ const mismatch=structuredClone(full?changedComparison:partialComparison);mismatch.counts.equal_declared_metadata++;mismatch.counts.changed_declared_metadata--;mismatch.selected_metadata_equal=true;
+ assert.equal(comparisonUI.validResult(mismatch,mismatch.page.offset,comparisonResult.left_package_id,differentPackageId),false,'Visible changed row cannot coexist with global zero changed rows');
+}
+// This mock supplies a backend-validated result for distinct package IDs; the
+// client must check reply consistency without implementing package validation.
+let countReply=distinctComparison;
+const countController=comparisonUI.createController({fetcher:async()=>Response.json(countReply)});
+countController.select(0,comparisonFile(comparisonOriginal));countController.select(1,comparisonFile(JSON.stringify({...packageGolden,package_id:differentPackageId})));
+assert(await countController.compare());const retainedCounts=countController.model.result;
+for(const full of [false,true]){
+ countReply=structuredClone(full?changedComparison:partialComparison);countReply.counts.equal_declared_metadata++;countReply.counts.changed_declared_metadata--;countReply.selected_metadata_equal=true;
+ assert.equal(await countController.compare(countReply.page.offset),false);assert.equal(countController.model.result,retainedCounts,'Page/count contradiction must preserve the previous page');
+}
+countController.dispose();
+const ambiguityComparison=structuredClone(distinctComparison);
+for(const index of [0,1]){const row=ambiguityComparison.rows[index];row.left=null;row.status='right_only';row.alignment=index===0?'ambiguous_cross_scope':'unmatched';row.cross_scope_candidates=index===0?1:0;row.declared_content_hash_match=null;}
+Object.assign(ambiguityComparison.counts,{equal_declared_metadata:9,right_only:2,ambiguous_cross_scope:1});ambiguityComparison.selected_metadata_equal=false;
+assert(comparisonUI.validResult(ambiguityComparison,0,comparisonResult.left_package_id,differentPackageId));
+ambiguityComparison.counts.ambiguous_cross_scope=2;assert.equal(comparisonUI.validResult(ambiguityComparison,0,comparisonResult.left_package_id,differentPackageId),false,'Full-page ambiguity count must be exact');
+const wrongHash=structuredClone(changedComparison);wrongHash.rows[0].differences[0]={field:'byte_size',left:{kind:'scalar',value:'0'},right:{kind:'scalar',value:'1'}};assert.equal(comparisonUI.validResult(wrongHash,0,comparisonResult.left_package_id,differentPackageId),false);
+wrongHash.rows[0].declared_content_hash_match=false;assert(comparisonUI.validResult(wrongHash,0,comparisonResult.left_package_id,differentPackageId));
+const fakeEqualScalars=structuredClone(changedComparison);fakeEqualScalars.rows[0].differences[0].right.value='javascript';assert.equal(comparisonUI.validResult(fakeEqualScalars,0,comparisonResult.left_package_id,differentPackageId),false);
+// A file that settles after its deadline cannot advance to more reads or fetch.
+for(const side of [0,1]){
+ let finishFile,requests=0,leftReads=0,rightReads=0;
+ const c=comparisonUI.createController({deadline:5,fetcher:async()=>{requests++;return Response.json(comparisonResult);}});
+ c.select(0,{size:packageGoldenBytes.length,arrayBuffer:()=>{leftReads++;return side===0?new Promise(resolve=>{finishFile=resolve;}):Promise.resolve(packageGoldenBytes.buffer);}});
+ c.select(1,{size:packageGoldenBytes.length,arrayBuffer:()=>{rightReads++;return side===1?new Promise(resolve=>{finishFile=resolve;}):Promise.resolve(packageGoldenBytes.buffer);}});
+ assert.equal(await c.compare(),false);assert.match(c.model.message,/timed out/);finishFile(packageGoldenBytes.buffer);await new Promise(resolve=>setTimeout(resolve,0));
+ assert.equal(requests,0);assert.equal(leftReads,1);assert.equal(rightReads,side===0?0:1);assert.equal(c.model.result,null);c.dispose();
+}
+// A previously disposed handle has no authority over a replacement mount.
+let finishRemount;const remounted=comparisonUI.mount(comparisonHost,{fetcher:()=>new Promise(resolve=>{finishRemount=resolve;})});
+remounted.controller.select(0,comparisonFile(comparisonOriginal));remounted.controller.select(1,comparisonFile(comparisonOriginal));const remountWork=remounted.controller.compare();while(!finishRemount)await new Promise(resolve=>setTimeout(resolve,0));
+const mountedChildren=[...comparisonHost.children];comparisonMounted.dispose();assert.equal(comparisonHost.rebEvidenceComparison,remounted);assert.deepEqual(comparisonHost.children,mountedChildren);assert.equal(remounted.controller.model.busy,true);
+finishRemount(Response.json(comparisonResult));assert(await remountWork);remounted.dispose();remounted.dispose();assert.equal(comparisonHost.children.length,0);
+console.log('PASS comparison review repairs: strict string/unique IDs, package/hash/page/count consistency, rejected-success retention, stale dispose ownership, and no post-timeout file/fetch work');
+
 const ledger = new TrafficFixtureNode();
 const rowOptions = {selectedId: "3", newIds: new Set(["3"]), onSelect() {}, onKey() {}};
 trafficUI.renderTrafficRows(ledger, retainedTraffic.slice(0, 500), rowOptions);
@@ -811,6 +932,155 @@ function appSection(start, end) {
   assert(offset >= 0 && boundary > offset, `Missing fixture boundary: ${start}`);
   return appSource.slice(offset, boundary);
 }
+
+// Request profiles belong to an exact retained request, even while headers or
+// JSON bodies are pending. Exercise production selection, validation and commit.
+const signalProfileSource = (await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8')) +
+  appSection('      function requestSignalRoot(', '      function signalEventKey(') +
+  appSection('      function requestSignalProfileSelection(', '      function renderFields(') +
+  ';({refresh:refreshRequestSignalProfile,selection:requestSignalProfileSelection,validate:isRequestSignalProfile})';
+function signalProfileFixture() {
+  const requests = [1, 2].map(id => ({id:`r${id}`, origin:'live', events:[{
+    session_id:'11', request_id:String(id), process_id:17, sequence_number:String(id), type:'request_started'
+  }]}));
+  const state = {requests, selectedRequestId:'r1', signalProfileGeneration:0, inspectorTab:'signals',
+    signalProfile:null, signalProfileKey:null, signalProfileEtag:null, signalProfileStatus:'idle', signalProfileError:null};
+  const calls = [], renders = [], location = {protocol:'http:'};
+  const fixture = {state, calls, renders, location, reply:() => signalProfileResponse(signalProfileBody(1))};
+  Object.assign(fixture, runInNewContext(signalProfileSource, {
+    state, location, URLSearchParams, TextDecoder,
+    document:{querySelector:() => ({hidden:false})},
+    renderInspector:() => renders.push('inspector'), renderFingerprintActivity:() => renders.push('fingerprinting'),
+    fetch:(url, options) => {calls.push({url, options}); return fixture.reply();}
+  }));
+  return fixture;
+}
+function signalProfileBody(id, category = id === 1 ? 'canvas' : 'webgl') {
+  return {protocol_version:1, document_kind:'request-signal-profile', session_id:'11', request_id:String(id),
+    root_event:{process_id:17, sequence_number:String(id)}, initiator_event:null, navigation_id:'1', frame_id:'1',
+    signals:[{category, relation:'parent_chain', confidence:'observed', event_count:'1',
+      first_event:{process_id:17, sequence_number:'7'}, last_event:{process_id:17, sequence_number:'7'}}],
+    coverage:{parent_depth:1, parent_depth_limit:32, copied_from_initiator:false, retention_truncated:false,
+      parent_depth_limited:false, count_saturated:false}};
+}
+function signalProfileResponse(body, status = 200, etag = 'profile-etag') {
+  return {status, ok:status === 200, headers:{get:() => etag}, json:async () => body};
+}
+function signalProfileDeferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => {resolve = yes; reject = no;});
+  return {promise, resolve, reject};
+}
+for (const sameRequest of [false, true]) {
+  for (const outcome of ['valid', 'malformed', 'rejected']) {
+    const fixture = signalProfileFixture(), held = signalProfileDeferred(), reading = signalProfileDeferred();
+    fixture.reply = () => ({...signalProfileResponse(null), json:() => {reading.resolve(); return held.promise;}});
+    const pending = fixture.refresh(); await reading.promise;
+    const next = signalProfileBody(sameRequest ? 1 : 2, 'webgl');
+    fixture.state.selectedRequestId = sameRequest ? 'r1' : 'r2';
+    fixture.reply = () => signalProfileResponse(next, 200, 'new-etag');
+    await fixture.refresh();
+    const renders = fixture.renders.length, key = fixture.state.signalProfileKey;
+    if (outcome === 'rejected') held.reject(new Error('Old JSON read failed'));
+    else held.resolve(outcome === 'valid' ? signalProfileBody(1) : {});
+    await pending;
+    assert.equal(fixture.state.signalProfile, next, 'A superseded JSON body cannot replace current request evidence');
+    assert.equal(fixture.state.signalProfileStatus, 'ready');
+    assert.equal(fixture.state.signalProfileError, null);
+    assert.equal(fixture.state.signalProfileEtag, 'new-etag');
+    assert.equal(fixture.state.signalProfileKey, key);
+    assert.equal(fixture.renders.length, renders, 'Superseded completion does not render');
+  }
+}
+for (const status of [200, 304, 404, 500, 'rejected']) {
+  const fixture = signalProfileFixture(), held = signalProfileDeferred();
+  fixture.reply = () => held.promise;
+  const pending = fixture.refresh(); fixture.state.selectedRequestId = 'r2';
+  const next = signalProfileBody(2); fixture.reply = () => signalProfileResponse(next);
+  await fixture.refresh(); const renders = fixture.renders.length;
+  if (status === 'rejected') held.reject(new Error('Old fetch failed'));
+  else held.resolve(signalProfileResponse(signalProfileBody(1), status));
+  await pending;
+  assert.equal(fixture.state.signalProfile, next); assert.equal(fixture.state.signalProfileStatus, 'ready');
+  assert.equal(fixture.renders.length, renders);
+}
+for (const phase of ['headers', 'body', 'failure']) {
+  for (const change of ['selection', 'session_id', 'request_id', 'process_id', 'sequence_number', 'evicted', 'ambiguous']) {
+    const fixture = signalProfileFixture(), held = signalProfileDeferred(), reading = signalProfileDeferred();
+    await fixture.refresh();
+    fixture.reply = () => phase === 'headers' ? held.promise
+      : {...signalProfileResponse(null), json:() => {reading.resolve(); return held.promise;}};
+    const pending = fixture.refresh(); if (phase !== 'headers') await reading.promise;
+    if (change === 'selection') fixture.state.selectedRequestId = 'r2';
+    else if (change === 'evicted') fixture.state.requests = [];
+    else if (change === 'ambiguous') fixture.state.requests.push(structuredClone(fixture.state.requests[0]));
+    else fixture.state.requests[0].events[0][change] = change === 'process_id' ? 18 : '99';
+    if (phase === 'failure') held.reject(new Error('Old body failed'));
+    else held.resolve(phase === 'headers' ? signalProfileResponse(signalProfileBody(1)) : signalProfileBody(1));
+    await pending;
+    assert.equal(fixture.state.signalProfile, null, `${phase}/${change} retires evidence owned by the prior tuple`);
+    assert.equal(fixture.state.signalProfileKey, null); assert.equal(fixture.state.signalProfileEtag, null);
+    assert.equal(fixture.state.signalProfileStatus, 'error');
+    assert.match(fixture.state.signalProfileError, /selected request.*changed/i);
+  }
+}
+for (const field of ['session_id', 'request_id', 'process_id', 'sequence_number']) {
+  const fixture = signalProfileFixture(); await fixture.refresh(); const previous = fixture.state.signalProfile;
+  const foreign = signalProfileBody(1); foreign.signals = [];
+  if (field === 'process_id' || field === 'sequence_number') foreign.root_event[field] = field === 'process_id' ? 18 : '99';
+  else foreign[field] = '99';
+  assert(fixture.validate(foreign), 'Foreign profile is structurally valid');
+  fixture.reply = () => signalProfileResponse(foreign); await fixture.refresh();
+  assert.equal(fixture.state.signalProfile, previous); assert.equal(fixture.state.signalProfileStatus, 'error');
+  assert.match(fixture.state.signalProfileError, /different.*request|different.*event/i);
+  assert.equal(fixture.state.signalProfileEtag, null);
+}
+for (const outcome of ['malformed', 'json', 'fetch', 'http']) {
+  const fixture = signalProfileFixture(); await fixture.refresh(); const previous = fixture.state.signalProfile;
+  fixture.reply = () => outcome === 'fetch' ? Promise.reject(new Error('Disconnected'))
+    : outcome === 'json' ? {...signalProfileResponse(null), json:async () => {throw new SyntaxError('Invalid JSON');}}
+      : signalProfileResponse({}, outcome === 'http' ? 500 : 200);
+  await fixture.refresh();
+  assert.equal(fixture.state.signalProfile, previous); assert.equal(fixture.state.signalProfileStatus, 'error');
+  assert.equal(fixture.state.signalProfileEtag, null, 'A failed refresh requires a full validated retry');
+  fixture.reply = () => signalProfileResponse(signalProfileBody(1)); await fixture.refresh();
+  assert.equal(fixture.calls.at(-1).options.headers['If-None-Match'], undefined);
+  assert.equal(fixture.state.signalProfileStatus, 'ready'); assert.equal(fixture.state.signalProfileError, null);
+}
+{
+  const fixture = signalProfileFixture(); await fixture.refresh(); const previous = fixture.state.signalProfile;
+  fixture.reply = () => signalProfileResponse(null, 304); await fixture.refresh();
+  assert.equal(fixture.state.signalProfile, previous); assert.equal(fixture.state.signalProfileStatus, 'ready');
+  assert.equal(fixture.calls.at(-1).options.headers['If-None-Match'], 'profile-etag');
+  fixture.state.selectedRequestId = 'r2'; fixture.reply = () => signalProfileResponse(null, 404); await fixture.refresh();
+  assert.equal(fixture.state.signalProfile, null); assert.equal(fixture.state.signalProfileStatus, 'empty');
+  assert.equal(fixture.calls.at(-1).options.headers['If-None-Match'], undefined);
+  fixture.reply = () => signalProfileResponse(null, 304); await fixture.refresh();
+  assert.equal(fixture.state.signalProfileStatus, 'empty');
+  fixture.state.selectedRequestId = 'r1'; await fixture.refresh();
+  assert.equal(fixture.state.signalProfile, null); assert.equal(fixture.state.signalProfileStatus, 'error');
+  assert.equal(fixture.state.signalProfileEtag, null, 'An unsolicited 304 cannot authenticate a cache entry');
+}
+for (const unavailable of ['missing', 'sample', 'file']) {
+  const fixture = signalProfileFixture(); await fixture.refresh(); const calls = fixture.calls.length;
+  if (unavailable === 'missing') fixture.state.selectedRequestId = null;
+  else if (unavailable === 'sample') fixture.state.requests[0].origin = 'sample';
+  else fixture.location.protocol = 'file:';
+  await fixture.refresh();
+  assert.equal(fixture.state.signalProfile, null); assert.equal(fixture.state.signalProfileStatus, 'empty');
+  assert.equal(fixture.state.signalProfileKey, null); assert.equal(fixture.state.signalProfileEtag, null);
+  assert.equal(fixture.calls.length, calls);
+}
+{
+  const fixture = signalProfileFixture(), held = signalProfileDeferred(), reading = signalProfileDeferred();
+  fixture.reply = () => ({...signalProfileResponse(null), json:() => {reading.resolve(); return held.promise;}});
+  const pending = fixture.refresh(); await reading.promise;
+  fixture.state.requests = structuredClone(fixture.state.requests);
+  held.resolve(signalProfileBody(1)); await pending;
+  assert.equal(fixture.state.signalProfileStatus, 'ready', 'Unchanged exact tuples survive catalog object replacement');
+}
+console.log('PASS request signal profile late headers/bodies/errors, exact owner and response identity, cache recovery and unavailable states (production functions; not rendered QA)');
+
 // Additive machine-readable failure reasons must not make the bundled UI
 // reject its existing application result envelope. Exercise the actual validators.
 const applicationResults = runInNewContext(
@@ -2349,6 +2619,15 @@ await assert.rejects(waitForSourceOwnershipSettlement(settlementObserver.read,se
 await assert.rejects(waitForSourceOwnershipSettlement(settlementObserver.read,{...observedPending[0],identity:'other-owner'}),/exact receipt/);
 console.log('PASS Sources held-operation terminal receipts: same promise/arguments/receiver, delayed stale-commit refusal, rejection, exact identity and bounded nonsettlement (not rendered QA)');
 
+// macOS uses a native popup for clicked selects; CDP arrow keys do not drive
+// that popup. Use the focused HTML select's keyboard type-ahead instead.
+// Keep real input events and the caller's selected-value assertion on all OSes.
+async function selectOptionByKeyboard(key, label) {
+  for (const letter of label) await key(letter, letter === ' ' ? 'Space' : `Key${letter.toUpperCase()}`, {
+    windowsVirtualKeyCode:letter.toUpperCase().charCodeAt(0), text:letter, unmodifiedText:letter,
+  });
+}
+
 async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture,recordSourceCheck=()=>{}}) {
   const ownershipReceipts=[];
   const receipt=(label,detail)=>{const entry={label,...detail};ownershipReceipts.push(entry);recordSourceCheck(entry);};
@@ -2392,7 +2671,7 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
   await sourceClick('[data-facts-action="previous"]');
   await sourceClick('[data-facts-action="previous"]');
   await sourceClick('#source-facts-report select');
-  await press('Home');await press('ArrowDown');await press('Enter');
+  await selectOptionByKeyboard(key, 'b');
   await until("document.querySelector('#source-facts-report select').value==='bindings'",'Keyboard category selection failed');
   assert.equal(await evaluate("document.querySelectorAll('#source-facts-report .source-fact').length"),1);
   await sourceClick('.source-fact > button');
@@ -2405,7 +2684,7 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
   await until("document.querySelector('.source-facts-coverage').textContent.includes('Complete within lexical-effects-v1 only')",'Complete coverage must remain profile-relative');
   fixture.mode='truncated';await sourceClick('[data-facts-action="retry-facts"]');
   await until("document.querySelector('.source-facts-coverage').textContent.includes('TRUNCATED')",'Truncated coverage was hidden');
-  await sourceClick('#source-facts-report select');await press('End');await press('Enter');
+  await sourceClick('#source-facts-report select');await selectOptionByKeyboard(key, 'u');
   await until("document.querySelector('#source-facts-report select').value==='frontiers'",'Unknown-frontier category did not open');
   assert.match(await evaluate("document.querySelector('.source-fact').textContent"),/abrupt-completion/);
   fixture.mode='error';await sourceClick('[data-facts-action="retry-facts"]');
@@ -2435,7 +2714,7 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
   await press('Enter');await until("document.querySelector('#source-facts-details').open",'Keyboard reopen failed');
   await press('Escape');assert.equal(await evaluate("document.querySelector('#source-facts-details').open"),false);
   await viewport(760,560);await click('#source-facts-toggle');
-  await sourceClick('#source-facts-report select');await press('Home');await press('ArrowDown');await press('Enter');
+  await sourceClick('#source-facts-report select');await selectOptionByKeyboard(key, 'b');
   await until("document.querySelector('#source-facts-report select').value==='bindings'",'Narrow category failed');
   await screenshot('source-facts-narrow-details');
   await sourceClick('.source-fact > button');
@@ -2499,9 +2778,9 @@ async function checkSourceFactsInteractions({evaluate,viewport,click,key,wheel,s
   };
   // Real browser interaction over validated synthetic debugger replies. The
   // fixture's JavaScript is rendered as text, never loaded into a target page.
-  await click('#source-search');await key('a','KeyA',{modifiers:2,windowsVirtualKeyCode:65});
+  await click('#source-search');await key('a','KeyA',{modifiers:process.platform==='darwin'?4:2,windowsVirtualKeyCode:65,...(process.platform==='darwin'?{commands:['selectAll']}:{})});
   const selectedQuery=await evaluate('({focused:document.activeElement===elements.sourceSearch,value:elements.sourceSearch.value,start:elements.sourceSearch.selectionStart,end:elements.sourceSearch.selectionEnd})');
-  assert.deepEqual(selectedQuery,{focused:true,value:'row',start:0,end:3},'Ctrl+A must select the complete prior source query before clearing it');
+  assert.deepEqual(selectedQuery,{focused:true,value:'row',start:0,end:3},'The platform select-all shortcut must select the complete prior source query before clearing it');
   await key('Backspace','Backspace',{windowsVirtualKeyCode:8});
   assert.equal(await evaluate('elements.sourceSearch.value'),'');
   const liveText="const owner = 'one';\n"+Array.from({length:180},(_,index)=>`const liveRow${index}={value:${index}};`).join('\n');
@@ -2716,7 +2995,7 @@ const observationBinary=structuredClone(observationContext);observationBinary.ev
 assert.equal(observationUI.evidenceObservationModel(observationBinary).rows[0].payload.encoding,'hex');
 console.log('PASS Evidence observation model: contract-valid records, scoped parents, nonzero context, CDP qualification, unknown outcomes, exact artifact identity, ambiguity, eviction and bounds');
 
-function observationPanelFixture(narrow = false) {
+function observationPanelFixture(narrow = false, options = {}) {
   const document={activeElement:null};
   class ObservationNode extends TrafficFixtureNode {
     matches(selector) {
@@ -2724,13 +3003,17 @@ function observationPanelFixture(narrow = false) {
       if(match){const [,tag,name,value]=match; const actual=name.startsWith('data-')?this.dataset[name.slice(5).replace(/-([a-z])/g,(_,letter)=>letter.toUpperCase())]:this.getAttribute(name);return (!tag||this.tagName.toLowerCase()===tag)&&actual!==null&&actual!==undefined&&(value===undefined||actual===value);}
       return super.matches(selector);
     }
-    focus(){document.activeElement=this;}
+    // Model the browser's disabled-focus fixup only for the native-key regression.
+    set disabled(value){this._disabled=Boolean(value);if(options.nativeFocus&&this._disabled&&document.activeElement===this)document.activeElement=document.body;}
+    get disabled(){return Boolean(this._disabled);}
+    focus(){if(!options.nativeFocus||!this.disabled)document.activeElement=this;}
     scrollIntoView(){}
+    removeEventListener(type,fn){this.listeners.set(type,(this.listeners.get(type)||[]).filter(listener=>listener!==fn));}
     replaceChildren(...nodes){if(this.contains(document.activeElement))document.activeElement=null;super.replaceChildren(...nodes);}
-    emit(type,fields={}){for(const callback of this.listeners.get(type)??[])callback({target:this,currentTarget:this,preventDefault(){},...fields});}
+    emit(type,fields={}){for(const callback of this.listeners.get(type)??[])callback({target:this,currentTarget:this,preventDefault(){},stopPropagation(){},...fields});}
   }
-  document.createElement=tag=>new ObservationNode(tag);
-  const ids=['evidence-investigation','evidence-rows','evidence-inspector','evidence-search','evidence-scope','evidence-workspace-notice','evidence-package-toggle','evidence-package-mode','evidence-return','evidence-trace','evidence-window-count','evidence-previous','evidence-next','evidence-context-kind','evidence-context-title','evidence-context-note','evidence-count','evidence-coverage-summary','evidence-gap-details','evidence-coverage-details','evidence-coverage-popover'];
+  document.createElement=tag=>new ObservationNode(tag);document.body=new ObservationNode('body');document.documentElement=new ObservationNode('html');if(options.native)document.documentElement.classList.add('native-shell');
+  const ids=['evidence-investigation','evidence-rows','evidence-inspector','evidence-search','evidence-scope','evidence-workspace-notice','evidence-package-toggle','evidence-package-mode','evidence-return','evidence-trace','evidence-window-count','evidence-previous','evidence-next','evidence-context-kind','evidence-context-title','evidence-context-note','evidence-count','evidence-coverage-summary','evidence-gap-details','evidence-coverage-details','evidence-coverage-popover','evidence-compare-toggle','evidence-comparison-section','evidence-comparison-panel','evidence-comparison-close','evidence-comparison-unavailable','evidence-package-panel'];
   const nodes=Object.fromEntries(ids.map(id=>[id,new ObservationNode()]));
   document.querySelector=selector=>nodes[selector.slice(1)]??null;
   const layout=new ObservationNode();layout.className='evidence-investigation-layout';
@@ -2738,7 +3021,10 @@ function observationPanelFixture(narrow = false) {
   nodes['evidence-coverage-details'].append(new ObservationNode('summary'),nodes['evidence-coverage-popover']);
   nodes['evidence-investigation'].append(nodes['evidence-coverage-details'],layout,...tabs);layout.append(nodes['evidence-rows'],nodes['evidence-inspector']);
   let context=observationFixtureContext(),packageVisible=false,packageCancels=0,sourceCalls=0;
-  const create=runInNewContext(observationCode+';createEvidenceWorkspace',{document,TextDecoder,Uint8Array,window:{matchMedia:()=>({matches:narrow})}});
+  let comparisonFetch=options.fetcher || (async()=>Response.json(comparisonResult));
+  nodes['evidence-package-mode'].append(nodes['evidence-package-panel'],nodes['evidence-comparison-section']);
+  nodes['evidence-comparison-section'].append(nodes['evidence-comparison-close'],nodes['evidence-comparison-unavailable'],nodes['evidence-comparison-panel']);
+  const create=runInNewContext(observationCode+'\n'+comparisonSource+';createEvidenceWorkspace',{document,TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,fetch:(...args)=>comparisonFetch(...args),location:{protocol:options.protocol||'http:'},window:{matchMedia:()=>({matches:narrow})}});
   const panel=create({getContext:()=>context,packagePanel:{sync(){},setVisible(value){packageVisible=value;if(!value)packageCancels++;}},onTrace(){},onRequest(){},onSource(){sourceCalls++;return true;},canOpenSource:()=>true});
   panel.setVisible(true);
   return {panel,nodes,tabs,document,get context(){return context;},set context(value){context=value;},get packageVisible(){return packageVisible;},get packageCancels(){return packageCancels;},get sourceCalls(){return sourceCalls;}};
@@ -2818,6 +3104,96 @@ const coveragePanel=observationPanelFixture();coveragePanel.nodes['evidence-cove
 coveragePanel.nodes['evidence-coverage-details'].emit('keydown',{key:'Escape',stopPropagation(){}});
 assert.equal(coveragePanel.nodes['evidence-coverage-details'].open,false);assert.equal(coveragePanel.document.activeElement,coveragePanel.nodes['evidence-coverage-details'].querySelector('summary'));
 console.log('PASS Evidence review regressions: arrival versus retained holes, scope separation, parent draft preservation, narrow visible-pane focus target, independent selection/error notices and stale duplicate source refusal');
+// Execute the real Evidence workspace lifecycle with the immutable comparator.
+let hostCalls=[],hostReply=null;
+const comparisonHostFixture=observationPanelFixture(false,{fetcher:async(url,options)=>{hostCalls.push({url,options});return hostReply?hostReply():Response.json(comparisonResult);}});
+const hc=comparisonHostFixture,n=hc.nodes;
+const hostHandle=()=>n['evidence-comparison-panel'].rebEvidenceComparison;
+assert.equal(hostHandle(),undefined,'Observation landing must not mount file tools');
+n['evidence-package-toggle'].click();assert.equal(hostHandle(),undefined,'Opening package tools must not start comparison');
+n['evidence-compare-toggle'].click();const originalHostHandle=hostHandle();assert(originalHostHandle);assert.equal(n['evidence-package-panel'].hidden,true);assert.equal(hc.packageVisible,false);assert.equal(hostCalls.length,0);
+assert.equal(hc.document.activeElement,n['evidence-comparison-panel'].querySelector('[data-comparison-side="0"]'));
+const hostInputs=n['evidence-comparison-panel'].querySelectorAll('input');for(const input of hostInputs){input.files=[comparisonFile(comparisonOriginal)];input.emit('change');}
+const initialFile=hostHandle().controller.model.files[0];hostInputs[0].focus();const firstControl=n['evidence-comparison-panel'].children[1];
+hc.panel.sync();assert.equal(hostHandle(),originalHostHandle);assert.equal(hostHandle().controller.model.files[0],initialFile);assert.equal(hc.document.activeElement,hostInputs[0]);assert.equal(n['evidence-comparison-panel'].children[1],firstControl);assert.equal(hostCalls.length,0);
+assert(await hostHandle().controller.compare());const acceptedHostResult=hostHandle().controller.model.result;
+let releaseHostResponse;hostReply=()=>new Promise(resolve=>{releaseHostResponse=resolve;});const hostPending=hostHandle().controller.compare();while(!releaseHostResponse)await new Promise(resolve=>setTimeout(resolve,0));
+n['evidence-comparison-section'].emit('keydown',{key:'Escape'});assert.equal(await hostPending,false);assert.equal(n['evidence-comparison-section'].hidden,false);assert.equal(hc.document.activeElement,n['evidence-comparison-panel'].querySelector('[data-comparison-action="compare"]'));
+releaseHostResponse(Response.json(comparisonResult));await new Promise(resolve=>setTimeout(resolve,0));assert.equal(hostHandle().controller.model.result,acceptedHostResult);
+n['evidence-comparison-section'].emit('keydown',{key:'Escape'});assert.equal(n['evidence-comparison-section'].hidden,true);assert.equal(hc.document.activeElement,n['evidence-compare-toggle']);assert.equal(hc.packageVisible,true);
+n['evidence-compare-toggle'].click();assert.equal(hostHandle(),originalHostHandle);assert.equal(hostHandle().controller.model.files[0],initialFile);assert.equal(hostHandle().controller.model.result,acceptedHostResult);
+let releaseHostFile;hostHandle().controller.select(0,{size:packageGoldenBytes.length,arrayBuffer:()=>new Promise(resolve=>{releaseHostFile=resolve;})});const beforeHostFile=hostCalls.length;const lateHostFile=hostHandle().controller.compare();n['evidence-return'].click();assert.equal(await lateHostFile,false);releaseHostFile(packageGoldenBytes.buffer);await new Promise(resolve=>setTimeout(resolve,0));assert.equal(hostCalls.length,beforeHostFile);assert.equal(n['evidence-investigation'].hidden,false);assert.equal(hc.document.activeElement,n['evidence-package-toggle']);
+n['evidence-package-toggle'].click();n['evidence-compare-toggle'].click();hostReply=null;hostHandle().controller.select(0,comparisonFile(comparisonOriginal));
+let hideResponse;hostReply=()=>new Promise(resolve=>{hideResponse=resolve;});const hidePending=hostHandle().controller.compare();while(!hideResponse)await new Promise(resolve=>setTimeout(resolve,0));hc.panel.setVisible(false);assert.equal(await hidePending,false);hideResponse(Response.json(comparisonResult));await new Promise(resolve=>setTimeout(resolve,0));hc.panel.setVisible(true);assert.equal(n['evidence-comparison-section'].hidden,true);assert.equal(hostHandle().controller.model.files[1],hostInputs[1].files[0]);assert.equal(hostCalls.length,beforeHostFile+1);
+assert.deepEqual(Object.keys(hc.panel.snapshot()).sort(),['packages','page','pane','requestKey','selectedKey'],'Navigation stores bounded view metadata, never comparison files or result objects');
+n['evidence-compare-toggle'].click();const disposedHost=hostHandle();hc.panel.disposeComparison();assert.equal(hostHandle(),undefined);n['evidence-compare-toggle'].click();const replacementHost=hostHandle();assert.notEqual(replacementHost,disposedHost);assert.equal(replacementHost.controller.model.files[0],null);disposedHost.dispose();assert.equal(hostHandle(),replacementHost);assert(n['evidence-comparison-panel'].children.length>0);hc.panel.disposeComparison();
+const storedComparison=observationPanelFixture(false,{protocol:'reb:',fetcher:()=>{throw new Error('Stored-native comparison must not dispatch');}});storedComparison.nodes['evidence-package-toggle'].click();storedComparison.nodes['evidence-compare-toggle'].click();assert.equal(storedComparison.nodes['evidence-comparison-panel'].rebEvidenceComparison,undefined);assert.match(storedComparison.nodes['evidence-comparison-unavailable'].textContent,/unavailable in stored-evidence native mode/);
+// Unlike directly emitting on the section, a physical key begins at the current
+// focus owner. Native disabled buttons lose focus before Escape can bubble.
+for(const action of ['compare','previous','next']) {
+  let release,requests=0;
+  const fixture=observationPanelFixture(false,{nativeFocus:true,fetcher:()=>{requests++;return new Promise(resolve=>{release=resolve;});}});
+  const {nodes,document:doc}=fixture;
+  nodes['evidence-package-toggle'].click();nodes['evidence-compare-toggle'].click();
+  const host=nodes['evidence-comparison-panel'],handle=host.rebEvidenceComparison;
+  for(const input of host.querySelectorAll('input')){input.files=[comparisonFile(comparisonOriginal)];input.emit('change');}
+  if(action!=='compare')handle.controller.model.result={...comparisonResult,page:{offset:50,next_offset:100}};
+  const trigger=host.querySelector(`[data-comparison-action="${action}"]`);
+  trigger.disabled=false;trigger.focus();trigger.click();
+  assert.equal(handle.controller.model.busy,true);
+  assert.equal(doc.activeElement,host.querySelector('[data-comparison-action="cancel"]'),`${action}: disabling the active trigger must hand keyboard ownership to Cancel`);
+  for(let turn=0;turn<100&&!release;turn++)await new Promise(resolve=>setTimeout(resolve,0));
+  assert(release,'Held comparison must reach the service');
+  let stopped=false;
+  for(let target=doc.activeElement;target&&!stopped;target=target.parentNode)target.emit('keydown',{key:'Escape',stopPropagation(){stopped=true;}});
+  assert.equal(handle.controller.model.busy,false,'Escape from the actual focus owner must cancel');
+  assert.equal(nodes['evidence-comparison-section'].hidden,false);
+  assert.equal(doc.activeElement,host.querySelector('[data-comparison-action="compare"]'));
+  release(Response.json(comparisonResult));await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(requests,1,'Cancellation must not retry');
+  fixture.panel.disposeComparison();
+}
+// Completion may replace only its own disabled focus owner. A newer focus
+// selection, including a file input or control outside comparison, wins.
+for(const result of ['success','error']) for(const move of [null,'input','outside']) {
+  let release;
+  const fixture=observationPanelFixture(false,{nativeFocus:true,fetcher:()=>new Promise(resolve=>{release=resolve;})});
+  const {nodes,document:doc}=fixture;
+  fixture.panel.showPackages(true);fixture.panel.showComparison(true);
+  const host=nodes['evidence-comparison-panel'],handle=host.rebEvidenceComparison,inputs=host.querySelectorAll('input');
+  for(const input of inputs){input.files=[comparisonFile(comparisonOriginal)];input.emit('change');}
+  const compare=host.querySelector('[data-comparison-action="compare"]');compare.focus();compare.click();
+  for(let turn=0;turn<100&&!release;turn++)await new Promise(resolve=>setTimeout(resolve,0));
+  assert(release);
+  const expected=move==='input'?inputs[1]:move==='outside'?nodes['evidence-search']:compare;
+  if(move)expected.focus();
+  release(result==='success'?Response.json(comparisonResult):new Response('unavailable',{status:503}));
+  for(let turn=0;turn<100&&handle.controller.model.busy;turn++)await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(handle.controller.model.busy,false);
+  assert.equal(doc.activeElement,expected,`${result}: settlement must preserve ${move||'owned'} focus`);
+  assert.equal(Boolean(handle.controller.model.result),result==='success');
+  fixture.panel.disposeComparison();
+}
+console.log('PASS mounted comparison native-disabled focus ownership and focus-routed Escape for Compare/Previous/Next (DOM model, not rendered QA)');
+console.log('PASS mounted Evidence comparison host: observation-first lazy entry, draft/focus/DOM retention on refresh, Escape/Close/Return/navigation ownership, late file suppression, metadata-only history, owned disposal/remount and stored-native unavailability');
+// Invoke the actual application's page lifecycle handlers, not a replacement.
+const comparisonLifecycleApp=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
+const comparisonLifecycleSource=comparisonLifecycleApp.slice(comparisonLifecycleApp.indexOf('      // Ordinary refresh/navigation keeps file drafts'),comparisonLifecycleApp.indexOf('      const sourceFactsPanel'));
+assert(comparisonLifecycleSource.includes("window.addEventListener('pagehide'"));
+let lifecycleReply=null,lifecycleCalls=0;
+const lifecycleHost=observationPanelFixture(false,{fetcher:async()=>{lifecycleCalls++;return lifecycleReply?lifecycleReply():Response.json(comparisonResult);}}),lifecycleHooks={};
+runInNewContext(comparisonLifecycleSource,{window:{addEventListener:(name,fn)=>{lifecycleHooks[name]=fn;}},document:{querySelector:()=>({hidden:false})},evidenceWorkspace:lifecycleHost.panel});
+lifecycleHost.panel.showPackages(true);lifecycleHost.panel.showComparison(true);const lifecyclePanel=()=>lifecycleHost.nodes['evidence-comparison-panel'].rebEvidenceComparison;
+for(const input of lifecycleHost.nodes['evidence-comparison-panel'].querySelectorAll('input')){input.files=[comparisonFile(comparisonOriginal)];input.emit('change');}
+const lifecycleOriginal=lifecyclePanel(),lifecycleFiles=[...lifecycleOriginal.controller.model.files];
+let releaseLifecycle;lifecycleReply=()=>new Promise(resolve=>{releaseLifecycle=resolve;});const lifecyclePending=lifecycleOriginal.controller.compare();while(!releaseLifecycle)await new Promise(resolve=>setTimeout(resolve,0));
+lifecycleHooks.pagehide({persisted:true});assert.equal(await lifecyclePending,false);releaseLifecycle(Response.json(comparisonResult));lifecycleHooks.pageshow();assert.equal(lifecyclePanel(),lifecycleOriginal);assert(lifecyclePanel().controller.model.files.every((file,index)=>file===lifecycleFiles[index]));assert.equal(lifecycleHost.nodes['evidence-comparison-section'].hidden,true);assert.equal(lifecycleCalls,1);
+lifecycleHost.panel.showComparison(true);lifecycleHooks.pagehide({persisted:false});assert.equal(lifecyclePanel(),undefined);lifecycleHooks.pageshow();assert.equal(lifecyclePanel(),undefined,'Page re-entry must not remount or request implicitly');lifecycleHost.panel.showComparison(true);assert.notEqual(lifecyclePanel(),lifecycleOriginal);assert.equal(lifecyclePanel().controller.model.files[0],null);assert.equal(lifecycleCalls,1);lifecycleHost.panel.disposeComparison();
+// An HTTP workspace remains supported when the native application marker is set.
+const liveNative=observationPanelFixture(false,{protocol:'http:',native:true});liveNative.panel.showPackages(true);liveNative.panel.showComparison(true);assert(liveNative.nodes['evidence-comparison-panel'].rebEvidenceComparison);assert.equal(liveNative.nodes['evidence-comparison-unavailable'].hidden,true);liveNative.panel.disposeComparison();
+console.log('PASS actual pagehide/pageshow handlers: BFCache keeps drafts but cancels work, departing document disposes, re-entry is explicit, and native live HTTP stays supported');
+
+
 
 
 
@@ -2860,6 +3236,71 @@ for (const scenario of ['return','evicted','duplicate','changed-session','interr
   else {assert.equal(nodes['evidence-rows'].scrollTop,55);assert.equal(nodes['evidence-inspector'].scrollTop,81);assert.equal(owner.activeElement.id,'evidence-open-source');assert.match(nodes['evidence-workspace-notice'].textContent,/outside the current filter/);}
 }
 console.log('PASS shared Evidence return with original request preflight, selected-key/pane ownership, independent scroll, exact focus, preserved current filters, evicted/duplicate/session refusal and interrupted focus (not rendered QA)');
+// Final composition: actual shared snapshot/restore owns the Evidence return,
+// while independent supplied-file drafts stay outside navigation history.
+for(const phase of ['service','file']){
+  let release,requests=0,hold=false;
+  const fixture=observationPanelFixture(true,{fetcher:async()=>{requests++;return hold&&phase==='service'?new Promise(resolve=>{release=resolve;}):Response.json(comparisonResult);}}),{nodes,document:owner}=fixture;
+  const request=fixture.context.request,other={...request,id:'other',events:request.events.map(e=>({...e,session_id:'8'}))};
+  const state={requests:[request,other],events:fixture.context.events,artifacts:fixture.context.artifacts,selectedRequestId:request.id,decoderSteps:[],inspectorTab:'evidence'};
+  for(const[id,node]of Object.entries(nodes))node.id=id;
+  nodes['evidence-rows'].querySelector('[data-evidence-key="7:42:102"]').click();fixture.panel.showPackages(true);fixture.panel.showComparison(true);
+  const handle=nodes['evidence-comparison-panel'].rebEvidenceComparison;
+  for(const input of nodes['evidence-comparison-panel'].querySelectorAll('input')){input.files=[comparisonFile(comparisonOriginal)];input.emit('change');}
+  assert(await handle.controller.compare());const previous=handle.controller.model.result;hold=true;
+  if(phase==='file')handle.controller.select(0,{size:packageGoldenBytes.length,arrayBuffer:()=>new Promise(resolve=>{release=resolve;})});
+  const files=[...handle.controller.model.files],pending=handle.controller.compare();while(!release)await new Promise(resolve=>setTimeout(resolve,0));
+  nodes['evidence-compare-toggle'].focus();nodes['evidence-rows'].scrollTop=55;nodes['evidence-inspector'].scrollTop=81;nodes['evidence-package-mode'].scrollTop=27;
+  const panes=[nodes['evidence-rows'],nodes['evidence-inspector'],nodes['evidence-package-mode']];const evidenceRoot={id:'screen-evidence',scrollTop:0,scrollLeft:0,contains:()=>true,matches:s=>s==='#screen-evidence',querySelectorAll:()=>panes,querySelector:s=>nodes[s.slice(1)]};
+  let screen='evidence',notice='';const raf=[],back={focus(){owner.activeElement=back;}};
+  const document={get activeElement(){return owner.activeElement;},querySelector:s=>s==='.screen:not([hidden])'?{id:`screen-${screen}`}:s==='#screen-evidence'?evidenceRoot:s==='#investigation-notice'?{textContent:notice}:s==='#investigation-back'?back:null};
+  const sandbox={state,document,CSS:{escape:s=>s},evidenceWorkspace:fixture.panel,sourceFactsPanel:{},selectedSource:()=>null,integerText:(e,k)=>String(e[k]),requestAnimationFrame:fn=>raf.push(fn),selectRequest:id=>{state.selectedRequestId=id;fixture.context={...fixture.context,request:state.requests.find(r=>r.id===id)};fixture.panel.sync();},showScreen:name=>{screen=name;fixture.panel.setVisible(name==='evidence');},noticeWriter:s=>{notice=s;}};
+  const navCode=await readFile(join(root,'apps/research-ui/investigation_navigation.js'),'utf8');const nav=runInNewContext(appSection('      function requestTraceRoot(','      function requestSignalProfileSelection(')+navCode+';investigationNotice=noticeWriter;({snapshot:investigationSnapshot,restore:restoreInvestigation,history:createInvestigationHistory})',sandbox);
+  const saved=nav.snapshot();assert.equal(saved.focus,'#evidence-compare-toggle');assert.equal(saved.evidence.packages,true);assert(!JSON.stringify(saved).includes('reb-package-v1:sha256:'),'Comparison bytes/IDs are not stored in shared navigation');
+  screen='sources';fixture.panel.setVisible(false);state.selectedRequestId='other';fixture.context={...fixture.context,request:other};fixture.panel.sync();assert.equal(await pending,false);
+  nodes['evidence-search'].value='newer filter';nodes['evidence-scope'].value='all';assert(nav.restore(saved));await Promise.resolve();for(const callback of raf.splice(0))callback();
+  release(phase==='file'?packageGoldenBytes.buffer:Response.json(comparisonResult));await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(screen,'evidence');assert.equal(state.selectedRequestId,request.id);assert.equal(fixture.panel.snapshot().selectedKey,'7:42:102');assert.equal(nodes['evidence-search'].value,'newer filter');assert.equal(nodes['evidence-scope'].value,'all');assert.equal(owner.activeElement,nodes['evidence-compare-toggle']);assert.equal(nodes['evidence-rows'].scrollTop,55);assert.equal(nodes['evidence-inspector'].scrollTop,81);assert.equal(nodes['evidence-package-mode'].scrollTop,27);
+  assert.equal(nodes['evidence-comparison-section'].hidden,true);assert(handle.controller.model.files.every((f,i)=>f===files[i]));assert.equal(handle.controller.model.result,phase==='file'?null:previous);assert.equal(requests,phase==='file'?1:2);
+  const calls=requests;fixture.panel.showComparison(true);assert.equal(requests,calls);assert.equal(nodes['evidence-comparison-panel'].rebEvidenceComparison,handle);fixture.panel.showComparison(false);fixture.panel.showPackages(false);assert.equal(fixture.panel.snapshot().selectedKey,'7:42:102');assert.equal(nodes['evidence-search'].value,'newer filter');assert.equal(nodes['evidence-rows'].scrollTop,55);
+  // The actual workspace arrow consumes shared Back; returning to that saved
+  // Evidence stop must use Forward, not a second Back on an empty back stack.
+  const trafficRoot={id:'screen-traffic',dataset:{},contains:()=>false,querySelectorAll:()=>[],querySelector:()=>null};
+  const sourceRoot={...trafficRoot,id:'screen-sources'},originalQuery=document.querySelector;
+  document.querySelector=selector=>selector==='#screen-traffic'?trafficRoot:selector==='#screen-sources'?sourceRoot:selector==='#console-experiment-traffic'?{dataset:{}}:originalQuery(selector);
+  sandbox.fieldSets={body:[]};sandbox.renderInspector=()=>{};state.fieldTab='body';
+  let historyState,workspaceClick,fallbacks=0;
+  const history=nav.history({snapshot:nav.snapshot,restore:nav.restore,changed:value=>{historyState=value;}});
+  const flush=async()=>{await Promise.resolve();for(const callback of raf.splice(0))callback();};
+  screen='traffic';fixture.panel.setVisible(false);history.record();
+  screen='evidence';fixture.panel.setVisible(true);history.record();
+  screen='sources';fixture.panel.setVisible(false);assert(history.back());await flush();
+  assert.equal(screen,'evidence');assert.equal(historyState.back.screen,'traffic');
+  fixture.panel.showPackages(true);fixture.panel.showComparison(true);release=null;
+  const leaving=handle.controller.compare();while(!release)await new Promise(resolve=>setTimeout(resolve,0));
+  const ownedFiles=[...handle.controller.model.files],beforeLeave=requests;
+  const arrow={dataset:{screen:'traffic'},classList:{contains:name=>name==='back-button'},addEventListener:(name,callback)=>{assert.equal(name,'click');workspaceClick=callback;}};
+  const workspaceHandler=appSection("      document.querySelectorAll('[data-screen]').forEach(",'      elements.signalFilters.forEach(');
+  runInNewContext(workspaceHandler,{document:{querySelectorAll:()=>[arrow]},investigationNavigation:history,showScreen:()=>{fallbacks++;}});
+  owner.activeElement=arrow;await workspaceClick();await flush();
+  assert.equal(await leaving,false);assert.equal(screen,'traffic');assert.equal(fallbacks,0,'The arrow must use shared history rather than create a new navigation branch');
+  assert.equal(historyState.back,null);assert.equal(historyState.forward.screen,'evidence');
+  assert.equal(history.back(),false,'The old second-Back driver action cannot return to Evidence');assert.equal(screen,'traffic');
+  release(phase==='file'?packageGoldenBytes.buffer:Response.json(comparisonResult));await new Promise(resolve=>setTimeout(resolve,0));
+  assert(history.forward());await flush();
+  assert.equal(screen,'evidence');assert.equal(state.selectedRequestId,request.id);
+  assert.equal(fixture.panel.snapshot().selectedKey,'7:42:102');assert.equal(fixture.panel.snapshot().packages,true);
+  assert.equal(nodes['evidence-comparison-panel'].rebEvidenceComparison,handle);
+  assert(handle.controller.model.files.every((file,index)=>file===ownedFiles[index]));
+  assert.equal(handle.controller.model.busy,false);assert.equal(nodes['evidence-comparison-section'].hidden,true);assert.equal(requests,beforeLeave,'Forward must not replay the cancelled comparison');
+  assert.equal(nodes['evidence-search'].value,'newer filter');assert.equal(nodes['evidence-scope'].value,'all');
+  assert.equal(owner.activeElement,back,'The workspace arrow has no stable selector; its return must retain the guarded shared fallback focus');
+  assert.equal(nodes['evidence-rows'].scrollTop,55);assert.equal(nodes['evidence-inspector'].scrollTop,81);
+  fixture.panel.showComparison(true);assert.equal(owner.activeElement,nodes['evidence-comparison-panel'].querySelector('[data-comparison-side="0"]'));assert.equal(requests,beforeLeave);
+  fixture.panel.disposeComparison();
+}
+console.log('PASS final linked Evidence comparison: actual shared snapshot/restore preserves newer filters, selected record, stable entry focus, independent scroll and file drafts, while cancelling late service/file work without replay or history payloads');
+
 
 // The rendered fixture tests presentation and user actions. The separate real
 // native-writer/HTTP probe establishes authoritative export and validation.
@@ -2883,21 +3324,29 @@ function evidenceBrowserFixture() {
         response.writeHead(200,{'Content-Type':'application/octet-stream','X-Artifact-Total-Bytes':String(observationSourceBytes.length),'X-Artifact-Offset':String(offset),'X-Artifact-Truncated':String(offset+bytes.length<observationSourceBytes.length)});response.end(bytes);return true;
       }
     }
-    if(!['/api/evidence/packages/export','/api/evidence/packages/validate'].includes(path)) return false;
+    if(!['/api/evidence/packages/export','/api/evidence/packages/validate','/api/evidence/packages/compare'].includes(path)) return false;
     let body=Buffer.alloc(0);
     for await(const chunk of request) {
-      if(body.length+chunk.length>4194304){response.writeHead(413);response.end();return true;}
+      if(body.length+chunk.length>(path.endsWith('/compare')?8392704:4194304)){response.writeHead(413);response.end();return true;}
       body=Buffer.concat([body,chunk]);
     }
     fixture.requests.push({path,bytes:body.length});
     if(path.endsWith('/validate'))fixture.lastValidation=body;
     const mode=fixture.mode;
-    if(mode==='pending_export'&&path.endsWith('/export')||mode==='pending_validate'&&path.endsWith('/validate')) await new Promise(resolve=>fixture.pending.push(resolve));
+    if(mode==='pending_export'&&path.endsWith('/export')||mode==='pending_validate'&&path.endsWith('/validate')||mode==='pending_compare'&&path.endsWith('/compare')) await new Promise(resolve=>fixture.pending.push(resolve));
     if(response.destroyed)return true;
     const send=(status,value)=>{response.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});response.end(value);};
     if(mode==='writer_busy'){send(409,'{"error":"Synthetic held writer lease"}');return true;}
     if(mode==='unavailable'){send(503,'{"error":"Synthetic unavailable guarded store"}');return true;}
     if(path.endsWith('/export')){send(200,bytes);return true;}
+    if(path.endsWith('/compare')){
+      let supplied;try{supplied=JSON.parse(body);}catch{send(400,'{}');return true;}
+      if(mode==='invalid'||body.includes(Buffer.from('"protocol_version": 1, "protocol_version": 1'))){send(400,'{}');return true;}
+      const value=supplied.right?.package_id===comparisonChangedResult.right_package_id?structuredClone(comparisonChangedResult):structuredClone(comparisonResult);
+      if(mode==='comparison_inconsistent')value.counts.equal_declared_metadata++;
+      if(mode==='comparison_wrong_id')value.right_package_id='reb-package-v1:sha256:'+'0'.repeat(64);
+      send(200,JSON.stringify(value));return true;
+    }
     const invalid=mode==='invalid'||body.includes(Buffer.from('"protocol_version": 1, "protocol_version": 1'));
     const value=mode==='unsupported'?{...packageInvalid,status:'unsupported'}:invalid?packageInvalid:packageValid;
     send(200,JSON.stringify(value));return true;
@@ -2917,7 +3366,10 @@ assert.deepEqual((await evidenceFixtureResponse('/api/evidence/packages/export',
 assert.equal(JSON.parse((await evidenceFixtureResponse('/api/evidence/packages/validate',packageGoldenBytes)).body).status,'valid');
 for(const [mode,status] of [['writer_busy',409],['unavailable',503]])assert.equal((await evidenceFixtureResponse('/api/evidence/packages/export',Buffer.from('{}'),mode)).status,status);
 for(const status of ['invalid','unsupported'])assert.equal(JSON.parse((await evidenceFixtureResponse('/api/evidence/packages/validate',packageGoldenBytes,status)).body).status,status);
-console.log('PASS Evidence browser fixture raw bytes, valid/invalid/unsupported and guarded-export errors (not rendered QA)');
+assert.equal(JSON.parse((await evidenceFixtureResponse('/api/evidence/packages/compare',Buffer.from('{}'))).body).comparison_id,comparisonResult.comparison_id);
+assert.equal(JSON.parse((await evidenceFixtureResponse('/api/evidence/packages/compare',Buffer.from(JSON.stringify({right:{package_id:comparisonChangedResult.right_package_id}})))).body).counts.changed_declared_metadata,1);
+assert(comparisonUI.validResult(comparisonChangedResult,0,packageGolden.package_id,JSON.parse(new TextDecoder().decode(comparisonChangedInput)).package_id),'Changed product fixture must pass the actual UI response contract');
+console.log('PASS Evidence browser fixture raw bytes, valid/invalid/unsupported, comparison and guarded-export errors (not rendered QA)');
 
 async function checkEvidenceObservationInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture}) {
   const readingPanes=[];
@@ -4005,11 +4457,90 @@ async function checkMemoryInteractions({evaluate,viewport,click,key,wheel,typeTe
   return {status:'passed',path:'real browser UI with synthetic native API fixture',viewports:[[1440,900],[760,560],[600,560],[360,740]],wheel_receipts:wheelReceipts,containment_receipts:containmentReceipts,checks:['independent bounded result/detail scrolling with unchanged siblings and hidden ancestors','inert repeated reveal preserves reading offsets at 760/600/360','real Advanced entry and pending re-entry at all widths','closed chooser and unobscured headers, modes and acted-on controls','native settled wheel reaches intended panes without forced DOM scroll','navigation preserves pending draft, owner and submitted receipt with no implicit action','four mode actions','submitted target and baseline receipts','50 rows','keyboard selection and refresh node identity','inert preview','empty vs unavailable','partial snapshot and disclosure','dominator-only diff','stop outcome and unproven source links','delayed target race','target/restart/context Stop retirement with automatic control recovery and following304','pointer mode recovery without implicit actions','responsive controls']};
 }
 
+async function checkEvidenceComparisonInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture,setFile,navigateNative}) {
+  const selector='#evidence-comparison-panel';
+  const state=`document.querySelector('${selector}').rebEvidenceComparison`;
+  const until=async(expression,message)=>{const end=Date.now()+5000;while(Date.now()<end){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,25));}assert.fail(message||expression);};
+  const press=(value,code=value)=>key(value,code,{windowsVirtualKeyCode:({Enter:13,Escape:27,Tab:9,' ':32})[value],...(value==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});
+  const reveal=async selector=>{for(let i=0;i<6;i++){const delta=await evaluate(`(()=>{const n=document.querySelector(${JSON.stringify(selector)});if(!n)throw new Error('Missing product comparison control');const p=n.closest('#evidence-package-mode');if(!p)return 0;const r=n.getBoundingClientRect(),b=p.getBoundingClientRect();return r.top<b.top+8?r.top-b.top-8:r.bottom>b.bottom-8?r.bottom-b.bottom+8:0;})()`);if(Math.abs(delta)<=1)return;await wheel('#evidence-package-mode',delta,true);}};
+  const hit=async selector=>{await reveal(selector);await click(selector);};
+  const compare=async()=>{await hit('[data-comparison-action="compare"]');await until(`${state}.controller.model.result!==null&&!${state}.controller.model.busy`,'Product comparison did not become ready');};
+  const calls=()=>fixture.requests.filter(r=>r.path.endsWith('/compare')).length;
+  const pending=async()=>{const end=Date.now()+5000;while(Date.now()<end){if(fixture.pending.length)return;await new Promise(resolve=>setTimeout(resolve,25));}assert.fail('Comparison request did not reach delayed service');};
+  const enter=async()=>{
+    fixture.observationActive=true;fixture.observationFrozen=false;
+    await evaluate('state.eventEtag=null;state.artifactEtag=null;refresh()');await until("state.events.some(e=>e.sequence_number==='102')&&state.artifacts.some(a=>a.artifact_id==='9')",'Observation fixture did not load through actual routes');fixture.observationFrozen=true;
+    await click('[data-request-id]');await click('#inspector-tab-evidence');await click('#request-package-entry [data-screen="evidence"]');
+    assert.equal(await evaluate("document.querySelector('#evidence-package-mode').hidden"),true,'Observations must remain the landing');
+    assert.equal(await evaluate(`${state}===undefined`),true,'File controls may not mount before explicit comparison entry');
+    await click('[data-evidence-key="7:42:102"]');
+  };
+  const geometry=async label=>{const g=await evaluate(`(()=>{const p=document.querySelector('#evidence-package-mode'),h=document.querySelector('${selector}'),r=p.getBoundingClientRect();return {width:innerWidth,height:innerHeight,page:document.documentElement.scrollWidth,left:r.left,right:r.right,bottom:r.bottom,client:p.clientHeight,host:h.clientWidth,scroll:h.scrollWidth};})()`);assert(g.page<=g.width+1&&g.left>=0&&g.right<=g.width+1&&g.bottom<=g.height+1&&g.client>=120&&g.scroll<=g.host+1,`${label}: actual mounted comparison must fit the workspace`);};
+  await enter();const initialCalls=calls();await screenshot('comparison-observation-landing');
+  const sourceSupported=await evaluate("!document.querySelector('[data-evidence-action=source]').disabled");
+  assert(sourceSupported,'Final comparison composition requires the approved shared Source adapter');
+  await click('#evidence-package-toggle');assert.equal(await evaluate(`${state}===undefined`),true);
+  await hit('#evidence-compare-toggle');assert.equal(await evaluate("document.activeElement.dataset.comparisonSide"),'0');
+  await setFile(0,'golden');await setFile(1,'golden');assert.equal(calls(),initialCalls,'File choices alone cannot contact comparator');
+  await evaluate(`window.productComparisonFiles=[...${state}.controller.model.files];window.productComparisonHandle=${state};window.productComparisonInput=document.querySelector('[data-comparison-side="0"]');evidenceWorkspace.sync()`);
+  assert(await evaluate(`${state}===productComparisonHandle&&${state}.controller.model.files.every((f,i)=>f===productComparisonFiles[i])&&document.querySelector('[data-comparison-side="0"]')===productComparisonInput`),'Ordinary refresh must preserve mounted input drafts');
+  await compare();assert.equal(calls(),initialCalls+1);assert.match(await evaluate(`document.querySelector('${selector}').textContent`),/11 equal/);await geometry('wide');await screenshot('comparison-product-wide');
+  await setFile(1,'changed');assert.equal(await evaluate(`${state}.controller.model.result`),null,'Replacing a file retires the old result');await compare();assert.match(await evaluate(`document.querySelector('${selector}').textContent`),/10 equal, 1 changed/);
+  await evaluate(`window.productAcceptedResult=${state}.controller.model.result`);
+  await hit(`${selector} .package-report-rows li:nth-child(4) summary`);assert.match(await evaluate(`document.querySelector('${selector}').textContent`),/monotonic_time_ns.*10.*11/);await screenshot('comparison-product-changed');
+  for(const mode of ['unavailable','comparison_wrong_id','comparison_inconsistent','invalid']){
+    fixture.mode=mode;await hit('[data-comparison-action="compare"]');await until(`!${state}.controller.model.busy`);assert(await evaluate(`${state}.controller.model.result===productAcceptedResult`),'A rejected or inconsistent service reply must retain prior evidence');
+  }
+  assert.match(await evaluate(`document.querySelector('${selector} [role=status]').textContent`),/rejected/);await screenshot('comparison-product-error-retained');fixture.mode='valid';
+  for(const [width,height] of [[760,560],[360,740]]){
+    await viewport(width,height);await reveal('[data-comparison-action="compare"]');await geometry(`${width} controls`);await screenshot(`comparison-product-${width}-controls`);
+    await reveal(`${selector} .package-report-rows li:nth-child(4)`);await geometry(`${width} record`);await screenshot(`comparison-product-${width}-record`);
+    await hit('#evidence-comparison-close');assert.equal(await evaluate("document.activeElement.id"),'evidence-compare-toggle');await press('Enter');assert.equal(await evaluate("document.activeElement.dataset.comparisonSide"),'0');assert(await evaluate(`${state}.controller.model.files.every((f,i)=>f===productComparisonFiles[i]||i===1&&f.name==='changed.json')`));
+  }
+  await viewport(1440,900);fixture.mode='pending_compare';await hit('[data-comparison-action="compare"]');await until(`${state}.controller.model.busy`);await pending();assert.equal(await evaluate("document.activeElement.dataset.comparisonAction"),'cancel','Pending comparison must keep keyboard ownership in its enabled Cancel control');await press('Escape');assert.equal(await evaluate(`${state}.controller.model.busy`),false);assert.equal(await evaluate("document.activeElement.dataset.comparisonAction"),'compare');fixture.release();fixture.mode='valid';
+  await press('Escape');assert.equal(await evaluate("document.querySelector('#evidence-comparison-section').hidden"),true);assert.equal(await evaluate("document.activeElement.id"),'evidence-compare-toggle');const reopenCalls=calls();await press('Enter');assert.equal(calls(),reopenCalls,'Keyboard reopen must not replay');
+  // Delay a real File.arrayBuffer, preserving the actual input/change workflow.
+  await evaluate("window.comparisonOriginalFileRead=File.prototype.arrayBuffer;window.comparisonHoldFile=true;File.prototype.arrayBuffer=function(){if(window.comparisonHoldFile){window.comparisonHoldFile=false;const file=this;return new Promise((resolve,reject)=>{window.releaseProductFile=()=>comparisonOriginalFileRead.call(file).then(resolve,reject);});}return comparisonOriginalFileRead.call(this);}");
+  const beforeLateFile=calls();await hit('[data-comparison-action="compare"]');await until('typeof releaseProductFile===\'function\'');await hit('#evidence-return');assert.equal(await evaluate(`${state}.controller.model.busy`),false);
+  await evaluate('releaseProductFile();File.prototype.arrayBuffer=comparisonOriginalFileRead');await evaluate('new Promise(resolve=>setTimeout(resolve,30))');assert.equal(calls(),beforeLateFile,'Returning to observations must suppress delayed-file dispatch');assert.equal(await evaluate("document.activeElement.id"),'evidence-package-toggle');assert.equal(await evaluate('evidenceWorkspace.snapshot().selectedKey'),'7:42:102');
+  // Drafts survive a genuine exact-source pivot and shared Back without any
+  // automatic comparison, export, transform or changed filter/scroll owner.
+  const sourceDelta=await evaluate("(()=>{const n=document.querySelector('[data-evidence-action=source]'),r=n.getBoundingClientRect(),p=document.querySelector('#evidence-inspector').getBoundingClientRect();return r.top<p.top+8?r.top-p.top-8:r.bottom>p.bottom-8?r.bottom-p.bottom+8:0;})()");
+  if(sourceDelta)await wheel('#evidence-inspector',sourceDelta);
+  await evaluate(`window.comparisonEvidenceReturn={search:document.querySelector('#evidence-search').value,scope:document.querySelector('#evidence-scope').value,list:document.querySelector('#evidence-rows').scrollTop,detail:document.querySelector('#evidence-inspector').scrollTop,key:evidenceWorkspace.snapshot().selectedKey,files:[...${state}.controller.model.files]}`);
+  const beforeSource=calls();await click('[data-evidence-action="source"]');await until("!document.querySelector('#screen-sources').hidden&&selectedSource()?.artifact_id==='9'");await click('#investigation-back');await until("!document.querySelector('#screen-evidence').hidden&&document.activeElement.id==='evidence-open-source'");
+  assert(await evaluate(`${state}.controller.model.files.every((f,i)=>f===comparisonEvidenceReturn.files[i])&&document.querySelector('#evidence-search').value===comparisonEvidenceReturn.search&&document.querySelector('#evidence-scope').value===comparisonEvidenceReturn.scope&&document.querySelector('#evidence-rows').scrollTop===comparisonEvidenceReturn.list&&document.querySelector('#evidence-inspector').scrollTop===comparisonEvidenceReturn.detail&&evidenceWorkspace.snapshot().selectedKey===comparisonEvidenceReturn.key`),'Shared Source Back must preserve comparison drafts and Evidence ownership');
+  assert.equal(calls(),beforeSource);assert.equal(fixture.derivedRequests,0);await screenshot('comparison-linked-source-back');
+  await click('#evidence-package-toggle');await hit('#evidence-compare-toggle');fixture.mode='pending_compare';await hit('[data-comparison-action="compare"]');await until(`${state}.controller.model.busy`);await pending();await click('#screen-evidence .back-button');fixture.release();fixture.mode='valid';assert.equal(await evaluate(`${state}.controller.model.busy`),false);
+  // The workspace arrow above already traversed shared Back; Evidence is now the Forward destination.
+  assert.equal(await evaluate("document.querySelector('#investigation-forward').textContent"),'Forward to Evidence');
+  await click('#investigation-forward');await until("!document.querySelector('#screen-evidence').hidden");if(await evaluate("document.querySelector('#evidence-package-mode').hidden"))await click('#evidence-package-toggle');assert.equal(await evaluate("document.querySelector('#evidence-comparison-section').hidden"),true);await hit('#evidence-compare-toggle');assert.equal(await evaluate(`${state}.controller.model.files[1].name`),'changed.json');
+  // Use production page lifecycle handlers while an actual service call waits.
+  fixture.mode='pending_compare';await hit('[data-comparison-action="compare"]');await pending();
+  await evaluate(`window.retiredProductComparison=${state};window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:false}));window.dispatchEvent(new PageTransitionEvent('pageshow',{persisted:false}))`);assert.equal(await evaluate(`${state}===undefined`),true);fixture.release();
+  const beforeRemount=calls();await hit('#evidence-compare-toggle');assert.equal(calls(),beforeRemount);assert.equal(await evaluate(`${state}.controller.model.files[0]`),null);
+  await setFile(0,'golden');await setFile(1,'golden');await hit('[data-comparison-action="compare"]');await pending();
+  await evaluate(`window.replacementProductComparison=${state};retiredProductComparison.dispose()`);assert(await evaluate(`${state}===replacementProductComparison&&${state}.controller.model.busy&&document.querySelectorAll('${selector} input[type=file]').length===2`),'A stale teardown must not wipe the pending product remount');fixture.release();fixture.mode='valid';await until(`${state}.controller.model.result!==null&&!${state}.controller.model.busy`);
+  // Use the exact synthetic source selection matching the existing exporter
+  // response; comparison must not silently select any of these six keys.
+  await hit('#evidence-comparison-close');
+  await evaluate(`state.events=${JSON.stringify(fixture.events)};state.artifacts=${JSON.stringify(fixture.artifacts)};state.sessionMode='demo';state.requests=[{id:'comparison-package-request',path:'https://fixture.invalid/comparison-package',method:'GET',status:200,time:1,type:'xhr',origin:'demo',tabId:'qa-tab',operation:'synthetic_qa',events:state.events,exchange:{request:{state:'empty',headers:[]},response:{state:'empty',headers:[]}}}];state.selectedRequestId='comparison-package-request';renderRequests();evidenceWorkspace.sync();window.packageReturnKey=evidenceWorkspace.snapshot().selectedKey`);
+  assert.equal(await evaluate("document.querySelectorAll('[data-package-candidates] input:checked').length"),0);
+  for(let i=1;i<=4;i++)await hit(`[data-package-candidates] label:nth-child(${i}) input`);
+  await hit('[data-package-scope]');await selectOptionByKeyboard(key, 'retained a');await until("document.querySelector('[data-package-scope]').value==='artifacts'");
+  for(let i=1;i<=2;i++)await hit(`[data-package-candidates] label:nth-child(${i}) input`);
+  await hit('[data-package-export]');await until("evidencePackagePanel.controller.model.status==='ready'");assert.deepEqual(new Uint8Array(fixture.lastValidation),packageGoldenBytes);
+  await hit('[data-package-upload] > summary');await setFile('package','golden');await hit('[data-package-validate]');await until("evidencePackagePanel.controller.model.status==='ready'");assert.deepEqual(new Uint8Array(fixture.lastValidation),packageGoldenBytes);await screenshot('comparison-existing-package-tools');
+  await hit('#evidence-return');assert.equal(await evaluate("document.querySelector('#evidence-investigation').hidden"),false);assert.equal(await evaluate('evidenceWorkspace.snapshot().selectedKey===packageReturnKey'),true);
+  await navigateNative();await enter();assert(await evaluate("document.documentElement.classList.contains('native-shell')&&location.protocol==='http:'"));await click('#evidence-package-toggle');await hit('#evidence-compare-toggle');await setFile(0,'golden');await setFile(1,'golden');await compare();await screenshot('comparison-native-live-http');
+  return {status:'passed',path:'actual observation-first Evidence product host',viewports:[[1440,900],[760,560],[360,740]],entryModes:['browser HTTP','native=1 live HTTP marker in Chromium; not macOS runtime'],sourcePivot:sourceSupported?'shared adapter present':'explicitly unavailable in standalone preview',checks:['real scripts and lazy secondary package action','two real File inputs','backend-produced equal and changed fixtures','ordinary refresh preserves files/DOM','strict rejected-success retention','wide/narrow product geometry','keyboard Close/Escape/reopen focus','late real File read after Return','shared Back cancels service ownership','exact Source Back preserves filters focus scroll and file drafts','actual page disposal/remount and stale handle','existing export and original-byte validation retained','observations selection retained','native live HTTP stays supported'],limitations:['Synthetic HTTP fixture is not new backend semantic or lease evidence.','Stored reb:// unavailability is covered by host/static tests, not native runtime.','No macOS or shared-navigation acceptance is implied.']};
+}
+
 async function checkTrafficBrowser() {
   const executable = process.env.REB_UI_CHROMIUM;
   assert(float32FixtureOnly || executable, "Set REB_UI_CHROMIUM to the installed Chrome/Chromium executable. Sandbox flags are not overridden.");
-  const directory = await mkdtemp(join(tmpdir(), memoryBrowser ? "reb-memory-ui-" : investigationBrowser ? "reb-investigation-ui-" : float32Browser || float32FixtureOnly ? "reb-float32-ui-" : collectionBrowser ? "reb-collection-ui-" : consoleBrowser ? "reb-console-ui-" : evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
-  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", memoryBrowser ? "memory-ui-qa" : investigationBrowser ? "investigation-ui-qa" : float32Browser || float32FixtureOnly ? "float32-ui-qa" : collectionBrowser ? "collection-ui-qa" : consoleBrowser ? "console-ui-qa" : evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
+  const directory = await mkdtemp(join(tmpdir(), memoryBrowser ? "reb-memory-ui-" : investigationBrowser ? "reb-investigation-ui-" : float32Browser || float32FixtureOnly ? "reb-float32-ui-" : collectionBrowser ? "reb-collection-ui-" : consoleBrowser ? "reb-console-ui-" : comparisonBrowser ? "reb-comparison-ui-" : evidenceBrowser ? "reb-evidence-ui-" : sourceFactsBrowser ? "reb-source-facts-ui-" : "reb-requests-ui-"));
+  const output = process.env.REB_UI_SCREENSHOTS || join(root, "build", memoryBrowser ? "memory-ui-qa" : investigationBrowser ? "investigation-ui-qa" : float32Browser || float32FixtureOnly ? "float32-ui-qa" : collectionBrowser ? "collection-ui-qa" : consoleBrowser ? "console-ui-qa" : comparisonBrowser ? "comparison-ui-qa" : evidenceBrowser ? "evidence-ui-qa" : sourceFactsBrowser ? "source-facts-ui-qa" : "requests-ui-qa");
   await mkdir(output, {recursive: true});
   let trafficApiMode = "offline";
   const memoryFixture = memoryBrowser ? await memoryBrowserFixture() : null;
@@ -4017,9 +4548,10 @@ async function checkTrafficBrowser() {
   let floatFixture;
   const factsFixture = investigationBrowser ? investigationFixture(await sourceFactsBrowserFixture()) : sourceFactsBrowser ? await sourceFactsBrowserFixture() : null;
   const consoleFixture = consoleBrowser ? createConsoleFixture() : null;
-  const evidenceFixture = evidenceBrowser ? evidenceBrowserFixture() : null;
+  const evidenceFixture = evidenceBrowser || comparisonBrowser ? evidenceBrowserFixture() : null;
   if(evidenceFixture){
     await writeFile(join(directory,'golden.json'),packageGoldenBytes);
+    await writeFile(join(directory,'changed.json'),comparisonChangedInput);
     await writeFile(join(directory,'duplicate.json'),new TextDecoder().decode(packageGoldenBytes).replace('"protocol_version": 1','"protocol_version": 1, "protocol_version": 1'));
   }
   const server = createServer(async (request, response) => {
@@ -4168,7 +4700,7 @@ async function checkTrafficBrowser() {
       })()`);
     };
     const key = async (value, code = value, native = {}) => {
-      await command("Input.dispatchKeyEvent", {type: "keyDown", key: value, code, ...native});
+      await command("Input.dispatchKeyEvent", {type: native.text ? "keyDown" : "rawKeyDown", key: value, code, ...native});
       await command("Input.dispatchKeyEvent", {type: "keyUp", key: value, code, windowsVirtualKeyCode:native.windowsVirtualKeyCode});
     };
     const dialog = async accept => {
@@ -4260,7 +4792,7 @@ async function checkTrafficBrowser() {
     };
     captureFailure = async () => {
       const result = await command("Page.captureScreenshot", {format: "png"});
-      await writeFile(join(output, memoryBrowser ? "memory-failure.png" : investigationBrowser ? "investigation-failure.png" : float32Browser ? "float32-failure.png" : collectionBrowser ? "collection-failure.png" : consoleBrowser ? "console-failure.png" : evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
+      await writeFile(join(output, memoryBrowser ? "memory-failure.png" : investigationBrowser ? "investigation-failure.png" : float32Browser ? "float32-failure.png" : collectionBrowser ? "collection-failure.png" : consoleBrowser ? "console-failure.png" : comparisonBrowser ? "comparison-failure.png" : evidenceBrowser ? "evidence-failure.png" : sourceFactsBrowser ? "source-facts-failure.png" : "requests-failure.png"), Buffer.from(result.data, "base64"));
     };
     await viewport(1440, 900);
     await command("Page.navigate", {url: `http://127.0.0.1:${server.address().port}/`});
@@ -4285,6 +4817,11 @@ async function checkTrafficBrowser() {
     } else if (float32Browser) {
       validation = await checkFloat32Interactions({evaluate,viewport,click,key,command,wheel,screenshot,fixture:floatFixture});
       assert.deepEqual(runtimeErrors,[],"Application raised uncaught errors during Float32 QA");
+    } else if (comparisonBrowser) {
+      const setFile=async(side,name)=>{const doc=await command('DOM.getDocument');const selector=side==='package'?'[data-package-file]':`[data-comparison-side="${side}"]`;const input=await command('DOM.querySelector',{nodeId:doc.root.nodeId,selector});await command('DOM.setFileInputFiles',{nodeId:input.nodeId,files:[join(directory,name+'.json')]});};
+      const navigateNative=async()=>{evidenceFixture.observationFrozen=false;await command('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/?native=1`});const end=Date.now()+5000;while(Date.now()<end){if(await evaluate("typeof evidenceWorkspace!=='undefined'&&document.documentElement.classList.contains('native-shell')"))return;await new Promise(resolve=>setTimeout(resolve,25));}assert.fail('Native live HTTP marker entry did not initialize');};
+      validation=await checkEvidenceComparisonInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:evidenceFixture,setFile,navigateNative});
+      assert.deepEqual(runtimeErrors,[],"Product comparison raised an uncaught error");
     } else if (evidenceBrowser) {
       const setFile=async name=>{
         const doc=await command('DOM.getDocument');
@@ -4433,9 +4970,9 @@ async function checkTrafficBrowser() {
   }
   if (failure) throw failure;
   await writeFile(join(output, float32FixtureOnly ? "fixture-validation.json" : "validation.json"), JSON.stringify(validation, null, 2));
-  console.log(`PASS ${float32FixtureOnly ? "real loopback fixture (not rendered QA)" : "real Chromium"} ${memoryBrowser ? 'Memory workflow' : float32Browser || float32FixtureOnly ? 'Float32 diagnostics' : collectionBrowser ? 'Collection' : consoleBrowser ? 'Console' : evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
+  console.log(`PASS ${float32FixtureOnly ? "real loopback fixture (not rendered QA)" : "real Chromium"} ${memoryBrowser ? 'Memory workflow' : float32Browser || float32FixtureOnly ? 'Float32 diagnostics' : collectionBrowser ? 'Collection' : consoleBrowser ? 'Console' : comparisonBrowser ? 'Evidence supplied-package comparison' : evidenceBrowser ? 'Evidence metadata' : sourceFactsBrowser ? 'Sources facts' : 'Requests'} interactions; screenshots: ${output}`);
 }
-if (investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly) {await checkTrafficBrowser(); process.exit(0);}
+if (investigationBrowser || trafficBrowser || sourceFactsBrowser || evidenceBrowser || comparisonBrowser || consoleBrowser || collectionBrowser || memoryBrowser || float32Browser || float32FixtureOnly) {await checkTrafficBrowser(); process.exit(0);}
 
 if (fieldsOnly) process.exit(0);
 const temporary = await mkdtemp(join(tmpdir(), "origin-trace-debugger-"));

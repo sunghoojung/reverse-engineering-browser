@@ -48,6 +48,17 @@ export async function checkInvestigationCore(root) {
   const fixture = investigationFixture({handle:async()=>false,release(){}});
   assert(evidence.isBrokerResponse({count:1,events:[fixture.event]}),'Synthetic investigation event must pass normal broker admission');
   assert(evidence.isOriginTraceResponse(fixture.trace),'Synthetic trace must pass the production trace contract');
+  const captureTrace = structuredClone(fixture.trace);
+  captureTrace.gaps.push({reason:'capture_gap',after_step:0,detail:'The retained stream contains native queue-drop markers; this does not identify a missing predecessor.'});
+  captureTrace.coverage.gap_count = 2;
+  assert(evidence.isOriginTraceResponse(captureTrace),'Queue-loss coverage must remain visible in the production trace consumer');
+  const coverageStart = app.indexOf('          const {linked_steps: linked, gap_count: gaps} = trace.coverage;');
+  const coverage = app.slice(coverageStart,app.indexOf('        } else {',coverageStart));
+  const coverageValue = {};
+  runInNewContext(coverage,{trace:captureTrace,elements:{coverageValue}});
+  assert.match(coverageValue.textContent,/2 reported gaps/);
+  assert.doesNotMatch(coverageValue.textContent,/missing predecessor|predecessor coverage/);
+  assert.match(coverageValue.title,/do not identify missing links or prove value flow/);
   // Fixture counterexample: session replacement retires a selection, not every
   // request. Derive each replacement through the real /api/events handler/model.
   const fixtureRequests=async session=>{

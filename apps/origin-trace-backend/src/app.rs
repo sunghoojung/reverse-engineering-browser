@@ -6,7 +6,7 @@ use crate::{
     decoder::Decoder,
     deobfuscation::Deobfuscator,
     error::{Code, Error, Phase, Reason, Result},
-    evidence, evidence_package, float32,
+    evidence, evidence_comparison, evidence_package, float32,
     native_console::NativeConsole,
     origin_trace, source_facts, validation, vm, wasm,
     workspace::{Kind, Store},
@@ -28,15 +28,16 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 16] = [
+const UI_ASSETS: [&str; 17] = [
     "index.html",
     "app.css",
     "app_state.js",
     "evidence_models.js",
     "evidence_package.js",
     "float32_inspector.js",
+    "evidence_comparison.js",
     "source_syntax.js",
     "source_facts.js",
     "investigation_navigation.js",
@@ -48,6 +49,12 @@ const UI_ASSETS: [&str; 16] = [
     "native_console.js",
     "native_console_completion.js",
 ];
+#[derive(Clone, Copy)]
+enum PackageOperation {
+    Validate,
+    Export,
+    Compare,
+}
 pub struct App {
     options: Options,
     port: u16,
@@ -120,15 +127,23 @@ impl App {
         .await
         .map_err(|e| Error::new(500, e.to_string()))?
     }
-    async fn package_operation(&self, bytes: Vec<u8>, export: bool) -> Result<Vec<u8>> {
+    async fn package_operation(
+        &self,
+        bytes: Vec<u8>,
+        operation: PackageOperation,
+        admitted: Option<OwnedSemaphorePermit>,
+    ) -> Result<Vec<u8>> {
         // Share the existing blocking-I/O admission pool, with a narrower package
         // cap and a single bounded wait. A dropped caller cannot release permits
         // while its blocking validation work is still running.
         let permits = tokio::time::timeout(Duration::from_secs(1), async {
-            let package = self.package_io.clone().acquire_owned().await.map_err(|_| {
-                Error::new(503, "Package operations are unavailable")
-                    .with_code(Code::DependencyUnavailable)
-            })?;
+            let package = match admitted {
+                Some(permit) => permit,
+                None => self.package_io.clone().acquire_owned().await.map_err(|_| {
+                    Error::new(503, "Package operations are unavailable")
+                        .with_code(Code::DependencyUnavailable)
+                })?,
+            };
             let io = self.io.clone().acquire_owned().await.map_err(|_| {
                 Error::new(503, "Package operations are unavailable")
                     .with_code(Code::DependencyUnavailable)
@@ -144,11 +159,17 @@ impl App {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         tokio::task::spawn_blocking(move || {
             let _permits = permits;
-            if export {
-                evidence_package::export_bytes_at(&bytes, &events, &artifacts, deadline)
-            } else {
-                serde_json::to_vec(&evidence_package::validate_bytes(&bytes)?)
-                    .map_err(|_| Error::new(500, "Package validation failed"))
+            match operation {
+                PackageOperation::Export => {
+                    evidence_package::export_bytes_at(&bytes, &events, &artifacts, deadline)
+                }
+                PackageOperation::Compare => {
+                    evidence_comparison::compare_bytes_at(&bytes, deadline)
+                }
+                PackageOperation::Validate => {
+                    serde_json::to_vec(&evidence_package::validate_bytes(&bytes)?)
+                        .map_err(|_| Error::new(500, "Package validation failed"))
+                }
             }
         })
         .await
@@ -718,6 +739,29 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                 .and_then(|v| v.parse::<usize>().ok())
                 .filter(|n| *n > 0 && *n <= maximum)
                 .ok_or_else(|| Error::bad("The request body size is invalid"))?;
+            // Comparison bodies can contain two 4 MiB originals. Reserve the
+            // existing package permit before ingesting them, with no body queue.
+            // Keep this permit through blocking work; body timeout/disconnect or
+            // dispatch admission failure releases it without starting comparison.
+            let comparison_permit = if path == "/api/evidence/packages/compare" {
+                Some(
+                    app.package_io
+                        .clone()
+                        .try_acquire_owned()
+                        .map_err(|error| match error {
+                            TryAcquireError::NoPermits => {
+                                Error::new(503, "Comparison capacity is full; retry explicitly")
+                                    .with_code(Code::ResourceLimit)
+                            }
+                            TryAcquireError::Closed => {
+                                Error::new(503, "Package operations are unavailable")
+                                    .with_code(Code::DependencyUnavailable)
+                            }
+                        })?,
+                )
+            } else {
+                None
+            };
             let bytes = tokio::time::timeout(Duration::from_secs(5), to_bytes(body, maximum))
                 .await
                 .map_err(|_| {
@@ -728,12 +772,14 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
             if bytes.len() != length {
                 return Err(Error::bad("The request body length is invalid"));
             }
-            if matches!(
-                path,
-                "/api/evidence/packages/validate" | "/api/evidence/packages/export"
-            ) {
+            if let Some(operation) = match path {
+                "/api/evidence/packages/validate" => Some(PackageOperation::Validate),
+                "/api/evidence/packages/export" => Some(PackageOperation::Export),
+                "/api/evidence/packages/compare" => Some(PackageOperation::Compare),
+                _ => None,
+            } {
                 return app
-                    .package_operation(bytes.to_vec(), path.ends_with("/export"))
+                    .package_operation(bytes.to_vec(), operation, comparison_permit)
                     .await
                     .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
             }
@@ -938,7 +984,7 @@ mod tests {
                 )
             };
             let error = app
-                .package_operation(b"{}".to_vec(), false)
+                .package_operation(b"{}".to_vec(), PackageOperation::Validate, None)
                 .await
                 .unwrap_err();
             assert_eq!(error.status, if closed { 503 } else { 408 });
@@ -957,7 +1003,8 @@ mod tests {
                 let bytes = app
                     .package_operation(
                         include_bytes!("../assets/evidence-packages/golden-v1.json").to_vec(),
-                        false,
+                        PackageOperation::Validate,
+                        None,
                     )
                     .await
                     .unwrap();
@@ -1006,5 +1053,104 @@ mod tests {
             }
             app.stop().await;
         }
+    }
+    #[tokio::test]
+    async fn comparison_prebody_admission_rejects_saturation_and_releases_cancelled_bodies() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let root = tempfile::tempdir().unwrap();
+        let mut options = Options::parse_from(["origin-trace-backend"]);
+        options.store = root.path().join("events.jsonl");
+        options.trace_store = root.path().join("trace.jsonl");
+        options.signal_store = root.path().join("signals.jsonl");
+        options.artifacts = root.path().join("artifacts");
+        options.api_collection = root.path().join("collection.json");
+        options.local_analyst = root.path().join("analyst.json");
+        options.analyst_runner = Some(std::env::current_exe().unwrap());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = App::new(options, address.port()).await;
+        let router = app.router();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let wait_permits = |expected| {
+            let app = app.clone();
+            async move {
+                tokio::time::timeout(Duration::from_secs(2), async move {
+                    while app.package_io.available_permits() != expected {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+        };
+        let header = format!(
+            "POST /api/evidence/packages/compare HTTP/1.1\r\nHost: {address}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{{",
+            evidence_comparison::MAX_REQUEST_BYTES
+        );
+        let mut first = tokio::net::TcpStream::connect(address).await.unwrap();
+        first.write_all(header.as_bytes()).await.unwrap();
+        wait_permits(1).await;
+        let mut second = tokio::net::TcpStream::connect(address).await.unwrap();
+        second.write_all(header.as_bytes()).await.unwrap();
+        wait_permits(0).await;
+        // The asserted permits are an admission barrier, not a timing sleep.
+        // These stalled requests have supplied one byte, not two large bodies.
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/evidence/packages/compare")
+            .header("host", address.to_string())
+            .header("content-length", evidence_comparison::MAX_REQUEST_BYTES)
+            .body(Body::empty())
+            .unwrap();
+        let rejected = handle(State(app.clone()), request).await;
+        assert_eq!(rejected.status(), 503);
+        let value: Value =
+            serde_json::from_slice(&to_bytes(rejected.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(value["code"], "resource_limit");
+        assert_eq!(app.package_io.available_permits(), 0);
+        // Cancellation releases a pre-body lease, allowing an explicit new call.
+        first.shutdown().await.unwrap();
+        drop(first);
+        wait_permits(1).await;
+        let p: Value =
+            serde_json::from_slice(include_bytes!("../assets/evidence-packages/golden-v1.json"))
+                .unwrap();
+        let body=serde_json::to_vec(&json!({"left":p,"right":p,"normalization_profile":evidence_comparison::PROFILE,"facets":["events"]})).unwrap();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/evidence/packages/compare")
+            .header("host", address.to_string())
+            .header("content-length", body.len())
+            .body(Body::from(body))
+            .unwrap();
+        assert_eq!(handle(State(app.clone()), request).await.status(), 200);
+        assert_eq!(app.package_io.available_permits(), 1);
+        // The second stalled body reaches its real body deadline and releases
+        // the lease, without blocking or launching any comparison worker.
+        let mut raw = Vec::new();
+        tokio::time::timeout(Duration::from_secs(7), second.read_to_end(&mut raw))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8(raw).unwrap().starts_with("HTTP/1.1 408 "));
+        wait_permits(2).await;
+        app.package_io.close();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/evidence/packages/compare")
+            .header("host", address.to_string())
+            .header("content-length", 100)
+            .body(Body::empty())
+            .unwrap();
+        let rejected = handle(State(app.clone()), request).await;
+        assert_eq!(rejected.status(), 503);
+        let value: Value =
+            serde_json::from_slice(&to_bytes(rejected.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(value["code"], "dependency_unavailable");
+        app.stop().await;
+        server.abort();
+        let _ = server.await;
     }
 }

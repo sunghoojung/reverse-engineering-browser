@@ -43,6 +43,10 @@
 
       <div id="workspace" class="workspace">
         <main class="main">
+          <section id="investigation-navigation" class="investigation-navigation" aria-label="Investigation navigation" hidden>
+            <div class="investigation-controls"><button id="investigation-back" class="secondary-button" type="button" title="Previous investigation stop (Alt + Left)" disabled>Back</button><button id="investigation-forward" class="secondary-button" type="button" title="Next investigation stop (Alt + Right)" disabled>Forward</button><details><summary>Link context</summary><p id="investigation-notice" role="status" aria-live="polite"></p><span id="investigation-history-count"></span><button id="investigation-clear" class="secondary-button" type="button">Clear return history</button></details></div>
+            <div id="investigation-source-search" class="investigation-source-search" aria-label="Unverified Console source search" hidden></div>
+          </section>
           <section id="screen-traffic" class="screen" aria-label="Traffic">
             <section id="console-experiment-traffic" class="console-experiment-traffic" aria-label="Console experiment activity" hidden>
               <header><strong id="console-traffic-title">Console experiment activity</strong><button id="console-traffic-back" class="secondary-button" type="button">Back to captured traffic</button></header>
@@ -248,6 +252,7 @@
                 <label><span class="sr-only" hidden>Find in source</span><input id="source-search" class="source-search" type="search" placeholder="Find" aria-label="Find in source" title="Find text; Enter for next, Shift+Enter for previous (first 1000 matches)" /></label>
                 <button id="source-pretty" class="source-tool" type="button" aria-label="Pretty print source" title="Pretty print source" disabled>{ }</button>
                 <button id="source-wasm" class="source-tool" type="button" aria-label="Inspect WebAssembly module" aria-pressed="false" hidden>Inspect</button>
+                <button id="investigation-decode-range" class="source-tool" type="button" title="First select an Original bytes link in Facts; this copies at most 64 KiB without running a transformation" disabled>Decode range</button>
                 <button id="source-facts-toggle" class="source-tool" type="button" aria-controls="source-facts-details" aria-expanded="false" disabled>Facts</button>
                 <button id="source-deob" class="source-tool" type="button" aria-label="Show deobfuscated representation" title="Show deobfuscated representation" disabled>Deob</button>
                 <button id="source-hook-pivot" class="source-tool" type="button" aria-controls="hooks-workspace" aria-expanded="false" title="Open Runtime Hooks beside source" disabled>Hooks</button>
@@ -1168,6 +1173,7 @@
                         <div class="decoder-view-tabs" role="group" aria-label="Output representation"><button class="secondary-button" type="button" data-decoder-view="text" aria-pressed="true">UTF-8</button><button class="secondary-button" type="button" data-decoder-view="hex" aria-pressed="false">Hex dump</button><button class="secondary-button" type="button" data-decoder-view="base64" aria-pressed="false">Base64</button></div>
                         <pre id="decoder-output" tabindex="0" data-empty-label="No bytes to display. Enter input to begin.">No bytes selected.</pre>
                         <div class="decoder-actions"><button id="decoder-copy-output" class="secondary-button" type="button" disabled>Copy visible output</button></div>
+                        <section id="investigation-decoder-origin" class="decoder-field-origin" aria-label="Decoded value evidence origin" hidden><p></p><button class="secondary-button" type="button">Open original evidence</button></section>
                         <section id="decoder-field-origin" class="decoder-field-origin" aria-label="Request field source search" hidden>
                           <p id="decoder-field-origin-label"></p>
                           <button id="decoder-find-sources" class="secondary-button" type="button" disabled>Find sources for result</button>
@@ -1282,6 +1288,7 @@
     <script src="pane_layout.js"></script>
     <script src="native_console_completion.js"></script>
     <script src="native_console.js"></script>
+    <script src="investigation_navigation.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

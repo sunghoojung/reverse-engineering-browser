@@ -66,6 +66,13 @@ export function createConsoleFixture() {
   return fixture;
 }
 
+// Input coordinates must be measured after the shared pane refresh and the
+// disclosure's asynchronous toggle/ResizeObserver positioning have painted.
+// This observes rendering only; strict hit testing and real input stay in click.
+async function settleConsoleLayout(evaluate) {
+  await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+}
+
 // Deterministically model the browser's scroll clamping when the shared
 // divider temporarily expands a scrollport during restore/measure/reapply.
 async function checkConsolePaneScroll(root) {
@@ -122,6 +129,31 @@ async function checkConsolePaneScroll(root) {
   const handle=body.children.find(child=>child.id==='pane-divider-native-console'),beforeKey=mainSize;
   handle.listeners.keydown({key:'ArrowDown',preventDefault(){},stopPropagation(){}});assert.equal(mainSize,beforeKey+10,'Divider keyboard resize must remain active');assert.equal(handle.style.top,`${mainSize-4}px`,'Divider hit target follows its split');
   visible=false;mutations[0]([{attributeName:'hidden'}]);flush();assert.equal(handle.hidden,true,'Visibility changes must retire the divider');visible=true;mutations[0]([{attributeName:'hidden'}]);flush();assert.equal(handle.hidden,false,'Reopening must restore full layout measurement');
+  // Counterexample for the old reopen -> immediate summary click sequence:
+  // the strict pre-input hit test can pass, then the scheduled real pane refresh
+  // moves the summary before pointer delivery. No toggle-positioning or scroll
+  // callback is required for that miss. Outside dismissal is checked separately
+  // in the controller fixture. This models a possible ordering; the old CI
+  // screenshot does not establish its input coordinates or disclosure state.
+  const closeDock=()=>{visible=false;mutations[0]([{attributeName:'hidden'}]);flush();};
+  const reopenDock=()=>{visible=true;mutations[0]([{attributeName:'hidden'}]);};
+  const summaryBox=()=>({top:panel.getBoundingClientRect().top+4,bottom:panel.getBoundingClientRect().top+30});
+  const pointerClick=()=>{
+    const before=summaryBox(),y=(before.top+before.bottom)/2;
+    assert(y>=before.top&&y<=before.bottom,'The baseline pre-input hit test passes');
+    flush();const after=summaryBox();
+    assert(y>=after.top&&y<=after.bottom,'Pane refresh moved the summary before pointer delivery');
+  };
+  closeDock();reopenDock();
+  assert.throws(pointerClick,/Pane refresh moved the summary/,'The original immediate click must expose the scheduling counterexample');
+  closeDock();reopenDock();
+  await settleConsoleLayout(async expression=>{
+    const queued=queue.size,result=runInNewContext(expression,context);
+    assert(result&&typeof result.then==='function'&&queue.size>queued,'Readiness must observe a future render frame');
+    flush();return await result;
+  });
+  assert.doesNotThrow(pointerClick,'Read-only paint readiness must precede strict measurement and pointer delivery');
+  console.log('PASS Console immediate-reopen pointer counterexample and read-only paint readiness (production pane scheduler; not rendered QA)');
   for(let i=0;i<65;i++){const owner=scrollOwner(800,()=>100);owner.scrollTop=10;extraOwners.push(owner);documentEvents.scroll({target:owner});}flush();mutations[0]([{attributeName:'hidden'}]);flush();
   assert.equal(extraOwners[0].scrollTop,0,'The oldest of 65 registered owners must be dropped');assert(extraOwners.slice(1).every(owner=>owner.scrollTop===10),'The 64 most recent owners remain preserved');
   extraOwners[1].scrollTop=0;documentEvents.scroll({target:extraOwners[1]});flush();extraOwners[1].scrollTop=10;mutations[0]([{attributeName:'hidden'}]);flush();assert.equal(extraOwners[1].scrollTop,0,'Returning to the origin removes an owner from tracking');
@@ -159,20 +191,26 @@ export async function checkConsoleDOM(root) {
     select(){} reportValidity(){return true;} setSelectionRange(start,end){this.selectionStart=start;this.selectionEnd=end;}
     getBoundingClientRect(){return {top:0,bottom:100,left:0,right:600,width:600,height:100};}
   }
-  const body=new Node('body');
-  document={body,activeElement:null,querySelector:selector=>body.querySelector(selector),createElement:tag=>new Node(tag),createTextNode:text=>{const node=new Node('text');node.textContent=text;return node;},createDocumentFragment:()=>new Node('fragment'),addEventListener(){},dispatchEvent(){}};
+  const body=new Node('body'),documentEvents={};
+  document={body,activeElement:null,querySelector:selector=>body.querySelector(selector),createElement:tag=>new Node(tag),createTextNode:text=>{const node=new Node('text');node.textContent=text;return node;},createDocumentFragment:()=>new Node('fragment'),addEventListener:(name,fn)=>documentEvents[name]=fn,dispatchEvent(){}};
   const html=await readFile(join(root,'apps/research-ui/index.html'),'utf8');
   const ids=[...html.matchAll(/<(\w+)[^>]*\bid="(native-console-[\w-]+)"[^>]*>/g)];
   const panel=new Node('section');panel.id='native-console-panel';body.append(panel);
   for(const [,tag,id]of ids){if(id===panel.id)continue;const node=new Node(tag);node.id=id;panel.append(node);}
   const get=id=>document.querySelector('#native-console-'+id);
   const workspace=new Node();workspace.id='workspace';body.append(workspace);
-  const summary=new Node('summary');get('connection').append(summary);get('target').append(new Node('option'));
+  const summary=new Node('summary'),menu=new Node();menu.className='native-console-connection-body';get('connection').append(summary,menu);menu.append(get('start'),get('stop'),get('refresh'));get('target').append(new Node('option'));
   get('level').value='all';get('scroll').append(get('output'));get('output').clientHeight=100;get('source').value='';
   const fixture=createConsoleFixture();let copies=0;
   const source=await readFile(join(root,'apps/research-ui/native_console.js'),'utf8');
   const context={document,TextEncoder,console,setTimeout,clearTimeout,setInterval(){},ResizeObserver:class{observe(){}},MutationObserver:class{observe(){}},CustomEvent:class{},navigator:{clipboard:{writeText:async()=>{copies++;}}},createNativeConsoleCompletion:()=>({close(){},keydown(){return false;}}),createSourceTokenizer:()=>({}),SOURCE_HIGHLIGHT_TOKEN_LIMIT:8192,sourceSyntaxTokens:text=>[{type:'plain',text}],sourcePrettyTokens:()=>[],fetch:async(path,options)=>{const reply=await fixture.respond(path,options?.body?JSON.parse(options.body):null);return {ok:reply.status===200,status:reply.status,json:async()=>reply.body};}};
   runInNewContext(source.replace(/\}\)\(\);\s*$/, 'globalThis.testConsole = {initialize, logs, poll, renderControls, state:()=>({session,pending,submitting,generation,outputGeneration,outputBytes,outputNodes})};})();'),context);
+  // Exercise production disclosure listeners separately from the scheduling
+  // counterexample: positioning and inside pointers must never close the menu.
+  get('connection').open=true;await get('connection').emit('toggle');
+  assert.equal(get('connection').open,true);assert.equal(menu.style.width,'350px');
+  for(const target of [summary,get('stop')]){documentEvents.pointerdown({target});assert.equal(get('connection').open,true);}
+  documentEvents.pointerdown({target:body});assert.equal(get('connection').open,false);
   const api=context.testConsole;fixture.stateMode='error';await api.initialize();assert.match(get('notice').textContent,/Check availability/);assert.equal(get('start').disabled,true);fixture.stateMode='ok';await get('check').click();get('url').value='https://fixture.invalid/console';await get('start').click();
   // Event listener returns void for start; drain the serialized request.
   const settle=async()=>{for(let i=0;i<12;i++)await Promise.resolve();};await settle();
@@ -258,7 +296,7 @@ export async function checkConsoleInteractions({evaluate,viewport,click,key,whee
   const eventually=async(predicate,message)=>{for(let i=0;i<150;i++){if(await predicate())return;await new Promise(resolve=>setTimeout(resolve,30));}assert.fail(message);};
   const until=(expression,message)=>eventually(()=>evaluate(expression),message);
   const press=value=>key(value,value,{windowsVirtualKeyCode:{Enter:13,Escape:27,ArrowDown:40,ArrowUp:38,Home:36,Tab:9}[value],...(value==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});
-  const reveal=async selector=>{await evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'nearest'})`);await click(selector);};
+  const reveal=async selector=>{await evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'nearest'})`);await settleConsoleLayout(evaluate);await click(selector);};
   const fill=async(selector,text)=>{await click(selector);await key('a','KeyA',{modifiers:2,windowsVirtualKeyCode:65});await type(text);};
   const evaluations=()=>fixture.calls.filter(call=>call.command?.operation==='evaluate');
   const commandChecks=[];
@@ -291,7 +329,24 @@ export async function checkConsoleInteractions({evaluate,viewport,click,key,whee
     await click('#native-console-target');await press('Home');await press('ArrowDown');await press('Enter');
     await until("!document.querySelector('#native-console-source').disabled",'Explicit document selection failed');
   };
-  const refresh=async()=>{await click('#native-console-connection > summary');await reveal('#native-console-refresh');await until("!document.querySelector('#native-console-target').disabled",'Document refresh did not settle');await selectDocument();};
+  const connectionSnapshot=()=>evaluate(`(()=>{
+    const connection=document.querySelector('#native-console-connection');
+    const box=node=>{const r=node.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};};
+    const summary=connection.querySelector('summary'),bounds=box(summary),hit=document.elementFromPoint((bounds.left+bounds.right)/2,(bounds.top+bounds.bottom)/2);
+    return {open:connection.open,panelHidden:document.querySelector('#native-console-panel').hidden,panel:box(document.querySelector('#native-console-panel')),summary:bounds,summaryHit:summary.contains(hit),hit:{id:hit?.id,tag:hit?.tagName},menu:box(connection.querySelector('.native-console-connection-body')),stop:box(document.querySelector('#native-console-stop')),tracks:document.querySelector('#workspace').style.getPropertyValue('grid-template-rows')};
+  })()`);
+  const openConnection=async()=>{
+    await settleConsoleLayout(evaluate);
+    const before=await connectionSnapshot();recordGeometry({label:'Session settings before pointer click',...before});
+    assert.equal(before.open,false,'Session settings must start closed; never blindly toggle an already-open disclosure');
+    assert.equal(before.panelHidden,false);assert(before.summaryHit,'The settled summary must own its pointer target');
+    await click('#native-console-connection > summary');
+    await settleConsoleLayout(evaluate);
+    const after=await connectionSnapshot();recordGeometry({label:'Session settings after one pointer click',...after});
+    assert.equal(after.open,true,'Session settings must open from one real summary click');
+    assert.deepEqual(after.summary,before.summary,'Opening Session settings must not race dock geometry');
+  };
+  const refresh=async()=>{await openConnection();await reveal('#native-console-refresh');await until("!document.querySelector('#native-console-target').disabled",'Document refresh did not settle');await selectDocument();};
   const geometry=async()=>{
     const value=await evaluate(`(()=>{const box=id=>{const r=document.querySelector(id).getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,height:r.height}};return {panel:box('#native-console-panel'),scroll:box('#native-console-scroll'),form:box('#native-console-form'),run:box('#native-console-run'),width:innerWidth,height:innerHeight};})()`);
     assert(value.scroll.height>=28,'Transcript must retain a readable line');assert(value.scroll.bottom<=value.form.top,'Composer must not overlap transcript');
@@ -411,9 +466,12 @@ export async function checkConsoleInteractions({evaluate,viewport,click,key,whee
   await click('#native-console-clear');await until("document.querySelector('#native-console-output').children.length===0",'Clear failed');await screenshot('console-cleared');
   // History still works after clearing; recalling is not execution.
   await click('#native-console-source');await press('ArrowUp');assert.equal(await evaluate("document.querySelector('#native-console-source').value"),'fixture.object');
-  await click('#native-console-close');assert.equal(await evaluate("document.activeElement.id"),'native-console-toggle');await click('#native-console-toggle');
+  await click('#native-console-close');assert.equal(await evaluate("document.activeElement.id"),'native-console-toggle');
+  await until("document.querySelector('#native-console-panel').hidden&&!document.querySelector('#workspace').style.getPropertyValue('grid-template-rows')",'Closing the narrow Console must release its saved split tracks');
+  await click('#native-console-toggle');
+  await until("!document.querySelector('#native-console-panel').hidden&&!!document.querySelector('#workspace').style.getPropertyValue('grid-template-rows')",'Reopening the narrow Console must restore its saved split tracks');
   assert.equal(await evaluate("document.querySelector('#native-console-source').value"),'fixture.object');
-  const oldSession=fixture.session;await click('#native-console-connection > summary');await reveal('#native-console-stop');await until("!document.querySelector('#native-console-start').disabled",'Disconnect did not complete');await reveal('#native-console-start');await until("document.querySelector('#native-console-target').options.length===2",'Reconnect did not list documents');await selectDocument();assert.notEqual(fixture.session,oldSession);assert.equal(await evaluate("document.querySelector('#native-console-source').value"),'fixture.object');const reconnected=await command('fixture.object');assert.equal(reconnected.session,fixture.session);assert.notEqual(reconnected.session,commandChecks[0].session_id);await screenshot('console-reconnected');
+  const oldSession=fixture.session;await openConnection();await screenshot('console-phone-session-settings');await reveal('#native-console-stop');await until("!document.querySelector('#native-console-start').disabled",'Disconnect did not complete');await reveal('#native-console-start');await until("document.querySelector('#native-console-target').options.length===2",'Reconnect did not list documents');await selectDocument();assert.notEqual(fixture.session,oldSession);assert.equal(await evaluate("document.querySelector('#native-console-source').value"),'fixture.object');const reconnected=await command('fixture.object');assert.equal(reconnected.session,fixture.session);assert.notEqual(reconnected.session,commandChecks[0].session_id);await screenshot('console-reconnected');
   // Restore the full Requests pane after a large saved dock and narrow reflow.
   await viewport(1440,900);await fill('#native-console-source','draft survives dock resize');await press('Escape');await click('#native-console-close');
   // Visibility changes schedule a full divider refresh on the next frame.

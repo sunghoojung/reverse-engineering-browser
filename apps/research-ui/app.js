@@ -956,6 +956,7 @@
       }
 
       function resetRequestSelection() {
+        state.originTraceController?.abort();
         state.trafficSelectionNotice = state.selectedRequestId === null ? '' : 'The selected request left the retained capture window. Choose another request.';
         state.selectedRequestId = null;
         state.selectedField = null;
@@ -1385,7 +1386,15 @@
         elements.requestCopyUrl.disabled = request.hostOnly;
       }
 
-      function selectRequest(id) {
+      function selectRequest(id, expectedIdentity = null) {
+        if (expectedIdentity) {
+          const candidates = state.requests.filter(candidate => candidate.id === id);
+          if (candidates.length !== 1 || !investigationSame(expectedIdentity, investigationRequestIdentity(candidates[0]))) {
+            investigationNotice('The exact request cannot be selected: its row identifier is missing, changed or ambiguous.', 'ambiguous'); return false;
+          }
+        }
+        investigationBeforeSelection();
+        state.originTraceController?.abort();
         const match = elements.requestSearchScope.value === 'content' ? state.trafficSearchMatches?.get(id) : null;
         if (match?.side) state.inspectorTab = match.mode === 'headers' ? 'headers' : match.side === 'Request' ? 'payload' : 'response';
         const request = state.requests.find(candidate => candidate.id === id);
@@ -1448,7 +1457,7 @@
       }
 
       function requestTraceRoot(request) {
-        if (request?.origin !== 'live') return null;
+        if (request?.origin !== 'live' || request.protocolRequestId || String(request.operation).startsWith('cdp_')) return null;
         const candidates = request.events ?? [];
         return candidates.find(event => event.type === 'request_started' && integerText(event, 'request_id') !== '0') ??
           candidates.find(event => event.type === 'request_initiated' && integerText(event, 'request_id') !== '0') ??
@@ -1540,7 +1549,7 @@
           const empty = document.createElement('div');
           empty.className = 'field-empty';
           empty.textContent = request?.origin === 'live'
-            ? 'Structured fields were not captured. Request-level origin evidence is still available.'
+            ? request.protocolRequestId ? 'This debugger request has no exact native-event link. Host, method and timing matches are correlation only.' : 'Structured fields were not captured. Request-level origin evidence is still available.'
             : request?.origin === 'demo'
               ? 'Demo request fields are not traceable. Select a live request for broker-backed origin evidence.'
               : request
@@ -1622,13 +1631,10 @@
         elements.requestInspector.hidden = showingExchange;
         document.querySelector('.detail-pane').classList.toggle('showing-exchange', showingExchange);
         if (showingExchange) {
-          renderTrafficDetails(exchangeInspector, request, state.inspectorTab, value => {
-            resetDecoderChain('Value copied from the request inspector.');
-            toolsElements.inputEncoding.value = 'text';
-            toolsElements.input.value = value;
-            showScreen('tools');
-            setToolsTab('decoder');
-            requestAnimationFrame(() => toolsElements.input.focus({preventScroll: true}));
+          renderTrafficDetails(exchangeInspector, request, state.inspectorTab, (value, selection) => {
+            const identity = investigationRequestIdentity(request);
+            investigationDecode(value, {route: identity ? {kind: 'request', identity, inspectorTab: state.inspectorTab} : null,
+              description: `${selection.side} · ${selection.path} · selected inspector value. UTF-8 string bytes are retained; raw HTTP byte offsets are unavailable.${identity ? '' : ' Exact request identity is unavailable.'}`});
           }, openFieldProvenance, elements.requestSearchScope.value === 'content' && state.trafficSearchMatches?.get(request?.id)?.side
             ? {...state.trafficSearchMatches.get(request.id), query: elements.requestFilter.value.trim()} : null, state.trafficSelectionNotice);
           return;
@@ -1767,7 +1773,11 @@
               ? 'Open disposable experiments for the selected request field.'
               : 'Experiments use the attached debugger target; selecting a request field is optional.';
           });
-        const documentSteps = state.originTrace?.steps ?? [];
+        const selection = originTraceSelection();
+        const trace = selection && state.originTraceKey === selection.key ? state.originTrace : null;
+        const stale = Boolean(state.originTrace && !trace);
+        const selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
+        const documentSteps = trace?.steps ?? [];
         const firstTime = documentSteps.length ? BigInt(documentSteps[documentSteps.length - 1].monotonic_time_ns) : 0n;
         const tracedEvidence = documentSteps.map(step => ({
           relative: formatMilliseconds(BigInt(step.monotonic_time_ns) - firstTime, '+'),
@@ -1777,11 +1787,11 @@
           correlation: `session ${step.event.session_id} · process ${step.event.process_id} · seq ${step.event.sequence_number} · frame ${step.frame_id} · request ${step.request_id} · artifact ${step.artifact_id}`,
           value: step.value || step.relation
         }));
-        const gapEvidence = (state.originTrace?.gaps ?? []).map(gap => ({
+        const gapEvidence = (trace?.gaps ?? []).map(gap => ({
           relative: 'gap', source: 'unknown', category: 'trace', type: gap.reason,
           correlation: `after step ${gap.after_step + 1}`, value: gap.detail
         }));
-        const selectedSampleEvidence = !state.originTrace && state.selectedField ? sampleEvidence : [];
+        const selectedSampleEvidence = !trace && selectedRequest?.origin === 'sample' && state.selectedField ? sampleEvidence : [];
         const evidence = [...tracedEvidence, ...gapEvidence, ...selectedSampleEvidence];
         elements.evidenceRows.replaceChildren(...evidence.map(event => {
           const row = document.createElement('div'); row.className = 'evidence-row'; row.setAttribute('role', 'row');
@@ -1796,7 +1806,7 @@
           });
           return row;
         }));
-        elements.evidenceCount.textContent = `${evidence.length} trace records`;
+        elements.evidenceCount.textContent = stale ? 'Trace unavailable: the retained request identity changed. Load its current trace.' : `${evidence.length} trace records`;
         elements.evidenceLinkCount.textContent = String(evidence.length);
         if (!document.querySelector('#screen-backtrace').hidden) renderBacktrace();
       }
@@ -1810,11 +1820,12 @@
           request,
           root,
           requestID,
-          key: `${request.id}:${root.process_id}:${integerText(root, 'sequence_number')}`
+          key: `${request.id}:${integerText(root, 'session_id')}:${root.process_id}:${integerText(root, 'sequence_number')}`
         };
       }
 
       async function refreshOriginTrace() {
+        state.originTraceController?.abort();
         const generation = ++state.originTraceGeneration;
         const selection = originTraceSelection();
         if (!selection || location.protocol === 'file:') {
@@ -1823,6 +1834,18 @@
           renderBacktrace();
           return;
         }
+        const controller = new AbortController();
+        state.originTraceController = controller;
+        const timer = setTimeout(() => controller.abort(), 10000);
+        const ownsSelection = () => {
+          if (generation !== state.originTraceGeneration) return false;
+          if (originTraceSelection()?.key === selection.key) return true;
+          state.originTraceGeneration += 1;
+          state.originTrace = null; state.originTraceKey = null; state.originTraceEtag = null;
+          state.selectedTraceRow = null; state.originTraceStatus = 'error';
+          state.originTraceError = 'The selected request event changed while reading its trace. Load the current trace explicitly.';
+          renderBacktrace(); return false;
+        };
         state.originTraceStatus = 'loading';
         state.originTraceError = null;
         renderBacktrace();
@@ -1835,25 +1858,33 @@
             root_process_id: String(selection.root.process_id),
             root_sequence_number: integerText(selection.root, 'sequence_number')
           });
-          const response = await fetch(`/api/origin-trace?${parameters}`, { cache: 'no-store', headers });
-          if (generation !== state.originTraceGeneration) return;
-          if (response.status === 304 && state.originTrace) {
+          const response = await fetch(`/api/origin-trace?${parameters}`, { cache: 'no-store', headers, signal: controller.signal });
+          if (!ownsSelection()) return;
+          if (response.status === 304 && state.originTrace && state.originTraceKey === selection.key) {
             state.originTraceStatus = 'ready';
             renderBacktrace();
             return;
           }
           if (!response.ok) throw new Error(`Origin trace store returned ${response.status}`);
-          const body = await response.json();
-          if (generation !== state.originTraceGeneration) return;
+          const bytes = await sourceFactsReadBytes(response, 1024 * 1024, controller.signal);
+          const body = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
+          if (!ownsSelection()) return;
           if (!isOriginTraceResponse(body)) throw new TypeError('Malformed origin trace response');
+          if (body.request_id !== selection.requestID || body.steps.length && !investigationSame(investigationEventIdentity(body.steps[0].event), investigationEventIdentity(selection.root))) {
+            throw new TypeError('Trace root belongs to a different captured session or event. Exact linkage is unavailable.');
+          }
           state.originTrace = body;
           state.originTraceStatus = 'ready';
           state.originTraceKey = selection.key;
           state.originTraceEtag = response.headers.get('ETag');
         } catch (error) {
-          if (generation !== state.originTraceGeneration) return;
+          if (!ownsSelection()) return;
           state.originTraceStatus = 'error';
-          state.originTraceError = error.message;
+          state.originTraceError = controller.signal.aborted ? 'The trace read timed out or was cancelled. Load the current trace explicitly.' : error.message.replace(/source-facts/gi, 'trace');
+        } finally {
+          clearTimeout(timer);
+          controller.abort();
+          if (state.originTraceController === controller) state.originTraceController = null;
         }
         renderBacktrace();
         renderEvidence();
@@ -1904,12 +1935,13 @@
         metadata.append(textElement('summary', '', 'Evidence identifiers'), identifiers);
         panel.append(facts, metadata);
         if (step.value) panel.append(textElement('h4', '', 'Captured value'), textElement('pre', 'trace-value', step.value));
-        const artifact = state.artifacts.find(candidate => candidate.artifact_id === step.artifact_id);
-        if (artifact) {
-          const open = textElement('button', 'secondary-button', 'Open source'); open.type = 'button';
-          open.addEventListener('click', () => { showScreen('sources', open); selectArtifact(artifact.artifact_id); });
-          panel.append(open);
-        }
+        const sourceLink = investigationTraceArtifact(step);
+        const open = textElement('button', 'secondary-button', 'Open retained source'); open.type = 'button';
+        open.dataset.investigationSource = 'true'; open.disabled = sourceLink.status !== 'ready';
+        open.addEventListener('click', () => openInvestigation({kind: 'artifact', identity: sourceLink.identity,
+          relation: `Trace step S${step.event.session_id}:P${step.event.process_id}:E${step.event.sequence_number} records this artifact. Trace relationship: ${step.confidence === 'observed' ? 'recorded link' : 'shared identifiers only'}. No value flow is implied.`}));
+        panel.append(open);
+        if (sourceLink.status !== 'ready') panel.append(textElement('p', 'trace-detail-message', sourceLink.message));
       }
 
       function traceStepElement(model) {
@@ -1963,7 +1995,7 @@
         elements.traceLoad.textContent = state.originTrace ? 'Refresh trace' : 'Load trace';
         elements.backtraceSubtitle.textContent = selection
           ? `${request.method} ${request.path}` : 'Request events and their recorded predecessors';
-        const trace = selection ? state.originTrace : null;
+        const trace = selection && state.originTraceKey === selection.key ? state.originTrace : null;
         const hasSteps = Boolean(trace?.steps.length);
         elements.traceContent.hidden = !hasSteps;
         elements.traceEmpty.hidden = hasSteps;
@@ -3140,6 +3172,7 @@
       }
 
       function revealRuntimeHookRequest(request) {
+        if (investigationScreen() === 'traffic') investigationNavigation?.record();
         state.selectedRuntimeHookRequest = {sessionId: runtimeHooksState()?.session_id, id: request.id};
         state.runtimeHookTrafficKey = null;
         showScreen('traffic');
@@ -4793,7 +4826,7 @@
         return false;
       }
 
-      async function createCollectionRequest(template = null) {
+      async function createCollectionRequest(template = null, {focus = true} = {}) {
         if (!collectionMayLeaveDraft()) return null;
         const folderId = state.collectionSelectedFolderId;
         const base = template?.name || 'New request';
@@ -4813,7 +4846,7 @@
           state.collectionRequestDraftId = null;
           state.collectionDraftDirty = false;
           renderApiCollection();
-          requestAnimationFrame(() => elements.collectionRequestName.focus({preventScroll: true}));
+          if (focus) requestAnimationFrame(() => elements.collectionRequestName.focus({preventScroll: true}));
           return request.id;
         }
         return null;
@@ -5934,6 +5967,7 @@
         toolsElements.decoderPanel.hidden = state.toolsTab !== 'decoder';
         toolsElements.jwtPanel.hidden = state.toolsTab !== 'jwt';
         renderDecoder();
+        renderInvestigationDecoder();
         renderJwt();
       }
 
@@ -5949,6 +5983,7 @@
       }
 
       function resetDecoderChain(message = 'Decoder chain cleared. Input was preserved.') {
+        investigationDecoderOrigin = null;
         clearDecoderFieldOrigin();
         state.decoderInputSnapshot = null;
         state.decoderSteps = [];
@@ -5965,12 +6000,9 @@
         if (selected.type === 'str') {
           try { const decoded = JSON.parse(value); if (typeof decoded === 'string') value = decoded; } catch { /* Keep captured display text. */ }
         }
-        resetDecoderChain('Selected request value copied into a fresh decoder chain.');
-        toolsElements.inputEncoding.value = 'text';
-        toolsElements.input.value = value;
-        showScreen('tools', elements.requestDecoderPivot);
-        setToolsTab('decoder');
-        requestAnimationFrame(() => toolsElements.input.focus({preventScroll: true}));
+        const identity = investigationRequestIdentity(state.requests.find(request => request.id === state.selectedRequestId));
+        investigationDecode(value, {route: identity ? {kind: 'request', identity, inspectorTab: 'evidence'} : null,
+          description: `Selected request field ${selected.path}. This is the displayed field value; raw HTTP byte offsets are unavailable.`});
       }
 
       async function runJwtAction(action) {
@@ -6982,6 +7014,7 @@
       function renderSources() {
         const source = selectedSource();
         sourceFactsPanel.sync(source);
+        syncInvestigationRange(source);
         const view = source?.content !== undefined ? sourceDisplayView(source) : null;
         document.querySelectorAll('[data-source-collection]').forEach(tab => {
           const selected = tab.dataset.sourceCollection === state.sourceCollection;
@@ -7014,7 +7047,7 @@
         elements.sourceHookPivot.disabled = !['running', 'paused'].includes(state.debuggerSession?.state);
         elements.sourceHookPivot.setAttribute('aria-expanded', String(state.sourceHooksOpen));
         renderSourceContent(source, view);
-        if (state.sourceDeobfuscated && source?.kind === 'javascript' && !document.querySelector('#screen-sources').hidden) loadDeobfuscation(source);
+        if (!investigationPassiveSource && state.sourceDeobfuscated && source?.kind === 'javascript' && !document.querySelector('#screen-sources').hidden) loadDeobfuscation(source);
         renderDeobfuscationReport(source);
       }
 
@@ -7080,6 +7113,7 @@
         const highlight = sourceOccurrenceRange(text, {column: position.column,
           length: Math.min(position.length, text.textContent.length - position.column)});
         if (highlight && globalThis.Highlight && globalThis.CSS?.highlights) CSS.highlights.set('source-search-match', new Highlight(highlight));
+        rememberInvestigationRange(source, range);
         elements.sourcePosition.textContent = `Original UTF-8 bytes [${range.start}, ${range.end}) · Line ${position.line + 1}, Column ${position.column + 1}${position.multiline ? ' · range continues on following lines' : ''}`;
         if (highlight) {
           const bounds = highlight.getBoundingClientRect();
@@ -7374,7 +7408,7 @@
           identity.bytes >= 0 && identity.bytes === source?.byte_size;
       }
 
-      function selectArtifact(artifactId, line = null, {identity: expectedIdentity = null} = {}) {
+      function selectArtifact(artifactId, line = null, {identity: expectedIdentity = null, passive = false} = {}) {
         const matches = state.artifacts.filter(candidate => candidate.artifact_id === artifactId);
         if (matches.length !== 1 || (expectedIdentity && !sourceArtifactIdentityMatches(matches[0], expectedIdentity))) {
           state.sourceNoticeKind = 'warning';
@@ -7383,9 +7417,12 @@
           return false;
         }
         const artifact = matches[0];
+        investigationPassiveSource = passive;
         state.sourceNotice = null;
         const identity = sourceIdentity(artifact);
         retireSourceAnalysis(identity);
+        investigationBeforeSelection();
+        sourceFactsPanel.cancel();
         state.sourceCollection = 'captured';
         state.selectedScriptId = null;
         state.selectedArtifactId = artifactId;
@@ -7413,8 +7450,11 @@
           return false;
         }
         const source = candidates[0];
+        investigationPassiveSource = false;
         state.sourceNotice = null;
         retireSourceAnalysis(sourceIdentity(source));
+        investigationBeforeSelection();
+        sourceFactsPanel.cancel();
         state.sourceCollection = 'page';
         state.selectedScriptId = scriptId;
         state.selectedArtifactId = null;
@@ -8914,22 +8954,26 @@
 
       function showScreen(name, trigger = null) {
         const screenName = name === 'backtraces' ? 'backtrace' : name;
+        investigationBeforeScreen(screenName);
+        if (screenName !== 'backtrace' && state.originTraceStatus === 'loading') {
+          state.originTraceController?.abort();
+          state.originTraceGeneration += 1;
+          state.originTraceStatus = state.originTrace ? 'ready' : 'idle';
+        }
         evidencePackagePanel.setVisible(screenName === 'evidence');
         if (screenName !== 'sources') sourceFactsPanel.cancel();
         if (screenName !== 'sources' && state.sourceHooksOpen) closeSourceHooks(false);
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
         document.querySelectorAll('.nav-button').forEach(button => {
           const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence') || (button.dataset.screen === 'traffic' && ['vm', 'field-provenance'].includes(screenName));
-          if (active) {
-            button.setAttribute('aria-current', 'page');
-            const group = button.closest('details');
-            if (group) {
-              group.open = !window.matchMedia('(max-width: 800px)').matches;
-              if (!group.open && trigger === button) group.querySelector('summary').focus();
-            }
-          } else button.removeAttribute('aria-current');
+          if (active) button.setAttribute('aria-current', 'page');
+          else button.removeAttribute('aria-current');
         });
-        if (screenName === 'evidence') document.querySelector('#advanced-navigation').open = false;
+        // Advanced is a floating chooser at every width. Finish the choice
+        // without leaving focus on a menu item that is about to be hidden.
+        const navigation = document.querySelector('#advanced-navigation');
+        if (navigation.contains(document.activeElement)) navigation.querySelector('summary').focus({ preventScroll: true });
+        navigation.open = false;
         if (screenName === 'signals') renderFingerprintActivity();
         if (screenName === 'traffic') renderRuntimeHookTraffic();
         if (screenName === 'backtrace') renderBacktrace();
@@ -8959,7 +9003,9 @@
           renderVmLab();
         }
         if (!trigger?.classList.contains('nav-button')) {
+          const revision = investigationRevision;
           requestAnimationFrame(() => {
+            if (revision !== investigationRevision || investigationScreen() !== screenName) return;
             if (screenName === 'traffic') {
               const selectedRow = [...elements.requestRows.querySelectorAll('.request-row')]
                 .find(row => row.dataset.requestId === state.selectedRequestId);
@@ -9117,6 +9163,7 @@
       }
 
       document.querySelectorAll('[data-screen]').forEach(button => button.addEventListener('click', async () => {
+        if (button.classList.contains('back-button') && investigationNavigation?.back()) return;
         showScreen(button.dataset.screen, button);
         if (button.dataset.screen === 'backtrace' && originTraceSelection()) await refreshOriginTrace();
         if (button.dataset.screen === 'signals') await refreshRequestSignalProfile();
@@ -9200,8 +9247,8 @@
         disclosure.querySelector('summary').focus();
         event.preventDefault();
       });
-      // A desktop group becomes a floating menu at narrow widths. Do not let
-      // resizing into that layout cover the active workflow with a stale menu.
+      // Keep an explicitly opened chooser from covering the workspace after
+      // resizing into the narrow layout.
       window.matchMedia('(max-width: 800px)').addEventListener('change', event => {
         if (!event.matches) return;
         const navigation = document.querySelector('#advanced-navigation');
@@ -9309,9 +9356,9 @@
           candidate.setAttribute('aria-pressed', String(candidate.dataset.filter === 'all')));
         renderRequests();
       });
-      elements.traceButton.addEventListener('click', async () => {
-        showScreen('backtrace', elements.traceButton);
-        await refreshOriginTrace();
+      elements.traceButton.addEventListener('click', () => {
+        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
+        openInvestigation({kind: 'trace', identity: investigationRequestIdentity(request), relation: 'Captured request → recorded trace. Shared-identifier relationships and missing predecessors remain explicit.'});
       });
       elements.requestRepeaterPivot.addEventListener('click', () => {
         state.experimentMode = 'repeater';
@@ -9321,30 +9368,7 @@
         showScreen('experiments', elements.requestRepeaterPivot);
         requestAnimationFrame(() => elements.repeaterRequestUrl.focus({preventScroll: true}));
       });
-      elements.requestCollectionPivot.addEventListener('click', async () => {
-        await refreshApiCollection();
-        const selected = state.requests.find(request => request.id === state.selectedRequestId);
-        if (!selected) return;
-        let requestUrl = selected.path;
-        if (!/^https?:\/\//iu.test(requestUrl)) {
-          requestUrl = `https://checkout.acme.test${requestUrl.startsWith('/') ? '' : '/'}${requestUrl}`;
-        }
-        try {
-          const parsed = new URL(requestUrl);
-          parsed.search = '';
-          parsed.hash = '';
-          const pathName = parsed.pathname.split('/').filter(Boolean).at(-1) || parsed.hostname;
-          await createCollectionRequest({
-            name: `${selected.method} ${pathName}`,
-            url: parsed.toString(),
-            method: /^[A-Z][A-Z0-9!#$%&'*+.^_`|~-]{0,31}$/u.test(selected.method) ? selected.method : 'GET'
-          });
-          showScreen('api-collection', elements.requestCollectionPivot);
-        } catch {
-          setCollectionNotice('error', 'The selected request URL cannot be imported safely.');
-          showScreen('api-collection', elements.requestCollectionPivot);
-        }
-      });
+      elements.requestCollectionPivot.addEventListener('click', copyInvestigationRequestToCollection);
       elements.requestDecoderPivot.addEventListener('click', useSelectedFieldInDecoder);
       elements.requestMemoryPivot.addEventListener('click', () => {
         const selected = state.selectedField;
@@ -9403,6 +9427,7 @@
         renderSources();
       });
       elements.sourceDeob.addEventListener('click', () => {
+        investigationPassiveSource = false;
         sourceFactsPanel.cancel();
         state.sourceDeobfuscated = !state.sourceDeobfuscated;
         renderSources();
@@ -10038,11 +10063,14 @@
           if (!/^[1-9][0-9]{0,19}$/.test(record.event_id) || record.document_id !== target || typeof record.origin !== 'string' || record.origin.length > 256 || typeof record.method !== 'string' || record.method.length > 16 || !Number.isInteger(record.status) || !Number.isFinite(record.time)) continue;
           consoleTraffic.set(`${session}:${target}:${record.event_id}`, {...record, session});
         }
+        if (investigationScreen() === 'traffic') investigationNavigation?.record();
         while (consoleTraffic.size > 128) consoleTraffic.delete(consoleTraffic.keys().next().value);
         showScreen('traffic'); document.querySelector('#screen-traffic').dataset.consoleTraffic = 'true';
         document.querySelector('#console-experiment-traffic').hidden = false;
+        document.querySelector('#console-experiment-traffic').dataset.session = session;
+        document.querySelector('#console-experiment-traffic').dataset.document = target;
         document.querySelector('#console-traffic-title').textContent = `Console experiment · document ${target}`;
-        document.querySelector('#console-traffic-notice').textContent = `Session ${session}. Metadata only; paths, queries, headers and bodies are excluded. “After command” indicates observation order, not proven causation.${dropped ? ` ${dropped} events dropped before delivery.` : ''}`;
+        document.querySelector('#console-traffic-notice').textContent = `Session ${session}. Metadata only; paths, queries, headers and bodies are excluded. “After evaluation request” indicates observation order, not proven causation.${dropped ? ` ${dropped} events dropped before delivery.` : ''}`;
         const container = document.querySelector('#console-traffic-events'); container.replaceChildren();
         const records = [...consoleTraffic.values()].filter(record => record.session === session && record.document_id === target);
         if (!records.length) container.textContent = 'No completed resources observed in this document since connection. Run a request, then open Experiment activity again.';
@@ -10050,11 +10078,17 @@
           const row = document.createElement('article'); row.className = 'console-traffic-event';
           const overview = document.createElement('div'); overview.className = 'console-traffic-overview';
           for (const text of [record.method, record.status || `error ${record.network_error}`, record.origin]) { const item = document.createElement('span'); item.textContent = String(text); overview.append(item); }
-          const command = document.createElement('button'); command.type = 'button'; command.className = 'native-console-location'; command.textContent = record.after_request_id === '0' ? 'Background activity' : `After command #${record.after_request_id}`;
+          const command = document.createElement('button'); command.type = 'button'; command.className = 'native-console-location'; command.textContent = record.after_request_id === '0' ? 'Background activity' : `After evaluation request ${record.after_request_id}`;
+          command.disabled = record.after_request_id === '0';
           command.addEventListener('click', () => {
             if (!/^[1-9][0-9]{0,19}$/.test(record.after_request_id)) return;
-            const result = document.querySelector(`#native-console-output [data-request-id="${record.after_request_id}"]`);
-            result?.scrollIntoView({block: 'center'});
+            const candidates = [...document.querySelectorAll('#native-console-output [data-request-id]')].filter(row =>
+              row.dataset.requestId === record.after_request_id && row.dataset.consoleSession === session && row.dataset.consoleDocument === target);
+            const result = candidates.find(row => row.classList.contains('native-console-command')) ?? candidates[0];
+            if (!result) {investigationNotice('This evaluation belongs to a Console session or document whose output is no longer retained.', 'stale'); return;}
+            if (document.querySelector('#native-console-panel').hidden) document.querySelector('#native-console-toggle').click();
+            result.tabIndex = -1; result.focus({preventScroll: true}); result.scrollIntoView({block: 'center'});
+            investigationNotice(`Console session ${session} · document ${target} · evaluation request ${record.after_request_id}${result.dataset.commandNumber ? ` · displayed command #${result.dataset.commandNumber}` : ''}. Observation order is not proof of causation.`);
           });
           overview.append(command);
           const details = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = `Event #${record.event_id} · resource ${record.resource_id}`;
@@ -10062,12 +10096,7 @@
         }
       });
       document.addEventListener('reb-console-location', event => {
-        const {url, line} = event.detail;
-        const script = liveSources().find(source => source.url === url);
-        const artifact = capturedSources().find(source => source.url === url);
-        if (script) { showScreen('sources'); selectScript(script.script_id, Math.max(0, line - 1)); }
-        else if (artifact) { showScreen('sources'); selectArtifact(artifact.artifact_id, Math.max(0, line - 1)); }
-        else event.detail.unavailable = true;
+        if (!investigationSourceSearch(event.detail ?? {})) event.detail.unavailable = true;
       });
       document.addEventListener('keydown', event => {
         if (event.defaultPrevented || event.target.closest?.('#native-console-panel')) return;
@@ -10153,4 +10182,5 @@
         setInterval(refresh, 2000);
       }
 
+      initializeInvestigationNavigation();
       initializePaneLayout();

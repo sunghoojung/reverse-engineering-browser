@@ -10,6 +10,40 @@ Project-wide authorization, capture, and privacy policy is in
 [SAFETY.md](../../SAFETY.md); this guide describes the product's current controls
 and limits.
 
+## Connected investigations
+
+**Advanced** is a manually opened workspace chooser. Completed workspace
+navigation closes it at every width; choosing an item returns keyboard focus
+to its summary. Linked Back/Forward keeps its existing destination-focus
+restoration. A refused link leaves the current workspace and chooser intact.
+
+Cross-workspace navigation uses one in-memory Back/Forward trail (at most 24
+stops). Alt+Left and Alt+Right work outside editors; visible controls remain
+available. Returns validate the exact retained session/event or artifact/hash,
+restore selected request/trace/source, original range, focus and bounded pane
+scroll positions, and leave owner-managed drafts in place. Expired or ambiguous
+links remain visible and do not switch to similarly named evidence.
+
+A captured request opens its recorded Backtrace. **Open retained source** uses
+that step's session and artifact identity. A Facts **Original bytes** link
+verifies complete retained UTF-8 bytes and SHA-256; **Decode range** copies those
+exact bytes, up to 64 KiB, into Decoder. **Open original evidence** retains the
+source identity and half-open byte range. Request inspector and Field trace
+handoffs distinguish selected string bytes from unavailable raw HTTP offsets.
+Replacing an existing Decoder draft requires confirmation. Input edits mark its
+prior origin stale. Navigation never transforms, sends, captures or executes.
+
+The explicit Collection copy action saves only method and a query-free URL
+after exact request identity and Collection draft checks. A confirmed recipe ID
+is a copied template, never captured evidence; no request is sent.
+
+Console URL links open a bounded, explicitly unverified source search. The
+separate disposable browser is not assigned a captured-artifact identity, and
+Console line offsets are never applied to search candidates. Debugger/native
+host-and-time correlations likewise cannot become exact captured trace links.
+See [Investigation navigation v1](../../docs/product/investigation-navigation-v1.md)
+for the identity boundary, retained limits and integration points.
+
 ## Native console
 
 The **Console** bottom dock starts a separate disposable custom Brave session for
@@ -82,8 +116,8 @@ URLs in the owned disposable browser. Navigation rejects old IDs and clears
 retained handles. Experiment activity opens a separate Traffic view of bounded
 native resource-completion metadata. It contains session/document/resource IDs
 and the last evaluation request ID; observation order does not prove causation.
-Paths, queries, headers and bodies are excluded. Source links look up corresponding
-URLs in the existing evidence workspace and report absent source explicitly.
+Paths, queries, headers and bodies are excluded. Source links search retained captured URLs with an explicit unverified label.
+They do not automatically open a source or claim an exact artifact relationship.
 
 Closing the dock preserves the session; Disconnect removes its browser/profile.
 The Sources Logs drawer remains the debugger log viewer. Console values and

@@ -21,7 +21,7 @@ export async function checkPackageContract() {
   const publicAssets = ['index.html', ...[...html.matchAll(/(?:src|href)="([^"/]+\.(?:js|css))"/g)].map(match => match[1])];
   assert.deepEqual([...assets].sort(), [...publicAssets, 'analyst_runner_core.js', 'analyst_runner_node.js'].sort());
   for (const asset of assets) {
-    assert.match(asset, /^[a-z_]+\.(?:html|css|js)$/);
+    assert.match(asset, /^[a-z][a-z0-9_]*\.(?:html|css|js)$/);
     assert((await stat(join(root, 'apps/research-ui', asset))).size > 0);
   }
   const native = await readFile(join(root, 'apps/research-ui/macos/OriginTraceApp.swift'), 'utf8');
@@ -92,12 +92,23 @@ export async function runPackagedSmoke(app, directory, name, flags = [], environ
   assert.equal(result.localAnalystRunOutcome, 'completed');
   assert.deepEqual(JSON.parse(result.localAnalystRunResult), {seed: 'native-verified'});
   assert.equal(result.decoderTransformText, 'Hello');
+  assertFloat32Smoke(name, result.float32);
   assert.equal(new URL(result.location).searchParams.get('native'), '1');
   const {publicAssets} = await checkPackageContract();
   assert.equal(result.packageAssetCount, publicAssets.length);
   assert.equal(result.packagePrivateAssetsBlocked, true);
   console.log(`PASS packaged WebKit ${name}: assets, native marker, API routes, Decoder and saved Analyst execution`);
   return {result, output};
+}
+
+export function assertFloat32Smoke(name, value) {
+  assert(['offline','demo','fallback','live'].includes(name));
+  const live=name==='live';
+  assert.deepEqual(value, {module_ready:true,mode:live?'live_http':'stored_native',run_disabled:!live,
+    output:live?{profile:'binary32-finite-steps-v1',input_sha256:'6d58692645c9d1cfaf13541cbd258f86193ef63c2f1d38f6bbca9617372d7bd6',reference_sha256:'df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119',
+      input_bits:'80000000',reference_bits:'00000000',input_sign_bit:1,reference_sign_bit:0,
+      input_class:'zero',reference_class:'zero',raw_bytes_equal:false,all_bits_equal:false,all_numeric_equal:true,
+      all_within_tolerance:true,finite_pairs:1,excluded_nonfinite_pairs:0,absolute_delta:0,relative_delta:0,ulp_distance:0,rms_delta:0}:null});
 }
 
 async function main() {

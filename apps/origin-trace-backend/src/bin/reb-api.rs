@@ -376,9 +376,13 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
         }
         if matches!(
             definition["operationId"].as_str(),
-            Some("validate_evidence_package" | "export_evidence_package")
+            Some("validate_evidence_package" | "export_evidence_package" | "compare_float32")
         ) {
-            origin_trace_backend::evidence_package::parse_bytes(&raw)?;
+            if definition["operationId"] == "compare_float32" {
+                origin_trace_backend::float32::validate_request_bytes(&raw)?;
+            } else {
+                origin_trace_backend::evidence_package::parse_bytes(&raw)?;
+            }
             request = request.header("content-type", "application/json").body(raw);
         } else {
             let body: Value = serde_json::from_slice(&raw)?;

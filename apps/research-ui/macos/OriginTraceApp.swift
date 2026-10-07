@@ -148,7 +148,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent("app.css")),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/pane_layout.js", "/app.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/source_syntax.js", "/source_facts.js", "/traffic_view.js", "/request_value_test.js", "/field_provenance.js", "/native_console_completion.js", "/native_console.js":
+      case "/pane_layout.js", "/app.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/source_syntax.js", "/source_facts.js", "/traffic_view.js", "/request_value_test.js", "/field_provenance.js", "/native_console_completion.js", "/native_console.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -3319,6 +3319,34 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
             if ((await fetch('/' + privatePath)).status !== 404) throw new Error(`Private asset exposed: ${privatePath}`);
           }
           window.__rebSmokePrivateAssetsBlocked = true;
+          if (typeof mountFloat32Inspector !== 'function' || typeof createFloat32Controller !== 'function' ||
+              typeof float32Panel?.controller?.run !== 'function' || typeof float32Panel.controller.snapshot !== 'function') {
+            throw new Error('Packaged Float32 module/controller did not load');
+          }
+          const float32Live = location.protocol === 'http:';
+          const float32Disabled = document.querySelector('#float32-run').disabled;
+          if (float32Disabled !== !float32Live || Boolean(float32Unavailable(location.protocol)) !== !float32Live) {
+            throw new Error('Packaged Float32 backend availability is incorrect');
+          }
+          let float32Output = null;
+          if (float32Live) {
+            await float32Panel.controller.run({protocol_version:1,
+              input:{representation:'float32-le',channels:1,frames:1,source:{kind:'bits',words:['80000000']}},
+              reference:{representation:'float32-le',channels:1,frames:1,source:{kind:'bits',words:['00000000']}},
+              tolerances:{absolute:0,relative:0,ulps:0},detail:{start:0,limit:1}});
+            const completed = float32Panel.controller.snapshot();
+            if (completed.pending || completed.status !== 'ready' || completed.stale) throw new Error('Packaged Float32 operation did not complete');
+            const report=completed.report,row=report.detail.rows[0],comparison=report.comparison;
+            float32Output={profile:report.profile,input_sha256:report.input.sha256,reference_sha256:report.reference.sha256,
+              input_bits:row.input.bits,reference_bits:row.reference.bits,input_sign_bit:row.input.sign_bit,reference_sign_bit:row.reference.sign_bit,
+              input_class:row.input.class,reference_class:row.reference.class,raw_bytes_equal:comparison.raw_bytes_equal,
+              all_bits_equal:comparison.all_bits_equal,all_numeric_equal:comparison.all_numeric_equal,
+              all_within_tolerance:comparison.all_within_tolerance,finite_pairs:comparison.finite_pairs,
+              excluded_nonfinite_pairs:comparison.excluded_nonfinite_pairs,absolute_delta:row.difference.absolute_delta,
+              relative_delta:row.difference.relative_delta,ulp_distance:row.difference.ulp_distance,rms_delta:comparison.rms_delta};
+          }
+          window.__rebSmokeFloat32={module_ready:true,mode:float32Live?'live_http':'stored_native',run_disabled:float32Disabled,output:float32Output};
+
           const artifacts = await fetch('/api/artifacts?limit=500').then(response => response.json());
           const source = artifacts.artifacts?.find(artifact => artifact.kind === 'javascript');
           if (source) {
@@ -3468,6 +3496,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
               captureMode: state.sessionMode,
               packageAssetCount: window.__rebSmokeAssets,
               packagePrivateAssetsBlocked: window.__rebSmokePrivateAssetsBlocked === true,
+              float32: window.__rebSmokeFloat32,
               stylesLoaded: [...document.styleSheets].some(sheet => sheet.href?.endsWith('/app.css')),
               nativeShell: document.documentElement.classList.contains('native-shell'),
               requests: document.querySelectorAll('.request-row').length,

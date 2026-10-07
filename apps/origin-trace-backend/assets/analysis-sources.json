@@ -250,5 +250,29 @@
     "applicability": "Inspiration for small original local fixtures.",
     "limitations": "Reviewed query-sign client/server representations disagree; upstream examples are not a trusted test oracle.",
     "reuse_status": "MIT reviewed; concepts only, no upstream code copied for this catalog."
+  },
+  {
+    "source_id": "rust-f32-representation",
+    "title": "Rust binary32 representation",
+    "primary_url": "https://doc.rust-lang.org/std/primitive.f32.html",
+    "reviewed_on": "2026-10-07",
+    "reviewed_revision": null,
+    "kind": "primary-documentation",
+    "summary": "Raw bit conversions, signed-zero comparison and NaN representation behavior.",
+    "applicability": "Representation and exceptional-value policies for binary32-finite-steps-v1.",
+    "limitations": "Published documentation reviewed on 2026-10-07, not an immutable revision. It does not define the REB finite-step metric or establish cross-platform computation identity.",
+    "reuse_status": "Primary documentation reviewed; original REB code and fixtures, no source copied."
+  },
+  {
+    "source_id": "oracle-binary32-format",
+    "title": "Oracle Solaris Studio 12.4 Numerical Computation Guide: Single Format",
+    "primary_url": "https://docs.oracle.com/cd/E37069_01/html/E39019/z4000ac019178.html",
+    "reviewed_on": "2026-10-07",
+    "reviewed_revision": null,
+    "kind": "primary-documentation",
+    "summary": "Binary32 sign, exponent and fraction layout with normal/subnormal and exceptional encodings.",
+    "applicability": "Bit classification and boundary fixtures for binary32-finite-steps-v1.",
+    "limitations": "Format facts do not imply browser, CPU, DSP or fingerprint identity.",
+    "reuse_status": "Primary documentation reviewed; original REB code and fixtures, no source copied."
   }
 ]

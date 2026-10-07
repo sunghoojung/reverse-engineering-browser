@@ -1133,6 +1133,7 @@
               <div class="tools-tabs" role="tablist" aria-label="Local tools">
                 <button id="tools-tab-decoder" class="tools-tab" type="button" role="tab" data-tools-tab="decoder" aria-selected="true" aria-controls="tools-panel-decoder">Decoder chain</button>
                 <button id="tools-tab-jwt" class="tools-tab" type="button" role="tab" data-tools-tab="jwt" aria-selected="false" aria-controls="tools-panel-jwt" tabindex="-1">JWT inspector</button>
+                <button id="tools-tab-float32" class="tools-tab" type="button" role="tab" data-tools-tab="float32" aria-selected="false" aria-controls="tools-panel-float32" tabindex="-1">Float32 comparison</button>
               </div>
 
               <div id="tools-panel-decoder" class="tools-panel" role="tabpanel" aria-labelledby="tools-tab-decoder">
@@ -1182,6 +1183,29 @@
                 </div>
               </div>
 
+
+              <div id="tools-panel-float32" class="tools-panel" role="tabpanel" aria-labelledby="tools-tab-float32" hidden>
+                <div class="float32-workspace">
+                  <form class="float32-form" aria-label="Exact float32 inputs">
+                    <h2>Binary32 evidence</h2><p>Explicit buffers only. Interleaved layout; 65,536 samples per side. No capture or environment inference. Retained choices use the current catalog’s first 2,048 rows, up to 256 KiB per artifact.</p>
+                    <button id="float32-example" class="secondary-button" type="button">Load synthetic edge examples</button>
+                    <fieldset id="float32-input-fields"><legend>Input</legend>
+ <div class="float32-controls"><label>Source<select data-float32-kind="input"><option value="bits">Raw hex words</option><option value="bytes">Base64 bytes</option><option value="artifact">Retained artifact</option></select></label><label>Byte order<select data-float32-endian="input"><option value="float32-le">Float32 little-endian</option><option value="float32-be">Float32 big-endian</option></select></label></div>
+ <label>Exact input<textarea data-float32-input="input" aria-label="Input raw values" maxlength="720896" spellcheck="false" placeholder="Eight-digit lowercase hex words, separated by whitespace"></textarea></label>
+ <label hidden>Retained artifact<select data-float32-artifact="input"><option value="">Select retained artifact</option></select></label>
+ <div class="float32-controls"><label>Channels<input data-float32-channels="input" type="number" min="1" max="64" step="1" value="1" required /></label><label>Frames<input data-float32-frames="input" type="number" min="0" max="65536" step="1" value="0" required /></label></div></fieldset>
+                    <label class="float32-check"><input id="float32-reference-enabled" type="checkbox" /> Compare with a reference</label>
+                    <fieldset id="float32-reference-fields"><legend>Reference</legend>
+ <div class="float32-controls"><label>Source<select data-float32-kind="reference"><option value="bits">Raw hex words</option><option value="bytes">Base64 bytes</option><option value="artifact">Retained artifact</option></select></label><label>Byte order<select data-float32-endian="reference"><option value="float32-le">Float32 little-endian</option><option value="float32-be">Float32 big-endian</option></select></label></div>
+ <label>Exact input<textarea data-float32-input="reference" aria-label="Reference raw values" maxlength="720896" spellcheck="false" placeholder="Eight-digit lowercase hex words, separated by whitespace"></textarea></label>
+ <label hidden>Retained artifact<select data-float32-artifact="reference"><option value="">Select retained artifact</option></select></label>
+ <div class="float32-controls"><label>Channels<input data-float32-channels="reference" type="number" min="1" max="64" step="1" value="1" required /></label><label>Frames<input data-float32-frames="reference" type="number" min="0" max="65536" step="1" value="0" required /></label></div></fieldset>
+                    <fieldset><legend>Caller tolerances · finite pairs only</legend><div class="float32-controls"><label>Absolute ≤ 1e80<input id="float32-absolute" type="number" min="0" max="1e80" step="any" value="0" required /></label><label>Relative ≤ 2<input id="float32-relative" type="number" min="0" max="2" step="any" value="0" required /></label><label>ULP steps<input id="float32-ulps" type="number" min="0" max="4294967295" step="1" value="0" required /></label></div><p>Passes absolute OR relative OR ULP. Tolerance does not change equality.</p></fieldset>
+                    <div class="float32-actions"><button id="float32-run" class="secondary-button decoder-primary" type="submit">Inspect / compare</button><button id="float32-cancel" class="secondary-button" type="button" disabled>Cancel</button><button id="float32-clear" class="secondary-button" type="button">Clear result</button></div>
+                  </form>
+                  <section class="float32-output" aria-label="Float32 diagnostic report"><p id="float32-status" role="status" aria-live="polite"></p><div id="float32-result"></div></section>
+                </div>
+              </div>
               <div id="tools-panel-jwt" class="tools-panel" role="tabpanel" aria-labelledby="tools-tab-jwt" hidden>
                 <div class="jwt-grid">
                   <section class="jwt-column" aria-label="JWT input and creation">
@@ -1274,6 +1298,7 @@
     <script src="app_state.js"></script>
     <script src="evidence_models.js"></script>
     <script src="evidence_package.js"></script>
+    <script src="float32_inspector.js"></script>
     <script src="source_syntax.js"></script>
     <script src="source_facts.js"></script>
     <script src="traffic_view.js"></script>

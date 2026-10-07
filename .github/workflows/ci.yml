@@ -114,6 +114,24 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+      - name: Exercise Float32 diagnostics with the actual backend
+        if: ${{ !cancelled() }}
+        run: |
+          cargo build --locked --manifest-path apps/origin-trace-backend/Cargo.toml
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          node tools/check-origin-trace-debugger.mjs --float32-ui-browser
+
+      - name: Upload rendered Float32 QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: float32-ui-${{ github.run_id }}
+          path: build/float32-ui-qa
+          if-no-files-found: ignore
+          retention-days: 3
+
   console-ui:
     runs-on: ubuntu-latest
     timeout-minutes: 10

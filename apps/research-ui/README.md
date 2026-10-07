@@ -925,3 +925,23 @@ plus catalog refresh, passive entry, wrong analyzer identity/preview bytes,
 explicit retries, stable Find/scroll, keyboard file tabs and close cleanup at
 1440×900, 760×560 and 360×740. Production-function and DOM fixtures run in
 `make lint`; they do not replace real browser screenshots or native acceptance.
+
+## Float32 comparison
+
+Open Tools → Float32 comparison to inspect exact hexadecimal binary32 words,
+base64 bytes, or a selected retained artifact. Declare byte order, channels and
+frames; optionally enable a reference. Inspect / compare is explicit. Raw bits,
+signed zero, NaN/Infinity counts, input digests, finite deltas/ULP and caller
+tolerances remain distinct. Sample pages do not narrow full-buffer metrics.
+Edits, cancellation and failures keep the last report visibly stale.
+
+This uses the local Rust backend, including live native sessions. Stored-evidence
+native mode displays its limitation. No sample capture, audio graph collection,
+platform identity, normalization, spoofing or target execution is added. See
+[the versioned contract](../../protocol/float32-comparison-v1.md).
+
+The existing driver owns the real browser lifecycle:
+`node tools/check-origin-trace-debugger.mjs --float32-ui-browser` with
+`REB_UI_CHROMIUM` set and the current backend built. Its domain fixture forwards
+requests to the actual backend; only held delivery and a labeled 503 are synthetic.
+`--float32-fixture-only` checks the real loopback boundary without rendered claims.

@@ -12,6 +12,11 @@ and limits.
 
 ## Connected investigations
 
+**Advanced** is a manually opened workspace chooser. Completed workspace
+navigation closes it at every width; choosing an item returns keyboard focus
+to its summary. Linked Back/Forward keeps its existing destination-focus
+restoration. A refused link leaves the current workspace and chooser intact.
+
 Cross-workspace navigation uses one in-memory Back/Forward trail (at most 24
 stops). Alt+Left and Alt+Right work outside editors; visible controls remain
 available. Returns validate the exact retained session/event or artifact/hash,
@@ -806,6 +811,8 @@ It separates native request records, explicit same-process parent links, matchin
 nonzero session/process/navigation/frame context and unlinked retained records.
 For debugger requests, the method/host/time association with native records remains
 visibly correlated, including when the native records have exact parent links.
+The compact request summary keeps the method/host/time basis, absent exact producer
+request key, missing-parent count and unknown coverage visible beside the reading panes.
 A context match never establishes causation, value flow or request ownership.
 
 The inspector exposes the operation, original bounded inline payload, recorded

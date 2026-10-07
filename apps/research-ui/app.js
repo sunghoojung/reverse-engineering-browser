@@ -8953,16 +8953,14 @@
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
         document.querySelectorAll('.nav-button').forEach(button => {
           const active = button.dataset.screen === screenName || (button.dataset.screen === 'backtrace' && screenName === 'evidence') || (button.dataset.screen === 'traffic' && ['vm', 'field-provenance'].includes(screenName));
-          if (active) {
-            button.setAttribute('aria-current', 'page');
-            const group = button.closest('details');
-            if (group) {
-              group.open = !window.matchMedia('(max-width: 800px)').matches;
-              if (!group.open && trigger === button) group.querySelector('summary').focus();
-            }
-          } else button.removeAttribute('aria-current');
+          if (active) button.setAttribute('aria-current', 'page');
+          else button.removeAttribute('aria-current');
         });
-        if (screenName === 'evidence') document.querySelector('#advanced-navigation').open = false;
+        // Advanced is a floating chooser at every width. Finish the choice
+        // without leaving focus on a menu item that is about to be hidden.
+        const navigation = document.querySelector('#advanced-navigation');
+        if (navigation.contains(document.activeElement)) navigation.querySelector('summary').focus({ preventScroll: true });
+        navigation.open = false;
         if (screenName === 'signals') renderFingerprintActivity();
         if (screenName === 'traffic') renderRuntimeHookTraffic();
         if (screenName === 'backtrace') renderBacktrace();
@@ -9236,8 +9234,8 @@
         disclosure.querySelector('summary').focus();
         event.preventDefault();
       });
-      // A desktop group becomes a floating menu at narrow widths. Do not let
-      // resizing into that layout cover the active workflow with a stale menu.
+      // Keep an explicitly opened chooser from covering the workspace after
+      // resizing into the narrow layout.
       window.matchMedia('(max-width: 800px)').addEventListener('change', event => {
         if (!event.matches) return;
         const navigation = document.querySelector('#advanced-navigation');

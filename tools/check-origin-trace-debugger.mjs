@@ -2358,6 +2358,8 @@ function observationPanelFixture(narrow = false) {
 const observations=observationPanelFixture();
 const observationRows=()=>observations.nodes['evidence-rows'].querySelectorAll('[data-evidence-key]');
 assert.equal(observationRows().length,7);
+assert.equal(observations.nodes['evidence-coverage-summary'].textContent,'1 missing parent · coverage unknown');
+assert.match(observations.nodes['evidence-gap-details'].textContent,/1 missing or ambiguous parent references/);
 observationRows().find(row=>row.dataset.evidenceKey==='7:42:102').click();
 const stableObservationInspector=observations.nodes['evidence-inspector'].children[0];
 const provenanceSummary=observations.nodes['evidence-inspector'].querySelector('summary');
@@ -2381,6 +2383,7 @@ observations.context={...observations.context,events:observations.context.events
 assert.equal(observations.panel.snapshot().selectedKey,null);assert.match(observations.nodes['evidence-workspace-notice'].textContent,/left the retained window/);
 observations.panel.sync();assert.equal(observations.panel.snapshot().selectedKey,null,'Eviction must not silently choose a neighboring record');
 observations.context=observationCDP;observations.panel.sync();assert.match(observations.nodes['evidence-context-note'].textContent,/No exact producer request key/);
+assert.match(observations.nodes['evidence-context-note'].textContent,/Matched by method, host and time/);
 observationRows().find(row=>row.dataset.evidenceKey==='7:42:102').click();assert.match(observations.nodes['evidence-inspector'].textContent,/association does not become exact/);
 observations.context=observationLarge;observations.panel.sync();assert.equal(observationRows().length,50);observations.nodes['evidence-next'].click();assert.match(observations.nodes['evidence-window-count'].textContent,/51–100 of 5000/);
 observationRows()[0].emit('keydown',{key:'End'});assert.match(observations.nodes['evidence-window-count'].textContent,/4951–5000 of 5000/);
@@ -2529,6 +2532,7 @@ for(const status of ['invalid','unsupported'])assert.equal(JSON.parse((await evi
 console.log('PASS Evidence browser fixture raw bytes, valid/invalid/unsupported and guarded-export errors (not rendered QA)');
 
 async function checkEvidenceObservationInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture}) {
+  const readingPanes=[];
   const until=async(expression,message)=>{const end=Date.now()+5000;while(Date.now()<end){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,25));}assert.fail(message);};
   const press=(value,code=value)=>key(value,code,{windowsVirtualKeyCode:({Enter:13,Escape:27,Home:36,End:35,ArrowDown:40,ArrowUp:38,Tab:9})[value],...(value==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});
   const observationReveal=async selector=>{
@@ -2544,6 +2548,7 @@ async function checkEvidenceObservationInteractions({evaluate,viewport,click,key
     assert(result.page<=result.width+1,`${label}: no page-wide horizontal overflow`);
     for(const pane of result.panes.filter(value=>value.visible)){assert(pane.left>=-1&&pane.right<=result.width+1&&pane.bottom<=result.height+1,`${label}: ${pane.name} stays in viewport`);assert(pane.scrollWidth<=pane.width+1,`${label}: ${pane.name} does not clip content horizontally`);}
     const active=result.panes.find(value=>value.name==='#evidence-rows'&&value.visible)??result.panes.find(value=>value.name==='#evidence-inspector'&&value.visible);assert(active?.client>=120,`${label}: selected pane retains reading space (${active?.client ?? 0}px; minimum 120px)`);
+    readingPanes.push({label,width:result.width,height:result.height,readingHeight:active.client});
   };
   fixture.observationActive=true;
   await evaluate('state.eventEtag=null;state.artifactEtag=null;refresh()');
@@ -2618,6 +2623,8 @@ async function checkEvidenceObservationInteractions({evaluate,viewport,click,key
     const essentials=await evaluate(`['#evidence-context-note','#evidence-workspace-notice','#evidence-coverage-summary','#evidence-search','#evidence-scope','#evidence-package-toggle','#evidence-previous','#evidence-next'].map(selector=>{const n=document.querySelector(selector),r=n.getBoundingClientRect(),style=getComputedStyle(n);return {selector,visible:r.width>0&&r.height>0&&r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight&&style.visibility!=='hidden',unclipped:n.scrollHeight<=n.clientHeight+1};})`);
     assert(essentials.every(value=>value.visible&&value.unclipped),`${width}: context qualifications, notices and controls must remain visible and unclipped: ${JSON.stringify(essentials)}`);
     assert.match(await evaluate("document.querySelector('#evidence-context-note').textContent"),/No exact producer request key/);
+    assert.match(await evaluate("document.querySelector('#evidence-context-note').textContent"),/Matched by method, host and time/);
+    assert.match(await evaluate("document.querySelector('#evidence-coverage-summary').textContent"),/1 missing parent · coverage unknown/);
     assert.match(await evaluate("document.querySelector('#evidence-workspace-notice').textContent"),/Request context changed/);
 
     const paneHeight=await evaluate("document.querySelector('.evidence-investigation-layout').clientHeight");
@@ -2642,7 +2649,7 @@ async function checkEvidenceObservationInteractions({evaluate,viewport,click,key
   fixture.observationActive=false;
   await evaluate("state.requests=[];state.events=[];state.artifacts=[];resetRequestSelection();renderEvidence()");await screenshot('evidence-investigation-empty');
   await click('#screen-evidence .back-button');
-  return {sourcePivot:sourceSupported?'passed with approved shared adapter':'unavailable until approved navigation composition',sourceRoundTrips,checks:['normal contract-valid broker/artifact routes','investigation-first landing','separate native parent/context/unlinked relationships','CDP association qualification','marker outcomes unknown','exact linked artifact and missing-source state','observation selection does not export','stable keyboard/focus/scroll','secondary package mode and return','narrow pane switch and scrolling','filtered parent traversal preserves drafts and visible focus','long correlated URL and bounded keyboard coverage at 760/360','composed Source Back preserves both pane scrolls and other tool drafts','eviction without substitution','empty retained window']};
+  return {sourcePivot:sourceSupported?'passed with approved shared adapter':'unavailable until approved navigation composition',sourceRoundTrips,readingPanes,checks:['normal contract-valid broker/artifact routes','investigation-first landing','separate native parent/context/unlinked relationships','CDP association qualification','marker outcomes unknown','exact linked artifact and missing-source state','observation selection does not export','stable keyboard/focus/scroll','secondary package mode and return','narrow pane switch and scrolling','filtered parent traversal preserves drafts and visible focus','long correlated URL and bounded keyboard coverage at 760/360','composed Source Back preserves both pane scrolls and other tool drafts','eviction without substitution','empty retained window']};
 }
 
 async function checkEvidenceInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture,setFile,verifyDownload}) {

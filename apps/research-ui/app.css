@@ -3465,8 +3465,17 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   .evidence-observation-tools label > span { display: none; }
 }
 @media (min-width: 601px) and (max-width: 760px) {
-  .evidence-context { grid-template-columns: minmax(0, 1fr) 220px; gap: 18px; }
+  /* Give the visible coverage warning room beside the compact correlation note. */
+  .evidence-context { grid-template-columns: minmax(0, 1fr) 240px; gap: 18px; }
   .evidence-coverage { display: grid; padding-left: 14px; border-left: 1px solid var(--line); }
+}
+
+/* On phones, keep the retained count and disclosure together so the warning
+   gets its own full-width line rather than competing with either control. */
+@media (max-width: 600px) {
+  .evidence-coverage { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+  .evidence-coverage > span { grid-column: 1 / -1; grid-row: 2; }
+  .evidence-coverage > details { grid-column: 2; grid-row: 1; }
 }
 
 /* Short narrow windows and phones keep warnings and controls without spending the

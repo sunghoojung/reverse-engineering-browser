@@ -66,9 +66,52 @@ export function createConsoleFixture() {
   return fixture;
 }
 
+// Deterministically model the browser's scroll clamping when the shared
+// divider temporarily expands a scrollport during restore/measure/reapply.
+async function checkConsolePaneScroll(root) {
+  let total=620, mainSize=360, trackWrites=0, serial=0, visible=true;const mutations=[];
+  const queue=new Map(), documentEvents={}, windowEvents={}, parents=new Map();
+  const reading={scrollTop:0,contentHeight:300},innerReading={scrollTop:0,contentHeight:200},consoleReading={scrollTop:0};
+  const plainStyle=()=>({setProperty(){},removeProperty(){}});
+  const node=()=>({id:'',hidden:false,dataset:{},style:plainStyle(),parentElement:null,attributes:{},classList:{add(){},remove(){}},listeners:{},setAttribute(k,v){this.attributes[k]=v;},addEventListener(k,v){this.listeners[k]=v;},getClientRects(){return [];},getBoundingClientRect(){return {left:0,right:360,top:0,bottom:total,width:360,height:total};},querySelector(){return node();}});
+  const body=node();body.children=[];body.append=n=>body.children.push(n);
+  const workspace=node();workspace.parentElement=body;
+  workspace.style={setProperty(name,value){if(name==='grid-template-rows'){trackWrites++;mainSize=Number.parseFloat(value);}},removeProperty(name){if(name==='grid-template-rows'){trackWrites++;mainSize=360;reading.scrollTop=Math.max(0,Math.min(reading.scrollTop,reading.contentHeight-mainSize));innerReading.scrollTop=Math.max(0,Math.min(innerReading.scrollTop,innerReading.contentHeight-(mainSize-160)));}}};
+  const main=node(),panel=node();main.id='main';panel.id='native-console-panel';
+  main.getClientRects=panel.getClientRects=()=>visible?[{}]:[];main.parentElement=panel.parentElement=workspace;
+  main.getBoundingClientRect=()=>({left:0,right:360,top:0,bottom:mainSize,width:360,height:mainSize});
+  panel.getBoundingClientRect=()=>({left:0,right:360,top:mainSize,bottom:total,width:360,height:total-mainSize});
+  workspace.querySelector=selector=>selector==='.main'?main:panel;
+  parents.set('#workspace',workspace);parents.set('main',main);parents.set('#native-console-panel',panel);
+  const document={body,querySelector:selector=>{if(!parents.has(selector))parents.set(selector,node());return parents.get(selector);},createElement:()=>node(),addEventListener:(name,fn)=>documentEvents[name]=fn};
+  const enqueue=fn=>{queue.set(++serial,fn);return serial;},cancel=id=>queue.delete(id);
+  const flush=()=>{let count=0;while(queue.size){assert(++count<20,'Pane scheduling must settle');const [id,fn]=queue.entries().next().value;queue.delete(id);fn();}};
+  const context={document,window:{addEventListener:(name,fn)=>windowEvents[name]=fn},innerWidth:360,innerHeight:740,
+    localStorage:{getItem:()=>JSON.stringify({'native-console':.33}),setItem(){}},isPlainObject:value=>!!value&&typeof value==='object',
+    requestAnimationFrame:enqueue,cancelAnimationFrame:cancel,setTimeout:enqueue,clearTimeout:cancel,
+    MutationObserver:class{constructor(fn){mutations.push(fn);}observe(){}},ResizeObserver:class{observe(){}},
+    getComputedStyle:element=>({display:element===workspace?'grid':'block',overflowX:'visible',overflowY:'visible',getPropertyValue:()=>`${mainSize}px ${total-mainSize}px`})};
+  runInNewContext(await readFile(join(root,'apps/research-ui/pane_layout.js'),'utf8')+';initializePaneLayout();',context);flush();
+  assert(mainSize<reading.contentHeight,'Saved dock must create the short scrollable upper pane');
+  const initialWrites=trackWrites;reading.scrollTop=60;innerReading.scrollTop=40;consoleReading.scrollTop=50;
+  for(const owner of [reading,innerReading,consoleReading]){documentEvents.scroll({target:owner});flush();
+    assert.equal(reading.scrollTop,60,'A pure scroll must not expand the pane and clamp its reading position');
+    assert.equal(innerReading.scrollTop,40,'A nested list scroll must keep its own reading position');
+    assert.equal(consoleReading.scrollTop,50,'Console scrolling must keep the upper pane independent');
+    assert.equal(trackWrites,initialWrites,'A pure scroll must reposition dividers without rewriting layout tracks');
+  }
+  total=700;windowEvents.resize({type:'resize'});documentEvents.scroll({target:reading});flush();assert(trackWrites>initialWrites,'A coalesced resize still requires full layout');
+  const resizedWrites=trackWrites;documentEvents.scroll({target:reading});windowEvents.resize({type:'resize'});flush();assert(trackWrites>resizedWrites,'A resize after scroll must upgrade the pending refresh');
+  const handle=body.children.find(child=>child.id==='pane-divider-native-console'),beforeKey=mainSize;
+  handle.listeners.keydown({key:'ArrowDown',preventDefault(){},stopPropagation(){}});assert.equal(mainSize,beforeKey+10,'Divider keyboard resize must remain active');assert.equal(handle.style.top,`${mainSize-4}px`,'Divider hit target follows its split');
+  visible=false;mutations[0]([{attributeName:'hidden'}]);flush();assert.equal(handle.hidden,true,'Visibility changes must retire the divider');visible=true;mutations[0]([{attributeName:'hidden'}]);flush();assert.equal(handle.hidden,false,'Reopening must restore full layout measurement');
+  console.log('PASS Console pane-scroll clamp regression, nested owners, resize/visibility scheduling and divider keyboard geometry (geometry model; not rendered QA)');
+}
+
 // Behavioral DOM fixture only. Pixel, hit testing and keyboard coverage use the
 // same browser driver as Requests, through --console-ui-browser.
 export async function checkConsoleDOM(root) {
+  await checkConsolePaneScroll(root);
   let document;
   class Node {
     constructor(tag='div') {this.tagName=tag;this.children=[];this.parentNode=null;this.dataset={};this.style={};this.attributes={};this.listeners={};this._text='';this.className='';this.value='';this.hidden=false;this.disabled=false;this.scrollTop=0;this.clientHeight=100;this.clientWidth=600;this.scrollHeight=100;this.selectionStart=0;this.selectionEnd=0;}
@@ -191,7 +234,7 @@ export async function checkConsoleDOM(root) {
   console.log('PASS Console serialized command/result identity, editable drafts, bounded property paging, shrink/regrowth and focus, held-poll Clear epochs, atomic malformed-poll/timestamp recovery without coercion, inert rendering, retry/reconnect, fixture error receipts, and transcript/filter/history bounds (DOM fixture; not rendered QA)');
 }
 
-export async function checkConsoleInteractions({evaluate,viewport,click,key,wheel,type,screenshot,fixture}) {
+export async function checkConsoleInteractions({evaluate,viewport,click,key,wheel,type,screenshot,fixture,recordGeometry=()=>{}}) {
   const eventually=async(predicate,message)=>{for(let i=0;i<150;i++){if(await predicate())return;await new Promise(resolve=>setTimeout(resolve,30));}assert.fail(message);};
   const until=(expression,message)=>eventually(()=>evaluate(expression),message);
   const press=value=>key(value,value,{windowsVirtualKeyCode:{Enter:13,Escape:27,ArrowDown:40,ArrowUp:38,Home:36,Tab:9}[value],...(value==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});
@@ -241,6 +284,7 @@ export async function checkConsoleInteractions({evaluate,viewport,click,key,whee
       const pane=document.querySelector('#screen-traffic .request-pane'),tools=pane.querySelector('.network-tools'),notice=pane.querySelector('.network-notice'),searchStatus=pane.querySelector('.request-search-status'),scope=pane.querySelector('.request-scope'),consolePanel=document.querySelector('#native-console-panel');
       return {label:${JSON.stringify(label)},viewport:{width:innerWidth,height:innerHeight},pane:{...box(pane),scrollTop:pane.scrollTop,clientHeight:pane.clientHeight,scrollHeight:pane.scrollHeight},tools:box(tools),filters:[...tools.querySelectorAll('.type-filter')].map(box),searchMode:document.querySelector('#request-search-scope').value,searchStatus:{...box(searchStatus),hidden:searchStatus.hidden},notice:box(notice),scope:box(scope),head:box(pane.querySelector('.request-head')),console:box(consolePanel),consoleHidden:consolePanel.hidden};
     })()`);
+    upperPaneChecks.push(value);recordGeometry(value);
     assert(value.filters.every(filter=>filter.top>=value.tools.top-1&&filter.bottom<=value.tools.bottom+1),`${label}: resource filters must fit inside their intrinsic toolbar row`);
     if(!value.searchStatus.hidden){
       assert(value.searchStatus.top>=value.tools.bottom-1,`${label}: content-search status must remain below the toolbar`);
@@ -250,16 +294,31 @@ export async function checkConsoleInteractions({evaluate,viewport,click,key,whee
     assert(value.scope.top>=value.notice.bottom-1,`${label}: warning must retain its intrinsic wrapped height`);
     assert(value.head.top>=value.scope.bottom-1,`${label}: request header must remain below scope controls`);
     if(!value.consoleHidden)assert(value.pane.bottom<=value.console.top+1,`${label}: upper pane must stay above Console`);
-    upperPaneChecks.push(value);return value;
+    return value;
   };
   const scrollUpperPane=async label=>{
-    const before=await upperPane(label);
-    assert(before.pane.scrollHeight>before.pane.clientHeight,`${label}: short upper pane must intentionally scroll`);
-    await wheel('#screen-traffic .request-pane',100);
+    let before=await upperPane(label);
+    assert(before.pane.scrollHeight>before.pane.clientHeight+1,`${label}: short upper pane must intentionally scroll`);
+    if(before.pane.scrollTop>0){await wheel('#screen-traffic .request-pane',-Math.max(1000,before.pane.scrollHeight),'scrollbar');before=await upperPane(label+' prepared by wheel');assert(before.pane.scrollTop<=1,`${label}: genuine wheel must prepare the top boundary`);}
+    const nestedBefore=await evaluate("({rows:document.querySelector('#request-rows').scrollTop,console:document.querySelector('#native-console-scroll').scrollTop})");
+    await wheel('#screen-traffic .request-pane',100,'scrollbar');
     const after=await upperPane(label+' after scroll');
     assert(after.pane.scrollTop>before.pane.scrollTop,`${label}: upper-pane wheel must reach overflowed content`);
     assert.equal(after.console.top,before.console.top,`${label}: upper-pane scrolling must not move Console`);
-    await wheel('#screen-traffic .request-pane',-1000);
+    assert.equal(after.pane.clientHeight,before.pane.clientHeight,`${label}: pure scrolling must not resize the upper pane`);
+    assert.deepEqual(await evaluate("({rows:document.querySelector('#request-rows').scrollTop,console:document.querySelector('#native-console-scroll').scrollTop})"),nestedBefore,`${label}: outer scroll must not consume a nested list or Console offset`);
+    await wheel('#screen-traffic .request-pane',-1000,'scrollbar');
+    assert((await upperPane(label+' restored top')).pane.scrollTop<=1,`${label}: genuine wheel must restore the top boundary`);
+  };
+  const scrollNestedLedger=async label=>{
+    await wheel('#screen-traffic .request-pane',1000,'scrollbar');
+    const before=await evaluate("({outer:document.querySelector('#screen-traffic .request-pane').scrollTop,rows:document.querySelector('#request-rows').scrollTop,console:document.querySelector('#native-console-scroll').scrollTop})");
+    await wheel('#request-rows',84);
+    const after=await evaluate("({outer:document.querySelector('#screen-traffic .request-pane').scrollTop,rows:document.querySelector('#request-rows').scrollTop,console:document.querySelector('#native-console-scroll').scrollTop})");
+    recordGeometry({label:label+' nested ledger ownership',before,after});
+    assert(after.rows>before.rows,`${label}: nested request ledger must scroll independently`);assert.equal(after.outer,before.outer,`${label}: nested wheel must not move its parent`);assert.equal(after.console,before.console,`${label}: nested wheel must not move Console`);
+    await wheel('#screen-traffic .request-pane',-1000,'scrollbar');
+    assert.equal(await evaluate("document.querySelector('#request-rows').scrollTop"),after.rows,`${label}: scrolling the parent must preserve the nested reading position`);
   };
   await click('#native-console-toggle');await until("!document.querySelector('#native-console-start').disabled",'Availability never became ready');
   await screenshot('console-connect');await fill('#native-console-url','https://fixture.invalid/console');await click('#native-console-start');
@@ -299,13 +358,17 @@ export async function checkConsoleInteractions({evaluate,viewport,click,key,whee
   await until("document.querySelector('#native-console-source').disabled",'Malformed timestamp did not fail closed');assert.equal(await evaluate("document.querySelector('#native-console-output').textContent"),beforeMalformedTime);assert.match(await evaluate("document.querySelector('#native-console-notice').textContent"),/Malformed page message/);await screenshot('console-malformed-timestamp');await refresh();
   for(let i=0;i<140;i++)fixture.messages.push({level:i%9?'info':'warning',text:`Synthetic message ${i} · <script>inert</script>`,time:0,truncated:false});
   await until("document.querySelector('#native-console-output-count').textContent.includes('older removed')",'Output eviction not visible');
-  await wheel('#native-console-scroll',-1000);await until("!document.querySelector('#native-console-latest').hidden",'Latest output navigation missing');
+  const upperBeforeConsoleWheel=await evaluate("document.querySelector('#screen-traffic .request-pane').scrollTop");
+  await wheel('#native-console-scroll',-1000);assert.equal(await evaluate("document.querySelector('#screen-traffic .request-pane').scrollTop"),upperBeforeConsoleWheel,'Console wheel must preserve the upper pane reading position');await until("!document.querySelector('#native-console-latest').hidden",'Latest output navigation missing');
   const before=await evaluate("document.querySelector('#native-console-scroll').scrollTop");fixture.messages.push({level:'info',text:'Synthetic new arrival',time:0,truncated:false});
   await until("document.querySelector('#native-console-latest').textContent.includes('new')",'New output indicator missing');
   const after=await evaluate("document.querySelector('#native-console-scroll').scrollTop");assert(after<=before+1,'New output must not jump a reader down the transcript');await click('#native-console-latest');
   assert.equal(await evaluate("document.querySelector('#native-console-latest').hidden"),true);
   await click('#native-console-search');await type('absent-result');await until("!document.querySelector('#native-console-no-matches').hidden",'No-match state missing');await press('Escape');
   assert.equal(await evaluate("document.activeElement.id"),'native-console-source');
+  // Original inert UI records make the inner ledger scrollable independently
+  // of its toolbar-owning parent. They do not enable capture or run target code.
+  await evaluate("state.requests=Array.from({length:40},(_,i)=>({id:'console-scroll-'+i,path:'https://fixture.invalid/scroll-item-'+i,method:'GET',status:200,time:i,type:'xhr',origin:'demo',tabId:'console-scroll-fixture',hostOnly:false,operation:'synthetic_console_scroll_fixture',events:[]}));renderRequests();");
   for(const [width,height,name]of [[760,560,'console-narrow'],[360,740,'console-phone']]){
     await viewport(width,height);await geometry();await scrollUpperPane(name);await screenshot(name);
     // Exercise the real selector and the optional fifth grid track. No
@@ -315,7 +378,7 @@ export async function checkConsoleInteractions({evaluate,viewport,click,key,whee
     await scrollUpperPane(name+' content search');await screenshot(name+'-content-search');
     await reveal('#request-search-scope');await press('Home');await press('Enter');
     await until("document.querySelector('#request-search-scope').value==='url'&&document.querySelector('#request-search-status').hidden",'URL search must restore the four-track pane');
-    await upperPane(name+' restored URL search');await command('fixture.object',true,'pointer');
+    await upperPane(name+' restored URL search');await scrollNestedLedger(name);await screenshot(name+'-nested-ledger');await command('fixture.object',true,'pointer');
   }
   await click('#native-console-clear');await until("document.querySelector('#native-console-output').children.length===0",'Clear failed');await screenshot('console-cleared');
   // History still works after clearing; recalling is not execution.
@@ -328,5 +391,5 @@ export async function checkConsoleInteractions({evaluate,viewport,click,key,whee
   const fullPane=await upperPane('return to full Requests');assert(fullPane.consoleHidden);assert(fullPane.pane.clientHeight>afterResize.panel.height);assert(fullPane.tools.top>=fullPane.pane.top-1,'Returning to the full pane must restore the toolbar into view');await screenshot('console-closed-full-requests');
   await click('#native-console-toggle');assert.equal(await evaluate("document.querySelector('#native-console-source').value"),'draft survives dock resize');await geometry();await upperPane('reopened after full Requests');
   assert.deepEqual(fixture.errors,[],'Synthetic fixture raised an unexpected error');
-  return {status:'passed',upper_pane_geometry:upperPaneChecks,command_receipts:commandChecks,resize:{before:beforeResize,after:afterResize},path:'browser development Console UI',source:'scripted native replies; no target JavaScript executed',viewports:[[1440,900],[760,560],[360,740]],checks:['hit-tested connection and explicit document selection','keyboard command entry and divider resizing','fixed composer geometry','intrinsic Requests toolbar/search-status/warning rows and independent upper-pane scroll','genuine content-search selector and URL restoration at both narrow widths','narrow reflow and full-pane return preserve geometry/draft','lazy getter-safe property paging','live shrink/regrowth and keyboard pager focus','inspection retry preserves page','pending editable draft and duplicate-submit rejection','transport failure and explicit recovery','stale document and value rejection','inert exception text','128-entry eviction and anchored arrival scroll','Find/Escape focus','pointer Run at narrow widths','Clear invalidates older quiet polls and preserves newer command/result ownership','malformed quiet poll fails closed without partial output','non-numeric timestamp batch is atomic without coercion','clear preserves history','close/reopen preserves draft','disconnect/reconnect requires fresh document selection and preserves draft']};
+  return {status:'passed',upper_pane_geometry:upperPaneChecks,command_receipts:commandChecks,resize:{before:beforeResize,after:afterResize},path:'browser development Console UI',source:'scripted native replies; no target JavaScript executed',viewports:[[1440,900],[760,560],[360,740]],checks:['hit-tested connection and explicit document selection','keyboard command entry and divider resizing','fixed composer geometry','intrinsic Requests toolbar/search-status/warning rows and independent upper-pane scroll','genuine content-search selector and URL restoration at both narrow widths','owned outer scrollbar, nested ledger and Console wheel isolation with failure-time receipts','narrow reflow and full-pane return preserve geometry/draft','lazy getter-safe property paging','live shrink/regrowth and keyboard pager focus','inspection retry preserves page','pending editable draft and duplicate-submit rejection','transport failure and explicit recovery','stale document and value rejection','inert exception text','128-entry eviction and anchored arrival scroll','Find/Escape focus','pointer Run at narrow widths','Clear invalidates older quiet polls and preserves newer command/result ownership','malformed quiet poll fails closed without partial output','non-numeric timestamp batch is atomic without coercion','clear preserves history','close/reopen preserves draft','disconnect/reconnect requires fresh document selection and preserves draft']};
 }

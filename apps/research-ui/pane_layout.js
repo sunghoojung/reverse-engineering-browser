@@ -24,8 +24,10 @@ function initializePaneLayout() {
   const persist = () => {
     try { localStorage.setItem(storageKey, JSON.stringify(saved)); } catch { /* Keep the current layout. */ }
   };
-  let scheduled = false, dragging = null;
-  const schedule = () => {
+  let scheduled = false, dragging = null, layoutRequired = false;
+  const schedule = (positionOnly = false) => {
+    // A real resize/visibility change wins if it coalesces with scrolling.
+    layoutRequired ||= positionOnly !== true;
     if (scheduled) return;
     scheduled = true;
     let frame, timeout;
@@ -33,7 +35,8 @@ function initializePaneLayout() {
       cancelAnimationFrame(frame);
       clearTimeout(timeout);
       scheduled = false;
-      layouts.forEach(layout => layout.refresh());
+      const positionOnly = !layoutRequired; layoutRequired = false;
+      layouts.forEach(layout => layout.refresh(positionOnly));
     };
     frame = requestAnimationFrame(refresh);
     // WebKit can suspend animation frames for an inactive native window while
@@ -97,10 +100,13 @@ function initializePaneLayout() {
       const tracks = [`${size}px`, 'minmax(0, 1fr)', ...geometry.tracks.slice(2)];
       parent.style.setProperty(property, tracks.join(' '));
     };
-    const refresh = () => {
-      // Remove our tracks before testing the responsive layout's geometry.
-      restore(); geometry = measure();
-      if (geometry && (saved[configuration.id] !== undefined ||
+    const refresh = (positionOnly = false) => {
+      // Scrolling changes clipping, not the split. Temporarily restoring the
+      // default tracks can expand a nested scrollport and clamp its position.
+      // Responsive/structural changes still measure from their CSS defaults.
+      if (!positionOnly) restore();
+      geometry = measure();
+      if (!positionOnly && geometry && (saved[configuration.id] !== undefined ||
           geometry.size < geometry.minimum[0] || geometry.size > geometry.total - geometry.minimum[1])) {
         apply(saved[configuration.id] ?? geometry.size / geometry.total); geometry = measure();
       }
@@ -185,7 +191,7 @@ function initializePaneLayout() {
   observer.observe(document.querySelector('#exchange-inspector'), { childList: true });
   observer.observe(document.querySelector('#native-console-panel'), { attributes: true, attributeFilter: ['hidden'] });
   window.addEventListener('resize', schedule);
-  document.addEventListener('scroll', schedule, true);
+  document.addEventListener('scroll', () => schedule(true), true);
   window.addEventListener('blur', () => dragging?.layout.finish(false));
   schedule();
 }

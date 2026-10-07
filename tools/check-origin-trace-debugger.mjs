@@ -1771,27 +1771,39 @@ async function checkTrafficBrowser() {
       await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     };
     const wheel = async (selector, deltaY, edge = false) => {
+      const mode = edge === 'scrollbar' ? 'scrollbar' : edge ? 'edge' : 'center';
       const point = await evaluate(`(() => {
         const node = document.querySelector(${JSON.stringify(selector)}), r = node.getBoundingClientRect();
-        // A scrollable child can consume a wheel aimed at its parent's center.
-        // Evidence deliberately keeps a visible padding gutter beside its list.
-        const x = ${edge} ? r.x+node.clientLeft+node.clientWidth-4 : r.x+r.width/2;
+        const mode = ${JSON.stringify(mode)}, gutter = r.width-node.clientWidth-2*node.clientLeft;
+        // An outer scroll owner's native scrollbar avoids nested list and form
+        // controls. Evidence retains its original visible-padding edge mode.
+        const x = mode==='scrollbar' && gutter>=6 ? r.x+node.clientLeft+node.clientWidth+gutter/2
+          : mode!=='center' ? r.x+node.clientLeft+node.clientWidth-4 : r.x+r.width/2;
         const y = r.y+r.height/2, hit = document.elementFromPoint(x,y);
         if (r.width <= 0 || r.height <= 0 || x < 0 || x >= innerWidth || y < 0 || y >= innerHeight || !hit || !node.contains(hit)) throw new Error('Scroll target is clipped or offscreen: '+${JSON.stringify(selector)});
-        if (${edge}) for(let child=hit;child&&child!==node;child=child.parentElement) {
-          if (['auto','scroll','overlay'].includes(getComputedStyle(child).overflowY) && child.scrollHeight>child.clientHeight+1) throw new Error('Outer wheel target is owned by a nested scroller: '+${JSON.stringify(selector)});
+        const nested=[];
+        for(let child=hit;child&&child!==node;child=child.parentElement) {
+          if (['auto','scroll','overlay'].includes(getComputedStyle(child).overflowY) && child.scrollHeight>child.clientHeight+1) nested.push({id:child.id,tag:child.tagName,scrollTop:child.scrollTop,clientHeight:child.clientHeight,scrollHeight:child.scrollHeight});
         }
-        return {x,y,scrollTop:node.scrollTop};
+        if(mode!=='center' && nested.length) throw new Error('Outer wheel target is owned by a nested scroller: '+${JSON.stringify(selector)}+' '+JSON.stringify(nested));
+        return {x,y,mode,gutter,scrollTop:node.scrollTop,clientHeight:node.clientHeight,scrollHeight:node.scrollHeight,hit:{id:hit.id,tag:hit.tagName},nested};
       })()`);
+      const receipt={selector,deltaY,point};
+      diagnostics.wheel_events=[...(diagnostics.wheel_events??[]).slice(-63),receipt];
+      // Move the actual pointer after viewport/scroll-owner changes before
+      // dispatching a genuine wheel event; never assign a DOM scroll offset.
+      await command("Input.dispatchMouseEvent", {type:"mouseMoved",x:point.x,y:point.y});
       await command("Input.dispatchMouseEvent", {type: "mouseWheel", x:point.x, y:point.y, deltaX: 0, deltaY});
-      await evaluate(`new Promise(resolve => {
-        const node=document.querySelector(${JSON.stringify(selector)}), start=performance.now();
+      receipt.result=await evaluate(`new Promise(resolve => {
+        const node=document.querySelector(${JSON.stringify(selector)}), start=performance.now(), trace=[];
         let previous=${point.scrollTop}, moved=false, stable=0;
         function frame(){const current=node.scrollTop; moved ||= current!==${point.scrollTop};
           stable=current===previous?stable+1:0; previous=current;
-          if(moved&&stable>=3 || performance.now()-start>1500) resolve(); else requestAnimationFrame(frame);}
+          if(trace.length<128)trace.push({elapsed:Math.round(performance.now()-start),scrollTop:current,clientHeight:node.clientHeight,scrollHeight:node.scrollHeight});
+          if(moved&&stable>=3 || performance.now()-start>1500) resolve({scrollTop:current,clientHeight:node.clientHeight,scrollHeight:node.scrollHeight,trace}); else requestAnimationFrame(frame);}
         requestAnimationFrame(frame);
       })`);
+      return receipt;
     };
     const click = async selector => {
       // Reveal a request only by scrolling its bounded ledger. Never scroll a
@@ -1907,7 +1919,7 @@ async function checkTrafficBrowser() {
     assert(await evaluate("typeof renderRequests === 'function'"), "Application did not initialize");
     diagnostics.phase = "interactive validation";
     if (consoleBrowser) {
-      validation = await checkConsoleInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:consoleFixture,type:text=>command("Input.insertText",{text})});
+      validation = await checkConsoleInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture:consoleFixture,type:text=>command("Input.insertText",{text}),recordGeometry:value=>{diagnostics.console_upper_panes=[...(diagnostics.console_upper_panes??[]).slice(-31),value];}});
       assert.deepEqual(runtimeErrors, [], "Application raised uncaught errors during Console QA");
     } else if (evidenceBrowser) {
       const setFile=async name=>{

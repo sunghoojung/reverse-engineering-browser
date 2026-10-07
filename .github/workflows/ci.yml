@@ -215,6 +215,29 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+  canvas-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Exercise Canvas previews in installed Chrome
+        run: |
+          REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          export REB_UI_CHROMIUM
+          test -n "$REB_UI_CHROMIUM"
+          node tools/check-origin-trace-debugger.mjs --canvas-ui-browser
+
+      - name: Upload rendered Canvas QA
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: canvas-ui-${{ github.run_id }}
+          path: build/canvas-ui-qa
+          if-no-files-found: error
+          retention-days: 3
+
   investigation-ui:
     runs-on: ubuntu-latest
     timeout-minutes: 10
